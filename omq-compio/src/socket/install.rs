@@ -1,0 +1,298 @@
+//! Peer-installation glue: register a fully-formed peer in
+//! [`SocketInner.out_peers`] and bring the wire driver online.
+//!
+//! Three install paths feed this module:
+//!   - inproc: synchronous via [`install_inproc_peer`] - peer
+//!     snapshot is known up-front, no codec runs, no handshake.
+//!   - accepted wire (TCP/IPC server side): [`install_accepted_wire_peer`].
+//!     Once-shot driver; if the peer dies the slot's sender goes
+//!     closed and `send` returns `Error::Closed`. The peer must
+//!     re-dial - server side has no reconnect.
+//!   - dial-side wire: dispatched from [`super::dial`]'s supervisor
+//!     via [`spawn_wire_driver`].
+
+use std::sync::{Arc, RwLock};
+
+use bytes::Bytes;
+
+use omq_proto::endpoint::Endpoint;
+use omq_proto::proto::SocketType;
+use omq_proto::subscription::SubscriptionSet;
+
+use crate::monitor::{DisconnectReason, MonitorEvent, PeerInfo};
+use crate::transport::driver::{self, DriverCommand, MonitorCtx};
+use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
+
+use super::inner::{is_round_robin_send, PeerOut, PeerSlot, SocketInner, WirePeerHandle};
+use super::{cmd_channel_capacity, pub_side_peer_sub};
+
+pub(super) fn install_inproc_peer(
+    inner: &Arc<SocketInner>,
+    conn: InprocConn,
+    endpoint: Endpoint,
+    connection_id: u64,
+    #[cfg(feature = "priority")] priority: u8,
+) {
+    let our_identity = inner.options.identity.clone();
+    let peer_identity = conn.peer.identity.clone();
+    let snap = conn.peer.clone();
+    let info = PeerInfo {
+        connection_id,
+        peer_address: None,
+        peer_identity: Some(snap.identity.clone()),
+        peer_properties: Arc::new(
+            omq_proto::proto::command::PeerProperties::default()
+                .with_socket_type(snap.socket_type)
+                .with_identity(snap.identity.clone()),
+        ),
+        zmtp_version: (3, 1),
+    };
+    let info_holder = Arc::new(RwLock::new(Some(info.clone())));
+    // For PUB / XPUB on inproc: treat the peer as subscribe-all
+    // since SUBSCRIBE never reaches us (inproc bypasses the codec).
+    // The SUB on the other side filters on recv via its own
+    // SubscriptionSet, so nothing is over-delivered.
+    let peer_sub = if matches!(inner.socket_type, SocketType::Pub | SocketType::XPub) {
+        let mut s = SubscriptionSet::new();
+        s.add(Bytes::new());
+        Some(Arc::new(RwLock::new(s)))
+    } else {
+        None
+    };
+    let out = PeerOut::Inproc {
+        sender: conn.out,
+        our_identity,
+    };
+    // Round-robin patterns send directly to inproc peers from
+    // `Socket::send_round_robin` - no pump needed. Wire peers
+    // consume the shared queue inside their driver.
+    let idx = {
+        let mut peers = inner.out_peers.write().expect("peers lock");
+        let idx = peers.len();
+        peers.push(PeerSlot {
+            out,
+            peer: Arc::new(RwLock::new(Some(conn.peer))),
+            connection_id,
+            endpoint: endpoint.clone(),
+            info: info_holder,
+            peer_sub,
+            #[cfg(feature = "priority")]
+            priority,
+        });
+        idx
+    };
+    #[cfg(feature = "priority")]
+    inner.rebuild_priority_view();
+    if !peer_identity.is_empty() {
+        inner
+            .identity_to_slot
+            .write()
+            .expect("identity table")
+            .insert(peer_identity, idx);
+    }
+    inner.on_peer_ready.notify(usize::MAX);
+    // Synthesise HandshakeSucceeded - inproc has no wire handshake
+    // but consumers expect the same monitor signal as wire peers.
+    inner.monitor.publish(MonitorEvent::HandshakeSucceeded {
+        endpoint,
+        peer: info,
+    });
+}
+
+pub(super) fn install_accepted_wire_peer<S>(
+    inner: &Arc<SocketInner>,
+    stream: S,
+    role: omq_proto::proto::connection::Role,
+    endpoint: Endpoint,
+    connection_id: u64,
+    peer_addr: Option<std::net::SocketAddr>,
+) where
+    S: compio::io::util::Splittable + 'static,
+    S::ReadHalf: compio::io::AsyncRead + 'static,
+    S::WriteHalf: compio::io::AsyncWrite + 'static,
+{
+    let cap = cmd_channel_capacity(&inner.options);
+    let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
+    let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
+    let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
+    let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let out = PeerOut::Wire(handle);
+    let slot_idx = {
+        let mut peers = inner.out_peers.write().expect("peers lock");
+        let idx = peers.len();
+        peers.push(PeerSlot {
+            out,
+            peer: Arc::new(RwLock::new(None)),
+            connection_id,
+            endpoint: endpoint.clone(),
+            info: info_holder.clone(),
+            peer_sub: peer_sub.clone(),
+            // Accepted peers always get default priority. Per-accepted
+            // override would need `bind_with`, which is out of scope.
+            #[cfg(feature = "priority")]
+            priority: omq_proto::DEFAULT_PRIORITY,
+        });
+        idx
+    };
+    #[cfg(feature = "priority")]
+    inner.rebuild_priority_view();
+    inner.on_peer_ready.notify(usize::MAX);
+    let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
+        &endpoint,
+        &inner.options,
+    );
+    spawn_wire_driver(
+        inner.clone(),
+        stream,
+        role,
+        cmd_rx,
+        slot_idx,
+        endpoint,
+        connection_id,
+        info_holder,
+        peer_addr,
+        peer_sub,
+        transform,
+    )
+    .detach();
+}
+
+/// Spawn the connection-driver task that runs the ZMTP codec for one
+/// stream connection. Returns its `JoinHandle` so the dial supervisor
+/// can await its exit. Generic over the stream type so TCP and IPC
+/// reuse the spawn glue.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_wire_driver<S>(
+    inner: Arc<SocketInner>,
+    stream: S,
+    role: omq_proto::proto::connection::Role,
+    cmd_rx: flume::Receiver<DriverCommand>,
+    slot_idx: usize,
+    endpoint: Endpoint,
+    connection_id: u64,
+    info_holder: Arc<RwLock<Option<PeerInfo>>>,
+    peer_address: Option<std::net::SocketAddr>,
+    peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    transform: Option<omq_proto::proto::transform::MessageTransform>,
+) -> compio::runtime::JoinHandle<()>
+where
+    S: compio::io::util::Splittable + 'static,
+    S::ReadHalf: compio::io::AsyncRead + 'static,
+    S::WriteHalf: compio::io::AsyncWrite + 'static,
+{
+    let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
+
+    // Snap listener: when the driver completes the handshake it sends
+    // one snapshot. Update PeerSlot.peer + identity_to_slot so ROUTER
+    // outbound can route by identity, and replay our SUB / XSUB
+    // subscriptions over the wire so the new publisher knows what we
+    // want.
+    {
+        let inner = inner.clone();
+        compio::runtime::spawn(async move {
+            let Ok(snap) = snap_rx.recv_async().await else {
+                return;
+            };
+            let identity = snap.identity.clone();
+            let out = {
+                let peers = inner.out_peers.read().expect("peers lock");
+                let slot = peers.get(slot_idx);
+                if let Some(s) = slot {
+                    *s.peer.write().expect("peer lock") = Some(snap);
+                }
+                slot.map(|s| s.out.clone())
+            };
+            if !identity.is_empty() {
+                inner
+                    .identity_to_slot
+                    .write()
+                    .expect("identity table")
+                    .insert(identity, slot_idx);
+            }
+            if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
+                let prefixes: Vec<Bytes> =
+                    inner.our_subs.read().expect("our_subs lock").clone();
+                if let Some(out) = out.as_ref() {
+                    for p in prefixes {
+                        let _ = out
+                            .send_command(omq_proto::proto::Command::Subscribe(p))
+                            .await;
+                    }
+                }
+            }
+            // DISH: replay joined groups to new RADIO peer so
+            // TCP/IPC RADIO/DISH filtering works through reconnects.
+            if matches!(inner.socket_type, SocketType::Dish) {
+                let groups: Vec<Bytes> = inner
+                    .joined_groups
+                    .read()
+                    .expect("joined_groups lock")
+                    .iter()
+                    .cloned()
+                    .collect();
+                if let Some(out) = out {
+                    for g in groups {
+                        let _ = out
+                            .send_command(omq_proto::proto::Command::Join(g))
+                            .await;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    let socket_type = inner.socket_type;
+    let options = inner.options.clone();
+    let peer_in_tx = inner.in_tx.clone();
+    let shared_msg_rx = if is_round_robin_send(socket_type) {
+        inner.shared_send_rx.as_ref().cloned()
+    } else {
+        None
+    };
+    let monitor_ctx = MonitorCtx {
+        monitor: inner.monitor.clone(),
+        endpoint: endpoint.clone(),
+        connection_id,
+        peer_info: info_holder.clone(),
+        peer_address,
+        peer_sub,
+    };
+    let inner_for_exit = inner.clone();
+    let endpoint_for_exit = endpoint;
+    let (reader, writer) = stream.split();
+    compio::runtime::spawn(async move {
+        let res = driver::run_connection(
+            reader,
+            writer,
+            role,
+            socket_type,
+            options,
+            cmd_rx,
+            shared_msg_rx,
+            peer_in_tx,
+            snap_tx,
+            Some(monitor_ctx),
+            transform,
+        )
+        .await;
+        // Publish Disconnected so monitor consumers see the peer
+        // tear down. Reason: PeerClosed for clean EOF, Error(...)
+        // for any other failure. Skip if the handshake never
+        // completed (no PeerInfo to attach).
+        let info = info_holder.read().expect("peer_info lock").clone();
+        if let Some(peer) = info {
+            let reason = match res {
+                Ok(()) => DisconnectReason::PeerClosed,
+                Err(e) => DisconnectReason::Error(format!("{e}")),
+            };
+            inner_for_exit
+                .monitor
+                .publish(MonitorEvent::Disconnected {
+                    endpoint: endpoint_for_exit,
+                    peer,
+                    reason,
+                });
+        }
+    })
+}

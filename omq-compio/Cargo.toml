@@ -1,0 +1,70 @@
+[package]
+name = "omq-compio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "compio backend for omq: thread-per-core io_uring/IOCP socket driver. Built on omq-proto."
+
+[lib]
+name = "omq_compio"
+
+[lints]
+workspace = true
+
+[features]
+# Minimal default: NULL mechanism + TCP / IPC / inproc / UDP only.
+# All crypto and compression features are opt-in.
+default = []
+curve = ["omq-proto/curve"]
+blake3zmq = ["omq-proto/blake3zmq"]
+lz4 = ["omq-proto/lz4"]
+zstd = ["omq-proto/zstd"]
+priority = ["omq-proto/priority"]
+# Enables the hand-rolled fuzz test suites (`tests/fuzz_*.rs`). Off by
+# default - those targets do ~1 M iterations each and dominate runtime
+# of `cargo test`. Run with `cargo test --features fuzz`.
+fuzz = []
+
+[dependencies]
+omq-proto = { path = "../omq-proto", default-features = false }
+bytes = "1"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+compio = { version = "=0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time"] }
+event-listener = "5"
+socket2 = "0.5"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+
+[dev-dependencies]
+rand = "0.8"
+# Used by benches/compression.rs to train a zstd dict from sample
+# JSON records before driving the with-dict throughput cells.
+zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
+
+[[bench]]
+name = "push_pull"
+harness = false
+
+[[bench]]
+name = "pub_sub"
+harness = false
+
+[[bench]]
+name = "req_rep"
+harness = false
+
+[[bench]]
+name = "router_dealer"
+harness = false
+
+[[bench]]
+name = "pair"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false
+

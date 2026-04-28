@@ -1,0 +1,39 @@
+[workspace]
+members = ["omq-compio", "omq-proto", "omq-tokio"]
+# Bindings live in their own subtree. Each is its own build root - Python's
+# maturin / Ruby's rake-compiler / etc. drive them - and they would otherwise
+# pull foreign-language toolchains into `cargo build --workspace`.
+exclude = ["bindings"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "ISC"
+authors = ["Patrik Wenger <paddor@gmail.com>"]
+repository = "https://github.com/paddor/omq.rs"
+description = "Pure Rust OMQ/ZeroMQ: wire-compatible, feature-complete, high-performance."
+
+[workspace.lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+
+[profile.bench]
+debug = "line-tables-only"
+
+[profile.release]
+debug = "line-tables-only"

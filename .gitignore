@@ -1,0 +1,15 @@
+/.cla*
+/CLA*
+/target
+**/target
+**/*.rs.bk
+Cargo.lock
+Cargo.lock.bak
+.DS_Store
+/tmp/
+**/benches/results.jsonl
+**/.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.so

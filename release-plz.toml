@@ -1,0 +1,35 @@
+# release-plz configuration. Each crate releases independently on its
+# own tag (`<crate>-v<version>`); no shared workspace version. CI/manual
+# invocation: `release-plz update` opens a PR with bumps + changelogs;
+# merging triggers `release-plz release` (tag + cargo publish).
+#
+# Currently no automation runs this - config sits ready for when we
+# decide to start cutting releases.
+
+[workspace]
+# Per-crate semantic-versioned changelog. release-plz auto-detects bump
+# severity from conventional commit prefixes (feat / fix / feat! / etc).
+changelog_update = true
+# Cut a GitHub release whenever a tag is pushed (not just a tag).
+git_release_enable = true
+# Tag every release. Format defaults to `<crate>-v<version>`.
+git_tag_enable = true
+# Pre-1.0 semver: treat 0.x.y feat as a 0.x.(y+1) bump (not 0.(x+1).0).
+# Set to true once we lock 1.0.
+semver_check = false
+
+[[package]]
+name = "omq-proto"
+# Foundation crate: codec API. Other backends pin a compatible range.
+# Strict semver applies once we hit 1.0. Pre-1.0 we bump minor on any
+# observable API change.
+
+[[package]]
+name = "omq-tokio"
+# Tokio-runtime backend.
+
+[[package]]
+name = "omq-compio"
+# compio-runtime backend (single-threaded). Drivers per platform:
+# io_uring on Linux, IOCP on Windows, polling on other Unix
+# (macOS, *BSD).

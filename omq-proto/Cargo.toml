@@ -1,0 +1,57 @@
+[package]
+name = "omq-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sans-I/O ZMTP codec, message types, and routing logic. Backend-agnostic core for omq-tokio / omq-compio."
+
+[lints]
+workspace = true
+
+[features]
+# Minimal default: NULL mechanism + TCP / IPC / inproc / UDP only.
+# No C compiler required, no crypto deps. Opt in to features:
+#   curve     CURVE encrypted-handshake (RFC 26)
+#   blake3zmq omq-native BLAKE3+ChaCha20 mechanism
+#   lz4       lz4+tcp:// transport (bundles liblz4; needs cc)
+#   zstd      zstd+tcp:// transport (bundles libzstd; needs cc)
+#   priority  strict per-pipe priority on connect_with
+default = []
+curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:zeroize"]
+blake3zmq = [
+    "dep:blake3",
+    "dep:chacha20-blake3",
+    "dep:x25519-dalek",
+    "dep:zeroize",
+]
+lz4 = ["dep:lz4-sys"]
+zstd = ["dep:zstd-safe"]
+priority = []
+
+[dependencies]
+blake3 = { version = "1", optional = true }
+bytes = "1"
+# Pinned to a fork carrying `#[target_feature(enable = "avx2")]` annotations that let LLVM
+# auto-vectorize the XOR/keystream-scatter loops surrounding the explicit intrinsic calls.
+# Without those annotations, builds that don't pass `-C target-cpu=native` fall back to
+# ~55 MiB/s instead of ~1 GiB/s on AVX2 hardware. Switch back to upstream once it lands.
+chacha20-blake3 = { git = "https://github.com/paddor/chacha20-blake3", rev = "59996a44ef5a01ce71ba5532d3c7a8d6fb0e9568", optional = true }
+crypto_box = { version = "0.9", features = ["std"], optional = true }
+crypto_secretbox = { version = "0.1", optional = true }
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+lz4-sys = { version = "1", optional = true }
+rand = "0.8"
+zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"], optional = true }
+patricia_tree = "0.10"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+socket2 = { version = "0.5", features = ["all"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["zeroize_derive"], optional = true }
+
+[[bench]]
+name = "mechanism_frame"
+harness = false
+required-features = ["curve", "blake3zmq"]

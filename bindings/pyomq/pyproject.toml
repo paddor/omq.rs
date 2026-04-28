@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pyomq"
+version = "0.0.1"
+description = "Python binding for omq.rs (Rust libzmq port). Drop-in pyzmq replacement on the common path."
+readme = "README.md"
+license = { text = "ISC" }
+requires-python = ">=3.9"
+authors = [{ name = "Patrik Wenger", email = "paddor@gmail.com" }]
+keywords = ["zeromq", "omq", "messaging", "pyzmq", "zmq"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: ISC License (ISCL)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: System :: Networking",
+]
+
+[project.optional-dependencies]
+# Crypto / compression: each maps to a maturin feature on the native module.
+# (Wheels in CI will be built per combination; for development a single
+# maturin develop --features ... covers it.)
+curve = []
+blake3zmq = []
+lz4 = []
+zstd = []
+all = []
+
+# Test dependencies; pip install pyomq[test] in a dev venv.
+test = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+    "pyzmq>=25",
+]
+
+[project.urls]
+Repository = "https://github.com/paddor/omq.rs"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.maturin]
+# Stable ABI - one wheel covers all supported Python versions.
+features = ["pyo3/abi3-py39"]
+# The native module lives at pyomq._native; pyomq itself is a pure
+# Python package re-exporting from it.
+module-name = "pyomq._native"
+python-source = "python"
+strip = true

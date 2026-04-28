@@ -1,0 +1,63 @@
+[package]
+name = "omq-tokio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tokio backend for omq: TCP / IPC / inproc / UDP transports + tokio-runtime socket driver. Built on omq-proto."
+
+[lints]
+workspace = true
+
+[features]
+# Minimal default: NULL mechanism + TCP / IPC / inproc / UDP only.
+# All crypto and compression features are opt-in. See `omq-proto`'s
+# Cargo.toml for the catalog.
+default = []
+curve = ["omq-proto/curve"]
+blake3zmq = ["omq-proto/blake3zmq"]
+lz4 = ["omq-proto/lz4"]
+zstd = ["omq-proto/zstd"]
+priority = ["omq-proto/priority"]
+# Enables the hand-rolled fuzz test suites (`tests/fuzz_*.rs`). Off by
+# default - those targets do ~1 M iterations each and dominate runtime
+# of `cargo test`. Run with `cargo test --features fuzz`.
+fuzz = []
+
+[dependencies]
+omq-proto = { path = "../omq-proto", default-features = false }
+async-channel = "2"
+bytes = "1"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+rand = "0.8"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+socket2 = "0.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[[bench]]
+name = "push_pull"
+harness = false
+
+[[bench]]
+name = "pub_sub"
+harness = false
+
+[[bench]]
+name = "req_rep"
+harness = false
+
+[[bench]]
+name = "router_dealer"
+harness = false
+
+[[bench]]
+name = "pair"
+harness = false

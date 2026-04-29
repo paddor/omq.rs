@@ -26,6 +26,8 @@ mod send;
 
 pub use handle::Socket;
 
+pub(crate) use inner::DirectIoState;
+
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.
 fn cmd_channel_capacity(options: &Options) -> usize {
     options.send_hwm.unwrap_or(1024).max(16) as usize

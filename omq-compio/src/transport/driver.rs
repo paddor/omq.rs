@@ -1,14 +1,30 @@
 //! Shared connection driver for stream transports (compio).
 //!
-//! Each connection spawns two tasks:
-//!  * a **read task** that always polls the buffer-ownership read
-//!    to completion (mid-flight cancellation of completion-based
-//!    reads is fragile; doing it from a separate task sidesteps
-//!    the issue) and forwards bytes through a flume channel;
-//!  * a **driver task** that owns the codec, drains events, flushes
-//!    pending writes via gather I/O (`write_vectored`), and selects
-//!    between the read channel, the user inbox, the pre-handshake
-//!    deadline, and the post-handshake heartbeat tick.
+//! One driver task per connection. Co-owns - via an async [`Mutex`] -
+//! the codec, transform, writer, and reader through [`PeerIo`].
+//! Reads happen under the lock so the [`Socket::recv`] direct path
+//! (Stage 5) can claim ownership of the FD without racing the
+//! driver. The driver `select_biased!`s between:
+//!   * `PollFd::read_ready` on the connection's fd - fires when the
+//!     kernel has data, cancellation-safe; the driver then takes the
+//!     [`PeerIo`] lock and does an inline `reader.read(buf).await`
+//!     (kernel data is already queued, so the SQE completes
+//!     near-immediately),
+//!   * the per-peer inbox,
+//!   * the shared work-stealing queue (round-robin types),
+//!   * the pre-handshake deadline,
+//!   * the post-handshake heartbeat tick,
+//!   * `recv_state_changed` (Stage 5) - flips the read arm off when
+//!     a `recv()` caller has claimed reads, and back on when they
+//!     release the claim,
+//!   * `eof_signal` (Stage 5) - lets the recv direct path tell us
+//!     to terminate after it observed EOF / fatal read error.
+//!
+//! Lock discipline: the [`PeerIo`] mutex is acquired per operation
+//! (event drain, write flush, codec encode, heartbeat, read). It is
+//! never held across the `select_biased!` await, so the
+//! [`Socket::send`] Stage 4 fast path and the [`Socket::recv`] Stage 5
+//! direct path can grab the lock between driver iterations.
 //!
 //! Generic over any `Splittable` stream whose halves implement
 //! `AsyncRead` + `AsyncWrite`. TCP and IPC each provide bind/connect
@@ -18,20 +34,25 @@
 //! `IoVectoredBuf` (via the `bytes` feature on compio-buf), so the
 //! codec's owned chunks go straight into `writer.write_vectored` -
 //! no unsafe iovec adapter, no manual `libc::iovec` construction.
+//!
+//! [`Mutex`]: async_lock::Mutex
+//! [`Socket::send`]: crate::Socket::send
+//! [`Socket::recv`]: crate::Socket::recv
 
 use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use compio::io::AsyncWrite;
-use compio::BufResult;
 use flume::{Receiver, Sender};
+use smallvec::SmallVec;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
+use omq_proto::proto::command::PeerProperties;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageTransform;
 use omq_proto::proto::{Command, Event, SocketType};
@@ -40,7 +61,9 @@ use omq_proto::subscription::SubscriptionSet;
 use crate::monitor::{
     MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo,
 };
+use crate::socket::DirectIoState;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader, WireWriter};
 
 /// Per-flush byte cap. Once a single drain has buffered this many
 /// bytes we stop pulling more from the inbox and let writev flush.
@@ -98,9 +121,62 @@ pub(crate) struct MonitorCtx {
     pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
 }
 
-/// Drive one connection through the ZMTP codec. Generic over the
-/// concrete owned read/write halves so TCP, IPC, and any future
-/// stream transport reuse this body.
+/// Events drained from the codec under the [`PeerIo`] lock that need
+/// post-processing OUTSIDE the lock (because the post-processing
+/// awaits on the per-socket `peer_in_tx` flume channel, which we
+/// must not hold across).
+enum Drained {
+    Handshake {
+        peer_minor: u8,
+        peer_properties: Arc<PeerProperties>,
+    },
+    Msg(Message),
+    Cmd(Command),
+}
+
+/// Build a fresh [`Connection`] for this driver from the negotiated
+/// options + role. Factored out only so the codec construction is in
+/// one place.
+fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connection {
+    let mut cfg = ConnectionConfig::new(role, socket_type)
+        .identity(options.identity.clone())
+        .mechanism(options.mechanism.to_setup());
+    if let Some(n) = options.max_message_size {
+        cfg = cfg.max_message_size(n);
+    }
+    Connection::new(cfg)
+}
+
+/// Build the [`SharedPeerIo`] handed to the driver and the Stage 4
+/// send / Stage 5 recv fast paths. Constructs the codec; the
+/// reader / writer halves are passed in already wrapped in the
+/// concrete [`WireReader`] / [`WireWriter`] enums (so all per-call
+/// dispatch is a static `match` and never heap-allocates a future).
+///
+/// [`Socket::send`]: crate::Socket::send
+/// [`Socket::recv`]: crate::Socket::recv
+pub(crate) fn build_peer_io(
+    role: Role,
+    socket_type: SocketType,
+    options: &Options,
+    reader: WireReader,
+    writer: WireWriter,
+    transform: Option<MessageTransform>,
+) -> SharedPeerIo {
+    let codec = make_codec(role, socket_type, options);
+    Arc::new(async_lock::Mutex::new(PeerIo {
+        codec,
+        transform,
+        writer,
+        reader,
+        handshake_done: false,
+    }))
+}
+
+/// Drive one connection through the ZMTP codec. The reader, writer,
+/// codec, and transform all live inside [`SharedPeerIo`] so
+/// `Socket::send`'s direct-write fast path and `Socket::recv`'s
+/// direct-read fast path can drive them too.
 ///
 /// `shared_msg_rx` is the per-socket round-robin queue (PUSH /
 /// DEALER / REQ / PAIR / REP). When provided, the driver races
@@ -109,10 +185,9 @@ pub(crate) struct MonitorCtx {
 /// fastest absorbs more work (work-stealing). `None` for
 /// per-peer-routing socket types (PUB / XPUB / RADIO / ROUTER /
 /// XSUB).
-pub(crate) async fn run_connection<R, W>(
-    mut reader: R,
-    mut writer: W,
-    role: Role,
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_connection(
+    state: Arc<DirectIoState>,
     socket_type: SocketType,
     options: Options,
     inbox: Receiver<DriverCommand>,
@@ -120,13 +195,9 @@ pub(crate) async fn run_connection<R, W>(
     peer_in_tx: Sender<InprocFrame>,
     peer_snapshot_tx: Sender<InprocPeerSnapshot>,
     monitor_ctx: Option<MonitorCtx>,
-    mut transform: Option<MessageTransform>,
-) -> Result<()>
-where
-    R: compio::io::AsyncRead + 'static,
-    W: AsyncWrite + 'static,
-{
-    let identity = options.identity.clone();
+) -> Result<()> {
+    let peer_io: SharedPeerIo = state.peer_io.clone();
+    let poll_fd = state.poll_fd.clone();
     let handshake_timeout = options.handshake_timeout;
     let hb_interval = options.heartbeat_interval;
     let hb_timeout = options
@@ -138,54 +209,20 @@ where
         .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
         .unwrap_or(0);
 
-    let mut cfg = ConnectionConfig::new(role, socket_type)
-        .identity(identity)
-        .mechanism(options.mechanism.to_setup());
-    if let Some(n) = options.max_message_size {
-        cfg = cfg.max_message_size(n);
-    }
-    let mut codec = Connection::new(cfg);
-
-    // Dedicated read task: continuously polls `read` and ferries
-    // chunks via flume so the driver loop never has to cancel an
-    // in-flight completion-based read.
-    //
-    // Sized at 64 KiB so a 32 KiB ZMTP message lands in a single read
-    // (kernel TCP loopback delivers up to ~64 KiB per read on a fresh
-    // buffer); historical 8 KiB caused 4 syscalls per 32 KiB message.
-    // We move the filled `Vec<u8>` into the channel rather than cloning
-    // it - the previous `buf.clone()` was an alloc + memcpy of the
-    // entire read on the hot path.
+    // Read buffer reused across iterations. Sized at 64 KiB so a
+    // 32 KiB ZMTP message lands in a single read (kernel loopback
+    // delivers up to ~64 KiB per read on a fresh buffer); historical
+    // 8 KiB caused 4 syscalls per 32 KiB message. The buffer is
+    // handed to compio's read by move and returned via `BufResult`,
+    // so no copy on the hot path.
     const READ_BUF_BYTES: usize = 64 * 1024;
-    let (bytes_tx, bytes_rx) = flume::bounded::<Vec<u8>>(4);
-    compio::runtime::spawn(async move {
-        let mut buf = Vec::with_capacity(READ_BUF_BYTES);
-        loop {
-            // compio's read returns BufResult<usize, T>. We give it the
-            // owned buffer; on success we ship the filled buffer down
-            // the channel (move, not clone) and allocate a fresh one
-            // for the next iteration. The system allocator caches the
-            // freed buffer so subsequent allocs typically reuse pages.
-            let BufResult(res, filled) = reader.read(buf).await;
-            match res {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let mut chunk = filled;
-                    chunk.truncate(n);
-                    if bytes_tx.send_async(chunk).await.is_err() {
-                        break;
-                    }
-                    buf = Vec::with_capacity(READ_BUF_BYTES);
-                }
-            }
-        }
-    })
-    .detach();
+    let mut read_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
 
-    let mut handshake_done = false;
     let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
     let mut deadline: Option<Instant> = handshake_timeout.map(|t| Instant::now() + t);
-    let mut last_input = Instant::now();
+    state
+        .last_input_nanos
+        .store(state.hb_epoch.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let mut hb_next: Option<Instant> = None;
     // Set when we receive `DriverCommand::Close`. We don't bail
     // immediately; we let the codec drain pending_cmds (post-
@@ -210,167 +247,130 @@ where
         // cleanly. Pre-handshake closes wait here for the handshake
         // (or its own timeout); a stuck peer is bounded by
         // Socket::close's wall-clock budget.
-        if closing
-            && handshake_done
-            && pending_cmds.is_empty()
-            && !codec.has_pending_transmit()
-        {
-            return Ok(());
+        if closing {
+            let io = peer_io.lock().await;
+            if io.handshake_done
+                && pending_cmds.is_empty()
+                && !io.codec.has_pending_transmit()
+            {
+                return Ok(());
+            }
         }
 
-        // 1) Drain parsed events.
-        while let Some(ev) = codec.poll_event() {
-            match ev {
-                Event::HandshakeSucceeded { peer_minor, peer_properties } => {
-                    if !handshake_done {
-                        handshake_done = true;
-                        deadline = None;
-                        if let Some(iv) = hb_interval {
-                            hb_next = Some(Instant::now() + iv);
-                        }
-                        peer_identity =
-                            peer_properties.identity.clone().unwrap_or_default();
-                        let snap = InprocPeerSnapshot {
-                            socket_type: peer_properties
-                                .socket_type
-                                .unwrap_or(SocketType::Pair),
-                            identity: peer_identity.clone(),
-                        };
-                        let _ = peer_snapshot_tx.send(snap);
-                        if let Some(ctx) = &monitor_ctx {
-                            let info = PeerInfo {
-                                connection_id: ctx.connection_id,
-                                peer_address: ctx.peer_address,
-                                peer_identity: peer_properties.identity.clone(),
-                                peer_properties: peer_properties.clone(),
-                                zmtp_version: (3, peer_minor),
-                            };
-                            *ctx.peer_info.write().expect("peer_info lock") =
-                                Some(info.clone());
-                            ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
-                                endpoint: ctx.endpoint.clone(),
-                                peer: info,
+        // 1) Drain parsed events. Lock briefly, capture everything
+        //    we'll dispatch outside; drain pending_cmds into the
+        //    codec the moment the handshake completes (so writes
+        //    can land in step 3 of the same iteration).
+        let drained: SmallVec<[Drained; 8]> = {
+            let mut io = peer_io.lock().await;
+            let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
+            while let Some(ev) = io.codec.poll_event() {
+                match ev {
+                    Event::HandshakeSucceeded { peer_minor, peer_properties } => {
+                        if !io.handshake_done {
+                            io.handshake_done = true;
+                            deadline = None;
+                            if let Some(iv) = hb_interval {
+                                hb_next = Some(Instant::now() + iv);
+                            }
+                            peer_identity = peer_properties
+                                .identity
+                                .clone()
+                                .unwrap_or_default();
+                            // Drain pre-handshake commands into the
+                            // codec now that we're allowed to send.
+                            while let Some(cmd) = pending_cmds.pop_front() {
+                                match cmd {
+                                    DriverCommand::SendMessage(m) => {
+                                        if let Some(t) = io.transform.as_mut() {
+                                            for wire in t.encode(&m)? {
+                                                io.codec.send_message(&wire)?;
+                                            }
+                                        } else {
+                                            io.codec.send_message(&m)?;
+                                        }
+                                    }
+                                    DriverCommand::SendCommand(c) => {
+                                        io.codec.send_command(&c)?;
+                                    }
+                                    DriverCommand::Close => closing = true,
+                                }
+                            }
+                            out.push(Drained::Handshake {
+                                peer_minor,
+                                peer_properties,
                             });
                         }
-                        while let Some(cmd) = pending_cmds.pop_front() {
-                            match cmd {
-                                DriverCommand::SendMessage(m) => {
-                                    if let Some(t) = transform.as_mut() {
-                                        for wire in t.encode(&m)? {
-                                            codec.send_message(&wire)?;
-                                        }
-                                    } else {
-                                        codec.send_message(&m)?;
-                                    }
-                                }
-                                DriverCommand::SendCommand(c) => codec.send_command(&c)?,
-                                // Defer; exit happens at the top of
-                                // the loop once pending writes flush.
-                                DriverCommand::Close => closing = true,
+                    }
+                    Event::Message(m) => {
+                        // Compression transport: decode the wire
+                        // payload back to plaintext before delivery.
+                        // `None` means the wire message was a dict
+                        // shipment consumed at the transport layer -
+                        // don't surface it.
+                        let m = if let Some(t) = io.transform.as_mut() {
+                            match t.decode(m)? {
+                                Some(plain) => plain,
+                                None => continue,
                             }
-                        }
+                        } else {
+                            m
+                        };
+                        out.push(Drained::Msg(m));
+                    }
+                    Event::Command(c) => out.push(Drained::Cmd(c)),
+                }
+            }
+            out
+        };
+
+        // 2) Dispatch drained events outside the lock.
+        for de in drained {
+            match de {
+                Drained::Handshake { peer_minor, peer_properties } => {
+                    let snap = InprocPeerSnapshot {
+                        socket_type: peer_properties
+                            .socket_type
+                            .unwrap_or(SocketType::Pair),
+                        identity: peer_identity.clone(),
+                    };
+                    let _ = peer_snapshot_tx.send(snap);
+                    if let Some(ctx) = &monitor_ctx {
+                        let info = PeerInfo {
+                            connection_id: ctx.connection_id,
+                            peer_address: ctx.peer_address,
+                            peer_identity: peer_properties.identity.clone(),
+                            peer_properties: peer_properties.clone(),
+                            zmtp_version: (3, peer_minor),
+                        };
+                        *ctx.peer_info.write().expect("peer_info lock") =
+                            Some(info.clone());
+                        ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
+                            endpoint: ctx.endpoint.clone(),
+                            peer: info,
+                        });
                     }
                 }
-                Event::Message(m) => {
-                    // Compression transport: decode the wire payload
-                    // back to plaintext before delivery. `None` means
-                    // the wire message was a dict shipment consumed
-                    // at the transport layer - don't surface it.
-                    let m = if let Some(t) = transform.as_mut() {
-                        match t.decode(m)? {
-                            Some(plain) => plain,
-                            None => continue,
-                        }
-                    } else {
-                        m
-                    };
+                Drained::Msg(m) => {
                     let frame = InprocFrame::message_from(peer_identity.clone(), m);
                     if peer_in_tx.send_async(frame).await.is_err() {
                         return Ok(());
                     }
                 }
-                Event::Command(c) => {
-                    match c {
-                        Command::Subscribe(prefix) => {
-                            if let Some(ctx) = &monitor_ctx {
-                                if let Some(set) = &ctx.peer_sub {
-                                    set.write()
-                                        .expect("peer_sub lock")
-                                        .add(prefix.clone());
-                                }
-                            }
-                            // XPUB surfaces the SUBSCRIBE as a recv-side
-                            // message (`\x01<topic>`). Forward via the
-                            // shared in_tx and let the socket layer's
-                            // recv() do the encoding so the per-socket
-                            // logic sits in one place.
-                            if matches!(socket_type, SocketType::XPub) {
-                                if peer_in_tx
-                                    .send_async(InprocFrame::Command(
-                                        Command::Subscribe(prefix),
-                                    ))
-                                    .await
-                                    .is_err()
-                                {
-                                    return Ok(());
-                                }
+                Drained::Cmd(c) => match c {
+                    Command::Subscribe(prefix) => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(set) = &ctx.peer_sub {
+                                set.write()
+                                    .expect("peer_sub lock")
+                                    .add(prefix.clone());
                             }
                         }
-                        Command::Cancel(prefix) => {
-                            if let Some(ctx) = &monitor_ctx {
-                                if let Some(set) = &ctx.peer_sub {
-                                    set.write()
-                                        .expect("peer_sub lock")
-                                        .remove(&prefix);
-                                }
-                            }
-                            if matches!(socket_type, SocketType::XPub) {
-                                if peer_in_tx
-                                    .send_async(InprocFrame::Command(
-                                        Command::Cancel(prefix),
-                                    ))
-                                    .await
-                                    .is_err()
-                                {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        Command::Error { reason } => {
-                            if let Some(ctx) = &monitor_ctx {
-                                if let Some(info) = ctx
-                                    .peer_info
-                                    .read()
-                                    .expect("peer_info lock")
-                                    .clone()
-                                {
-                                    ctx.monitor.publish(MonitorEvent::PeerCommand {
-                                        endpoint: ctx.endpoint.clone(),
-                                        peer: info,
-                                        command: PeerCommandKind::Error { reason },
-                                    });
-                                }
-                            }
-                        }
-                        Command::Unknown { name, body } => {
-                            if let Some(ctx) = &monitor_ctx {
-                                if let Some(info) = ctx
-                                    .peer_info
-                                    .read()
-                                    .expect("peer_info lock")
-                                    .clone()
-                                {
-                                    ctx.monitor.publish(MonitorEvent::PeerCommand {
-                                        endpoint: ctx.endpoint.clone(),
-                                        peer: info,
-                                        command: PeerCommandKind::Unknown { name, body },
-                                    });
-                                }
-                            }
-                        }
-                        other => {
+                        if matches!(socket_type, SocketType::XPub) {
                             if peer_in_tx
-                                .send_async(InprocFrame::Command(other))
+                                .send_async(InprocFrame::Command(
+                                    Command::Subscribe(prefix),
+                                ))
                                 .await
                                 .is_err()
                             {
@@ -378,39 +378,157 @@ where
                             }
                         }
                     }
-                }
+                    Command::Cancel(prefix) => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(set) = &ctx.peer_sub {
+                                set.write()
+                                    .expect("peer_sub lock")
+                                    .remove(&prefix);
+                            }
+                        }
+                        if matches!(socket_type, SocketType::XPub) {
+                            if peer_in_tx
+                                .send_async(InprocFrame::Command(Command::Cancel(prefix)))
+                                .await
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Command::Error { reason } => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(info) = ctx
+                                .peer_info
+                                .read()
+                                .expect("peer_info lock")
+                                .clone()
+                            {
+                                ctx.monitor.publish(MonitorEvent::PeerCommand {
+                                    endpoint: ctx.endpoint.clone(),
+                                    peer: info,
+                                    command: PeerCommandKind::Error { reason },
+                                });
+                            }
+                        }
+                    }
+                    Command::Unknown { name, body } => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(info) = ctx
+                                .peer_info
+                                .read()
+                                .expect("peer_info lock")
+                                .clone()
+                            {
+                                ctx.monitor.publish(MonitorEvent::PeerCommand {
+                                    endpoint: ctx.endpoint.clone(),
+                                    peer: info,
+                                    command: PeerCommandKind::Unknown { name, body },
+                                });
+                            }
+                        }
+                    }
+                    other => {
+                        if peer_in_tx
+                            .send_async(InprocFrame::Command(other))
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                },
             }
         }
 
-        // 2) Flush pending outbound via gather I/O. compio's
-        //    `IoVectoredBuf` impl on `Vec<bytes::Bytes>` lets us hand
-        //    the codec's owned chunks to `write_vectored` directly -
-        //    no unsafe iovec adapter.
-        if codec.has_pending_transmit() {
-            let mut chunks = codec.clone_transmit_chunks();
-            if chunks.len() > 1024 {
-                chunks.truncate(1024);
-            }
-            if !chunks.is_empty() {
-                let BufResult(res, _bufs) = writer.write_vectored(chunks).await;
-                let written = res.map_err(Error::Io)?;
-                if written == 0 {
-                    return Ok(());
+        // 3) Flush pending outbound via gather I/O. Hold the lock
+        //    across the write so a concurrent Socket::send fast
+        //    path can't take the same chunks before we
+        //    `advance_transmit`. compio's `IoVectoredBuf` impl on
+        //    `Vec<bytes::Bytes>` lets the codec's owned chunks go
+        //    directly to `write_vectored` - no unsafe iovec
+        //    adapter.
+        let wrote_something = {
+            let mut io = peer_io.lock().await;
+            if io.codec.has_pending_transmit() {
+                let mut chunks = io.codec.clone_transmit_chunks();
+                if chunks.len() > 1024 {
+                    chunks.truncate(1024);
                 }
-                codec.advance_transmit(written);
-                continue;
+                if !chunks.is_empty() {
+                    let written = io
+                        .writer
+                        .write_vectored(chunks)
+                        .await
+                        .map_err(Error::Io)?;
+                    if written == 0 {
+                        return Ok(());
+                    }
+                    io.codec.advance_transmit(written);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if wrote_something {
+            continue;
         }
 
-        // 3) Race a read against an inbox command, plus the
-        //    pre-handshake deadline and the post-handshake heartbeat
-        //    tick. When the socket has a shared round-robin queue,
-        //    also race `shared_msg_rx`: every peer driver receives
-        //    on it, so whichever flushes its codec fastest grabs
-        //    the next message - work-stealing without an
+        // 4) Race readability on the wire against an inbox command,
+        //    plus the pre-handshake deadline and post-handshake
+        //    heartbeat tick. When the socket has a shared round-robin
+        //    queue, also race `shared_msg_rx`: every peer driver
+        //    receives on it, so whichever flushes its codec fastest
+        //    grabs the next message - work-stealing without an
         //    intermediate pump task.
+        //
+        //    The `peer_io` lock is NEVER held across this select - the
+        //    fast-path send caller is free to grab the lock between
+        //    iterations.
+        //
+        //    `PollFd::read_ready` is cancellation-safe (the underlying
+        //    io_uring `PollOnce` SQE can be cancelled cleanly), so we
+        //    can drop it when another arm wins the race. Once it
+        //    fires, we do an inline `reader.read(buf).await` - kernel
+        //    data is already queued, the SQE completes immediately,
+        //    and we never abandon a buffer-owning read mid-flight.
         use futures::FutureExt;
-        let bytes_fut = bytes_rx.recv_async();
+        // Stage 5 gate: when a `recv()` caller has claimed the read
+        // path (`recv_claim == 1`), the driver must NOT race the
+        // FD readiness or it would steal bytes out from under the
+        // claim. Park on `recv_state_changed` instead - the claim
+        // is released via a `notify(usize::MAX)` on Drop, which
+        // wakes us so we re-evaluate.
+        //
+        // EOF / fatal-read signal: when the recv direct path
+        // observes EOF or a fatal read error, it notifies
+        // `eof_signal` so we exit instead of looping.
+        let recv_active = state.recv_claim.load(Ordering::Acquire) == 1;
+        // Avoid per-iteration `event_listener::Listener` allocations
+        // when the recv claim isn't held. Most loop iterations on a
+        // throughput-bound PULL run with `recv_active == false` (the
+        // recv direct path peeks `in_rx` and falls back when the
+        // driver has buffered messages); creating + dropping two
+        // unused Listeners per iter would dominate the small-message
+        // hot path.
+        let read_ready_fut = async {
+            if recv_active {
+                state.recv_state_changed.listen().await;
+                Err(())
+            } else {
+                poll_fd.read_ready().await.map_err(|_| ())
+            }
+        };
+        let eof_fut = async {
+            if recv_active {
+                state.eof_signal.listen().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
         let cmd_fut = inbox.recv_async();
         let timeout_fut = maybe_sleep_until(deadline);
         let hb_fut = maybe_sleep_until(hb_next);
@@ -421,36 +539,88 @@ where
                 None => std::future::pending::<Option<Message>>().await,
             }
         };
-        futures::pin_mut!(bytes_fut);
+        futures::pin_mut!(read_ready_fut);
+        futures::pin_mut!(eof_fut);
         futures::pin_mut!(cmd_fut);
         futures::pin_mut!(timeout_fut);
         futures::pin_mut!(hb_fut);
         futures::pin_mut!(shared_fut);
         let cap = max_batch_bytes();
         futures::select_biased! {
+            () = eof_fut.fuse() => {
+                // Recv direct path observed EOF / read error.
+                return Ok(());
+            }
             () = timeout_fut.fuse() => {
                 return Err(Error::HandshakeFailed("handshake timeout".into()));
             }
             () = hb_fut.fuse() => {
-                if last_input.elapsed() > hb_timeout {
+                let now_nanos = state.hb_epoch.elapsed().as_nanos() as u64;
+                let last_nanos = state
+                    .last_input_nanos
+                    .load(Ordering::Relaxed);
+                let elapsed = Duration::from_nanos(now_nanos.saturating_sub(last_nanos));
+                if elapsed > hb_timeout {
                     return Err(Error::Timeout);
                 }
                 let ping = Command::Ping {
                     ttl_deciseconds: hb_ttl_deciseconds,
                     context: Bytes::new(),
                 };
-                let _ = codec.send_command(&ping);
+                {
+                    let mut io = peer_io.lock().await;
+                    let _ = io.codec.send_command(&ping);
+                }
                 if let Some(iv) = hb_interval {
                     hb_next = Some(Instant::now() + iv);
                 }
             }
-            bytes = bytes_fut.fuse() => {
-                let bytes = match bytes {
-                    Ok(b) => b,
-                    Err(_) => return Ok(()),
-                };
-                last_input = Instant::now();
-                codec.handle_input(&bytes)?;
+            ready = read_ready_fut.fuse() => {
+                if ready.is_err() {
+                    // Either the read_ready FD probe failed (peer
+                    // closed) or the recv claim flipped state. In
+                    // the FD-error case, exit. In the
+                    // claim-changed case, just loop and re-evaluate
+                    // (recv may have released; we'll grab reads
+                    // again).
+                    if recv_active {
+                        // Claim state flipped - reloop.
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    let buf = std::mem::replace(
+                        &mut read_buf,
+                        Vec::with_capacity(READ_BUF_BYTES),
+                    );
+                    let mut io = peer_io.lock().await;
+                    // Re-check claim under lock. Subtle race: the
+                    // recv direct caller may have flipped
+                    // `recv_claim` to 1 between our `recv_active`
+                    // snapshot and now. If so, we must NOT read -
+                    // the recv side's own `read_ready` SQE has
+                    // fired too, and reading here would steal the
+                    // kernel data, hanging the recv future on its
+                    // subsequent read SQE.
+                    if state.recv_claim.load(Ordering::Acquire) == 1 {
+                        drop(io);
+                        read_buf = buf;
+                    } else {
+                        let (res, filled) = io.reader.read(buf).await;
+                        let n = match res {
+                            Ok(0) | Err(_) => return Ok(()),
+                            Ok(n) => n,
+                        };
+                        state.last_input_nanos.store(
+                            state.hb_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        io.codec.handle_input(&filled[..n])?;
+                        drop(io);
+                        read_buf = filled;
+                        read_buf.clear();
+                    }
+                }
             }
             cmd = cmd_fut.fuse() => {
                 let mut next = match cmd {
@@ -458,24 +628,30 @@ where
                     Err(_) => return Ok(()),
                 };
                 while let Some(cmd) = next.take() {
-                    if !handshake_done {
-                        pending_cmds.push_back(cmd);
-                    } else {
-                        match cmd {
-                            DriverCommand::SendMessage(m) => {
-                                if let Some(t) = transform.as_mut() {
-                                    for wire in t.encode(&m)? {
-                                        codec.send_message(&wire)?;
+                    let cap_reached = {
+                        let mut io = peer_io.lock().await;
+                        if !io.handshake_done {
+                            pending_cmds.push_back(cmd);
+                        } else {
+                            match cmd {
+                                DriverCommand::SendMessage(m) => {
+                                    if let Some(t) = io.transform.as_mut() {
+                                        for wire in t.encode(&m)? {
+                                            io.codec.send_message(&wire)?;
+                                        }
+                                    } else {
+                                        io.codec.send_message(&m)?;
                                     }
-                                } else {
-                                    codec.send_message(&m)?;
                                 }
+                                DriverCommand::SendCommand(c) => {
+                                    io.codec.send_command(&c)?;
+                                }
+                                DriverCommand::Close => closing = true,
                             }
-                            DriverCommand::SendCommand(c) => codec.send_command(&c)?,
-                            DriverCommand::Close => closing = true,
                         }
-                    }
-                    if codec.pending_transmit_size() >= cap { break; }
+                        io.codec.pending_transmit_size() >= cap
+                    };
+                    if cap_reached { break; }
                     if let Ok(c) = inbox.try_recv() {
                         next = Some(c);
                     }
@@ -500,16 +676,20 @@ where
                     .as_ref()
                     .expect("shared_fut only ready when rx is Some");
                 while let Some(m) = next.take() {
-                    if !handshake_done {
-                        pending_cmds.push_back(DriverCommand::SendMessage(m));
-                    } else if let Some(t) = transform.as_mut() {
-                        for wire in t.encode(&m)? {
-                            codec.send_message(&wire)?;
+                    let cap_reached = {
+                        let mut io = peer_io.lock().await;
+                        if !io.handshake_done {
+                            pending_cmds.push_back(DriverCommand::SendMessage(m));
+                        } else if let Some(t) = io.transform.as_mut() {
+                            for wire in t.encode(&m)? {
+                                io.codec.send_message(&wire)?;
+                            }
+                        } else {
+                            io.codec.send_message(&m)?;
                         }
-                    } else {
-                        codec.send_message(&m)?;
-                    }
-                    if codec.pending_transmit_size() >= cap { break; }
+                        io.codec.pending_transmit_size() >= cap
+                    };
+                    if cap_reached { break; }
                     if let Ok(m) = shared.try_recv() {
                         next = Some(m);
                     }

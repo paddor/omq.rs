@@ -10,17 +10,18 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-use omq_proto::proto::SocketType;
+use omq_proto::proto::{Event, SocketType};
 
 use crate::monitor::{MonitorEvent, MonitorStream, PeerIdent};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{self, InprocFrame};
 use crate::transport::ipc as ipc_transport;
+use crate::transport::peer_io::PeerIo;
 use crate::transport::tcp as tcp_transport;
 
 use super::dial::{connect_ipc_with_reconnect, connect_tcp_with_reconnect};
 use super::inner::{
-    ListenerEntry, PeerOut, SocketInner, UdpDialerEntry, WirePeerHandle,
+    DirectIoState, ListenerEntry, PeerOut, SocketInner, UdpDialerEntry, WirePeerHandle,
 };
 use super::install::{install_accepted_wire_peer, install_inproc_peer};
 use super::reject_encrypted_inproc;
@@ -33,6 +34,37 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
         t,
         SocketType::Req | SocketType::Rep | SocketType::Dish
     )
+}
+
+/// Stage 5 recv-direct fast path eligibility. The direct path
+/// requires:
+///   - exactly one peer (single-peer wire connection),
+///   - the socket type is one whose recv stream is "user data only"
+///     (no ROUTER identity prefix; no XPUB/XSUB SUBSCRIBE / CANCEL
+///     surfacing; no UDP-only DISH).
+fn direct_recv_eligible(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Pull
+            | SocketType::Sub
+            | SocketType::Rep
+            | SocketType::Pair
+            | SocketType::Req
+    )
+}
+
+/// RAII guard for the [`DirectIoState`] recv claim. Released on drop:
+/// resets `recv_claim` to 0 (idle) and wakes the driver via
+/// `recv_state_changed` so it re-evaluates and resumes reading.
+struct ClaimGuard<'a> {
+    state: &'a Arc<DirectIoState>,
+}
+
+impl Drop for ClaimGuard<'_> {
+    fn drop(&mut self) {
+        self.state.recv_claim.store(0, Ordering::Release);
+        self.state.recv_state_changed.notify(usize::MAX);
+    }
 }
 
 #[derive(Clone)]
@@ -156,9 +188,10 @@ impl Socket {
                         // but `to_poll_fd()` produces a SharedFd-backed
                         // wrapper that does. The original stream keeps
                         // its share, so the fd survives the drop.
-                        if let Ok(poll_fd) = stream.to_poll_fd() {
-                            let _ = inner.options.tcp_keepalive.apply(&poll_fd);
-                        }
+                        let Ok(poll_fd) = stream.to_poll_fd() else {
+                            continue;
+                        };
+                        let _ = inner.options.tcp_keepalive.apply(&poll_fd);
                         let conn_id = inner
                             .next_connection_id
                             .fetch_add(1, Ordering::Relaxed);
@@ -167,9 +200,12 @@ impl Socket {
                             peer_ident: PeerIdent::Socket(addr),
                             connection_id: conn_id,
                         });
+                        let (reader, writer) = stream.into_split();
                         install_accepted_wire_peer(
                             &inner,
-                            stream,
+                            reader.into(),
+                            writer.into(),
+                            poll_fd,
                             Role::Server,
                             ep_for_task.clone(),
                             conn_id,
@@ -208,6 +244,9 @@ impl Socket {
             loop {
                 match listener.inner.accept().await {
                     Ok((stream, _addr)) => {
+                        let Ok(poll_fd) = stream.to_poll_fd() else {
+                            continue;
+                        };
                         let conn_id = inner
                             .next_connection_id
                             .fetch_add(1, Ordering::Relaxed);
@@ -216,9 +255,12 @@ impl Socket {
                             peer_ident: PeerIdent::Path(ident_path.clone()),
                             connection_id: conn_id,
                         });
+                        let (reader, writer) = stream.into_split();
                         install_accepted_wire_peer(
                             &inner,
-                            stream,
+                            reader.into(),
+                            writer.into(),
+                            poll_fd,
                             Role::Server,
                             ep_for_task.clone(),
                             conn_id,
@@ -629,13 +671,25 @@ impl Socket {
         Ok(())
     }
 
-    /// Send a message. Routing depends on socket type:
-    /// PUSH / DEALER / REQ: round-robin across peers.
-    /// PUB / XPUB / RADIO: fan out (with subscription/group filter).
-    /// PAIR / REP: round-robin (single-peer in PAIR's case).
-    /// REQ/REP envelope wrapping happens inline via TypeState.
+    /// Receive a message. Stage 5 direct path is tried first when
+    /// eligible (single wire peer, supported socket type) - reads the
+    /// FD inline so the driver's read-side hop is skipped, saving
+    /// one task wake per RTT. On non-eligible sockets, contention on
+    /// the recv_claim, or an early bailout (e.g. pre-handshake), the
+    /// classic `in_rx` loop runs unchanged.
+    ///
+    /// Cancellation: dropping the returned future after `read_ready`
+    /// has fired but before the read SQE returns may forfeit a small
+    /// amount of in-flight bytes (~5 µs window). The codec stays
+    /// consistent and the connection remains usable; the next
+    /// `recv()` continues from there.
     pub async fn recv(&self) -> Result<Message> {
         let st = self.inner.socket_type;
+        if direct_recv_eligible(st) {
+            if let Some(msg) = self.try_direct_recv().await? {
+                return Ok(msg);
+            }
+        }
         loop {
             let frame = self
                 .inner
@@ -737,6 +791,255 @@ impl Socket {
                     continue;
                 }
             }
+        }
+    }
+
+    /// Snapshot the [`DirectIoState`] iff this socket has exactly one
+    /// connected wire peer. Returns `None` for inproc-only sockets,
+    /// no-peer sockets, or multi-peer sockets - any of which forces
+    /// the caller to fall back to the slow `in_rx` path.
+    fn snapshot_direct_io_single_peer(&self) -> Option<Arc<DirectIoState>> {
+        let peers = self.inner.out_peers.read().expect("peers lock");
+        if peers.len() != 1 {
+            return None;
+        }
+        let p = &peers[0];
+        let handle = p.direct_io.as_ref()?;
+        handle
+            .read()
+            .expect("direct_io handle lock")
+            .clone()
+    }
+
+    /// Walk the codec's user-facing event stream once under the
+    /// [`PeerIo`] lock. Returns `Ok(Some(msg))` for the first
+    /// `Event::Message` (with transform-decode applied), `Ok(None)`
+    /// if the codec produced only commands or nothing.
+    ///
+    /// Commands like Ping / Pong / Error / Unknown are silently
+    /// consumed - the slow `in_rx` path's monitor publishing for
+    /// Error / Unknown is sacrificed on the direct path (rare;
+    /// documented in the stripped-Stage-5 plan).
+    ///
+    /// HandshakeSucceeded is treated defensively: we gate entry to
+    /// the direct-read loop on `handshake_done == true` while
+    /// holding the lock, so this branch shouldn't normally fire.
+    /// Flip the flag and continue if it does.
+    fn drain_one_user_event(&self, io: &mut PeerIo) -> Result<Option<Message>> {
+        while let Some(ev) = io.codec.poll_event() {
+            match ev {
+                Event::Message(m) => {
+                    let m = if let Some(t) = io.transform.as_mut() {
+                        match t.decode(m)? {
+                            Some(plain) => plain,
+                            None => continue,
+                        }
+                    } else {
+                        m
+                    };
+                    return Ok(Some(m));
+                }
+                Event::Command(_) => continue,
+                Event::HandshakeSucceeded { .. } => {
+                    io.handshake_done = true;
+                    continue;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Apply post-receive socket-type processing: SUB / XSUB
+    /// subscription filtering, REQ / REP type-state. Mirrors the
+    /// in_rx loop's handling. Returns `None` on filtered messages
+    /// (caller continues the read loop), `Some(msg)` to surface.
+    fn post_recv_apply(&self, msg: Message) -> Result<Option<Message>> {
+        if !self.matches_subscription(&msg) {
+            return Ok(None);
+        }
+        let st = self.inner.socket_type;
+        if post_recv_needs_type_state(st) {
+            Ok(self
+                .inner
+                .type_state
+                .lock()
+                .expect("type_state lock")
+                .post_recv(st, msg)?)
+        } else {
+            Ok(Some(msg))
+        }
+    }
+
+    /// Process one InprocFrame from `in_rx` for the direct-recv
+    /// fallback race. Only handles the variants that the
+    /// direct-recv-eligible socket types (Pull / Sub / Rep / Pair
+    /// / Req) actually receive: SinglePart and Message. Command is
+    /// XPub-only and not eligible for direct recv anyway.
+    fn process_inproc_frame_for_direct(
+        &self,
+        frame: InprocFrame,
+    ) -> Result<Option<Message>> {
+        match frame {
+            InprocFrame::SinglePart { body, .. } => {
+                self.post_recv_apply(Message::single(body))
+            }
+            InprocFrame::Message(boxed) => {
+                let crate::transport::inproc::InprocFullMessage { msg, .. } = *boxed;
+                self.post_recv_apply(msg)
+            }
+            InprocFrame::Command(_) => Ok(None),
+        }
+    }
+
+    /// Stage 5 direct-recv: read straight off the wire instead of
+    /// going through the driver's read arm + `in_rx` channel hop.
+    /// Saves ~12 µs (one task wake) per RTT on the inbound side.
+    ///
+    /// Bails (returns `Ok(None)` to the caller, which falls back to
+    /// the `in_rx` loop) when:
+    ///   - the socket has zero or many peers,
+    ///   - the peer has no `DirectIoState` (inproc / UDP),
+    ///   - another `recv()` already holds the claim,
+    ///   - the handshake hasn't completed yet (driver still owns
+    ///     the read path until handshake).
+    async fn try_direct_recv(&self) -> Result<Option<Message>> {
+        // Fall back if the driver has already buffered messages into
+        // in_rx - they must be drained in arrival order.
+        if !self.inner.in_rx.is_empty() {
+            return Ok(None);
+        }
+        let state = match self.snapshot_direct_io_single_peer() {
+            Some(s) => s,
+            None => {
+                return Ok(None);
+            }
+        };
+        if state
+            .recv_claim
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let _guard = ClaimGuard { state: &state };
+        // Race-safe recheck: between the first peek and the claim
+        // flip, the driver could have enqueued into in_rx (it stops
+        // reading on its next iteration). Bail if so.
+        if !self.inner.in_rx.is_empty() {
+            return Ok(None);
+        }
+
+        const READ_BUF_BYTES: usize = 64 * 1024;
+        let mut local_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
+
+        loop {
+            // 1) Drain any user-facing events the driver left in the
+            //    codec. Bail out (Ok(None)) if the handshake hasn't
+            //    completed - we hold the lock so this is race-free.
+            let drained = {
+                let mut io = state.peer_io.lock().await;
+                if !io.handshake_done {
+                    return Ok(None);
+                }
+                self.drain_one_user_event(&mut io)?
+            };
+            if let Some(msg) = drained {
+                if let Some(out) = self.post_recv_apply(msg)? {
+                    return Ok(Some(out));
+                }
+                continue;
+            }
+
+            // 2) Race kernel-buffered readability against an
+            //    in_rx fire. The driver may have parsed an event
+            //    under the [`PeerIo`] lock while we were releasing
+            //    it (small window, but real on a single-threaded
+            //    runtime: drain-events-under-lock → release →
+            //    forward-to-in_rx is two steps). If in_rx wins,
+            //    drop the claim and process the buffered frame
+            //    inline so we never deadlock waiting on the FD
+            //    while the driver has a message in its hand.
+            //
+            //    `read_ready` is backed by a one-shot io_uring
+            //    PollOnce SQE that cancels cleanly. `recv_async`
+            //    on flume is cancel-safe by construction.
+            let read_ready_fut = state.poll_fd.read_ready();
+            let inrx_fut = self.inner.in_rx.recv_async();
+            futures::pin_mut!(read_ready_fut);
+            futures::pin_mut!(inrx_fut);
+            use futures::FutureExt;
+            let read_ok = futures::select_biased! {
+                frame = inrx_fut.fuse() => {
+                    let frame = frame.map_err(|_| Error::Closed)?;
+                    // Drop claim via RAII before returning.
+                    drop(_guard);
+                    return Ok(self.process_inproc_frame_for_direct(frame)?);
+                }
+                ready = read_ready_fut.fuse() => {
+                    ready.is_ok()
+                }
+            };
+            if !read_ok {
+                state.eof_signal.notify(usize::MAX);
+                return Err(Error::Closed);
+            }
+
+            // 3) Read + handle_input, both under the lock so a
+            //    concurrent driver iteration can't race us. The
+            //    cancellation window is the gap between `read_ready`
+            //    firing and the read SQE completing - bounded and
+            //    small (~5 µs on Linux loopback).
+            let buf = std::mem::replace(
+                &mut local_buf,
+                Vec::with_capacity(READ_BUF_BYTES),
+            );
+            let mut io = state.peer_io.lock().await;
+            let (res, filled) = io.reader.read(buf).await;
+            match res {
+                Ok(0) => {
+                    state.eof_signal.notify(usize::MAX);
+                    return Err(Error::Closed);
+                }
+                Err(e) => {
+                    state.eof_signal.notify(usize::MAX);
+                    return Err(Error::Io(e));
+                }
+                Ok(n) => {
+                    io.codec.handle_input(&filled[..n])?;
+                    state.last_input_nanos.store(
+                        state.hb_epoch.elapsed().as_nanos() as u64,
+                        Ordering::Relaxed,
+                    );
+                    // Flush any codec output that resulted from
+                    // handle_input - e.g. auto-PONGs to a peer
+                    // PING. The driver is parked on
+                    // `recv_state_changed` while we hold the
+                    // claim, so it can't flush for us; the peer
+                    // would otherwise see no PONG and time us
+                    // out. Hold the lock across the writev: a
+                    // concurrent fast-path send must wait.
+                    while io.codec.has_pending_transmit() {
+                        let mut chunks = io.codec.clone_transmit_chunks();
+                        if chunks.len() > 1024 {
+                            chunks.truncate(1024);
+                        }
+                        if chunks.is_empty() {
+                            break;
+                        }
+                        let written =
+                            io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
+                        if written == 0 {
+                            state.eof_signal.notify(usize::MAX);
+                            return Err(Error::Closed);
+                        }
+                        io.codec.advance_transmit(written);
+                    }
+                    drop(io);
+                    local_buf = filled;
+                    local_buf.clear();
+                }
+            }
+            // Loop back to drain the freshly-parsed events.
         }
     }
 

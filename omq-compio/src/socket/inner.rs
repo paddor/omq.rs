@@ -10,11 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
     Arc, Mutex, RwLock,
 };
+use std::time::Instant;
 
 use bytes::Bytes;
+use compio::runtime::fd::PollFd;
 use event_listener::Event;
 
 use omq_proto::endpoint::Endpoint;
@@ -28,6 +30,7 @@ use omq_proto::type_state::TypeState;
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerInfo};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
+use crate::transport::peer_io::SharedPeerIo;
 
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
@@ -145,8 +148,81 @@ pub(super) enum PeerOut {
 
 pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 
+/// Per-connection direct-I/O state shared between the driver and the
+/// fast-path send / direct-recv callers on [`Socket`].
+///
+/// Holds the `SharedPeerIo` (codec + writer + reader + transform), the
+/// readiness handle for the FD, and the recv-claim state machine that
+/// arbitrates which task (driver vs. recv caller) owns reads at any
+/// given moment.
+///
+/// [`Socket`]: super::handle::Socket
+pub(crate) struct DirectIoState {
+    pub(crate) peer_io: SharedPeerIo,
+    /// Cancel-safe FD readiness probe. Shared with the driver task,
+    /// which uses it identically to `PollFd::read_ready`.
+    pub(crate) poll_fd: Arc<PollFd<socket2::Socket>>,
+    /// 0 = idle (driver reads); 1 = `recv()` owns reads. Drained
+    /// events under the [`PeerIo`] lock are fine on either side; the
+    /// claim arbitrates only the read SQE.
+    pub(crate) recv_claim: AtomicU8,
+    /// Driver listens on this to wake when `recv_claim` flips back
+    /// to 0 (the direct-recv caller has released the claim).
+    pub(crate) recv_state_changed: Event,
+    /// `recv()` notifies on this on EOF / fatal read error so the
+    /// driver task terminates instead of busy-looping after recv has
+    /// bailed.
+    pub(crate) eof_signal: Event,
+    /// Shared `last_input` for heartbeat-timeout. `recv()` updates on
+    /// each successful read; the driver's heartbeat arm reads it on
+    /// each tick. Stores nanos relative to `hb_epoch` (a per-state
+    /// monotonic origin set at construction; fits 584 years).
+    pub(crate) last_input_nanos: AtomicU64,
+    pub(crate) hb_epoch: Instant,
+}
+
+impl std::fmt::Debug for DirectIoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectIoState")
+            .field("recv_claim", &self.recv_claim.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl DirectIoState {
+    pub(crate) fn new(
+        peer_io: SharedPeerIo,
+        poll_fd: Arc<PollFd<socket2::Socket>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            peer_io,
+            poll_fd,
+            recv_claim: AtomicU8::new(0),
+            recv_state_changed: Event::new(),
+            eof_signal: Event::new(),
+            last_input_nanos: AtomicU64::new(0),
+            hb_epoch: Instant::now(),
+        })
+    }
+}
+
+/// Direct-I/O handle for wire peers. The dial supervisor owns a
+/// clone and swaps the inner `Option` on reconnect: `None` while a
+/// driver is restarting, `Some(Arc<DirectIoState>)` once the new
+/// state is wired up. [`Socket::send`]'s fast path and
+/// [`Socket::recv`]'s direct path snapshot the inner Arc; if they
+/// see `None`, they fall back to the slow path.
+///
+/// [`Socket::send`]: super::handle::Socket::send
+/// [`Socket::recv`]: super::handle::Socket::recv
+pub(super) type DirectIoHandle = Arc<RwLock<Option<Arc<DirectIoState>>>>;
+
 pub(super) struct PeerSlot {
     pub(super) out: PeerOut,
+    /// Stage 4 direct-write fast path. `None` for inproc / UDP peers
+    /// (those don't run the ZMTP codec). For wire peers, the inner
+    /// `Option<SharedPeerIo>` is swapped on reconnect.
+    pub(super) direct_io: Option<DirectIoHandle>,
     /// Peer's snapshot - known at connect/accept for inproc;
     /// populated post-handshake for wire peers via the snap_rx
     /// channel set in `spawn_wire_driver`.

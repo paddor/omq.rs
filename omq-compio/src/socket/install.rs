@@ -14,6 +14,7 @@
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
+use compio::runtime::fd::PollFd;
 
 use omq_proto::endpoint::Endpoint;
 use omq_proto::proto::SocketType;
@@ -22,8 +23,12 @@ use omq_proto::subscription::SubscriptionSet;
 use crate::monitor::{DisconnectReason, MonitorEvent, PeerInfo};
 use crate::transport::driver::{self, DriverCommand, MonitorCtx};
 use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
+use crate::transport::peer_io::{WireReader, WireWriter};
 
-use super::inner::{is_round_robin_send, PeerOut, PeerSlot, SocketInner, WirePeerHandle};
+use super::inner::{
+    is_round_robin_send, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
+    WirePeerHandle,
+};
 use super::{cmd_channel_capacity, pub_side_peer_sub};
 
 pub(super) fn install_inproc_peer(
@@ -71,6 +76,7 @@ pub(super) fn install_inproc_peer(
         let idx = peers.len();
         peers.push(PeerSlot {
             out,
+            direct_io: None,
             peer: Arc::new(RwLock::new(Some(conn.peer))),
             connection_id,
             endpoint: endpoint.clone(),
@@ -99,29 +105,43 @@ pub(super) fn install_inproc_peer(
     });
 }
 
-pub(super) fn install_accepted_wire_peer<S>(
+pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
-    stream: S,
+    reader: WireReader,
+    writer: WireWriter,
+    poll_fd: PollFd<socket2::Socket>,
     role: omq_proto::proto::connection::Role,
     endpoint: Endpoint,
     connection_id: u64,
     peer_addr: Option<std::net::SocketAddr>,
-) where
-    S: compio::io::util::Splittable + 'static,
-    S::ReadHalf: compio::io::AsyncRead + 'static,
-    S::WriteHalf: compio::io::AsyncWrite + 'static,
-{
+) {
     let cap = cmd_channel_capacity(&inner.options);
     let (cmd_tx, cmd_rx) = flume::bounded::<DriverCommand>(cap);
     let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
+        &endpoint,
+        &inner.options,
+    );
+    let peer_io = crate::transport::driver::build_peer_io(
+        role,
+        inner.socket_type,
+        &inner.options,
+        reader,
+        writer,
+        transform,
+    );
+    let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
+    let direct_io_handle: DirectIoHandle =
+        Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
     let slot_idx = {
         let mut peers = inner.out_peers.write().expect("peers lock");
         let idx = peers.len();
         peers.push(PeerSlot {
             out,
+            direct_io: Some(direct_io_handle.clone()),
             peer: Arc::new(RwLock::new(None)),
             connection_id,
             endpoint: endpoint.clone(),
@@ -137,14 +157,10 @@ pub(super) fn install_accepted_wire_peer<S>(
     #[cfg(feature = "priority")]
     inner.rebuild_priority_view();
     inner.on_peer_ready.notify(usize::MAX);
-    let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
-        &endpoint,
-        &inner.options,
-    );
     spawn_wire_driver(
         inner.clone(),
-        stream,
-        role,
+        state,
+        direct_io_handle,
         cmd_rx,
         slot_idx,
         endpoint,
@@ -152,20 +168,20 @@ pub(super) fn install_accepted_wire_peer<S>(
         info_holder,
         peer_addr,
         peer_sub,
-        transform,
     )
     .detach();
 }
 
 /// Spawn the connection-driver task that runs the ZMTP codec for one
 /// stream connection. Returns its `JoinHandle` so the dial supervisor
-/// can await its exit. Generic over the stream type so TCP and IPC
-/// reuse the spawn glue.
+/// can await its exit. Caller must already have built the
+/// [`DirectIoState`] (the codec, reader, writer, poll_fd, claim atomics
+/// all live there).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_wire_driver<S>(
+pub(super) fn spawn_wire_driver(
     inner: Arc<SocketInner>,
-    stream: S,
-    role: omq_proto::proto::connection::Role,
+    state: Arc<DirectIoState>,
+    direct_io_handle: DirectIoHandle,
     cmd_rx: flume::Receiver<DriverCommand>,
     slot_idx: usize,
     endpoint: Endpoint,
@@ -173,13 +189,7 @@ pub(super) fn spawn_wire_driver<S>(
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_address: Option<std::net::SocketAddr>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
-    transform: Option<omq_proto::proto::transform::MessageTransform>,
-) -> compio::runtime::JoinHandle<()>
-where
-    S: compio::io::util::Splittable + 'static,
-    S::ReadHalf: compio::io::AsyncRead + 'static,
-    S::WriteHalf: compio::io::AsyncWrite + 'static,
-{
+) -> compio::runtime::JoinHandle<()> {
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
 
     // Snap listener: when the driver completes the handshake it sends
@@ -260,12 +270,10 @@ where
     };
     let inner_for_exit = inner.clone();
     let endpoint_for_exit = endpoint;
-    let (reader, writer) = stream.split();
+    let direct_io_for_exit = direct_io_handle;
     compio::runtime::spawn(async move {
         let res = driver::run_connection(
-            reader,
-            writer,
-            role,
+            state,
             socket_type,
             options,
             cmd_rx,
@@ -273,9 +281,14 @@ where
             peer_in_tx,
             snap_tx,
             Some(monitor_ctx),
-            transform,
         )
         .await;
+        // Disengage the fast path before the dial supervisor swaps in
+        // a fresh PeerIo; while this is `None`, Socket::send falls
+        // back to cmd_tx and waits.
+        *direct_io_for_exit
+            .write()
+            .expect("direct_io handle lock") = None;
         // Publish Disconnected so monitor consumers see the peer
         // tear down. Reason: PeerClosed for clean EOF, Error(...)
         // for any other failure. Skip if the handshake never

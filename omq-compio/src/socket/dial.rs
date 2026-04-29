@@ -22,7 +22,8 @@ use crate::transport::driver::DriverCommand;
 use crate::transport::{ipc as ipc_transport, tcp as tcp_transport};
 
 use super::inner::{
-    DialerEntry, PeerOut, PeerSlot, SocketInner, WirePeerHandle,
+    DialerEntry, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
+    WirePeerHandle,
 };
 use super::{cmd_channel_capacity, pub_side_peer_sub};
 
@@ -47,6 +48,7 @@ pub(super) fn connect_tcp_with_reconnect(
     // blocks on on_peer_ready until the peer slot lands.
     let handle: WirePeerHandle =
         Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = wrapper.clone();
 
     let dialer_task = compio::runtime::spawn(dial_supervisor_tcp(
@@ -56,6 +58,7 @@ pub(super) fn connect_tcp_with_reconnect(
         role,
         policy,
         handle,
+        direct_io_handle,
         info_holder,
         peer_sub,
         #[cfg(feature = "priority")]
@@ -79,6 +82,7 @@ async fn dial_supervisor_tcp(
     role: omq_proto::proto::connection::Role,
     policy: ReconnectPolicy,
     handle: WirePeerHandle,
+    direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     #[cfg(feature = "priority")] priority: u8,
@@ -115,9 +119,12 @@ async fn dial_supervisor_tcp(
         // Apply per-socket TCP keepalive policy, if any. compio's
         // TcpStream doesn't expose AsFd directly; `to_poll_fd()` does
         // and shares the fd, so the original stream stays intact.
-        if let Ok(poll_fd) = stream.to_poll_fd() {
-            let _ = inner.options.tcp_keepalive.apply(&poll_fd);
-        }
+        // We also keep the `PollFd` for the driver's read-readiness
+        // wait (avoids a dedicated read task).
+        let Ok(poll_fd) = stream.to_poll_fd() else {
+            continue;
+        };
+        let _ = inner.options.tcp_keepalive.apply(&poll_fd);
         let peer_addr = stream.peer_addr().ok();
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
         inner.monitor.publish(MonitorEvent::Connected {
@@ -136,6 +143,24 @@ async fn dial_supervisor_tcp(
             *set.write().expect("peer_sub lock") = SubscriptionSet::new();
         }
 
+        let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
+            &wrapper,
+            &inner.options,
+        );
+        let (reader, writer) = stream.into_split();
+        let peer_io = crate::transport::driver::build_peer_io(
+            role,
+            inner.socket_type,
+            &inner.options,
+            reader.into(),
+            writer.into(),
+            transform,
+        );
+        let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
+        *direct_io_handle
+            .write()
+            .expect("direct_io handle lock") = Some(state.clone());
+
         let idx = if let Some(idx) = slot_idx {
             idx
         } else {
@@ -143,6 +168,7 @@ async fn dial_supervisor_tcp(
             let idx = peers.len();
             peers.push(PeerSlot {
                 out: PeerOut::Wire(handle.clone()),
+                direct_io: Some(direct_io_handle.clone()),
                 peer: Arc::new(RwLock::new(None)),
                 connection_id: conn_id,
                 endpoint: wrapper.clone(),
@@ -160,8 +186,8 @@ async fn dial_supervisor_tcp(
 
         let driver_join = super::install::spawn_wire_driver(
             inner.clone(),
-            stream,
-            role,
+            state,
+            direct_io_handle.clone(),
             cmd_rx,
             idx,
             wrapper.clone(),
@@ -169,10 +195,6 @@ async fn dial_supervisor_tcp(
             info_holder.clone(),
             peer_addr,
             peer_sub.clone(),
-            omq_proto::proto::transform::MessageTransform::for_endpoint(
-                &wrapper,
-                &inner.options,
-            ),
         );
 
         let _ = driver_join.await;
@@ -196,6 +218,7 @@ pub(super) fn connect_ipc_with_reconnect(
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let handle: WirePeerHandle =
         Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = endpoint.clone();
 
     let dialer_task = compio::runtime::spawn(dial_supervisor_ipc(
@@ -204,6 +227,7 @@ pub(super) fn connect_ipc_with_reconnect(
         role,
         policy,
         handle,
+        direct_io_handle,
         info_holder,
         peer_sub,
         #[cfg(feature = "priority")]
@@ -226,6 +250,7 @@ async fn dial_supervisor_ipc(
     role: omq_proto::proto::connection::Role,
     policy: ReconnectPolicy,
     handle: WirePeerHandle,
+    direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
     #[cfg(feature = "priority")] priority: u8,
@@ -263,6 +288,9 @@ async fn dial_supervisor_ipc(
             }
         };
         let Some(stream) = stream else { return };
+        let Ok(poll_fd) = stream.to_poll_fd() else {
+            continue;
+        };
         let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
         inner.monitor.publish(MonitorEvent::Connected {
             endpoint: endpoint.clone(),
@@ -278,6 +306,20 @@ async fn dial_supervisor_ipc(
             *set.write().expect("peer_sub lock") = SubscriptionSet::new();
         }
 
+        let (reader, writer) = stream.into_split();
+        let peer_io = crate::transport::driver::build_peer_io(
+            role,
+            inner.socket_type,
+            &inner.options,
+            reader.into(),
+            writer.into(),
+            None,
+        );
+        let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
+        *direct_io_handle
+            .write()
+            .expect("direct_io handle lock") = Some(state.clone());
+
         let idx = if let Some(idx) = slot_idx {
             idx
         } else {
@@ -285,6 +327,7 @@ async fn dial_supervisor_ipc(
             let idx = peers.len();
             peers.push(PeerSlot {
                 out: PeerOut::Wire(handle.clone()),
+                direct_io: Some(direct_io_handle.clone()),
                 peer: Arc::new(RwLock::new(None)),
                 connection_id: conn_id,
                 endpoint: endpoint.clone(),
@@ -302,8 +345,8 @@ async fn dial_supervisor_ipc(
 
         let driver_join = super::install::spawn_wire_driver(
             inner.clone(),
-            stream,
-            role,
+            state,
+            direct_io_handle.clone(),
             cmd_rx,
             idx,
             endpoint.clone(),
@@ -311,7 +354,6 @@ async fn dial_supervisor_ipc(
             info_holder.clone(),
             None,
             peer_sub.clone(),
-            None,
         );
 
         let _ = driver_join.await;

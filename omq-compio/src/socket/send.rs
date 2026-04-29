@@ -19,6 +19,9 @@ use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::SocketType;
 
+#[cfg(not(feature = "priority"))]
+use crate::transport::driver::DriverCommand;
+
 use super::handle::Socket;
 use super::inner::PeerOut;
 
@@ -92,15 +95,23 @@ impl Socket {
 
     /// Round-robin dispatch across the socket's connected peers.
     ///
-    /// - Inproc peers receive **direct sends** keyed off
-    ///   `inner.rr_index` (one flume hop into the destination's
-    ///   `in_tx`). HWM is per-peer (matches libzmq's
-    ///   `zmq_inproc(7)`); a slow inproc peer back-pressures only
-    ///   its share of sends.
-    /// - Wire peers (TCP/IPC) funnel through `shared_send_tx`. Every
-    ///   wire driver races the shared queue inside `run_connection`,
-    ///   so work-stealing is preserved among wire peers and
-    ///   `Options::send_hwm` caps total wire-side in-flight.
+    /// - Inproc peers receive direct sends keyed off `inner.rr_index`
+    ///   (one flume hop into the destination's `in_tx`). HWM is
+    ///   per-peer (matches libzmq's `zmq_inproc(7)`); a slow inproc
+    ///   peer back-pressures only its share of sends.
+    /// - Single-wire-peer sockets (the common REQ/REP / DEALER /
+    ///   PAIR case) submit straight to the peer's per-driver
+    ///   `cmd_tx` - the driver coalesces back-to-back sends into one
+    ///   `writev` (true cross-message batching). The original
+    ///   Stage 4 "encode + write inline from `Socket::send`" fast
+    ///   path was reverted in favour of this batching: at small
+    ///   message sizes the per-call writev syscall dominated, and
+    ///   collapsing sends into the driver's natural batching loop
+    ///   recovered ~5-7× throughput.
+    /// - Wire peers at >1 peer funnel through `shared_send_tx`;
+    ///   every wire driver races the shared queue inside
+    ///   `run_connection`, so work-stealing and a true socket-wide
+    ///   `Options::send_hwm` are preserved.
     #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         loop {
@@ -111,29 +122,70 @@ impl Socket {
                 } else {
                     let idx = self.inner().rr_index.fetch_add(1, Ordering::Relaxed)
                         % peers.len();
-                    Some(peers[idx].out.clone())
+                    let p = &peers[idx];
+                    Some((p.out.clone(), peers.len()))
                 }
             };
-            if let Some(chosen) = chosen {
-                return match &chosen {
-                    PeerOut::Inproc { .. } => chosen.send(msg).await,
-                    PeerOut::Wire(_) => {
-                        let tx = self
-                            .inner()
-                            .shared_send_tx
-                            .read()
-                            .expect("shared_send_tx lock")
-                            .clone()
-                            .ok_or(Error::Closed)?;
-                        tx.send_async(msg).await.map_err(|_| Error::Closed)
-                    }
-                };
+            if let Some((chosen, peer_count)) = chosen {
+                return self.slow_round_robin(chosen, msg, peer_count).await;
             }
             let listener = self.inner().on_peer_ready.listen();
             if !self.inner().out_peers.read().expect("peers lock").is_empty() {
                 continue;
             }
             listener.await;
+        }
+    }
+
+    /// `cmd_tx`-routed round-robin send. Used for every wire-side
+    /// dispatch (single peer goes direct to the per-peer cmd channel
+    /// to skip the shared queue's work-stealing overhead; multi-peer
+    /// goes through the shared queue) and inproc peers.
+    #[cfg(not(feature = "priority"))]
+    async fn slow_round_robin(
+        &self,
+        chosen: PeerOut,
+        msg: Message,
+        peer_count: usize,
+    ) -> Result<()> {
+        match chosen {
+            PeerOut::Inproc { .. } => chosen.send(msg).await,
+            PeerOut::Wire(handle) if peer_count == 1 => {
+                // Try the per-peer cmd channel directly. If the
+                // driver died (handshake timeout, peer death,
+                // reconnect in flight), the channel is
+                // disconnected; fall back to the shared queue
+                // so messages buffer up to `send_hwm` until a
+                // new driver picks them up - matches libzmq's
+                // "no live peer" semantics.
+                let tx = handle.read().expect("wire peer handle lock").clone();
+                match tx.send_async(DriverCommand::SendMessage(msg)).await {
+                    Ok(()) => Ok(()),
+                    Err(flume::SendError(cmd)) => {
+                        let DriverCommand::SendMessage(msg) = cmd else {
+                            return Err(Error::Closed);
+                        };
+                        let stx = self
+                            .inner()
+                            .shared_send_tx
+                            .read()
+                            .expect("shared_send_tx lock")
+                            .clone()
+                            .ok_or(Error::Closed)?;
+                        stx.send_async(msg).await.map_err(|_| Error::Closed)
+                    }
+                }
+            }
+            PeerOut::Wire(_) => {
+                let tx = self
+                    .inner()
+                    .shared_send_tx
+                    .read()
+                    .expect("shared_send_tx lock")
+                    .clone()
+                    .ok_or(Error::Closed)?;
+                tx.send_async(msg).await.map_err(|_| Error::Closed)
+            }
         }
     }
 

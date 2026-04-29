@@ -219,8 +219,8 @@ pub(super) type DirectIoHandle = Arc<RwLock<Option<Arc<DirectIoState>>>>;
 
 pub(super) struct PeerSlot {
     pub(super) out: PeerOut,
-    /// Stage 4 direct-write fast path. `None` for inproc / UDP peers
-    /// (those don't run the ZMTP codec). For wire peers, the inner
+    /// Direct-write fast path. `None` for inproc / UDP peers (those
+    /// don't run the ZMTP codec). For wire peers, the inner
     /// `Option<SharedPeerIo>` is swapped on reconnect.
     pub(super) direct_io: Option<DirectIoHandle>,
     /// Peer's snapshot - known at connect/accept for inproc;

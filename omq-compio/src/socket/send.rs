@@ -103,24 +103,11 @@ impl Socket {
     }
 
     /// Round-robin dispatch across the socket's connected peers.
-    ///
-    /// - Inproc peers receive direct sends keyed off `inner.rr_index`
-    ///   (one flume hop into the destination's `in_tx`). HWM is
-    ///   per-peer (matches libzmq's `zmq_inproc(7)`); a slow inproc
-    ///   peer back-pressures only its share of sends.
-    /// - Single-wire-peer sockets (the common REQ/REP / DEALER /
-    ///   PAIR case) submit straight to the peer's per-driver
-    ///   `cmd_tx` - the driver coalesces back-to-back sends into one
-    ///   `writev` (true cross-message batching). The original
-    ///   Stage 4 "encode + write inline from `Socket::send`" fast
-    ///   path was reverted in favour of this batching: at small
-    ///   message sizes the per-call writev syscall dominated, and
-    ///   collapsing sends into the driver's natural batching loop
-    ///   recovered ~5-7× throughput.
-    /// - Wire peers at >1 peer funnel through `shared_send_tx`;
-    ///   every wire driver races the shared queue inside
-    ///   `run_connection`, so work-stealing and a true socket-wide
-    ///   `Options::send_hwm` are preserved.
+    /// Inproc peers receive direct sends; single wire peers submit to
+    /// their per-driver `cmd_tx` (the driver coalesces back-to-back
+    /// sends into one `writev`); multi-wire-peer sockets funnel through
+    /// `shared_send_tx`, where every driver races the shared queue
+    /// (work-stealing + socket-wide `Options::send_hwm`).
     #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
         loop {

@@ -120,19 +120,8 @@ pub fn materialize(
         REG.with(|r| r.borrow_mut().insert(id, sock.clone()));
 
         // Send pump: drain Python-side queue into the omq Socket.
-        //
-        // We tried bounded greedy drain here (try_recv after each
-        // recv_async until 256 msgs / 256 KB), expecting it to feed
-        // the wire driver bursts that fold into single writev calls.
-        // It didn't help: the wire driver already drains its own
-        // inbox via try_recv up to 256 KB before flushing, so the
-        // pump's batching just shifts work between two co-located
-        // tasks. Some cells regressed (inproc 8 KiB 2.03 -> 1.61x).
-        // Keep the simple shape; the real wins for TCP large are
-        // elsewhere (frame encoding, recv-side syscall coalescing).
-        //
-        // Errors from `send` are eaten in v0.1; HWM-blocking is
-        // preserved by the bounded send_rx upstream.
+        // Errors from `send` are eaten; HWM-blocking is preserved by
+        // the bounded `send_rx` upstream.
         let s = sock.clone();
         compio::runtime::spawn(async move {
             while let Ok(msg) = send_rx.recv_async().await {

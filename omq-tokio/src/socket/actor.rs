@@ -1,7 +1,4 @@
 //! Socket actor: owns per-socket state, multiplexes commands + internal events.
-//!
-//! Phase 4 scope: one live peer at a time. Routing strategies and multi-peer
-//! semantics land in Phase 5 + 6.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -1082,7 +1079,7 @@ impl SocketDriver {
                         }
                         Err(_) => {
                             // Protocol violation: drop message but keep the
-                            // socket open. Phase 8's monitor surfaces this.
+                            // socket open. Surfaces via the monitor stream.
                         }
                     }
                 } else if self.recv_strategy.deliver(peer_id, msg).await.is_err() {
@@ -1374,7 +1371,7 @@ mod tests {
 
         client.send(Message::single("ping")).await.unwrap();
         let _ = server.recv().await.unwrap();
-        // Identity validation moves to Phase 8's monitor events; here we
+        // Identity validation surfaces via monitor events; here we
         // only confirm the socket accepts a non-empty identity option.
         server.close().await.unwrap();
         client.close().await.unwrap();

@@ -43,12 +43,11 @@ fn is_identity_recv(t: SocketType) -> bool {
     matches!(t, SocketType::Router | SocketType::Server | SocketType::Peer)
 }
 
-/// Stage 5 recv-direct fast path eligibility. The direct path
-/// requires:
-///   - exactly one peer (single-peer wire connection),
-///   - the socket type is one whose recv stream is "user data only"
-///     (no ROUTER identity prefix; no XPUB/XSUB SUBSCRIBE / CANCEL
-///     surfacing; no UDP-only DISH).
+/// Recv-direct fast path eligibility. The path is taken when there's
+/// exactly one wire peer and the socket type's recv stream is "user
+/// data only" — no ROUTER identity prefix, no XPUB/XSUB subscribe
+/// command surfacing, no UDP-only DISH. Other shapes go through the
+/// driver's inproc-frame hop.
 fn direct_recv_eligible(t: SocketType) -> bool {
     matches!(
         t,

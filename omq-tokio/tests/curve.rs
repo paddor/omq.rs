@@ -223,3 +223,86 @@ async fn curve_authenticator_rejects_unknown_client() {
     let r = tokio::time::timeout(Duration::from_millis(200), server.recv()).await;
     assert!(r.is_err(), "rejected client must not deliver any frame");
 }
+
+// =====================================================================
+// Strategy-bucket coverage: every send strategy must route through a
+// CURVE-encrypted connection without surprises. PUSH/PULL covers the
+// round-robin bucket above; here: REQ/REP, DEALER/ROUTER (identity),
+// PUB/SUB (fan-out subscription-filtered).
+// =====================================================================
+
+#[tokio::test]
+async fn curve_req_rep() {
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = temp_ipc("req-rep");
+
+    let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
+    rep.bind(ep.clone()).await.unwrap();
+    let req = Socket::new(
+        SocketType::Req,
+        Options::default().curve_client(client_kp, server_pub),
+    );
+    req.connect(ep).await.unwrap();
+
+    req.send(Message::single("q")).await.unwrap();
+    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
+    rep.send(Message::single("a")).await.unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
+}
+
+#[tokio::test]
+async fn curve_dealer_router() {
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = temp_ipc("dealer-router");
+
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().curve_server(server_kp),
+    );
+    router.bind(ep.clone()).await.unwrap();
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"d1"))
+            .curve_client(client_kp, server_pub),
+    );
+    dealer.connect(ep).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    dealer.send(Message::single("hi")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), router.recv()).await.unwrap().unwrap();
+    assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
+    assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
+}
+
+#[tokio::test]
+async fn curve_pub_sub() {
+    let server_kp = CurveKeypair::generate();
+    let client_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let ep = temp_ipc("pub-sub");
+
+    let p = Socket::new(SocketType::Pub, Options::default().curve_server(server_kp));
+    p.bind(ep.clone()).await.unwrap();
+    let s = Socket::new(
+        SocketType::Sub,
+        Options::default().curve_client(client_kp, server_pub),
+    );
+    s.subscribe("").await.unwrap();
+    s.connect(ep).await.unwrap();
+
+    for _ in 0..30 {
+        let _ = p.send(Message::single("hello")).await;
+        if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(50), s.recv()).await {
+            assert_eq!(m.parts()[0].coalesce(), &b"hello"[..]);
+            return;
+        }
+    }
+    panic!("SUB never received over CURVE");
+}

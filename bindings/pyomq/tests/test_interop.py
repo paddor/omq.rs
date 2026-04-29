@@ -1,8 +1,9 @@
 """Wire-compat tests against pyzmq as the reference peer.
 
 Each pattern runs both directions: pyomq listener <-> pyzmq dialer and
-pyzmq listener <-> pyomq dialer. The test module is gated on pyzmq
-being importable so the rest of the suite still runs without it.
+pyzmq listener <-> pyomq dialer. Cells run over TCP and IPC. Inproc is
+intentionally absent: pyzmq's inproc and pyomq's inproc each maintain
+their own process-local registry, so they can never see each other.
 """
 
 import time
@@ -19,16 +20,31 @@ def _settle():
     time.sleep(0.2)
 
 
+# Each pattern test takes an `endpoint` string. Parametrising with two
+# fixtures via indirect=True keeps the body transport-agnostic.
+@pytest.fixture
+def endpoint(request):
+    return request.getfixturevalue(request.param)
+
+
+_TRANSPORTS = pytest.mark.parametrize(
+    "endpoint",
+    ["tcp_endpoint", "ipc_endpoint"],
+    indirect=True,
+)
+
+
 # ---------- PUSH / PULL ----------
 
-def test_pyomq_push_pyzmq_pull(tcp_endpoint):
+@_TRANSPORTS
+def test_pyomq_push_pyzmq_pull(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     pull = py_ctx.socket(zmq_pyzmq.PULL)
-    pull.bind(tcp_endpoint)
+    pull.bind(endpoint)
     try:
         ctx = pyomq.Context()
         push = ctx.socket(pyomq.PUSH)
-        push.connect(tcp_endpoint)
+        push.connect(endpoint)
         push.send(b"from-pyomq")
         assert pull.recv() == b"from-pyomq"
         push.close()
@@ -37,14 +53,15 @@ def test_pyomq_push_pyzmq_pull(tcp_endpoint):
         pull.close()
 
 
-def test_pyzmq_push_pyomq_pull(tcp_endpoint):
+@_TRANSPORTS
+def test_pyzmq_push_pyomq_pull(endpoint):
     ctx = pyomq.Context()
     pull = ctx.socket(pyomq.PULL)
-    pull.bind(tcp_endpoint)
+    pull.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
-        push.connect(tcp_endpoint)
+        push.connect(endpoint)
         push.send(b"from-pyzmq")
         assert pull.recv() == b"from-pyzmq"
         push.close()
@@ -55,15 +72,16 @@ def test_pyzmq_push_pyomq_pull(tcp_endpoint):
 
 # ---------- PUB / SUB ----------
 
-def test_pyomq_pub_pyzmq_sub(tcp_endpoint):
+@_TRANSPORTS
+def test_pyomq_pub_pyzmq_sub(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     sub = py_ctx.socket(zmq_pyzmq.SUB)
     sub.setsockopt(zmq_pyzmq.SUBSCRIBE, b"hot/")
-    sub.connect(tcp_endpoint)
+    sub.connect(endpoint)
     try:
         ctx = pyomq.Context()
         pub = ctx.socket(pyomq.PUB)
-        pub.bind(tcp_endpoint)
+        pub.bind(endpoint)
         _settle()
         pub.send(b"cold/skip")
         pub.send(b"hot/take")
@@ -75,15 +93,16 @@ def test_pyomq_pub_pyzmq_sub(tcp_endpoint):
         sub.close()
 
 
-def test_pyzmq_pub_pyomq_sub(tcp_endpoint):
+@_TRANSPORTS
+def test_pyzmq_pub_pyomq_sub(endpoint):
     ctx = pyomq.Context()
     sub = ctx.socket(pyomq.SUB)
     sub.setsockopt(pyomq.SUBSCRIBE, b"hot/")
-    sub.connect(tcp_endpoint)
+    sub.connect(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         pub = py_ctx.socket(zmq_pyzmq.PUB)
-        pub.bind(tcp_endpoint)
+        pub.bind(endpoint)
         _settle()
         pub.send(b"cold/skip")
         pub.send(b"hot/take")
@@ -97,14 +116,15 @@ def test_pyzmq_pub_pyomq_sub(tcp_endpoint):
 
 # ---------- REQ / REP ----------
 
-def test_pyomq_req_pyzmq_rep(tcp_endpoint):
+@_TRANSPORTS
+def test_pyomq_req_pyzmq_rep(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     rep = py_ctx.socket(zmq_pyzmq.REP)
-    rep.bind(tcp_endpoint)
+    rep.bind(endpoint)
     try:
         ctx = pyomq.Context()
         req = ctx.socket(pyomq.REQ)
-        req.connect(tcp_endpoint)
+        req.connect(endpoint)
         req.send(b"ping")
         assert rep.recv() == b"ping"
         rep.send(b"pong")
@@ -115,14 +135,15 @@ def test_pyomq_req_pyzmq_rep(tcp_endpoint):
         rep.close()
 
 
-def test_pyzmq_req_pyomq_rep(tcp_endpoint):
+@_TRANSPORTS
+def test_pyzmq_req_pyomq_rep(endpoint):
     ctx = pyomq.Context()
     rep = ctx.socket(pyomq.REP)
-    rep.bind(tcp_endpoint)
+    rep.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         req = py_ctx.socket(zmq_pyzmq.REQ)
-        req.connect(tcp_endpoint)
+        req.connect(endpoint)
         req.send(b"ping")
         assert rep.recv() == b"ping"
         rep.send(b"pong")
@@ -135,15 +156,16 @@ def test_pyzmq_req_pyomq_rep(tcp_endpoint):
 
 # ---------- DEALER / ROUTER ----------
 
-def test_pyomq_dealer_pyzmq_router(tcp_endpoint):
+@_TRANSPORTS
+def test_pyomq_dealer_pyzmq_router(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     router = py_ctx.socket(zmq_pyzmq.ROUTER)
-    router.bind(tcp_endpoint)
+    router.bind(endpoint)
     try:
         ctx = pyomq.Context()
         dealer = ctx.socket(pyomq.DEALER)
         dealer.setsockopt(pyomq.IDENTITY, b"D")
-        dealer.connect(tcp_endpoint)
+        dealer.connect(endpoint)
         dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D"
@@ -156,15 +178,16 @@ def test_pyomq_dealer_pyzmq_router(tcp_endpoint):
         router.close()
 
 
-def test_pyzmq_dealer_pyomq_router(tcp_endpoint):
+@_TRANSPORTS
+def test_pyzmq_dealer_pyomq_router(endpoint):
     ctx = pyomq.Context()
     router = ctx.socket(pyomq.ROUTER)
-    router.bind(tcp_endpoint)
+    router.bind(endpoint)
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         dealer = py_ctx.socket(zmq_pyzmq.DEALER)
         dealer.setsockopt(zmq_pyzmq.IDENTITY, b"D")
-        dealer.connect(tcp_endpoint)
+        dealer.connect(endpoint)
         dealer.send(b"hi")
         parts = router.recv_multipart()
         assert parts[0] == b"D"
@@ -179,14 +202,15 @@ def test_pyzmq_dealer_pyomq_router(tcp_endpoint):
 
 # ---------- PAIR ----------
 
-def test_pair_both_directions(tcp_endpoint):
+@_TRANSPORTS
+def test_pair_both_directions(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     a = py_ctx.socket(zmq_pyzmq.PAIR)
-    a.bind(tcp_endpoint)
+    a.bind(endpoint)
     try:
         ctx = pyomq.Context()
         b = ctx.socket(pyomq.PAIR)
-        b.connect(tcp_endpoint)
+        b.connect(endpoint)
         a.send(b"hi-from-pyzmq")
         assert b.recv() == b"hi-from-pyzmq"
         b.send(b"hi-from-pyomq")
@@ -195,3 +219,10 @@ def test_pair_both_directions(tcp_endpoint):
         ctx.term()
     finally:
         a.close()
+
+
+# XPUB/XSUB cross-impl is intentionally absent from this matrix:
+# pyzmq's XSUB sends subscriptions as 0x01-prefixed *messages*
+# (the legacy ZMTP 3.0 form), while omq's XPUB only updates its
+# per-peer subscription set on the explicit SUBSCRIBE *command*
+# (ZMTP 3.1). Filing a separate omq fix for that wire shape.

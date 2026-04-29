@@ -36,6 +36,13 @@ fn post_recv_needs_type_state(t: SocketType) -> bool {
     )
 }
 
+/// Identity-routed recv: the user-visible message is `[peer_identity,
+/// body...]` rather than `[body...]`. ROUTER, SERVER and PEER all
+/// identify their peers this way so a reply can be addressed back.
+fn is_identity_recv(t: SocketType) -> bool {
+    matches!(t, SocketType::Router | SocketType::Server | SocketType::Peer)
+}
+
 /// Stage 5 recv-direct fast path eligibility. The direct path
 /// requires:
 ///   - exactly one peer (single-peer wire connection),
@@ -703,7 +710,7 @@ impl Socket {
                     // channel hop. The slot in flight was ~64 B (just
                     // a Bytes + Option<Bytes>) instead of the full
                     // ~624 B Message struct.
-                    let msg = if matches!(st, SocketType::Router) {
+                    let msg = if is_identity_recv(st) {
                         let id = peer_identity.unwrap_or_default();
                         let mut wrapped = Message::new();
                         wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
@@ -737,7 +744,7 @@ impl Socket {
                     if !self.matches_subscription(&msg) {
                         continue;
                     }
-                    let msg = if matches!(st, SocketType::Router) {
+                    let msg = if is_identity_recv(st) {
                         let id = peer_identity.unwrap_or_default();
                         let mut wrapped = Message::new();
                         wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
@@ -1130,16 +1137,37 @@ impl Socket {
     }
 
     fn matches_subscription(&self, msg: &Message) -> bool {
-        if !matches!(self.inner.socket_type, SocketType::Sub | SocketType::XSub) {
-            return true;
+        match self.inner.socket_type {
+            SocketType::Sub | SocketType::XSub => {
+                let topic = msg
+                    .parts()
+                    .first()
+                    .map(|p| p.coalesce())
+                    .unwrap_or_default();
+                self.inner
+                    .subscriptions
+                    .read()
+                    .expect("subscriptions lock")
+                    .matches(&topic)
+            }
+            SocketType::Dish => {
+                // RFC 48: DISH receives `[group, body]`; drop messages
+                // whose group is not in `joined_groups`. Inproc and
+                // wire RADIO peers fan out to every connection without
+                // a per-peer filter; the DISH side does the filtering.
+                let group = msg
+                    .parts()
+                    .first()
+                    .map(|p| p.coalesce())
+                    .unwrap_or_default();
+                self.inner
+                    .joined_groups
+                    .read()
+                    .expect("joined_groups lock")
+                    .contains(&group[..])
+            }
+            _ => true,
         }
-        let topic = msg
-            .parts()
-            .first()
-            .map(|p| p.coalesce())
-            .unwrap_or_default();
-        let subs = self.inner.subscriptions.read().expect("subscriptions lock");
-        subs.matches(&topic)
     }
 
     pub(super) async fn snapshot_peers(&self) -> Vec<PeerOut> {

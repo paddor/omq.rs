@@ -79,16 +79,25 @@ impl Socket {
             msg
         };
         match st {
-            SocketType::Push | SocketType::Dealer | SocketType::Req => {
-                self.send_round_robin(msg).await
+            SocketType::Push
+            | SocketType::Dealer
+            | SocketType::Req
+            | SocketType::Pair
+            | SocketType::Rep
+            | SocketType::Client
+            | SocketType::Scatter
+            | SocketType::Channel => self.send_round_robin(msg).await,
+            SocketType::Router | SocketType::Server | SocketType::Peer => {
+                self.send_identity_routed(msg).await
             }
-            SocketType::Router => self.send_router(msg).await,
             SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
             SocketType::Radio => self.send_radio(msg).await,
-            SocketType::Pair | SocketType::Rep => self.send_round_robin(msg).await,
             SocketType::XSub => self.send_fan_out(msg).await,
-            _ => Err(Error::Protocol(format!(
-                "send is not supported on socket type {st:?}"
+            SocketType::Pull
+            | SocketType::Sub
+            | SocketType::Dish
+            | SocketType::Gather => Err(Error::Protocol(format!(
+                "send is not supported on recv-only socket type {st:?}"
             ))),
         }
     }
@@ -277,7 +286,11 @@ impl Socket {
     /// Look up the matching peer slot and forward the rest. If no
     /// match: `router_mandatory = true` → `Error::Unroutable`,
     /// otherwise silent drop (libzmq default).
-    async fn send_router(&self, msg: Message) -> Result<()> {
+    /// Identity-routed send: ROUTER, SERVER, PEER. Message must be
+    /// `[routing_id, body...]`; the first frame names the target peer
+    /// in `identity_to_slot`. Unknown identity is dropped silently
+    /// unless `router_mandatory` is set, which surfaces `Unroutable`.
+    async fn send_identity_routed(&self, msg: Message) -> Result<()> {
         let parts = msg.parts();
         if parts.is_empty() {
             return Err(Error::Unroutable);

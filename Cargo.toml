@@ -1,5 +1,5 @@
 [workspace]
-members = ["omq-compio", "omq-proto", "omq-tokio"]
+members = ["omq", "omq-compio", "omq-proto", "omq-tokio"]
 # Bindings live in their own subtree. Each is its own build root - Python's
 # maturin / Ruby's rake-compiler / etc. drive them - and they would otherwise
 # pull foreign-language toolchains into `cargo build --workspace`.

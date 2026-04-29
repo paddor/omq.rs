@@ -1,0 +1,47 @@
+[package]
+name = "omq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure Rust OMQ/ZeroMQ. Facade over omq-compio (default) or omq-tokio. Wire-compatible with libzmq."
+
+[lints]
+workspace = true
+
+[features]
+# Pick exactly one backend. compio is the default; tokio-backend is
+# for callers already invested in a tokio runtime. Enabling both is a
+# compile-time error.
+default = ["compio-backend"]
+compio-backend = ["dep:omq-compio"]
+tokio-backend = ["dep:omq-tokio"]
+
+# Per-feature passthroughs. Each gates the same name on whichever
+# backend the consumer selected.
+curve = [
+  "omq-compio?/curve",
+  "omq-tokio?/curve",
+]
+blake3zmq = [
+  "omq-compio?/blake3zmq",
+  "omq-tokio?/blake3zmq",
+]
+lz4 = [
+  "omq-compio?/lz4",
+  "omq-tokio?/lz4",
+]
+zstd = [
+  "omq-compio?/zstd",
+  "omq-tokio?/zstd",
+]
+priority = [
+  "omq-compio?/priority",
+  "omq-tokio?/priority",
+]
+
+[dependencies]
+omq-compio = { path = "../omq-compio", default-features = false, optional = true }
+omq-tokio  = { path = "../omq-tokio",  default-features = false, optional = true }

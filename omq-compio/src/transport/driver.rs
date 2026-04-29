@@ -125,6 +125,38 @@ fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connect
     Connection::new(cfg)
 }
 
+/// Apply a SUBSCRIBE/CANCEL coming from a peer: update the per-peer
+/// subscription set and, on XPUB, surface the command to the user
+/// recv stream as a `\x01<prefix>` / `\x00<prefix>` message.
+async fn handle_sub_cmd(
+    socket_type: SocketType,
+    monitor_ctx: Option<&MonitorCtx>,
+    peer_in_tx: &flume::Sender<InprocFrame>,
+    cmd: Command,
+) -> std::io::Result<()> {
+    let prefix = match &cmd {
+        Command::Subscribe(p) | Command::Cancel(p) => p.clone(),
+        _ => return Ok(()),
+    };
+    if let Some(ctx) = monitor_ctx {
+        if let Some(set) = &ctx.peer_sub {
+            let mut s = set.write().expect("peer_sub lock");
+            match cmd {
+                Command::Subscribe(_) => s.add(prefix.clone()),
+                Command::Cancel(_) => s.remove(&prefix),
+                _ => {}
+            }
+        }
+    }
+    if matches!(socket_type, SocketType::XPub) {
+        // Surface to the XPUB user as a 0x01/0x00-prefixed message.
+        // libzmq does the same — XPUB readers consume these to know
+        // who subscribed.
+        let _ = peer_in_tx.send_async(InprocFrame::Command(cmd)).await;
+    }
+    Ok(())
+}
+
 /// Build the [`SharedPeerIo`] handed to the driver and to the direct
 /// send/recv fast paths. Constructs the codec; reader/writer halves
 /// arrive wrapped in concrete [`WireReader`] / [`WireWriter`] enums so
@@ -327,49 +359,51 @@ pub(crate) async fn run_connection(
                     }
                 }
                 Drained::Msg(m) => {
+                    // PUB/XPUB also accept the legacy ZMTP 3.0 form of
+                    // SUBSCRIBE/CANCEL: a single-frame message whose
+                    // body starts with 0x01 (subscribe) or 0x00
+                    // (cancel). pyzmq XSUB and libzmq's older paths
+                    // emit these instead of the 3.1 wire commands.
+                    if matches!(socket_type, SocketType::Pub | SocketType::XPub)
+                        && m.parts().len() == 1
+                    {
+                        let body = m.parts()[0].coalesce();
+                        if let Some((tag, prefix)) = body.split_first() {
+                            let cmd = match tag {
+                                0x01 => Some(Command::Subscribe(
+                                    bytes::Bytes::copy_from_slice(prefix),
+                                )),
+                                0x00 => Some(Command::Cancel(
+                                    bytes::Bytes::copy_from_slice(prefix),
+                                )),
+                                _ => None,
+                            };
+                            if let Some(c) = cmd {
+                                handle_sub_cmd(
+                                    socket_type,
+                                    monitor_ctx.as_ref(),
+                                    &peer_in_tx,
+                                    c,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                    }
                     let frame = InprocFrame::message_from(peer_identity.clone(), m);
                     if peer_in_tx.send_async(frame).await.is_err() {
                         return Ok(());
                     }
                 }
                 Drained::Cmd(c) => match c {
-                    Command::Subscribe(prefix) => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(set) = &ctx.peer_sub {
-                                set.write()
-                                    .expect("peer_sub lock")
-                                    .add(prefix.clone());
-                            }
-                        }
-                        if matches!(socket_type, SocketType::XPub) {
-                            if peer_in_tx
-                                .send_async(InprocFrame::Command(
-                                    Command::Subscribe(prefix),
-                                ))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    Command::Cancel(prefix) => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(set) = &ctx.peer_sub {
-                                set.write()
-                                    .expect("peer_sub lock")
-                                    .remove(&prefix);
-                            }
-                        }
-                        if matches!(socket_type, SocketType::XPub) {
-                            if peer_in_tx
-                                .send_async(InprocFrame::Command(Command::Cancel(prefix)))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        }
+                    Command::Subscribe(_) | Command::Cancel(_) => {
+                        handle_sub_cmd(
+                            socket_type,
+                            monitor_ctx.as_ref(),
+                            &peer_in_tx,
+                            c,
+                        )
+                        .await?;
                     }
                     Command::Error { reason } => {
                         if let Some(ctx) = &monitor_ctx {

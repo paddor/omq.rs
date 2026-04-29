@@ -1050,6 +1050,31 @@ impl SocketDriver {
                 if self.closing {
                     return;
                 }
+                // Legacy ZMTP 3.0 SUBSCRIBE/CANCEL: a single-frame
+                // message whose body starts with 0x01 / 0x00. pyzmq
+                // XSUB and older libzmq paths emit these instead of
+                // the 3.1 wire commands. PUB/XPUB must honour both.
+                if matches!(self.socket_type, SocketType::Pub | SocketType::XPub)
+                    && msg.parts().len() == 1
+                {
+                    let body = msg.parts()[0].coalesce();
+                    if let Some((tag, prefix)) = body.split_first() {
+                        match tag {
+                            0x01 => {
+                                self.send_strategy.peer_subscribe(
+                                    peer_id,
+                                    bytes::Bytes::copy_from_slice(prefix),
+                                );
+                                return;
+                            }
+                            0x00 => {
+                                self.send_strategy.peer_cancel(peer_id, prefix);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // IdentityRecv runs first (for ROUTER/REP) to prepend the
                 // peer identity. Then type_state splits off the envelope
                 // (for REP) or strips the empty delimiter (for REQ).

@@ -221,8 +221,37 @@ def test_pair_both_directions(endpoint):
         a.close()
 
 
-# XPUB/XSUB cross-impl is intentionally absent from this matrix:
-# pyzmq's XSUB sends subscriptions as 0x01-prefixed *messages*
-# (the legacy ZMTP 3.0 form), while omq's XPUB only updates its
-# per-peer subscription set on the explicit SUBSCRIBE *command*
-# (ZMTP 3.1). Filing a separate omq fix for that wire shape.
+# ---------- XPUB / XSUB ----------
+
+@_TRANSPORTS
+def test_pyomq_xpub_pyzmq_xsub(endpoint):
+    """XPUB receives subscribes from XSUB and filters its publishes
+    accordingly. Exercises both ZMTP 3.1 SUBSCRIBE commands and the
+    legacy 3.0 0x01-prefix message form pyzmq XSUB emits."""
+    ctx = pyomq.Context()
+    xpub = ctx.socket(pyomq.XPUB)
+    xpub.bind(endpoint)
+    try:
+        py_ctx = zmq_pyzmq.Context.instance()
+        xsub = py_ctx.socket(zmq_pyzmq.XSUB)
+        xsub.connect(endpoint)
+        xsub.send(b"\x01hot/")  # legacy ZMTP 3.0 subscribe
+        # XPUB surfaces the subscribe as a 0x01-prefixed message.
+        xpub.setsockopt(pyomq.RCVTIMEO, 1000)
+        sub_msg = xpub.recv()
+        assert sub_msg == b"\x01hot/"
+        xsub.setsockopt(zmq_pyzmq.RCVTIMEO, 1000)
+        for _ in range(20):
+            xpub.send(b"cold/skip")
+            xpub.send(b"hot/take")
+            try:
+                assert xsub.recv() == b"hot/take"
+                break
+            except zmq_pyzmq.Again:
+                time.sleep(0.05)
+        else:
+            pytest.fail("XSUB never received hot/take")
+        xsub.close()
+    finally:
+        xpub.close()
+        ctx.term()

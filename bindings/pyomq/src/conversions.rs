@@ -57,14 +57,6 @@ pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
     Ok(Bytes::copy_from_slice(view))
 }
 
-/// Build a single-part `Message` from a Python bytes-like object.
-/// PyO3's buffer protocol gives us a `&[u8]` zero-copy view; we then
-/// copy once into `Bytes`, which is the only copy on the send path.
-pub fn message_from_pybytes(b: &Bound<'_, PyAny>) -> PyResult<Message> {
-    let view: &[u8] = b.extract::<&[u8]>()?;
-    Ok(Message::single(Bytes::copy_from_slice(view)))
-}
-
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
 pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
     let mut msg = Message::new();
@@ -74,16 +66,6 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
         msg.push_part(Payload::from_bytes(bytes_from_pyany(&part)?));
     }
     Ok(msg)
-}
-
-/// Convert a single-part recv into Python bytes (returns the first
-/// frame; later frames discarded - the caller is responsible for using
-/// `recv_multipart` if a multipart message may arrive).
-pub fn first_part_to_pybytes<'py>(py: Python<'py>, msg: Message) -> Bound<'py, PyBytes> {
-    let parts = msg.into_parts();
-    let payload = parts.into_iter().next().unwrap_or_else(|| Payload::from_bytes(Bytes::new()));
-    let bytes = payload.coalesce();
-    PyBytes::new_bound(py, &bytes)
 }
 
 /// Return a Python list of bytes - one per message frame.

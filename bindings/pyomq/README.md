@@ -58,11 +58,11 @@ Loopback PUSH/PULL throughput vs pyzmq, on a 2019 MacBook Pro VM (Linux 6.12, si
 
 | Size  | inproc pyomq  | inproc pyzmq | ratio | tcp pyomq | tcp pyzmq | ratio |
 |-------|--------------:|-------------:|------:|----------:|----------:|------:|
-| 128 B | 1.20 M/s      | 172 k/s      | **7.00×** | 590 k/s  | 222 k/s   | **2.66×** |
-| 512 B | 1.13 M/s      | 166 k/s      | **6.81×** | 589 k/s  | 232 k/s   | **2.53×** |
-| 2 KiB | 1.04 M/s      | 156 k/s      | **6.65×** | 443 k/s  | 172 k/s   | **2.57×** |
-| 8 KiB | 881 k/s       | 129 k/s      | **6.85×** | 196 k/s  | 108 k/s   | **1.83×** |
-| 32 KiB| 483 k/s       | 80 k/s       | **6.01×** | 49 k/s   | 42 k/s    | **1.17×** |
+| 128 B | 1.13 M/s      | 178 k/s      | **6.32×** | 604 k/s  | 229 k/s   | **2.64×** |
+| 512 B | 1.05 M/s      | 165 k/s      | **6.35×** | 571 k/s  | 223 k/s   | **2.56×** |
+| 2 KiB | 974 k/s       | 154 k/s      | **6.32×** | 417 k/s  | 187 k/s   | **2.23×** |
+| 8 KiB | 833 k/s       | 129 k/s      | **6.46×** | 178 k/s  | 104 k/s   | **1.70×** |
+| 32 KiB| 469 k/s       | 76 k/s       | **6.16×** | 53 k/s   | 41 k/s    | **1.31×** |
 
 Run `pytest tests/test_perf.py -v -s` to reproduce on your hardware.
 

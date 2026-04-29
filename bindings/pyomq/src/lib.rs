@@ -1,6 +1,16 @@
 //! pyomq native module. The Python-facing surface is in `python/pyomq/`;
 //! this module exposes the native classes that re-export it imports.
 
+// PyO3 0.22's procedural macros emit code that triggers the Rust 2024
+// `unsafe_op_in_unsafe_fn` warning at the call sites it generates.
+// User code is unaffected. Silence the noise here; revisit when we
+// bump to a pyo3 release whose macros wrap their own unsafe calls.
+#![allow(unsafe_op_in_unsafe_fn)]
+// Also suppress the `gil-refs` cfg-condition warnings — pyo3 0.22's
+// abi3 feature path checks for that cfg key, which Rust 1.80+ flags
+// because nothing actually defines it.
+#![allow(unexpected_cfgs)]
+
 mod constants;
 mod context;
 mod conversions;

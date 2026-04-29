@@ -17,7 +17,7 @@
 //! because it can block for milliseconds.
 
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use flume::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError};
@@ -147,10 +147,6 @@ impl SocketInner {
         *self.rxbuf.lock().unwrap() = parts;
     }
 
-    pub fn rxbuf_lock(&self) -> MutexGuard<'_, Vec<Bytes>> {
-        self.rxbuf.lock().unwrap()
-    }
-
     /// Drop the materialized state on close. Pumps see Disconnected on
     /// the next op and exit; the registry entry is removed separately.
     pub fn take_materialized(&self) -> Option<Materialized> {
@@ -164,20 +160,12 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub fn from_inner(inner: Arc<SocketInner>) -> Self {
-        Self { inner }
-    }
-
     pub fn new(socket_type: omq_compio::SocketType) -> Self {
         Self { inner: SocketInner::new(socket_type) }
     }
 
     pub fn socket_type(&self) -> omq_compio::SocketType {
         self.inner.socket_type
-    }
-
-    pub(crate) fn ensure_id(&self) -> PyResult<u64> {
-        self.inner.ensure_id()
     }
 }
 
@@ -303,6 +291,7 @@ impl Socket {
         options::getsockopt(self.inner.as_ref(), py, option)
     }
 
+    #[pyo3(signature = (_linger=None))]
     fn close(&self, py: Python<'_>, _linger: Option<i64>) -> PyResult<()> {
         let m = self.inner.take_materialized();
         let Some(m) = m else { return Ok(()); };

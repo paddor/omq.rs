@@ -208,23 +208,6 @@ where
     }
 }
 
-/// Sync helper: run a non-async op on the compio thread that takes the
-/// socket by reference. Useful for accessors like `socket_type()` that
-/// don't return a future.
-pub fn with_socket_sync<F, T>(id: u64, f: F) -> Result<T, MissingSocket>
-where
-    F: FnOnce(&InnerSocket) -> T + Send + 'static,
-    T: Send + 'static,
-{
-    run(move || {
-        REG.with(|r| {
-            r.borrow()
-                .get(&id)
-                .map(|s| f(s.as_ref()))
-                .ok_or(MissingSocket)
-        })
-    })
-}
 
 #[derive(Debug)]
 pub struct MissingSocket;

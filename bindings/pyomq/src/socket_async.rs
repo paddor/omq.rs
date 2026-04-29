@@ -33,10 +33,6 @@ pub struct AsyncSocket {
 }
 
 impl AsyncSocket {
-    pub fn from_inner(inner: Arc<SocketInner>) -> Self {
-        Self { inner }
-    }
-
     pub fn new(socket_type: omq_compio::SocketType) -> Self {
         Self { inner: SocketInner::new(socket_type) }
     }
@@ -215,6 +211,7 @@ impl AsyncSocket {
         crate::options::getsockopt(self.inner.as_ref(), py, option)
     }
 
+    #[pyo3(signature = (_linger=None))]
     fn close<'py>(&self, py: Python<'py>, _linger: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
         let m = self.inner.take_materialized();
         runtime::compio_future_into_py(py, move || async move {

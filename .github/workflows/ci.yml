@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: workspace tests (default features)
+        run: cargo test --workspace --locked
+
+  feature-matrix:
+    name: feature ${{ matrix.feature }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [curve, blake3zmq, lz4, zstd, priority]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p omq-tokio  --features ${{ matrix.feature }}
+      - run: cargo test -p omq-compio --features ${{ matrix.feature }}
+
+  facade:
+    name: omq facade (both backends)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p omq
+      - run: cargo test -p omq --no-default-features --features tokio-backend
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+
+  pyomq:
+    name: pyomq + pyzmq interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: install python deps
+        run: pip install maturin pytest pytest-asyncio pyzmq
+      - name: build pyomq
+        working-directory: bindings/pyomq
+        run: maturin develop --release
+      - name: pytest
+        working-directory: bindings/pyomq
+        run: pytest -v
+
+  ruby-interop:
+    name: ruby omq interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: "3.3" }
+      - name: install omq-cli
+        run: gem install omq-cli
+      - name: rust ↔ ruby interop (tokio)
+        run: cargo test -p omq-tokio  --test interop_ruby
+      - name: rust ↔ ruby interop (compio)
+        run: cargo test -p omq-compio --test interop_ruby

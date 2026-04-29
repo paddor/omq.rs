@@ -239,6 +239,11 @@ pub(super) struct PeerSlot {
     /// Wire peers feed it via SUBSCRIBE / CANCEL; inproc peers
     /// default to subscribe-all (the SUB filters on receive).
     pub(super) peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    /// RADIO-side per-peer group filter. `None` for non-radio socket
+    /// types. Wire peers feed it via JOIN / LEAVE commands replayed
+    /// from the connected DISH. Inproc peers default to `None` and
+    /// the DISH side filters on receive (mirrors `peer_sub`).
+    pub(super) peer_groups: Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>>,
     /// Per-pipe priority for round-robin send. Lower number = higher
     /// priority. Set at install time from `ConnectOpts::priority`;
     /// defaults to `DEFAULT_PRIORITY` (128) for accepted peers and

@@ -97,6 +97,10 @@ pub(crate) struct MonitorCtx {
     /// socket layer's send-time filter has up-to-date state. `None`
     /// for non-pub-side socket types.
     pub peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    /// RADIO-side per-peer joined-group set. Updated as JOIN / LEAVE
+    /// commands arrive over the wire from the connected DISH so
+    /// `send_radio` can filter per peer. `None` for non-radio types.
+    pub peer_groups: Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>>,
 }
 
 /// Events drained from the codec under the [`PeerIo`] lock that need
@@ -404,6 +408,24 @@ pub(crate) async fn run_connection(
                             c,
                         )
                         .await?;
+                    }
+                    Command::Join(group) => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(set) = &ctx.peer_groups {
+                                set.write()
+                                    .expect("peer_groups lock")
+                                    .insert(group);
+                            }
+                        }
+                    }
+                    Command::Leave(group) => {
+                        if let Some(ctx) = &monitor_ctx {
+                            if let Some(set) = &ctx.peer_groups {
+                                set.write()
+                                    .expect("peer_groups lock")
+                                    .remove(&group);
+                            }
+                        }
                     }
                     Command::Error { reason } => {
                         if let Some(ctx) = &monitor_ctx {

@@ -29,7 +29,7 @@ use super::inner::{
     is_round_robin_send, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
     WirePeerHandle,
 };
-use super::{cmd_channel_capacity, pub_side_peer_sub};
+use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
 pub(super) fn install_inproc_peer(
     inner: &Arc<SocketInner>,
@@ -82,6 +82,7 @@ pub(super) fn install_inproc_peer(
             endpoint: endpoint.clone(),
             info: info_holder,
             peer_sub,
+            peer_groups: None,
             #[cfg(feature = "priority")]
             priority,
         });
@@ -120,6 +121,7 @@ pub(super) fn install_accepted_wire_peer(
     let handle: WirePeerHandle = Arc::new(RwLock::new(cmd_tx));
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let peer_groups = radio_side_peer_groups(inner.socket_type);
     let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
         &endpoint,
         &inner.options,
@@ -147,6 +149,7 @@ pub(super) fn install_accepted_wire_peer(
             endpoint: endpoint.clone(),
             info: info_holder.clone(),
             peer_sub: peer_sub.clone(),
+            peer_groups: peer_groups.clone(),
             // Accepted peers always get default priority. Per-accepted
             // override would need `bind_with`, which is out of scope.
             #[cfg(feature = "priority")]
@@ -168,6 +171,7 @@ pub(super) fn install_accepted_wire_peer(
         info_holder,
         peer_addr,
         peer_sub,
+        peer_groups,
     )
     .detach();
 }
@@ -189,6 +193,7 @@ pub(super) fn spawn_wire_driver(
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_address: Option<std::net::SocketAddr>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
 ) -> compio::runtime::JoinHandle<()> {
     let (snap_tx, snap_rx) = flume::bounded::<InprocPeerSnapshot>(1);
 
@@ -267,6 +272,7 @@ pub(super) fn spawn_wire_driver(
         peer_info: info_holder.clone(),
         peer_address,
         peer_sub,
+        peer_groups,
     };
     let inner_for_exit = inner.clone();
     let endpoint_for_exit = endpoint;

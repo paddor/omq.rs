@@ -13,6 +13,7 @@
 
 use std::sync::{atomic::Ordering, Arc, RwLock};
 
+use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::options::ReconnectPolicy;
 use omq_proto::subscription::SubscriptionSet;
@@ -25,7 +26,7 @@ use super::inner::{
     DialerEntry, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
     WirePeerHandle,
 };
-use super::{cmd_channel_capacity, pub_side_peer_sub};
+use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
 /// Spawn the TCP dial supervisor and register the dialer entry.
 /// Returns immediately. See [`super::Socket::connect`] for the
@@ -41,6 +42,7 @@ pub(super) fn connect_tcp_with_reconnect(
     let policy = inner.options.reconnect.clone();
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let peer_groups = radio_side_peer_groups(inner.socket_type);
     // Placeholder sender - replaced before any driver runs.
     // bounded(1) with the rx dropped immediately means anything
     // that races a send before the dialer installs a real sender
@@ -61,6 +63,7 @@ pub(super) fn connect_tcp_with_reconnect(
         direct_io_handle,
         info_holder,
         peer_sub,
+        peer_groups,
         #[cfg(feature = "priority")]
         priority,
     ));
@@ -85,6 +88,7 @@ async fn dial_supervisor_tcp(
     direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
     use omq_proto::backoff::next_delay;
@@ -174,6 +178,7 @@ async fn dial_supervisor_tcp(
                 endpoint: wrapper.clone(),
                 info: info_holder.clone(),
                 peer_sub: peer_sub.clone(),
+                peer_groups: peer_groups.clone(),
                 #[cfg(feature = "priority")]
                 priority,
             });
@@ -195,6 +200,7 @@ async fn dial_supervisor_tcp(
             info_holder.clone(),
             peer_addr,
             peer_sub.clone(),
+            peer_groups.clone(),
         );
 
         let _ = driver_join.await;
@@ -216,6 +222,7 @@ pub(super) fn connect_ipc_with_reconnect(
     let policy = inner.options.reconnect.clone();
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
+    let peer_groups = radio_side_peer_groups(inner.socket_type);
     let handle: WirePeerHandle =
         Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
@@ -230,6 +237,7 @@ pub(super) fn connect_ipc_with_reconnect(
         direct_io_handle,
         info_holder,
         peer_sub,
+        peer_groups,
         #[cfg(feature = "priority")]
         priority,
     ));
@@ -253,6 +261,7 @@ async fn dial_supervisor_ipc(
     direct_io_handle: DirectIoHandle,
     info_holder: Arc<RwLock<Option<PeerInfo>>>,
     peer_sub: Option<Arc<RwLock<SubscriptionSet>>>,
+    peer_groups: Option<Arc<RwLock<std::collections::HashSet<Bytes>>>>,
     #[cfg(feature = "priority")] priority: u8,
 ) {
     use omq_proto::backoff::next_delay;
@@ -333,6 +342,7 @@ async fn dial_supervisor_ipc(
                 endpoint: endpoint.clone(),
                 info: info_holder.clone(),
                 peer_sub: peer_sub.clone(),
+                peer_groups: peer_groups.clone(),
                 #[cfg(feature = "priority")]
                 priority,
             });
@@ -354,6 +364,7 @@ async fn dial_supervisor_ipc(
             info_holder.clone(),
             None,
             peer_sub.clone(),
+            peer_groups.clone(),
         );
 
         let _ = driver_join.await;

@@ -314,8 +314,9 @@ impl Socket {
     }
 
     /// RADIO: each message must be `[group, body]`. Fan out to every
-    /// UDP dialer as one datagram, and to every TCP/IPC peer as a
-    /// 2-frame ZMTP message.
+    /// UDP dialer as one datagram, and to each TCP/IPC peer that has
+    /// joined the message's group. Inproc peers have no per-peer
+    /// group filter; the DISH side filters on receive.
     async fn send_radio(&self, msg: Message) -> Result<()> {
         let parts = msg.parts();
         if parts.len() != 2 {
@@ -340,9 +341,21 @@ impl Socket {
                 let _ = sock.send(payload).await;
             }
         }
-        let stream_targets = {
+        let stream_targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
-            peers.iter().map(|p| p.out.clone()).collect::<Vec<_>>()
+            peers
+                .iter()
+                .filter(|p| match &p.peer_groups {
+                    // Wire peer with a group filter: deliver only if joined.
+                    Some(set) => set
+                        .read()
+                        .expect("peer_groups lock")
+                        .contains(&group[..]),
+                    // Inproc peers — no filter; DISH filters on recv.
+                    None => true,
+                })
+                .map(|p| p.out.clone())
+                .collect()
         };
         for peer in stream_targets {
             let _ = peer.send(msg.clone()).await;

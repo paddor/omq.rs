@@ -42,3 +42,15 @@ fn pub_side_peer_sub(st: SocketType) -> Option<Arc<RwLock<SubscriptionSet>>> {
         None
     }
 }
+
+/// Build a fresh empty joined-group set for this socket's RADIO-side
+/// fan-out filter, or `None` if the socket type doesn't filter.
+fn radio_side_peer_groups(
+    st: SocketType,
+) -> Option<Arc<RwLock<std::collections::HashSet<bytes::Bytes>>>> {
+    if matches!(st, SocketType::Radio) {
+        Some(Arc::new(RwLock::new(std::collections::HashSet::new())))
+    } else {
+        None
+    }
+}

@@ -41,6 +41,10 @@ socket2 = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+# Cross-runtime interop tests drive a compio backend on a dedicated
+# thread while the tokio backend runs in the test's own runtime.
+omq-compio = { path = "../omq-compio", default-features = false }
+compio = { version = "=0.19.0-rc.1", features = ["macros", "net", "io", "bytes", "runtime", "io-uring", "time", "sync"] }
 
 [[bench]]
 name = "push_pull"

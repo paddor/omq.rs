@@ -18,7 +18,6 @@
 
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
 use bytes::Bytes;
 use flume::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError};
@@ -27,6 +26,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyType};
 
 use crate::conversions;
+use crate::dispatch;
 use crate::error::{map_err, timeout_err};
 use crate::options;
 use crate::runtime;
@@ -185,36 +185,22 @@ impl Socket {
 impl Socket {
     fn bind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| runtime::with_socket(id, move |s| async move { s.bind(ep).await }))
-            .map_err(missing)
-            .and_then(|r| r.map_err(map_err))
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.bind(ep).await })
     }
 
     fn connect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| runtime::with_socket(id, move |s| async move { s.connect(ep).await }))
-            .map_err(missing)
-            .and_then(|r| r.map_err(map_err))
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.connect(ep).await })
     }
 
     fn unbind(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| runtime::with_socket(id, move |s| async move { s.unbind(ep).await }))
-            .map_err(missing)
-            .and_then(|r| r.map_err(map_err))
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.unbind(ep).await })
     }
 
     fn disconnect(&self, py: Python<'_>, endpoint: &str) -> PyResult<()> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| {
-            runtime::with_socket(id, move |s| async move { s.disconnect(ep).await })
-        })
-        .map_err(missing)
-        .and_then(|r| r.map_err(map_err))
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.disconnect(ep).await })
     }
 
     #[pyo3(signature = (payload, flags = 0))]
@@ -281,47 +267,23 @@ impl Socket {
     }
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
-        let view: &[u8] = prefix.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| {
-            runtime::with_socket(id, move |s| async move { s.subscribe(bytes).await })
-        })
-        .map_err(missing)
-        .and_then(|r| r.map_err(map_err))
+        let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
     }
 
     fn unsubscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
-        let view: &[u8] = prefix.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| {
-            runtime::with_socket(id, move |s| async move { s.unsubscribe(bytes).await })
-        })
-        .map_err(missing)
-        .and_then(|r| r.map_err(map_err))
+        let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.unsubscribe(bytes).await })
     }
 
     fn join(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
-        let view: &[u8] = group.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| {
-            runtime::with_socket(id, move |s| async move { s.join(bytes).await })
-        })
-        .map_err(missing)
-        .and_then(|r| r.map_err(map_err))
+        let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.join(bytes).await })
     }
 
     fn leave(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
-        let view: &[u8] = group.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        py.allow_threads(|| {
-            runtime::with_socket(id, move |s| async move { s.leave(bytes).await })
-        })
-        .map_err(missing)
-        .and_then(|r| r.map_err(map_err))
+        let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
+        dispatch::sync_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
     }
 
     fn setsockopt(
@@ -420,9 +382,3 @@ impl Socket {
     }
 }
 
-fn missing(_: runtime::MissingSocket) -> PyErr {
-    map_err(PError::Closed)
-}
-
-#[allow(dead_code)]
-fn _need_for_compat(_d: Duration) {}

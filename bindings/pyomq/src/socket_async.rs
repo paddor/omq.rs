@@ -22,6 +22,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyType};
 
 use crate::conversions;
+use crate::dispatch;
 use crate::error::map_err;
 use crate::runtime;
 use crate::socket::SocketInner;
@@ -49,50 +50,22 @@ impl AsyncSocket {
 impl AsyncSocket {
     fn bind<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.bind(ep).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        dispatch::async_unit(&self.inner, py, |s| async move { s.bind(ep).await })
     }
 
     fn connect<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.connect(ep).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        dispatch::async_unit(&self.inner, py, |s| async move { s.connect(ep).await })
     }
 
     fn unbind<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.unbind(ep).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        dispatch::async_unit(&self.inner, py, |s| async move { s.unbind(ep).await })
     }
 
     fn disconnect<'py>(&self, py: Python<'py>, endpoint: &str) -> PyResult<Bound<'py, PyAny>> {
         let ep = SocketInner::parse_endpoint(endpoint)?;
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.disconnect(ep).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        dispatch::async_unit(&self.inner, py, |s| async move { s.disconnect(ep).await })
     }
 
     #[pyo3(signature = (payload, flags = 0))]
@@ -204,55 +177,23 @@ impl AsyncSocket {
     }
 
     fn subscribe<'py>(&self, py: Python<'py>, prefix: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let view: &[u8] = prefix.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.subscribe(bytes).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
+        dispatch::async_unit(&self.inner, py, |s| async move { s.subscribe(bytes).await })
     }
 
     fn unsubscribe<'py>(&self, py: Python<'py>, prefix: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let view: &[u8] = prefix.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.unsubscribe(bytes).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        let bytes = Bytes::copy_from_slice(prefix.extract::<&[u8]>()?);
+        dispatch::async_unit(&self.inner, py, |s| async move { s.unsubscribe(bytes).await })
     }
 
     fn join<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let view: &[u8] = group.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.join(bytes).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
+        dispatch::async_unit(&self.inner, py, |s| async move { s.join(bytes).await })
     }
 
     fn leave<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let view: &[u8] = group.extract()?;
-        let bytes = Bytes::copy_from_slice(view);
-        let id = self.inner.ensure_id()?;
-        runtime::compio_future_into_py(py, move || async move {
-            match runtime::with_socket_async(id, |s| async move { s.leave(bytes).await }).await {
-                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
-                Ok(Err(e)) => Err(map_err(e)),
-                Err(_) => Err(map_err(PError::Closed)),
-            }
-        })
+        let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
+        dispatch::async_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
     }
 
     /// Sync setsockopt (returning None directly) - matches pyzmq's

@@ -227,15 +227,13 @@ pub(super) struct PeerSlot {
     /// populated post-handshake for wire peers via the snap_rx
     /// channel set in `spawn_wire_driver`.
     pub(super) peer: Arc<RwLock<Option<InprocPeerSnapshot>>>,
-    /// Stable per-socket connection id - exposed via monitor events.
-    #[allow(dead_code)]
+    /// Stable per-socket connection id - exposed via monitor events
+    /// and `connection_info`/`connections`.
     pub(super) connection_id: u64,
     /// Endpoint this peer was reached via (bind side or dial side).
-    #[allow(dead_code)]
     pub(super) endpoint: Endpoint,
     /// Populated post-handshake. Carries identity / peer_address /
     /// negotiated ZMTP version. Cleared on driver exit.
-    #[allow(dead_code)]
     pub(super) info: Arc<RwLock<Option<PeerInfo>>>,
     /// PUB-side fan-out filter. `None` for non-pub socket types.
     /// Wire peers feed it via SUBSCRIBE / CANCEL; inproc peers

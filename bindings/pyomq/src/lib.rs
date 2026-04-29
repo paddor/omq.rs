@@ -4,6 +4,7 @@
 mod constants;
 mod context;
 mod conversions;
+mod dispatch;
 mod error;
 mod options;
 mod runtime;

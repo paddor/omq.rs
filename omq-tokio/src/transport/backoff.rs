@@ -30,7 +30,7 @@ pub enum Cancelled {
 ///
 /// The first attempt happens immediately; subsequent attempts wait per the
 /// policy. Reports per-attempt delays through `on_delay` so callers can emit
-/// `ConnectDelayed` monitor events from Phase 8.
+/// `ConnectDelayed` monitor events.
 ///
 /// The `dial` closure performs one connection attempt; each call builds a
 /// fresh future so no state leaks across retries.

@@ -1,13 +1,10 @@
 //! Fair-queue recv: one shared channel, all peers push in.
 //!
-//! Phase 5 keeps this minimal: every incoming message goes to the socket's
-//! MPMC recv channel. Fairness comes naturally from tokio's scheduler --
-//! each peer's `ConnectionDriver` is a separate task and yields between
-//! events. Per-peer fairness caps (e.g. a 256-msg / 512-KiB cutoff) can
-//! be added later if benchmarks show starvation.
-//!
-//! Subscription filtering for SUB/XSUB and group filtering for DISH land
-//! in Phase 6 as extensions of this type.
+//! Every incoming message goes to the socket's MPMC recv channel.
+//! Fairness comes naturally from tokio's scheduler — each peer's
+//! `ConnectionDriver` is a separate task and yields between events.
+//! Subscription filtering (SUB/XSUB) and group filtering (DISH) sit
+//! on top of this as recv-side filters.
 
 use std::collections::HashSet;
 

@@ -165,7 +165,7 @@ pub struct Connection {
 
 impl Connection {
     /// Create a new connection and queue our greeting into the out buffer.
-    /// Supports NULL and CURVE mechanisms; blake3zmq arrives in Phase 12.
+    /// Supports the NULL, CURVE, and BLAKE3ZMQ mechanisms.
     pub fn new(config: ConnectionConfig) -> Self {
         let mechanism = config.mechanism.clone().build();
         let mut conn = Self {

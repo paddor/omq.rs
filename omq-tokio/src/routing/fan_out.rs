@@ -1,9 +1,9 @@
 //! Fan-out send: one queue + one pump per subscriber, filtered by the
 //! peer's SUBSCRIBE-driven prefix set.
 //!
-//! PUB and XPUB compose this with the `Identity::subscriptions` extension
-//! in Phase 7. RADIO uses group-based fan-out (same shape, different
-//! match function); Phase 10 adds the RADIO specialisation.
+//! PUB and XPUB compose this with the `Identity::subscriptions`
+//! extension; RADIO uses the same shape with a group-match function
+//! instead of a prefix-match.
 //!
 //! On every `send`, we iterate the peer table under a short mutex lock,
 //! filter by subscription, clone the message per target, and await

@@ -5,11 +5,6 @@
 //! (listeners, connected peers, recv queue, options). The handle talks to
 //! the driver via an MPSC command inbox + an MPMC recv channel; no shared
 //! mutexes on the hot path.
-//!
-//! Phase 4 scope: one live peer at a time (PAIR-like semantics). Routing
-//! strategies -- shared-queue + work-stealing pumps for round-robin types,
-//! per-connection queues for fan-out / identity types -- land in Phase 5
-//! and 6.
 
 pub mod actor;
 pub mod dispatch;

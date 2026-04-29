@@ -1,4 +1,4 @@
-//! BLAKE3ZMQ security mechanism (Phase 12).
+//! BLAKE3ZMQ security mechanism (omq-native AEAD: X25519 + BLAKE3 + ChaCha20).
 //!
 //! Wire-name `BLAKE3`, ZMTP 3.1 mechanism. Modelled on Noise XX with
 //! BLAKE3 transcript hashing, X25519 key exchange, and ChaCha20-BLAKE3

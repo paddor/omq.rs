@@ -6,10 +6,10 @@
 //! `AsyncRead + AsyncWrite + Send + Unpin`, which is what the engine's
 //! connection driver consumes.
 //!
-//! This module does not define a single enum dispatch -- transports are
+//! This module does not define a single enum dispatch — transports are
 //! generic type parameters at the call site so static dispatch stays
-//! available. The `Socket` actor in Phase 4 composes these behind an owned
-//! dyn dispatch layer where it matters.
+//! available. The `Socket` actor composes these behind an owned dyn
+//! dispatch layer where it matters.
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -30,9 +30,9 @@ pub use tcp::TcpTransport;
 
 /// A transport scheme.
 ///
-/// Rust's current async-fn-in-trait (stable since 1.75) covers our static-
-/// dispatch use; callers that need heterogeneous transport storage go
-/// through the socket actor in Phase 4.
+/// Rust's current async-fn-in-trait (stable since 1.75) covers our
+/// static-dispatch use; callers that need heterogeneous transport
+/// storage go through the socket actor.
 pub trait Transport: Send + Sync + 'static {
     /// The stream type produced by `connect` / `accept`.
     type Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static;

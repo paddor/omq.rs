@@ -8,8 +8,8 @@
 //! to write via [`Connection::poll_transmit`] + [`Connection::advance_transmit`].
 //!
 //! This design mirrors `rustls::ConnectionCommon` and `quinn-proto`: the
-//! protocol state lives in owned buffers and a pure state machine, and the
-//! engine crate plugs it into tokio in Phase 3.
+//! protocol state lives in owned buffers and a pure state machine, and
+//! the backend crates plug it into their runtime.
 //!
 //! Both ZMTP 3.0 and ZMTP 3.1 are supported. Peers speaking < 3.0 are rejected
 //! after reading 11 bytes (signature + major version).
@@ -81,7 +81,7 @@ impl SocketType {
         }
     }
 
-    /// Whether the type is a draft (gated behind the `draft` feature in Phase 10).
+    /// Whether the type is a draft RFC (CLIENT/SERVER, RADIO/DISH, etc.).
     pub const fn is_draft(self) -> bool {
         matches!(
             self,

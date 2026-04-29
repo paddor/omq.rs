@@ -5,7 +5,7 @@
 //! loop over (socket read, socket write, command inbox, cancellation).
 //! Events produced by the codec are forwarded on a `mpsc::Sender<Event>`.
 //!
-//! Phase 4 composes one of these per peer behind a `Socket` actor.
+//! The socket actor composes one of these per peer.
 
 pub mod driver;
 

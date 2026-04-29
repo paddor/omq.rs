@@ -1,5 +1,5 @@
-//! Security-mechanism handshakes (NULL in Phase 2; CURVE staged in Phase
-//! 9; blake3zmq in Phase 12).
+//! Security-mechanism handshakes: NULL (default), CURVE (RFC 26),
+//! BLAKE3ZMQ (omq-native AEAD).
 //!
 //! Each mechanism runs a small state machine that consumes [`Command`]s and
 //! may emit more. When the peer's properties have been accepted, the
@@ -184,7 +184,7 @@ pub(crate) enum SecurityMechanism {
 }
 
 impl SecurityMechanism {
-    #[allow(dead_code, reason = "surfaced to monitor events in Phase 8")]
+    #[allow(dead_code, reason = "surfaced to monitor events")]
     pub(crate) fn name(&self) -> MechanismName {
         match self {
             Self::Null(_) => MechanismName::NULL,

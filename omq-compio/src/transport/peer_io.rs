@@ -1,14 +1,11 @@
 //! Per-peer shared I/O state.
 //!
 //! Wire connections expose their codec + writer + reader + transform
-//! behind one async [`Mutex`] so the driver task, the
-//! [`Socket::send`] fast path (Stage 4), and the [`Socket::recv`]
-//! direct path (Stage 5) can all drive them. Reads happen under the
+//! behind one async [`Mutex`] so the driver task and the direct
+//! send/recv fast paths can all drive them. Reads happen under the
 //! lock so the driver and a direct-recv caller can't race the same
 //! buffer.
 //!
-//! [`Socket::send`]: crate::Socket::send
-//! [`Socket::recv`]: crate::Socket::recv
 //! [`Mutex`]: async_lock::Mutex
 //!
 //! The reader / writer halves are stored as concrete `enum` variants
@@ -132,7 +129,7 @@ pub(crate) struct PeerIo {
     pub(crate) writer: WireWriter,
     pub(crate) reader: WireReader,
     /// Flipped to `true` once `Event::HandshakeSucceeded` has been
-    /// observed. The Stage 4 fast path bails out (falling back to
+    /// observed. The direct send fast path bails out (falling back to
     /// `cmd_tx`) until this is set, since pre-handshake the codec
     /// rejects `send_message`.
     pub(crate) handshake_done: bool,

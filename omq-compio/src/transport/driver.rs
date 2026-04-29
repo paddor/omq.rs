@@ -1,43 +1,21 @@
 //! Shared connection driver for stream transports (compio).
 //!
-//! One driver task per connection. Co-owns - via an async [`Mutex`] -
-//! the codec, transform, writer, and reader through [`PeerIo`].
-//! Reads happen under the lock so the [`Socket::recv`] direct path
-//! (Stage 5) can claim ownership of the FD without racing the
-//! driver. The driver `select_biased!`s between:
-//!   * `PollFd::read_ready` on the connection's fd - fires when the
-//!     kernel has data, cancellation-safe; the driver then takes the
-//!     [`PeerIo`] lock and does an inline `reader.read(buf).await`
-//!     (kernel data is already queued, so the SQE completes
-//!     near-immediately),
-//!   * the per-peer inbox,
-//!   * the shared work-stealing queue (round-robin types),
-//!   * the pre-handshake deadline,
-//!   * the post-handshake heartbeat tick,
-//!   * `recv_state_changed` (Stage 5) - flips the read arm off when
-//!     a `recv()` caller has claimed reads, and back on when they
-//!     release the claim,
-//!   * `eof_signal` (Stage 5) - lets the recv direct path tell us
-//!     to terminate after it observed EOF / fatal read error.
+//! One driver task per connection. Co-owns the codec, transform,
+//! writer and reader through [`PeerIo`] behind an async [`Mutex`].
+//! The driver `select_biased!`s between `PollFd::read_ready` (kernel
+//! readability), the per-peer inbox, the shared work-stealing queue
+//! (round-robin types), the pre-handshake deadline, the heartbeat
+//! tick, and the recv-direct claim/release signals.
 //!
-//! Lock discipline: the [`PeerIo`] mutex is acquired per operation
-//! (event drain, write flush, codec encode, heartbeat, read). It is
-//! never held across the `select_biased!` await, so the
-//! [`Socket::send`] Stage 4 fast path and the [`Socket::recv`] Stage 5
-//! direct path can grab the lock between driver iterations.
+//! Lock discipline: the [`PeerIo`] mutex is per-op only — never held
+//! across an await — so the direct send/recv fast paths can grab it
+//! between driver iterations.
 //!
 //! Generic over any `Splittable` stream whose halves implement
 //! `AsyncRead` + `AsyncWrite`. TCP and IPC each provide bind/connect
 //! glue and call `run_connection`.
 //!
-//! Note: compio's `Vec<bytes::Bytes>` directly implements
-//! `IoVectoredBuf` (via the `bytes` feature on compio-buf), so the
-//! codec's owned chunks go straight into `writer.write_vectored` -
-//! no unsafe iovec adapter, no manual `libc::iovec` construction.
-//!
 //! [`Mutex`]: async_lock::Mutex
-//! [`Socket::send`]: crate::Socket::send
-//! [`Socket::recv`]: crate::Socket::recv
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -147,14 +125,11 @@ fn make_codec(role: Role, socket_type: SocketType, options: &Options) -> Connect
     Connection::new(cfg)
 }
 
-/// Build the [`SharedPeerIo`] handed to the driver and the Stage 4
-/// send / Stage 5 recv fast paths. Constructs the codec; the
-/// reader / writer halves are passed in already wrapped in the
-/// concrete [`WireReader`] / [`WireWriter`] enums (so all per-call
-/// dispatch is a static `match` and never heap-allocates a future).
-///
-/// [`Socket::send`]: crate::Socket::send
-/// [`Socket::recv`]: crate::Socket::recv
+/// Build the [`SharedPeerIo`] handed to the driver and to the direct
+/// send/recv fast paths. Constructs the codec; reader/writer halves
+/// arrive wrapped in concrete [`WireReader`] / [`WireWriter`] enums so
+/// per-call dispatch is a static `match` and never heap-allocates a
+/// future.
 pub(crate) fn build_peer_io(
     role: Role,
     socket_type: SocketType,
@@ -496,8 +471,8 @@ pub(crate) async fn run_connection(
         //    data is already queued, the SQE completes immediately,
         //    and we never abandon a buffer-owning read mid-flight.
         use futures::FutureExt;
-        // Stage 5 gate: when a `recv()` caller has claimed the read
-        // path (`recv_claim == 1`), the driver must NOT race the
+        // Recv-direct gate: when a `recv()` caller has claimed the
+        // read path (`recv_claim == 1`), the driver must NOT race the
         // FD readiness or it would steal bytes out from under the
         // claim. Park on `recv_state_changed` instead - the claim
         // is released via a `notify(usize::MAX)` on Drop, which

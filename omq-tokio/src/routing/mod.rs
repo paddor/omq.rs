@@ -12,9 +12,8 @@
 //! | SUB/XSUB    | None (sends SUBSCRIBE/CANCEL only)    | FairQueue             |
 //! | ROUTER      | Identity (peer lookup by first frame) | IdentityRecv (prefix) |
 //!
-//! Conflate mode applies to FanOut only (PUB/XPUB/RADIO in later phases).
-//! REP envelope save/restore lives at the socket-type wiring level in
-//! Phase 7.
+//! Conflate mode applies to FanOut only (PUB/XPUB/RADIO).
+//! REP envelope save/restore lives at the socket-type wiring level.
 
 pub(crate) mod drop_queue;
 pub(crate) mod fair_queue;

@@ -677,12 +677,12 @@ impl Socket {
         Ok(())
     }
 
-    /// Receive a message. Stage 5 direct path is tried first when
-    /// eligible (single wire peer, supported socket type) - reads the
-    /// FD inline so the driver's read-side hop is skipped, saving
-    /// one task wake per RTT. On non-eligible sockets, contention on
-    /// the recv_claim, or an early bailout (e.g. pre-handshake), the
-    /// classic `in_rx` loop runs unchanged.
+    /// Receive a message. The direct path is tried first when eligible
+    /// (single wire peer, supported socket type) — reads the FD inline
+    /// so the driver's read-side hop is skipped, saving one task wake
+    /// per RTT. On non-eligible sockets, contention on `recv_claim`,
+    /// or an early bailout (e.g. pre-handshake), the `in_rx` loop runs
+    /// unchanged.
     ///
     /// Cancellation: dropping the returned future after `read_ready`
     /// has fired but before the read SQE returns may forfeit a small
@@ -897,9 +897,9 @@ impl Socket {
         }
     }
 
-    /// Stage 5 direct-recv: read straight off the wire instead of
-    /// going through the driver's read arm + `in_rx` channel hop.
-    /// Saves ~12 µs (one task wake) per RTT on the inbound side.
+    /// Direct-recv: read straight off the wire instead of going
+    /// through the driver's read arm + `in_rx` channel hop. Saves
+    /// ~12 µs (one task wake) per RTT on the inbound side.
     ///
     /// Bails (returns `Ok(None)` to the caller, which falls back to
     /// the `in_rx` loop) when:

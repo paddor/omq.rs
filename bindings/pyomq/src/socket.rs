@@ -302,6 +302,28 @@ impl Socket {
         .and_then(|r| r.map_err(map_err))
     }
 
+    fn join(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
+        let view: &[u8] = group.extract()?;
+        let bytes = Bytes::copy_from_slice(view);
+        let id = self.inner.ensure_id()?;
+        py.allow_threads(|| {
+            runtime::with_socket(id, move |s| async move { s.join(bytes).await })
+        })
+        .map_err(missing)
+        .and_then(|r| r.map_err(map_err))
+    }
+
+    fn leave(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
+        let view: &[u8] = group.extract()?;
+        let bytes = Bytes::copy_from_slice(view);
+        let id = self.inner.ensure_id()?;
+        py.allow_threads(|| {
+            runtime::with_socket(id, move |s| async move { s.leave(bytes).await })
+        })
+        .map_err(missing)
+        .and_then(|r| r.map_err(map_err))
+    }
+
     fn setsockopt(
         &self,
         py: Python<'_>,

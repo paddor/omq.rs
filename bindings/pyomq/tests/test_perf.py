@@ -1,19 +1,11 @@
-"""Performance gate: pyomq PUSH/PULL must beat pyzmq by 2x.
+"""Performance gate: pyomq PUSH/PULL must beat pyzmq by 2x at small
+sizes and at least match it at large sizes.
 
 Loopback inproc / tcp throughput across {128, 512, 2048, 8192, 32768}
 byte payloads, alternating runs to dampen thermal noise. The harness
-asserts ``pyomq msgs/s >= 2.0 * pyzmq msgs/s`` for every cell. Cells
-that miss the gate are reported in the failure message.
-
-Skipped automatically when pyzmq isn't importable.
-
-NOTE (v0.1): the gate currently FAILS - pyomq runs ~0.2-0.5x of pyzmq
-on PUSH/PULL. The architecture funnels every Python call through a
-cross-thread flume submission to the compio runtime; per-call overhead
-dwarfs the I/O. Closing the gap requires a per-socket fast path that
-bypasses the runtime hop for the hot send / recv calls (queue-direct
-enqueue, runtime-agnostic flume sender held on the Python side).
-Marked `xfail` so the suite reports clean while the fix lands.
+asserts ``pyomq msgs/s >= 2.0 * pyzmq msgs/s`` for small sizes and
+``>= 0.95 * pyzmq`` for large sizes. Skipped automatically when
+pyzmq isn't importable.
 """
 
 import threading

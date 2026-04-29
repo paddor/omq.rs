@@ -229,6 +229,32 @@ impl AsyncSocket {
         })
     }
 
+    fn join<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let view: &[u8] = group.extract()?;
+        let bytes = Bytes::copy_from_slice(view);
+        let id = self.inner.ensure_id()?;
+        runtime::compio_future_into_py(py, move || async move {
+            match runtime::with_socket_async(id, |s| async move { s.join(bytes).await }).await {
+                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
+                Ok(Err(e)) => Err(map_err(e)),
+                Err(_) => Err(map_err(PError::Closed)),
+            }
+        })
+    }
+
+    fn leave<'py>(&self, py: Python<'py>, group: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let view: &[u8] = group.extract()?;
+        let bytes = Bytes::copy_from_slice(view);
+        let id = self.inner.ensure_id()?;
+        runtime::compio_future_into_py(py, move || async move {
+            match runtime::with_socket_async(id, |s| async move { s.leave(bytes).await }).await {
+                Ok(Ok(())) => Python::with_gil(|py| Ok(py.None())),
+                Ok(Err(e)) => Err(map_err(e)),
+                Err(_) => Err(map_err(PError::Closed)),
+            }
+        })
+    }
+
     /// Sync setsockopt (returning None directly) - matches pyzmq's
     /// async API which keeps setsockopt synchronous since it's not I/O.
     fn setsockopt(

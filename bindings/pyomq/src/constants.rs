@@ -4,7 +4,7 @@
 
 use pyo3::prelude::*;
 
-// Socket types (libzmq `zmq.h`):
+// Socket types (libzmq `zmq.h` + `zmq_draft.h`):
 pub const PAIR: i32 = 0;
 pub const PUB: i32 = 1;
 pub const SUB: i32 = 2;
@@ -16,6 +16,15 @@ pub const PULL: i32 = 7;
 pub const PUSH: i32 = 8;
 pub const XPUB: i32 = 9;
 pub const XSUB: i32 = 10;
+// Draft socket types (libzmq `zmq_draft.h`):
+pub const SERVER: i32 = 12;
+pub const CLIENT: i32 = 13;
+pub const RADIO: i32 = 14;
+pub const DISH: i32 = 15;
+pub const GATHER: i32 = 16;
+pub const SCATTER: i32 = 17;
+pub const PEER: i32 = 19;
+pub const CHANNEL: i32 = 20;
 
 // Socket options:
 pub const AFFINITY: i32 = 4;
@@ -65,6 +74,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     cs!(
         PAIR, PUB, SUB, REQ, REP, DEALER, ROUTER, PULL, PUSH, XPUB, XSUB,
+        SERVER, CLIENT, RADIO, DISH, GATHER, SCATTER, PEER, CHANNEL,
         AFFINITY, IDENTITY, SUBSCRIBE, UNSUBSCRIBE, RCVMORE, TYPE, LINGER,
         RECONNECT_IVL, BACKLOG, RECONNECT_IVL_MAX, MAXMSGSIZE, SNDHWM, RCVHWM,
         RCVTIMEO, SNDTIMEO, ROUTER_MANDATORY,

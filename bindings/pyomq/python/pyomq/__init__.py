@@ -30,6 +30,15 @@ from ._native import (  # type: ignore[attr-defined]
     PUSH,
     XPUB,
     XSUB,
+    # Draft socket types (RFC 41 / 48 / 49 / 51 + PEER)
+    SERVER,
+    CLIENT,
+    RADIO,
+    DISH,
+    GATHER,
+    SCATTER,
+    PEER,
+    CHANNEL,
     # Option constants
     AFFINITY,
     IDENTITY,
@@ -100,6 +109,15 @@ __all__ = [
     "PUSH",
     "XPUB",
     "XSUB",
+    # draft socket types
+    "SERVER",
+    "CLIENT",
+    "RADIO",
+    "DISH",
+    "GATHER",
+    "SCATTER",
+    "PEER",
+    "CHANNEL",
     # options
     "AFFINITY",
     "IDENTITY",

@@ -23,6 +23,14 @@ fn map_socket_type(st: i32) -> PyResult<omq_compio::SocketType> {
         constants::PUSH => omq_compio::SocketType::Push,
         constants::XPUB => omq_compio::SocketType::XPub,
         constants::XSUB => omq_compio::SocketType::XSub,
+        constants::SERVER => omq_compio::SocketType::Server,
+        constants::CLIENT => omq_compio::SocketType::Client,
+        constants::RADIO => omq_compio::SocketType::Radio,
+        constants::DISH => omq_compio::SocketType::Dish,
+        constants::GATHER => omq_compio::SocketType::Gather,
+        constants::SCATTER => omq_compio::SocketType::Scatter,
+        constants::PEER => omq_compio::SocketType::Peer,
+        constants::CHANNEL => omq_compio::SocketType::Channel,
         other => {
             return Err(map_err(omq_proto::error::Error::InvalidEndpoint(format!(
                 "unknown socket type {other}"

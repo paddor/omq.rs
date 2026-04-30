@@ -67,10 +67,17 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `compio-backend`  | (default) compio io_uring/IOCP backend            | -                                |
 | `tokio-backend`   | tokio multi-thread backend                        | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism            | `blake3`, `chacha20-blake3`, `x25519-dalek` |
+| `blake3zmq`       | OMQ-native BLAKE3 + ChaCha20 mechanism†           | `blake3`, `chacha20-blake3`, `x25519-dalek` |
 | `lz4`             | `lz4+tcp://` compression transport                | `lz4-sys`                       |
 | `zstd`            | `zstd+tcp://` compression transport               | `zstd-safe` (vends `libzstd`; needs `cc`) |
 | `priority`        | Strict per-pipe priority on `Socket::connect_with`| -                                |
+
+† **BLAKE3ZMQ has not been independently security audited.** It's an
+omq-native construction (Noise XX + BLAKE3 + X25519 + ChaCha20-BLAKE3)
+and should not be relied on for anything that matters until it has had
+third-party review. Use **CURVE** (RFC 26) for production / regulated
+workloads. Audits welcome - open an issue if you can help fund or
+conduct one.
 
 ## Benchmarks
 

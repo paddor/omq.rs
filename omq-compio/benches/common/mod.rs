@@ -22,7 +22,7 @@ pub(crate) const DEFAULT_TRANSPORTS: &[&str] = &["inproc", "ipc", "tcp"];
 pub(crate) const PRIME_ITERS: usize = 2_000;
 pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
-pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(300);
+pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(500);
 pub(crate) const ROUNDS: usize = 1;
 pub(crate) const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 

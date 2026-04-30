@@ -36,8 +36,8 @@ pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 
 /// Per-cell timed budget. `ROUND_DURATION` × ROUNDS ≈ wall time per cell.
-/// One round at 300 ms each gets the suite done in ~1 min total.
-pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(300);
+/// One round at 500 ms each gets the suite done in ~1.5 min total.
+pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(500);
 pub(crate) const ROUNDS: usize = 1;
 
 /// Hard ceiling per cell. Longer than ~prime + warmup + ROUNDS×duration

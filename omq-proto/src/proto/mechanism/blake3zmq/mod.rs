@@ -12,6 +12,14 @@
 //! matching session keys; `transform.rs` exercises the AEAD round
 //! trip; the existing `tests/blake3zmq.rs` integration runs PUSH/PULL
 //! over inproc end-to-end.
+//!
+//! **Security:** This is a novel, omq-native construction and has
+//! **not been independently security audited.** Don't use it for
+//! anything that matters until it has had third-party review. For
+//! production or regulated workloads use the `curve` feature instead
+//! (RFC 26 / NaCl XSalsa20Poly1305 - well-reviewed and what libzmq
+//! ships). Independent audits of BLAKE3ZMQ are very welcome; if you
+//! can fund or conduct one, please open an issue on the repo.
 
 pub mod cookie;
 pub mod crypto;

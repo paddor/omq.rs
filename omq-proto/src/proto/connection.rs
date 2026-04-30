@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 use std::io::IoSlice;
 use std::sync::Arc;
 
+#[cfg(feature = "curve")]
+use bytes::BufMut;
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 
@@ -323,19 +325,37 @@ impl Connection {
             return self.absorb_data_frame(frame.flags.more, Payload::from_bytes(plaintext));
         }
 
-        if frame.flags.command {
-            let cmd = command::decode(frame.payload.coalesce())?;
-            // CURVE: a "MESSAGE" command carries an encrypted
-            // application frame. Decrypt + treat as a data frame.
-            // Compiled out when no encrypting mechanism is built in.
-            #[cfg(feature = "curve")]
-            if let (Command::Unknown { name, body }, Some(FrameTransform::Curve(tx))) =
-                (&cmd, self.transform.as_mut())
-                && name.as_ref() == b"MESSAGE"
+        // CURVE: every post-handshake application frame on the wire is a
+        // ZMTP DATA frame whose body is `\x07 "MESSAGE" flags(1) nonce(8)
+        // box(...)` - libzmq does NOT set the COMMAND bit for these.
+        // ZMTP commands (PING, SUBSCRIBE, ...) under CURVE are sent as
+        // separate `MESSAGE`-wrapped data frames whose decrypted plaintext
+        // is itself a command-encoded body; we handle those by re-decoding
+        // the plaintext if its inner shape begins with a command name.
+        #[cfg(feature = "curve")]
+        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
+        #[cfg(feature = "curve")]
+        if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
+            let body = frame.payload.coalesce();
+            if body.len() >= CURVE_MESSAGE_PREFIX.len()
+                && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
-                let (more, plaintext) = tx.decrypt_message(body)?;
+                let (more, plaintext) =
+                    tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
+                if frame.flags.command {
+                    let cmd = command::decode(plaintext)?;
+                    self.handle_post_handshake_command(cmd);
+                    return Ok(true);
+                }
                 return self.absorb_data_frame(more, Payload::from_bytes(plaintext));
             }
+            return Err(Error::Protocol(
+                "expected CURVE-wrapped MESSAGE on data-phase connection".into(),
+            ));
+        }
+
+        if frame.flags.command {
+            let cmd = command::decode(frame.payload.coalesce())?;
             self.handle_post_handshake_command(cmd);
             return Ok(true);
         }
@@ -409,6 +429,30 @@ impl Connection {
                 continue;
             }
 
+            // CURVE post-handshake: commands (SUBSCRIBE / CANCEL / PING /
+            // JOIN / LEAVE / ...) traverse the same MESSAGE encryption as
+            // application data; the wire COMMAND bit stays set so the
+            // receiver knows the decrypted plaintext is a command body.
+            #[cfg(feature = "curve")]
+            if matches!(self.state, State::Ready)
+                && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
+            {
+                let plaintext = body.freeze();
+                let Ok(enc) = tx.encrypt_message(false, &plaintext) else {
+                    continue;
+                };
+                let mut wire = BytesMut::with_capacity(8 + enc.len());
+                wire.put_u8(b"MESSAGE".len() as u8);
+                wire.put_slice(b"MESSAGE");
+                wire.put_slice(&enc);
+                let f = crate::message::Frame {
+                    flags: crate::message::FrameFlags::COMMAND,
+                    payload: Payload::from_bytes(wire.freeze()),
+                };
+                frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
+                continue;
+            }
+
             let f = crate::message::Frame {
                 flags: crate::message::FrameFlags::COMMAND,
                 payload: Payload::from_bytes(body.freeze()),
@@ -470,9 +514,12 @@ impl Connection {
         Ok(())
     }
 
-    /// CURVE-encrypted part: wrap the plaintext in a MESSAGE command
-    /// per RFC 26 and queue it as one ZMTP frame. Caller has already
-    /// verified `self.transform` is `Some(FrameTransform::Curve(_))`.
+    /// CURVE-encrypted part: wrap the plaintext per RFC 26 (`"\x07"
+    /// "MESSAGE" flags(1) nonce(8) box`) and queue it as one ZMTP DATA
+    /// frame. libzmq sends these as data frames (not COMMAND frames);
+    /// the inner plaintext flag byte carries the application-level MORE.
+    /// Caller has already verified `self.transform` is
+    /// `Some(FrameTransform::Curve(_))`.
     #[cfg(feature = "curve")]
     fn send_part_curve(&mut self, more: bool, part: &Payload) -> Result<()> {
         let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() else {
@@ -480,17 +527,18 @@ impl Connection {
         };
         let plaintext = part.coalesce();
         let body = tx.encrypt_message(more, &plaintext)?;
-        let mut cmd_body = BytesMut::new();
-        command::encode(
-            &Command::Unknown {
-                name: bytes::Bytes::from_static(b"MESSAGE"),
-                body,
-            },
-            &mut cmd_body,
-        );
+        let mut wire = BytesMut::with_capacity(8 + body.len());
+        wire.put_u8(b"MESSAGE".len() as u8);
+        wire.put_slice(b"MESSAGE");
+        wire.put_slice(&body);
+        let flags = if more {
+            crate::message::FrameFlags::MORE
+        } else {
+            crate::message::FrameFlags::LAST
+        };
         let f = crate::message::Frame {
-            flags: crate::message::FrameFlags::COMMAND,
-            payload: Payload::from_bytes(cmd_body.freeze()),
+            flags,
+            payload: Payload::from_bytes(wire.freeze()),
         };
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())

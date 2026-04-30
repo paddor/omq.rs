@@ -82,38 +82,46 @@ impl std::fmt::Debug for CurveTransform {
 
 impl CurveTransform {
     /// Encrypt a single application frame's payload, returning the body of
-    /// the MESSAGE command (flags + nonce + ciphertext).
+    /// the MESSAGE command after the `\x07MESSAGE` name prefix:
+    /// `nonce(8) || box(flags(1) || plaintext)`. The MORE bit lives
+    /// *inside* the encrypted plaintext per RFC 26 / libzmq.
     pub(crate) fn encrypt_message(&mut self, more: bool, plaintext: &[u8]) -> Result<Bytes> {
         self.out_counter = self.out_counter.checked_add(1).ok_or_else(|| {
             Error::Protocol("CURVE outbound nonce counter exhausted".into())
         })?;
         let nonce = nonce_short(&self.out_prefix, self.out_counter);
+        let mut pt = Vec::with_capacity(1 + plaintext.len());
+        pt.push(u8::from(more));
+        pt.extend_from_slice(plaintext);
         let ct = self
             .salsa
-            .encrypt(&nonce.into(), plaintext)
+            .encrypt(&nonce.into(), pt.as_slice())
             .map_err(|_| Error::Protocol("CURVE encrypt failed".into()))?;
-        let mut body = BytesMut::with_capacity(1 + 8 + ct.len());
-        body.put_u8(if more { 0x01 } else { 0x00 });
+        let mut body = BytesMut::with_capacity(8 + ct.len());
         body.put_slice(&self.out_counter.to_be_bytes());
         body.put_slice(&ct);
         Ok(body.freeze())
     }
 
-    /// Decrypt a MESSAGE command body. Returns `(more, plaintext)`.
+    /// Decrypt a MESSAGE command body (post-`\x07MESSAGE` prefix). Returns
+    /// `(more, plaintext)`. Body layout: `nonce(8) || box(flags(1) || data)`.
     pub(crate) fn decrypt_message(&mut self, body: &[u8]) -> Result<(bool, Bytes)> {
-        if body.len() < 1 + 8 + 16 {
+        if body.len() < 8 + 16 + 1 {
             return Err(Error::Protocol("MESSAGE command too short".into()));
         }
-        let more = body[0] & 0x01 != 0;
-        let counter = u64::from_be_bytes(body[1..9].try_into().unwrap());
-        let ct = &body[9..];
+        let counter = u64::from_be_bytes(body[..8].try_into().unwrap());
+        let ct = &body[8..];
         let nonce = nonce_short(&self.in_prefix, counter);
         let pt = self
             .salsa
             .decrypt(&nonce.into(), ct)
             .map_err(|_| Error::Protocol("CURVE decrypt failed".into()))?;
+        if pt.is_empty() {
+            return Err(Error::Protocol("CURVE MESSAGE plaintext missing flags".into()));
+        }
+        let more = pt[0] & 0x01 != 0;
         self.in_counter = counter;
-        Ok((more, Bytes::from(pt)))
+        Ok((more, Bytes::copy_from_slice(&pt[1..])))
     }
 }
 
@@ -244,7 +252,6 @@ impl CurveMechanism {
                 cmd.kind()
             )));
         };
-
         match (self.state, name.as_ref()) {
             (CurveState::Init, b"HELLO") if self.is_server => {
                 self.parse_hello(&body)?;
@@ -291,6 +298,12 @@ impl CurveMechanism {
 
     /// Build the [`CurveTransform`] used for post-handshake MESSAGE
     /// encryption. Call only after handshake reaches `Done`.
+    ///
+    /// libzmq carries the short-nonce counter from the handshake into the
+    /// MESSAGE phase (i.e. the client's first MESSAGE has counter 3 after
+    /// HELLO=1 and INITIATE=2). Resetting to 0 here used to make our
+    /// MESSAGEs look stale to libzmq (which validates monotonicity) and
+    /// caused silent decrypt-and-drop on the libzmq side.
     pub(crate) fn build_transform(&self) -> Result<CurveTransform> {
         let peer_eph = self.peer_eph_public.as_ref().ok_or_else(|| {
             Error::HandshakeFailed("transform requested before peer eph key is known".into())
@@ -303,7 +316,7 @@ impl CurveMechanism {
         };
         Ok(CurveTransform {
             salsa,
-            out_counter: 0,
+            out_counter: self.out_counter,
             in_counter: 0,
             out_prefix,
             in_prefix,
@@ -454,7 +467,11 @@ impl CurveMechanism {
         let mut vouch_pt = [0u8; 64];
         vouch_pt[..32].copy_from_slice(&our_eph_public_bytes);
         vouch_pt[32..].copy_from_slice(server_pub.as_bytes());
-        let vouch_box = SalsaBox::new(&server_pub, &our_lt_secret)
+        // RFC 26: vouch box is sealed by the client's long-term secret to
+        // the SERVER'S TRANSIENT public key (S_eph), NOT the long-term one.
+        // Using S_long here was a longstanding bug that interop'd with
+        // itself but not with libzmq.
+        let vouch_box = SalsaBox::new(&server_eph, &our_lt_secret)
             .encrypt(&vouch_nonce.into(), &vouch_pt[..])
             .map_err(|_| Error::Protocol("CURVE VOUCH encrypt failed".into()))?;
 
@@ -534,7 +551,9 @@ impl CurveMechanism {
         let cl = PublicKey::from_bytes(cl_bytes);
         // Verify the vouch.
         let vouch_nonce = nonce_long(NONCE_VOUCH_PREFIX, &vouch_suffix);
-        let vouch_pt = SalsaBox::new(&cl, &self.our_lt_secret)
+        // RFC 26: vouch box is opened on the server side using the server's
+        // TRANSIENT secret + the client's long-term public.
+        let vouch_pt = SalsaBox::new(&cl, &self.our_eph_secret)
             .decrypt(&vouch_nonce.into(), vouch_box)
             .map_err(|_| Error::HandshakeFailed("CURVE VOUCH invalid".into()))?;
         if vouch_pt.len() != 64

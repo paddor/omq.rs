@@ -112,6 +112,12 @@ impl Socket {
 
     pub async fn bind(&self, endpoint: Endpoint) -> Result<()> {
         reject_encrypted_inproc(&endpoint, &self.inner.options.mechanism)?;
+        // The Lz4Tcp / ZstdTcp arms are gated on this crate's own
+        // feature; Cargo feature unification can still surface those
+        // variants (e.g. when a workspace neighbour enables `omq-proto/lz4`
+        // for its own tests but pulls us in as a dev-dep without our lz4),
+        // so we add a wildcard runtime fallback.
+        #[allow(unreachable_patterns)]
         match endpoint {
             Endpoint::Inproc { name } => self.bind_inproc(name).await,
             Endpoint::Tcp { .. } => self.bind_tcp(endpoint).await,
@@ -121,6 +127,9 @@ impl Socket {
             Endpoint::ZstdTcp { .. } => self.bind_tcp(endpoint).await,
             Endpoint::Ipc(_) => self.bind_ipc(endpoint).await,
             Endpoint::Udp { .. } => self.bind_udp(endpoint).await,
+            _ => Err(Error::Protocol(
+                "transport variant not enabled in this omq-compio build".into(),
+            )),
         }
     }
 
@@ -454,6 +463,10 @@ impl Socket {
                 Ok(())
             }
             Endpoint::Udp { .. } => self.connect_udp(endpoint).await,
+            #[allow(unreachable_patterns)]
+            _ => Err(Error::Protocol(
+                "transport variant not enabled in this omq-compio build".into(),
+            )),
         }
     }
 

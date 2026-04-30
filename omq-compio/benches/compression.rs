@@ -37,7 +37,9 @@ pub(super) fn compio_main() {
     rt.block_on(async_main());
 }
 
+#[allow(clippy::too_many_lines)]
 async fn async_main() {
+    use omq_proto::proto::transform::{Lz4Transform, ZstdTransform};
     common::print_header("PUSH/PULL - JSON payloads (virtual throughput)");
     println!("note: loopback has no bandwidth scarcity, so compression's CPU");
     println!("cost dominates over its wire-byte savings. The compression ratio");
@@ -49,7 +51,6 @@ async fn async_main() {
     // virtual-throughput numbers in light of where the bench CAN'T
     // show the win (loopback) vs where compression actually helps
     // (real networks).
-    use omq_proto::proto::transform::{Lz4Transform, ZstdTransform};
     println!("--- compression ratios on this JSON template ---");
     for &size in &[128usize, 256, 512, 1024, 2048, 4096, 16384] {
         let plain = json_payload(size);
@@ -61,8 +62,7 @@ async fn async_main() {
         let m = omq_compio::Message::single(plain.clone());
         let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
             out.last()
-                .map(|m| m.parts().iter().map(|p| p.len()).sum::<usize>())
-                .unwrap_or(plain.len())
+                .map_or(plain.len(), |m| m.parts().iter().map(omq_compio::Payload::len).sum::<usize>())
         };
         let lz4_n = encoded_len(Lz4Transform::new().encode(&m).unwrap());
         let zstd_n = encoded_len(ZstdTransform::new().encode(&m).unwrap());
@@ -140,8 +140,7 @@ async fn async_main() {
             // shipment to the peer (one-shot per connection); the
             // payload is in the second message.
             out.last()
-                .map(|m| m.parts().iter().map(|p| p.len()).sum::<usize>())
-                .unwrap_or(plain.len())
+                .map_or(plain.len(), |m| m.parts().iter().map(omq_compio::Payload::len).sum::<usize>())
         };
         let lz4_n = encoded_len(
             Lz4Transform::with_send_dict(lz4_dict.clone())
@@ -227,11 +226,9 @@ fn wire_size(transport: &str, plain: &Bytes, dict: Option<&Bytes>) -> usize {
     let m = omq_compio::Message::single(plain.clone());
     let encoded_len = |out: omq_proto::proto::transform::TransformedOut| {
         out.last()
-            .map(|m| m.parts().iter().map(|p| p.len()).sum::<usize>())
-            .unwrap_or(plain.len())
+            .map_or(plain.len(), |m| m.parts().iter().map(omq_compio::Payload::len).sum::<usize>())
     };
     match transport {
-        "tcp" => plain.len(),
         "lz4+tcp" => {
             let mut t = match dict {
                 Some(d) => Lz4Transform::with_send_dict(d.clone()).unwrap(),
@@ -246,6 +243,7 @@ fn wire_size(transport: &str, plain: &Bytes, dict: Option<&Bytes>) -> usize {
             };
             encoded_len(t.encode(&m).unwrap())
         }
+        // "tcp" or anything else: plain bytes pass through.
         _ => plain.len(),
     }
 }
@@ -356,7 +354,7 @@ fn json_payload(target_bytes: usize) -> Bytes {
     while out.len() < target_bytes {
         let mut rec = TEMPLATE.to_string();
         // Vary the "{ID}" placeholders so successive records differ.
-        let id = format!("{:08x}", counter.wrapping_mul(0x9E3779B1));
+        let id = format!("{:08x}", counter.wrapping_mul(0x9E37_79B1));
         rec = rec.replace("{ID}", &id);
         out.push_str(&rec);
         counter = counter.wrapping_add(1);

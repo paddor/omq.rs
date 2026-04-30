@@ -41,7 +41,7 @@ pub fn encode_frame(frame: &Frame, out: &mut BytesMut) {
 /// Lets the engine driver gather-write the result with `writev`/
 /// `sendmsg` rather than memcpy'ing into a contiguous buffer first.
 ///
-/// `scratch` is a per-connection BytesMut held by the caller. Each
+/// `scratch` is a per-connection `BytesMut` held by the caller. Each
 /// header (1-9 bytes) is written into it and then peeled off as a
 /// `Bytes` via `split()` - the underlying allocation is shared via
 /// Arc with all previously emitted headers, amortising allocs to one

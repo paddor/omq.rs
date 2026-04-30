@@ -42,7 +42,7 @@ pub(crate) struct UdpListenerEntry {
 }
 
 /// One outbound UDP "connection" (RADIO side). Holds the synthetic
-/// peer id under which the SendStrategy registered the sender, so
+/// peer id under which the `SendStrategy` registered the sender, so
 /// teardown can call `connection_removed`.
 pub(crate) struct UdpDialerEntry {
     pub endpoint: Endpoint,
@@ -114,19 +114,16 @@ pub(crate) fn spawn_radio_sender(
                         }
                         let group = parts[0].coalesce();
                         let body = parts[1].coalesce();
-                        match udp::encode_datagram(&group, &body) {
-                            Ok(dgram) => {
-                                // Best-effort fire-and-forget; UDP errors
-                                // (ECONNREFUSED, ENETUNREACH) are silently
-                                // dropped.
-                                let _ = sock.send(&dgram).await;
-                            }
-                            Err(_) => continue,
+                        if let Ok(dgram) = udp::encode_datagram(&group, &body) {
+                            // Best-effort fire-and-forget; UDP errors
+                            // (ECONNREFUSED, ENETUNREACH) are silently
+                            // dropped.
+                            let _ = sock.send(&dgram).await;
                         }
                     }
                     // SendCommand on UDP is meaningless (no JOIN/LEAVE
                     // exchange on the wire); discard.
-                    Some(DriverCommand::SendCommand(_)) => continue,
+                    Some(DriverCommand::SendCommand(_)) => {},
                     Some(DriverCommand::Close) | None => break,
                 }
             }

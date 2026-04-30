@@ -110,14 +110,9 @@ async fn zstd_auto_train_end_to_end() {
     push.close().await.unwrap();
 
     let mut got = 0usize;
-    loop {
-        match compio::time::timeout(Duration::from_millis(200), pull.recv()).await {
-            Ok(Ok(m)) => {
-                assert_eq!(m.parts()[0].coalesce(), &sample[..]);
-                got += 1;
-            }
-            _ => break,
-        }
+    while let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(200), pull.recv()).await {
+        assert_eq!(m.parts()[0].coalesce(), &sample[..]);
+        got += 1;
     }
     assert!(got >= 1000, "auto-train flow lost too many messages: got {got}");
 }

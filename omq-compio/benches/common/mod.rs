@@ -86,8 +86,11 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
                 "lz4+tcp" => Endpoint::Lz4Tcp { host, port },
                 #[cfg(feature = "zstd")]
                 "zstd+tcp" => Endpoint::ZstdTcp { host, port },
-                _ => panic!("bench: transport '{transport}' requires its feature; \
-                            rerun with `--features {}`", transport.replace('+', "+").replace("tcp", "")),
+                _ => panic!(
+                    "bench: transport '{transport}' requires its feature; \
+                     rerun with `--features {}`",
+                    transport.trim_end_matches("tcp").trim_end_matches('+')
+                ),
             }
         }
         other => panic!("bench: unknown transport {other}"),
@@ -109,9 +112,7 @@ pub(crate) async fn wait_connected(socks: &[&omq_compio::Socket]) {
         if all_ok {
             return;
         }
-        if Instant::now() > deadline {
-            panic!("bench: timed out waiting for peers to connect");
-        }
+        assert!(Instant::now() <= deadline, "bench: timed out waiting for peers to connect");
         compio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -123,9 +124,7 @@ pub(crate) async fn wait_subscribed(
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut pending: Vec<usize> = (0..subs.len()).collect();
     while !pending.is_empty() {
-        if Instant::now() > deadline {
-            panic!("bench: subscriptions never propagated");
-        }
+        assert!(Instant::now() <= deadline, "bench: subscriptions never propagated");
         let _ = pub_.send(omq_compio::Message::single("")).await;
         let mut still: Vec<usize> = Vec::new();
         for &i in &pending {
@@ -169,7 +168,7 @@ where
         let t = Instant::now();
         burst(final_n).await;
         let elapsed = t.elapsed();
-        if best.map_or(true, |b| elapsed < b) {
+        if best.is_none_or(|b| elapsed < b) {
             best = Some(elapsed);
         }
     }
@@ -265,8 +264,7 @@ pub(crate) async fn with_timeout<T>(
     label: &str,
     fut: impl std::future::Future<Output = T>,
 ) -> T {
-    match compio::time::timeout(RUN_TIMEOUT, fut).await {
-        Ok(v) => v,
-        Err(_) => panic!("BENCH TIMEOUT: {label} exceeded {:?}", RUN_TIMEOUT),
-    }
+    compio::time::timeout(RUN_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {RUN_TIMEOUT:?}"))
 }

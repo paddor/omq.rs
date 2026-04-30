@@ -99,11 +99,13 @@ impl PeerProperties {
         Self::default()
     }
 
+    #[must_use]
     pub fn with_socket_type(mut self, t: SocketType) -> Self {
         self.socket_type = Some(t);
         self
     }
 
+    #[must_use]
     pub fn with_identity(mut self, id: Bytes) -> Self {
         if !id.is_empty() {
             self.identity = Some(id);
@@ -143,7 +145,7 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
         Command::Error { reason } => {
             write_name(out, NAME_ERROR);
             let bytes = reason.as_bytes();
-            assert!(bytes.len() <= u8::MAX as usize, "error reason too long");
+            assert!(u8::try_from(bytes.len()).is_ok(), "error reason too long");
             out.put_u8(bytes.len() as u8);
             out.put_slice(bytes);
         }
@@ -156,7 +158,7 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
             out.put_slice(group);
         }
         Command::Unknown { name, body } => {
-            assert!(name.len() <= u8::MAX as usize, "command name too long");
+            assert!(u8::try_from(name.len()).is_ok(), "command name too long");
             out.put_u8(name.len() as u8);
             out.put_slice(name);
             out.put_slice(body);
@@ -165,6 +167,7 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
 }
 
 /// Parse a command from the payload bytes of a COMMAND-flagged frame.
+#[allow(clippy::needless_pass_by_value)]
 pub fn decode(body: Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("empty command frame".into()));
@@ -173,7 +176,7 @@ pub fn decode(body: Bytes) -> Result<Command> {
     if body.len() < 1 + name_len {
         return Err(Error::Protocol("command truncated in name".into()));
     }
-    let name = body.slice(1..1 + name_len);
+    let name = body.slice(1..=name_len);
     let body = body.slice(1 + name_len..);
 
     let cmd = match name.as_ref() {
@@ -196,7 +199,7 @@ pub fn decode(body: Bytes) -> Result<Command> {
 }
 
 fn write_name(out: &mut BytesMut, name: &[u8]) {
-    assert!(name.len() <= u8::MAX as usize, "command name too long");
+    assert!(u8::try_from(name.len()).is_ok(), "command name too long");
     out.put_u8(name.len() as u8);
     out.put_slice(name);
 }
@@ -232,8 +235,8 @@ fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut) {
 }
 
 fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
-    assert!(name.len() <= u8::MAX as usize, "property name too long");
-    assert!(value.len() <= u32::MAX as usize, "property value too long");
+    assert!(u8::try_from(name.len()).is_ok(), "property name too long");
+    assert!(u32::try_from(value.len()).is_ok(), "property value too long");
     out.put_u8(name.len() as u8);
     out.put_slice(name);
     out.put_u32(value.len() as u32);
@@ -250,7 +253,7 @@ fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
         if body.len() < 1 + name_len + 4 {
             return Err(Error::Protocol("READY property truncated".into()));
         }
-        let name = body.slice(1..1 + name_len);
+        let name = body.slice(1..=name_len);
         let value_len =
             u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap()) as usize;
         let val_start = 1 + name_len + 4;
@@ -282,6 +285,7 @@ fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
     Ok(props)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn decode_ping(body: Bytes) -> Result<Command> {
     if body.len() < 2 {
         return Err(Error::Protocol("PING body missing TTL".into()));
@@ -294,6 +298,7 @@ fn decode_ping(body: Bytes) -> Result<Command> {
     Ok(Command::Ping { ttl_deciseconds: ttl, context })
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn decode_error(body: Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("ERROR body missing reason length".into()));
@@ -302,7 +307,7 @@ fn decode_error(body: Bytes) -> Result<Command> {
     if body.len() < 1 + reason_len {
         return Err(Error::Protocol("ERROR reason truncated".into()));
     }
-    let reason_bytes = body.slice(1..1 + reason_len);
+    let reason_bytes = body.slice(1..=reason_len);
     let reason = String::from_utf8(reason_bytes.to_vec())
         .map_err(|_| Error::Protocol("ERROR reason not UTF-8".into()))?;
     Ok(Command::Error { reason })
@@ -312,6 +317,7 @@ fn decode_error(body: Bytes) -> Result<Command> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::needless_pass_by_value)]
     fn roundtrip(cmd: Command) -> Command {
         let mut buf = BytesMut::new();
         encode(&cmd, &mut buf);

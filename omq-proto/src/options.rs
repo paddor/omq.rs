@@ -1,7 +1,7 @@
 //! Socket options: typed builder.
 //!
 //! Defaults differ from libzmq in two places: per-socket HWM semantics
-//! and conflate restricted to FanOut patterns.
+//! and conflate restricted to `FanOut` patterns.
 
 use std::time::Duration;
 
@@ -57,7 +57,7 @@ pub struct Options {
     pub max_message_size: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to
-    /// FanOut patterns only (PUB/XPUB/RADIO). Ignored elsewhere.
+    /// `FanOut` patterns only (PUB/XPUB/RADIO). Ignored elsewhere.
     pub conflate: bool,
 
     /// ROUTER: fail `send` with `Error::Unroutable` for unknown identities.
@@ -82,16 +82,16 @@ pub struct Options {
 
     /// Zstd auto-trained dictionaries (RFC §6.5). Defaults to **on**
     /// - when neither `compression_dict` nor any other dict source
-    /// is configured on a `zstd+tcp://` connection, the encoder
-    /// samples the first 1000 outbound messages or 100 KiB total
-    /// plaintext (whichever fires first), trains an 8 KiB dict, and
-    /// ships it. After that the per-frame compression threshold
-    /// drops from 512 B to 64 B and small messages start riding the
-    /// dict. Setting `compression_dict` overrides - auto-train is
-    /// silently disabled when a static dict is supplied.
-    /// Ignored by `lz4+tcp://` (LZ4 has no standard trainer).
-    /// Set to `false` to suppress training (e.g. tests that need a
-    /// deterministic wire shape).
+    ///   is configured on a `zstd+tcp://` connection, the encoder
+    ///   samples the first 1000 outbound messages or 100 KiB total
+    ///   plaintext (whichever fires first), trains an 8 KiB dict, and
+    ///   ships it. After that the per-frame compression threshold
+    ///   drops from 512 B to 64 B and small messages start riding the
+    ///   dict. Setting `compression_dict` overrides - auto-train is
+    ///   silently disabled when a static dict is supplied.
+    ///   Ignored by `lz4+tcp://` (LZ4 has no standard trainer).
+    ///   Set to `false` to suppress training (e.g. tests that need a
+    ///   deterministic wire shape).
     pub compression_auto_train: bool,
 }
 
@@ -174,7 +174,9 @@ impl MechanismConfig {
             Self::CurveServer { our_keypair, .. } | Self::CurveClient { our_keypair, .. } => {
                 Some(&our_keypair.secret)
             }
-            _ => None,
+            Self::Null => None,
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3ZmqServer { .. } | Self::Blake3ZmqClient { .. } => None,
         }
     }
 
@@ -241,86 +243,103 @@ impl Options {
         Self::default()
     }
 
+    #[must_use]
     pub fn send_hwm(mut self, hwm: u32) -> Self {
         self.send_hwm = Some(hwm);
         self
     }
 
+    #[must_use]
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = Some(hwm);
         self
     }
 
+    #[must_use]
     pub fn unbounded_send(mut self) -> Self {
         self.send_hwm = None;
         self
     }
 
+    #[must_use]
     pub fn unbounded_recv(mut self) -> Self {
         self.recv_hwm = None;
         self
     }
 
+    #[must_use]
     pub fn linger(mut self, d: Duration) -> Self {
         self.linger = Some(d);
         self
     }
 
+    #[must_use]
     pub fn linger_forever(mut self) -> Self {
         self.linger = None;
         self
     }
 
+    #[must_use]
     pub fn identity(mut self, id: impl Into<Bytes>) -> Self {
         self.identity = id.into();
         self
     }
 
+    #[must_use]
     pub fn reconnect(mut self, policy: ReconnectPolicy) -> Self {
         self.reconnect = policy;
         self
     }
 
+    #[must_use]
     pub fn heartbeat_interval(mut self, d: Duration) -> Self {
         self.heartbeat_interval = Some(d);
         self
     }
 
+    #[must_use]
     pub fn heartbeat_ttl(mut self, d: Duration) -> Self {
         self.heartbeat_ttl = Some(d);
         self
     }
 
+    #[must_use]
     pub fn heartbeat_timeout(mut self, d: Duration) -> Self {
         self.heartbeat_timeout = Some(d);
         self
     }
 
+    #[must_use]
     pub fn handshake_timeout(mut self, d: Duration) -> Self {
         self.handshake_timeout = Some(d);
         self
     }
 
+    #[must_use]
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
         self
     }
 
+    #[must_use]
     pub fn conflate(mut self, c: bool) -> Self {
         self.conflate = c;
         self
     }
 
+    #[must_use]
     pub fn router_mandatory(mut self, m: bool) -> Self {
         self.router_mandatory = m;
         self
     }
 
+    #[must_use]
     pub fn on_mute(mut self, m: OnMute) -> Self {
         self.on_mute = m;
         self
     }
 
+    #[must_use]
     pub fn tcp_keepalive(mut self, k: KeepAlive) -> Self {
         self.tcp_keepalive = k;
         self
@@ -331,6 +350,7 @@ impl Options {
     /// key during their handshake. Use [`Self::curve_authenticator`] to
     /// add a per-client admission callback.
     #[cfg(feature = "curve")]
+    #[must_use]
     pub fn curve_server(mut self, our_keypair: CurveKeypair) -> Self {
         self.mechanism = MechanismConfig::CurveServer {
             our_keypair,
@@ -342,6 +362,7 @@ impl Options {
 
     /// Configure this socket as a CURVE client targeting `server_public`.
     #[cfg(feature = "curve")]
+    #[must_use]
     pub fn curve_client(
         mut self,
         our_keypair: CurveKeypair,
@@ -362,6 +383,7 @@ impl Options {
     /// share it. Use [`Self::blake3zmq_authenticator`] to add a
     /// per-client admission callback.
     #[cfg(feature = "blake3zmq")]
+    #[must_use]
     pub fn blake3zmq_server(mut self, our_keypair: Blake3ZmqKeypair) -> Self {
         self.mechanism = MechanismConfig::Blake3ZmqServer {
             our_keypair,
@@ -384,6 +406,7 @@ impl Options {
     /// Panics if the current mechanism is not a server configuration
     /// of an encrypting mechanism.
     #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[must_use]
     pub fn authenticator<F>(mut self, f: F) -> Self
     where
         F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
@@ -406,6 +429,7 @@ impl Options {
     /// Configure this socket as a BLAKE3ZMQ client targeting
     /// `server_public`. Non-standard, omq-to-omq only.
     #[cfg(feature = "blake3zmq")]
+    #[must_use]
     pub fn blake3zmq_client(
         mut self,
         our_keypair: Blake3ZmqKeypair,
@@ -421,6 +445,7 @@ impl Options {
     /// Set the outbound compression dictionary. Used by compression
     /// transports (`lz4+tcp://`, future `zstd+tcp://`). Panics if the dict
     /// is empty or larger than 8192 bytes (`omq-lz4` RFC §6.2).
+    #[must_use]
     pub fn compression_dict(mut self, dict: impl Into<Bytes>) -> Self {
         let dict = dict.into();
         assert!(

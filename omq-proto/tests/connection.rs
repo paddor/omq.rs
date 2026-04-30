@@ -1,7 +1,7 @@
 //! Connection-level handshake / message-roundtrip tests, extracted
 //! from `omq-proto/src/proto/connection.rs`. Only the tests that
-//! exercise the public Connection API (handle_input / poll_transmit /
-//! send_message / poll_event) live here. The two tests that poke
+//! exercise the public Connection API (`handle_input` / `poll_transmit` /
+//! `send_message` / `poll_event`) live here. The two tests that poke
 //! internal greeting / frame encoders stay inline.
 
 use bytes::Bytes;

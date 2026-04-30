@@ -31,6 +31,7 @@ use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 /// Spawn the TCP dial supervisor and register the dialer entry.
 /// Returns immediately. See [`super::Socket::connect`] for the
 /// public-facing semantics.
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn connect_tcp_with_reconnect(
     inner: &Arc<SocketInner>,
     endpoint: Endpoint,
@@ -39,7 +40,7 @@ pub(super) fn connect_tcp_with_reconnect(
 ) {
     let wrapper = endpoint.clone();
     let plain_tcp = endpoint.underlying_tcp();
-    let policy = inner.options.reconnect.clone();
+    let policy = inner.options.reconnect;
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
@@ -78,6 +79,7 @@ pub(super) fn connect_tcp_with_reconnect(
         });
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn dial_supervisor_tcp(
     inner: Arc<SocketInner>,
     wrapper: Endpoint,
@@ -97,27 +99,20 @@ async fn dial_supervisor_tcp(
     loop {
         let mut attempt: u32 = 0;
         let stream = loop {
-            match tcp_transport::connect(&plain).await {
-                Ok(s) => break Some(s),
-                Err(_) => {
-                    attempt = attempt.saturating_add(1);
-                    if matches!(policy, ReconnectPolicy::Disabled)
-                        && slot_idx.is_none()
-                    {
-                        return;
-                    }
-                    let delay = match next_delay(&policy, attempt) {
-                        Some(d) => d,
-                        None => break None,
-                    };
-                    inner.monitor.publish(MonitorEvent::ConnectDelayed {
-                        endpoint: wrapper.clone(),
-                        retry_in: delay,
-                        attempt,
-                    });
-                    compio::time::sleep(delay).await;
-                }
+            if let Ok(s) = tcp_transport::connect(&plain).await {
+                break Some(s);
             }
+            attempt = attempt.saturating_add(1);
+            if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
+                return;
+            }
+            let Some(delay) = next_delay(&policy, attempt) else { break None };
+            inner.monitor.publish(MonitorEvent::ConnectDelayed {
+                endpoint: wrapper.clone(),
+                retry_in: delay,
+                attempt,
+            });
+            compio::time::sleep(delay).await;
         };
         let Some(stream) = stream else { return };
         // Apply per-socket TCP keepalive policy, if any. compio's
@@ -134,8 +129,7 @@ async fn dial_supervisor_tcp(
         inner.monitor.publish(MonitorEvent::Connected {
             endpoint: wrapper.clone(),
             peer_ident: peer_addr
-                .map(PeerIdent::Socket)
-                .unwrap_or_else(|| PeerIdent::Path(format!("{wrapper}"))),
+                .map_or_else(|| PeerIdent::Path(format!("{wrapper}")), PeerIdent::Socket),
             connection_id: conn_id,
         });
 
@@ -219,7 +213,7 @@ pub(super) fn connect_ipc_with_reconnect(
     role: omq_proto::proto::connection::Role,
     #[cfg(feature = "priority")] priority: u8,
 ) {
-    let policy = inner.options.reconnect.clone();
+    let policy = inner.options.reconnect;
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
@@ -252,6 +246,7 @@ pub(super) fn connect_ipc_with_reconnect(
         });
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn dial_supervisor_ipc(
     inner: Arc<SocketInner>,
     endpoint: Endpoint,
@@ -274,27 +269,20 @@ async fn dial_supervisor_ipc(
     loop {
         let mut attempt: u32 = 0;
         let stream = loop {
-            match ipc_transport::connect(&endpoint).await {
-                Ok(s) => break Some(s),
-                Err(_) => {
-                    attempt = attempt.saturating_add(1);
-                    if matches!(policy, ReconnectPolicy::Disabled)
-                        && slot_idx.is_none()
-                    {
-                        return;
-                    }
-                    let delay = match next_delay(&policy, attempt) {
-                        Some(d) => d,
-                        None => break None,
-                    };
-                    inner.monitor.publish(MonitorEvent::ConnectDelayed {
-                        endpoint: endpoint.clone(),
-                        retry_in: delay,
-                        attempt,
-                    });
-                    compio::time::sleep(delay).await;
-                }
+            if let Ok(s) = ipc_transport::connect(&endpoint).await {
+                break Some(s);
             }
+            attempt = attempt.saturating_add(1);
+            if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
+                return;
+            }
+            let Some(delay) = next_delay(&policy, attempt) else { break None };
+            inner.monitor.publish(MonitorEvent::ConnectDelayed {
+                endpoint: endpoint.clone(),
+                retry_in: delay,
+                attempt,
+            });
+            compio::time::sleep(delay).await;
         };
         let Some(stream) = stream else { return };
         let Ok(poll_fd) = stream.to_poll_fd() else {

@@ -3,7 +3,7 @@
 //! `MonitorEvent` and friends are pure data - both runtime backends
 //! (`omq-tokio`, `omq-compio`) emit the same types via their own
 //! broadcast / fan-out implementations. The transport that delivers
-//! events (tokio::sync::broadcast vs flume fan-out) lives in each
+//! events (`tokio::sync::broadcast` vs flume fan-out) lives in each
 //! backend; the events themselves are shared here.
 
 use std::fmt;

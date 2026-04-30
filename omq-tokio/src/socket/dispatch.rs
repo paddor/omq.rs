@@ -84,9 +84,9 @@ impl AsyncWrite for AnyStream {
 }
 
 /// What `bind_any` / `connect_any` hand back. Either a byte-stream
-/// (TCP / IPC - runs the ZMTP codec via ConnectionDriver) or a
+/// (TCP / IPC - runs the ZMTP codec via `ConnectionDriver`) or a
 /// pre-paired Message channel (inproc - runs the codec-less
-/// InprocPeerDriver).
+/// `InprocPeerDriver`).
 pub enum AnyConn {
     ByteStream { stream: AnyStream, peer_ident: PeerIdent },
     Inproc { conn: InprocConn, peer_ident: PeerIdent },

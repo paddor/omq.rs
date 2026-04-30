@@ -35,7 +35,7 @@ pub(crate) const WARMUP_DURATION: Duration = Duration::from_millis(100);
 /// estimate.
 pub(crate) const WARMUP_MIN_ITERS: usize = 1_000;
 
-/// Per-cell timed budget. ROUND_DURATION × ROUNDS ≈ wall time per cell.
+/// Per-cell timed budget. `ROUND_DURATION` × ROUNDS ≈ wall time per cell.
 /// One round at 300 ms each gets the suite done in ~1 min total.
 pub(crate) const ROUND_DURATION: Duration = Duration::from_millis(300);
 pub(crate) const ROUNDS: usize = 1;
@@ -138,9 +138,7 @@ pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
         if all_ok {
             return;
         }
-        if Instant::now() > deadline {
-            panic!("bench: timed out waiting for peers to connect");
-        }
+        assert!(Instant::now() <= deadline, "bench: timed out waiting for peers to connect");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -152,9 +150,7 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut pending: Vec<usize> = (0..subs.len()).collect();
     while !pending.is_empty() {
-        if Instant::now() > deadline {
-            panic!("bench: subscriptions never propagated");
-        }
+        assert!(Instant::now() <= deadline, "bench: subscriptions never propagated");
         // Probe.
         let _ = pub_.send(omq_tokio::Message::single("")).await;
         let mut still: Vec<usize> = Vec::new();
@@ -202,7 +198,7 @@ where
         let t = Instant::now();
         burst(final_n).await;
         let elapsed = t.elapsed();
-        if best.map_or(true, |b| elapsed < b) {
+        if best.is_none_or(|b| elapsed < b) {
             best = Some(elapsed);
         }
     }
@@ -297,8 +293,7 @@ fn rustc_version_runtime() -> String {
 /// headroom. Defaults to the count of available CPUs.
 pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
     let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
+        .map_or(2, std::num::NonZero::get);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()
@@ -309,8 +304,7 @@ pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
 /// Thin wrapper around `tokio::time::timeout` to enforce the per-cell
 /// hard ceiling. Panics on timeout with a recognisable message.
 pub(crate) async fn with_timeout<T>(label: &str, fut: impl std::future::Future<Output = T>) -> T {
-    match tokio::time::timeout(RUN_TIMEOUT, fut).await {
-        Ok(v) => v,
-        Err(_) => panic!("BENCH TIMEOUT: {label} exceeded {:?}", RUN_TIMEOUT),
-    }
+    tokio::time::timeout(RUN_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {RUN_TIMEOUT:?}"))
 }

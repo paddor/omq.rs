@@ -19,6 +19,7 @@ fn inproc(name: &str) -> Endpoint {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::items_after_statements)]
 async fn pub_conflate_keeps_only_latest_per_subscriber() {
     let ep = inproc("conflate-pub-sub");
     let pub_ = Socket::new(SocketType::Pub, Options::default().conflate(true));
@@ -37,9 +38,10 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
         if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), sub.recv()).await {
             break;
         }
-        if std::time::Instant::now() > deadline {
-            panic!("subscription never propagated");
-        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "subscription never propagated"
+        );
     }
 
     // Drain anything still queued from probe-storm.

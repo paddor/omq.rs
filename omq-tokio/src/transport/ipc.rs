@@ -5,7 +5,7 @@
 //! tests don't fail with `EADDRINUSE`. Matches libzmq's
 //! `ZMQ_IPC_FILTER_PID`-free default.
 //!
-//! Linux abstract namespace (`ipc://@name`, leading-null sockaddr_un)
+//! Linux abstract namespace (`ipc://@name`, leading-null `sockaddr_un`)
 //! is also supported. Abstract sockets carry no filesystem entry and
 //! are torn down by the kernel when the last fd referencing them
 //! closes -- nothing for the listener to clean up. On non-Linux
@@ -52,6 +52,7 @@ impl Transport for IpcTransport {
     }
 }
 
+#[allow(clippy::unused_async)]
 async fn bind_filesystem(endpoint: &Endpoint, path: &Path) -> Result<IpcListener> {
     // Best-effort cleanup of any stale socket at this path. Ignore
     // failure: the real bind below surfaces a precise error if the
@@ -119,7 +120,7 @@ pub struct IpcListener {
     endpoint: Endpoint,
     /// `Some(path)` for filesystem binds; `None` for abstract.
     cleanup_path: Option<PathBuf>,
-    /// Stable PeerIdent surfaced on every accept (the bound address).
+    /// Stable `PeerIdent` surfaced on every accept (the bound address).
     ident: PeerIdent,
 }
 

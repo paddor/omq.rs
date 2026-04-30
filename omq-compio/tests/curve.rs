@@ -104,7 +104,7 @@ async fn curve_rejected_on_inproc() {
             name: "curve-inproc-rej".into(),
         })
         .await;
-    assert!(matches!(r, Err(_)), "inproc + CURVE must reject");
+    assert!(r.is_err(), "inproc + CURVE must reject");
 }
 
 // =====================================================================

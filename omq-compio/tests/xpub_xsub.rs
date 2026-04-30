@@ -1,7 +1,7 @@
 //! XPUB / XSUB subscription propagation:
 //! - SUB → PUB: SUBSCRIBE / CANCEL drives PUB-side filtering.
 //! - SUB → XPUB: SUBSCRIBE surfaces as a `\x01<topic>` message at
-//!   XPUB.recv(), CANCEL as `\x00<topic>`.
+//!   `XPUB.recv()`, CANCEL as `\x00<topic>`.
 
 use std::time::Duration;
 

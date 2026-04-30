@@ -34,6 +34,7 @@ async fn ipc_push_pull_single_message() {
 
 #[compio::test]
 async fn ipc_push_pull_burst() {
+    const N: u32 = 200;
     let ep = temp_ipc("burst");
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(ep.clone()).await.unwrap();
@@ -41,7 +42,6 @@ async fn ipc_push_pull_burst() {
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
 
-    const N: u32 = 200;
     for i in 0..N {
         push.send(Message::single(format!("m-{i:04}"))).await.unwrap();
     }

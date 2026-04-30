@@ -36,6 +36,7 @@ use super::command::{self, Command, PeerProperties};
 /// without applying name-dispatched body parsing. Used during the mechanism
 /// handshake where opaque CURVE READY / INITIATE bodies must reach the
 /// mechanism untouched.
+#[allow(clippy::needless_pass_by_value)]
 fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
     if body.is_empty() {
         return Err(Error::Protocol("empty command frame".into()));
@@ -44,7 +45,7 @@ fn decode_command_raw(body: bytes::Bytes) -> Result<Command> {
     if body.len() < 1 + name_len {
         return Err(Error::Protocol("command truncated in name".into()));
     }
-    let name = body.slice(1..1 + name_len);
+    let name = body.slice(1..=name_len);
     let rest = body.slice(1 + name_len..);
     Ok(Command::Unknown { name, body: rest })
 }
@@ -84,16 +85,19 @@ impl ConnectionConfig {
         }
     }
 
+    #[must_use]
     pub fn identity(mut self, id: bytes::Bytes) -> Self {
         self.identity = id;
         self
     }
 
+    #[must_use]
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
         self
     }
 
+    #[must_use]
     pub fn mechanism(mut self, m: MechanismSetup) -> Self {
         self.mechanism = m;
         self
@@ -137,10 +141,10 @@ pub struct Connection {
     /// commands; BLAKE3ZMQ encrypts data-frame payloads in place.
     #[cfg(any(feature = "curve", feature = "blake3zmq"))]
     transform: Option<FrameTransform>,
-    /// 64-byte ZMTP greeting we sent (captured at queue_greeting time)
+    /// 64-byte ZMTP greeting we sent (captured at `queue_greeting` time)
     /// + 64-byte greeting we received (captured during decode). Both
-    /// are needed by transcript-binding mechanisms (BLAKE3ZMQ); other
-    /// mechanisms ignore them.
+    ///   are needed by transcript-binding mechanisms (BLAKE3ZMQ); other
+    ///   mechanisms ignore them.
     our_greeting: Bytes,
     peer_greeting: Bytes,
     peer_minor: u8,
@@ -302,6 +306,9 @@ impl Connection {
     }
 
     fn try_advance_ready(&mut self) -> Result<bool> {
+        #[cfg(feature = "curve")]
+        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
+        // is itself a command-encoded body; we handle those by re-decoding
         let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
             return Ok(false);
         };
@@ -330,10 +337,7 @@ impl Connection {
         // box(...)` - libzmq does NOT set the COMMAND bit for these.
         // ZMTP commands (PING, SUBSCRIBE, ...) under CURVE are sent as
         // separate `MESSAGE`-wrapped data frames whose decrypted plaintext
-        // is itself a command-encoded body; we handle those by re-decoding
         // the plaintext if its inner shape begins with a command name.
-        #[cfg(feature = "curve")]
-        const CURVE_MESSAGE_PREFIX: &[u8] = b"\x07MESSAGE";
         #[cfg(feature = "curve")]
         if let Some(FrameTransform::Curve(tx)) = self.transform.as_mut() {
             let body = frame.payload.coalesce();
@@ -417,10 +421,7 @@ impl Connection {
                 const TAG_LEN: usize = 32;
                 let plaintext = body.freeze();
                 let aad = blake3zmq_aad(crate::message::FrameFlags::COMMAND, plaintext.len() + TAG_LEN);
-                let ciphertext = match tx.encrypt(&aad, &plaintext) {
-                    Ok(ct) => ct,
-                    Err(_) => continue, // AEAD doesn't fail at encrypt time in practice
-                };
+                let Ok(ciphertext) = tx.encrypt(&aad, &plaintext) else { continue };
                 let f = crate::message::Frame {
                     flags: crate::message::FrameFlags::COMMAND,
                     payload: Payload::from_bytes(Bytes::from(ciphertext)),

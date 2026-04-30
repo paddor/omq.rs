@@ -144,11 +144,11 @@ async fn dict_roundtrip_small_payload() {
 
 #[tokio::test]
 async fn many_messages_in_a_row() {
+    const N: usize = 200;
     let (pull, ep) = pull_on_loopback().await;
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
 
-    const N: usize = 200;
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
     }

@@ -35,6 +35,7 @@ fn nonce_short(prefix: &[u8; 16], counter: u64) -> [u8; 24] {
 }
 
 /// Construct a 24-byte nonce as `prefix(8) || suffix(16)`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
     let mut n = [0u8; 24];
     n[..8].copy_from_slice(prefix);
@@ -165,6 +166,7 @@ pub(crate) struct CurveMechanism {
 }
 
 impl CurveMechanism {
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_client(
         our_keypair: CurveKeypair,
         server_public: CurvePublicKey,
@@ -191,6 +193,7 @@ impl CurveMechanism {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_server(
         our_keypair: CurveKeypair,
         authenticator: Option<super::Authenticator>,
@@ -629,15 +632,15 @@ fn encode_metadata(props: &PeerProperties) -> Vec<u8> {
 }
 
 fn write_property(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
-    assert!(name.len() <= u8::MAX as usize);
-    assert!(value.len() <= u32::MAX as usize);
+    assert!(u8::try_from(name.len()).is_ok());
+    assert!(u32::try_from(value.len()).is_ok());
     out.push(name.len() as u8);
     out.extend_from_slice(name);
     out.extend_from_slice(&(value.len() as u32).to_be_bytes());
     out.extend_from_slice(value);
 }
 
-/// Decode a ZMTP property list as PeerProperties.
+/// Decode a ZMTP property list as `PeerProperties`.
 fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
     use crate::proto::SocketType;
     let mut props = PeerProperties::default();
@@ -649,7 +652,7 @@ fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
         if body.len() < 1 + name_len + 4 {
             return Err(Error::HandshakeFailed("metadata truncated".into()));
         }
-        let name = &body[1..1 + name_len];
+        let name = &body[1..=name_len];
         let value_len = u32::from_be_bytes(
             body[1 + name_len..1 + name_len + 4].try_into().unwrap(),
         ) as usize;

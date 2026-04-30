@@ -128,23 +128,8 @@ impl SocketType {
 /// Returns true iff a socket of type `ours` can handshake with a peer of type
 /// `theirs`.
 pub const fn is_compatible(ours: SocketType, theirs: SocketType) -> bool {
-    use SocketType::*;
-    match (ours, theirs) {
-        (Pub, Sub | XSub) | (XPub, Sub | XSub) => true,
-        (Sub, Pub | XPub) | (XSub, Pub | XPub) => true,
-        (Push, Pull) | (Pull, Push) => true,
-        (Req, Rep | Router) => true,
-        (Rep, Req | Dealer) => true,
-        (Dealer, Rep | Dealer | Router) => true,
-        (Router, Req | Dealer | Router) => true,
-        (Pair, Pair) => true,
-        (Client, Server) | (Server, Client) => true,
-        (Radio, Dish) | (Dish, Radio) => true,
-        (Scatter, Gather) | (Gather, Scatter) => true,
-        (Channel, Channel) => true,
-        (Peer, Peer) => true,
-        _ => false,
-    }
+    use SocketType::{Pub, Sub, XSub, XPub, Push, Pull, Req, Rep, Router, Dealer, Pair, Client, Server, Radio, Dish, Scatter, Gather, Channel, Peer};
+    matches!((ours, theirs), (Pub | XPub, Sub | XSub) | (Sub | XSub, Pub | XPub) | (Push, Pull) | (Pull, Push) | (Req, Rep | Router) | (Rep, Req | Dealer) | (Dealer, Rep | Dealer | Router) | (Router, Req | Dealer | Router) | (Pair, Pair) | (Client, Server) | (Server, Client) | (Radio, Dish) | (Dish, Radio) | (Scatter, Gather) | (Gather, Scatter) | (Channel, Channel) | (Peer, Peer))
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 //! wire, so the synthesised handshake completes immediately.
 //!
 //! Buffer capacity (whole messages, not bytes) defaults to
-//! `Options::send_hwm` at the SocketDriver layer where each
+//! `Options::send_hwm` at the `SocketDriver` layer where each
 //! channel is wired up.
 
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ pub struct InprocPeerSnapshot {
     pub identity: Bytes,
 }
 
-/// What `connect` / `accept` hand back to the SocketDriver instead
+/// What `connect` / `accept` hand back to the `SocketDriver` instead
 /// of a byte stream. `out` is the channel WE send into;
 /// `in_rx` is what WE receive from.
 #[derive(Debug)]
@@ -156,7 +156,7 @@ impl InprocListener {
     }
 
     /// Accept the next incoming connector. Returns the connector's
-    /// snapshot via the InprocConn. Acks back our own snapshot.
+    /// snapshot via the `InprocConn`. Acks back our own snapshot.
     pub async fn accept(&mut self) -> Result<InprocConn> {
         let req = self.incoming.recv().await.ok_or(Error::Closed)?;
         let InprocConnectRequest {
@@ -224,7 +224,7 @@ mod tests {
             InprocFrame::Message(m) => {
                 assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
             }
-            _ => panic!("expected Message"),
+            InprocFrame::Command(_) => panic!("expected Message"),
         }
     }
 

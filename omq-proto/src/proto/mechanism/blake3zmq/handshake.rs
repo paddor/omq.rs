@@ -426,7 +426,7 @@ impl Client {
     /// Build the HELLO command payload
     /// (`version || C' || padding || hello_box`). The mechanism layer
     /// wraps this as `Command::Unknown { name: "HELLO", body }`.
-    /// Internally rolls h1 = H(h0 || HELLO_wire_bytes).
+    /// Internally rolls h1 = H(h0 || `HELLO_wire_bytes`).
     pub fn build_hello(&mut self) -> Result<Vec<u8>> {
         if !matches!(self.state, ClientState::Initial) {
             return Err(self.fail("client tried to build_hello out of state"));
@@ -456,10 +456,7 @@ impl Client {
     /// Process WELCOME payload (`welcome_box`), return the INITIATE
     /// command payload (`cookie || initiate_box`).
     pub fn process_welcome(&mut self, welcome_body: &[u8]) -> Result<Vec<u8>> {
-        let (cn_secret, cn_public, dh1) = match std::mem::replace(&mut self.state, ClientState::Failed) {
-            ClientState::AwaitingWelcome { cn_secret, cn_public, dh1 } => (cn_secret, cn_public, dh1),
-            _ => return Err(self.fail("client saw WELCOME out of state")),
-        };
+        let ClientState::AwaitingWelcome { cn_secret, cn_public, dh1 } = std::mem::replace(&mut self.state, ClientState::Failed) else { return Err(self.fail("client saw WELCOME out of state")) };
 
         if welcome_body.len() != WELCOME_PAYLOAD_LEN {
             return Err(self.fail(format!(
@@ -524,10 +521,7 @@ impl Client {
 
     /// Process READY body. Handshake is now complete on success.
     pub fn process_ready(&mut self, ready_body: &[u8]) -> Result<()> {
-        let dh2 = match std::mem::replace(&mut self.state, ClientState::Failed) {
-            ClientState::AwaitingReady { dh2 } => dh2,
-            _ => return Err(self.fail("client saw READY out of state")),
-        };
+        let ClientState::AwaitingReady { dh2 } = std::mem::replace(&mut self.state, ClientState::Failed) else { return Err(self.fail("client saw READY out of state")) };
 
         let mut dh2_h3 = Vec::with_capacity(KEY_LEN + 32);
         dh2_h3.extend_from_slice(&dh2);
@@ -675,7 +669,7 @@ mod tests {
         g[11] = 0x01;
         let name = b"BLAKE3";
         g[12..12 + name.len()].copy_from_slice(name);
-        g[32] = if as_server { 1 } else { 0 };
+        g[32] = u8::from(as_server);
         g
     }
 

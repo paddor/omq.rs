@@ -89,10 +89,10 @@ enum InternalEvent {
 struct PeerEntry {
     ident: PeerIdent,
     handle: DriverHandle,
-    /// Set on HandshakeSucceeded (the peer's READY property or server-
+    /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
     identity: bytes::Bytes,
-    /// Populated on HandshakeSucceeded so Disconnected events can carry
+    /// Populated on `HandshakeSucceeded` so Disconnected events can carry
     /// the last-known identity / properties.
     info: Option<PeerInfo>,
     /// Endpoint this peer arrived at (bind side) or dialed to (connect
@@ -143,7 +143,7 @@ pub(crate) struct SocketDriver {
     type_state: TypeState,
     monitor: MonitorPublisher,
     /// Active subscription prefixes for SUB / XSUB. Replayed to new peers
-    /// on HandshakeSucceeded so late-connecting publishers get our state.
+    /// on `HandshakeSucceeded` so late-connecting publishers get our state.
     subscriptions: Vec<bytes::Bytes>,
     /// Active group joins for DISH. Replayed to new ZMTP peers on
     /// handshake; checked locally on every UDP datagram. Shared with
@@ -217,7 +217,7 @@ impl SocketDriver {
                     self.teardown().await;
                     return;
                 }
-                _ = async { linger_sleep.unwrap().await }, if self.close_deadline.is_some() => {
+                () = async { linger_sleep.unwrap().await }, if self.close_deadline.is_some() => {
                     self.teardown().await;
                     return;
                 }
@@ -442,7 +442,7 @@ impl SocketDriver {
     }
 
     /// Establish a UDP RADIO outbound. Validates socket type, opens
-    /// the socket, registers a synthetic peer with the SendStrategy
+    /// the socket, registers a synthetic peer with the `SendStrategy`
     /// so `send` routes through the sender task's inbox.
     async fn start_dial_udp(&mut self, endpoint: Endpoint) -> Result<()> {
         if self.socket_type != SocketType::Radio {
@@ -765,8 +765,8 @@ impl SocketDriver {
     }
 
     /// Dispatch on transport type: byte-stream conns get the full
-    /// ConnectionDriver / codec stack; inproc conns skip both and
-    /// run the InprocPeerDriver directly.
+    /// `ConnectionDriver` / codec stack; inproc conns skip both and
+    /// run the `InprocPeerDriver` directly.
     fn spawn_any_conn(
         &mut self,
         conn: AnyConn,
@@ -968,6 +968,7 @@ impl SocketDriver {
         ));
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {
         match event {
             ZmtpEvent::HandshakeSucceeded { peer_minor, peer_properties } => {
@@ -1003,8 +1004,7 @@ impl SocketDriver {
                     let prio = self
                         .peers
                         .get(&peer_id)
-                        .map(|p| p.priority)
-                        .unwrap_or(omq_proto::DEFAULT_PRIORITY);
+                        .map_or(omq_proto::DEFAULT_PRIORITY, |p| p.priority);
                     self.send_strategy.connection_added_with_priority(
                         peer_id,
                         handle.clone(),
@@ -1089,23 +1089,14 @@ impl SocketDriver {
                         .recv_strategy
                         .wrap_for_transform(peer_id, msg)
                         .await;
-                    let wrapped = match wrapped {
-                        Some(m) => m,
-                        None => return,
-                    };
-                    match self.type_state.post_recv(self.socket_type, wrapped) {
-                        Ok(Some(m)) => {
-                            if self.recv_tx.send(m).await.is_err() {
-                                self.begin_close(None, Some(Duration::ZERO));
-                            }
-                        }
-                        Ok(None) => {
-                            // Silently drop malformed / out-of-order.
-                        }
-                        Err(_) => {
-                            // Protocol violation: drop message but keep the
-                            // socket open. Surfaces via the monitor stream.
-                        }
+                    let Some(wrapped) = wrapped else { return };
+                    // Ok(None): malformed / out-of-order; drop silently.
+                    // Err(_):   protocol violation; drop but keep the
+                    //           socket open. Surfaces via the monitor.
+                    if let Ok(Some(m)) = self.type_state.post_recv(self.socket_type, wrapped)
+                        && self.recv_tx.send(m).await.is_err()
+                    {
+                        self.begin_close(None, Some(Duration::ZERO));
                     }
                 } else if self.recv_strategy.deliver(peer_id, msg).await.is_err() {
                     self.begin_close(None, Some(Duration::ZERO));
@@ -1187,6 +1178,7 @@ impl SocketDriver {
         }
     }
 
+    #[allow(clippy::unused_async)]
     async fn teardown(&mut self) {
         self.send_strategy.shutdown();
         for p in self.peers.values() {
@@ -1217,15 +1209,16 @@ impl SocketDriver {
     }
 }
 
-/// Extract a SocketAddr from a PeerIdent where applicable. None for inproc
+/// Extract a `SocketAddr` from a `PeerIdent` where applicable. None for inproc
 /// and filesystem paths.
-
+///
 /// Inproc fast path connection driver. Replaces the
-/// engine::ConnectionDriver / ZMTP codec stack for in-process
-/// peers. Synthesises HandshakeSucceeded immediately (no greeting
+/// `engine::ConnectionDriver` / ZMTP codec stack for in-process
+/// peers. Synthesises `HandshakeSucceeded` immediately (no greeting
 /// exchange), then forwards Messages and Commands between the
-/// SocketDriver's inbox and the partner's channels until either
+/// `SocketDriver`'s inbox and the partner's channels until either
 /// side drops.
+#[allow(clippy::too_many_arguments)]
 async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::DriverCommand>,
     mut in_rx: mpsc::Receiver<InprocFrame>,
@@ -1311,7 +1304,7 @@ async fn inproc_peer_driver(
         }
     }
     .await;
-    let _ = result;
+    let () = result;
     let _ = peer_out.send((peer_id, PeerOut::Closed)).await;
 }
 

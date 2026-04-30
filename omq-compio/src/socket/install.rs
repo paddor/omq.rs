@@ -106,6 +106,7 @@ pub(super) fn install_inproc_peer(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn install_accepted_wire_peer(
     inner: &Arc<SocketInner>,
     reader: WireReader,
@@ -179,9 +180,11 @@ pub(super) fn install_accepted_wire_peer(
 /// Spawn the connection-driver task that runs the ZMTP codec for one
 /// stream connection. Returns its `JoinHandle` so the dial supervisor
 /// can await its exit. Caller must already have built the
-/// [`DirectIoState`] (the codec, reader, writer, poll_fd, claim atomics
+/// [`DirectIoState`] (the codec, reader, writer, `poll_fd`, claim atomics
 /// all live there).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn spawn_wire_driver(
     inner: Arc<SocketInner>,
     state: Arc<DirectIoState>,
@@ -261,7 +264,7 @@ pub(super) fn spawn_wire_driver(
     let options = inner.options.clone();
     let peer_in_tx = inner.in_tx.clone();
     let shared_msg_rx = if is_round_robin_send(socket_type) {
-        inner.shared_send_rx.as_ref().cloned()
+        inner.shared_send_rx.clone()
     } else {
         None
     };

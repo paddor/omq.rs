@@ -47,16 +47,13 @@ impl MonitorPublisher {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn publish(&self, event: MonitorEvent) {
         let mut sinks = self.sinks.lock().expect("monitor sinks");
         sinks.retain(|sink| !sink.tx.is_disconnected());
         for sink in sinks.iter() {
-            match sink.tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(flume::TrySendError::Full(_)) => {
-                    sink.lagged.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(flume::TrySendError::Disconnected(_)) => {}
+            if let Err(flume::TrySendError::Full(_)) = sink.tx.try_send(event.clone()) {
+                sink.lagged.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

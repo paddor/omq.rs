@@ -182,7 +182,7 @@ impl Frame {
 ///
 /// Sized to the realistic envelope shapes:
 /// - 1 part: PUSH / PULL / PUB / SUB / PAIR / DEALER body
-/// - 2 parts: REQ pre_send `[empty_delim, body]`, ROUTER recv
+/// - 2 parts: REQ `pre_send` `[empty_delim, body]`, ROUTER recv
 ///   `[peer_identity, body]`, ROUTER outbound `[identity, body]`
 /// - 3 parts: REP envelope `[identity, empty_delim, body]`
 ///

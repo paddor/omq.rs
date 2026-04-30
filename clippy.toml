@@ -1,0 +1,16 @@
+# Identifiers clippy::doc_markdown should NOT flag inside doc comments.
+# These are protocol / product / kernel-feature names (not Rust idents)
+# that just happen to look CamelCased to the lint's heuristic.
+doc-valid-idents = [
+    "..",
+    "ZeroMQ",
+    "ChaCha20",
+    "ChaCha20-BLAKE3",
+    "XSalsa20",
+    "Curve25519",
+    "X25519",
+    "io_uring",
+    "IOCP",
+    "ZMTP",
+    "HelloWorld",
+]

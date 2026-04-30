@@ -2,13 +2,13 @@
 //!
 //! Runs a single payload size for a long-enough wall-clock window
 //! that flame graphs over it have signal. Tweak via env:
-//!   OMQ_PROFILE_SIZE   bytes per message (default 128)
-//!   OMQ_PROFILE_SECS   wall-clock seconds (default 5)
+//!   `OMQ_PROFILE_SIZE`   bytes per message (default 128)
+//!   `OMQ_PROFILE_SECS`   wall-clock seconds (default 5)
 //!
 //! Build & profile:
-//!   cargo build --release --example profile_tcp -p omq-compio
+//!   cargo build --release --example `profile_tcp` -p omq-compio
 //!   perf record -F 999 --call-graph dwarf,16384 \
-//!       target/release/examples/profile_tcp
+//!       `target/release/examples/profile_tcp`
 //!   perf report --stdio --no-children -g none -n | head -60
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};

@@ -30,8 +30,8 @@ async fn linger_zero_drops_pending_on_close() {
     .await;
     push.close().await.unwrap();
 
-    // No peer ever connected; close was instant.
-    assert!(true);
+    // No peer ever connected; close was instant. (The fact that we
+    // reach this line at all is what we're verifying.)
 }
 
 #[tokio::test]
@@ -84,7 +84,7 @@ async fn max_message_size_rejects_oversize() {
     // specifics here beyond "doesn't deliver the oversize message".
     push.send(Message::single("123456789")).await.unwrap();
     let r = tokio::time::timeout(Duration::from_millis(200), pull.recv()).await;
-    assert!(matches!(r, Err(_)), "oversize must not be delivered");
+    assert!(r.is_err(), "oversize must not be delivered");
 }
 
 #[tokio::test]
@@ -139,7 +139,7 @@ async fn identity_propagates_on_handshake() {
                 got_identity = peer.peer_identity.clone();
                 break;
             }
-            Ok(Ok(_)) => continue,
+            Ok(Ok(_)) => {},
             _ => break,
         }
     }

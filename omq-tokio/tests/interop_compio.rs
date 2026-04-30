@@ -100,7 +100,7 @@ async fn compio_push_to_tokio_pull_tcp() {
             }
             // Let the wire driver flush before the runtime tears down.
             compio::time::sleep(Duration::from_millis(150)).await;
-        })
+        });
     });
 
     let mut got = Vec::new();
@@ -172,7 +172,7 @@ async fn compio_pub_to_tokio_sub_tcp() {
                 let _ = p.send(Message::single("topic.hello")).await;
                 compio::time::sleep(Duration::from_millis(20)).await;
             }
-        })
+        });
     });
 
     let m = tokio::time::timeout(Duration::from_secs(3), sub.recv())

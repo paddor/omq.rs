@@ -24,10 +24,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 fn opts_with_hb() -> Options {
-    let mut o = Options::default();
-    o.heartbeat_interval = Some(Duration::from_millis(50));
-    o.heartbeat_timeout = Some(Duration::from_millis(500));
-    o
+    Options {
+        heartbeat_interval: Some(Duration::from_millis(50)),
+        heartbeat_timeout: Some(Duration::from_millis(500)),
+        ..Default::default()
+    }
 }
 
 #[compio::test]

@@ -32,8 +32,8 @@ fn opts(prio: u8) -> ConnectOpts {
 
 /// 3 inproc PULLs at priorities [1, 4, 8]. PUSH sends 1000 msgs
 /// without draining any PULL. With strict precedence, all 1000
-/// land at PULL@1 (filling its recv_hwm but not spilling, because
-/// recv_hwm default is 1024 ≥ 1000).
+/// land at PULL@1 (filling its `recv_hwm` but not spilling, because
+/// `recv_hwm` default is 1024 ≥ 1000).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn inproc_strict_precedence() {
     let pull_a = Socket::new(SocketType::Pull, Options::default());
@@ -73,6 +73,7 @@ async fn inproc_strict_precedence() {
 /// robin should fair-share. Allow generous slop for scheduler jitter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn inproc_equal_priorities_round_robin() {
+    const N: usize = 300;
     let pull_a = Socket::new(SocketType::Pull, Options::default());
     let pull_b = Socket::new(SocketType::Pull, Options::default());
     let pull_c = Socket::new(SocketType::Pull, Options::default());
@@ -85,7 +86,6 @@ async fn inproc_equal_priorities_round_robin() {
     push.connect_with(inproc("prio-eq-b"), opts(8)).await.unwrap();
     push.connect_with(inproc("prio-eq-c"), opts(8)).await.unwrap();
 
-    const N: usize = 300;
     for _ in 0..N {
         push.send(Message::single("x")).await.unwrap();
     }

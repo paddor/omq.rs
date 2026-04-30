@@ -1,7 +1,7 @@
 //! Identity-based routing for ROUTER, REP, SERVER, PEER.
 //!
 //! Each peer is keyed by `(identity, connection_id)`; the identity-to-peer
-//! map holds the LATEST peer_id for a given identity, so a reconnect
+//! map holds the LATEST `peer_id` for a given identity, so a reconnect
 //! replaces the stale entry without leaking the old peer state. Avoids
 //! zmq.rs issue #190 (memory leak on identity churn).
 //!
@@ -210,6 +210,7 @@ impl IdentityRecv {
     /// Produce the identity-prefixed message without sending it. Used when
     /// the socket type applies a post-recv transform (REP) before
     /// delivery.
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {
         let identity = {
             let g = self.peers.lock().expect("identity recv poisoned");

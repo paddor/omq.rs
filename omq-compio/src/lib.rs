@@ -1,7 +1,7 @@
 //! omq-compio - compio-runtime backend for omq.
 //!
 //! Built on compio's thread-per-core executor with io_uring (Linux),
-//! IOCP (Windows), and io_uring/poll (macOS) drivers. Each `Socket`
+//! IOCP (Windows), and kqueue (macOS) drivers. Each `Socket`
 //! is pinned to the executor it was created on; cross-executor sends
 //! use a runtime-agnostic mpsc (flume).
 //!
@@ -10,7 +10,7 @@
 //! This crate provides only the runtime glue.
 //!
 //! Status: beachhead. PUSH/PULL on inproc + TCP, send-batching,
-//! gather writes via compio's `Vec<Bytes>` IoVectoredBuf path.
+//! gather writes via compio's `Vec<Bytes>` `IoVectoredBuf` path.
 
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,

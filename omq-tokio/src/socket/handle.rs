@@ -36,14 +36,12 @@ impl Socket {
     /// Create a new socket of the given type with the given options. Spawns
     /// the driver task on the current tokio runtime.
     pub fn new(socket_type: SocketType, options: Options) -> Self {
-        if options.conflate && !crate::routing::supports_conflate(socket_type) {
-            panic!(
-                "Options::conflate(true) is not valid for socket type {:?} \
-                 - only PUSH/PULL/PUB/SUB/XPUB/XSUB/RADIO/DISH/DEALER/SCATTER/GATHER \
-                 carry queueable single-message-state semantics",
-                socket_type
-            );
-        }
+        assert!(
+            !options.conflate || crate::routing::supports_conflate(socket_type),
+            "Options::conflate(true) is not valid for socket type {socket_type:?} \
+             - only PUSH/PULL/PUB/SUB/XPUB/XSUB/RADIO/DISH/DEALER/SCATTER/GATHER \
+             carry queueable single-message-state semantics"
+        );
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.unwrap_or(1024).max(16) as usize);
         // Conflate currently affects send-side queues only (per-peer

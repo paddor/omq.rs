@@ -3,7 +3,8 @@
 //! `omq` is a thin facade that re-exports a backend chosen at build
 //! time. The default `compio-backend` feature pulls in
 //! [`omq-compio`](https://crates.io/crates/omq-compio), a
-//! single-thread io_uring/IOCP runtime; the alternative
+//! single-thread io_uring (Linux), IOCP (Windows), or kqueue (macOS)
+//! runtime; the alternative
 //! `tokio-backend` feature swaps in
 //! [`omq-tokio`](https://crates.io/crates/omq-tokio), a multi-thread
 //! mio/tokio runtime. The two are mutually exclusive — enabling

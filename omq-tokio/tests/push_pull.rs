@@ -33,6 +33,7 @@ async fn push_pull_single_peer() {
 
 #[tokio::test]
 async fn push_pull_multi_peer_distributes() {
+    const N: usize = 300;
     // One PUSH socket, three PULL sockets all connected to it. Work
     // distributes; every message is delivered to exactly one PULL.
     let ep = inproc_ep("pp-multi-3");
@@ -50,7 +51,6 @@ async fn push_pull_multi_peer_distributes() {
     // Give handshakes a moment to complete across all three pulls.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    const N: usize = 300;
     for i in 0..N {
         push.send(Message::single(format!("msg-{i}"))).await.unwrap();
     }
@@ -90,6 +90,7 @@ async fn push_pull_multi_peer_distributes() {
 
 #[tokio::test]
 async fn push_pull_slow_peer_does_not_block_fast() {
+    const N: usize = 200;
     // Two PULLs, one slower. The point isn't a specific split ratio (which
     // depends on how quickly backpressure propagates through the buffer
     // chain) but that a slow recv-side consumer never starves a fast one:
@@ -106,7 +107,6 @@ async fn push_pull_slow_peer_does_not_block_fast() {
     slow.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    const N: usize = 200;
     for i in 0..N {
         push.send(Message::single(format!("m-{i}"))).await.unwrap();
     }
@@ -150,6 +150,7 @@ async fn push_pull_slow_peer_does_not_block_fast() {
 
 #[tokio::test]
 async fn push_pull_under_backpressure_delivers_everything() {
+    const N: usize = 1_000;
     // Larger N + small recv HWM on the slow peer + big payloads, so
     // backpressure propagates through the ZMTP pipeline. Work-stealing is
     // an emergent property here that depends on internal buffer sizing;
@@ -167,7 +168,6 @@ async fn push_pull_under_backpressure_delivers_everything() {
     slow.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    const N: usize = 1_000;
     let payload = vec![b'x'; 512];
     for i in 0..N {
         let mut m = payload.clone();

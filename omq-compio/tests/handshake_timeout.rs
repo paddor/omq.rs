@@ -32,13 +32,15 @@ async fn connect_to_silent_peer_times_out_then_backpressures() {
     });
 
     let hwm: u32 = 16;
-    let mut opts = Options::default();
-    opts.handshake_timeout = Some(Duration::from_millis(100));
-    // Reconnect would race the test: the supervisor would re-dial
-    // the silent peer and replace the closed cmd channel. We're
-    // testing the timeout itself, not the supervisor.
-    opts.reconnect = ReconnectPolicy::Disabled;
-    opts.send_hwm = Some(hwm);
+    let opts = Options {
+        handshake_timeout: Some(Duration::from_millis(100)),
+        // Reconnect would race the test: the supervisor would re-dial
+        // the silent peer and replace the closed cmd channel. We're
+        // testing the timeout itself, not the supervisor.
+        reconnect: ReconnectPolicy::Disabled,
+        send_hwm: Some(hwm),
+        ..Default::default()
+    };
     let push = Socket::new(SocketType::Push, opts);
     push.connect(Endpoint::Tcp {
         host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
@@ -55,7 +57,7 @@ async fn connect_to_silent_peer_times_out_then_backpressures() {
     // queue. The first `hwm` should land instantly; the next one
     // must block (queue full, no pump to drain it).
     let mut accepted = 0usize;
-    for _ in 0..(hwm as usize + 1) {
+    for _ in 0..=(hwm as usize) {
         match compio::time::timeout(
             Duration::from_millis(100),
             push.send(Message::single("x")),

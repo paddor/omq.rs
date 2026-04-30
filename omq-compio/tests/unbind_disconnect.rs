@@ -52,12 +52,7 @@ async fn disconnect_after_connect_succeeds() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
     pull.bind(tcp_loopback(0)).await.unwrap();
-    let port = match mon.recv().await.unwrap() {
-        omq_compio::MonitorEvent::Listening {
-            endpoint: Endpoint::Tcp { port, .. },
-        } => port,
-        _ => unreachable!(),
-    };
+    let omq_compio::MonitorEvent::Listening { endpoint: Endpoint::Tcp { port, .. } } = mon.recv().await.unwrap() else { unreachable!() };
 
     push.connect(tcp_loopback(port)).await.unwrap();
     // Roundtrip a message to confirm the connection is live.

@@ -71,9 +71,9 @@ impl Drop for Blake3ZmqSecretKey {
         // Best-effort zeroize. When the actual mechanism lands, switch
         // to the `zeroize` crate's `Zeroizing<[u8; 32]>` for compile-
         // time guarantees.
-        for b in self.0.iter_mut() {
+        for b in &mut self.0 {
             unsafe {
-                std::ptr::write_volatile(b as *mut u8, 0);
+                std::ptr::write_volatile(std::ptr::from_mut::<u8>(b), 0);
             }
         }
     }
@@ -128,6 +128,7 @@ enum HandshakeState {
 }
 
 impl Blake3ZmqMechanism {
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_server(
         keypair: Blake3ZmqKeypair,
         cookie_keyring: Arc<CookieKeyring>,
@@ -146,6 +147,7 @@ impl Blake3ZmqMechanism {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new_client(
         keypair: Blake3ZmqKeypair,
         server_public: Blake3ZmqPublicKey,
@@ -162,6 +164,7 @@ impl Blake3ZmqMechanism {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
@@ -186,9 +189,8 @@ impl Blake3ZmqMechanism {
             Role::Client { keypair, server_public } => {
                 let mut cli = HandshakeClient::new(keypair, server_public, metadata);
                 cli.set_greetings(our_greeting, peer_greeting);
-                let hello = cli.build_hello().map_err(|e| {
+                let hello = cli.build_hello().inspect_err(|_| {
                     self.state = HandshakeState::Failed;
-                    e
                 })?;
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"HELLO"),
@@ -201,6 +203,7 @@ impl Blake3ZmqMechanism {
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn on_command(
         &mut self,
         cmd: Command,
@@ -234,7 +237,7 @@ impl Blake3ZmqMechanism {
                     });
                     let peer_props = srv
                         .peer_metadata()
-                        .map(|m| crate::proto::command::decode_properties(m))
+                        .map(crate::proto::command::decode_properties)
                         .transpose()
                         .map_err(|e| {
                             Error::HandshakeFailed(format!(
@@ -267,7 +270,7 @@ impl Blake3ZmqMechanism {
                     cli.process_ready(&body)?;
                     let peer_props = cli
                         .peer_metadata()
-                        .map(|m| crate::proto::command::decode_properties(m))
+                        .map(crate::proto::command::decode_properties)
                         .transpose()
                         .map_err(|e| {
                             Error::HandshakeFailed(format!(

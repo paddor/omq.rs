@@ -54,8 +54,9 @@ pub struct DriverHandle {
 /// channel: either a parsed ZMTP `Event` or a final `Closed` signal
 /// emitted just before the driver task exits. Replaces the old
 /// per-connection shim task that wrapped Events into the
-/// SocketDriver's InternalEvent::PeerEvent / PeerClosed.
+/// `SocketDriver`'s `InternalEvent::PeerEvent` / `PeerClosed`.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum PeerOut {
     Event(Event),
     Closed,
@@ -71,8 +72,8 @@ where
     stream: T,
     codec: Connection,
     inbox: mpsc::Receiver<DriverCommand>,
-    /// Shared multi-producer channel feeding the SocketDriver's
-    /// per-peer event loop. Each entry is tagged with the peer_id
+    /// Shared multi-producer channel feeding the `SocketDriver`'s
+    /// per-peer event loop. Each entry is tagged with the `peer_id`
     /// this driver was assigned; the receiver dispatches on that.
     peer_out: mpsc::Sender<(u64, PeerOut)>,
     peer_id: u64,
@@ -136,7 +137,7 @@ where
     ///
     /// In every exit path (success or error) the driver sends one final
     /// `PeerOut::Closed` on the shared peer-event channel so the
-    /// SocketDriver can clean up its peer entry. The previous shim task
+    /// `SocketDriver` can clean up its peer entry. The previous shim task
     /// that did this wrapping is gone - we save one task spawn and one
     /// per-message channel hop on every connection.
     pub async fn run(self) -> Result<()> {
@@ -316,11 +317,9 @@ mod tests {
 
     impl EventAdapter {
         pub(super) async fn recv(&mut self) -> Option<Event> {
-            loop {
-                match self.rx.recv().await? {
-                    (_, PeerOut::Event(e)) => return Some(e),
-                    (_, PeerOut::Closed) => return None,
-                }
+            match self.rx.recv().await? {
+                (_, PeerOut::Event(e)) => Some(e),
+                (_, PeerOut::Closed) => None,
             }
         }
     }
@@ -331,6 +330,7 @@ mod tests {
     /// is the simplest way to test it without involving the inproc
     /// transport (which since the inproc fast-path landed bypasses
     /// the codec entirely).
+    #[allow(clippy::unused_async)]
     async fn inproc_pair(
         _name: &str,
     ) -> (DriverHandle, EventAdapter, DriverHandle, EventAdapter) {

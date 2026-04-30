@@ -150,6 +150,7 @@ async fn monitor_surfaces_peer_error_command() {
     use omq_tokio::proto::{Command, Connection, Event, SocketType as ProtoSocketType};
     use omq_tokio::transport::{TcpTransport, Transport as _};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+    use omq_tokio::engine::PeerOut;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -176,7 +177,6 @@ async fn monitor_surfaces_peer_error_command() {
             .identity(Bytes::from_static(b"peer")),
     );
     let (inbox_tx, inbox_rx) = mpsc::channel(8);
-    use omq_tokio::engine::PeerOut;
     let (evt_tx, mut evt_rx) = mpsc::channel::<(u64, PeerOut)>(8);
     let driver = ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
     tokio::spawn(async move { driver.run().await });
@@ -188,7 +188,7 @@ async fn monitor_surfaces_peer_error_command() {
             .unwrap()
         {
             Some((_, PeerOut::Event(Event::HandshakeSucceeded { .. }))) => break,
-            Some(_) => continue,
+            Some(_) => {},
             None => panic!("peer driver exited"),
         }
     }
@@ -212,7 +212,7 @@ async fn monitor_surfaces_peer_error_command() {
     let cmd = saw.expect("expected PeerCommand on monitor");
     match cmd {
         PeerCommandKind::Error { reason } => assert_eq!(reason, "boom"),
-        other => panic!("expected Error, got {other:?}"),
+        other @ PeerCommandKind::Unknown { .. } => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -268,13 +268,13 @@ async fn connection_info_returns_status_post_handshake() {
 
     // Wait for the server-side handshake event so we know a peer exists.
     let conn_id = loop {
-        match tokio::time::timeout(Duration::from_millis(500), srv_mon.recv())
-            .await
-            .unwrap()
-            .unwrap()
+        if let MonitorEvent::HandshakeSucceeded { peer, .. } =
+            tokio::time::timeout(Duration::from_millis(500), srv_mon.recv())
+                .await
+                .unwrap()
+                .unwrap()
         {
-            MonitorEvent::HandshakeSucceeded { peer, .. } => break peer.connection_id,
-            _ => continue,
+            break peer.connection_id;
         }
     };
 
@@ -312,7 +312,7 @@ async fn monitor_emits_closed_on_socket_close() {
                 saw_closed = true;
                 break;
             }
-            Ok(Ok(_)) => continue,
+            Ok(Ok(_)) => {},
             Ok(Err(_)) | Err(_) => break,
         }
     }

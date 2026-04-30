@@ -18,7 +18,7 @@ async fn next_event(m: &mut omq_compio::MonitorStream) -> Option<MonitorEvent> {
     compio::time::timeout(Duration::from_millis(500), m.recv())
         .await
         .ok()
-        .and_then(|r| r.ok())
+        .and_then(std::result::Result::ok)
 }
 
 #[compio::test]
@@ -54,9 +54,7 @@ async fn handshake_succeeded_seen_on_both_sides() {
     let mut client_done = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !(server_done && client_done) {
-        if std::time::Instant::now() > deadline {
-            panic!("timed out: server_done={server_done} client_done={client_done}");
-        }
+        assert!(std::time::Instant::now() <= deadline, "timed out: server_done={server_done} client_done={client_done}");
         if !server_done {
             if let Some(MonitorEvent::HandshakeSucceeded { .. }) =
                 next_event(&mut server_m).await

@@ -5,8 +5,8 @@
 //! with `EADDRINUSE`. The connection driver is shared with TCP via
 //! `transport::driver::run_connection`.
 //!
-//! Linux abstract namespace (`ipc://@name`, leading-null sockaddr_un)
-//! is supported via std::os::unix::net + `from_std`. On non-Linux
+//! Linux abstract namespace (`ipc://@name`, leading-null `sockaddr_un`)
+//! is supported via `std::os::unix::net` + `from_std`. On non-Linux
 //! platforms `ipc://@name` is rejected.
 
 use std::path::PathBuf;

@@ -62,7 +62,7 @@ impl Socket {
     /// PUSH / DEALER / REQ: round-robin across peers.
     /// PUB / XPUB / RADIO: fan out (with subscription/group filter).
     /// PAIR / REP: round-robin (single-peer in PAIR's case).
-    /// REQ/REP envelope wrapping happens inline via TypeState.
+    /// REQ/REP envelope wrapping happens inline via `TypeState`.
     pub async fn send(&self, msg: Message) -> Result<()> {
         let st = self.inner().socket_type;
         // TypeState's pre_send is a no-op for round-robin / fan-out
@@ -373,7 +373,7 @@ impl Socket {
         let topic = msg
             .parts()
             .first()
-            .map(|p| p.coalesce())
+            .map(omq_proto::Payload::coalesce)
             .unwrap_or_default();
         let targets: Vec<PeerOut> = {
             let peers = self.inner().out_peers.read().expect("peers lock");
@@ -383,8 +383,7 @@ impl Socket {
                     let matched = slot
                         .peer_sub
                         .as_ref()
-                        .map(|s| s.read().expect("peer_sub lock").matches(&topic))
-                        .unwrap_or(false);
+                        .is_some_and(|s| s.read().expect("peer_sub lock").matches(&topic));
                     matched.then(|| slot.out.clone())
                 })
                 .collect()

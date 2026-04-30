@@ -4,7 +4,7 @@
 //!   ROUTER addresses replies by that identity.
 //! - DEALER outbound is round-robin (PUSH/REQ-style), works without
 //!   identity tracking on its end.
-//! - router_mandatory: send to unknown identity returns Unroutable.
+//! - `router_mandatory`: send to unknown identity returns Unroutable.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
@@ -29,9 +29,10 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 fn opts_with_identity(id: &str) -> Options {
-    let mut o = Options::default();
-    o.identity = Bytes::from(id.to_string().into_bytes());
-    o
+    Options {
+        identity: Bytes::from(id.to_string().into_bytes()),
+        ..Default::default()
+    }
 }
 
 #[compio::test]
@@ -69,8 +70,10 @@ async fn router_addresses_dealer_by_identity() {
 #[compio::test]
 async fn router_mandatory_errors_on_unknown_identity() {
     let port = loopback_port();
-    let mut opts = Options::default();
-    opts.router_mandatory = true;
+    let opts = Options {
+        router_mandatory: true,
+        ..Default::default()
+    };
     let router = Socket::new(SocketType::Router, opts);
     router.bind(tcp_ep(port)).await.unwrap();
 

@@ -41,6 +41,7 @@ async fn tcp_push_pull_single_message() {
 
 #[compio::test]
 async fn tcp_push_pull_burst() {
+    const N: u32 = 200;
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
@@ -48,7 +49,6 @@ async fn tcp_push_pull_burst() {
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(tcp_ep(port)).await.unwrap();
 
-    const N: u32 = 200;
     for i in 0..N {
         push.send(Message::single(format!("m-{i:04}"))).await.unwrap();
     }

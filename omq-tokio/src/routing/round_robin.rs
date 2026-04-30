@@ -200,22 +200,18 @@ impl Submitter {
                 }
                 i = j;
             }
-            match highest_alive {
-                Some(h) => {
-                    return h
-                        .inbox
-                        .send(DriverCommand::SendMessage(msg))
-                        .await
-                        .map_err(|_| Error::Closed);
-                }
-                None => {
-                    let waiter = self.on_change.notified();
-                    if self.has_live_peer() {
-                        continue;
-                    }
-                    waiter.await;
-                }
+            if let Some(h) = highest_alive {
+                return h
+                    .inbox
+                    .send(DriverCommand::SendMessage(msg))
+                    .await
+                    .map_err(|_| Error::Closed);
             }
+            let waiter = self.on_change.notified();
+            if self.has_live_peer() {
+                continue;
+            }
+            waiter.await;
         }
     }
 
@@ -292,8 +288,9 @@ impl RoundRobinSend {
     /// In priority mode the "queue" lives in the per-peer driver
     /// inboxes - `is_drained` tells the socket driver "all sends have
     /// been dispatched"; once we've handed each `SendMessage` off to
-    /// an inbox via try_send/send, it's the connection driver's job
+    /// an inbox via `try_send/send`, it's the connection driver's job
     /// to flush, not ours.
+    #[allow(clippy::unused_self)]
     pub(crate) fn is_drained(&self) -> bool {
         true
     }

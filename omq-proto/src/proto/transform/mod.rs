@@ -106,6 +106,10 @@ impl MessageTransform {
 
     /// Transform an inbound wire message. `None` means the message was
     /// consumed by the transport (dict shipment) and must not surface.
+    #[cfg_attr(
+        not(any(feature = "lz4", feature = "zstd")),
+        allow(clippy::needless_pass_by_value)
+    )]
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         match self {
             #[cfg(feature = "lz4")]

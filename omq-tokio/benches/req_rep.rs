@@ -55,14 +55,9 @@ async fn run_cell(transport: &str, size: usize, seq: usize) -> common::Cell {
     let responder = {
         let rep = rep.clone();
         tokio::spawn(async move {
-            loop {
-                match rep.recv().await {
-                    Ok(m) => {
-                        if rep.send(m).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(m) = rep.recv().await {
+                if rep.send(m).await.is_err() {
+                    break;
                 }
             }
         })

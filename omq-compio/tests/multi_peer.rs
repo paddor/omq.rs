@@ -15,6 +15,7 @@ fn ep(name: &str) -> Endpoint {
 
 #[compio::test]
 async fn push_distributes_across_three_pulls() {
+    const N: usize = 300;
     // Shared per-socket queue + per-peer pumps gives work-stealing,
     // not strict modulo round-robin: every message reaches exactly
     // one PULL, distribution converges roughly uniformly when peers
@@ -32,7 +33,6 @@ async fn push_distributes_across_three_pulls() {
         push.connect(ep(&format!("rr-{i}"))).await.unwrap();
     }
 
-    const N: usize = 300;
     for i in 0..N {
         push.send(Message::single(format!("m{i}"))).await.unwrap();
     }

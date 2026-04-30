@@ -45,6 +45,7 @@ impl ConnectOpts {
 
     /// Set the priority for this endpoint. Lower number = higher
     /// priority. Pass any `NonZeroU8`; values are not clamped.
+    #[must_use]
     pub const fn priority(mut self, p: NonZeroU8) -> Self {
         self.priority = p;
         self

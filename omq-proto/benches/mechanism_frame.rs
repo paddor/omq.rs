@@ -7,9 +7,9 @@
 //!
 //! - **NULL**       baseline; no crypto, just `Bytes::copy_from_slice`.
 //! - **CURVE**      one `crypto_box::SalsaBox` seal (XSalsa20 +
-//!                  Poly1305 16-byte tag, RFC 26).
+//!   Poly1305 16-byte tag, RFC 26).
 //! - **BLAKE3ZMQ**  one `chacha20-blake3` AEAD seal (ChaCha20 + keyed
-//!                  BLAKE3 32-byte tag, RFC §10).
+//!   BLAKE3 32-byte tag, RFC §10).
 //!
 //! Run: `cargo bench -p omq-proto --bench mechanism_frame --features 'curve blake3zmq'`
 //!

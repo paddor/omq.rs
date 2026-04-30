@@ -129,7 +129,7 @@ impl std::fmt::Debug for Lz4Transform {
             .field("send_dict_shipped", &self.send_dict_shipped)
             .field("recv_dict", &self.recv_dict.as_ref().map(Bytes::len))
             .field("max_message_size", &self.max_message_size)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -232,6 +232,10 @@ impl Lz4Transform {
         Ok(Some(out))
     }
 
+    // lz4 caps inputs at 2 GiB (LZ4_MAX_INPUT_SIZE < i32::MAX), so the
+    // usize-to-i32 casts feeding the FFI never wrap on 32- or 64-bit
+    // targets. Per-fn allow rather than refactoring every FFI call.
+    #[allow(clippy::cast_possible_wrap)]
     fn encode_part(&mut self, part: &Payload) -> Result<Payload> {
         let plain = part.coalesce();
         let threshold = if self.send_dict.is_some() {
@@ -302,6 +306,7 @@ impl Lz4Transform {
     }
 }
 
+#[allow(clippy::cast_possible_wrap)]
 fn decode_lz4b(body: &[u8], dict: Option<&Bytes>, budget: &mut Option<usize>) -> Result<Payload> {
     if body.len() < 8 {
         return Err(Error::Protocol(
@@ -354,6 +359,7 @@ fn decode_lz4b(body: &[u8], dict: Option<&Bytes>, budget: &mut Option<usize>) ->
 mod tests {
     use super::*;
 
+    #[allow(clippy::needless_pass_by_value)]
     fn rt(msg: Message) -> Message {
         let mut enc = Lz4Transform::new();
         let mut dec = Lz4Transform::new();

@@ -46,7 +46,7 @@ pub enum MechanismSetup {
     Blake3ZmqServer {
         keypair: Blake3ZmqKeypair,
         /// Shared cookie keyring for periodic rotation per RFC §9.2.
-        /// SocketDriver attaches a per-Socket keyring so concurrent
+        /// `SocketDriver` attaches a per-Socket keyring so concurrent
         /// server-side handshakes share the rotation timeline.
         cookie_keyring: std::sync::Arc<blake3zmq::CookieKeyring>,
         /// Optional authenticator: callback invoked after vouch
@@ -175,6 +175,12 @@ pub(crate) enum MechanismStep {
 }
 
 #[derive(Debug)]
+// `CurveMechanism` and `Blake3ZmqMechanism` carry tens of bytes of inline
+// state (counters, prefixes, transient keys) while `NullMechanism` is one
+// enum tag. Boxing them would push every connection through an extra
+// allocation on the hot handshake path; we keep the inline shape on
+// purpose.
+#[cfg_attr(any(feature = "curve", feature = "blake3zmq"), allow(clippy::large_enum_variant))]
 pub(crate) enum SecurityMechanism {
     Null(NullMechanism),
     #[cfg(feature = "curve")]
@@ -199,6 +205,10 @@ impl SecurityMechanism {
     /// immediate outbound commands get pushed onto `out`. Greeting
     /// bytes are passed through for transcript-binding mechanisms
     /// (BLAKE3ZMQ); NULL and CURVE ignore them.
+    #[cfg_attr(
+        not(any(feature = "curve", feature = "blake3zmq")),
+        allow(clippy::unnecessary_wraps)
+    )]
     pub(crate) fn start(
         &mut self,
         out: &mut Vec<Command>,
@@ -240,6 +250,7 @@ impl SecurityMechanism {
     /// data-phase AEAD that operates on raw frame payloads;
     /// CURVE produces a per-part MESSAGE-command transform.
     #[cfg(any(feature = "curve", feature = "blake3zmq"))]
+    #[cfg_attr(not(feature = "curve"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn build_transform(&self) -> Result<Option<FrameTransform>> {
         match self {
             Self::Null(_) => Ok(None),
@@ -360,7 +371,7 @@ mod tests {
             MechanismStep::Complete { peer_properties } => {
                 assert_eq!(peer_properties.socket_type, Some(SocketType::Pull));
             }
-            _ => panic!("expected Complete"),
+            MechanismStep::Continue => panic!("expected Complete"),
         }
         assert_eq!(m.state, NullState::Done);
     }
@@ -372,7 +383,7 @@ mod tests {
         m.start(&mut out, PeerProperties::default());
         out.clear();
         let err = m
-            .on_command(Command::Subscribe(Default::default()), &mut out)
+            .on_command(Command::Subscribe(bytes::Bytes::default()), &mut out)
             .unwrap_err();
         assert!(matches!(err, Error::HandshakeFailed(_)));
     }

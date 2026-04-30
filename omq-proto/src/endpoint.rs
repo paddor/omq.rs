@@ -128,6 +128,7 @@ impl Endpoint {
     /// transport sees a plain `tcp://` endpoint. Identity for plain
     /// `tcp://`. Returns the endpoint unchanged for `ipc://` /
     /// `inproc://` / `udp://`.
+    #[must_use]
     pub fn underlying_tcp(&self) -> Endpoint {
         match self {
             #[cfg(feature = "lz4")]
@@ -148,6 +149,7 @@ impl Endpoint {
     /// Used after binding through the underlying TCP transport so the
     /// bound endpoint surfaced to the user still says
     /// `lz4+tcp://...` / `zstd+tcp://...`.
+    #[must_use]
     pub fn rewrap_tcp(&self, resolved: Endpoint) -> Endpoint {
         match (self, resolved) {
             #[cfg(feature = "lz4")]

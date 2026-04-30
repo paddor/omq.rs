@@ -32,8 +32,8 @@ fn opts(prio: u8) -> ConnectOpts {
 
 /// 3 inproc PULLs at priorities [1, 4, 8]. PUSH sends 1000 msgs
 /// without draining any PULL. With strict precedence, all 1000
-/// land at PULL@1 (filling its recv_hwm but not spilling, because
-/// recv_hwm default is 1024 ≥ 1000).
+/// land at PULL@1 (filling its `recv_hwm` but not spilling, because
+/// `recv_hwm` default is 1024 ≥ 1000).
 #[compio::test]
 async fn inproc_strict_precedence() {
     let pull_a = Socket::new(SocketType::Pull, Options::default());
@@ -60,7 +60,7 @@ async fn inproc_strict_precedence() {
     assert_eq!(count_c, 0, "priority-8 peer must be starved");
 }
 
-/// PULL@1 with a small recv_hwm fills early; subsequent sends spill
+/// PULL@1 with a small `recv_hwm` fills early; subsequent sends spill
 /// to PULL@4 (tier round-robin within priority 4 isn't tested here -
 /// just verify the spillover happened).
 #[compio::test]
@@ -82,7 +82,7 @@ async fn inproc_saturation_fall_through() {
 
     let a = drain(&pull_a).await;
     let b = drain(&pull_b).await;
-    assert!(a >= 8 && a <= 16, "A should hold around its recv_hwm; got {a}");
+    assert!((8..=16).contains(&a), "A should hold around its recv_hwm; got {a}");
     assert_eq!(a + b, 100, "every send must arrive somewhere");
     assert!(b > 0, "spillover to lower-priority peer must happen");
 }
@@ -91,6 +91,7 @@ async fn inproc_saturation_fall_through() {
 /// robin should fair-share. Allow generous slop for scheduler jitter.
 #[compio::test]
 async fn inproc_equal_priorities_round_robin() {
+    const N: usize = 300;
     let pull_a = Socket::new(SocketType::Pull, Options::default());
     let pull_b = Socket::new(SocketType::Pull, Options::default());
     let pull_c = Socket::new(SocketType::Pull, Options::default());
@@ -103,7 +104,6 @@ async fn inproc_equal_priorities_round_robin() {
     push.connect_with(inproc("prio-eq-b"), opts(8)).await.unwrap();
     push.connect_with(inproc("prio-eq-c"), opts(8)).await.unwrap();
 
-    const N: usize = 300;
     for _ in 0..N {
         push.send(Message::single("x")).await.unwrap();
     }

@@ -18,7 +18,7 @@ description = "Pure Rust OMQ/ZeroMQ: wire-compatible, feature-complete, high-per
 [workspace.lints.rust]
 missing_debug_implementations = "deny"
 unsafe_op_in_unsafe_fn = "deny"
-rust_2018_idioms = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]

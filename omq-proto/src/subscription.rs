@@ -21,6 +21,7 @@ impl SubscriptionSet {
     }
 
     /// Add a subscription. Empty prefix is recorded as `subscribe_all`.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add(&mut self, prefix: Bytes) {
         if prefix.is_empty() {
             self.subscribe_all = true;

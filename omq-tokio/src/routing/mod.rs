@@ -5,14 +5,14 @@
 //!
 //! | Type        | Send                                  | Recv                  |
 //! |-------------|---------------------------------------|-----------------------|
-//! | PUSH/PAIR   | RoundRobin (work-stealing)            | FairQueue             |
-//! | PULL        | None                                  | FairQueue             |
-//! | DEALER      | RoundRobin                            | FairQueue             |
-//! | PUB         | FanOut (subscription-filtered)        | None                  |
-//! | SUB/XSUB    | None (sends SUBSCRIBE/CANCEL only)    | FairQueue             |
-//! | ROUTER      | Identity (peer lookup by first frame) | IdentityRecv (prefix) |
+//! | PUSH/PAIR   | `RoundRobin` (work-stealing)            | `FairQueue`             |
+//! | PULL        | None                                  | `FairQueue`             |
+//! | DEALER      | `RoundRobin`                            | `FairQueue`             |
+//! | PUB         | `FanOut` (subscription-filtered)        | None                  |
+//! | SUB/XSUB    | None (sends SUBSCRIBE/CANCEL only)    | `FairQueue`             |
+//! | ROUTER      | Identity (peer lookup by first frame) | `IdentityRecv` (prefix) |
 //!
-//! Conflate mode applies to FanOut only (PUB/XPUB/RADIO).
+//! Conflate mode applies to `FanOut` only (PUB/XPUB/RADIO).
 //! REP envelope save/restore lives at the socket-type wiring level.
 
 pub(crate) mod drop_queue;
@@ -132,7 +132,7 @@ impl SendStrategy {
         match self {
             Self::None => {}
             Self::RoundRobin(s) => {
-                s.connection_added_with_priority(peer_id, handle, priority)
+                s.connection_added_with_priority(peer_id, handle, priority);
             }
             Self::FanOut(s) => s.connection_added(peer_id, handle),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity),
@@ -157,14 +157,14 @@ impl SendStrategy {
         }
     }
 
-    /// Record a SUBSCRIBE from a peer. No-op except for FanOut.
+    /// Record a SUBSCRIBE from a peer. No-op except for `FanOut`.
     pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
         if let Self::FanOut(s) = self {
             s.peer_subscribe(peer_id, prefix);
         }
     }
 
-    /// Record a CANCEL from a peer. No-op except for FanOut.
+    /// Record a CANCEL from a peer. No-op except for `FanOut`.
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {
         if let Self::FanOut(s) = self {
             s.peer_cancel(peer_id, prefix);
@@ -258,8 +258,9 @@ impl RecvStrategy {
     /// Prepare a recv message for a per-socket-type post-recv transform.
     /// For `Identity`, prepends the sender's identity so the REP handler
     /// sees the full envelope; for `FairQueue`, returns the message
-    /// unchanged. Used when the type_state needs to post-process (REQ,
+    /// unchanged. Used when the `type_state` needs to post-process (REQ,
     /// REP) rather than hitting the recv channel directly.
+    #[allow(clippy::unused_async)]
     pub(crate) async fn wrap_for_transform(
         &self,
         peer_id: u64,
@@ -293,7 +294,7 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
 }
 
 /// Whether this socket type accepts `Options::conflate(true)`. Per
-/// libzmq's ZMQ_CONFLATE: the option is meaningful on patterns
+/// libzmq's `ZMQ_CONFLATE`: the option is meaningful on patterns
 /// where the queue is just "the next message" (no envelope, no
 /// per-peer ordering invariant). REQ/REP/ROUTER/SERVER/PEER track
 /// envelopes; PAIR/CHANNEL/CLIENT carry sequence-sensitive state.
@@ -315,7 +316,7 @@ pub(crate) fn supports_conflate(t: SocketType) -> bool {
 }
 
 /// Resolve queue capacity + drop policy for `options`. When
-/// `conflate` is set, both are forced to (1, DropOldest) - that
+/// `conflate` is set, both are forced to (1, `DropOldest`) - that
 /// gives the "queue is just the latest message" semantics
 /// regardless of the user's other settings.
 pub(crate) fn effective_queue_params(options: &omq_proto::options::Options) -> (usize, omq_proto::options::OnMute) {

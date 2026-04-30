@@ -60,7 +60,7 @@ pub(super) struct SocketInner {
     pub(super) udp_dialers: RwLock<Vec<UdpDialerEntry>>,
     /// Active listeners. Each `bind()` registers one entry whose
     /// `_task` is the accept (or DISH recv) loop. Dropping the
-    /// JoinHandle cancels the task - that's what `unbind()` does.
+    /// `JoinHandle` cancels the task - that's what `unbind()` does.
     pub(super) listeners: RwLock<Vec<ListenerEntry>>,
     /// Active dialers. Each TCP/IPC `connect()` registers one entry
     /// whose `_task` is the dial supervisor. Inproc and UDP don't
@@ -131,7 +131,7 @@ pub(super) struct UdpDialerEntry {
 }
 
 /// Per-peer outbound channel. Inproc peers route directly into the
-/// peer's shared in_tx (one channel hop). Wire peers (TCP, IPC) go
+/// peer's shared `in_tx` (one channel hop). Wire peers (TCP, IPC) go
 /// through a dedicated driver task; the `Sender` lives behind an
 /// `Arc<RwLock>` so the dial supervisor can swap it when the
 /// underlying driver dies.
@@ -224,7 +224,7 @@ pub(super) struct PeerSlot {
     /// `Option<SharedPeerIo>` is swapped on reconnect.
     pub(super) direct_io: Option<DirectIoHandle>,
     /// Peer's snapshot - known at connect/accept for inproc;
-    /// populated post-handshake for wire peers via the snap_rx
+    /// populated post-handshake for wire peers via the `snap_rx`
     /// channel set in `spawn_wire_driver`.
     pub(super) peer: Arc<RwLock<Option<InprocPeerSnapshot>>>,
     /// Stable per-socket connection id - exposed via monitor events
@@ -232,7 +232,7 @@ pub(super) struct PeerSlot {
     pub(super) connection_id: u64,
     /// Endpoint this peer was reached via (bind side or dial side).
     pub(super) endpoint: Endpoint,
-    /// Populated post-handshake. Carries identity / peer_address /
+    /// Populated post-handshake. Carries identity / `peer_address` /
     /// negotiated ZMTP version. Cleared on driver exit.
     pub(super) info: Arc<RwLock<Option<PeerInfo>>>,
     /// PUB-side fan-out filter. `None` for non-pub socket types.

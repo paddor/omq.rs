@@ -158,7 +158,7 @@ mod tests {
         // Decodes to 24 bytes, not 32.
         assert!(matches!(
             CurvePublicKey::from_z85("0123456789012345678901234567890"),
-            Err(Error::Protocol(_)) | Err(_)
+            Err(Error::Protocol(_) | _)
         ));
     }
 

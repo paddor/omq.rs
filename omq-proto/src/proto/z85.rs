@@ -36,7 +36,7 @@ pub fn encode(data: &[u8]) -> Result<String> {
     let out_len = data.len() / 4 * 5;
     let mut out = Vec::with_capacity(out_len);
     for chunk in data.chunks_exact(4) {
-        let value = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
+        let value = u64::from(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         // 5 base-85 digits, most-significant first.
         let d4 = (value / 85u64.pow(4)) % 85;
         let d3 = (value / 85u64.pow(3)) % 85;
@@ -77,9 +77,9 @@ pub fn decode(s: &str) -> Result<Vec<u8>> {
                     c as char
                 )));
             }
-            value = value * 85 + d as u64;
+            value = value * 85 + u64::from(d);
         }
-        if value > u32::MAX as u64 {
+        if value > u64::from(u32::MAX) {
             return Err(Error::Protocol("Z85 chunk overflowed u32".into()));
         }
         let v = value as u32;
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn alphabet_unique_and_85() {
         let mut seen = [false; 256];
-        for &c in ALPHABET.iter() {
+        for &c in ALPHABET {
             assert!(!seen[c as usize], "duplicate char in alphabet: {c}");
             seen[c as usize] = true;
         }
@@ -155,11 +155,11 @@ mod tests {
     #[test]
     fn proptest_roundtrip_random_lengths() {
         // Quick fuzz: random 4N-byte inputs roundtrip cleanly.
-        let mut rng = 0xdeadbeefu64;
+        let mut rng = 0xdead_beef_u64;
         for n in [4, 8, 12, 32, 96, 128] {
             let mut data = vec![0u8; n];
             for b in &mut data {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
                 *b = (rng >> 33) as u8;
             }
             let s = encode(&data).unwrap();

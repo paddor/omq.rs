@@ -81,8 +81,8 @@ pub enum DriverCommand {
 }
 
 /// Per-connection context: monitor publisher + per-peer subscription
-/// set. Carried by the driver so it can publish HandshakeSucceeded /
-/// PeerCommand events with the correct peer/endpoint/connection_id,
+/// set. Carried by the driver so it can publish `HandshakeSucceeded` /
+/// `PeerCommand` events with the correct `peer/endpoint/connection_id`,
 /// drive PUB-side fan-out filtering off the peer's
 /// SUBSCRIBE / CANCEL stream, and publish Disconnected on exit.
 #[derive(Clone, Debug)]
@@ -197,6 +197,7 @@ pub(crate) fn build_peer_io(
 /// per-peer-routing socket types (PUB / XPUB / RADIO / ROUTER /
 /// XSUB).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_connection(
     state: Arc<DirectIoState>,
     socket_type: SocketType,
@@ -207,6 +208,7 @@ pub(crate) async fn run_connection(
     peer_snapshot_tx: Sender<InprocPeerSnapshot>,
     monitor_ctx: Option<MonitorCtx>,
 ) -> Result<()> {
+    const READ_BUF_BYTES: usize = 64 * 1024;
     let peer_io: SharedPeerIo = state.peer_io.clone();
     let poll_fd = state.poll_fd.clone();
     let handshake_timeout = options.handshake_timeout;
@@ -226,7 +228,6 @@ pub(crate) async fn run_connection(
     // 8 KiB caused 4 syscalls per 32 KiB message. The buffer is
     // handed to compio's read by move and returned via `BufResult`,
     // so no copy on the hot path.
-    const READ_BUF_BYTES: usize = 64 * 1024;
     let mut read_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
 
     let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
@@ -252,6 +253,7 @@ pub(crate) async fn run_connection(
     let mut peer_identity = bytes::Bytes::new();
 
     loop {
+        use futures::FutureExt;
         // Close path: once the user has asked to close AND the
         // handshake completed AND every pending command has been
         // encoded AND the codec has nothing left to write, we exit
@@ -486,7 +488,9 @@ pub(crate) async fn run_connection(
                 if chunks.len() > 1024 {
                     chunks.truncate(1024);
                 }
-                if !chunks.is_empty() {
+                if chunks.is_empty() {
+                    false
+                } else {
                     let written = io
                         .writer
                         .write_vectored(chunks)
@@ -497,8 +501,6 @@ pub(crate) async fn run_connection(
                     }
                     io.codec.advance_transmit(written);
                     true
-                } else {
-                    false
                 }
             } else {
                 false
@@ -526,7 +528,6 @@ pub(crate) async fn run_connection(
         //    fires, we do an inline `reader.read(buf).await` - kernel
         //    data is already queued, the SQE completes immediately,
         //    and we never abandon a buffer-owning read mid-flight.
-        use futures::FutureExt;
         // Recv-direct gate: when a `recv()` caller has claimed the
         // read path (`recv_claim == 1`), the driver must NOT race the
         // FD readiness or it would steal bytes out from under the
@@ -661,9 +662,7 @@ pub(crate) async fn run_connection(
                 while let Some(cmd) = next.take() {
                     let cap_reached = {
                         let mut io = peer_io.lock().await;
-                        if !io.handshake_done {
-                            pending_cmds.push_back(cmd);
-                        } else {
+                        if io.handshake_done {
                             match cmd {
                                 DriverCommand::SendMessage(m) => {
                                     if let Some(t) = io.transform.as_mut() {
@@ -679,6 +678,8 @@ pub(crate) async fn run_connection(
                                 }
                                 DriverCommand::Close => closing = true,
                             }
+                        } else {
+                            pending_cmds.push_back(cmd);
                         }
                         io.codec.pending_transmit_size() >= cap
                     };
@@ -693,16 +694,13 @@ pub(crate) async fn run_connection(
                 // when handshake completes). Post-handshake we drain
                 // the shared queue greedily until codec hits the batch
                 // cap - fewer wakes, more amortization in writev.
-                let mut next = match msg {
-                    Some(m) => Some(m),
-                    None => {
-                        // Queue closed (socket closing) - stop
-                        // selecting on it but keep running until
-                        // pending writes flush + Close lands.
-                        shared_closed = true;
-                        continue;
-                    }
+                // None: queue closed (socket closing) - stop selecting on it
+                // but keep running until pending writes flush + Close lands.
+                let Some(m) = msg else {
+                    shared_closed = true;
+                    continue;
                 };
+                let mut next = Some(m);
                 let shared = shared_msg_rx
                     .as_ref()
                     .expect("shared_fut only ready when rx is Some");

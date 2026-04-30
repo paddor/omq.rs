@@ -36,7 +36,7 @@ pub const NONCE_LEN: usize = 24;
 /// the body that goes inside a ZMTP command frame for the
 /// HELLO/WELCOME/INITIATE/READY/ERROR exchanges.
 pub fn encode_command_body(name: &str, payload: &[u8]) -> Vec<u8> {
-    assert!(name.len() <= u8::MAX as usize, "command name too long");
+    assert!(u8::try_from(name.len()).is_ok(), "command name too long");
     let mut out = Vec::with_capacity(1 + name.len() + payload.len());
     out.push(name.len() as u8);
     out.extend_from_slice(name.as_bytes());
@@ -54,7 +54,7 @@ pub fn parse_command_body(body: &[u8]) -> Result<(&str, &[u8])> {
     if body.len() < 1 + name_len {
         return Err(Error::Protocol("command body truncated in name".into()));
     }
-    let name_bytes = &body[1..1 + name_len];
+    let name_bytes = &body[1..=name_len];
     let name = std::str::from_utf8(name_bytes)
         .map_err(|_| Error::Protocol("command name not ASCII".into()))?;
     Ok((name, &body[1 + name_len..]))

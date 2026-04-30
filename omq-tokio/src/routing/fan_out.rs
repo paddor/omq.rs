@@ -229,6 +229,6 @@ impl FanOutSend {
 }
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
-    msg.parts().first().map(|p| p.coalesce()).unwrap_or_default()
+    msg.parts().first().map(omq_proto::Payload::coalesce).unwrap_or_default()
 }
 

@@ -133,6 +133,7 @@ impl Socket {
         }
     }
 
+    #[allow(clippy::unused_async)]
     async fn bind_inproc(&self, name: String) -> Result<()> {
         let snapshot = self.inner.snapshot();
         let listener = inproc::bind(&name, snapshot, self.inner.in_tx.clone())?;
@@ -144,28 +145,21 @@ impl Socket {
         let ep_for_task = resolved.clone();
         let name_for_ident = name;
         let task = compio::runtime::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok(conn) => {
-                        let conn_id = inner
-                            .next_connection_id
-                            .fetch_add(1, Ordering::Relaxed);
-                        inner.monitor.publish(MonitorEvent::Accepted {
-                            endpoint: ep_for_task.clone(),
-                            peer_ident: PeerIdent::Inproc(name_for_ident.clone()),
-                            connection_id: conn_id,
-                        });
-                        install_inproc_peer(
-                            &inner,
-                            conn,
-                            ep_for_task.clone(),
-                            conn_id,
-                            #[cfg(feature = "priority")]
-                            omq_proto::DEFAULT_PRIORITY,
-                        );
-                    }
-                    Err(_) => break,
-                }
+            while let Ok(conn) = listener.accept().await {
+                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                inner.monitor.publish(MonitorEvent::Accepted {
+                    endpoint: ep_for_task.clone(),
+                    peer_ident: PeerIdent::Inproc(name_for_ident.clone()),
+                    connection_id: conn_id,
+                });
+                install_inproc_peer(
+                    &inner,
+                    conn,
+                    ep_for_task.clone(),
+                    conn_id,
+                    #[cfg(feature = "priority")]
+                    omq_proto::DEFAULT_PRIORITY,
+                );
             }
         });
         self.inner
@@ -194,41 +188,29 @@ impl Socket {
         let ep_for_task = resolved.clone();
         let task = compio::runtime::spawn(async move {
             use omq_proto::proto::connection::Role;
-            loop {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        let _ = stream.set_nodelay(true);
-                        // Apply per-socket TCP keepalive policy, if any.
-                        // Compio's TcpStream doesn't expose AsFd directly,
-                        // but `to_poll_fd()` produces a SharedFd-backed
-                        // wrapper that does. The original stream keeps
-                        // its share, so the fd survives the drop.
-                        let Ok(poll_fd) = stream.to_poll_fd() else {
-                            continue;
-                        };
-                        let _ = inner.options.tcp_keepalive.apply(&poll_fd);
-                        let conn_id = inner
-                            .next_connection_id
-                            .fetch_add(1, Ordering::Relaxed);
-                        inner.monitor.publish(MonitorEvent::Accepted {
-                            endpoint: ep_for_task.clone(),
-                            peer_ident: PeerIdent::Socket(addr),
-                            connection_id: conn_id,
-                        });
-                        let (reader, writer) = stream.into_split();
-                        install_accepted_wire_peer(
-                            &inner,
-                            reader.into(),
-                            writer.into(),
-                            poll_fd,
-                            Role::Server,
-                            ep_for_task.clone(),
-                            conn_id,
-                            Some(addr),
-                        );
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, addr)) = listener.accept().await {
+                let _ = stream.set_nodelay(true);
+                let Ok(poll_fd) = stream.to_poll_fd() else {
+                    continue;
+                };
+                let _ = inner.options.tcp_keepalive.apply(&poll_fd);
+                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                inner.monitor.publish(MonitorEvent::Accepted {
+                    endpoint: ep_for_task.clone(),
+                    peer_ident: PeerIdent::Socket(addr),
+                    connection_id: conn_id,
+                });
+                let (reader, writer) = stream.into_split();
+                install_accepted_wire_peer(
+                    &inner,
+                    reader.into(),
+                    writer.into(),
+                    poll_fd,
+                    Role::Server,
+                    ep_for_task.clone(),
+                    conn_id,
+                    Some(addr),
+                );
             }
         });
         self.inner
@@ -256,34 +238,27 @@ impl Socket {
         };
         let task = compio::runtime::spawn(async move {
             use omq_proto::proto::connection::Role;
-            loop {
-                match listener.inner.accept().await {
-                    Ok((stream, _addr)) => {
-                        let Ok(poll_fd) = stream.to_poll_fd() else {
-                            continue;
-                        };
-                        let conn_id = inner
-                            .next_connection_id
-                            .fetch_add(1, Ordering::Relaxed);
-                        inner.monitor.publish(MonitorEvent::Accepted {
-                            endpoint: ep_for_task.clone(),
-                            peer_ident: PeerIdent::Path(ident_path.clone()),
-                            connection_id: conn_id,
-                        });
-                        let (reader, writer) = stream.into_split();
-                        install_accepted_wire_peer(
-                            &inner,
-                            reader.into(),
-                            writer.into(),
-                            poll_fd,
-                            Role::Server,
-                            ep_for_task.clone(),
-                            conn_id,
-                            None,
-                        );
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _addr)) = listener.inner.accept().await {
+                let Ok(poll_fd) = stream.to_poll_fd() else {
+                    continue;
+                };
+                let conn_id = inner.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                inner.monitor.publish(MonitorEvent::Accepted {
+                    endpoint: ep_for_task.clone(),
+                    peer_ident: PeerIdent::Path(ident_path.clone()),
+                    connection_id: conn_id,
+                });
+                let (reader, writer) = stream.into_split();
+                install_accepted_wire_peer(
+                    &inner,
+                    reader.into(),
+                    writer.into(),
+                    poll_fd,
+                    Role::Server,
+                    ep_for_task.clone(),
+                    conn_id,
+                    None,
+                );
             }
         });
         self.inner
@@ -322,10 +297,7 @@ impl Socket {
             loop {
                 let compio::BufResult(res, returned) = sock.recv_from(buf).await;
                 buf = returned;
-                let n = match res {
-                    Ok((n, _from)) => n,
-                    Err(_) => break,
-                };
+                let Ok((n, _from)) = res else { break };
                 let Some((group, body)) =
                     crate::transport::udp::decode_datagram(&buf[..n])
                 else {
@@ -502,6 +474,7 @@ impl Socket {
     /// (or DISH UDP recv loop) by dropping its task handle; already-
     /// accepted peers stay connected. Returns `Error::Unroutable` if
     /// no listener at `endpoint` is registered.
+    #[allow(clippy::unused_async)]
     pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
         let mut listeners = self.inner.listeners.write().expect("listeners lock");
         let before = listeners.len();
@@ -522,6 +495,7 @@ impl Socket {
     /// `ReconnectPolicy::Disabled` the driver IS the dialer task,
     /// so disconnecting tears the peer down too. Returns
     /// `Error::Unroutable` if no dialer matches.
+    #[allow(clippy::unused_async)]
     pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let mut dialers = self.inner.dialers.write().expect("dialers lock");
         let mut udp = self.inner.udp_dialers.write().expect("udp_dialers lock");
@@ -538,7 +512,7 @@ impl Socket {
     /// Snapshot the live status of one connected peer by
     /// `connection_id`. `Ok(None)` means no peer with that id
     /// exists (never connected, or already disconnected).
-    pub async fn connection_info(
+    pub fn connection_info(
         &self,
         connection_id: u64,
     ) -> Result<Option<crate::monitor::ConnectionStatus>> {
@@ -564,6 +538,7 @@ impl Socket {
 
     /// Snapshot every currently-connected peer. Empty vec when no
     /// peers are live. Useful for introspection / health checks.
+    #[allow(clippy::unused_async)]
     pub async fn connections(&self) -> Result<Vec<crate::monitor::ConnectionStatus>> {
         let peers = self.inner.out_peers.read().expect("peers lock");
         Ok(peers
@@ -702,6 +677,7 @@ impl Socket {
     /// amount of in-flight bytes (~5 µs window). The codec stays
     /// consistent and the connection remains usable; the next
     /// `recv()` continues from there.
+    #[allow(clippy::too_many_lines)]
     pub async fn recv(&self) -> Result<Message> {
         let st = self.inner.socket_type;
         if direct_recv_eligible(st) {
@@ -807,7 +783,6 @@ impl Socket {
                             return Ok(m);
                         }
                     }
-                    continue;
                 }
             }
         }
@@ -840,10 +815,11 @@ impl Socket {
     /// Error / Unknown is sacrificed on the direct path (rare;
     /// documented in the stripped-Stage-5 plan).
     ///
-    /// HandshakeSucceeded is treated defensively: we gate entry to
+    /// `HandshakeSucceeded` is treated defensively: we gate entry to
     /// the direct-read loop on `handshake_done == true` while
     /// holding the lock, so this branch shouldn't normally fire.
     /// Flip the flag and continue if it does.
+    #[allow(clippy::unused_self)]
     fn drain_one_user_event(&self, io: &mut PeerIo) -> Result<Option<Message>> {
         while let Some(ev) = io.codec.poll_event() {
             match ev {
@@ -858,10 +834,9 @@ impl Socket {
                     };
                     return Ok(Some(m));
                 }
-                Event::Command(_) => continue,
+                Event::Command(_) => {},
                 Event::HandshakeSucceeded { .. } => {
                     io.handshake_done = true;
-                    continue;
                 }
             }
         }
@@ -870,7 +845,7 @@ impl Socket {
 
     /// Apply post-receive socket-type processing: SUB / XSUB
     /// subscription filtering, REQ / REP type-state. Mirrors the
-    /// in_rx loop's handling. Returns `None` on filtered messages
+    /// `in_rx` loop's handling. Returns `None` on filtered messages
     /// (caller continues the read loop), `Some(msg)` to surface.
     fn post_recv_apply(&self, msg: Message) -> Result<Option<Message>> {
         if !self.matches_subscription(&msg) {
@@ -889,10 +864,10 @@ impl Socket {
         }
     }
 
-    /// Process one InprocFrame from `in_rx` for the direct-recv
+    /// Process one `InprocFrame` from `in_rx` for the direct-recv
     /// fallback race. Only handles the variants that the
     /// direct-recv-eligible socket types (Pull / Sub / Rep / Pair
-    /// / Req) actually receive: SinglePart and Message. Command is
+    /// / Req) actually receive: `SinglePart` and Message. Command is
     /// XPub-only and not eligible for direct recv anyway.
     fn process_inproc_frame_for_direct(
         &self,
@@ -922,16 +897,16 @@ impl Socket {
     ///   - the handshake hasn't completed yet (driver still owns
     ///     the read path until handshake).
     async fn try_direct_recv(&self) -> Result<Option<Message>> {
+        const READ_BUF_BYTES: usize = 64 * 1024;
+        use futures::FutureExt;
+
         // Fall back if the driver has already buffered messages into
         // in_rx - they must be drained in arrival order.
         if !self.inner.in_rx.is_empty() {
             return Ok(None);
         }
-        let state = match self.snapshot_direct_io_single_peer() {
-            Some(s) => s,
-            None => {
-                return Ok(None);
-            }
+        let Some(state) = self.snapshot_direct_io_single_peer() else {
+            return Ok(None);
         };
         if state
             .recv_claim
@@ -940,7 +915,7 @@ impl Socket {
         {
             return Ok(None);
         }
-        let _guard = ClaimGuard { state: &state };
+        let guard = ClaimGuard { state: &state };
         // Race-safe recheck: between the first peek and the claim
         // flip, the driver could have enqueued into in_rx (it stops
         // reading on its next iteration). Bail if so.
@@ -948,9 +923,7 @@ impl Socket {
             return Ok(None);
         }
 
-        const READ_BUF_BYTES: usize = 64 * 1024;
         let mut local_buf: Vec<u8> = Vec::with_capacity(READ_BUF_BYTES);
-
         loop {
             // 1) Drain any user-facing events the driver left in the
             //    codec. Bail out (Ok(None)) if the handshake hasn't
@@ -986,13 +959,12 @@ impl Socket {
             let inrx_fut = self.inner.in_rx.recv_async();
             futures::pin_mut!(read_ready_fut);
             futures::pin_mut!(inrx_fut);
-            use futures::FutureExt;
             let read_ok = futures::select_biased! {
                 frame = inrx_fut.fuse() => {
                     let frame = frame.map_err(|_| Error::Closed)?;
                     // Drop claim via RAII before returning.
-                    drop(_guard);
-                    return Ok(self.process_inproc_frame_for_direct(frame)?);
+                    drop(guard);
+                    return self.process_inproc_frame_for_direct(frame);
                 }
                 ready = read_ready_fut.fuse() => {
                     ready.is_ok()
@@ -1105,7 +1077,7 @@ impl Socket {
                 .iter()
                 .filter_map(|p| match &p.out {
                     PeerOut::Wire(handle) => Some(handle.clone()),
-                    _ => None,
+                    PeerOut::Inproc { .. } => None,
                 })
                 .collect()
         };
@@ -1121,7 +1093,7 @@ impl Socket {
                     PeerOut::Inproc { sender, .. } => {
                         !sender.is_empty() && !sender.is_disconnected()
                     }
-                    _ => false,
+                    PeerOut::Wire(_) => false,
                 })
             };
             let wire_alive = wire_handles.iter().any(|handle| {
@@ -1154,7 +1126,7 @@ impl Socket {
                 let topic = msg
                     .parts()
                     .first()
-                    .map(|p| p.coalesce())
+                    .map(omq_proto::Payload::coalesce)
                     .unwrap_or_default();
                 self.inner
                     .subscriptions
@@ -1170,7 +1142,7 @@ impl Socket {
                 let group = msg
                     .parts()
                     .first()
-                    .map(|p| p.coalesce())
+                    .map(omq_proto::Payload::coalesce)
                     .unwrap_or_default();
                 self.inner
                     .joined_groups

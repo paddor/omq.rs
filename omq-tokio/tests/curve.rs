@@ -39,7 +39,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
     client.connect(ep).await.unwrap();
 
     client.send(Message::single("hello over curve")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_millis(1000), server.recv())
+    let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
         .await
         .unwrap()
         .unwrap();
@@ -71,7 +71,7 @@ async fn curve_multipart_roundtrip() {
         .await
         .unwrap();
 
-    let m = tokio::time::timeout(Duration::from_millis(1000), pair_a.recv())
+    let m = tokio::time::timeout(Duration::from_secs(1), pair_a.recv())
         .await
         .unwrap()
         .unwrap();
@@ -145,7 +145,7 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
                 saw_handshake = true;
                 break;
             }
-            Ok(Ok(_)) => continue,
+            Ok(Ok(_)) => {},
             _ => break,
         }
     }
@@ -182,7 +182,7 @@ async fn curve_authenticator_admits_known_client() {
     client.connect(ep).await.unwrap();
 
     client.send(Message::single("authed")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_millis(1000), server.recv())
+    let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
         .await
         .unwrap()
         .unwrap();

@@ -113,16 +113,16 @@ struct TrainState {
 impl std::fmt::Debug for ZstdTransform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZstdTransform")
-            .field("send_dict_len", &self.send_dict.as_ref().map(|d| d.len()))
+            .field("send_dict_len", &self.send_dict.as_ref().map(bytes::Bytes::len))
             .field("send_dict_shipped", &self.send_dict_shipped)
-            .field("recv_dict_len", &self.recv_dict.as_ref().map(|d| d.len()))
+            .field("recv_dict_len", &self.recv_dict.as_ref().map(bytes::Bytes::len))
             .field("max_message_size", &self.max_message_size)
             .field("level", &self.level)
             .field(
                 "auto_train",
                 &self.train.as_ref().map(|t| (t.samples.len(), t.total_bytes)),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -244,13 +244,11 @@ impl ZstdTransform {
             sizes.push(s.len());
         }
         let mut dict_buf: Vec<u8> = Vec::with_capacity(DICT_CAPACITY);
-        let trained_len = match zstd_safe::train_from_buffer(
-            &mut dict_buf,
-            &samples_buf,
-            &sizes,
-        ) {
-            Ok(n) => n,
-            Err(_) => return, // train failed → auto-train disabled
+        // train failed → auto-train disabled
+        let Ok(trained_len) =
+            zstd_safe::train_from_buffer(&mut dict_buf, &samples_buf, &sizes)
+        else {
+            return;
         };
         dict_buf.truncate(trained_len);
         if let Err(()) = patch_user_dict_id(&mut dict_buf) {

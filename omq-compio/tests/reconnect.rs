@@ -36,10 +36,12 @@ async fn connect_retries_until_listener_appears() {
         pull
     });
 
-    let mut opts = Options::default();
-    opts.reconnect = ReconnectPolicy::Exponential {
-        min: Duration::from_millis(20),
-        max: Duration::from_millis(80),
+    let opts = Options {
+        reconnect: ReconnectPolicy::Exponential {
+            min: Duration::from_millis(20),
+            max: Duration::from_millis(80),
+        },
+        ..Default::default()
     };
     let push = Socket::new(SocketType::Push, opts);
     push.connect(tcp_ep(port)).await.unwrap();

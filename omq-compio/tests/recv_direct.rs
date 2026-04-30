@@ -68,6 +68,7 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
 /// without loss or duplication.
 #[compio::test]
 async fn two_concurrent_recv_callers_share_messages() {
+    const N: u32 = 100;
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.bind(tcp_ep(port)).await.unwrap();
@@ -75,7 +76,6 @@ async fn two_concurrent_recv_callers_share_messages() {
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(tcp_ep(port)).await.unwrap();
 
-    const N: u32 = 100;
     let producer = {
         let push = push.clone();
         compio::runtime::spawn(async move {
@@ -120,9 +120,11 @@ async fn two_concurrent_recv_callers_share_messages() {
 /// the idle window the next `send` still arrives.
 #[compio::test]
 async fn heartbeat_keeps_connection_alive_under_direct_recv() {
-    let mut o = Options::default();
-    o.heartbeat_interval = Some(Duration::from_millis(50));
-    o.heartbeat_timeout = Some(Duration::from_millis(500));
+    let o = Options {
+        heartbeat_interval: Some(Duration::from_millis(50)),
+        heartbeat_timeout: Some(Duration::from_millis(500)),
+        ..Default::default()
+    };
 
     let port = loopback_port();
     let pull = Socket::new(SocketType::Pull, o.clone());

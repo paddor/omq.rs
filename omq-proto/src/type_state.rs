@@ -44,21 +44,18 @@ impl TypeState {
             SocketType::Client
             | SocketType::Scatter
             | SocketType::Gather
-            | SocketType::Channel => {
-                if msg.len() != 1 {
-                    return Err(Error::Protocol(format!(
-                        "{:?} socket requires single-part messages (got {})",
-                        t,
-                        msg.len()
-                    )));
-                }
+            | SocketType::Channel
+                if msg.len() != 1 =>
+            {
+                return Err(Error::Protocol(format!(
+                    "{t:?} socket requires single-part messages (got {})",
+                    msg.len()
+                )));
             }
-            SocketType::Server => {
-                if msg.len() != 2 {
-                    return Err(Error::Protocol(
-                        "SERVER socket requires [routing_id, body] (2 parts)".into(),
-                    ));
-                }
+            SocketType::Server if msg.len() != 2 => {
+                return Err(Error::Protocol(
+                    "SERVER socket requires [routing_id, body] (2 parts)".into(),
+                ));
             }
             _ => {}
         }
@@ -135,7 +132,7 @@ impl TypeState {
                 // Split at first empty delimiter. Frames before it are
                 // envelope; frames after are the request body.
                 let parts = msg.parts();
-                let Some(delim_idx) = parts.iter().position(|p| p.is_empty()) else {
+                let Some(delim_idx) = parts.iter().position(super::message::Payload::is_empty) else {
                     return Ok(None); // malformed
                 };
                 let mut envelope = Vec::with_capacity(delim_idx);

@@ -91,7 +91,7 @@ pub struct InprocPeerSnapshot {
 }
 
 /// What `connect` / `accept` hand back. `out` is where WE send
-/// frames (= the peer's shared in_tx). `peer` is the peer's
+/// frames (= the peer's shared `in_tx`). `peer` is the peer's
 /// snapshot.
 #[derive(Debug)]
 pub struct InprocConn {
@@ -100,16 +100,16 @@ pub struct InprocConn {
 }
 
 /// Sent from connect to accept through the registry: connector's
-/// snapshot, connector's in_tx (so the listener knows where to
+/// snapshot, connector's `in_tx` (so the listener knows where to
 /// reply), and an ack channel through which the listener returns
-/// its own snapshot + in_tx.
+/// its own snapshot + `in_tx`.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
     /// Listener will send INTO this to deliver frames to the
     /// connector.
     connector_in_tx: Sender<InprocFrame>,
     /// Cross-thread one-shot ack carrying listener's snapshot +
-    /// in_tx.
+    /// `in_tx`.
     accept_ack: Sender<(InprocPeerSnapshot, Sender<InprocFrame>)>,
 }
 
@@ -149,7 +149,7 @@ pub fn bind(
 
 /// Connect to a previously-bound `name`. Hands the listener our
 /// shared `in_tx` (so it can deliver back to us); receives the
-/// listener's snapshot + in_tx in return.
+/// listener's snapshot + `in_tx` in return.
 pub async fn connect(
     name: &str,
     snapshot: InprocPeerSnapshot,

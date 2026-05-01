@@ -167,6 +167,10 @@ pub struct Connection {
     /// partial write. Always strictly less than `out_chunks[0].len()`
     /// (or 0 when the queue is empty).
     front_consumed: usize,
+    /// Cached sum of `out_chunks[i].len()` for all i. Maintained at
+    /// every push/pop so `pending_transmit_size` runs in O(1) instead
+    /// of iterating the whole queue on every drain-loop call.
+    out_bytes_total: usize,
     events: VecDeque<Event>,
     pending_parts: SmallVec<[Payload; MESSAGE_INLINE_PARTS]>,
     pending_size: usize,
@@ -189,6 +193,7 @@ impl Connection {
             out_chunks: VecDeque::new(),
             header_scratch: BytesMut::with_capacity(64 * 1024),
             front_consumed: 0,
+            out_bytes_total: 0,
             events: VecDeque::new(),
             pending_parts: SmallVec::new(),
             pending_size: 0,
@@ -207,6 +212,7 @@ impl Connection {
         g.encode(&mut buf);
         let bytes = buf.freeze();
         self.our_greeting = bytes.clone();
+        self.out_bytes_total += bytes.len();
         self.out_chunks.push_back(bytes);
     }
 
@@ -443,6 +449,9 @@ impl Connection {
                     flags: crate::message::FrameFlags::COMMAND,
                     payload: Payload::from_bytes(Bytes::from(ciphertext)),
                 };
+                let plen = f.payload.len();
+                self.out_bytes_total +=
+                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -467,6 +476,9 @@ impl Connection {
                     flags: crate::message::FrameFlags::COMMAND,
                     payload: Payload::from_bytes(wire.freeze()),
                 };
+                let plen = f.payload.len();
+                self.out_bytes_total +=
+                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
                 continue;
             }
@@ -475,6 +487,9 @@ impl Connection {
                 flags: crate::message::FrameFlags::COMMAND,
                 payload: Payload::from_bytes(body.freeze()),
             };
+            let plen = f.payload.len();
+            self.out_bytes_total +=
+                (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
             frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         }
     }
@@ -521,6 +536,9 @@ impl Connection {
                     flags,
                     payload: p.clone(),
                 };
+                let plen = f.payload.len();
+                self.out_bytes_total +=
+                    (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
             }
         }
@@ -565,6 +583,9 @@ impl Connection {
             flags,
             payload: Payload::from_bytes(wire.freeze()),
         };
+        let plen = f.payload.len();
+        self.out_bytes_total +=
+            (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }
@@ -593,6 +614,9 @@ impl Connection {
             flags,
             payload: Payload::from_bytes(Bytes::from(ciphertext)),
         };
+        let plen = f.payload.len();
+        self.out_bytes_total +=
+            (if plen > frame::MAX_SHORT_FRAME_SIZE { 9 } else { 2 }) + plen;
         frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
         Ok(())
     }
@@ -602,21 +626,14 @@ impl Connection {
         self.events.pop_front()
     }
 
-    /// Total bytes pending transmit across all queued chunks.
+    /// Total bytes pending transmit across all queued chunks. O(1).
     pub fn pending_transmit_size(&self) -> usize {
-        self.out_chunks
-            .iter()
-            .map(Bytes::len)
-            .sum::<usize>()
-            .saturating_sub(self.front_consumed)
+        self.out_bytes_total.saturating_sub(self.front_consumed)
     }
 
     /// Whether any bytes are pending transmit.
     pub fn has_pending_transmit(&self) -> bool {
-        if self.out_chunks.is_empty() {
-            return false;
-        }
-        self.pending_transmit_size() > 0
+        self.out_bytes_total > self.front_consumed
     }
 
     /// Borrow the queued outbound chunks as a `Vec<IoSlice>` ready for
@@ -677,13 +694,15 @@ impl Connection {
                 debug_assert!(false, "advance_transmit beyond pending bytes");
                 return;
             };
-            let remaining = front.len() - self.front_consumed;
+            let front_len = front.len();
+            let remaining = front_len - self.front_consumed;
             if n < remaining {
                 self.front_consumed += n;
                 return;
             }
             n -= remaining;
             self.out_chunks.pop_front();
+            self.out_bytes_total = self.out_bytes_total.saturating_sub(front_len);
             self.front_consumed = 0;
         }
     }

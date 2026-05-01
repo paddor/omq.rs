@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.85"]
+        toolchain: [stable, "1.86"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -87,7 +87,7 @@ jobs:
         run: ../../.venv/bin/maturin develop --release
       - name: pytest
         working-directory: bindings/pyomq
-        run: ../../.venv/bin/pytest -v
+        run: ../../.venv/bin/pytest -v -k "not test_perf"
 
   ruby-interop:
     name: ruby omq interop

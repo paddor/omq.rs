@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
     Arc, Mutex, RwLock,
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
@@ -101,7 +101,10 @@ pub(super) struct SocketInner {
 pub(super) fn is_round_robin_send(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Push | SocketType::Dealer | SocketType::Req | SocketType::Pair
+        SocketType::Push
+            | SocketType::Dealer
+            | SocketType::Req
+            | SocketType::Pair
             | SocketType::Rep
     )
 }
@@ -190,10 +193,7 @@ impl std::fmt::Debug for DirectIoState {
 }
 
 impl DirectIoState {
-    pub(crate) fn new(
-        peer_io: SharedPeerIo,
-        poll_fd: Arc<PollFd<socket2::Socket>>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(peer_io: SharedPeerIo, poll_fd: Arc<PollFd<socket2::Socket>>) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
             poll_fd,
@@ -259,7 +259,10 @@ impl PeerOut {
 
     pub(super) async fn send(&self, msg: Message) -> Result<()> {
         match self {
-            Self::Inproc { sender, our_identity } => sender
+            Self::Inproc {
+                sender,
+                our_identity,
+            } => sender
                 .send_async(InprocFrame::message_from(our_identity.clone(), msg))
                 .await
                 .map_err(|_| Error::Closed),
@@ -275,7 +278,10 @@ impl PeerOut {
     /// `Error::Closed` if the peer is gone.
     pub(super) fn try_send_immediate(&self, msg: Message) -> Result<()> {
         match self {
-            Self::Inproc { sender, our_identity } => {
+            Self::Inproc {
+                sender,
+                our_identity,
+            } => {
                 let frame = InprocFrame::message_from(our_identity.clone(), msg);
                 sender.try_send(frame).map_err(|e| match e {
                     flume::TrySendError::Full(_) => Error::WouldBlock,
@@ -284,10 +290,11 @@ impl PeerOut {
             }
             Self::Wire(handle) => {
                 let tx = handle.read().expect("wire peer handle lock").clone();
-                tx.try_send(DriverCommand::SendMessage(msg)).map_err(|e| match e {
-                    flume::TrySendError::Full(_) => Error::WouldBlock,
-                    flume::TrySendError::Disconnected(_) => Error::Closed,
-                })
+                tx.try_send(DriverCommand::SendMessage(msg))
+                    .map_err(|e| match e {
+                        flume::TrySendError::Full(_) => Error::WouldBlock,
+                        flume::TrySendError::Disconnected(_) => Error::Closed,
+                    })
             }
         }
     }
@@ -305,14 +312,14 @@ impl PeerOut {
         msg: &Message,
     ) -> std::result::Result<(), flume::TrySendError<()>> {
         match self {
-            Self::Inproc { sender, our_identity } => {
-                let frame =
-                    InprocFrame::message_from(our_identity.clone(), msg.clone());
+            Self::Inproc {
+                sender,
+                our_identity,
+            } => {
+                let frame = InprocFrame::message_from(our_identity.clone(), msg.clone());
                 sender.try_send(frame).map_err(|e| match e {
                     flume::TrySendError::Full(_) => flume::TrySendError::Full(()),
-                    flume::TrySendError::Disconnected(_) => {
-                        flume::TrySendError::Disconnected(())
-                    }
+                    flume::TrySendError::Disconnected(_) => flume::TrySendError::Disconnected(()),
                 })
             }
             Self::Wire(handle) => {
@@ -330,7 +337,10 @@ impl PeerOut {
 
     pub(super) async fn send_command(&self, c: omq_proto::proto::Command) -> Result<()> {
         match self {
-            Self::Inproc { sender, our_identity: _ } => sender
+            Self::Inproc {
+                sender,
+                our_identity: _,
+            } => sender
                 .send_async(InprocFrame::Command(c))
                 .await
                 .map_err(|_| Error::Closed),
@@ -417,4 +427,3 @@ impl SocketInner {
         *self.priority_view.write().expect("priority_view lock") = idx;
     }
 }
-

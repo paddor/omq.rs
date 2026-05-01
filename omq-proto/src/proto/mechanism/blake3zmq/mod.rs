@@ -39,7 +39,9 @@ use crate::error::{Error, Result};
 use crate::proto::command::{Command, PeerProperties, encode_properties};
 
 use super::MechanismStep;
-use handshake::{Client as HandshakeClient, Keypair as HandshakeKeypair, Server as HandshakeServer, SessionKeys};
+use handshake::{
+    Client as HandshakeClient, Keypair as HandshakeKeypair, Server as HandshakeServer, SessionKeys,
+};
 
 /// X25519 keypair used by both client and server sides of the BLAKE3ZMQ
 /// handshake. The 32-byte secret half is `Drop`-zeroed.
@@ -100,17 +102,23 @@ pub struct Blake3ZmqMechanism {
 impl std::fmt::Debug for Blake3ZmqMechanism {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Blake3ZmqMechanism")
-            .field("role", &match self.role {
-                Role::Server { .. } => "server",
-                Role::Client { .. } => "client",
-            })
-            .field("state", &match self.state {
-                HandshakeState::NotStarted => "not-started",
-                HandshakeState::Server(_) => "server-handshaking",
-                HandshakeState::Client(_) => "client-handshaking",
-                HandshakeState::Done(_) => "done",
-                HandshakeState::Failed => "failed",
-            })
+            .field(
+                "role",
+                &match self.role {
+                    Role::Server { .. } => "server",
+                    Role::Client { .. } => "client",
+                },
+            )
+            .field(
+                "state",
+                &match self.state {
+                    HandshakeState::NotStarted => "not-started",
+                    HandshakeState::Server(_) => "server-handshaking",
+                    HandshakeState::Client(_) => "client-handshaking",
+                    HandshakeState::Done(_) => "done",
+                    HandshakeState::Failed => "failed",
+                },
+            )
             .finish()
     }
 }
@@ -156,10 +164,7 @@ impl Blake3ZmqMechanism {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn new_client(
-        keypair: Blake3ZmqKeypair,
-        server_public: Blake3ZmqPublicKey,
-    ) -> Self {
+    pub(crate) fn new_client(keypair: Blake3ZmqKeypair, server_public: Blake3ZmqPublicKey) -> Self {
         Self {
             role: Role::Client {
                 keypair: HandshakeKeypair {
@@ -185,7 +190,11 @@ impl Blake3ZmqMechanism {
         // for the transcript. Each side knows its own role.
         let role = std::mem::replace(&mut self.role, placeholder_role());
         match role {
-            Role::Server { keypair, cookie_keyring, authenticator } => {
+            Role::Server {
+                keypair,
+                cookie_keyring,
+                authenticator,
+            } => {
                 let mut srv = HandshakeServer::new(keypair, cookie_keyring, metadata);
                 if let Some(auth) = authenticator {
                     srv.set_authenticator(auth);
@@ -194,7 +203,10 @@ impl Blake3ZmqMechanism {
                 self.state = HandshakeState::Server(srv);
                 self.role = role_placeholder_server();
             }
-            Role::Client { keypair, server_public } => {
+            Role::Client {
+                keypair,
+                server_public,
+            } => {
                 let mut cli = HandshakeClient::new(keypair, server_public, metadata);
                 cli.set_greetings(our_greeting, peer_greeting);
                 let hello = cli.build_hello().inspect_err(|_| {
@@ -248,9 +260,7 @@ impl Blake3ZmqMechanism {
                         .map(crate::proto::command::decode_properties)
                         .transpose()
                         .map_err(|e| {
-                            Error::HandshakeFailed(format!(
-                                "BLAKE3ZMQ peer metadata parse: {e}"
-                            ))
+                            Error::HandshakeFailed(format!("BLAKE3ZMQ peer metadata parse: {e}"))
                         })?
                         .unwrap_or_default();
                     let sessions = srv.sessions().expect("server done").clone();
@@ -281,9 +291,7 @@ impl Blake3ZmqMechanism {
                         .map(crate::proto::command::decode_properties)
                         .transpose()
                         .map_err(|e| {
-                            Error::HandshakeFailed(format!(
-                                "BLAKE3ZMQ peer metadata parse: {e}"
-                            ))
+                            Error::HandshakeFailed(format!("BLAKE3ZMQ peer metadata parse: {e}"))
                         })?
                         .unwrap_or_default();
                     let sessions = cli.sessions().expect("client done").clone();

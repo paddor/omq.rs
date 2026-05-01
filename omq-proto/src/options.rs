@@ -10,10 +10,10 @@ use bytes::Bytes;
 use crate::proto::mechanism::MechanismSetup;
 #[cfg(any(feature = "curve", feature = "blake3zmq"))]
 use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
-#[cfg(feature = "curve")]
-use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 #[cfg(feature = "blake3zmq")]
 use crate::proto::mechanism::{Blake3ZmqKeypair, Blake3ZmqPublicKey};
+#[cfg(feature = "curve")]
+use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 /// Upper bound for `Options::compression_dict`. Matches the smaller
 /// of the two dict-size limits across the supported compression
 /// transports - the lz4 RFC's 64 KiB minus 4 (sentinel + ZDICT
@@ -186,30 +186,39 @@ impl MechanismConfig {
         match self {
             Self::Null => MechanismSetup::Null,
             #[cfg(feature = "curve")]
-            Self::CurveServer { our_keypair, authenticator } => MechanismSetup::CurveServer {
+            Self::CurveServer {
+                our_keypair,
+                authenticator,
+            } => MechanismSetup::CurveServer {
                 keypair: our_keypair.clone(),
                 authenticator: authenticator.clone(),
             },
             #[cfg(feature = "curve")]
-            Self::CurveClient { our_keypair, server_public } => MechanismSetup::CurveClient {
+            Self::CurveClient {
+                our_keypair,
+                server_public,
+            } => MechanismSetup::CurveClient {
                 keypair: our_keypair.clone(),
                 server_public: *server_public,
             },
             #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { our_keypair, cookie_keyring, authenticator } => {
-                MechanismSetup::Blake3ZmqServer {
-                    keypair: our_keypair.clone(),
-                    cookie_keyring: cookie_keyring.clone(),
-                    authenticator: authenticator.clone(),
-                }
-            }
+            Self::Blake3ZmqServer {
+                our_keypair,
+                cookie_keyring,
+                authenticator,
+            } => MechanismSetup::Blake3ZmqServer {
+                keypair: our_keypair.clone(),
+                cookie_keyring: cookie_keyring.clone(),
+                authenticator: authenticator.clone(),
+            },
             #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqClient { our_keypair, server_public } => {
-                MechanismSetup::Blake3ZmqClient {
-                    keypair: our_keypair.clone(),
-                    server_public: *server_public,
-                }
-            }
+            Self::Blake3ZmqClient {
+                our_keypair,
+                server_public,
+            } => MechanismSetup::Blake3ZmqClient {
+                keypair: our_keypair.clone(),
+                server_public: *server_public,
+            },
         }
     }
 }
@@ -358,7 +367,6 @@ impl Options {
         };
         self
     }
-
 
     /// Configure this socket as a CURVE client targeting `server_public`.
     #[cfg(feature = "curve")]

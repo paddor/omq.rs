@@ -50,20 +50,14 @@ async fn pub_filters_by_subscriber_prefix() {
         let _ = pub_.send(Message::single("news.alpha")).await;
         let _ = pub_.send(Message::single("sports.beta")).await;
         if !news_got {
-            if let Ok(Ok(m)) =
-                compio::time::timeout(Duration::from_millis(20), news.recv()).await
-            {
+            if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(20), news.recv()).await {
                 let bytes = m.parts()[0].coalesce();
-                assert!(
-                    bytes.starts_with(b"news."),
-                    "news got non-news: {bytes:?}"
-                );
+                assert!(bytes.starts_with(b"news."), "news got non-news: {bytes:?}");
                 news_got = true;
             }
         }
         if !sports_got {
-            if let Ok(Ok(m)) =
-                compio::time::timeout(Duration::from_millis(20), sports.recv()).await
+            if let Ok(Ok(m)) = compio::time::timeout(Duration::from_millis(20), sports.recv()).await
             {
                 let bytes = m.parts()[0].coalesce();
                 assert!(

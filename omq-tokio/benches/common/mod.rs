@@ -74,14 +74,17 @@ pub(crate) fn transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         s.split(',').map(|t| t.trim().to_string()).collect()
     } else {
-        DEFAULT_TRANSPORTS.iter().map(|s| (*s).to_string()).collect()
+        DEFAULT_TRANSPORTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     }
 }
 
 pub(crate) fn peers_override() -> Option<Vec<usize>> {
-    std::env::var("OMQ_BENCH_PEERS").ok().map(|s| {
-        s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
-    })
+    std::env::var("OMQ_BENCH_PEERS")
+        .ok()
+        .map(|s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect())
 }
 
 /// Build a fresh endpoint for cell `seq` on `transport`. For TCP we
@@ -89,7 +92,9 @@ pub(crate) fn peers_override() -> Option<Vec<usize>> {
 /// bench's bind doesn't have to deal with port-zero discovery.
 pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
     match transport {
-        "inproc" => Endpoint::Inproc { name: format!("bench-{seq}") },
+        "inproc" => Endpoint::Inproc {
+            name: format!("bench-{seq}"),
+        },
         "ipc" => {
             let mut dir = std::env::temp_dir();
             dir.push(format!("omq-bench-{}-{seq}.sock", std::process::id()));
@@ -111,8 +116,10 @@ pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
                 "lz4+tcp" => Endpoint::Lz4Tcp { host, port },
                 #[cfg(feature = "zstd")]
                 "zstd+tcp" => Endpoint::ZstdTcp { host, port },
-                _ => panic!("bench: transport '{transport}' requires its feature; \
-                            rebuild with `--features lz4` and/or `--features zstd`"),
+                _ => panic!(
+                    "bench: transport '{transport}' requires its feature; \
+                            rebuild with `--features lz4` and/or `--features zstd`"
+                ),
             }
         }
         other => panic!("bench: unknown transport {other}"),
@@ -138,7 +145,10 @@ pub(crate) async fn wait_connected(socks: &[&omq_tokio::Socket]) {
         if all_ok {
             return;
         }
-        assert!(Instant::now() <= deadline, "bench: timed out waiting for peers to connect");
+        assert!(
+            Instant::now() <= deadline,
+            "bench: timed out waiting for peers to connect"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -150,7 +160,10 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut pending: Vec<usize> = (0..subs.len()).collect();
     while !pending.is_empty() {
-        assert!(Instant::now() <= deadline, "bench: subscriptions never propagated");
+        assert!(
+            Instant::now() <= deadline,
+            "bench: subscriptions never propagated"
+        );
         // Probe.
         let _ = pub_.send(omq_tokio::Message::single("")).await;
         let mut still: Vec<usize> = Vec::new();
@@ -168,11 +181,7 @@ pub(crate) async fn wait_subscribed(pub_: &omq_tokio::Socket, subs: &[&omq_tokio
 /// Returns the best (lowest wall-clock) of the timed runs along with
 /// the final `n` (messages per timed burst). `align` rounds n to a
 /// multiple of the sender count so per-sender splits stay even.
-pub(crate) async fn measure_best_of<F, Fut>(
-    msg_size: usize,
-    align: usize,
-    burst: F,
-) -> Cell
+pub(crate) async fn measure_best_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
 where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -205,7 +214,12 @@ where
     let elapsed = best.unwrap();
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
-    Cell { n: final_n, elapsed, mbps, msgs_s }
+    Cell {
+        n: final_n,
+        elapsed,
+        mbps,
+        msgs_s,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -245,13 +259,7 @@ pub(crate) fn print_cell(msg_size: usize, c: Cell) {
     );
 }
 
-pub(crate) fn append_jsonl(
-    pattern: &str,
-    transport: &str,
-    peers: usize,
-    msg_size: usize,
-    c: Cell,
-) {
+pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_size: usize, c: Cell) {
     if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
         return;
     }
@@ -292,8 +300,7 @@ fn rustc_version_runtime() -> String {
 /// one worker for the receiver(s), one per sender, plus a bit of
 /// headroom. Defaults to the count of available CPUs.
 pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
-    let workers = std::thread::available_parallelism()
-        .map_or(2, std::num::NonZero::get);
+    let workers = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()

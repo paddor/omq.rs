@@ -10,15 +10,15 @@
 //! set `OMQ_FUZZ_ITERS=<N>` to tune the per-target budget.
 
 use bytes::{Bytes, BytesMut};
-use rand::{Rng, RngCore, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, RngCore, SeedableRng};
 
 use omq_tokio::proto::{
-    command,
+    SocketType, command,
     connection::{Connection, ConnectionConfig, Role},
-    frame, greeting, z85,
+    frame, greeting,
     mechanism::MechanismSetup,
-    SocketType,
+    z85,
 };
 
 fn iters() -> usize {
@@ -94,8 +94,8 @@ fn fuzz_command_decode() {
 fn fuzz_handle_input_full_stream() {
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-            .mechanism(MechanismSetup::Null);
+        let cfg =
+            ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let raw = random_bytes(&mut rng, 4096);
         let _ = conn.handle_input(&raw);
@@ -114,8 +114,8 @@ fn fuzz_handle_input_full_stream() {
 fn fuzz_handle_input_chunked() {
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-            .mechanism(MechanismSetup::Null);
+        let cfg =
+            ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let raw = random_bytes(&mut rng, 4096);
         let mut pos = 0;
@@ -140,7 +140,11 @@ fn fuzz_handle_input_chunked() {
 fn fuzz_handle_input_both_roles() {
     let mut rng = rng();
     for i in 0..iters() / 4 {
-        let role = if rng.gen_bool(0.5) { Role::Server } else { Role::Client };
+        let role = if rng.gen_bool(0.5) {
+            Role::Server
+        } else {
+            Role::Client
+        };
         let st = match rng.gen_range(0..4) {
             0 => SocketType::Push,
             1 => SocketType::Pull,
@@ -194,8 +198,8 @@ fn fuzz_frame_roundtrip() {
         };
         let mut out = BytesMut::new();
         encode_frame(&frame, &mut out);
-        let decoded = try_decode_frame(&mut out)
-            .expect("decode of self-encoded frame must not error");
+        let decoded =
+            try_decode_frame(&mut out).expect("decode of self-encoded frame must not error");
         let decoded = decoded.expect("must produce a frame");
         assert_eq!(decoded.flags.more, more, "more bit");
         assert_eq!(decoded.flags.command, command, "command bit");
@@ -237,8 +241,8 @@ fn fuzz_handle_input_perturbed_greeting() {
             let pos = rng.gen_range(0..64);
             buf[pos] = rng.r#gen();
         }
-        let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-            .mechanism(MechanismSetup::Null);
+        let cfg =
+            ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(MechanismSetup::Null);
         let mut conn = Connection::new(cfg);
         let _ = conn.handle_input(&buf);
         while conn.poll_event().is_some() {}
@@ -254,7 +258,8 @@ fn fuzz_handle_input_perturbed_greeting() {
 #[test]
 fn fuzz_z85_decode() {
     let mut rng = rng();
-    let alphabet: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+    let alphabet: &[u8] =
+        b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
     for i in 0..iters() {
         // Mix 90% z85-alphabet bytes with 10% arbitrary, length 0..256.
         let len = rng.gen_range(0..=256);
@@ -364,11 +369,12 @@ mod mech_fuzz {
         let mut rng = rng();
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-                .mechanism(MechanismSetup::CurveServer {
+            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                MechanismSetup::CurveServer {
                     keypair: kp,
                     authenticator: None,
-                });
+                },
+            );
             let mut conn = Connection::new(cfg);
             let raw = random_bytes(&mut rng, 1024);
             let _ = conn.handle_input(&raw);
@@ -390,11 +396,12 @@ mod mech_fuzz {
         let mut rng = rng();
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-                .mechanism(MechanismSetup::CurveServer {
+            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                MechanismSetup::CurveServer {
                     keypair: kp,
                     authenticator: None,
-                });
+                },
+            );
             let mut conn = Connection::new(cfg);
             let _ = conn.handle_input(&greeting);
             // HELLO is 194-byte body for the well-formed case;
@@ -427,12 +434,13 @@ mod mech_fuzz {
         let keyring = Arc::new(CookieKeyring::new());
         for i in 0..iters() / 8 {
             let kp = Blake3ZmqKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-                .mechanism(MechanismSetup::Blake3ZmqServer {
+            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                MechanismSetup::Blake3ZmqServer {
                     keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
-                });
+                },
+            );
             let mut conn = Connection::new(cfg);
             let raw = random_bytes(&mut rng, 1024);
             let _ = conn.handle_input(&raw);
@@ -458,12 +466,13 @@ mod mech_fuzz {
         let mut rng = rng();
         for i in 0..iters() / 8 {
             let kp = Blake3ZmqKeypair::generate();
-            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull)
-                .mechanism(MechanismSetup::Blake3ZmqServer {
+            let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                MechanismSetup::Blake3ZmqServer {
                     keypair: kp,
                     cookie_keyring: keyring.clone(),
                     authenticator: None,
-                });
+                },
+            );
             let mut conn = Connection::new(cfg);
             let _ = conn.handle_input(&greeting);
             let body_len = rng.gen_range(0..=256);

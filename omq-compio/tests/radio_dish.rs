@@ -25,9 +25,18 @@ async fn radio_to_dish_with_matching_group() {
     dish.join("weather").await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["weather", "sunny"])).await.unwrap();
-    radio.send(Message::multipart(["news", "ignored"])).await.unwrap();
-    radio.send(Message::multipart(["weather", "rain"])).await.unwrap();
+    radio
+        .send(Message::multipart(["weather", "sunny"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["news", "ignored"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["weather", "rain"]))
+        .await
+        .unwrap();
 
     let m1 = compio::time::timeout(Duration::from_millis(500), dish.recv())
         .await
@@ -66,7 +75,10 @@ async fn dish_join_replays_to_new_radios() {
     dish.connect(ep).await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["late", "joined"])).await.unwrap();
+    radio
+        .send(Message::multipart(["late", "joined"]))
+        .await
+        .unwrap();
     let m = compio::time::timeout(Duration::from_millis(500), dish.recv())
         .await
         .unwrap()
@@ -85,7 +97,10 @@ async fn dish_leave_stops_delivery() {
     dish.join("g").await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["g", "first"])).await.unwrap();
+    radio
+        .send(Message::multipart(["g", "first"]))
+        .await
+        .unwrap();
     let m = compio::time::timeout(Duration::from_millis(500), dish.recv())
         .await
         .unwrap()
@@ -95,7 +110,10 @@ async fn dish_leave_stops_delivery() {
     dish.leave("g").await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["g", "second"])).await.unwrap();
+    radio
+        .send(Message::multipart(["g", "second"]))
+        .await
+        .unwrap();
     let r = compio::time::timeout(Duration::from_millis(150), dish.recv()).await;
     assert!(r.is_err(), "after leave the group should no longer deliver");
 }

@@ -168,9 +168,10 @@ pub async fn connect(
         accept_ack: ack_tx,
     };
 
-    req_tx.send_async(request).await.map_err(|_| {
-        Error::InvalidEndpoint(format!("inproc binding closed: {name}"))
-    })?;
+    req_tx
+        .send_async(request)
+        .await
+        .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
     let (listener_snapshot, listener_in_tx) = ack_rx
         .recv_async()
         .await

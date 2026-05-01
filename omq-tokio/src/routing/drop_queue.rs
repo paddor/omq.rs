@@ -22,7 +22,14 @@ impl DropQueue {
     pub(crate) fn new(capacity: usize, policy: OnMute) -> (Self, flume::Receiver<Message>) {
         let cap = capacity.max(1);
         let (tx, rx) = flume::bounded(cap);
-        (Self { tx, rx: rx.clone(), policy }, rx)
+        (
+            Self {
+                tx,
+                rx: rx.clone(),
+                policy,
+            },
+            rx,
+        )
     }
 
     /// Submit a message. Behaviour depends on policy:

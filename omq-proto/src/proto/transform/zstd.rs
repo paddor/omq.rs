@@ -36,11 +36,11 @@ use zstd_safe::{CCtx, CParameter, DCtx};
 use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
-use super::common::{
-    build_dict_shipment, plaintext_payload, take_budget, validate_dict, ENVELOPE_PLAIN,
-    SENTINEL_PLAIN,
-};
 use super::TransformedOut;
+use super::common::{
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, build_dict_shipment, plaintext_payload, take_budget,
+    validate_dict,
+};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const SENTINEL_DICT: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
@@ -113,14 +113,23 @@ struct TrainState {
 impl std::fmt::Debug for ZstdTransform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZstdTransform")
-            .field("send_dict_len", &self.send_dict.as_ref().map(bytes::Bytes::len))
+            .field(
+                "send_dict_len",
+                &self.send_dict.as_ref().map(bytes::Bytes::len),
+            )
             .field("send_dict_shipped", &self.send_dict_shipped)
-            .field("recv_dict_len", &self.recv_dict.as_ref().map(bytes::Bytes::len))
+            .field(
+                "recv_dict_len",
+                &self.recv_dict.as_ref().map(bytes::Bytes::len),
+            )
             .field("max_message_size", &self.max_message_size)
             .field("level", &self.level)
             .field(
                 "auto_train",
-                &self.train.as_ref().map(|t| (t.samples.len(), t.total_bytes)),
+                &self
+                    .train
+                    .as_ref()
+                    .map(|t| (t.samples.len(), t.total_bytes)),
             )
             .finish_non_exhaustive()
     }
@@ -228,9 +237,7 @@ impl ZstdTransform {
         }
         state.samples.push(Bytes::copy_from_slice(plain));
         state.total_bytes += plain.len();
-        if state.samples.len() < TRAIN_MAX_SAMPLES
-            && state.total_bytes < TRAIN_MAX_BYTES
-        {
+        if state.samples.len() < TRAIN_MAX_SAMPLES && state.total_bytes < TRAIN_MAX_BYTES {
             return;
         }
         // Threshold hit. Take ownership of the samples (the trainer
@@ -245,8 +252,7 @@ impl ZstdTransform {
         }
         let mut dict_buf: Vec<u8> = Vec::with_capacity(DICT_CAPACITY);
         // train failed → auto-train disabled
-        let Ok(trained_len) =
-            zstd_safe::train_from_buffer(&mut dict_buf, &samples_buf, &sizes)
+        let Ok(trained_len) = zstd_safe::train_from_buffer(&mut dict_buf, &samples_buf, &sizes)
         else {
             return;
         };
@@ -362,7 +368,9 @@ impl ZstdTransform {
         }
         // Copy out the compressed bytes; out_buf stays for the next
         // message. Could be a `Bytes::copy_from_slice` directly.
-        Ok(Payload::from_bytes(Bytes::copy_from_slice(&self.out_buf[..n])))
+        Ok(Payload::from_bytes(Bytes::copy_from_slice(
+            &self.out_buf[..n],
+        )))
     }
 
     fn decode_zstd(&mut self, bytes: &Bytes, budget: &mut Option<usize>) -> Result<Payload> {
@@ -417,10 +425,7 @@ fn patch_user_dict_id(dict: &mut [u8]) -> std::result::Result<(), ()> {
 }
 
 fn zstd_err(code: usize) -> Error {
-    Error::Protocol(format!(
-        "zstd: {}",
-        zstd_safe::get_error_name(code)
-    ))
+    Error::Protocol(format!("zstd: {}", zstd_safe::get_error_name(code)))
 }
 
 #[cfg(test)]
@@ -445,7 +450,10 @@ mod tests {
         assert_eq!(&bytes[..4], &ZSTD_MAGIC);
 
         let mut dec = ZstdTransform::new();
-        let out = dec.decode(wire.into_iter().next().unwrap()).unwrap().unwrap();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
     }
 
@@ -557,8 +565,7 @@ mod tests {
         // Use distinct-but-related JSON-like samples so the trainer
         // has something to extract. Each sample is well under
         // TRAIN_MAX_SAMPLE_LEN.
-        let sample =
-            br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
+        let sample = br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
         let mut roundtripped = 0usize;
         // Force the byte threshold (100 KiB ≈ 1750 of these samples).
         for _ in 0..2000 {
@@ -616,7 +623,9 @@ mod tests {
     #[test]
     fn auto_train_disabled_when_static_dict_present() {
         let dict = Bytes::from(vec![b'a'; 1024]);
-        let enc = ZstdTransform::with_send_dict(dict).unwrap().with_auto_train();
+        let enc = ZstdTransform::with_send_dict(dict)
+            .unwrap()
+            .with_auto_train();
         assert!(enc.train.is_none(), "static dict should disable auto-train");
     }
 }

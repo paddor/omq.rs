@@ -14,10 +14,7 @@ async fn linger_zero_drops_pending_on_close() {
     // Send before any peer is around. With linger = 0, close drops the
     // queued message.
     let ep = inproc_ep("opt-linger0");
-    let push = Socket::new(
-        SocketType::Push,
-        Options::default().linger(Duration::ZERO),
-    );
+    let push = Socket::new(SocketType::Push, Options::default().linger(Duration::ZERO));
     push.bind(ep.clone()).await.unwrap();
 
     // No peer connected; default Block OnMute makes send wait forever
@@ -61,10 +58,7 @@ async fn router_mandatory_true_errors_on_unknown() {
 #[tokio::test]
 async fn max_message_size_rejects_oversize() {
     let ep = inproc_ep("opt-mms");
-    let pull = Socket::new(
-        SocketType::Pull,
-        Options::default().max_message_size(8),
-    );
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
     pull.bind(ep.clone()).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -131,7 +125,9 @@ async fn try_recv_returns_buffered_message() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let push = Socket::new(SocketType::Push, Options::default());
     pull.bind(inproc_ep("try-recv-buffered-tok")).await.unwrap();
-    push.connect(inproc_ep("try-recv-buffered-tok")).await.unwrap();
+    push.connect(inproc_ep("try-recv-buffered-tok"))
+        .await
+        .unwrap();
     push.send(Message::single("hello")).await.unwrap();
     tokio::task::yield_now().await;
     let msg = pull.try_recv().unwrap();
@@ -152,7 +148,10 @@ async fn try_send_returns_would_block_when_hwm_full() {
             break;
         }
     }
-    assert!(blocked, "try_send should return WouldBlock when cmd_tx is full");
+    assert!(
+        blocked,
+        "try_send should return WouldBlock when cmd_tx is full"
+    );
 }
 
 #[tokio::test]
@@ -175,7 +174,7 @@ async fn identity_propagates_on_handshake() {
                 got_identity = peer.peer_identity.clone();
                 break;
             }
-            Ok(Ok(_)) => {},
+            Ok(Ok(_)) => {}
             _ => break,
         }
     }

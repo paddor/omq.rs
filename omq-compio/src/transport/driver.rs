@@ -36,9 +36,7 @@ use omq_proto::proto::transform::MessageTransform;
 use omq_proto::proto::{Command, Event, SocketType};
 use omq_proto::subscription::SubscriptionSet;
 
-use crate::monitor::{
-    MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo,
-};
+use crate::monitor::{MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo};
 use crate::socket::DirectIoState;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
 use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader, WireWriter};
@@ -232,9 +230,10 @@ pub(crate) async fn run_connection(
 
     let mut pending_cmds: VecDeque<DriverCommand> = VecDeque::new();
     let mut deadline: Option<Instant> = handshake_timeout.map(|t| Instant::now() + t);
-    state
-        .last_input_nanos
-        .store(state.hb_epoch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    state.last_input_nanos.store(
+        state.hb_epoch.elapsed().as_nanos() as u64,
+        Ordering::Relaxed,
+    );
     let mut hb_next: Option<Instant> = None;
     // Set when we receive `DriverCommand::Close`. We don't bail
     // immediately; we let the codec drain pending_cmds (post-
@@ -262,10 +261,7 @@ pub(crate) async fn run_connection(
         // Socket::close's wall-clock budget.
         if closing {
             let io = peer_io.lock().await;
-            if io.handshake_done
-                && pending_cmds.is_empty()
-                && !io.codec.has_pending_transmit()
-            {
+            if io.handshake_done && pending_cmds.is_empty() && !io.codec.has_pending_transmit() {
                 return Ok(());
             }
         }
@@ -279,17 +275,17 @@ pub(crate) async fn run_connection(
             let mut out: SmallVec<[Drained; 8]> = SmallVec::new();
             while let Some(ev) = io.codec.poll_event() {
                 match ev {
-                    Event::HandshakeSucceeded { peer_minor, peer_properties } => {
+                    Event::HandshakeSucceeded {
+                        peer_minor,
+                        peer_properties,
+                    } => {
                         if !io.handshake_done {
                             io.handshake_done = true;
                             deadline = None;
                             if let Some(iv) = hb_interval {
                                 hb_next = Some(Instant::now() + iv);
                             }
-                            peer_identity = peer_properties
-                                .identity
-                                .clone()
-                                .unwrap_or_default();
+                            peer_identity = peer_properties.identity.clone().unwrap_or_default();
                             // Drain pre-handshake commands into the
                             // codec now that we're allowed to send.
                             while let Some(cmd) = pending_cmds.pop_front() {
@@ -340,11 +336,12 @@ pub(crate) async fn run_connection(
         // 2) Dispatch drained events outside the lock.
         for de in drained {
             match de {
-                Drained::Handshake { peer_minor, peer_properties } => {
+                Drained::Handshake {
+                    peer_minor,
+                    peer_properties,
+                } => {
                     let snap = InprocPeerSnapshot {
-                        socket_type: peer_properties
-                            .socket_type
-                            .unwrap_or(SocketType::Pair),
+                        socket_type: peer_properties.socket_type.unwrap_or(SocketType::Pair),
                         identity: peer_identity.clone(),
                     };
                     let _ = peer_snapshot_tx.send(snap);
@@ -356,8 +353,7 @@ pub(crate) async fn run_connection(
                             peer_properties: peer_properties.clone(),
                             zmtp_version: (3, peer_minor),
                         };
-                        *ctx.peer_info.write().expect("peer_info lock") =
-                            Some(info.clone());
+                        *ctx.peer_info.write().expect("peer_info lock") = Some(info.clone());
                         ctx.monitor.publish(MonitorEvent::HandshakeSucceeded {
                             endpoint: ctx.endpoint.clone(),
                             peer: info,
@@ -376,22 +372,17 @@ pub(crate) async fn run_connection(
                         let body = m.parts()[0].coalesce();
                         if let Some((tag, prefix)) = body.split_first() {
                             let cmd = match tag {
-                                0x01 => Some(Command::Subscribe(
-                                    bytes::Bytes::copy_from_slice(prefix),
-                                )),
-                                0x00 => Some(Command::Cancel(
-                                    bytes::Bytes::copy_from_slice(prefix),
-                                )),
+                                0x01 => {
+                                    Some(Command::Subscribe(bytes::Bytes::copy_from_slice(prefix)))
+                                }
+                                0x00 => {
+                                    Some(Command::Cancel(bytes::Bytes::copy_from_slice(prefix)))
+                                }
                                 _ => None,
                             };
                             if let Some(c) = cmd {
-                                handle_sub_cmd(
-                                    socket_type,
-                                    monitor_ctx.as_ref(),
-                                    &peer_in_tx,
-                                    c,
-                                )
-                                .await?;
+                                handle_sub_cmd(socket_type, monitor_ctx.as_ref(), &peer_in_tx, c)
+                                    .await?;
                                 continue;
                             }
                         }
@@ -403,39 +394,26 @@ pub(crate) async fn run_connection(
                 }
                 Drained::Cmd(c) => match c {
                     Command::Subscribe(_) | Command::Cancel(_) => {
-                        handle_sub_cmd(
-                            socket_type,
-                            monitor_ctx.as_ref(),
-                            &peer_in_tx,
-                            c,
-                        )
-                        .await?;
+                        handle_sub_cmd(socket_type, monitor_ctx.as_ref(), &peer_in_tx, c).await?;
                     }
                     Command::Join(group) => {
                         if let Some(ctx) = &monitor_ctx {
                             if let Some(set) = &ctx.peer_groups {
-                                set.write()
-                                    .expect("peer_groups lock")
-                                    .insert(group);
+                                set.write().expect("peer_groups lock").insert(group);
                             }
                         }
                     }
                     Command::Leave(group) => {
                         if let Some(ctx) = &monitor_ctx {
                             if let Some(set) = &ctx.peer_groups {
-                                set.write()
-                                    .expect("peer_groups lock")
-                                    .remove(&group);
+                                set.write().expect("peer_groups lock").remove(&group);
                             }
                         }
                     }
                     Command::Error { reason } => {
                         if let Some(ctx) = &monitor_ctx {
-                            if let Some(info) = ctx
-                                .peer_info
-                                .read()
-                                .expect("peer_info lock")
-                                .clone()
+                            if let Some(info) =
+                                ctx.peer_info.read().expect("peer_info lock").clone()
                             {
                                 ctx.monitor.publish(MonitorEvent::PeerCommand {
                                     endpoint: ctx.endpoint.clone(),
@@ -447,11 +425,8 @@ pub(crate) async fn run_connection(
                     }
                     Command::Unknown { name, body } => {
                         if let Some(ctx) = &monitor_ctx {
-                            if let Some(info) = ctx
-                                .peer_info
-                                .read()
-                                .expect("peer_info lock")
-                                .clone()
+                            if let Some(info) =
+                                ctx.peer_info.read().expect("peer_info lock").clone()
                             {
                                 ctx.monitor.publish(MonitorEvent::PeerCommand {
                                     endpoint: ctx.endpoint.clone(),
@@ -491,11 +466,7 @@ pub(crate) async fn run_connection(
                 if chunks.is_empty() {
                     false
                 } else {
-                    let written = io
-                        .writer
-                        .write_vectored(chunks)
-                        .await
-                        .map_err(Error::Io)?;
+                    let written = io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
                     if written == 0 {
                         return Ok(());
                     }

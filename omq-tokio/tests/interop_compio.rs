@@ -19,11 +19,17 @@ fn free_tcp_port() -> u16 {
 }
 
 fn loopback_tokio(port: u16) -> omq_tokio::Endpoint {
-    omq_tokio::Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port }
+    omq_tokio::Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 fn loopback_compio(port: u16) -> omq_compio::Endpoint {
-    omq_compio::Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port }
+    omq_compio::Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 fn run_compio<F, T>(f: F) -> T
@@ -129,7 +135,10 @@ async fn tokio_dealer_to_compio_router_tcp() {
                 .await
                 .expect("compio router timed out")
                 .unwrap();
-            (m.parts()[0].coalesce().to_vec(), m.parts()[1].coalesce().to_vec())
+            (
+                m.parts()[0].coalesce().to_vec(),
+                m.parts()[1].coalesce().to_vec(),
+            )
         })
     });
 

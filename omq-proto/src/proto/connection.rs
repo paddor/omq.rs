@@ -28,7 +28,7 @@ use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
-use crate::message::{Message, Payload, MESSAGE_INLINE_PARTS};
+use crate::message::{MESSAGE_INLINE_PARTS, Message, Payload};
 
 use super::command::{self, Command, PeerProperties};
 
@@ -113,7 +113,10 @@ impl ConnectionConfig {
 pub enum Event {
     /// Handshake is complete. Carries the effective ZMTP minor version and
     /// the peer's properties (socket type, identity, extras).
-    HandshakeSucceeded { peer_minor: u8, peer_properties: Arc<PeerProperties> },
+    HandshakeSucceeded {
+        peer_minor: u8,
+        peer_properties: Arc<PeerProperties>,
+    },
     /// A fully assembled application message.
     Message(Message),
     /// A post-handshake ZMTP command (SUBSCRIBE, CANCEL, JOIN, LEAVE, ERROR,
@@ -196,7 +199,10 @@ impl Connection {
     }
 
     fn queue_greeting(&mut self) {
-        let g = Greeting::current(self.config.mechanism_name(), self.config.role == Role::Server);
+        let g = Greeting::current(
+            self.config.mechanism_name(),
+            self.config.role == Role::Server,
+        );
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
         let bytes = buf.freeze();
@@ -254,8 +260,12 @@ impl Connection {
         // BLAKE3ZMQ needs the greetings for h0; CURVE/NULL ignore them.
         // Pass both directions so the mechanism can compute the
         // transcript correctly regardless of role.
-        self.mechanism
-            .start(&mut cmds, our_props, &self.our_greeting, &self.peer_greeting)?;
+        self.mechanism.start(
+            &mut cmds,
+            our_props,
+            &self.our_greeting,
+            &self.peer_greeting,
+        )?;
         self.write_outbound_commands(&cmds);
         Ok(true)
     }
@@ -279,9 +289,9 @@ impl Connection {
         let step = self.mechanism.on_command(cmd, &mut cmds)?;
         self.write_outbound_commands(&cmds);
         if let MechanismStep::Complete { peer_properties } = step {
-            let peer_type = peer_properties.socket_type.ok_or_else(|| {
-                Error::HandshakeFailed("peer did not declare socket type".into())
-            })?;
+            let peer_type = peer_properties
+                .socket_type
+                .ok_or_else(|| Error::HandshakeFailed("peer did not declare socket type".into()))?;
             if !is_compatible(self.config.socket_type, peer_type) {
                 return Err(Error::HandshakeFailed(format!(
                     "incompatible socket types: ours={:?} peer={:?}",
@@ -344,8 +354,7 @@ impl Connection {
             if body.len() >= CURVE_MESSAGE_PREFIX.len()
                 && &body[..CURVE_MESSAGE_PREFIX.len()] == CURVE_MESSAGE_PREFIX
             {
-                let (more, plaintext) =
-                    tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
+                let (more, plaintext) = tx.decrypt_message(&body[CURVE_MESSAGE_PREFIX.len()..])?;
                 if frame.flags.command {
                     let cmd = command::decode(plaintext)?;
                     self.handle_post_handshake_command(cmd);
@@ -373,7 +382,10 @@ impl Connection {
         if let Some(max) = self.config.max_message_size
             && self.pending_size > max
         {
-            return Err(Error::MessageTooLarge { size: self.pending_size, max });
+            return Err(Error::MessageTooLarge {
+                size: self.pending_size,
+                max,
+            });
         }
         self.pending_parts.push(payload);
         if !more {
@@ -420,8 +432,13 @@ impl Connection {
             {
                 const TAG_LEN: usize = 32;
                 let plaintext = body.freeze();
-                let aad = blake3zmq_aad(crate::message::FrameFlags::COMMAND, plaintext.len() + TAG_LEN);
-                let Ok(ciphertext) = tx.encrypt(&aad, &plaintext) else { continue };
+                let aad = blake3zmq_aad(
+                    crate::message::FrameFlags::COMMAND,
+                    plaintext.len() + TAG_LEN,
+                );
+                let Ok(ciphertext) = tx.encrypt(&aad, &plaintext) else {
+                    continue;
+                };
                 let f = crate::message::Frame {
                     flags: crate::message::FrameFlags::COMMAND,
                     payload: Payload::from_bytes(Bytes::from(ciphertext)),
@@ -469,7 +486,9 @@ impl Connection {
     /// each part is encrypted into a MESSAGE command per RFC 26.
     pub fn send_message(&mut self, msg: &Message) -> Result<()> {
         if !matches!(self.state, State::Ready) {
-            return Err(Error::Protocol("send_message before handshake complete".into()));
+            return Err(Error::Protocol(
+                "send_message before handshake complete".into(),
+            ));
         }
         let parts = msg.parts();
         if parts.is_empty() {
@@ -498,7 +517,10 @@ impl Connection {
                 } else {
                     crate::message::FrameFlags::LAST
                 };
-                let f = crate::message::Frame { flags, payload: p.clone() };
+                let f = crate::message::Frame {
+                    flags,
+                    payload: p.clone(),
+                };
                 frame::encode_frame_into(&f, &mut self.out_chunks, &mut self.header_scratch);
             }
         }
@@ -509,7 +531,9 @@ impl Connection {
     /// after handshake.
     pub fn send_command(&mut self, cmd: &Command) -> Result<()> {
         if !matches!(self.state, State::Ready) {
-            return Err(Error::Protocol("send_command before handshake complete".into()));
+            return Err(Error::Protocol(
+                "send_command before handshake complete".into(),
+            ));
         }
         self.write_outbound_commands(std::slice::from_ref(cmd));
         Ok(())
@@ -728,7 +752,12 @@ mod tests {
     fn peer_minor_downgrades_to_zero() {
         // Peer announces 3.0; we speak 3.1; effective minor should be 0.
         let mut c = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
-        let g3_0 = Greeting { major: 3, minor: 0, mechanism: MechanismName::NULL, as_server: false };
+        let g3_0 = Greeting {
+            major: 3,
+            minor: 0,
+            mechanism: MechanismName::NULL,
+            as_server: false,
+        };
         let mut wire = BytesMut::new();
         g3_0.encode(&mut wire);
         // Peer's READY follows.

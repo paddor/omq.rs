@@ -3,8 +3,8 @@
 //! - 3 PUSHes→PULL fair-queue.
 //! - PUB→3 SUBs fan-out with subscription filtering.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -57,7 +57,10 @@ async fn push_distributes_across_three_pulls() {
     assert_eq!(total, N, "every message must reach exactly one pull");
     for c in &counts {
         let n = c.load(Ordering::SeqCst);
-        assert!(n > N / 20, "pull got only {n} / {N}; distribution too skewed");
+        assert!(
+            n > N / 20,
+            "pull got only {n} / {N}; distribution too skewed"
+        );
     }
 }
 
@@ -109,11 +112,7 @@ async fn pub_sub_fan_out_with_prefix_filter() {
     for _ in 0..50 {
         let _ = pub_.send(Message::single("__probe__")).await;
         for s in &subs {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(2),
-                s.recv(),
-            )
-            .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(2), s.recv()).await;
         }
     }
 
@@ -123,13 +122,10 @@ async fn pub_sub_fan_out_with_prefix_filter() {
             .unwrap();
     }
     for (i, s) in subs.iter().enumerate() {
-        let m = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            s.recv(),
-        )
-        .await
-        .expect("recv timeout")
-        .unwrap();
+        let m = tokio::time::timeout(std::time::Duration::from_secs(2), s.recv())
+            .await
+            .expect("recv timeout")
+            .unwrap();
         let body = m.parts()[0].coalesce();
         assert!(
             body.starts_with(topics[i].as_bytes()),

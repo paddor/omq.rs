@@ -55,7 +55,9 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
     // pump scheduling jitter.
     const N: u32 = 5_000;
     for i in 0..N {
-        pub_.send(Message::single(format!("msg-{i:05}"))).await.unwrap();
+        pub_.send(Message::single(format!("msg-{i:05}")))
+            .await
+            .unwrap();
     }
     // Give the pump a moment to settle.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -102,7 +104,9 @@ async fn push_conflate_keeps_only_latest() {
     // No peer yet: every send goes straight into the cap-1 queue
     // and replaces whatever was there.
     for i in 0..100u32 {
-        push.send(Message::single(format!("m-{i:03}"))).await.unwrap();
+        push.send(Message::single(format!("m-{i:03}")))
+            .await
+            .unwrap();
     }
 
     // Now wire up the PULL side.

@@ -52,7 +52,10 @@ async fn monitor_full_lifecycle_on_pair() {
     }
     assert!(matches!(srv_kinds[0], MonitorEvent::Listening { .. }));
     assert!(matches!(srv_kinds[1], MonitorEvent::Accepted { .. }));
-    assert!(matches!(srv_kinds[2], MonitorEvent::HandshakeSucceeded { .. }));
+    assert!(matches!(
+        srv_kinds[2],
+        MonitorEvent::HandshakeSucceeded { .. }
+    ));
 
     // Client: Connected -> HandshakeSucceeded.
     let mut cli_kinds = Vec::new();
@@ -64,7 +67,10 @@ async fn monitor_full_lifecycle_on_pair() {
         cli_kinds.push(ev);
     }
     assert!(matches!(cli_kinds[0], MonitorEvent::Connected { .. }));
-    assert!(matches!(cli_kinds[1], MonitorEvent::HandshakeSucceeded { .. }));
+    assert!(matches!(
+        cli_kinds[1],
+        MonitorEvent::HandshakeSucceeded { .. }
+    ));
 
     // HandshakeSucceeded carries identity from the peer (client used default
     // empty identity here, so peer_identity should be None).
@@ -145,12 +151,12 @@ async fn multiple_monitors_each_see_events() {
 #[tokio::test]
 async fn monitor_surfaces_peer_error_command() {
     use bytes::Bytes;
+    use omq_tokio::engine::PeerOut;
     use omq_tokio::engine::{ConnectionDriver, DriverCommand};
     use omq_tokio::proto::connection::{ConnectionConfig, Role};
     use omq_tokio::proto::{Command, Connection, Event, SocketType as ProtoSocketType};
     use omq_tokio::transport::{TcpTransport, Transport as _};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
-    use omq_tokio::engine::PeerOut;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -178,7 +184,8 @@ async fn monitor_surfaces_peer_error_command() {
     );
     let (inbox_tx, inbox_rx) = mpsc::channel(8);
     let (evt_tx, mut evt_rx) = mpsc::channel::<(u64, PeerOut)>(8);
-    let driver = ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
+    let driver =
+        ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
     tokio::spawn(async move { driver.run().await });
 
     // Wait for the peer-side handshake to complete before sending.
@@ -188,7 +195,7 @@ async fn monitor_surfaces_peer_error_command() {
             .unwrap()
         {
             Some((_, PeerOut::Event(Event::HandshakeSucceeded { .. }))) => break,
-            Some(_) => {},
+            Some(_) => {}
             None => panic!("peer driver exited"),
         }
     }
@@ -312,7 +319,7 @@ async fn monitor_emits_closed_on_socket_close() {
                 saw_closed = true;
                 break;
             }
-            Ok(Ok(_)) => {},
+            Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
         }
     }

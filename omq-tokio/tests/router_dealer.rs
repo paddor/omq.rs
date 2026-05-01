@@ -84,9 +84,7 @@ async fn router_mandatory_errors_on_unknown_identity() {
     // No dealers connected.
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let r = router
-        .send(Message::multipart(["ghost", "hello"]))
-        .await;
+    let r = router.send(Message::multipart(["ghost", "hello"])).await;
     assert!(matches!(r, Err(omq_tokio::Error::Unroutable)), "got {r:?}");
 }
 

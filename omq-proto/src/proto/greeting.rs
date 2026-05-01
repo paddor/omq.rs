@@ -78,15 +78,18 @@ impl MechanismName {
 
     /// Return the trimmed ASCII prefix (up to the first NUL).
     pub fn as_bytes(&self) -> &[u8] {
-        let n = self.0.iter().position(|&b| b == 0).unwrap_or(MECHANISM_BYTES);
+        let n = self
+            .0
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(MECHANISM_BYTES);
         &self.0[..n]
     }
 
     /// Trimmed name as `&str`. Returns an error if non-ASCII.
     pub fn as_str(&self) -> Result<&str> {
-        std::str::from_utf8(self.as_bytes()).map_err(|_| {
-            Error::Protocol("mechanism name is not valid ASCII".into())
-        })
+        std::str::from_utf8(self.as_bytes())
+            .map_err(|_| Error::Protocol("mechanism name is not valid ASCII".into()))
     }
 }
 
@@ -111,7 +114,12 @@ pub struct Greeting {
 impl Greeting {
     /// Build a greeting for our current wire version.
     pub fn current(mechanism: MechanismName, as_server: bool) -> Self {
-        Self { major: ZMTP_MAJOR, minor: ZMTP_MINOR, mechanism, as_server }
+        Self {
+            major: ZMTP_MAJOR,
+            minor: ZMTP_MINOR,
+            mechanism,
+            as_server,
+        }
     }
 
     /// Serialise into `out`.
@@ -182,7 +190,15 @@ pub fn try_decode(buf: &mut BytesMut) -> Result<Option<(Greeting, bytes::Bytes)>
     }
     let mechanism = MechanismName::from_padded(&mech_raw);
     let as_server = bytes[32] != 0;
-    Ok(Some((Greeting { major, minor, mechanism, as_server }, bytes)))
+    Ok(Some((
+        Greeting {
+            major,
+            minor,
+            mechanism,
+            as_server,
+        },
+        bytes,
+    )))
 }
 
 /// Compute the effective ZMTP minor for the session: `min(our, peer)`.
@@ -246,7 +262,12 @@ mod tests {
 
     #[test]
     fn decode_captures_3_0_minor() {
-        let g = Greeting { major: 3, minor: 0, mechanism: MechanismName::NULL, as_server: false };
+        let g = Greeting {
+            major: 3,
+            minor: 0,
+            mechanism: MechanismName::NULL,
+            as_server: false,
+        };
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
         let (decoded, _) = try_decode(&mut buf).unwrap().unwrap();

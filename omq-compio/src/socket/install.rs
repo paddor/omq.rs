@@ -26,8 +26,8 @@ use crate::transport::inproc::{InprocConn, InprocPeerSnapshot};
 use crate::transport::peer_io::{WireReader, WireWriter};
 
 use super::inner::{
-    is_round_robin_send, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
-    WirePeerHandle,
+    DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner, WirePeerHandle,
+    is_round_robin_send,
 };
 use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
@@ -123,10 +123,8 @@ pub(super) fn install_accepted_wire_peer(
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
-    let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
-        &endpoint,
-        &inner.options,
-    );
+    let transform =
+        omq_proto::proto::transform::MessageTransform::for_endpoint(&endpoint, &inner.options);
     let peer_io = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
@@ -136,8 +134,7 @@ pub(super) fn install_accepted_wire_peer(
         transform,
     );
     let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
-    let direct_io_handle: DirectIoHandle =
-        Arc::new(RwLock::new(Some(state.clone())));
+    let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
     let slot_idx = {
         let mut peers = inner.out_peers.write().expect("peers lock");
@@ -228,8 +225,7 @@ pub(super) fn spawn_wire_driver(
                     .insert(identity, slot_idx);
             }
             if matches!(inner.socket_type, SocketType::Sub | SocketType::XSub) {
-                let prefixes: Vec<Bytes> =
-                    inner.our_subs.read().expect("our_subs lock").clone();
+                let prefixes: Vec<Bytes> = inner.our_subs.read().expect("our_subs lock").clone();
                 if let Some(out) = out.as_ref() {
                     for p in prefixes {
                         let _ = out
@@ -250,9 +246,7 @@ pub(super) fn spawn_wire_driver(
                     .collect();
                 if let Some(out) = out {
                     for g in groups {
-                        let _ = out
-                            .send_command(omq_proto::proto::Command::Join(g))
-                            .await;
+                        let _ = out.send_command(omq_proto::proto::Command::Join(g)).await;
                     }
                 }
             }
@@ -295,9 +289,7 @@ pub(super) fn spawn_wire_driver(
         // Disengage the fast path before the dial supervisor swaps in
         // a fresh PeerIo; while this is `None`, Socket::send falls
         // back to cmd_tx and waits.
-        *direct_io_for_exit
-            .write()
-            .expect("direct_io handle lock") = None;
+        *direct_io_for_exit.write().expect("direct_io handle lock") = None;
         // Publish Disconnected so monitor consumers see the peer
         // tear down. Reason: PeerClosed for clean EOF, Error(...)
         // for any other failure. Skip if the handshake never
@@ -308,13 +300,11 @@ pub(super) fn spawn_wire_driver(
                 Ok(()) => DisconnectReason::PeerClosed,
                 Err(e) => DisconnectReason::Error(format!("{e}")),
             };
-            inner_for_exit
-                .monitor
-                .publish(MonitorEvent::Disconnected {
-                    endpoint: endpoint_for_exit,
-                    peer,
-                    reason,
-                });
+            inner_for_exit.monitor.publish(MonitorEvent::Disconnected {
+                endpoint: endpoint_for_exit,
+                peer,
+                reason,
+            });
         }
     })
 }

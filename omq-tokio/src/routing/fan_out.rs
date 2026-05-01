@@ -133,7 +133,9 @@ impl FanOutSend {
     pub(crate) fn new(options: &Options, mode: FanOutMode) -> Self {
         let (hwm, on_mute) = super::effective_queue_params(options);
         Self {
-            inner: Arc::new(Mutex::new(FanOutInner { peers: HashMap::new() })),
+            inner: Arc::new(Mutex::new(FanOutInner {
+                peers: HashMap::new(),
+            })),
             defaults: Defaults { hwm, on_mute },
             mode,
             root_cancel: CancellationToken::new(),
@@ -141,7 +143,10 @@ impl FanOutSend {
     }
 
     pub(crate) fn submitter(&self) -> Submitter {
-        Submitter { inner: self.inner.clone(), mode: self.mode }
+        Submitter {
+            inner: self.inner.clone(),
+            mode: self.mode,
+        }
     }
 
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
@@ -229,6 +234,8 @@ impl FanOutSend {
 }
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
-    msg.parts().first().map(omq_proto::Payload::coalesce).unwrap_or_default()
+    msg.parts()
+        .first()
+        .map(omq_proto::Payload::coalesce)
+        .unwrap_or_default()
 }
-

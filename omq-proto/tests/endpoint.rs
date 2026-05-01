@@ -15,7 +15,10 @@ fn parse(s: &str) -> Endpoint {
 fn tcp_ipv4() {
     assert_eq!(
         parse("tcp://127.0.0.1:5555"),
-        Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port: 5555 }
+        Endpoint::Tcp {
+            host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: 5555
+        }
     );
 }
 
@@ -23,7 +26,10 @@ fn tcp_ipv4() {
 fn tcp_ipv6() {
     assert_eq!(
         parse("tcp://[::1]:5555"),
-        Endpoint::Tcp { host: Host::Ip(IpAddr::V6(Ipv6Addr::LOCALHOST)), port: 5555 }
+        Endpoint::Tcp {
+            host: Host::Ip(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            port: 5555
+        }
     );
 }
 
@@ -31,7 +37,10 @@ fn tcp_ipv6() {
 fn tcp_dns() {
     assert_eq!(
         parse("tcp://example.com:5555"),
-        Endpoint::Tcp { host: Host::Name("example.com".into()), port: 5555 }
+        Endpoint::Tcp {
+            host: Host::Name("example.com".into()),
+            port: 5555
+        }
     );
 }
 
@@ -39,7 +48,10 @@ fn tcp_dns() {
 fn tcp_wildcard() {
     assert_eq!(
         parse("tcp://*:5555"),
-        Endpoint::Tcp { host: Host::Wildcard, port: 5555 }
+        Endpoint::Tcp {
+            host: Host::Wildcard,
+            port: 5555
+        }
     );
 }
 
@@ -93,7 +105,10 @@ fn udp_without_group() {
 fn lz4_tcp() {
     assert_eq!(
         parse("lz4+tcp://host:9"),
-        Endpoint::Lz4Tcp { host: Host::Name("host".into()), port: 9 }
+        Endpoint::Lz4Tcp {
+            host: Host::Name("host".into()),
+            port: 9
+        }
     );
 }
 
@@ -102,7 +117,10 @@ fn lz4_tcp() {
 fn zstd_tcp() {
     assert_eq!(
         parse("zstd+tcp://host:9"),
-        Endpoint::ZstdTcp { host: Host::Name("host".into()), port: 9 }
+        Endpoint::ZstdTcp {
+            host: Host::Name("host".into()),
+            port: 9
+        }
     );
 }
 

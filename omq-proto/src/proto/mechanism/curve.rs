@@ -87,9 +87,10 @@ impl CurveTransform {
     /// `nonce(8) || box(flags(1) || plaintext)`. The MORE bit lives
     /// *inside* the encrypted plaintext per RFC 26 / libzmq.
     pub(crate) fn encrypt_message(&mut self, more: bool, plaintext: &[u8]) -> Result<Bytes> {
-        self.out_counter = self.out_counter.checked_add(1).ok_or_else(|| {
-            Error::Protocol("CURVE outbound nonce counter exhausted".into())
-        })?;
+        self.out_counter = self
+            .out_counter
+            .checked_add(1)
+            .ok_or_else(|| Error::Protocol("CURVE outbound nonce counter exhausted".into()))?;
         let nonce = nonce_short(&self.out_prefix, self.out_counter);
         let mut pt = Vec::with_capacity(1 + plaintext.len());
         pt.push(u8::from(more));
@@ -118,7 +119,9 @@ impl CurveTransform {
             .decrypt(&nonce.into(), ct)
             .map_err(|_| Error::Protocol("CURVE decrypt failed".into()))?;
         if pt.is_empty() {
-            return Err(Error::Protocol("CURVE MESSAGE plaintext missing flags".into()));
+            return Err(Error::Protocol(
+                "CURVE MESSAGE plaintext missing flags".into(),
+            ));
         }
         let more = pt[0] & 0x01 != 0;
         self.in_counter = counter;
@@ -167,10 +170,7 @@ pub(crate) struct CurveMechanism {
 
 impl CurveMechanism {
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn new_client(
-        our_keypair: CurveKeypair,
-        server_public: CurvePublicKey,
-    ) -> Self {
+    pub(crate) fn new_client(our_keypair: CurveKeypair, server_public: CurvePublicKey) -> Self {
         let our_lt_secret = SecretKey::from_bytes(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from_bytes(*our_keypair.public.as_bytes());
         let peer_lt_public = PublicKey::from_bytes(*server_public.as_bytes());
@@ -284,12 +284,16 @@ impl CurveMechanism {
                     body: ready,
                 });
                 self.state = CurveState::Done;
-                Ok(MechanismStep::Complete { peer_properties: peer_props })
+                Ok(MechanismStep::Complete {
+                    peer_properties: peer_props,
+                })
             }
             (CurveState::AwaitingReady, b"READY") if !self.is_server => {
                 let peer_props = self.parse_ready(&body)?;
                 self.state = CurveState::Done;
-                Ok(MechanismStep::Complete { peer_properties: peer_props })
+                Ok(MechanismStep::Complete {
+                    peer_properties: peer_props,
+                })
             }
             (st, n) => Err(Error::HandshakeFailed(format!(
                 "CURVE state {:?} cannot consume command {:?}",
@@ -480,8 +484,7 @@ impl CurveMechanism {
 
         // Initiate plaintext = C_long_pub(32) + vouch_suffix(16) + vouch_box(80) + metadata.
         let metadata = encode_metadata(&our_props);
-        let mut init_pt =
-            Vec::with_capacity(32 + 16 + 80 + metadata.len());
+        let mut init_pt = Vec::with_capacity(32 + 16 + 80 + metadata.len());
         init_pt.extend_from_slice(&our_lt_public_bytes);
         init_pt.extend_from_slice(&vouch_suffix);
         init_pt.extend_from_slice(&vouch_box);
@@ -517,7 +520,9 @@ impl CurveMechanism {
             .decrypt(&cookie_nonce.into(), cookie_box)
             .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))?;
         if cookie_pt.len() != 64 {
-            return Err(Error::HandshakeFailed("CURVE cookie plaintext bad len".into()));
+            return Err(Error::HandshakeFailed(
+                "CURVE cookie plaintext bad len".into(),
+            ));
         }
         let cookie_cp_bytes: [u8; 32] = cookie_pt[..32].try_into().unwrap();
         let cookie_ss_bytes: [u8; 32] = cookie_pt[32..].try_into().unwrap();
@@ -563,7 +568,9 @@ impl CurveMechanism {
             || &vouch_pt[..32] != expected_cp.as_bytes()
             || &vouch_pt[32..] != self.our_lt_public.as_bytes()
         {
-            return Err(Error::HandshakeFailed("CURVE VOUCH content mismatch".into()));
+            return Err(Error::HandshakeFailed(
+                "CURVE VOUCH content mismatch".into(),
+            ));
         }
 
         // Run authenticator (if installed) against the now-verified
@@ -653,9 +660,8 @@ fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
             return Err(Error::HandshakeFailed("metadata truncated".into()));
         }
         let name = &body[1..=name_len];
-        let value_len = u32::from_be_bytes(
-            body[1 + name_len..1 + name_len + 4].try_into().unwrap(),
-        ) as usize;
+        let value_len =
+            u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap()) as usize;
         let val_start = 1 + name_len + 4;
         if body.len() < val_start + value_len {
             return Err(Error::HandshakeFailed("metadata value truncated".into()));
@@ -678,7 +684,9 @@ fn decode_metadata(mut body: &[u8]) -> Result<PeerProperties> {
                 props.identity = Some(Bytes::copy_from_slice(value));
             }
         } else {
-            props.other.push((name_str.to_string(), Bytes::copy_from_slice(value)));
+            props
+                .other
+                .push((name_str.to_string(), Bytes::copy_from_slice(value)));
         }
     }
     Ok(props)
@@ -708,8 +716,12 @@ mod tests {
         let mut c_out = Vec::new();
 
         // Both call start.
-        server.start(&mut s_out, dummy_props(SocketType::Pull)).unwrap();
-        client.start(&mut c_out, dummy_props(SocketType::Push)).unwrap();
+        server
+            .start(&mut s_out, dummy_props(SocketType::Pull))
+            .unwrap();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
         assert!(s_out.is_empty());
         assert_eq!(c_out.len(), 1);
 
@@ -774,7 +786,9 @@ mod tests {
 
         let mut c_out = Vec::new();
         let mut s_out = Vec::new();
-        client.start(&mut c_out, dummy_props(SocketType::Push)).unwrap();
+        client
+            .start(&mut c_out, dummy_props(SocketType::Push))
+            .unwrap();
         // Mutate one byte of the HELLO body to invalidate the signature box.
         if let Command::Unknown { name, body } = &c_out[0] {
             let mut bad = body.to_vec();

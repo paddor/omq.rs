@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
 use futures::channel::oneshot;
+use tokio::sync::mpsc;
 
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -93,7 +93,9 @@ pub fn bind(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocListener> 
     }
     Ok(InprocListener {
         name: name.to_string(),
-        endpoint: omq_proto::endpoint::Endpoint::Inproc { name: name.to_string() },
+        endpoint: omq_proto::endpoint::Endpoint::Inproc {
+            name: name.to_string(),
+        },
         snapshot,
         incoming: rx,
     })
@@ -121,9 +123,10 @@ pub async fn connect(name: &str, snapshot: InprocPeerSnapshot) -> Result<InprocC
         accept_ack: ack_tx,
     };
 
-    req_tx.send(request).await.map_err(|_| {
-        Error::InvalidEndpoint(format!("inproc binding closed: {name}"))
-    })?;
+    req_tx
+        .send(request)
+        .await
+        .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
     let listener_snapshot = ack_rx
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
@@ -191,15 +194,17 @@ mod tests {
     use omq_proto::proto::SocketType;
 
     fn snap(t: SocketType) -> InprocPeerSnapshot {
-        InprocPeerSnapshot { socket_type: t, identity: Bytes::new() }
+        InprocPeerSnapshot {
+            socket_type: t,
+            identity: Bytes::new(),
+        }
     }
 
     #[tokio::test]
     async fn bind_connect_accept_exchange() {
         let mut l = bind("test-bca", snap(SocketType::Pull)).unwrap();
-        let connector = tokio::spawn(async move {
-            connect("test-bca", snap(SocketType::Push)).await
-        });
+        let connector =
+            tokio::spawn(async move { connect("test-bca", snap(SocketType::Push)).await });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
 

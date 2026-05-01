@@ -64,4 +64,3 @@ pub trait Listener: Send + 'static {
     /// Accept the next incoming connection.
     fn accept(&mut self) -> impl Future<Output = Result<(Self::Stream, PeerIdent)>> + Send;
 }
-

@@ -50,8 +50,7 @@ async fn cancel_recv_mid_wait_then_recv_succeeds() {
     // Abandon recv() mid-flight: it has claimed the recv slot,
     // entered the read_ready/in_rx select, and is parked. Drop
     // forces a Drop on the ClaimGuard which must release the claim.
-    let cancelled =
-        compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
+    let cancelled = compio::time::timeout(Duration::from_millis(100), pull.recv()).await;
     assert!(cancelled.is_err(), "first recv should have timed out");
 
     push.send(Message::single("after-cancel")).await.unwrap();
@@ -80,7 +79,9 @@ async fn two_concurrent_recv_callers_share_messages() {
         let push = push.clone();
         compio::runtime::spawn(async move {
             for i in 0..N {
-                push.send(Message::single(format!("msg-{i}"))).await.unwrap();
+                push.send(Message::single(format!("msg-{i}")))
+                    .await
+                    .unwrap();
             }
         })
     };
@@ -108,8 +109,7 @@ async fn two_concurrent_recv_callers_share_messages() {
     let mut got: Vec<Vec<u8>> = recv_a.await.unwrap_or_default();
     got.extend(recv_b.await.unwrap_or_default());
     got.sort();
-    let mut expected: Vec<Vec<u8>> =
-        (0..N).map(|i| format!("msg-{i}").into_bytes()).collect();
+    let mut expected: Vec<Vec<u8>> = (0..N).map(|i| format!("msg-{i}").into_bytes()).collect();
     expected.sort();
     assert_eq!(got, expected);
 }
@@ -144,9 +144,7 @@ async fn heartbeat_keeps_connection_alive_under_direct_recv() {
     // side must keep the connection from timing out.
     let pull_handle = compio::runtime::spawn({
         let pull = pull.clone();
-        async move {
-            compio::time::timeout(Duration::from_secs(2), pull.recv()).await
-        }
+        async move { compio::time::timeout(Duration::from_secs(2), pull.recv()).await }
     });
 
     compio::time::sleep(Duration::from_millis(700)).await;

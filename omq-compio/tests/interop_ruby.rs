@@ -35,14 +35,14 @@ fn skip_if_no_omq() -> bool {
 /// runtime. Equivalent to tokio's `spawn_blocking` for our purposes:
 /// keeps blocking work (sync `child.wait_with_output()`) off the
 /// single-thread runtime so async sockets can keep making progress.
-async fn await_blocking<T: Send + 'static>(
-    f: impl FnOnce() -> T + Send + 'static,
-) -> T {
+async fn await_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = flume::bounded::<T>(1);
     std::thread::spawn(move || {
         let _ = tx.send(f());
     });
-    rx.recv_async().await.expect("blocking thread dropped sender")
+    rx.recv_async()
+        .await
+        .expect("blocking thread dropped sender")
 }
 
 async fn wait_with_output(child: Child) -> Output {
@@ -64,7 +64,10 @@ fn tcp_transport() -> Transport {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     Transport {
-        rust: Endpoint::Tcp { host: Host::Ip("127.0.0.1".parse().unwrap()), port },
+        rust: Endpoint::Tcp {
+            host: Host::Ip("127.0.0.1".parse().unwrap()),
+            port,
+        },
         cli: format!("tcp://127.0.0.1:{port}"),
     }
 }
@@ -74,11 +77,16 @@ fn ipc_transport(name: &str) -> Transport {
         "omq-rs-compio-interop-{name}-{}-{}.sock",
         std::process::id(),
         std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_file(&path);
     let cli = format!("ipc://{}", path.display());
-    Transport { rust: Endpoint::Ipc(IpcPath::Filesystem(path)), cli }
+    Transport {
+        rust: Endpoint::Ipc(IpcPath::Filesystem(path)),
+        cli,
+    }
 }
 
 async fn wait_for_handshake(sock: &Socket) {
@@ -87,7 +95,7 @@ async fn wait_for_handshake(sock: &Socket) {
         loop {
             match mon.recv().await {
                 Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => panic!("monitor stream closed before handshake: {e:?}"),
             }
         }
@@ -115,7 +123,9 @@ async fn rust_push_to_ruby_pull(t: Transport) {
     wait_for_handshake(&push).await;
 
     for i in 0..5 {
-        push.send(Message::single(format!("hello-{i}"))).await.unwrap();
+        push.send(Message::single(format!("hello-{i}")))
+            .await
+            .unwrap();
     }
 
     let out = wait_with_output(child).await;
@@ -129,13 +139,17 @@ async fn rust_push_to_ruby_pull(t: Transport) {
 
 #[compio::test]
 async fn rust_push_to_ruby_pull_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_push_to_ruby_pull(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn rust_push_to_ruby_pull_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_push_to_ruby_pull(ipc_transport("push-pull")).await;
 }
 
@@ -163,7 +177,10 @@ async fn ruby_push_to_rust_pull(t: Transport) {
             .await
             .expect("recv timed out")
             .unwrap();
-        assert_eq!(msg.parts()[0].coalesce(), format!("from-ruby-{i}").as_bytes());
+        assert_eq!(
+            msg.parts()[0].coalesce(),
+            format!("from-ruby-{i}").as_bytes()
+        );
     }
 
     let _ = wait_status(child).await;
@@ -171,13 +188,17 @@ async fn ruby_push_to_rust_pull(t: Transport) {
 
 #[compio::test]
 async fn ruby_push_to_rust_pull_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     ruby_push_to_rust_pull(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn ruby_push_to_rust_pull_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     ruby_push_to_rust_pull(ipc_transport("push-pull-rev")).await;
 }
 
@@ -213,13 +234,17 @@ async fn rust_req_to_ruby_rep(t: Transport) {
 
 #[compio::test]
 async fn rust_req_to_ruby_rep_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_req_to_ruby_rep(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn rust_req_to_ruby_rep_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_req_to_ruby_rep(ipc_transport("req-rep")).await;
 }
 
@@ -241,27 +266,39 @@ async fn rust_pub_to_ruby_sub(t: Transport) {
     wait_for_handshake(&pubs).await;
     compio::time::sleep(Duration::from_millis(100)).await;
 
-    pubs.send(Message::multipart(["weather.eu", "sunny"])).await.unwrap();
-    pubs.send(Message::multipart(["news.global", "ignored"])).await.unwrap();
-    pubs.send(Message::multipart(["weather.us", "rainy"])).await.unwrap();
+    pubs.send(Message::multipart(["weather.eu", "sunny"]))
+        .await
+        .unwrap();
+    pubs.send(Message::multipart(["news.global", "ignored"]))
+        .await
+        .unwrap();
+    pubs.send(Message::multipart(["weather.us", "rainy"]))
+        .await
+        .unwrap();
 
     let out = wait_with_output(child).await;
     assert!(out.status.success(), "omq sub failed: {out:?}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
         vec!["weather.eu\tsunny", "weather.us\trainy"]
     );
 }
 
 #[compio::test]
 async fn rust_pub_to_ruby_sub_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_pub_to_ruby_sub(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn rust_pub_to_ruby_sub_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_pub_to_ruby_sub(ipc_transport("pub-sub")).await;
 }
 
@@ -275,8 +312,16 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
 
     let child = Command::new("omq")
         .args([
-            "dealer", "-c", &t.cli, "--identity", "worker-7",
-            "-A", "-D", "from-dealer", "-n", "1",
+            "dealer",
+            "-c",
+            &t.cli,
+            "--identity",
+            "worker-7",
+            "-A",
+            "-D",
+            "from-dealer",
+            "-n",
+            "1",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -296,13 +341,17 @@ async fn rust_router_sees_ruby_dealer_identity(t: Transport) {
 
 #[compio::test]
 async fn rust_router_sees_ruby_dealer_identity_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_router_sees_ruby_dealer_identity(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn rust_router_sees_ruby_dealer_identity_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_router_sees_ruby_dealer_identity(ipc_transport("router-dealer")).await;
 }
 
@@ -324,26 +373,41 @@ async fn rust_radio_to_ruby_dish(t: Transport) {
     wait_for_handshake(&radio).await;
     compio::time::sleep(Duration::from_millis(100)).await;
 
-    radio.send(Message::multipart(["weather", "sunny"])).await.unwrap();
-    radio.send(Message::multipart(["news", "skipped"])).await.unwrap();
-    radio.send(Message::multipart(["weather", "rainy"])).await.unwrap();
+    radio
+        .send(Message::multipart(["weather", "sunny"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["news", "skipped"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["weather", "rainy"]))
+        .await
+        .unwrap();
 
     let out = wait_with_output(child).await;
     assert!(out.status.success(), "omq dish failed: {out:?}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
         vec!["weather\tsunny", "weather\trainy"]
     );
 }
 
 #[compio::test]
 async fn rust_radio_to_ruby_dish_tcp() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_radio_to_ruby_dish(tcp_transport()).await;
 }
 
 #[compio::test]
 async fn rust_radio_to_ruby_dish_ipc() {
-    if skip_if_no_omq() { return; }
+    if skip_if_no_omq() {
+        return;
+    }
     rust_radio_to_ruby_dish(ipc_transport("radio-dish")).await;
 }

@@ -44,9 +44,15 @@ async fn inproc_strict_precedence() {
     pull_c.bind(inproc("prio-strict-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect_with(inproc("prio-strict-a"), opts(1)).await.unwrap();
-    push.connect_with(inproc("prio-strict-b"), opts(4)).await.unwrap();
-    push.connect_with(inproc("prio-strict-c"), opts(8)).await.unwrap();
+    push.connect_with(inproc("prio-strict-a"), opts(1))
+        .await
+        .unwrap();
+    push.connect_with(inproc("prio-strict-b"), opts(4))
+        .await
+        .unwrap();
+    push.connect_with(inproc("prio-strict-c"), opts(8))
+        .await
+        .unwrap();
 
     for _ in 0..1000u32 {
         push.send(Message::single("x")).await.unwrap();
@@ -71,8 +77,12 @@ async fn inproc_saturation_fall_through() {
     pull_b.bind(inproc("prio-spill-b")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect_with(inproc("prio-spill-a"), opts(1)).await.unwrap();
-    push.connect_with(inproc("prio-spill-b"), opts(4)).await.unwrap();
+    push.connect_with(inproc("prio-spill-a"), opts(1))
+        .await
+        .unwrap();
+    push.connect_with(inproc("prio-spill-b"), opts(4))
+        .await
+        .unwrap();
 
     // Send 100 without draining A. After A's queue fills (~8), the
     // rest should spill to B.
@@ -82,7 +92,10 @@ async fn inproc_saturation_fall_through() {
 
     let a = drain(&pull_a).await;
     let b = drain(&pull_b).await;
-    assert!((8..=16).contains(&a), "A should hold around its recv_hwm; got {a}");
+    assert!(
+        (8..=16).contains(&a),
+        "A should hold around its recv_hwm; got {a}"
+    );
     assert_eq!(a + b, 100, "every send must arrive somewhere");
     assert!(b > 0, "spillover to lower-priority peer must happen");
 }
@@ -100,9 +113,15 @@ async fn inproc_equal_priorities_round_robin() {
     pull_c.bind(inproc("prio-eq-c")).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
-    push.connect_with(inproc("prio-eq-a"), opts(8)).await.unwrap();
-    push.connect_with(inproc("prio-eq-b"), opts(8)).await.unwrap();
-    push.connect_with(inproc("prio-eq-c"), opts(8)).await.unwrap();
+    push.connect_with(inproc("prio-eq-a"), opts(8))
+        .await
+        .unwrap();
+    push.connect_with(inproc("prio-eq-b"), opts(8))
+        .await
+        .unwrap();
+    push.connect_with(inproc("prio-eq-c"), opts(8))
+        .await
+        .unwrap();
 
     for _ in 0..N {
         push.send(Message::single("x")).await.unwrap();
@@ -115,7 +134,10 @@ async fn inproc_equal_priorities_round_robin() {
     // With tier round-robin, each peer should get a real share.
     // Don't assert exact 1/3; tolerate jitter.
     for (label, n) in [("a", a), ("b", b), ("c", c)] {
-        assert!(n > N / 20, "peer {label} got {n} / {N} - tier round-robin starved");
+        assert!(
+            n > N / 20,
+            "peer {label} got {n} / {N} - tier round-robin starved"
+        );
     }
 }
 
@@ -143,7 +165,10 @@ async fn tcp_strict_precedence() {
     let a = drain(&pull_a).await;
     let b = drain(&pull_b).await;
     assert_eq!(a + b, 200, "every send must arrive");
-    assert_eq!(b, 0, "priority-8 peer should be starved while priority-1 is alive");
+    assert_eq!(
+        b, 0,
+        "priority-8 peer should be starved while priority-1 is alive"
+    );
     assert_eq!(a, 200);
 }
 

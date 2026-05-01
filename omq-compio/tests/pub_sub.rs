@@ -58,14 +58,20 @@ async fn pub_sub_late_subscriber_misses_earlier() {
     let publisher = Socket::new(SocketType::Pub, Options::default());
     publisher.bind(ep.clone()).await.unwrap();
 
-    publisher.send(Message::single("pre-subscribe")).await.unwrap();
+    publisher
+        .send(Message::single("pre-subscribe"))
+        .await
+        .unwrap();
 
     let subscriber = Socket::new(SocketType::Sub, Options::default());
     subscriber.connect(ep).await.unwrap();
     subscriber.subscribe("").await.unwrap();
     wait_ready().await;
 
-    publisher.send(Message::single("post-subscribe")).await.unwrap();
+    publisher
+        .send(Message::single("post-subscribe"))
+        .await
+        .unwrap();
 
     let m = compio::time::timeout(Duration::from_millis(500), subscriber.recv())
         .await
@@ -89,7 +95,10 @@ async fn pub_sub_subscribe_all_with_empty_prefix() {
     wait_ready().await;
 
     for t in ["a", "bb", "ccc", "quux"] {
-        publisher.send(Message::single(t.to_string())).await.unwrap();
+        publisher
+            .send(Message::single(t.to_string()))
+            .await
+            .unwrap();
     }
     for expected in ["a", "bb", "ccc", "quux"] {
         let m = compio::time::timeout(Duration::from_millis(500), subscriber.recv())

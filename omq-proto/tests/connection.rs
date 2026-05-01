@@ -8,14 +8,13 @@ use bytes::Bytes;
 
 use omq_proto::error::Error;
 use omq_proto::message::Message;
+use omq_proto::proto::SocketType;
 use omq_proto::proto::command::Command;
 use omq_proto::proto::connection::{Connection, ConnectionConfig, Event, Role};
-use omq_proto::proto::SocketType;
 
 fn push_pull_pair() -> (Connection, Connection) {
     let push = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Push)
-            .identity(Bytes::from_static(b"p")),
+        ConnectionConfig::new(Role::Client, SocketType::Push).identity(Bytes::from_static(b"p")),
     );
     let pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
     (push, pull)
@@ -51,8 +50,12 @@ fn handshake_completes_on_compat_pair() {
     let lev = pull.poll_event().unwrap();
     match (pev, lev) {
         (
-            Event::HandshakeSucceeded { peer_properties: p, .. },
-            Event::HandshakeSucceeded { peer_properties: l, .. },
+            Event::HandshakeSucceeded {
+                peer_properties: p, ..
+            },
+            Event::HandshakeSucceeded {
+                peer_properties: l, ..
+            },
         ) => {
             assert_eq!(p.socket_type, Some(SocketType::Pull));
             assert_eq!(l.socket_type, Some(SocketType::Push));
@@ -127,7 +130,8 @@ fn roundtrip_multipart_message() {
     while push.poll_event().is_some() {}
     while pull.poll_event().is_some() {}
 
-    push.send_message(&Message::multipart(["a", "bb", "ccc"])).unwrap();
+    push.send_message(&Message::multipart(["a", "bb", "ccc"]))
+        .unwrap();
     pump(&mut push, &mut pull);
     match pull.poll_event().unwrap() {
         Event::Message(m) => {
@@ -169,9 +173,8 @@ fn ping_is_auto_answered_with_pong() {
 
 #[test]
 fn oversized_message_rejected() {
-    let mut a = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Pair).max_message_size(4),
-    );
+    let mut a =
+        Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair).max_message_size(4));
     let mut b = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair));
     pump(&mut a, &mut b);
     while a.poll_event().is_some() {}
@@ -224,15 +227,20 @@ fn curve_handshake_and_message_roundtrip() {
     let server_pub = server_kp.public;
 
     let mut server = Connection::new(
-        ConnectionConfig::new(Role::Server, SocketType::Pull)
-            .mechanism(MechanismSetup::CurveServer { keypair: server_kp, authenticator: None }),
+        ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+            MechanismSetup::CurveServer {
+                keypair: server_kp,
+                authenticator: None,
+            },
+        ),
     );
     let mut client = Connection::new(
-        ConnectionConfig::new(Role::Client, SocketType::Push)
-            .mechanism(MechanismSetup::CurveClient {
+        ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+            MechanismSetup::CurveClient {
                 keypair: client_kp,
                 server_public: server_pub,
-            }),
+            },
+        ),
     );
 
     for i in 0..10 {
@@ -244,10 +252,14 @@ fn curve_handshake_and_message_roundtrip() {
         server.advance_transmit(s_out.len());
         client.advance_transmit(c_out.len());
         if !s_out.is_empty() {
-            client.handle_input(&s_out).expect("client accepts server bytes");
+            client
+                .handle_input(&s_out)
+                .expect("client accepts server bytes");
         }
         if !c_out.is_empty() {
-            server.handle_input(&c_out).expect("server accepts client bytes");
+            server
+                .handle_input(&c_out)
+                .expect("server accepts client bytes");
         }
     }
     assert!(server.is_ready(), "server must reach Ready");

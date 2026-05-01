@@ -24,11 +24,11 @@ use smallvec::SmallVec;
 use crate::error::{Error, Result};
 use crate::message::{Message, Payload};
 
-use super::common::{
-    build_dict_shipment, plaintext_payload, take_budget, validate_dict, ENVELOPE_PLAIN,
-    SENTINEL_PLAIN,
-};
 use super::TransformedOut;
+use super::common::{
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, build_dict_shipment, plaintext_payload, take_budget,
+    validate_dict,
+};
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
 const SENTINEL_LZ4D: [u8; 4] = *b"LZ4D";
@@ -406,7 +406,10 @@ mod tests {
         assert!(bytes.len() - 12 < plain.len() / 4);
 
         let mut dec = Lz4Transform::new();
-        let out = dec.decode(wire.into_iter().next().unwrap()).unwrap().unwrap();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
     }
 
@@ -421,7 +424,10 @@ mod tests {
         let wire = enc.encode(&msg).unwrap();
         let bytes = wire[0].parts()[0].coalesce();
         let mut dec = Lz4Transform::new();
-        let out = dec.decode(wire.into_iter().next().unwrap()).unwrap().unwrap();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
         assert!(bytes[..4] == SENTINEL_PLAIN || bytes[..4] == SENTINEL_LZ4B);
     }
@@ -438,7 +444,10 @@ mod tests {
         let wire = enc.encode(&msg).unwrap();
         assert_eq!(wire[0].len(), 3);
         let mut dec = Lz4Transform::new();
-        let out = dec.decode(wire.into_iter().next().unwrap()).unwrap().unwrap();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out.parts()[0].coalesce(), &b"meta"[..]);
         assert_eq!(out.parts()[1].coalesce().to_vec(), big);
@@ -544,7 +553,10 @@ mod tests {
         let mut enc = Lz4Transform::new();
         let mut dec = Lz4Transform::new();
         let wire = enc.encode(&Message::single(plain.clone())).unwrap();
-        let out = dec.decode(wire.into_iter().next().unwrap()).unwrap().unwrap();
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(out.parts()[0].coalesce().to_vec(), plain);
     }
 

@@ -101,7 +101,10 @@ async fn dish_leave_stops_delivery() {
     dish.join("g").await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["g", "first"])).await.unwrap();
+    radio
+        .send(Message::multipart(["g", "first"]))
+        .await
+        .unwrap();
     let m = tokio::time::timeout(Duration::from_millis(500), dish.recv())
         .await
         .unwrap()
@@ -111,7 +114,10 @@ async fn dish_leave_stops_delivery() {
     dish.leave("g").await.unwrap();
     wait().await;
 
-    radio.send(Message::multipart(["g", "second"])).await.unwrap();
+    radio
+        .send(Message::multipart(["g", "second"]))
+        .await
+        .unwrap();
     let r = tokio::time::timeout(Duration::from_millis(150), dish.recv()).await;
     assert!(r.is_err(), "after leave the group should no longer deliver");
 }

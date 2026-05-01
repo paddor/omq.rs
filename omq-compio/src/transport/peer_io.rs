@@ -21,9 +21,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use compio::BufResult;
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream, UnixStream};
-use compio::BufResult;
 
 use omq_proto::proto::connection::Connection;
 use omq_proto::proto::transform::MessageTransform;
@@ -46,10 +46,7 @@ impl WireReader {
     /// Read into the provided buffer; on completion the buffer is
     /// returned alongside the result so callers can reuse the
     /// allocation.
-    pub(crate) async fn read(
-        &mut self,
-        buf: Vec<u8>,
-    ) -> (std::io::Result<usize>, Vec<u8>) {
+    pub(crate) async fn read(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
         match self {
             Self::Tcp(r) => {
                 let BufResult(res, buf) = r.read(buf).await;
@@ -92,10 +89,7 @@ impl WireWriter {
     /// implements `IoVectoredBuf` (via the `bytes` feature on
     /// compio-buf), so the codec's owned chunks go straight into
     /// the syscall - no manual `iovec` construction.
-    pub(crate) async fn write_vectored(
-        &mut self,
-        bufs: Vec<Bytes>,
-    ) -> std::io::Result<usize> {
+    pub(crate) async fn write_vectored(&mut self, bufs: Vec<Bytes>) -> std::io::Result<usize> {
         match self {
             Self::Tcp(w) => {
                 let BufResult(res, _) = w.write_vectored(bufs).await;

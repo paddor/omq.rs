@@ -15,7 +15,10 @@ use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 use omq_proto::endpoint::{Host, IpcPath};
 
 fn tcp_ep(port: u16) -> Endpoint {
-    Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port }
+    Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
@@ -33,8 +36,13 @@ fn ipc_ep(name: &str) -> Endpoint {
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc {
-        name: format!("cov-{name}-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+        name: format!(
+            "cov-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ),
     }
 }
 
@@ -68,10 +76,16 @@ async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(client_ep).await.unwrap();
     req.send(Message::single("q")).await.unwrap();
-    let q = compio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = compio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
 }
 
@@ -86,7 +100,9 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     wait().await;
     dealer.send(Message::single("hi")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), router.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
 }
@@ -97,7 +113,10 @@ async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     let b = Socket::new(SocketType::Pair, Options::default());
     b.connect(client_ep).await.unwrap();
     a.send(Message::single("x")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), b.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"x"[..]);
 }
 
@@ -129,7 +148,9 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     wait().await;
     client.send(Message::single("ping")).await.unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), server.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"c1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"ping"[..]);
 }
@@ -141,7 +162,10 @@ async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     s.connect(client_ep).await.unwrap();
     wait().await;
     s.send(Message::single("m")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), g.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), g.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"m"[..]);
 }
 
@@ -152,20 +176,30 @@ async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     b.connect(client_ep).await.unwrap();
     wait().await;
     a.send(Message::single("hi")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), b.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
 }
 
 async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
-    let a = Socket::new(SocketType::Peer, Options::default()
-        .identity(Bytes::from_static(b"pa")));
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pa")),
+    );
     a.bind(server_ep).await.unwrap();
-    let b = Socket::new(SocketType::Peer, Options::default()
-        .identity(Bytes::from_static(b"pb")));
+    let b = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pb")),
+    );
     b.connect(client_ep).await.unwrap();
     wait().await;
     b.send(Message::multipart(["pa", "hi a"])).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), a.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), a.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"pb"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi a"[..]);
 }
@@ -174,40 +208,148 @@ async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
 // Inproc cells
 // =====================================================================
 
-#[compio::test] async fn push_pull_inproc()       { let ep = inproc_ep("pp"); push_pull_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn req_rep_inproc()         { let ep = inproc_ep("rr"); req_rep_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn dealer_router_inproc()   { let ep = inproc_ep("dr"); dealer_router_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn pair_inproc()            { let ep = inproc_ep("pair"); pair_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn pub_sub_inproc()         { let ep = inproc_ep("ps"); pub_sub_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn client_server_inproc()   { let ep = inproc_ep("cs"); client_server_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn scatter_gather_inproc()  { let ep = inproc_ep("sg"); scatter_gather_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn channel_inproc()         { let ep = inproc_ep("ch"); channel_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn peer_inproc()            { let ep = inproc_ep("pp"); peer_roundtrip(ep.clone(), ep).await; }
+#[compio::test]
+async fn push_pull_inproc() {
+    let ep = inproc_ep("pp");
+    push_pull_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn req_rep_inproc() {
+    let ep = inproc_ep("rr");
+    req_rep_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn dealer_router_inproc() {
+    let ep = inproc_ep("dr");
+    dealer_router_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn pair_inproc() {
+    let ep = inproc_ep("pair");
+    pair_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn pub_sub_inproc() {
+    let ep = inproc_ep("ps");
+    pub_sub_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn client_server_inproc() {
+    let ep = inproc_ep("cs");
+    client_server_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn scatter_gather_inproc() {
+    let ep = inproc_ep("sg");
+    scatter_gather_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn channel_inproc() {
+    let ep = inproc_ep("ch");
+    channel_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn peer_inproc() {
+    let ep = inproc_ep("pp");
+    peer_roundtrip(ep.clone(), ep).await;
+}
 
 // =====================================================================
 // IPC cells
 // =====================================================================
 
-#[compio::test] async fn push_pull_ipc()          { let ep = ipc_ep("pp"); push_pull_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn req_rep_ipc()            { let ep = ipc_ep("rr"); req_rep_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn dealer_router_ipc()      { let ep = ipc_ep("dr"); dealer_router_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn pair_ipc()               { let ep = ipc_ep("pair"); pair_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn pub_sub_ipc()            { let ep = ipc_ep("ps"); pub_sub_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn client_server_ipc()      { let ep = ipc_ep("cs"); client_server_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn scatter_gather_ipc()     { let ep = ipc_ep("sg"); scatter_gather_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn channel_ipc()            { let ep = ipc_ep("ch"); channel_roundtrip(ep.clone(), ep).await; }
-#[compio::test] async fn peer_ipc()               { let ep = ipc_ep("pp"); peer_roundtrip(ep.clone(), ep).await; }
+#[compio::test]
+async fn push_pull_ipc() {
+    let ep = ipc_ep("pp");
+    push_pull_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn req_rep_ipc() {
+    let ep = ipc_ep("rr");
+    req_rep_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn dealer_router_ipc() {
+    let ep = ipc_ep("dr");
+    dealer_router_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn pair_ipc() {
+    let ep = ipc_ep("pair");
+    pair_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn pub_sub_ipc() {
+    let ep = ipc_ep("ps");
+    pub_sub_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn client_server_ipc() {
+    let ep = ipc_ep("cs");
+    client_server_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn scatter_gather_ipc() {
+    let ep = ipc_ep("sg");
+    scatter_gather_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn channel_ipc() {
+    let ep = ipc_ep("ch");
+    channel_roundtrip(ep.clone(), ep).await;
+}
+#[compio::test]
+async fn peer_ipc() {
+    let ep = ipc_ep("pp");
+    peer_roundtrip(ep.clone(), ep).await;
+}
 
 // =====================================================================
 // TCP cells
 // =====================================================================
 
-#[compio::test] async fn push_pull_tcp()          { let p = free_tcp_port(); push_pull_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn req_rep_tcp()            { let p = free_tcp_port(); req_rep_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn dealer_router_tcp()      { let p = free_tcp_port(); dealer_router_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn pair_tcp()               { let p = free_tcp_port(); pair_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn pub_sub_tcp()            { let p = free_tcp_port(); pub_sub_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn client_server_tcp()      { let p = free_tcp_port(); client_server_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn scatter_gather_tcp()     { let p = free_tcp_port(); scatter_gather_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn channel_tcp()            { let p = free_tcp_port(); channel_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[compio::test] async fn peer_tcp()               { let p = free_tcp_port(); peer_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
+#[compio::test]
+async fn push_pull_tcp() {
+    let p = free_tcp_port();
+    push_pull_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn req_rep_tcp() {
+    let p = free_tcp_port();
+    req_rep_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn dealer_router_tcp() {
+    let p = free_tcp_port();
+    dealer_router_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn pair_tcp() {
+    let p = free_tcp_port();
+    pair_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn pub_sub_tcp() {
+    let p = free_tcp_port();
+    pub_sub_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn client_server_tcp() {
+    let p = free_tcp_port();
+    client_server_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn scatter_gather_tcp() {
+    let p = free_tcp_port();
+    scatter_gather_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn channel_tcp() {
+    let p = free_tcp_port();
+    channel_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[compio::test]
+async fn peer_tcp() {
+    let p = free_tcp_port();
+    peer_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}

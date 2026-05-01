@@ -25,7 +25,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use chacha20_blake3::ChaCha20Blake3;
-use crypto_box::{aead::Aead, SalsaBox, SecretKey};
+use crypto_box::{SalsaBox, SecretKey, aead::Aead};
 
 const SIZES: &[usize] = &[64, 256, 1024, 4096, 16384, 65536];
 
@@ -37,10 +37,11 @@ const TARGET_NS_PER_CELL: u64 = 200_000_000; // 200 ms
 
 fn main() {
     println!("Mechanism per-frame microbench");
+    println!("primitives: NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3)");
     println!(
-        "primitives: NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3)"
+        "target wall-time per cell: ~{} ms\n",
+        TARGET_NS_PER_CELL / 1_000_000
     );
-    println!("target wall-time per cell: ~{} ms\n", TARGET_NS_PER_CELL / 1_000_000);
 
     println!(
         "  {:>6} | {:>14} | {:>14} | {:>14}",

@@ -57,9 +57,7 @@ pub(crate) enum SendSubmitter {
 impl SendSubmitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         match self {
-            Self::None => Err(Error::Protocol(
-                "socket type does not support send".into(),
-            )),
+            Self::None => Err(Error::Protocol("socket type does not support send".into())),
             Self::RoundRobin(s) => s.send(msg).await,
             Self::FanOut(s) => s.send(msg).await,
             Self::Identity(s) => s.send(msg).await,
@@ -81,9 +79,7 @@ impl SendStrategy {
                 Self::FanOut(FanOutSend::new(options, FanOutMode::SubscriptionPrefix))
             }
             // Fan-out send (group-based, RADIO).
-            SocketType::Radio => {
-                Self::FanOut(FanOutSend::new(options, FanOutMode::Group))
-            }
+            SocketType::Radio => Self::FanOut(FanOutSend::new(options, FanOutMode::Group)),
             // Identity-routed send.
             SocketType::Router | SocketType::Rep | SocketType::Server | SocketType::Peer => {
                 Self::Identity(IdentitySend::new(options))
@@ -213,10 +209,7 @@ pub(crate) enum RecvStrategy {
 }
 
 impl RecvStrategy {
-    pub(crate) fn for_socket_type(
-        t: SocketType,
-        recv_tx: async_channel::Sender<Message>,
-    ) -> Self {
+    pub(crate) fn for_socket_type(t: SocketType, recv_tx: async_channel::Sender<Message>) -> Self {
         match t {
             // Send-only types.
             SocketType::Push | SocketType::Pub | SocketType::Radio | SocketType::Scatter => {
@@ -261,11 +254,7 @@ impl RecvStrategy {
     /// unchanged. Used when the `type_state` needs to post-process (REQ,
     /// REP) rather than hitting the recv channel directly.
     #[allow(clippy::unused_async)]
-    pub(crate) async fn wrap_for_transform(
-        &self,
-        peer_id: u64,
-        msg: Message,
-    ) -> Option<Message> {
+    pub(crate) async fn wrap_for_transform(&self, peer_id: u64, msg: Message) -> Option<Message> {
         match self {
             Self::None => None,
             Self::FairQueue(_) => Some(msg),
@@ -319,7 +308,9 @@ pub(crate) fn supports_conflate(t: SocketType) -> bool {
 /// `conflate` is set, both are forced to (1, `DropOldest`) - that
 /// gives the "queue is just the latest message" semantics
 /// regardless of the user's other settings.
-pub(crate) fn effective_queue_params(options: &omq_proto::options::Options) -> (usize, omq_proto::options::OnMute) {
+pub(crate) fn effective_queue_params(
+    options: &omq_proto::options::Options,
+) -> (usize, omq_proto::options::OnMute) {
     if options.conflate {
         (1, omq_proto::options::OnMute::DropOldest)
     } else {

@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use futures::channel::oneshot;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use omq_proto::endpoint::Endpoint;
@@ -49,9 +49,8 @@ impl Socket {
         // recv-side adaptation needs a drop-oldest async_channel
         // wrapper that's not yet in place; recv_hwm is honored as
         // before. The headline PUB-conflate use case works.
-        let (recv_tx, recv_rx) = async_channel::bounded::<Message>(
-            options.recv_hwm.unwrap_or(1024).max(16) as usize,
-        );
+        let (recv_tx, recv_rx) =
+            async_channel::bounded::<Message>(options.recv_hwm.unwrap_or(1024).max(16) as usize);
         let monitor = MonitorPublisher::new();
         let driver = SocketDriver::new(
             socket_type,
@@ -188,7 +187,10 @@ impl Socket {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Subscribe { prefix: prefix.into(), ack })
+            .send(SocketCommand::Subscribe {
+                prefix: prefix.into(),
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
@@ -200,7 +202,10 @@ impl Socket {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Unsubscribe { prefix: prefix.into(), ack })
+            .send(SocketCommand::Unsubscribe {
+                prefix: prefix.into(),
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
@@ -212,7 +217,10 @@ impl Socket {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Join { group: group.into(), ack })
+            .send(SocketCommand::Join {
+                group: group.into(),
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
@@ -223,7 +231,10 @@ impl Socket {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Leave { group: group.into(), ack })
+            .send(SocketCommand::Leave {
+                group: group.into(),
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?

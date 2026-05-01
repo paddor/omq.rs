@@ -31,7 +31,12 @@ impl Session {
         nonce_prefix.copy_from_slice(&initial_nonce[..NONCE_PREFIX_LEN]);
         let counter_base =
             u64::from_le_bytes(initial_nonce[NONCE_PREFIX_LEN..].try_into().unwrap());
-        Self { key, nonce_prefix, counter_base, counter: 0 }
+        Self {
+            key,
+            nonce_prefix,
+            counter_base,
+            counter: 0,
+        }
     }
 
     /// Construct the per-message nonce: `nonce_prefix || (counter_base + counter) LE`.
@@ -49,9 +54,10 @@ impl Session {
         // counter reaches 2^64. We start at 0 and bump after each use,
         // so the disallowed value is `u64::MAX + 1` (overflow). Refuse
         // to advance past that boundary.
-        self.counter = self.counter.checked_add(1).ok_or_else(|| {
-            Error::HandshakeFailed("BLAKE3ZMQ session counter exhausted".into())
-        })?;
+        self.counter = self
+            .counter
+            .checked_add(1)
+            .ok_or_else(|| Error::HandshakeFailed("BLAKE3ZMQ session counter exhausted".into()))?;
         Ok(())
     }
 }

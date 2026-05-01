@@ -47,7 +47,10 @@ fn tcp_transport() -> Transport {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     Transport {
-        rust: Endpoint::Tcp { host: Host::Ip("127.0.0.1".parse().unwrap()), port },
+        rust: Endpoint::Tcp {
+            host: Host::Ip("127.0.0.1".parse().unwrap()),
+            port,
+        },
         cli: format!("tcp://127.0.0.1:{port}"),
     }
 }
@@ -66,7 +69,10 @@ fn ipc_transport(name: &str) -> Transport {
     // Stale leftover from a previous run would prevent bind.
     let _ = std::fs::remove_file(&path);
     let cli = format!("ipc://{}", path.display());
-    Transport { rust: Endpoint::Ipc(IpcPath::Filesystem(path)), cli }
+    Transport {
+        rust: Endpoint::Ipc(IpcPath::Filesystem(path)),
+        cli,
+    }
 }
 
 /// Wait until the socket reports a successful ZMTP handshake with at least
@@ -78,7 +84,7 @@ async fn wait_for_handshake(sock: &Socket) {
         loop {
             match mon.recv().await {
                 Ok(MonitorEvent::HandshakeSucceeded { .. }) => return,
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => panic!("monitor stream closed before handshake: {e:?}"),
             }
         }
@@ -106,7 +112,9 @@ async fn rust_push_to_ruby_pull(t: Transport) {
     wait_for_handshake(&push).await;
 
     for i in 0..5 {
-        push.send(Message::single(format!("hello-{i}"))).await.unwrap();
+        push.send(Message::single(format!("hello-{i}")))
+            .await
+            .unwrap();
     }
 
     let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
@@ -160,7 +168,10 @@ async fn ruby_push_to_rust_pull(t: Transport) {
             .await
             .expect("recv timed out")
             .unwrap();
-        assert_eq!(msg.parts()[0].coalesce(), format!("from-ruby-{i}").as_bytes());
+        assert_eq!(
+            msg.parts()[0].coalesce(),
+            format!("from-ruby-{i}").as_bytes()
+        );
     }
 
     let _ = tokio::task::spawn_blocking(move || child.wait().unwrap())
@@ -253,16 +264,24 @@ async fn rust_pub_to_ruby_sub(t: Transport) {
     // publish so the topic table has the prefix registered.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    pubs.send(Message::multipart(["weather.eu", "sunny"])).await.unwrap();
-    pubs.send(Message::multipart(["news.global", "ignored"])).await.unwrap();
-    pubs.send(Message::multipart(["weather.us", "rainy"])).await.unwrap();
+    pubs.send(Message::multipart(["weather.eu", "sunny"]))
+        .await
+        .unwrap();
+    pubs.send(Message::multipart(["news.global", "ignored"]))
+        .await
+        .unwrap();
+    pubs.send(Message::multipart(["weather.us", "rainy"]))
+        .await
+        .unwrap();
 
     let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
         .await
         .unwrap();
     assert!(out.status.success(), "omq sub failed: {out:?}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
         vec!["weather.eu\tsunny", "weather.us\trainy"]
     );
 }
@@ -362,16 +381,27 @@ async fn rust_radio_to_ruby_dish(t: Transport) {
     // JOIN command lands shortly after the handshake.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    radio.send(Message::multipart(["weather", "sunny"])).await.unwrap();
-    radio.send(Message::multipart(["news", "skipped"])).await.unwrap();
-    radio.send(Message::multipart(["weather", "rainy"])).await.unwrap();
+    radio
+        .send(Message::multipart(["weather", "sunny"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["news", "skipped"]))
+        .await
+        .unwrap();
+    radio
+        .send(Message::multipart(["weather", "rainy"]))
+        .await
+        .unwrap();
 
     let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
         .await
         .unwrap();
     assert!(out.status.success(), "omq dish failed: {out:?}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
         vec!["weather\tsunny", "weather\trainy"]
     );
 }

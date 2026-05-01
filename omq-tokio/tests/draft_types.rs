@@ -53,9 +53,7 @@ async fn client_rejects_multipart_send() {
     let ep = inproc_ep("draft-client-multi");
     let client = Socket::new(SocketType::Client, Options::default());
     client.bind(ep).await.unwrap();
-    let r = client
-        .send(Message::multipart(["a", "b"]))
-        .await;
+    let r = client.send(Message::multipart(["a", "b"])).await;
     assert!(matches!(r, Err(Error::Protocol(_))), "got {r:?}");
 }
 
@@ -80,7 +78,10 @@ async fn scatter_gather_single_frame_roundtrip() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..3 {
-        scatter.send(Message::single(format!("m{i}"))).await.unwrap();
+        scatter
+            .send(Message::single(format!("m{i}")))
+            .await
+            .unwrap();
     }
     for i in 0..3 {
         let m = tokio::time::timeout(Duration::from_millis(500), gather.recv())
@@ -149,7 +150,9 @@ async fn peer_bidirectional_identity_routing() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // PEER is multi-part-capable; first frame is routing identity.
-    b.send(Message::multipart(["peer-a", "hello a"])).await.unwrap();
+    b.send(Message::multipart(["peer-a", "hello a"]))
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), a.recv())
         .await
         .unwrap()
@@ -157,7 +160,9 @@ async fn peer_bidirectional_identity_routing() {
     assert_eq!(got.parts()[0].coalesce(), &b"peer-b"[..]);
     assert_eq!(got.parts()[1].coalesce(), &b"hello a"[..]);
 
-    a.send(Message::multipart(["peer-b", "hello b"])).await.unwrap();
+    a.send(Message::multipart(["peer-b", "hello b"]))
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), b.recv())
         .await
         .unwrap()

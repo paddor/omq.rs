@@ -39,7 +39,10 @@ pub enum Command {
     /// SUB/XSUB cancelled this topic prefix.
     Cancel(Bytes),
     /// Heartbeat PING (ZMTP 3.1+).
-    Ping { ttl_deciseconds: u16, context: Bytes },
+    Ping {
+        ttl_deciseconds: u16,
+        context: Bytes,
+    },
     /// Heartbeat PONG (ZMTP 3.1+), echoes the sender's context.
     Pong { context: Bytes },
     /// Peer-signalled protocol error.
@@ -133,7 +136,10 @@ pub fn encode(cmd: &Command, out: &mut BytesMut) {
             write_name(out, NAME_CANCEL);
             out.put_slice(prefix);
         }
-        Command::Ping { ttl_deciseconds, context } => {
+        Command::Ping {
+            ttl_deciseconds,
+            context,
+        } => {
             write_name(out, NAME_PING);
             out.put_u16(*ttl_deciseconds);
             out.put_slice(context);
@@ -236,7 +242,10 @@ fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut) {
 
 fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
     assert!(u8::try_from(name.len()).is_ok(), "property name too long");
-    assert!(u32::try_from(value.len()).is_ok(), "property value too long");
+    assert!(
+        u32::try_from(value.len()).is_ok(),
+        "property value too long"
+    );
     out.put_u8(name.len() as u8);
     out.put_slice(name);
     out.put_u32(value.len() as u32);
@@ -263,9 +272,8 @@ fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties> {
         let value = body.slice(val_start..val_start + value_len);
         body = body.slice(val_start + value_len..);
 
-        let name_str = std::str::from_utf8(&name).map_err(|_| {
-            Error::Protocol("READY property name not ASCII".into())
-        })?;
+        let name_str = std::str::from_utf8(&name)
+            .map_err(|_| Error::Protocol("READY property name not ASCII".into()))?;
         if name_str.eq_ignore_ascii_case("Socket-Type") {
             let t = SocketType::from_wire(&value).ok_or_else(|| {
                 Error::Protocol(format!(
@@ -295,7 +303,10 @@ fn decode_ping(body: Bytes) -> Result<Command> {
     if context.len() > PING_CONTEXT_MAX {
         return Err(Error::Protocol("PING context too long".into()));
     }
-    Ok(Command::Ping { ttl_deciseconds: ttl, context })
+    Ok(Command::Ping {
+        ttl_deciseconds: ttl,
+        context,
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -373,14 +384,19 @@ mod tests {
             context: Bytes::from_static(b"ctx"),
         });
         match p {
-            Command::Ping { ttl_deciseconds, context } => {
+            Command::Ping {
+                ttl_deciseconds,
+                context,
+            } => {
                 assert_eq!(ttl_deciseconds, 600);
                 assert_eq!(&context[..], b"ctx");
             }
             _ => panic!(),
         }
 
-        let pong = roundtrip(Command::Pong { context: Bytes::from_static(b"ctx") });
+        let pong = roundtrip(Command::Pong {
+            context: Bytes::from_static(b"ctx"),
+        });
         assert!(matches!(pong, Command::Pong { context } if &context[..] == b"ctx"));
     }
 
@@ -391,15 +407,14 @@ mod tests {
         buf.put_slice(NAME_PING);
         buf.put_u16(0);
         buf.put_bytes(0xAA, PING_CONTEXT_MAX + 1);
-        assert!(matches!(
-            decode(buf.freeze()),
-            Err(Error::Protocol(_))
-        ));
+        assert!(matches!(decode(buf.freeze()), Err(Error::Protocol(_))));
     }
 
     #[test]
     fn error_command() {
-        let cmd = Command::Error { reason: "oops".into() };
+        let cmd = Command::Error {
+            reason: "oops".into(),
+        };
         match roundtrip(cmd) {
             Command::Error { reason } => assert_eq!(reason, "oops"),
             _ => panic!(),
@@ -446,7 +461,19 @@ mod tests {
             Command::Subscribe(Bytes::new()).kind(),
             CommandKind::Subscribe
         );
-        assert_eq!(Command::Pong { context: Bytes::new() }.kind(), CommandKind::Pong);
-        assert_eq!(Command::Error { reason: String::new() }.kind(), CommandKind::Error);
+        assert_eq!(
+            Command::Pong {
+                context: Bytes::new()
+            }
+            .kind(),
+            CommandKind::Pong
+        );
+        assert_eq!(
+            Command::Error {
+                reason: String::new()
+            }
+            .kind(),
+            CommandKind::Error
+        );
     }
 }

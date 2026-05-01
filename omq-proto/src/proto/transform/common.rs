@@ -26,7 +26,10 @@ pub(super) const ENVELOPE_PLAIN: usize = 4;
 pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()> {
     if let Some(left) = budget {
         if take > *left {
-            return Err(Error::MessageTooLarge { size: take, max: *left });
+            return Err(Error::MessageTooLarge {
+                size: take,
+                max: *left,
+            });
         }
         *left -= take;
     }

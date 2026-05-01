@@ -88,19 +88,27 @@ impl AsyncWrite for AnyStream {
 /// pre-paired Message channel (inproc - runs the codec-less
 /// `InprocPeerDriver`).
 pub(crate) enum AnyConn {
-    ByteStream { stream: AnyStream, peer_ident: PeerIdent },
-    Inproc { conn: InprocConn, peer_ident: PeerIdent },
+    ByteStream {
+        stream: AnyStream,
+        peer_ident: PeerIdent,
+    },
+    Inproc {
+        conn: InprocConn,
+        peer_ident: PeerIdent,
+    },
 }
 
 impl std::fmt::Debug for AnyConn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ByteStream { peer_ident, .. } => {
-                f.debug_struct("AnyConn::ByteStream").field("peer_ident", peer_ident).finish()
-            }
-            Self::Inproc { peer_ident, .. } => {
-                f.debug_struct("AnyConn::Inproc").field("peer_ident", peer_ident).finish()
-            }
+            Self::ByteStream { peer_ident, .. } => f
+                .debug_struct("AnyConn::ByteStream")
+                .field("peer_ident", peer_ident)
+                .finish(),
+            Self::Inproc { peer_ident, .. } => f
+                .debug_struct("AnyConn::Inproc")
+                .field("peer_ident", peer_ident)
+                .finish(),
         }
     }
 }
@@ -161,9 +169,10 @@ pub(super) async fn bind_any(
         ));
     }
     match endpoint {
-        Endpoint::Inproc { name } => {
-            Ok(AnyListener::Inproc(inproc_transport::bind(name, snapshot.clone())?))
-        }
+        Endpoint::Inproc { name } => Ok(AnyListener::Inproc(inproc_transport::bind(
+            name,
+            snapshot.clone(),
+        )?)),
         Endpoint::Ipc(_) => Ok(AnyListener::Ipc(IpcTransport::bind(endpoint).await?)),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
     }
@@ -177,7 +186,10 @@ pub(super) async fn connect_any(
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);
-        return Ok(AnyConn::ByteStream { stream: AnyStream::Tcp(s), peer_ident });
+        return Ok(AnyConn::ByteStream {
+            stream: AnyStream::Tcp(s),
+            peer_ident,
+        });
     }
     match endpoint {
         Endpoint::Inproc { name } => {
@@ -190,7 +202,10 @@ pub(super) async fn connect_any(
         Endpoint::Ipc(_) => {
             let s = IpcTransport::connect(endpoint).await?;
             let peer_ident = peer_ident_for_endpoint(endpoint);
-            Ok(AnyConn::ByteStream { stream: AnyStream::Ipc(s), peer_ident })
+            Ok(AnyConn::ByteStream {
+                stream: AnyStream::Ipc(s),
+                peer_ident,
+            })
         }
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
     }

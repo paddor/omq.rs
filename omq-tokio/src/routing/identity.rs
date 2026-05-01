@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::DriverHandle;
 use omq_proto::error::{Error, Result};
-use omq_proto::message::{Message, Payload, MESSAGE_INLINE_PARTS};
+use omq_proto::message::{MESSAGE_INLINE_PARTS, Message, Payload};
 use omq_proto::options::Options;
 
 use super::drop_queue::DropQueue;
@@ -113,7 +113,10 @@ impl IdentitySend {
                 peers: HashMap::new(),
                 identity_to_peer: HashMap::new(),
             })),
-            defaults: Defaults { hwm, on_mute: options.on_mute },
+            defaults: Defaults {
+                hwm,
+                on_mute: options.on_mute,
+            },
             router_mandatory: options.router_mandatory,
             root_cancel: CancellationToken::new(),
         }
@@ -127,12 +130,7 @@ impl IdentitySend {
     }
 
     /// Register a peer under its declared (or generated) identity.
-    pub(crate) fn connection_added(
-        &mut self,
-        peer_id: u64,
-        handle: DriverHandle,
-        identity: Bytes,
-    ) {
+    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle, identity: Bytes) {
         let (queue, rx) = DropQueue::new(self.defaults.hwm, self.defaults.on_mute);
         let pump_cancel = self.root_cancel.child_token();
         let pc_clone = pump_cancel.clone();

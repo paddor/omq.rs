@@ -15,8 +15,8 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use rand::{Rng, RngCore, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, RngCore, SeedableRng};
 
 use omq_tokio::{Endpoint, IpcPath, Message, OnMute, Options, Socket, SocketType};
 
@@ -42,7 +42,9 @@ fn iters() -> usize {
 
 fn random_inproc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.r#gen();
-    Endpoint::Inproc { name: format!("fuzz-{id:x}") }
+    Endpoint::Inproc {
+        name: format!("fuzz-{id:x}"),
+    }
 }
 
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
@@ -63,10 +65,7 @@ async fn fuzz_pub_sub_action_sequences() {
             random_ipc(&mut rng)
         };
 
-        let pub_ = Socket::new(
-            SocketType::Pub,
-            Options::default().on_mute(OnMute::Block),
-        );
+        let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
         pub_.bind(ep.clone()).await.unwrap();
 
         let n_subs = rng.gen_range(1..=4);
@@ -181,11 +180,7 @@ async fn fuzz_push_pull_action_sequences() {
                     let _ = pushes[i].connections().await;
                 }
                 _ => {
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(20),
-                        pull.recv(),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(Duration::from_millis(20), pull.recv()).await;
                 }
             }
         }

@@ -22,7 +22,9 @@ async fn pull_on_loopback() -> (Socket, Endpoint) {
         .unwrap()
         .unwrap();
     let port = match ev {
-        MonitorEvent::Listening { endpoint: Endpoint::ZstdTcp { port, .. } } => port,
+        MonitorEvent::Listening {
+            endpoint: Endpoint::ZstdTcp { port, .. },
+        } => port,
         other => panic!("unexpected {other:?}"),
     };
     let connect_ep = Endpoint::ZstdTcp {
@@ -104,7 +106,9 @@ async fn dict_roundtrip_small_payload() {
         .unwrap()
         .unwrap();
     let port = match ev {
-        MonitorEvent::Listening { endpoint: Endpoint::ZstdTcp { port, .. } } => port,
+        MonitorEvent::Listening {
+            endpoint: Endpoint::ZstdTcp { port, .. },
+        } => port,
         other => panic!("unexpected {other:?}"),
     };
 

@@ -54,18 +54,17 @@ async fn handshake_succeeded_seen_on_both_sides() {
     let mut client_done = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !(server_done && client_done) {
-        assert!(std::time::Instant::now() <= deadline, "timed out: server_done={server_done} client_done={client_done}");
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "timed out: server_done={server_done} client_done={client_done}"
+        );
         if !server_done {
-            if let Some(MonitorEvent::HandshakeSucceeded { .. }) =
-                next_event(&mut server_m).await
-            {
+            if let Some(MonitorEvent::HandshakeSucceeded { .. }) = next_event(&mut server_m).await {
                 server_done = true;
             }
         }
         if !client_done {
-            if let Some(MonitorEvent::HandshakeSucceeded { .. }) =
-                next_event(&mut client_m).await
-            {
+            if let Some(MonitorEvent::HandshakeSucceeded { .. }) = next_event(&mut client_m).await {
                 client_done = true;
             }
         }

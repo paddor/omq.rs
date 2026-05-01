@@ -102,8 +102,7 @@ async fn zstd_auto_train_end_to_end() {
     );
     push.connect(ep).await.unwrap();
 
-    let sample =
-        br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
+    let sample = br#"{"event":"login","user":"alice","ip":"10.0.0.1","ok":true}"#;
     for _ in 0..1500 {
         push.send(Message::single(sample.as_slice())).await.unwrap();
     }
@@ -114,5 +113,8 @@ async fn zstd_auto_train_end_to_end() {
         assert_eq!(m.parts()[0].coalesce(), &sample[..]);
         got += 1;
     }
-    assert!(got >= 1000, "auto-train flow lost too many messages: got {got}");
+    assert!(
+        got >= 1000,
+        "auto-train flow lost too many messages: got {got}"
+    );
 }

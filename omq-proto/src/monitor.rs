@@ -42,22 +42,46 @@ pub enum MonitorEvent {
     /// Bind succeeded and the listener is active.
     Listening { endpoint: Endpoint },
     /// An incoming peer was accepted; handshake is starting.
-    Accepted { endpoint: Endpoint, peer_ident: PeerIdent, connection_id: u64 },
+    Accepted {
+        endpoint: Endpoint,
+        peer_ident: PeerIdent,
+        connection_id: u64,
+    },
     /// An outbound dial succeeded; handshake is starting.
-    Connected { endpoint: Endpoint, peer_ident: PeerIdent, connection_id: u64 },
+    Connected {
+        endpoint: Endpoint,
+        peer_ident: PeerIdent,
+        connection_id: u64,
+    },
     /// The ZMTP handshake completed; the peer is ready for data.
     HandshakeSucceeded { endpoint: Endpoint, peer: PeerInfo },
     /// The ZMTP handshake failed.
-    HandshakeFailed { endpoint: Endpoint, peer_ident: PeerIdent, reason: String },
+    HandshakeFailed {
+        endpoint: Endpoint,
+        peer_ident: PeerIdent,
+        reason: String,
+    },
     /// A dial attempt will retry after `retry_in`.
-    ConnectDelayed { endpoint: Endpoint, retry_in: Duration, attempt: u32 },
+    ConnectDelayed {
+        endpoint: Endpoint,
+        retry_in: Duration,
+        attempt: u32,
+    },
     /// A peer connection was torn down.
-    Disconnected { endpoint: Endpoint, peer: PeerInfo, reason: DisconnectReason },
+    Disconnected {
+        endpoint: Endpoint,
+        peer: PeerInfo,
+        reason: DisconnectReason,
+    },
     /// A post-handshake ZMTP command from the peer that the routing
     /// layer doesn't consume itself: `ERROR` and any `Unknown` extension
     /// command. SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG are
     /// handled internally and never surface here.
-    PeerCommand { endpoint: Endpoint, peer: PeerInfo, command: PeerCommandKind },
+    PeerCommand {
+        endpoint: Endpoint,
+        peer: PeerInfo,
+        command: PeerCommandKind,
+    },
     /// The socket driver finished teardown.
     Closed,
 }

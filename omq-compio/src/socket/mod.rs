@@ -32,7 +32,11 @@ pub(crate) use inner::DirectIoState;
 /// When conflate is enabled the shared send queue is cap-1 (drain-before-send),
 /// so the per-peer channel only needs to hold the single forwarded message.
 fn cmd_channel_capacity(options: &Options) -> usize {
-    if options.conflate { 1 } else { options.send_hwm.unwrap_or(1024).max(16) as usize }
+    if options.conflate {
+        1
+    } else {
+        options.send_hwm.unwrap_or(1024).max(16) as usize
+    }
 }
 
 /// Socket types for which `Options::conflate(true)` is meaningful.

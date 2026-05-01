@@ -48,11 +48,7 @@ pub fn encode_frame(frame: &Frame, out: &mut BytesMut) {
 /// per ~7000 frames (64 KiB / 9). When `scratch` runs out of capacity
 /// we allocate a fresh 64 KiB chunk; the old allocation stays alive
 /// via the references held in `out_chunks` until those Bytes drop.
-pub fn encode_frame_into(
-    frame: &Frame,
-    out: &mut VecDeque<Bytes>,
-    scratch: &mut BytesMut,
-) {
+pub fn encode_frame_into(frame: &Frame, out: &mut VecDeque<Bytes>, scratch: &mut BytesMut) {
     if scratch.capacity() < MAX_FRAME_HEADER_LEN {
         *scratch = BytesMut::with_capacity(64 * 1024);
     }
@@ -300,11 +296,11 @@ mod tests {
 
     #[test]
     fn encode_multi_chunk_payload_concats() {
-        let p = Payload::from_chunks([
-            Bytes::from_static(b"ab"),
-            Bytes::from_static(b"cd"),
-        ]);
-        let f = Frame { flags: FrameFlags::LAST, payload: p };
+        let p = Payload::from_chunks([Bytes::from_static(b"ab"), Bytes::from_static(b"cd")]);
+        let f = Frame {
+            flags: FrameFlags::LAST,
+            payload: p,
+        };
         let mut buf = BytesMut::new();
         encode_frame(&f, &mut buf);
         assert_eq!(&buf[..], &[0x00, 0x04, b'a', b'b', b'c', b'd']);

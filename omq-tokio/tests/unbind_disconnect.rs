@@ -43,13 +43,17 @@ async fn unbind_then_rebind_succeeds() {
 
 #[tokio::test]
 async fn disconnect_after_connect_succeeds() {
-    let opts =
-        Options::default().reconnect(omq_proto::options::ReconnectPolicy::Disabled);
+    let opts = Options::default().reconnect(omq_proto::options::ReconnectPolicy::Disabled);
     let push = Socket::new(SocketType::Push, opts);
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
     pull.bind(tcp_loopback(0)).await.unwrap();
-    let omq_tokio::MonitorEvent::Listening { endpoint: Endpoint::Tcp { port, .. } } = mon.recv().await.unwrap() else { unreachable!() };
+    let omq_tokio::MonitorEvent::Listening {
+        endpoint: Endpoint::Tcp { port, .. },
+    } = mon.recv().await.unwrap()
+    else {
+        unreachable!()
+    };
 
     push.connect(tcp_loopback(port)).await.unwrap();
     push.send(Message::single("hi")).await.unwrap();

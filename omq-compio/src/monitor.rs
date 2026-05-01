@@ -61,13 +61,10 @@ impl MonitorPublisher {
     pub(crate) fn subscribe(&self) -> MonitorStream {
         let (tx, rx) = flume::bounded(MONITOR_CAPACITY);
         let lagged = Arc::new(AtomicU64::new(0));
-        self.sinks
-            .lock()
-            .expect("monitor sinks")
-            .push(MonitorSink {
-                tx,
-                lagged: lagged.clone(),
-            });
+        self.sinks.lock().expect("monitor sinks").push(MonitorSink {
+            tx,
+            lagged: lagged.clone(),
+        });
         MonitorStream { rx, lagged }
     }
 }

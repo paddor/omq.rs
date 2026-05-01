@@ -6,13 +6,14 @@
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
-use omq_compio::{
-    CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType,
-};
+use omq_compio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
     let mut dir = std::env::temp_dir();
-    dir.push(format!("omq-compio-curve-{name}-{}.sock", std::process::id()));
+    dir.push(format!(
+        "omq-compio-curve-{name}-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&dir);
     Endpoint::Ipc(IpcPath::Filesystem(dir))
 }
@@ -32,10 +33,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
 
     let ep = temp_ipc("push-pull");
 
-    let server = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     server.bind(ep.clone()).await.unwrap();
 
     let client = Socket::new(
@@ -44,7 +42,10 @@ async fn curve_push_pull_roundtrip_over_ipc() {
     );
     client.connect(ep).await.unwrap();
 
-    client.send(Message::single("hello over curve")).await.unwrap();
+    client
+        .send(Message::single("hello over curve"))
+        .await
+        .unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -58,10 +59,7 @@ async fn curve_multipart_roundtrip_tcp() {
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
 
-    let pair_a = Socket::new(
-        SocketType::Pair,
-        Options::default().curve_server(server_kp),
-    );
+    let pair_a = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     let mut mon = pair_a.monitor();
     pair_a.bind(tcp_loopback(0)).await.unwrap();
     let port = match mon.recv().await.unwrap() {
@@ -95,10 +93,7 @@ async fn curve_multipart_roundtrip_tcp() {
 #[compio::test]
 async fn curve_rejected_on_inproc() {
     let kp = CurveKeypair::generate();
-    let s = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(kp),
-    );
+    let s = Socket::new(SocketType::Pull, Options::default().curve_server(kp));
     let r = s
         .bind(Endpoint::Inproc {
             name: "curve-inproc-rej".into(),
@@ -127,10 +122,16 @@ async fn curve_req_rep() {
     req.connect(ep).await.unwrap();
 
     req.send(Message::single("q")).await.unwrap();
-    let q = compio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = compio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
 }
 
@@ -141,7 +142,10 @@ async fn curve_dealer_router() {
     let server_pub = server_kp.public;
     let ep = temp_ipc("dealer-router");
 
-    let router = Socket::new(SocketType::Router, Options::default().curve_server(server_kp));
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().curve_server(server_kp),
+    );
     router.bind(ep.clone()).await.unwrap();
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -153,7 +157,10 @@ async fn curve_dealer_router() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), router.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
 }

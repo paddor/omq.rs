@@ -10,7 +10,10 @@ use omq_proto::endpoint::{Host, IpcPath};
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
-    Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port }
+    Endpoint::Tcp {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        port,
+    }
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
@@ -18,7 +21,9 @@ fn ipc_ep(name: &str) -> Endpoint {
         "omq-tokio-cov-{name}-{}-{}.sock",
         std::process::id(),
         std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_file(&path);
     Endpoint::Ipc(IpcPath::Filesystem(path))
@@ -26,8 +31,13 @@ fn ipc_ep(name: &str) -> Endpoint {
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc {
-        name: format!("cov-{name}-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+        name: format!(
+            "cov-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ),
     }
 }
 
@@ -48,7 +58,10 @@ async fn push_pull_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(client_ep).await.unwrap();
     push.send(Message::single("hi")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
 }
 
@@ -58,10 +71,16 @@ async fn req_rep_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(client_ep).await.unwrap();
     req.send(Message::single("q")).await.unwrap();
-    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = tokio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
 }
 
@@ -75,7 +94,10 @@ async fn dealer_router_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     dealer.connect(client_ep).await.unwrap();
     wait().await;
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), router.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
 }
@@ -86,7 +108,10 @@ async fn pair_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     let b = Socket::new(SocketType::Pair, Options::default());
     b.connect(client_ep).await.unwrap();
     a.send(Message::single("x")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), b.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"x"[..]);
 }
 
@@ -117,7 +142,9 @@ async fn client_server_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     wait().await;
     client.send(Message::single("ping")).await.unwrap();
     let m = tokio::time::timeout(Duration::from_secs(2), server.recv())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"c1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"ping"[..]);
 }
@@ -129,7 +156,10 @@ async fn scatter_gather_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     s.connect(client_ep).await.unwrap();
     wait().await;
     s.send(Message::single("m")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), g.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), g.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"m"[..]);
 }
 
@@ -140,50 +170,168 @@ async fn channel_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
     b.connect(client_ep).await.unwrap();
     wait().await;
     a.send(Message::single("hi")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), b.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), b.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"hi"[..]);
 }
 
 async fn peer_roundtrip(server_ep: Endpoint, client_ep: Endpoint) {
-    let a = Socket::new(SocketType::Peer, Options::default()
-        .identity(Bytes::from_static(b"pa")));
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pa")),
+    );
     a.bind(server_ep).await.unwrap();
-    let b = Socket::new(SocketType::Peer, Options::default()
-        .identity(Bytes::from_static(b"pb")));
+    let b = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"pb")),
+    );
     b.connect(client_ep).await.unwrap();
     wait().await;
     b.send(Message::multipart(["pa", "hi a"])).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), a.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), a.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"pb"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi a"[..]);
 }
 
-#[tokio::test] async fn push_pull_inproc()       { let ep = inproc_ep("pp"); push_pull_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn req_rep_inproc()         { let ep = inproc_ep("rr"); req_rep_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn dealer_router_inproc()   { let ep = inproc_ep("dr"); dealer_router_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn pair_inproc()            { let ep = inproc_ep("pair"); pair_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn pub_sub_inproc()         { let ep = inproc_ep("ps"); pub_sub_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn client_server_inproc()   { let ep = inproc_ep("cs"); client_server_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn scatter_gather_inproc()  { let ep = inproc_ep("sg"); scatter_gather_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn channel_inproc()         { let ep = inproc_ep("ch"); channel_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn peer_inproc()            { let ep = inproc_ep("pp"); peer_roundtrip(ep.clone(), ep).await; }
+#[tokio::test]
+async fn push_pull_inproc() {
+    let ep = inproc_ep("pp");
+    push_pull_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn req_rep_inproc() {
+    let ep = inproc_ep("rr");
+    req_rep_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn dealer_router_inproc() {
+    let ep = inproc_ep("dr");
+    dealer_router_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn pair_inproc() {
+    let ep = inproc_ep("pair");
+    pair_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn pub_sub_inproc() {
+    let ep = inproc_ep("ps");
+    pub_sub_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn client_server_inproc() {
+    let ep = inproc_ep("cs");
+    client_server_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn scatter_gather_inproc() {
+    let ep = inproc_ep("sg");
+    scatter_gather_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn channel_inproc() {
+    let ep = inproc_ep("ch");
+    channel_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn peer_inproc() {
+    let ep = inproc_ep("pp");
+    peer_roundtrip(ep.clone(), ep).await;
+}
 
-#[tokio::test] async fn push_pull_ipc()          { let ep = ipc_ep("pp"); push_pull_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn req_rep_ipc()            { let ep = ipc_ep("rr"); req_rep_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn dealer_router_ipc()      { let ep = ipc_ep("dr"); dealer_router_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn pair_ipc()               { let ep = ipc_ep("pair"); pair_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn pub_sub_ipc()            { let ep = ipc_ep("ps"); pub_sub_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn client_server_ipc()      { let ep = ipc_ep("cs"); client_server_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn scatter_gather_ipc()     { let ep = ipc_ep("sg"); scatter_gather_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn channel_ipc()            { let ep = ipc_ep("ch"); channel_roundtrip(ep.clone(), ep).await; }
-#[tokio::test] async fn peer_ipc()               { let ep = ipc_ep("pp"); peer_roundtrip(ep.clone(), ep).await; }
+#[tokio::test]
+async fn push_pull_ipc() {
+    let ep = ipc_ep("pp");
+    push_pull_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn req_rep_ipc() {
+    let ep = ipc_ep("rr");
+    req_rep_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn dealer_router_ipc() {
+    let ep = ipc_ep("dr");
+    dealer_router_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn pair_ipc() {
+    let ep = ipc_ep("pair");
+    pair_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn pub_sub_ipc() {
+    let ep = ipc_ep("ps");
+    pub_sub_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn client_server_ipc() {
+    let ep = ipc_ep("cs");
+    client_server_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn scatter_gather_ipc() {
+    let ep = ipc_ep("sg");
+    scatter_gather_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn channel_ipc() {
+    let ep = ipc_ep("ch");
+    channel_roundtrip(ep.clone(), ep).await;
+}
+#[tokio::test]
+async fn peer_ipc() {
+    let ep = ipc_ep("pp");
+    peer_roundtrip(ep.clone(), ep).await;
+}
 
-#[tokio::test] async fn push_pull_tcp()          { let p = free_tcp_port(); push_pull_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn req_rep_tcp()            { let p = free_tcp_port(); req_rep_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn dealer_router_tcp()      { let p = free_tcp_port(); dealer_router_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn pair_tcp()               { let p = free_tcp_port(); pair_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn pub_sub_tcp()            { let p = free_tcp_port(); pub_sub_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn client_server_tcp()      { let p = free_tcp_port(); client_server_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn scatter_gather_tcp()     { let p = free_tcp_port(); scatter_gather_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn channel_tcp()            { let p = free_tcp_port(); channel_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
-#[tokio::test] async fn peer_tcp()               { let p = free_tcp_port(); peer_roundtrip(tcp_ep(p), tcp_ep(p)).await; }
+#[tokio::test]
+async fn push_pull_tcp() {
+    let p = free_tcp_port();
+    push_pull_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn req_rep_tcp() {
+    let p = free_tcp_port();
+    req_rep_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn dealer_router_tcp() {
+    let p = free_tcp_port();
+    dealer_router_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn pair_tcp() {
+    let p = free_tcp_port();
+    pair_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn pub_sub_tcp() {
+    let p = free_tcp_port();
+    pub_sub_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn client_server_tcp() {
+    let p = free_tcp_port();
+    client_server_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn scatter_gather_tcp() {
+    let p = free_tcp_port();
+    scatter_gather_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn channel_tcp() {
+    let p = free_tcp_port();
+    channel_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}
+#[tokio::test]
+async fn peer_tcp() {
+    let p = free_tcp_port();
+    peer_roundtrip(tcp_ep(p), tcp_ep(p)).await;
+}

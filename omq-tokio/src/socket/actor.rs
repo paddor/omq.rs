@@ -3,39 +3,36 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use futures::channel::oneshot;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use omq_proto::endpoint::Endpoint;
-use omq_proto::error::{Error, Result};
-use omq_proto::message::Message;
-use omq_proto::endpoint::reject_encrypted_inproc;
-use omq_proto::options::Options;
-use omq_proto::proto::connection::{ConnectionConfig, Role};
-use omq_proto::proto::transform::MessageTransform;
-use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
-use crate::routing::{
-    RecvStrategy, SendStrategy, SendSubmitter, max_peer_count, supports_groups,
-    supports_subscribe,
-};
 use super::dispatch::{
-    AnyConn, AnyStream, bind_any, connect_any, generated_identity,
-    peer_ident_socket_addr,
+    AnyConn, AnyStream, bind_any, connect_any, generated_identity, peer_ident_socket_addr,
 };
 use super::monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo,
 };
+use super::type_state::TypeState;
 use super::udp::{
     JoinedGroups, UdpDialerEntry, UdpListenerEntry, fake_handle, new_joined_groups,
     spawn_dish_listener, spawn_radio_sender,
 };
-use super::type_state::TypeState;
-use crate::transport::{
-    Cancelled, InprocConn, InprocFrame, InprocPeerSnapshot, PeerIdent,
-    dial_with_backoff,
+use crate::routing::{
+    RecvStrategy, SendStrategy, SendSubmitter, max_peer_count, supports_groups, supports_subscribe,
 };
+use crate::transport::{
+    Cancelled, InprocConn, InprocFrame, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
+};
+use omq_proto::endpoint::Endpoint;
+use omq_proto::endpoint::reject_encrypted_inproc;
+use omq_proto::error::{Error, Result};
+use omq_proto::message::Message;
+use omq_proto::options::Options;
+use omq_proto::proto::connection::{ConnectionConfig, Role};
+use omq_proto::proto::transform::MessageTransform;
+use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
 use crate::engine::{ConnectionDriver, DriverConfig, DriverHandle};
 
@@ -44,36 +41,67 @@ use crate::engine::{ConnectionDriver, DriverConfig, DriverHandle};
 /// and uses its own Message-typed channel pair (see `AnyConn`).
 #[derive(Debug)]
 pub(crate) enum SocketCommand {
-    Bind { endpoint: Endpoint, ack: oneshot::Sender<Result<()>> },
+    Bind {
+        endpoint: Endpoint,
+        ack: oneshot::Sender<Result<()>>,
+    },
     Connect {
         endpoint: Endpoint,
         ack: oneshot::Sender<Result<()>>,
         #[cfg(feature = "priority")]
         priority: u8,
     },
-    Send { msg: Message, ack: oneshot::Sender<Result<()>> },
-    Subscribe { prefix: bytes::Bytes, ack: oneshot::Sender<Result<()>> },
-    Unsubscribe { prefix: bytes::Bytes, ack: oneshot::Sender<Result<()>> },
-    Join { group: bytes::Bytes, ack: oneshot::Sender<Result<()>> },
-    Leave { group: bytes::Bytes, ack: oneshot::Sender<Result<()>> },
+    Send {
+        msg: Message,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    Subscribe {
+        prefix: bytes::Bytes,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    Unsubscribe {
+        prefix: bytes::Bytes,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    Join {
+        group: bytes::Bytes,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    Leave {
+        group: bytes::Bytes,
+        ack: oneshot::Sender<Result<()>>,
+    },
     /// Tear down a previously-established listener for `endpoint`.
-    Unbind { endpoint: Endpoint, ack: oneshot::Sender<Result<()>> },
+    Unbind {
+        endpoint: Endpoint,
+        ack: oneshot::Sender<Result<()>>,
+    },
     /// Tear down a previously-started dialer for `endpoint`.
-    Disconnect { endpoint: Endpoint, ack: oneshot::Sender<Result<()>> },
+    Disconnect {
+        endpoint: Endpoint,
+        ack: oneshot::Sender<Result<()>>,
+    },
     /// Snapshot the live status of one peer keyed by `connection_id`.
     QueryConnection {
         connection_id: u64,
         ack: oneshot::Sender<Option<ConnectionStatus>>,
     },
     /// Snapshot every currently-connected peer.
-    QueryConnections { ack: oneshot::Sender<Vec<ConnectionStatus>> },
-    Close { ack: Option<oneshot::Sender<Result<()>>> },
+    QueryConnections {
+        ack: oneshot::Sender<Vec<ConnectionStatus>>,
+    },
+    Close {
+        ack: Option<oneshot::Sender<Result<()>>>,
+    },
 }
 
 /// Events produced inside the driver (listeners accepting, connections
 /// emitting ZMTP events, etc.) and funnelled through one shared mpsc.
 enum InternalEvent {
-    Accepted { conn: AnyConn, endpoint: Endpoint },
+    Accepted {
+        conn: AnyConn,
+        endpoint: Endpoint,
+    },
     Connected {
         conn: AnyConn,
         endpoint: Endpoint,
@@ -81,9 +109,19 @@ enum InternalEvent {
         priority: u8,
     },
     ConnectGaveUp,
-    ConnectDelayed { endpoint: Endpoint, retry_in: Duration, attempt: u32 },
-    PeerEvent { peer_id: u64, event: ZmtpEvent },
-    PeerClosed { peer_id: u64, reason: DisconnectReason },
+    ConnectDelayed {
+        endpoint: Endpoint,
+        retry_in: Duration,
+        attempt: u32,
+    },
+    PeerEvent {
+        peer_id: u64,
+        event: ZmtpEvent,
+    },
+    PeerClosed {
+        peer_id: u64,
+        reason: DisconnectReason,
+    },
 }
 
 struct PeerEntry {
@@ -209,7 +247,9 @@ impl SocketDriver {
                 return;
             }
 
-            let linger_sleep = self.close_deadline.map(|t| tokio::time::sleep_until(t.into()));
+            let linger_sleep = self
+                .close_deadline
+                .map(|t| tokio::time::sleep_until(t.into()));
 
             tokio::select! {
                 biased;
@@ -534,11 +574,7 @@ impl SocketDriver {
         Ok(())
     }
 
-    async fn apply_subscription(
-        &mut self,
-        prefix: bytes::Bytes,
-        subscribe: bool,
-    ) -> Result<()> {
+    async fn apply_subscription(&mut self, prefix: bytes::Bytes, subscribe: bool) -> Result<()> {
         if !supports_subscribe(self.socket_type) {
             return Err(Error::Protocol(
                 "socket type does not support subscribe".into(),
@@ -625,11 +661,7 @@ impl SocketDriver {
         Ok(())
     }
 
-    fn start_dial(
-        &mut self,
-        endpoint: Endpoint,
-        #[cfg(feature = "priority")] priority: u8,
-    ) {
+    fn start_dial(&mut self, endpoint: Endpoint, #[cfg(feature = "priority")] priority: u8) {
         let cancel = self.cancel.child_token();
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();
@@ -727,7 +759,11 @@ impl SocketDriver {
                 // Dial task exited. Leave the entry alone; the Socket remains
                 // usable; a follow-up connect would re-arm.
             }
-            InternalEvent::ConnectDelayed { endpoint, retry_in, attempt } => {
+            InternalEvent::ConnectDelayed {
+                endpoint,
+                retry_in,
+                attempt,
+            } => {
                 self.monitor.publish(MonitorEvent::ConnectDelayed {
                     endpoint,
                     retry_in,
@@ -822,7 +858,11 @@ impl SocketDriver {
         let peer_id = self.next_peer_id;
         self.next_peer_id += 1;
 
-        let role = if is_server { Role::Server } else { Role::Client };
+        let role = if is_server {
+            Role::Server
+        } else {
+            Role::Client
+        };
         let mut cfg = ConnectionConfig::new(role, self.socket_type)
             .identity(self.options.identity.clone())
             .mechanism(self.options.mechanism.to_setup());
@@ -869,7 +909,10 @@ impl SocketDriver {
             peer_id,
             PeerEntry {
                 ident: peer_ident,
-                handle: DriverHandle { inbox: inbox_tx, cancel: child_cancel },
+                handle: DriverHandle {
+                    inbox: inbox_tx,
+                    cancel: child_cancel,
+                },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
@@ -940,7 +983,10 @@ impl SocketDriver {
             peer_id,
             PeerEntry {
                 ident: peer_ident,
-                handle: DriverHandle { inbox: inbox_tx, cancel: child_cancel.clone() },
+                handle: DriverHandle {
+                    inbox: inbox_tx,
+                    cancel: child_cancel.clone(),
+                },
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
@@ -949,7 +995,11 @@ impl SocketDriver {
             },
         );
 
-        let InprocConn { out, in_rx, peer: _peer } = conn;
+        let InprocConn {
+            out,
+            in_rx,
+            peer: _peer,
+        } = conn;
 
         // Driver task. Writes events directly to the SocketDriver's
         // shared peer-out channel and emits PeerOut::Closed on exit.
@@ -971,13 +1021,18 @@ impl SocketDriver {
     #[allow(clippy::too_many_lines)]
     async fn handle_peer_event(&mut self, peer_id: u64, event: ZmtpEvent) {
         match event {
-            ZmtpEvent::HandshakeSucceeded { peer_minor, peer_properties } => {
+            ZmtpEvent::HandshakeSucceeded {
+                peer_minor,
+                peer_properties,
+            } => {
                 let identity = peer_properties
                     .identity
                     .clone()
                     .unwrap_or_else(|| generated_identity(peer_id));
                 let (handle, subs_replay, endpoint, peer_ident) = {
-                    let Some(p) = self.peers.get_mut(&peer_id) else { return };
+                    let Some(p) = self.peers.get_mut(&peer_id) else {
+                        return;
+                    };
                     p.identity = identity.clone();
                     let info = PeerInfo {
                         connection_id: peer_id,
@@ -1061,10 +1116,8 @@ impl SocketDriver {
                     if let Some((tag, prefix)) = body.split_first() {
                         match tag {
                             0x01 => {
-                                self.send_strategy.peer_subscribe(
-                                    peer_id,
-                                    bytes::Bytes::copy_from_slice(prefix),
-                                );
+                                self.send_strategy
+                                    .peer_subscribe(peer_id, bytes::Bytes::copy_from_slice(prefix));
                                 // XPub surfaces the subscribe notification as a
                                 // message; Pub silently consumes it.
                                 if self.socket_type != SocketType::XPub {
@@ -1091,10 +1144,7 @@ impl SocketDriver {
                 // we push the transformed message into it directly when
                 // the type has a post-recv transform.
                 if self.type_state_needs_transform() {
-                    let wrapped = self
-                        .recv_strategy
-                        .wrap_for_transform(peer_id, msg)
-                        .await;
+                    let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg).await;
                     let Some(wrapped) = wrapped else { return };
                     // Ok(None): malformed / out-of-order; drop silently.
                     // Err(_):   protocol violation; drop but keep the
@@ -1140,16 +1190,10 @@ impl SocketDriver {
                         self.send_strategy.peer_leave(peer_id, &group);
                     }
                     Command::Error { reason } => {
-                        self.publish_peer_command(
-                            peer_id,
-                            PeerCommandKind::Error { reason },
-                        );
+                        self.publish_peer_command(peer_id, PeerCommandKind::Error { reason });
                     }
                     Command::Unknown { name, body } => {
-                        self.publish_peer_command(
-                            peer_id,
-                            PeerCommandKind::Unknown { name, body },
-                        );
+                        self.publish_peer_command(peer_id, PeerCommandKind::Unknown { name, body });
                     }
                     _ => {}
                 }
@@ -1161,8 +1205,12 @@ impl SocketDriver {
     /// peer entry has already been removed or its handshake hadn't
     /// completed (no `PeerInfo` yet).
     fn publish_peer_command(&self, peer_id: u64, command: PeerCommandKind) {
-        let Some(peer) = self.peers.get(&peer_id) else { return };
-        let Some(info) = peer.info.clone() else { return };
+        let Some(peer) = self.peers.get(&peer_id) else {
+            return;
+        };
+        let Some(info) = peer.info.clone() else {
+            return;
+        };
         self.monitor.publish(MonitorEvent::PeerCommand {
             endpoint: peer.endpoint.clone(),
             peer: info,
@@ -1170,11 +1218,7 @@ impl SocketDriver {
         });
     }
 
-    fn begin_close(
-        &mut self,
-        ack: Option<oneshot::Sender<Result<()>>>,
-        linger: Option<Duration>,
-    ) {
+    fn begin_close(&mut self, ack: Option<oneshot::Sender<Result<()>>>, linger: Option<Duration>) {
         if self.closing {
             if let Some(a) = ack {
                 let _ = a.send(Ok(()));
@@ -1261,7 +1305,10 @@ async fn inproc_peer_driver(
         peer_id: u64,
         ev: ZmtpEvent,
     ) -> Result<(), ()> {
-        peer_out.send((peer_id, PeerOut::Event(ev))).await.map_err(|_| ())
+        peer_out
+            .send((peer_id, PeerOut::Event(ev)))
+            .await
+            .map_err(|_| ())
     }
 
     let result: () = async {
@@ -1338,9 +1385,9 @@ pub(crate) fn spawn_driver(driver: SocketDriver) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use omq_proto::message::Message;
     use omq_proto::proto::SocketType;
-    use bytes::Bytes;
 
     fn inproc_ep(name: &str) -> Endpoint {
         Endpoint::Inproc { name: name.into() }

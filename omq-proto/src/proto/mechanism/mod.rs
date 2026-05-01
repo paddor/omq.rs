@@ -11,16 +11,16 @@ pub mod curve;
 #[cfg(feature = "curve")]
 pub mod curve_keys;
 #[cfg(feature = "curve")]
-pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
-#[cfg(feature = "curve")]
 pub(crate) use curve::{CurveMechanism, CurveTransform};
+#[cfg(feature = "curve")]
+pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 
 #[cfg(feature = "blake3zmq")]
 pub mod blake3zmq;
 #[cfg(feature = "blake3zmq")]
-pub use blake3zmq::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
-#[cfg(feature = "blake3zmq")]
 pub(crate) use blake3zmq::Blake3ZmqMechanism;
+#[cfg(feature = "blake3zmq")]
+pub use blake3zmq::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
 
 /// Mechanism setup passed to [`Connection::new`]. Equivalent in shape to
 /// `options::MechanismConfig` but lives at this layer so the codec can
@@ -78,21 +78,32 @@ impl MechanismSetup {
         match self {
             Self::Null => SecurityMechanism::Null(NullMechanism::new()),
             #[cfg(feature = "curve")]
-            Self::CurveServer { keypair, authenticator } => SecurityMechanism::Curve(
-                CurveMechanism::new_server(keypair, authenticator),
-            ),
+            Self::CurveServer {
+                keypair,
+                authenticator,
+            } => SecurityMechanism::Curve(CurveMechanism::new_server(keypair, authenticator)),
             #[cfg(feature = "curve")]
-            Self::CurveClient { keypair, server_public } => {
-                SecurityMechanism::Curve(CurveMechanism::new_client(keypair, server_public))
+            Self::CurveClient {
+                keypair,
+                server_public,
+            } => SecurityMechanism::Curve(CurveMechanism::new_client(keypair, server_public)),
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3ZmqServer {
+                keypair,
+                cookie_keyring,
+                authenticator,
+            } => SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_server(
+                keypair,
+                cookie_keyring,
+                authenticator,
+            )),
+            #[cfg(feature = "blake3zmq")]
+            Self::Blake3ZmqClient {
+                keypair,
+                server_public,
+            } => {
+                SecurityMechanism::Blake3Zmq(Blake3ZmqMechanism::new_client(keypair, server_public))
             }
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqServer { keypair, cookie_keyring, authenticator } => SecurityMechanism::Blake3Zmq(
-                Blake3ZmqMechanism::new_server(keypair, cookie_keyring, authenticator),
-            ),
-            #[cfg(feature = "blake3zmq")]
-            Self::Blake3ZmqClient { keypair, server_public } => SecurityMechanism::Blake3Zmq(
-                Blake3ZmqMechanism::new_client(keypair, server_public),
-            ),
         }
     }
 }
@@ -180,7 +191,10 @@ pub(crate) enum MechanismStep {
 // enum tag. Boxing them would push every connection through an extra
 // allocation on the hot handshake path; we keep the inline shape on
 // purpose.
-#[cfg_attr(any(feature = "curve", feature = "blake3zmq"), allow(clippy::large_enum_variant))]
+#[cfg_attr(
+    any(feature = "curve", feature = "blake3zmq"),
+    allow(clippy::large_enum_variant)
+)]
 pub(crate) enum SecurityMechanism {
     Null(NullMechanism),
     #[cfg(feature = "curve")]
@@ -257,7 +271,9 @@ impl SecurityMechanism {
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.build_transform().map(|t| Some(FrameTransform::Curve(t))),
             #[cfg(feature = "blake3zmq")]
-            Self::Blake3Zmq(m) => Ok(m.build_transform(m.is_client()).map(FrameTransform::Blake3Zmq)),
+            Self::Blake3Zmq(m) => Ok(m
+                .build_transform(m.is_client())
+                .map(FrameTransform::Blake3Zmq)),
         }
     }
 }
@@ -292,7 +308,9 @@ enum NullState {
 
 impl NullMechanism {
     pub(crate) fn new() -> Self {
-        Self { state: NullState::NotStarted }
+        Self {
+            state: NullState::NotStarted,
+        }
     }
 
     fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
@@ -300,15 +318,13 @@ impl NullMechanism {
         self.state = NullState::AwaitingReady;
     }
 
-    fn on_command(
-        &mut self,
-        cmd: Command,
-        _out: &mut Vec<Command>,
-    ) -> Result<MechanismStep> {
+    fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
         match (self.state, cmd) {
             (NullState::AwaitingReady, Command::Ready(props)) => {
                 self.state = NullState::Done;
-                Ok(MechanismStep::Complete { peer_properties: props })
+                Ok(MechanismStep::Complete {
+                    peer_properties: props,
+                })
             }
             // Connection's mechanism handshake stage hands us raw commands
             // as `Unknown` (so CURVE can see opaque bodies). Parse the
@@ -316,13 +332,16 @@ impl NullMechanism {
             (NullState::AwaitingReady, Command::Unknown { name, body })
                 if name.as_ref() == b"READY" =>
             {
-                let props = super::command::decode(prepend_name(b"READY", &body))
-                    .and_then(|c| match c {
+                let props = super::command::decode(prepend_name(b"READY", &body)).and_then(
+                    |c| match c {
                         Command::Ready(p) => Ok(p),
                         _ => Err(Error::HandshakeFailed("READY parse mismatch".into())),
-                    })?;
+                    },
+                )?;
                 self.state = NullState::Done;
-                Ok(MechanismStep::Complete { peer_properties: props })
+                Ok(MechanismStep::Complete {
+                    peer_properties: props,
+                })
             }
             (NullState::AwaitingReady, other) => Err(Error::HandshakeFailed(format!(
                 "expected READY, got {:?}",
@@ -361,9 +380,7 @@ mod tests {
         out.clear();
         let step = m
             .on_command(
-                Command::Ready(
-                    PeerProperties::default().with_socket_type(SocketType::Pull),
-                ),
+                Command::Ready(PeerProperties::default().with_socket_type(SocketType::Pull)),
                 &mut out,
             )
             .unwrap();

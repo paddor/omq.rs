@@ -7,7 +7,9 @@ use omq::{Endpoint, Options, SocketType};
 #[test]
 fn types_and_constants_re_exported() {
     assert!(matches!(SocketType::Push, SocketType::Push));
-    let _ep = Endpoint::Inproc { name: "facade-smoke".into() };
+    let _ep = Endpoint::Inproc {
+        name: "facade-smoke".into(),
+    };
     let _opts = Options::default();
     assert!(omq::BACKEND == "compio" || omq::BACKEND == "tokio");
 }

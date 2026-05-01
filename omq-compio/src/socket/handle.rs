@@ -1,7 +1,7 @@
 //! Public [`Socket`] handle and the `impl Socket` block - every
 //! `&self` method on the public API surface lives here.
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,17 +30,17 @@ use super::reject_encrypted_inproc;
 /// REQ / REP touch state, DISH validates two-frame `[group, body]`
 /// shape. Everything else just returns the message unchanged.
 fn post_recv_needs_type_state(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Req | SocketType::Rep | SocketType::Dish
-    )
+    matches!(t, SocketType::Req | SocketType::Rep | SocketType::Dish)
 }
 
 /// Identity-routed recv: the user-visible message is `[peer_identity,
 /// body...]` rather than `[body...]`. ROUTER, SERVER and PEER all
 /// identify their peers this way so a reply can be addressed back.
 fn is_identity_recv(t: SocketType) -> bool {
-    matches!(t, SocketType::Router | SocketType::Server | SocketType::Peer)
+    matches!(
+        t,
+        SocketType::Router | SocketType::Server | SocketType::Peer
+    )
 }
 
 /// Recv-direct fast path eligibility. The path is taken when there's
@@ -51,11 +51,7 @@ fn is_identity_recv(t: SocketType) -> bool {
 fn direct_recv_eligible(t: SocketType) -> bool {
     matches!(
         t,
-        SocketType::Pull
-            | SocketType::Sub
-            | SocketType::Rep
-            | SocketType::Pair
-            | SocketType::Req
+        SocketType::Pull | SocketType::Sub | SocketType::Rep | SocketType::Pair | SocketType::Req
     )
 }
 
@@ -304,9 +300,7 @@ impl Socket {
                 let compio::BufResult(res, returned) = sock.recv_from(buf).await;
                 buf = returned;
                 let Ok((n, _from)) = res else { break };
-                let Some((group, body)) =
-                    crate::transport::udp::decode_datagram(&buf[..n])
-                else {
+                let Some((group, body)) = crate::transport::udp::decode_datagram(&buf[..n]) else {
                     continue;
                 };
                 let joined_now = {
@@ -319,12 +313,11 @@ impl Socket {
                 let mut msg = Message::new();
                 msg.push_part(omq_proto::message::Payload::from_bytes(group));
                 msg.push_part(omq_proto::message::Payload::from_bytes(body));
-                let frame = InprocFrame::Message(Box::new(
-                    crate::transport::inproc::InprocFullMessage {
+                let frame =
+                    InprocFrame::Message(Box::new(crate::transport::inproc::InprocFullMessage {
                         peer_identity: None,
                         msg,
-                    },
-                ));
+                    }));
                 if inner.in_tx.send_async(frame).await.is_err() {
                     break;
                 }
@@ -372,8 +365,7 @@ impl Socket {
         match endpoint {
             Endpoint::Inproc { name } => {
                 let snapshot = self.inner.snapshot();
-                let conn = inproc::connect(&name, snapshot, self.inner.in_tx.clone())
-                    .await?;
+                let conn = inproc::connect(&name, snapshot, self.inner.in_tx.clone()).await?;
                 let conn_id = self
                     .inner
                     .next_connection_id
@@ -628,9 +620,7 @@ impl Socket {
     /// [`bind_udp`]'s recv loop.
     pub async fn join(&self, group: impl Into<Bytes>) -> Result<()> {
         if !matches!(self.inner.socket_type, SocketType::Dish) {
-            return Err(Error::Protocol(
-                "join is only valid on DISH sockets".into(),
-            ));
+            return Err(Error::Protocol("join is only valid on DISH sockets".into()));
         }
         let group = group.into();
         self.inner
@@ -700,7 +690,10 @@ impl Socket {
                 .await
                 .map_err(|_| Error::Closed)?;
             match frame {
-                InprocFrame::SinglePart { peer_identity, body } => {
+                InprocFrame::SinglePart {
+                    peer_identity,
+                    body,
+                } => {
                     if let Some(max) = self.inner.options.max_message_size {
                         if body.len() > max {
                             continue;
@@ -737,10 +730,7 @@ impl Socket {
                     }
                 }
                 InprocFrame::Message(boxed) => {
-                    let crate::transport::inproc::InprocFullMessage {
-                        peer_identity,
-                        msg,
-                    } = *boxed;
+                    let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
                     if let Some(max) = self.inner.options.max_message_size {
                         if msg.byte_len() > max {
                             continue;
@@ -812,7 +802,10 @@ impl Socket {
     fn process_inbound_frame(&self, frame: InprocFrame) -> Result<Option<Message>> {
         let st = self.inner.socket_type;
         match frame {
-            InprocFrame::SinglePart { peer_identity, body } => {
+            InprocFrame::SinglePart {
+                peer_identity,
+                body,
+            } => {
                 if let Some(max) = self.inner.options.max_message_size {
                     if body.len() > max {
                         return Ok(None);
@@ -926,10 +919,7 @@ impl Socket {
         }
         let p = &peers[0];
         let handle = p.direct_io.as_ref()?;
-        handle
-            .read()
-            .expect("direct_io handle lock")
-            .clone()
+        handle.read().expect("direct_io handle lock").clone()
     }
 
     /// Walk the codec's user-facing event stream once under the
@@ -961,7 +951,7 @@ impl Socket {
                     };
                     return Ok(Some(m));
                 }
-                Event::Command(_) => {},
+                Event::Command(_) => {}
                 Event::HandshakeSucceeded { .. } => {
                     io.handshake_done = true;
                 }
@@ -996,10 +986,7 @@ impl Socket {
     /// direct-recv-eligible socket types (Pull / Sub / Rep / Pair
     /// / Req) actually receive: `SinglePart` and Message. Command is
     /// XPub-only and not eligible for direct recv anyway.
-    fn process_inproc_frame_for_direct(
-        &self,
-        frame: InprocFrame,
-    ) -> Result<Option<Message>> {
+    fn process_inproc_frame_for_direct(&self, frame: InprocFrame) -> Result<Option<Message>> {
         let max = self.inner.options.max_message_size;
         match frame {
             InprocFrame::SinglePart { body, .. } => {
@@ -1114,10 +1101,7 @@ impl Socket {
             //    cancellation window is the gap between `read_ready`
             //    firing and the read SQE completing - bounded and
             //    small (~5 µs on Linux loopback).
-            let buf = std::mem::replace(
-                &mut local_buf,
-                Vec::with_capacity(READ_BUF_BYTES),
-            );
+            let buf = std::mem::replace(&mut local_buf, Vec::with_capacity(READ_BUF_BYTES));
             let mut io = state.peer_io.lock().await;
             let (res, filled) = io.reader.read(buf).await;
             match res {
@@ -1151,8 +1135,7 @@ impl Socket {
                         if chunks.is_empty() {
                             break;
                         }
-                        let written =
-                            io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
+                        let written = io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
                         if written == 0 {
                             state.eof_signal.notify(usize::MAX);
                             return Err(Error::Closed);

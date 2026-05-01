@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 
 /// 85-character alphabet from RFC 32. Ordered so each character's index in
 /// the alphabet is its base-85 value.
-const ALPHABET: &[u8; 85] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+const ALPHABET: &[u8; 85] =
+    b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
 
 /// Reverse lookup: ASCII -> base-85 digit, or 0xFF for invalid.
 const DECODER: [u8; 256] = build_decoder();
@@ -125,7 +126,10 @@ mod tests {
     #[test]
     fn decode_rejects_invalid_chars() {
         assert!(matches!(decode("Hello\\Worl"), Err(Error::Protocol(_))));
-        assert!(matches!(decode("Hello\u{0080}orl"), Err(Error::Protocol(_))));
+        assert!(matches!(
+            decode("Hello\u{0080}orl"),
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[test]
@@ -159,7 +163,9 @@ mod tests {
         for n in [4, 8, 12, 32, 96, 128] {
             let mut data = vec![0u8; n];
             for b in &mut data {
-                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 *b = (rng >> 33) as u8;
             }
             let s = encode(&data).unwrap();

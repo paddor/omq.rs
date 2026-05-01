@@ -40,10 +40,7 @@ fn tcp_ep() -> Endpoint {
 }
 
 async fn check_subside_handshake(ep: Endpoint) {
-    let pub_ = Socket::new(
-        SocketType::Pub,
-        Options::default().on_mute(OnMute::Block),
-    );
+    let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
     pub_.bind(ep.clone()).await.unwrap();
 
     let s1 = Socket::new(SocketType::Sub, Options::default());
@@ -99,7 +96,10 @@ async fn check_dish_join_handshake(ep: Endpoint) {
         }
         compio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(ready, "DISH connector-side never populated peer_info on {ep:?}");
+    assert!(
+        ready,
+        "DISH connector-side never populated peer_info on {ep:?}"
+    );
 }
 
 #[compio::test]

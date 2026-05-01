@@ -4,13 +4,14 @@
 
 use std::time::Duration;
 
-use omq_compio::{
-    Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType,
-};
+use omq_compio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
     let mut p = std::env::temp_dir();
-    p.push(format!("omq-compio-blake3-{name}-{}.sock", std::process::id()));
+    p.push(format!(
+        "omq-compio-blake3-{name}-{}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&p);
     Endpoint::Ipc(IpcPath::Filesystem(p))
 }
@@ -34,7 +35,10 @@ async fn blake3zmq_push_pull_roundtrip() {
     );
     client.connect(ep).await.unwrap();
 
-    client.send(Message::single("hello over blake3zmq")).await.unwrap();
+    client
+        .send(Message::single("hello over blake3zmq"))
+        .await
+        .unwrap();
     let m = compio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -53,7 +57,10 @@ async fn blake3zmq_req_rep() {
     let server_pub = server_kp.public;
     let ep = temp_ipc("req-rep");
 
-    let rep = Socket::new(SocketType::Rep, Options::default().blake3zmq_server(server_kp));
+    let rep = Socket::new(
+        SocketType::Rep,
+        Options::default().blake3zmq_server(server_kp),
+    );
     rep.bind(ep.clone()).await.unwrap();
     let req = Socket::new(
         SocketType::Req,
@@ -62,10 +69,16 @@ async fn blake3zmq_req_rep() {
     req.connect(ep).await.unwrap();
 
     req.send(Message::single("q")).await.unwrap();
-    let q = compio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    let q = compio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = compio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    let a = compio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
 }
 
@@ -76,7 +89,10 @@ async fn blake3zmq_dealer_router() {
     let server_pub = server_kp.public;
     let ep = temp_ipc("dr");
 
-    let router = Socket::new(SocketType::Router, Options::default().blake3zmq_server(server_kp));
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().blake3zmq_server(server_kp),
+    );
     router.bind(ep.clone()).await.unwrap();
     let dealer = Socket::new(
         SocketType::Dealer,
@@ -88,7 +104,10 @@ async fn blake3zmq_dealer_router() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = compio::time::timeout(Duration::from_secs(2), router.recv()).await.unwrap().unwrap();
+    let m = compio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
 }
@@ -100,7 +119,10 @@ async fn blake3zmq_pub_sub() {
     let server_pub = server_kp.public;
     let ep = temp_ipc("ps");
 
-    let p = Socket::new(SocketType::Pub, Options::default().blake3zmq_server(server_kp));
+    let p = Socket::new(
+        SocketType::Pub,
+        Options::default().blake3zmq_server(server_kp),
+    );
     p.bind(ep.clone()).await.unwrap();
     let s = Socket::new(
         SocketType::Sub,

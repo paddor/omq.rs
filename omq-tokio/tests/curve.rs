@@ -8,9 +8,7 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use omq_tokio::{
-    CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType,
-};
+use omq_tokio::{CurveKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
     let mut dir = std::env::temp_dir();
@@ -26,10 +24,7 @@ async fn curve_push_pull_roundtrip_over_ipc() {
 
     let ep = temp_ipc("push-pull");
 
-    let server = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     server.bind(ep.clone()).await.unwrap();
 
     let client = Socket::new(
@@ -38,7 +33,10 @@ async fn curve_push_pull_roundtrip_over_ipc() {
     );
     client.connect(ep).await.unwrap();
 
-    client.send(Message::single("hello over curve")).await.unwrap();
+    client
+        .send(Message::single("hello over curve"))
+        .await
+        .unwrap();
     let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
         .await
         .unwrap()
@@ -54,10 +52,7 @@ async fn curve_multipart_roundtrip() {
 
     let ep = temp_ipc("multipart");
 
-    let pair_a = Socket::new(
-        SocketType::Pair,
-        Options::default().curve_server(server_kp),
-    );
+    let pair_a = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     pair_a.bind(ep.clone()).await.unwrap();
 
     let pair_b = Socket::new(
@@ -91,10 +86,7 @@ async fn curve_wrong_server_key_fails_handshake() {
 
     let ep = temp_ipc("wrong-key");
 
-    let server = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let server = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     server.bind(ep.clone()).await.unwrap();
 
     let client = Socket::new(
@@ -124,10 +116,7 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
     let server_pub = server_kp.public;
 
     let ep = temp_ipc("monitor");
-    let server = Socket::new(
-        SocketType::Pair,
-        Options::default().curve_server(server_kp),
-    );
+    let server = Socket::new(SocketType::Pair, Options::default().curve_server(server_kp));
     let mut mon = server.monitor();
     server.bind(ep.clone()).await.unwrap();
 
@@ -145,7 +134,7 @@ async fn curve_emits_handshake_succeeded_with_curve_mechanism() {
                 saw_handshake = true;
                 break;
             }
-            Ok(Ok(_)) => {},
+            Ok(Ok(_)) => {}
             _ => break,
         }
     }
@@ -187,7 +176,10 @@ async fn curve_authenticator_admits_known_client() {
         .unwrap()
         .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"authed"[..]);
-    assert!(saw_callback.load(Ordering::SeqCst), "authenticator must run");
+    assert!(
+        saw_callback.load(Ordering::SeqCst),
+        "authenticator must run"
+    );
 }
 
 #[tokio::test]
@@ -247,10 +239,16 @@ async fn curve_req_rep() {
     req.connect(ep).await.unwrap();
 
     req.send(Message::single("q")).await.unwrap();
-    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv()).await.unwrap().unwrap();
+    let q = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(q.parts()[0].coalesce(), &b"q"[..]);
     rep.send(Message::single("a")).await.unwrap();
-    let a = tokio::time::timeout(Duration::from_secs(2), req.recv()).await.unwrap().unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(2), req.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.parts()[0].coalesce(), &b"a"[..]);
 }
 
@@ -276,7 +274,10 @@ async fn curve_dealer_router() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     dealer.send(Message::single("hi")).await.unwrap();
-    let m = tokio::time::timeout(Duration::from_secs(2), router.recv()).await.unwrap().unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(m.parts()[0].coalesce(), &b"d1"[..]);
     assert_eq!(m.parts()[1].coalesce(), &b"hi"[..]);
 }

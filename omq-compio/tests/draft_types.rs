@@ -32,7 +32,10 @@ async fn client_server_basic_roundtrip() {
     assert_eq!(got.parts()[0].coalesce(), &b"cli1"[..]);
     assert_eq!(got.parts()[1].coalesce(), &b"ping"[..]);
 
-    server.send(Message::multipart(["cli1", "pong"])).await.unwrap();
+    server
+        .send(Message::multipart(["cli1", "pong"]))
+        .await
+        .unwrap();
 
     let reply = compio::time::timeout(Duration::from_millis(500), client.recv())
         .await
@@ -71,7 +74,10 @@ async fn scatter_gather_single_frame_roundtrip() {
     compio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..3 {
-        scatter.send(Message::single(format!("m{i}"))).await.unwrap();
+        scatter
+            .send(Message::single(format!("m{i}")))
+            .await
+            .unwrap();
     }
     for i in 0..3 {
         let m = compio::time::timeout(Duration::from_millis(500), gather.recv())
@@ -139,7 +145,9 @@ async fn peer_bidirectional_identity_routing() {
     b.connect(ep).await.unwrap();
     compio::time::sleep(Duration::from_millis(50)).await;
 
-    b.send(Message::multipart(["peer-a", "hello a"])).await.unwrap();
+    b.send(Message::multipart(["peer-a", "hello a"]))
+        .await
+        .unwrap();
     let got = compio::time::timeout(Duration::from_millis(500), a.recv())
         .await
         .unwrap()
@@ -147,7 +155,9 @@ async fn peer_bidirectional_identity_routing() {
     assert_eq!(got.parts()[0].coalesce(), &b"peer-b"[..]);
     assert_eq!(got.parts()[1].coalesce(), &b"hello a"[..]);
 
-    a.send(Message::multipart(["peer-b", "hello b"])).await.unwrap();
+    a.send(Message::multipart(["peer-b", "hello b"]))
+        .await
+        .unwrap();
     let got = compio::time::timeout(Duration::from_millis(500), b.recv())
         .await
         .unwrap()

@@ -98,7 +98,15 @@ where
         peer_id: u64,
         cancel: CancellationToken,
     ) -> Self {
-        Self::with_config(stream, codec, inbox, peer_out, peer_id, cancel, DriverConfig::default())
+        Self::with_config(
+            stream,
+            codec,
+            inbox,
+            peer_out,
+            peer_id,
+            cancel,
+            DriverConfig::default(),
+        )
     }
 
     pub fn with_config(
@@ -331,9 +339,7 @@ mod tests {
     /// transport (which since the inproc fast-path landed bypasses
     /// the codec entirely).
     #[allow(clippy::unused_async)]
-    async fn inproc_pair(
-        _name: &str,
-    ) -> (DriverHandle, EventAdapter, DriverHandle, EventAdapter) {
+    async fn inproc_pair(_name: &str) -> (DriverHandle, EventAdapter, DriverHandle, EventAdapter) {
         let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
 
         let server_codec = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
@@ -370,9 +376,15 @@ mod tests {
         tokio::spawn(async move { c_driver.run().await });
 
         (
-            DriverHandle { inbox: c_inbox_tx, cancel: c_cancel },
+            DriverHandle {
+                inbox: c_inbox_tx,
+                cancel: c_cancel,
+            },
             EventAdapter { rx: c_evt_rx },
-            DriverHandle { inbox: s_inbox_tx, cancel: s_cancel },
+            DriverHandle {
+                inbox: s_inbox_tx,
+                cancel: s_cancel,
+            },
             EventAdapter { rx: s_evt_rx },
         )
     }
@@ -390,8 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_roundtrip_over_inproc() {
-        let (client, mut client_events, _server, mut server_events) =
-            inproc_pair("drv-msg").await;
+        let (client, mut client_events, _server, mut server_events) = inproc_pair("drv-msg").await;
         client_events.recv().await.unwrap();
         server_events.recv().await.unwrap();
 
@@ -412,8 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_stops_driver() {
-        let (client, _client_events, _server, _server_events) =
-            inproc_pair("drv-cancel").await;
+        let (client, _client_events, _server, _server_events) = inproc_pair("drv-cancel").await;
         client.cancel.cancel();
         // The driver should exit; confirm by closing its inbox and checking
         // a subsequent send fails.
@@ -424,14 +434,19 @@ mod tests {
 
     #[tokio::test]
     async fn handshake_completes_over_tcp() {
-        use omq_proto::endpoint::{Endpoint, Host};
         use crate::transport::{Listener as _, TcpTransport, Transport as _};
+        use omq_proto::endpoint::{Endpoint, Host};
         use std::net::{IpAddr, Ipv4Addr};
 
-        let bind_ep = Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port: 0 };
+        let bind_ep = Endpoint::Tcp {
+            host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: 0,
+        };
         let mut listener = TcpTransport::bind(&bind_ep).await.unwrap();
         let local = listener.local_endpoint().clone();
-        let Endpoint::Tcp { port, .. } = local else { panic!() };
+        let Endpoint::Tcp { port, .. } = local else {
+            panic!()
+        };
 
         let connect_ep = Endpoint::Tcp {
             host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),

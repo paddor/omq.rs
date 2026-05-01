@@ -24,16 +24,16 @@ use crate::proto::frame::{FLAG_COMMAND, FLAG_LONG, MAX_SHORT_FRAME_SIZE};
 use std::sync::Arc;
 
 use super::cookie::CookieKeyring;
-use crate::proto::greeting::MechanismName;
-use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 use super::crypto::{
-    Hash, Nonce24, X25519Public, X25519Secret, aead_decrypt, aead_encrypt, ephemeral_keypair,
-    hash, kdf, kdf24, x25519, x25519_basepoint,
+    Hash, Nonce24, X25519Public, X25519Secret, aead_decrypt, aead_encrypt, ephemeral_keypair, hash,
+    kdf, kdf24, x25519, x25519_basepoint,
 };
 use super::wire::{
     COOKIE_LEN, COOKIE_PLAIN_LEN, HELLO_PAYLOAD_LEN, KEY_LEN, NONCE_LEN, PROTOCOL_ID, TAG_LEN,
     VOUCH_BOX_LEN, WELCOME_PAYLOAD_LEN, encode_command_body, parse_command_body,
 };
+use crate::proto::greeting::MechanismName;
+use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 
 /// Permanent X25519 keypair used by either side of the handshake.
 #[derive(Clone)]
@@ -102,11 +102,7 @@ enum ServerState {
 }
 
 impl Server {
-    pub fn new(
-        permanent: Keypair,
-        cookie_keyring: Arc<CookieKeyring>,
-        metadata: Vec<u8>,
-    ) -> Self {
+    pub fn new(permanent: Keypair, cookie_keyring: Arc<CookieKeyring>, metadata: Vec<u8>) -> Self {
         Self {
             permanent,
             cookie_keyring,
@@ -370,7 +366,9 @@ impl Server {
 
     pub fn peer_permanent_public(&self) -> Option<&X25519Public> {
         match &self.state {
-            ServerState::Done { client_permanent, .. } => Some(client_permanent),
+            ServerState::Done {
+                client_permanent, ..
+            } => Some(client_permanent),
             _ => None,
         }
     }
@@ -449,14 +447,25 @@ impl Client {
         let wire = wire_for_command_frame("HELLO", &payload);
         self.transcript = hash_chain(&self.transcript, &wire);
 
-        self.state = ClientState::AwaitingWelcome { cn_secret, cn_public, dh1 };
+        self.state = ClientState::AwaitingWelcome {
+            cn_secret,
+            cn_public,
+            dh1,
+        };
         Ok(payload)
     }
 
     /// Process WELCOME payload (`welcome_box`), return the INITIATE
     /// command payload (`cookie || initiate_box`).
     pub fn process_welcome(&mut self, welcome_body: &[u8]) -> Result<Vec<u8>> {
-        let ClientState::AwaitingWelcome { cn_secret, cn_public, dh1 } = std::mem::replace(&mut self.state, ClientState::Failed) else { return Err(self.fail("client saw WELCOME out of state")) };
+        let ClientState::AwaitingWelcome {
+            cn_secret,
+            cn_public,
+            dh1,
+        } = std::mem::replace(&mut self.state, ClientState::Failed)
+        else {
+            return Err(self.fail("client saw WELCOME out of state"));
+        };
 
         if welcome_body.len() != WELCOME_PAYLOAD_LEN {
             return Err(self.fail(format!(
@@ -468,8 +477,7 @@ impl Client {
 
         let welcome_key = kdf(&ctx("WELCOME key"), &dh1);
         let welcome_nonce = kdf24(&ctx("WELCOME nonce"), &self.transcript);
-        let welcome_plain =
-            aead_decrypt(&welcome_key, &welcome_nonce, welcome_body, b"WELCOME")?;
+        let welcome_plain = aead_decrypt(&welcome_key, &welcome_nonce, welcome_body, b"WELCOME")?;
         if welcome_plain.len() != KEY_LEN + COOKIE_LEN {
             return Err(self.fail("WELCOME plaintext wrong size"));
         }
@@ -521,7 +529,11 @@ impl Client {
 
     /// Process READY body. Handshake is now complete on success.
     pub fn process_ready(&mut self, ready_body: &[u8]) -> Result<()> {
-        let ClientState::AwaitingReady { dh2 } = std::mem::replace(&mut self.state, ClientState::Failed) else { return Err(self.fail("client saw READY out of state")) };
+        let ClientState::AwaitingReady { dh2 } =
+            std::mem::replace(&mut self.state, ClientState::Failed)
+        else {
+            return Err(self.fail("client saw READY out of state"));
+        };
 
         let mut dh2_h3 = Vec::with_capacity(KEY_LEN + 32);
         dh2_h3.extend_from_slice(&dh2);
@@ -573,7 +585,8 @@ fn ctx(suffix: &str) -> String {
 }
 
 fn greet_h0(client_greeting: &[u8], server_greeting: &[u8]) -> Hash {
-    let mut buf = Vec::with_capacity(PROTOCOL_ID.len() + client_greeting.len() + server_greeting.len());
+    let mut buf =
+        Vec::with_capacity(PROTOCOL_ID.len() + client_greeting.len() + server_greeting.len());
     buf.extend_from_slice(PROTOCOL_ID.as_bytes());
     buf.extend_from_slice(client_greeting);
     buf.extend_from_slice(server_greeting);

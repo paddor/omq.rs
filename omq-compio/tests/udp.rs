@@ -102,7 +102,10 @@ async fn radio_rejects_non_pair_messages() {
     let radio = Socket::new(SocketType::Radio, Options::default());
     radio.connect(ep).await.unwrap();
     let r = radio.send(Message::single("noheader")).await;
-    assert!(matches!(r, Err(omq_compio::Error::Protocol(_))), "got {r:?}");
+    assert!(
+        matches!(r, Err(omq_compio::Error::Protocol(_))),
+        "got {r:?}"
+    );
 }
 
 #[compio::test]

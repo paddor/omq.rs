@@ -11,7 +11,7 @@
 //!
 //! Mirrors omq-tokio's `start_dial` semantics.
 
-use std::sync::{atomic::Ordering, Arc, RwLock};
+use std::sync::{Arc, RwLock, atomic::Ordering};
 
 use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
@@ -23,8 +23,7 @@ use crate::transport::driver::DriverCommand;
 use crate::transport::{ipc as ipc_transport, tcp as tcp_transport};
 
 use super::inner::{
-    DialerEntry, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner,
-    WirePeerHandle,
+    DialerEntry, DirectIoHandle, DirectIoState, PeerOut, PeerSlot, SocketInner, WirePeerHandle,
 };
 use super::{cmd_channel_capacity, pub_side_peer_sub, radio_side_peer_groups};
 
@@ -49,8 +48,7 @@ pub(super) fn connect_tcp_with_reconnect(
     // that races a send before the dialer installs a real sender
     // hits the buffered slot then errors. In practice send()
     // blocks on on_peer_ready until the peer slot lands.
-    let handle: WirePeerHandle =
-        Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    let handle: WirePeerHandle = Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = wrapper.clone();
 
@@ -106,7 +104,9 @@ async fn dial_supervisor_tcp(
             if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
                 return;
             }
-            let Some(delay) = next_delay(&policy, attempt) else { break None };
+            let Some(delay) = next_delay(&policy, attempt) else {
+                break None;
+            };
             inner.monitor.publish(MonitorEvent::ConnectDelayed {
                 endpoint: wrapper.clone(),
                 retry_in: delay,
@@ -141,10 +141,8 @@ async fn dial_supervisor_tcp(
             *set.write().expect("peer_sub lock") = SubscriptionSet::new();
         }
 
-        let transform = omq_proto::proto::transform::MessageTransform::for_endpoint(
-            &wrapper,
-            &inner.options,
-        );
+        let transform =
+            omq_proto::proto::transform::MessageTransform::for_endpoint(&wrapper, &inner.options);
         let (reader, writer) = stream.into_split();
         let peer_io = crate::transport::driver::build_peer_io(
             role,
@@ -155,9 +153,7 @@ async fn dial_supervisor_tcp(
             transform,
         );
         let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
-        *direct_io_handle
-            .write()
-            .expect("direct_io handle lock") = Some(state.clone());
+        *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
         let idx = if let Some(idx) = slot_idx {
             idx
@@ -217,8 +213,7 @@ pub(super) fn connect_ipc_with_reconnect(
     let info_holder: Arc<RwLock<Option<PeerInfo>>> = Arc::new(RwLock::new(None));
     let peer_sub = pub_side_peer_sub(inner.socket_type);
     let peer_groups = radio_side_peer_groups(inner.socket_type);
-    let handle: WirePeerHandle =
-        Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
+    let handle: WirePeerHandle = Arc::new(RwLock::new(flume::bounded::<DriverCommand>(1).0));
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(None));
     let dialer_endpoint = endpoint.clone();
 
@@ -276,7 +271,9 @@ async fn dial_supervisor_ipc(
             if matches!(policy, ReconnectPolicy::Disabled) && slot_idx.is_none() {
                 return;
             }
-            let Some(delay) = next_delay(&policy, attempt) else { break None };
+            let Some(delay) = next_delay(&policy, attempt) else {
+                break None;
+            };
             inner.monitor.publish(MonitorEvent::ConnectDelayed {
                 endpoint: endpoint.clone(),
                 retry_in: delay,
@@ -313,9 +310,7 @@ async fn dial_supervisor_ipc(
             None,
         );
         let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
-        *direct_io_handle
-            .write()
-            .expect("direct_io handle lock") = Some(state.clone());
+        *direct_io_handle.write().expect("direct_io handle lock") = Some(state.clone());
 
         let idx = if let Some(idx) = slot_idx {
             idx

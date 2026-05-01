@@ -63,9 +63,8 @@ impl MessageTransform {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => {
                 let lz4 = match options.compression_dict.clone() {
-                    Some(d) => Lz4Transform::with_send_dict(d).expect(
-                        "compression_dict validated at Options::compression_dict",
-                    ),
+                    Some(d) => Lz4Transform::with_send_dict(d)
+                        .expect("compression_dict validated at Options::compression_dict"),
                     None => Lz4Transform::new(),
                 }
                 .with_max_message_size(options.max_message_size);
@@ -74,9 +73,8 @@ impl MessageTransform {
             #[cfg(feature = "zstd")]
             Endpoint::ZstdTcp { .. } => {
                 let mut zstd = match options.compression_dict.clone() {
-                    Some(d) => ZstdTransform::with_send_dict(d).expect(
-                        "compression_dict validated at Options::compression_dict",
-                    ),
+                    Some(d) => ZstdTransform::with_send_dict(d)
+                        .expect("compression_dict validated at Options::compression_dict"),
                     None => ZstdTransform::new(),
                 }
                 .with_max_message_size(options.max_message_size);

@@ -21,7 +21,10 @@ pub(crate) struct FairQueueRecv {
 
 impl FairQueueRecv {
     pub(crate) fn new(recv_tx: async_channel::Sender<Message>) -> Self {
-        Self { recv_tx, peers: HashSet::new() }
+        Self {
+            recv_tx,
+            peers: HashSet::new(),
+        }
     }
 
     pub(crate) fn connection_added(&mut self, peer_id: u64) {

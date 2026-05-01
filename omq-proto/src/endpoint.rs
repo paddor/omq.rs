@@ -25,7 +25,11 @@ pub enum Endpoint {
     /// `inproc://name` in-process transport.
     Inproc { name: String },
     /// `udp://[group@]host:port` for RADIO/DISH (group optional).
-    Udp { group: Option<String>, host: Host, port: u16 },
+    Udp {
+        group: Option<String>,
+        host: Host,
+        port: u16,
+    },
     /// `lz4+tcp://host:port` LZ4-compressed TCP. Requires the `lz4` feature.
     #[cfg(feature = "lz4")]
     Lz4Tcp { host: Host, port: u16 },
@@ -89,13 +93,13 @@ impl FromStr for Endpoint {
                 if rest.is_empty() {
                     return Err(Error::InvalidEndpoint(s.to_string()));
                 }
-                Ok(Endpoint::Inproc { name: rest.to_string() })
+                Ok(Endpoint::Inproc {
+                    name: rest.to_string(),
+                })
             }
             "udp" => parse_udp(rest),
             #[cfg(feature = "lz4")]
-            "lz4+tcp" => {
-                parse_host_port(rest).map(|(host, port)| Endpoint::Lz4Tcp { host, port })
-            }
+            "lz4+tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Lz4Tcp { host, port }),
             #[cfg(feature = "zstd")]
             "zstd+tcp" => {
                 parse_host_port(rest).map(|(host, port)| Endpoint::ZstdTcp { host, port })
@@ -241,7 +245,10 @@ impl FromStr for EndpointSpec {
             Some(b'>') => (EndpointRole::Connect, &s[1..]),
             _ => (EndpointRole::Default, s),
         };
-        Ok(Self { role, endpoint: rest.parse()? })
+        Ok(Self {
+            role,
+            endpoint: rest.parse()?,
+        })
     }
 }
 
@@ -296,7 +303,10 @@ fn parse_host(s: &str) -> Result<Host> {
     if let Ok(ip) = s.parse::<IpAddr>() {
         return Ok(Host::Ip(ip));
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
         return Err(Error::InvalidEndpoint(format!("invalid host {s}")));
     }
     Ok(Host::Name(s.to_string()))
@@ -308,7 +318,9 @@ fn parse_ipc(rest: &str) -> Result<IpcPath> {
     }
     if let Some(name) = rest.strip_prefix('@') {
         if name.is_empty() {
-            return Err(Error::InvalidEndpoint("empty abstract ipc name".to_string()));
+            return Err(Error::InvalidEndpoint(
+                "empty abstract ipc name".to_string(),
+            ));
         }
         return Ok(IpcPath::Abstract(name.to_string()));
     }
@@ -323,4 +335,3 @@ fn parse_udp(rest: &str) -> Result<Endpoint> {
     let (host, port) = parse_host_port(hp)?;
     Ok(Endpoint::Udp { group, host, port })
 }
-

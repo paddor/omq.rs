@@ -55,22 +55,30 @@ pub(crate) fn transports() -> Vec<String> {
     if let Ok(s) = std::env::var("OMQ_BENCH_TRANSPORTS") {
         s.split(',').map(|t| t.trim().to_string()).collect()
     } else {
-        DEFAULT_TRANSPORTS.iter().map(|s| (*s).to_string()).collect()
+        DEFAULT_TRANSPORTS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     }
 }
 
 pub(crate) fn peers_override() -> Option<Vec<usize>> {
-    std::env::var("OMQ_BENCH_PEERS").ok().map(|s| {
-        s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
-    })
+    std::env::var("OMQ_BENCH_PEERS")
+        .ok()
+        .map(|s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect())
 }
 
 pub(crate) fn endpoint(transport: &str, seq: usize) -> Endpoint {
     match transport {
-        "inproc" => Endpoint::Inproc { name: format!("bench-{seq}") },
+        "inproc" => Endpoint::Inproc {
+            name: format!("bench-{seq}"),
+        },
         "ipc" => {
             let mut dir = std::env::temp_dir();
-            dir.push(format!("omq-compio-bench-{}-{seq}.sock", std::process::id()));
+            dir.push(format!(
+                "omq-compio-bench-{}-{seq}.sock",
+                std::process::id()
+            ));
             let _ = std::fs::remove_file(&dir);
             Endpoint::Ipc(IpcPath::Filesystem(dir))
         }
@@ -112,24 +120,26 @@ pub(crate) async fn wait_connected(socks: &[&omq_compio::Socket]) {
         if all_ok {
             return;
         }
-        assert!(Instant::now() <= deadline, "bench: timed out waiting for peers to connect");
+        assert!(
+            Instant::now() <= deadline,
+            "bench: timed out waiting for peers to connect"
+        );
         compio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
-pub(crate) async fn wait_subscribed(
-    pub_: &omq_compio::Socket,
-    subs: &[&omq_compio::Socket],
-) {
+pub(crate) async fn wait_subscribed(pub_: &omq_compio::Socket, subs: &[&omq_compio::Socket]) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut pending: Vec<usize> = (0..subs.len()).collect();
     while !pending.is_empty() {
-        assert!(Instant::now() <= deadline, "bench: subscriptions never propagated");
+        assert!(
+            Instant::now() <= deadline,
+            "bench: subscriptions never propagated"
+        );
         let _ = pub_.send(omq_compio::Message::single("")).await;
         let mut still: Vec<usize> = Vec::new();
         for &i in &pending {
-            match compio::time::timeout(Duration::from_millis(20), subs[i].recv()).await
-            {
+            match compio::time::timeout(Duration::from_millis(20), subs[i].recv()).await {
                 Ok(Ok(_)) => {}
                 _ => still.push(i),
             }
@@ -138,11 +148,7 @@ pub(crate) async fn wait_subscribed(
     }
 }
 
-pub(crate) async fn measure_best_of<F, Fut>(
-    msg_size: usize,
-    align: usize,
-    burst: F,
-) -> Cell
+pub(crate) async fn measure_best_of<F, Fut>(msg_size: usize, align: usize, burst: F) -> Cell
 where
     F: Fn(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -175,7 +181,12 @@ where
     let elapsed = best.unwrap();
     let mbps = (final_n * msg_size) as f64 / elapsed.as_secs_f64() / 1_000_000.0;
     let msgs_s = final_n as f64 / elapsed.as_secs_f64();
-    Cell { n: final_n, elapsed, mbps, msgs_s }
+    Cell {
+        n: final_n,
+        elapsed,
+        mbps,
+        msgs_s,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -215,13 +226,7 @@ pub(crate) fn print_cell(msg_size: usize, c: Cell) {
     );
 }
 
-pub(crate) fn append_jsonl(
-    pattern: &str,
-    transport: &str,
-    peers: usize,
-    msg_size: usize,
-    c: Cell,
-) {
+pub(crate) fn append_jsonl(pattern: &str, transport: &str, peers: usize, msg_size: usize, c: Cell) {
     if std::env::var_os("OMQ_BENCH_NO_WRITE").is_some() {
         return;
     }
@@ -260,10 +265,7 @@ fn rustc_version_runtime() -> String {
 /// Compio runs everything on the current thread; no multi-thread
 /// builder is needed (or available). Each bench `main()` constructs
 /// one runtime via `#[compio::main]`.
-pub(crate) async fn with_timeout<T>(
-    label: &str,
-    fut: impl std::future::Future<Output = T>,
-) -> T {
+pub(crate) async fn with_timeout<T>(label: &str, fut: impl std::future::Future<Output = T>) -> T {
     compio::time::timeout(RUN_TIMEOUT, fut)
         .await
         .unwrap_or_else(|_| panic!("BENCH TIMEOUT: {label} exceeded {RUN_TIMEOUT:?}"))

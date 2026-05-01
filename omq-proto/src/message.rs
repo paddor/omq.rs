@@ -149,11 +149,20 @@ pub struct FrameFlags {
 
 impl FrameFlags {
     /// Last data frame in a message.
-    pub const LAST: Self = Self { more: false, command: false };
+    pub const LAST: Self = Self {
+        more: false,
+        command: false,
+    };
     /// Intermediate data frame (more frames follow).
-    pub const MORE: Self = Self { more: true, command: false };
+    pub const MORE: Self = Self {
+        more: true,
+        command: false,
+    };
     /// A ZMTP command frame (terminal by definition; MORE is not allowed with COMMAND).
-    pub const COMMAND: Self = Self { more: false, command: true };
+    pub const COMMAND: Self = Self {
+        more: false,
+        command: true,
+    };
 }
 
 /// A single ZMTP frame on the wire.
@@ -165,11 +174,18 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(payload: impl Into<Payload>, flags: FrameFlags) -> Self {
-        Self { flags, payload: payload.into() }
+        Self {
+            flags,
+            payload: payload.into(),
+        }
     }
 
     pub fn data(payload: impl Into<Payload>, more: bool) -> Self {
-        let flags = if more { FrameFlags::MORE } else { FrameFlags::LAST };
+        let flags = if more {
+            FrameFlags::MORE
+        } else {
+            FrameFlags::LAST
+        };
         Self::new(payload, flags)
     }
 
@@ -211,7 +227,9 @@ impl Message {
         I: IntoIterator<Item = P>,
         P: Into<Payload>,
     {
-        Self { parts: parts.into_iter().map(Into::into).collect() }
+        Self {
+            parts: parts.into_iter().map(Into::into).collect(),
+        }
     }
 
     pub fn push_part(&mut self, part: impl Into<Payload>) {
@@ -339,9 +357,27 @@ mod tests {
 
     #[test]
     fn frame_flags_consts() {
-        assert_eq!(FrameFlags::LAST, FrameFlags { more: false, command: false });
-        assert_eq!(FrameFlags::MORE, FrameFlags { more: true, command: false });
-        assert_eq!(FrameFlags::COMMAND, FrameFlags { more: false, command: true });
+        assert_eq!(
+            FrameFlags::LAST,
+            FrameFlags {
+                more: false,
+                command: false
+            }
+        );
+        assert_eq!(
+            FrameFlags::MORE,
+            FrameFlags {
+                more: true,
+                command: false
+            }
+        );
+        assert_eq!(
+            FrameFlags::COMMAND,
+            FrameFlags {
+                more: false,
+                command: true
+            }
+        );
     }
 
     #[test]

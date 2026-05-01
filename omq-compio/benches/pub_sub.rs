@@ -23,8 +23,7 @@ async fn main() {
                 seq += 1;
                 let label = format!("{transport}/{peers}peer/{size}B");
                 let cell =
-                    common::with_timeout(&label, run_cell(&transport, peers, size, seq))
-                        .await;
+                    common::with_timeout(&label, run_cell(&transport, peers, size, seq)).await;
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, &transport, peers, size, cell);
             }
@@ -35,10 +34,7 @@ async fn main() {
 
 async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let ep = common::endpoint(transport, seq);
-    let pub_ = Socket::new(
-        SocketType::Pub,
-        Options::default().on_mute(OnMute::Block),
-    );
+    let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
     let mut subs: Vec<Socket> = Vec::with_capacity(peers);

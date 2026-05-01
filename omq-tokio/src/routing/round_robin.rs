@@ -22,7 +22,10 @@
 #[cfg(not(feature = "priority"))]
 use std::collections::HashMap;
 #[cfg(feature = "priority")]
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[cfg(not(feature = "priority"))]
 use tokio::task::JoinHandle;
@@ -97,7 +100,13 @@ impl RoundRobinSend {
         let task = tokio::spawn(async move {
             pump(rx, handle, pump_cancel).await;
         });
-        self.pumps.insert(peer_id, PumpEntry { cancel, _task: task });
+        self.pumps.insert(
+            peer_id,
+            PumpEntry {
+                cancel,
+                _task: task,
+            },
+        );
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -110,7 +119,9 @@ impl RoundRobinSend {
     /// driver hand off `Send` command handling so the actor loop never
     /// blocks on HWM backpressure.
     pub(crate) fn submitter(&self) -> Submitter {
-        Submitter { queue: self.queue.clone() }
+        Submitter {
+            queue: self.queue.clone(),
+        }
     }
 
     pub(crate) fn shutdown(&self) {
@@ -243,11 +254,7 @@ impl RoundRobinSend {
 
     #[allow(dead_code)] // kept for parity with the non-priority impl's API
     pub(crate) fn connection_added(&mut self, peer_id: u64, handle: DriverHandle) {
-        self.connection_added_with_priority(
-            peer_id,
-            handle,
-            omq_proto::DEFAULT_PRIORITY,
-        );
+        self.connection_added_with_priority(peer_id, handle, omq_proto::DEFAULT_PRIORITY);
     }
 
     pub(crate) fn connection_added_with_priority(
@@ -257,7 +264,11 @@ impl RoundRobinSend {
         priority: u8,
     ) {
         let mut peers = self.peers.write().expect("peers lock");
-        peers.push(PriorityPeer { peer_id, priority, handle });
+        peers.push(PriorityPeer {
+            peer_id,
+            priority,
+            handle,
+        });
         peers.sort_by_key(|p| p.priority);
         drop(peers);
         // Wake any submitter awaiting a peer-set change (notify_waiters
@@ -299,11 +310,7 @@ impl RoundRobinSend {
 /// Per-peer pump. Races other pumps for the next message; once a message is
 /// in hand, opportunistically drains up to the batch cap before yielding.
 #[cfg(not(feature = "priority"))]
-async fn pump(
-    rx: flume::Receiver<Message>,
-    peer: DriverHandle,
-    cancel: CancellationToken,
-) {
+async fn pump(rx: flume::Receiver<Message>, peer: DriverHandle, cancel: CancellationToken) {
     loop {
         tokio::select! {
             biased;

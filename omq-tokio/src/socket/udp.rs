@@ -19,10 +19,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use omq_proto::endpoint::Endpoint;
 use crate::engine::{DriverCommand, DriverHandle};
-use omq_proto::message::Message;
 use crate::transport::udp;
+use omq_proto::endpoint::Endpoint;
+use omq_proto::message::Message;
 
 /// Joined-groups set, shared between the socket actor (mutated by
 /// `apply_join`) and every UDP DISH listener task (read on each recv).

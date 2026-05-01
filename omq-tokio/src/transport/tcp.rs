@@ -35,8 +35,14 @@ impl Transport for TcpTransport {
         let addr = resolve_bind(host, *port).await?;
         let listener = TokioTcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
-        let bound = Endpoint::Tcp { host: Host::Ip(local.ip()), port: local.port() };
-        Ok(TcpListener { inner: listener, endpoint: bound })
+        let bound = Endpoint::Tcp {
+            host: Host::Ip(local.ip()),
+            port: local.port(),
+        };
+        Ok(TcpListener {
+            inner: listener,
+            endpoint: bound,
+        })
     }
 
     async fn connect(endpoint: &Endpoint) -> Result<Self::Stream> {
@@ -102,14 +108,19 @@ mod tests {
     use super::*;
 
     fn loopback_port_zero() -> Endpoint {
-        Endpoint::Tcp { host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), port: 0 }
+        Endpoint::Tcp {
+            host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: 0,
+        }
     }
 
     #[tokio::test]
     async fn bind_connect_accept() {
         let mut listener = TcpTransport::bind(&loopback_port_zero()).await.unwrap();
         let local = listener.local_endpoint().clone();
-        let Endpoint::Tcp { port, .. } = local else { panic!() };
+        let Endpoint::Tcp { port, .. } = local else {
+            panic!()
+        };
         assert!(port != 0, "OS should assign a port");
 
         let connect_target = Endpoint::Tcp {
@@ -136,7 +147,10 @@ mod tests {
 
     #[tokio::test]
     async fn connect_rejects_wildcard() {
-        let ep = Endpoint::Tcp { host: Host::Wildcard, port: 5555 };
+        let ep = Endpoint::Tcp {
+            host: Host::Wildcard,
+            port: 5555,
+        };
         assert!(matches!(
             TcpTransport::connect(&ep).await,
             Err(Error::InvalidEndpoint(_))

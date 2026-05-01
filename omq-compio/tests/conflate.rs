@@ -54,7 +54,9 @@ async fn push_conflate_keeps_only_latest() {
     // No peer yet: every send goes into the cap-1 shared queue and
     // replaces whatever was there. All 100 sends return immediately.
     for i in 0..100u32 {
-        push.send(Message::single(format!("m-{i:03}"))).await.unwrap();
+        push.send(Message::single(format!("m-{i:03}")))
+            .await
+            .unwrap();
     }
 
     // Now bind PULL. The reconnect supervisor connects PUSH → PULL;
@@ -63,8 +65,7 @@ async fn push_conflate_keeps_only_latest() {
     pull.bind(tcp_ep(port)).await.unwrap();
 
     let mut received = Vec::new();
-    while let Ok(Ok(msg)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await
-    {
+    while let Ok(Ok(msg)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {
         received.push(String::from_utf8_lossy(&msg.parts()[0].coalesce()).into_owned());
         if received.len() >= 5 {
             break;

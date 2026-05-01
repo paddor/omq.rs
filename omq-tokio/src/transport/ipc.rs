@@ -179,7 +179,11 @@ mod tests {
     #[tokio::test]
     async fn abstract_bind_connect_roundtrip() {
         // Random suffix avoids cross-test collisions in the abstract namespace.
-        let name = format!("omq-ipc-abs-{}-{}", std::process::id(), rand::random::<u32>());
+        let name = format!(
+            "omq-ipc-abs-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        );
         let ep = Endpoint::Ipc(IpcPath::Abstract(name));
         let mut listener = IpcTransport::bind(&ep).await.unwrap();
         let ep2 = ep.clone();

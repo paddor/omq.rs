@@ -12,19 +12,19 @@
 //! Status: beachhead. PUSH/PULL on inproc + TCP, send-batching,
 //! gather writes via compio's `Vec<Bytes>` `IoVectoredBuf` path.
 
+#[cfg(feature = "priority")]
+pub use omq_proto::ConnectOpts;
+#[cfg(any(feature = "curve", feature = "blake3zmq"))]
+pub use omq_proto::{Authenticator, MechanismPeerInfo};
+#[cfg(feature = "blake3zmq")]
+pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
+#[cfg(feature = "curve")]
+pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, IpcPath, KeepAlive,
     MechanismConfig, Message, OnMute, Options, Payload, ReconnectPolicy, Result, SocketType,
     is_compatible,
 };
-#[cfg(any(feature = "curve", feature = "blake3zmq"))]
-pub use omq_proto::{Authenticator, MechanismPeerInfo};
-#[cfg(feature = "curve")]
-pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey};
-#[cfg(feature = "blake3zmq")]
-pub use omq_proto::{Blake3ZmqKeypair, Blake3ZmqPublicKey, Blake3ZmqSecretKey};
-#[cfg(feature = "priority")]
-pub use omq_proto::ConnectOpts;
 
 pub use omq_proto::endpoint;
 pub use omq_proto::error;

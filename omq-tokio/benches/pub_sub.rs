@@ -6,7 +6,7 @@
 mod common;
 
 use bytes::Bytes;
-use omq_tokio::{Message, Options, OnMute, Socket, SocketType};
+use omq_tokio::{Message, OnMute, Options, Socket, SocketType};
 
 const PATTERN: &str = "pub_sub";
 const PEER_COUNTS: &[usize] = &[3];
@@ -25,7 +25,8 @@ fn main() {
                 for &size in &common::sizes() {
                     seq += 1;
                     let label = format!("{transport}/{peers}peer/{size}B");
-                    let cell = common::with_timeout(&label, run_cell(&transport, peers, size, seq)).await;
+                    let cell =
+                        common::with_timeout(&label, run_cell(&transport, peers, size, seq)).await;
                     common::print_cell(size, cell);
                     common::append_jsonl(PATTERN, &transport, peers, size, cell);
                 }
@@ -39,10 +40,7 @@ async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> com
     let ep = common::endpoint(transport, seq);
     // Default PUB on_mute is drop_newest. The bench needs strict
     // delivery (we count exactly k receives per sub) - opt into block.
-    let pub_ = Socket::new(
-        SocketType::Pub,
-        Options::default().on_mute(OnMute::Block),
-    );
+    let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
     let mut subs: Vec<Socket> = Vec::with_capacity(peers);

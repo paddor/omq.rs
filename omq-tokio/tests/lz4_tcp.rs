@@ -115,7 +115,9 @@ async fn dict_roundtrip_small_payload() {
         .unwrap()
         .unwrap();
     let port = match ev {
-        MonitorEvent::Listening { endpoint: Endpoint::Lz4Tcp { port, .. } } => port,
+        MonitorEvent::Listening {
+            endpoint: Endpoint::Lz4Tcp { port, .. },
+        } => port,
         other => panic!("unexpected {other:?}"),
     };
 

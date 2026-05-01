@@ -150,8 +150,7 @@ mod tests {
         let r = CookieKeyring::new();
         let key = r.current_key();
         let nonce = [0xa5u8; 24];
-        let ct = chacha20_blake3::ChaCha20Blake3::new(key)
-            .encrypt(&nonce, b"secret", b"aad");
+        let ct = chacha20_blake3::ChaCha20Blake3::new(key).encrypt(&nonce, b"secret", b"aad");
 
         r.rotate_now();
         let pt = r
@@ -167,8 +166,7 @@ mod tests {
         let r = CookieKeyring::new();
         let key = r.current_key();
         let nonce = [0xa5u8; 24];
-        let ct = chacha20_blake3::ChaCha20Blake3::new(key)
-            .encrypt(&nonce, b"secret", b"aad");
+        let ct = chacha20_blake3::ChaCha20Blake3::new(key).encrypt(&nonce, b"secret", b"aad");
 
         r.rotate_now();
         r.rotate_now();

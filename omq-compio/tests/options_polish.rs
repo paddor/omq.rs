@@ -12,10 +12,7 @@ fn inproc_ep(name: &str) -> Endpoint {
 #[compio::test]
 async fn linger_zero_drops_pending_on_close() {
     let ep = inproc_ep("opt-linger0");
-    let push = Socket::new(
-        SocketType::Push,
-        Options::default().linger(Duration::ZERO),
-    );
+    let push = Socket::new(SocketType::Push, Options::default().linger(Duration::ZERO));
     push.bind(ep.clone()).await.unwrap();
 
     let _ = compio::time::timeout(
@@ -52,10 +49,7 @@ async fn router_mandatory_true_errors_on_unknown() {
 #[compio::test]
 async fn max_message_size_rejects_oversize() {
     let ep = inproc_ep("opt-mms");
-    let pull = Socket::new(
-        SocketType::Pull,
-        Options::default().max_message_size(8),
-    );
+    let pull = Socket::new(SocketType::Pull, Options::default().max_message_size(8));
     pull.bind(ep.clone()).await.unwrap();
 
     let push = Socket::new(SocketType::Push, Options::default());
@@ -109,8 +103,12 @@ async fn try_recv_empty_returns_would_block() {
 async fn try_recv_returns_buffered_message() {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let push = Socket::new(SocketType::Push, Options::default());
-    pull.bind(inproc_ep("try-recv-buffered-compio")).await.unwrap();
-    push.connect(inproc_ep("try-recv-buffered-compio")).await.unwrap();
+    pull.bind(inproc_ep("try-recv-buffered-compio"))
+        .await
+        .unwrap();
+    push.connect(inproc_ep("try-recv-buffered-compio"))
+        .await
+        .unwrap();
     push.send(Message::single("hello")).await.unwrap();
     // Yield so the inproc frame is forwarded through in_tx/in_rx.
     let _ = compio::runtime::spawn(async {}).await;
@@ -121,9 +119,14 @@ async fn try_recv_returns_buffered_message() {
 #[compio::test]
 async fn try_send_no_peers_returns_would_block() {
     let push = Socket::new(SocketType::Push, Options::default());
-    push.bind(inproc_ep("try-send-nopeer-compio")).await.unwrap();
+    push.bind(inproc_ep("try-send-nopeer-compio"))
+        .await
+        .unwrap();
     // No peer connected; shared queue has capacity but no peer means WouldBlock.
-    assert!(matches!(push.try_send(Message::single("x")), Err(Error::WouldBlock)));
+    assert!(matches!(
+        push.try_send(Message::single("x")),
+        Err(Error::WouldBlock)
+    ));
 }
 
 #[compio::test]

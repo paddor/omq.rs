@@ -41,10 +41,7 @@ impl TypeState {
         // messages are `[routing_id, body]` (2 parts) before the identity
         // strip; we enforce body is single by allowing exactly 2 parts.
         match t {
-            SocketType::Client
-            | SocketType::Scatter
-            | SocketType::Gather
-            | SocketType::Channel
+            SocketType::Client | SocketType::Scatter | SocketType::Gather | SocketType::Channel
                 if msg.len() != 1 =>
             {
                 return Err(Error::Protocol(format!(
@@ -132,7 +129,8 @@ impl TypeState {
                 // Split at first empty delimiter. Frames before it are
                 // envelope; frames after are the request body.
                 let parts = msg.parts();
-                let Some(delim_idx) = parts.iter().position(super::message::Payload::is_empty) else {
+                let Some(delim_idx) = parts.iter().position(super::message::Payload::is_empty)
+                else {
                     return Ok(None); // malformed
                 };
                 let mut envelope = Vec::with_capacity(delim_idx);
@@ -158,7 +156,9 @@ mod tests {
     #[test]
     fn req_prepends_empty_delimiter() {
         let mut s = TypeState::new();
-        let out = s.pre_send(SocketType::Req, Message::single("body")).unwrap();
+        let out = s
+            .pre_send(SocketType::Req, Message::single("body"))
+            .unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.parts()[0].is_empty());
         assert_eq!(out.parts()[1].coalesce(), &b"body"[..]);
@@ -186,7 +186,9 @@ mod tests {
     #[test]
     fn req_drops_reply_without_pending_send() {
         let mut s = TypeState::new();
-        let r = s.post_recv(SocketType::Req, Message::multipart(["", "x"])).unwrap();
+        let r = s
+            .post_recv(SocketType::Req, Message::multipart(["", "x"]))
+            .unwrap();
         assert!(r.is_none());
     }
 
@@ -194,7 +196,9 @@ mod tests {
     fn req_drops_malformed_reply_missing_delimiter() {
         let mut s = TypeState::new();
         s.pre_send(SocketType::Req, Message::single("a")).unwrap();
-        let r = s.post_recv(SocketType::Req, Message::single("no-delim")).unwrap();
+        let r = s
+            .post_recv(SocketType::Req, Message::single("no-delim"))
+            .unwrap();
         assert!(r.is_none());
     }
 

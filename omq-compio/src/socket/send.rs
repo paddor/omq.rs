@@ -12,8 +12,8 @@
 //! `Socket::send` itself dispatches; the per-strategy methods sit in
 //! a single `impl Socket` block here.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
@@ -93,12 +93,11 @@ impl Socket {
             SocketType::Pub | SocketType::XPub => self.send_pub_filtered(msg).await,
             SocketType::Radio => self.send_radio(msg).await,
             SocketType::XSub => self.send_fan_out(msg).await,
-            SocketType::Pull
-            | SocketType::Sub
-            | SocketType::Dish
-            | SocketType::Gather => Err(Error::Protocol(format!(
-                "send is not supported on recv-only socket type {st:?}"
-            ))),
+            SocketType::Pull | SocketType::Sub | SocketType::Dish | SocketType::Gather => {
+                Err(Error::Protocol(format!(
+                    "send is not supported on recv-only socket type {st:?}"
+                )))
+            }
         }
     }
 
@@ -129,8 +128,7 @@ impl Socket {
                     }
                     None
                 } else {
-                    let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed)
-                        % peers.len();
+                    let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % peers.len();
                     let p = &peers[idx];
                     Some((p.out.clone(), peers.len()))
                 }
@@ -278,7 +276,11 @@ impl Socket {
         if peers.is_empty() {
             return PriorityOutcome::NoLivePeers;
         }
-        let view = self.inner().priority_view.read().expect("priority_view lock");
+        let view = self
+            .inner()
+            .priority_view
+            .read()
+            .expect("priority_view lock");
         let rr = self.inner().rr_index.fetch_add(1, Ordering::Relaxed);
         let mut highest_alive: Option<PeerOut> = None;
         let mut i = 0;
@@ -326,7 +328,11 @@ impl Socket {
         }
         let identity = parts[0].coalesce();
         let target = {
-            let table = self.inner().identity_to_slot.read().expect("identity table");
+            let table = self
+                .inner()
+                .identity_to_slot
+                .read()
+                .expect("identity table");
             let idx = table.get(&identity).copied();
             drop(table);
             idx.and_then(|idx| {
@@ -389,10 +395,7 @@ impl Socket {
                 .iter()
                 .filter(|p| match &p.peer_groups {
                     // Wire peer with a group filter: deliver only if joined.
-                    Some(set) => set
-                        .read()
-                        .expect("peer_groups lock")
-                        .contains(&group[..]),
+                    Some(set) => set.read().expect("peer_groups lock").contains(&group[..]),
                     // Inproc peers — no filter; DISH filters on recv.
                     None => true,
                 })
@@ -565,9 +568,7 @@ impl Socket {
     fn try_send_round_robin(&self, msg: Message) -> Result<()> {
         match self.try_send_priority_walk(&msg) {
             PriorityOutcome::Sent => Ok(()),
-            PriorityOutcome::AwaitOn(_) | PriorityOutcome::NoLivePeers => {
-                Err(Error::WouldBlock)
-            }
+            PriorityOutcome::AwaitOn(_) | PriorityOutcome::NoLivePeers => Err(Error::WouldBlock),
         }
     }
 
@@ -578,7 +579,11 @@ impl Socket {
         }
         let identity = parts[0].coalesce();
         let target = {
-            let table = self.inner().identity_to_slot.read().expect("identity table");
+            let table = self
+                .inner()
+                .identity_to_slot
+                .read()
+                .expect("identity table");
             let idx = table.get(&identity).copied();
             drop(table);
             idx.and_then(|idx| {
@@ -636,10 +641,7 @@ impl Socket {
             peers
                 .iter()
                 .filter(|p| match &p.peer_groups {
-                    Some(set) => set
-                        .read()
-                        .expect("peer_groups lock")
-                        .contains(&group[..]),
+                    Some(set) => set.read().expect("peer_groups lock").contains(&group[..]),
                     None => true,
                 })
                 .map(|p| p.out.clone())

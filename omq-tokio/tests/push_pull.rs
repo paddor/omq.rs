@@ -1,7 +1,7 @@
 //! Multi-peer PUSH / PULL integration tests and work-stealing demo.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -52,7 +52,9 @@ async fn push_pull_multi_peer_distributes() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for i in 0..N {
-        push.send(Message::single(format!("msg-{i}"))).await.unwrap();
+        push.send(Message::single(format!("msg-{i}")))
+            .await
+            .unwrap();
     }
 
     // Drain each pull concurrently.
@@ -84,7 +86,10 @@ async fn push_pull_multi_peer_distributes() {
         let n = c.load(Ordering::SeqCst);
         // Each pull should get at least 5% of the messages -- work stealing
         // converges approximately uniformly when all peers are equally fast.
-        assert!(n > N / 20, "pull got only {n} / {N}; distribution too skewed");
+        assert!(
+            n > N / 20,
+            "pull got only {n} / {N}; distribution too skewed"
+        );
     }
 }
 
@@ -145,7 +150,10 @@ async fn push_pull_slow_peer_does_not_block_fast() {
     let s = slow_count.load(Ordering::SeqCst);
     assert_eq!(f + s, N, "every message must arrive");
     assert!(f > 0 && s > 0, "both peers must receive some messages");
-    assert!(f >= s, "fast peer should never receive fewer than slow (got {f} vs {s})");
+    assert!(
+        f >= s,
+        "fast peer should never receive fewer than slow (got {f} vs {s})"
+    );
 }
 
 #[tokio::test]
@@ -223,7 +231,9 @@ async fn push_send_before_peer_connects_queues() {
     push.bind(ep.clone()).await.unwrap();
 
     for i in 0..5 {
-        push.send(Message::single(format!("early-{i}"))).await.unwrap();
+        push.send(Message::single(format!("early-{i}")))
+            .await
+            .unwrap();
     }
 
     let pull = Socket::new(SocketType::Pull, Options::default());

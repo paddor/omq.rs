@@ -21,8 +21,7 @@ use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 #[compio::test]
 async fn connect_to_silent_peer_times_out_then_backpressures() {
-    let listener =
-        StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let listener = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let accept_handle = std::thread::spawn(move || {
@@ -58,11 +57,8 @@ async fn connect_to_silent_peer_times_out_then_backpressures() {
     // must block (queue full, no pump to drain it).
     let mut accepted = 0usize;
     for _ in 0..=(hwm as usize) {
-        match compio::time::timeout(
-            Duration::from_millis(100),
-            push.send(Message::single("x")),
-        )
-        .await
+        match compio::time::timeout(Duration::from_millis(100), push.send(Message::single("x")))
+            .await
         {
             Ok(Ok(())) => accepted += 1,
             _ => break,

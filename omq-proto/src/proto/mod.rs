@@ -24,7 +24,7 @@ pub mod z85;
 
 pub use command::{Command, CommandKind, PeerProperties};
 pub use connection::{Connection, ConnectionConfig, Event, Role};
-pub use frame::{MAX_SHORT_FRAME_SIZE, MAX_FRAME_HEADER_LEN};
+pub use frame::{MAX_FRAME_HEADER_LEN, MAX_SHORT_FRAME_SIZE};
 pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_MINOR};
 
 /// All 18 ZMTP socket types (11 standard + 7 draft).
@@ -128,8 +128,30 @@ impl SocketType {
 /// Returns true iff a socket of type `ours` can handshake with a peer of type
 /// `theirs`.
 pub const fn is_compatible(ours: SocketType, theirs: SocketType) -> bool {
-    use SocketType::{Pub, Sub, XSub, XPub, Push, Pull, Req, Rep, Router, Dealer, Pair, Client, Server, Radio, Dish, Scatter, Gather, Channel, Peer};
-    matches!((ours, theirs), (Pub | XPub, Sub | XSub) | (Sub | XSub, Pub | XPub) | (Push, Pull) | (Pull, Push) | (Req, Rep | Router) | (Rep, Req | Dealer) | (Dealer, Rep | Dealer | Router) | (Router, Req | Dealer | Router) | (Pair, Pair) | (Client, Server) | (Server, Client) | (Radio, Dish) | (Dish, Radio) | (Scatter, Gather) | (Gather, Scatter) | (Channel, Channel) | (Peer, Peer))
+    use SocketType::{
+        Channel, Client, Dealer, Dish, Gather, Pair, Peer, Pub, Pull, Push, Radio, Rep, Req,
+        Router, Scatter, Server, Sub, XPub, XSub,
+    };
+    matches!(
+        (ours, theirs),
+        (Pub | XPub, Sub | XSub)
+            | (Sub | XSub, Pub | XPub)
+            | (Push, Pull)
+            | (Pull, Push)
+            | (Req, Rep | Router)
+            | (Rep, Req | Dealer)
+            | (Dealer, Rep | Dealer | Router)
+            | (Router, Req | Dealer | Router)
+            | (Pair, Pair)
+            | (Client, Server)
+            | (Server, Client)
+            | (Radio, Dish)
+            | (Dish, Radio)
+            | (Scatter, Gather)
+            | (Gather, Scatter)
+            | (Channel, Channel)
+            | (Peer, Peer)
+    )
 }
 
 #[cfg(test)]

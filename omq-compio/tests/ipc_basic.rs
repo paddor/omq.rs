@@ -43,7 +43,9 @@ async fn ipc_push_pull_burst() {
     push.connect(ep).await.unwrap();
 
     for i in 0..N {
-        push.send(Message::single(format!("m-{i:04}"))).await.unwrap();
+        push.send(Message::single(format!("m-{i:04}")))
+            .await
+            .unwrap();
     }
     for i in 0..N {
         let m = compio::time::timeout(Duration::from_secs(2), pull.recv())

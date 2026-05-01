@@ -47,9 +47,7 @@ impl MonitorStream {
             Ok(e) => Ok(e),
             Err(broadcast::error::TryRecvError::Empty) => Err(MonitorTryRecvError::Empty),
             Err(broadcast::error::TryRecvError::Closed) => Err(MonitorTryRecvError::Closed),
-            Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                Err(MonitorTryRecvError::Lagged(n))
-            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => Err(MonitorTryRecvError::Lagged(n)),
         }
     }
 }

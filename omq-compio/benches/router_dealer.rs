@@ -23,8 +23,7 @@ async fn main() {
                 seq += 1;
                 let label = format!("{transport}/{peers}peer/{size}B");
                 let cell =
-                    common::with_timeout(&label, run_cell(&transport, peers, size, seq))
-                        .await;
+                    common::with_timeout(&label, run_cell(&transport, peers, size, seq)).await;
                 common::print_cell(size, cell);
                 common::append_jsonl(PATTERN, &transport, peers, size, cell);
             }

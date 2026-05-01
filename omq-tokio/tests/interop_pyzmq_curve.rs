@@ -14,9 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
-use omq_tokio::{
-    CurveKeypair, Endpoint, Message, MonitorEvent, Options, Socket, SocketType,
-};
+use omq_tokio::{CurveKeypair, Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 fn pyzmq_curve_available() -> bool {
     Command::new("python3")
@@ -46,7 +44,10 @@ fn free_tcp_port() -> u16 {
 }
 
 fn loopback(port: u16) -> Endpoint {
-    Endpoint::Tcp { host: Host::Ip("127.0.0.1".parse().unwrap()), port }
+    Endpoint::Tcp {
+        host: Host::Ip("127.0.0.1".parse().unwrap()),
+        port,
+    }
 }
 
 /// Wait for the Rust socket to log at least one successful CURVE
@@ -92,10 +93,7 @@ async fn rust_curve_pull_from_pyzmq_push() {
     let client_sec_z85 = client_kp.secret.to_z85();
 
     let port = free_tcp_port();
-    let pull = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     pull.bind(loopback(port)).await.unwrap();
 
     // pyzmq PUSH client: 5 messages, then close.
@@ -268,10 +266,7 @@ async fn rust_curve_pull_rejects_null_pyzmq_push() {
 
     let server_kp = CurveKeypair::generate();
     let port = free_tcp_port();
-    let pull = Socket::new(
-        SocketType::Pull,
-        Options::default().curve_server(server_kp),
-    );
+    let pull = Socket::new(SocketType::Pull, Options::default().curve_server(server_kp));
     pull.bind(loopback(port)).await.unwrap();
 
     let script = r#"
@@ -304,4 +299,3 @@ ctx.term()
 
     let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;
 }
-

@@ -47,13 +47,18 @@ fn iters() -> usize {
 
 fn random_inproc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.r#gen();
-    Endpoint::Inproc { name: format!("fuzz-{id:x}") }
+    Endpoint::Inproc {
+        name: format!("fuzz-{id:x}"),
+    }
 }
 
 fn random_ipc(rng: &mut StdRng) -> Endpoint {
     let id: u64 = rng.r#gen();
     let mut p = std::env::temp_dir();
-    p.push(format!("omq-compio-fuzz-{}-{id:x}.sock", std::process::id()));
+    p.push(format!(
+        "omq-compio-fuzz-{}-{id:x}.sock",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&p);
     Endpoint::Ipc(IpcPath::Filesystem(p))
 }
@@ -68,10 +73,7 @@ async fn fuzz_pub_sub_action_sequences() {
             random_ipc(&mut rng)
         };
 
-        let pub_ = Socket::new(
-            SocketType::Pub,
-            Options::default().on_mute(OnMute::Block),
-        );
+        let pub_ = Socket::new(SocketType::Pub, Options::default().on_mute(OnMute::Block));
         pub_.bind(ep.clone()).await.unwrap();
 
         let n_subs = rng.gen_range(1..=4);
@@ -139,11 +141,7 @@ async fn fuzz_pub_sub_action_sequences() {
                 if got[i] {
                     continue;
                 }
-                if let Ok(Ok(_)) = compio::time::timeout(
-                    Duration::from_millis(20),
-                    s.recv(),
-                )
-                .await
+                if let Ok(Ok(_)) = compio::time::timeout(Duration::from_millis(20), s.recv()).await
                 {
                     got[i] = true;
                 }
@@ -195,11 +193,7 @@ async fn fuzz_push_pull_action_sequences() {
                     .await;
                 }
                 2 => {
-                    let _ = compio::time::timeout(
-                        Duration::from_millis(20),
-                        pull.recv(),
-                    )
-                    .await;
+                    let _ = compio::time::timeout(Duration::from_millis(20), pull.recv()).await;
                 }
                 3 => {
                     let mut m = pushes[i].monitor();
@@ -214,15 +208,11 @@ async fn fuzz_push_pull_action_sequences() {
                             let len = rng.gen_range(0..=128);
                             let mut payload = vec![0u8; len];
                             rng.fill_bytes(&mut payload);
-                            msg.push_part(omq_compio::Payload::from_bytes(
-                                Bytes::from(payload),
-                            ));
+                            msg.push_part(omq_compio::Payload::from_bytes(Bytes::from(payload)));
                         }
-                        let _ = compio::time::timeout(
-                            Duration::from_millis(50),
-                            pushes[i].send(msg),
-                        )
-                        .await;
+                        let _ =
+                            compio::time::timeout(Duration::from_millis(50), pushes[i].send(msg))
+                                .await;
                     }
                 }
             }

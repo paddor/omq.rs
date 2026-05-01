@@ -4,7 +4,7 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.0.1 pre-release
+## [0.1.0] - Unreleased
 
 Initial pre-release. Three-crate Rust ZeroMQ implementation, wire-compatible
 with libzmq. compio is the primary backend; omq-tokio is the cross-runtime
@@ -29,6 +29,9 @@ alternative.
 
 - `Socket::new`, `bind`, `connect`, `unbind`, `disconnect`, `send`, `recv`,
   `try_send`, `try_recv`. Identical signatures across both backends.
+  `try_send` / `try_recv` are synchronous and non-blocking: they return
+  `Err(Error::WouldBlock)` immediately rather than suspending the task.
+  `Error::WouldBlock` is the new variant in `omq-proto::Error`.
 - `Socket::connect_with(endpoint, ConnectOpts)` (gated `priority` feature)
   for strict per-pipe priority on round-robin patterns.
 - `Socket::join` / `Socket::leave` for DISH (RFC 48).

@@ -1,7 +1,7 @@
 # Benchmarks
 
-Numbers below are from a single sweep on Linux 6.12 (Debian 13) running
-in a VM on a 2019 MacBook Pro (Intel i7-9750H, 4 vCPU), Rust 1.95.0,
+Numbers below are from a single sweep on Linux 6.12 (Debian 13) on an
+Intel Mac Mini 2018 (i7-8700B, 3.2 GHz, 4 vCPU), Rust 1.95.0,
 default features (no priority feature; priority mode trades work-
 stealing for per-peer queues - relevant for ordering, not throughput).
 Built with `cargo bench --release`. Each cell is one prime + warmup +
@@ -38,12 +38,12 @@ kicks in - take ±25 % at 8 KiB+ as a rough envelope.
 
 | Size    | inproc                  | ipc                  | tcp                  | lz4+tcp              | zstd+tcp             |
 |---------|-------------------------|----------------------|----------------------|----------------------|----------------------|
-| 128 B   | **2.32M / 297 MB/s**    | 735k / 94.1 MB/s     | 784k / 100 MB/s      | 550k / 70.5 MB/s     | 89.1k / 11.4 MB/s    |
-| 512 B   | **2.34M / 1.20 GB/s**   | 688k / 352 MB/s      | 718k / 368 MB/s      | 311k / 159 MB/s      | 88.3k / 45.2 MB/s    |
-| 2 KiB   | **2.29M / 4.70 GB/s**   | 566k / 1.16 GB/s     | 563k / 1.15 GB/s     | 315k / 646 MB/s      | 286k / 586 MB/s      |
-| 8 KiB   | **2.32M / 19.0 GB/s**   | 299k / 2.45 GB/s     | 239k / 1.96 GB/s     | 224k / 1.84 GB/s     | 192k / 1.57 GB/s     |
-| 32 KiB  | **2.25M / 73.8 GB/s**   | 95.7k / 3.13 GB/s    | 73.6k / 2.41 GB/s    | 97.1k / 3.18 GB/s    | 84.5k / 2.77 GB/s    |
-| 128 KiB | **2.31M / 303 GB/s**    | 26.6k / 3.49 GB/s    | 20.0k / 2.62 GB/s    | 28.3k / 3.71 GB/s    | 27.1k / 3.55 GB/s    |
+| 128 B   | **3.20M / 410 MB/s**    | 979k / 125 MB/s      | 962k / 123 MB/s      | 708k / 90.6 MB/s     | 95.7k / 12.2 MB/s    |
+| 512 B   | **3.16M / 1.62 GB/s**   | 876k / 448 MB/s      | 880k / 451 MB/s      | 496k / 254 MB/s      | 97.1k / 49.7 MB/s    |
+| 2 KiB   | **3.17M / 6.50 GB/s**   | 722k / 1.48 GB/s     | 742k / 1.52 GB/s     | 420k / 861 MB/s      | 333k / 682 MB/s      |
+| 8 KiB   | **3.18M / 26.0 GB/s**   | 381k / 3.12 GB/s     | 364k / 2.98 GB/s     | 269k / 2.21 GB/s     | 221k / 1.81 GB/s     |
+| 32 KiB  | **3.18M / 104 GB/s**    | 123k / 4.04 GB/s     | 113k / 3.70 GB/s     | 111k / 3.65 GB/s     | 94.8k / 3.11 GB/s    |
+| 128 KiB | **2.87M / 376 GB/s**    | 31.8k / 4.17 GB/s    | 28.4k / 3.72 GB/s    | 33.3k / 4.36 GB/s    | 29.4k / 3.85 GB/s    |
 
 Note: large-payload "GB/s" on inproc reflects the zero-copy refcount-
 clone path - bytes never traverse the kernel. lz4 / zstd are wins above
@@ -81,19 +81,19 @@ Loopback throughput (msgs/s · wire MB/s · virtual MB/s):
 
 | size  | tcp                          | lz4+tcp                            | zstd+tcp                           |
 |-------|------------------------------|------------------------------------|------------------------------------|
-| 128 B | 760k / 97.2 MB/s             | 551k / 72.7 MB/s / 70.5 MB/s       | 120k / 15.8 MB/s / 15.3 MB/s       |
-| 256 B | 720k / 184 MB/s              | 545k / 142 MB/s / 139 MB/s         | 120k / 31.2 MB/s / 30.7 MB/s       |
-| 512 B | 686k / 351 MB/s              | 334k / 109 MB/s / 171 MB/s         | 88.1k / 27.8 MB/s / 45.1 MB/s      |
-| 1 KiB | 640k / 655 MB/s              | 304k / 120 MB/s / 311 MB/s         | 225k / 81.0 MB/s / 230 MB/s        |
-| 2 KiB | 565k / 1.16 GB/s             | 258k / 140 MB/s / 528 MB/s         | 165k / 75.6 MB/s / 338 MB/s        |
-| 4 KiB | 429k / 1.76 GB/s             | 198k / 165 MB/s / 810 MB/s         | 105k / 57.9 MB/s / 429 MB/s        |
-| 16 KiB| 142k / 2.33 GB/s             | 86.2k / 218 MB/s / 1.41 GB/s       | 41.2k / 52.5 MB/s / 675 MB/s       |
+| 128 B | 982k / 126 MB/s              | 739k / 97.5 MB/s / 94.6 MB/s       | 136k / 17.9 MB/s / 17.4 MB/s       |
+| 256 B | 951k / 243 MB/s              | 725k / 188 MB/s / 186 MB/s         | 138k / 35.9 MB/s / 35.4 MB/s       |
+| 512 B | 906k / 464 MB/s              | 415k / 135 MB/s / 213 MB/s         | 101k / 31.9 MB/s / 51.7 MB/s       |
+| 1 KiB | 815k / 835 MB/s              | 382k / 151 MB/s / 392 MB/s         | 269k / 96.8 MB/s / 275 MB/s        |
+| 2 KiB | 760k / 1.56 GB/s             | 317k / 173 MB/s / 650 MB/s         | 198k / 90.8 MB/s / 406 MB/s        |
+| 4 KiB | 588k / 2.41 GB/s             | 244k / 203 MB/s / 1.00 GB/s        | 125k / 69.0 MB/s / 511 MB/s        |
+| 16 KiB| 218k / 3.57 GB/s             | 106k / 268 MB/s / 1.73 GB/s        | 47.6k / 60.6 MB/s / 780 MB/s       |
 
 On loopback, plain TCP wins msgs/s - compression's CPU cost has no
 offsetting wire-bandwidth payoff because there's no bandwidth scarcity.
 **Look at the wire MB/s column** to predict behavior on a bandwidth-
-bounded link: at 16 KiB messages, lz4+tcp ships ~218 MB/s wire while
-delivering ~1.41 GB/s of application data. On a 1 Gbps WAN (~125 MB/s
+bounded link: at 16 KiB messages, lz4+tcp ships ~268 MB/s wire while
+delivering ~1.73 GB/s of application data. On a 1 Gbps WAN (~125 MB/s
 wire ceiling) plain `tcp` would deliver 125 MB/s of application data
 total - `lz4+tcp` would deliver ~810 MB/s and `zstd+tcp` ~1.6 GB/s.
 That's where compression earns its keep.
@@ -128,11 +128,11 @@ Loopback throughput with the same dict (msgs/s · wire MB/s · virt MB/s):
 
 | size  | lz4+tcp                          | zstd+tcp                       |
 |-------|----------------------------------|--------------------------------|
-| 128 B | 295k / 6.5 MB/s / 37.8 MB/s     | 131k / 3.3 MB/s / 16.7 MB/s   |
-| 256 B | 300k / 6.6 MB/s / 76.8 MB/s     | 127k / 3.3 MB/s / 32.6 MB/s   |
-| 512 B | 303k / 7.0 MB/s / 155 MB/s      | 125k / 3.3 MB/s / 64.0 MB/s   |
-| 1 KiB | 267k / 24.3 MB/s / 273 MB/s     | 120k / 3.5 MB/s / 123 MB/s    |
-| 2 KiB | 226k / 54.5 MB/s / 463 MB/s     | 106k / 12.9 MB/s / 218 MB/s   |
+| 128 B | 387k / 8.5 MB/s / 49.5 MB/s     | 150k / 3.7 MB/s / 19.2 MB/s   |
+| 256 B | 381k / 8.4 MB/s / 97.6 MB/s     | 150k / 3.9 MB/s / 38.3 MB/s   |
+| 512 B | 364k / 8.4 MB/s / 186 MB/s      | 148k / 3.8 MB/s / 75.7 MB/s   |
+| 1 KiB | 329k / 30.0 MB/s / 337 MB/s     | 147k / 4.3 MB/s / 150 MB/s    |
+| 2 KiB | 277k / 66.9 MB/s / 568 MB/s     | 123k / 14.9 MB/s / 252 MB/s   |
 
 Same loopback caveat: CPU cost without bandwidth payoff. On a
 bandwidth-bounded link the wire-MB/s column is the actual link
@@ -145,22 +145,23 @@ of plaintext.
 
 | transport | size  | omq-compio    | omq-tokio      |
 |-----------|-------|---------------|----------------|
-| inproc    | 128 B | 30 µs (33.3k) | 56 µs (17.9k)  |
-| inproc    | 2 KiB | 40 µs (24.9k) | 56 µs (18.0k)  |
-| ipc       | 128 B | 54 µs (18.4k) | 110 µs (9.1k)  |
-| ipc       | 2 KiB | 58 µs (17.4k) | 116 µs (8.7k)  |
-| tcp       | 128 B | 62 µs (16.1k) | 144 µs (7.0k)  |
-| tcp       | 2 KiB | 64 µs (15.7k) | 148 µs (6.7k)  |
+| inproc    | 128 B | 5.3 µs (190k) | 31 µs (32.4k)  |
+| inproc    | 2 KiB | 5.3 µs (188k) | 30 µs (32.8k)  |
+| ipc       | 128 B | 21 µs (47.5k) | 57 µs (17.6k)  |
+| ipc       | 2 KiB | 23 µs (44.4k) | 59 µs (17.1k)  |
+| tcp       | 128 B | 30 µs (33.3k) | 77 µs (12.9k)  |
+| tcp       | 2 KiB | 31 µs (31.9k) | 75 µs (13.4k)  |
 
 µs is round-trip wall time; parenthesized number is full request+reply
-pairs per second. compio wins inproc by ~2× (single-thread, no
-syscall); on wire transports compio's RTT runs roughly half tokio's at
-small messages (see "compio IPC latency: hop-reduction history"
-below). Cells are single 0.5 s runs; small-message wire RTTs jitter
-±15-25% on a 4-vCPU VM, so read the trend, not any single cell. The
-RTT win comes from Stage 5's recv-direct path: on the inbound side,
-`Socket::recv` reads the FD inline instead of waiting for the driver
-task to forward parsed messages over a flume hop.
+pairs per second. compio wins inproc by ~6× (single-thread, no
+syscall, recv-direct fast path); on wire transports compio's RTT runs
+roughly 2.5-3× below tokio's at small messages (see "compio IPC
+latency: hop-reduction history" below). Cells are single 0.5 s runs;
+small-message wire RTTs jitter ±15-25% on a 4-vCPU VM, so read the
+trend, not any single cell. The RTT win comes from Stage 5's
+recv-direct path: on the inbound side, `Socket::recv` reads the FD
+inline instead of waiting for the driver task to forward parsed
+messages over a flume hop.
 
 ### compio IPC latency: hop-reduction history
 
@@ -247,12 +248,12 @@ workers. Stage 1's single-wire-peer bypass would port to tokio's
 
 | Size    | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---------|---------------|--------------|------------|-----------|------------|-----------|
-| 128 B   | **2.32M**     | 337k         | **735k**   | 250k      | **784k**   | 129k      |
-| 512 B   | **2.34M**     | 337k         | **688k**   | 206k      | **718k**   | 130k      |
-| 2 KiB   | **2.29M**     | 321k         | **566k**   | 169k      | **563k**   | 126k      |
-| 8 KiB   | **2.32M**     | 332k         | **299k**   | 36.6k     | **239k**   | 113k      |
-| 32 KiB  | **2.25M**     | 369k         | **95.7k**  | 19.4k     | **73.6k**  | 49.9k     |
-| 128 KiB | **2.31M**     | 308k         | **26.6k**  | 13.0k     | **20.0k**  | 14.4k     |
+| 128 B   | **3.20M**     | 423k         | **979k**   | 239k      | **962k**   | 118k      |
+| 512 B   | **3.16M**     | 423k         | **876k**   | 215k      | **880k**   | 120k      |
+| 2 KiB   | **3.17M**     | 430k         | **722k**   | 227k      | **742k**   | 116k      |
+| 8 KiB   | **3.18M**     | 440k         | **381k**   | 117k      | **364k**   | 109k      |
+| 32 KiB  | **3.18M**     | 430k         | **123k**   | 49.4k     | **113k**   | 52.3k     |
+| 128 KiB | **2.87M**     | 417k         | **31.8k**  | 18.9k     | **28.4k**  | 24.9k     |
 
 Numbers are msg/s. compio wins at every size on every transport on
 this hardware: io_uring + the direct-routing path beats tokio's
@@ -273,12 +274,12 @@ is better.
 
 |  size   |   NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3) |
 |--------:|----------------:|-------------------------:|----------------------------:|
-|    64 B |    1.73 GB/s    |               41 MB/s    |                  123 MB/s   |
-|   256 B |    6.56 GB/s    |              132 MB/s    |                  323 MB/s   |
-| 1 KiB   |   22.3 GB/s     |              293 MB/s    |                  573 MB/s   |
-| 4 KiB   |   44.1 GB/s     |              432 MB/s    |                  809 MB/s   |
-|16 KiB   |   47.1 GB/s     |              429 MB/s    |             **1.08 GB/s**   |
-|64 KiB   |   42.8 GB/s     |              509 MB/s    |             **1.31 GB/s**   |
+|    64 B |    4.27 GB/s    |               49 MB/s    |                  152 MB/s   |
+|   256 B |    14.2 GB/s    |              154 MB/s    |                  381 MB/s   |
+| 1 KiB   |   42.7 GB/s     |              330 MB/s    |                  666 MB/s   |
+| 4 KiB   |   63.0 GB/s     |              477 MB/s    |                  904 MB/s   |
+|16 KiB   |   54.1 GB/s     |              533 MB/s    |             **1.22 GB/s**   |
+|64 KiB   |   36.0 GB/s     |              545 MB/s    |             **1.41 GB/s**   |
 
 > **Security note on BLAKE3ZMQ.** This mechanism is omq-native and has
 > **not been independently security audited.** It's modelled on Noise
@@ -295,9 +296,9 @@ Numbers are stock `cargo bench` (no `-C target-cpu=native`). omq-proto
 pins a fork of `chacha20-blake3` adding `#[target_feature(enable =
 "avx2")]` annotations that let LLVM auto-vectorize the loops
 surrounding the explicit intrinsic calls. Without that patch,
-BLAKE3ZMQ runs ~20× slower (~52 MB/s at bulk sizes) unless every
+BLAKE3ZMQ runs ~20× slower (~50 MiB/s at bulk sizes) unless every
 downstream consumer rebuilds with `-C target-cpu=native`. `crypto_box`
-(CURVE) plateaus around ~510 MB/s either way: its salsa20
+(CURVE) plateaus around ~545 MB/s either way: its salsa20
 implementation has no SIMD path. Reproduce with:
 
 ```sh

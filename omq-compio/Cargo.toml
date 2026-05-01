@@ -45,6 +45,11 @@ rand = "0.8"
 # JSON records before driving the with-dict throughput cells.
 zstd-safe = { version = "7", default-features = false, features = ["std", "zdict_builder"] }
 
+[[bin]]
+name = "omq-rep"
+path = "src/bin/omq_rep.rs"
+required-features = []
+
 [[bench]]
 name = "push_pull"
 harness = false

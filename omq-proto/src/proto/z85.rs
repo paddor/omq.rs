@@ -28,7 +28,7 @@ const fn build_decoder() -> [u8; 256] {
 ///
 /// `data.len()` must be a multiple of 4.
 pub fn encode(data: &[u8]) -> Result<String> {
-    if data.len() % 4 != 0 {
+    if !data.len().is_multiple_of(4) {
         return Err(Error::Protocol(format!(
             "Z85 input must be a multiple of 4 bytes, got {}",
             data.len()
@@ -60,7 +60,7 @@ pub fn encode(data: &[u8]) -> Result<String> {
 /// Returns `Error::Protocol` on invalid characters or wrong length.
 pub fn decode(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes();
-    if bytes.len() % 5 != 0 {
+    if !bytes.len().is_multiple_of(5) {
         return Err(Error::Protocol(format!(
             "Z85 input must be a multiple of 5 chars, got {}",
             bytes.len()

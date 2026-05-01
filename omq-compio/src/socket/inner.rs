@@ -270,6 +270,28 @@ impl PeerOut {
         }
     }
 
+    /// Non-blocking attempt to deliver one owned message to this peer.
+    /// Returns `Error::WouldBlock` if the channel is full,
+    /// `Error::Closed` if the peer is gone.
+    pub(super) fn try_send_immediate(&self, msg: Message) -> Result<()> {
+        match self {
+            Self::Inproc { sender, our_identity } => {
+                let frame = InprocFrame::message_from(our_identity.clone(), msg);
+                sender.try_send(frame).map_err(|e| match e {
+                    flume::TrySendError::Full(_) => Error::WouldBlock,
+                    flume::TrySendError::Disconnected(_) => Error::Closed,
+                })
+            }
+            Self::Wire(handle) => {
+                let tx = handle.read().expect("wire peer handle lock").clone();
+                tx.try_send(DriverCommand::SendMessage(msg)).map_err(|e| match e {
+                    flume::TrySendError::Full(_) => Error::WouldBlock,
+                    flume::TrySendError::Disconnected(_) => Error::Closed,
+                })
+            }
+        }
+    }
+
     /// Non-blocking attempt to send a message to this peer. Used by
     /// the strict-priority picker to walk peers in priority order
     /// and fall through Full/Disconnected without awaiting.

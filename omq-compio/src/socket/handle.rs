@@ -805,6 +805,116 @@ impl Socket {
         }
     }
 
+    /// Process one `InprocFrame` from the inbound channel. Returns `Ok(Some(msg))`
+    /// when a user-visible message is ready, `Ok(None)` for frames that should be
+    /// silently skipped (filtered subscriptions, commands on non-XPUB sockets,
+    /// etc.), or `Err` on protocol/state errors.
+    fn process_inbound_frame(&self, frame: InprocFrame) -> Result<Option<Message>> {
+        let st = self.inner.socket_type;
+        match frame {
+            InprocFrame::SinglePart { peer_identity, body } => {
+                if let Some(max) = self.inner.options.max_message_size {
+                    if body.len() > max {
+                        return Ok(None);
+                    }
+                }
+                let msg = if is_identity_recv(st) {
+                    let id = peer_identity.unwrap_or_default();
+                    let mut wrapped = Message::new();
+                    wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
+                    wrapped.push_part(omq_proto::message::Payload::from_bytes(body));
+                    wrapped
+                } else {
+                    Message::single(body)
+                };
+                if !self.matches_subscription(&msg) {
+                    return Ok(None);
+                }
+                if post_recv_needs_type_state(st) {
+                    self.inner
+                        .type_state
+                        .lock()
+                        .expect("type_state lock")
+                        .post_recv(st, msg)
+                } else {
+                    Ok(Some(msg))
+                }
+            }
+            InprocFrame::Message(boxed) => {
+                let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
+                if let Some(max) = self.inner.options.max_message_size {
+                    if msg.byte_len() > max {
+                        return Ok(None);
+                    }
+                }
+                if !self.matches_subscription(&msg) {
+                    return Ok(None);
+                }
+                let msg = if is_identity_recv(st) {
+                    let id = peer_identity.unwrap_or_default();
+                    let mut wrapped = Message::new();
+                    wrapped.push_part(omq_proto::message::Payload::from_bytes(id));
+                    for p in msg.parts() {
+                        wrapped.push_part(p.clone());
+                    }
+                    wrapped
+                } else {
+                    msg
+                };
+                if post_recv_needs_type_state(st) {
+                    self.inner
+                        .type_state
+                        .lock()
+                        .expect("type_state lock")
+                        .post_recv(st, msg)
+                } else {
+                    Ok(Some(msg))
+                }
+            }
+            InprocFrame::Command(c) => {
+                if matches!(st, SocketType::XPub) {
+                    use omq_proto::proto::Command;
+                    let body = match c {
+                        Command::Subscribe(p) => {
+                            let mut buf = bytes::BytesMut::with_capacity(1 + p.len());
+                            buf.extend_from_slice(&[0x01]);
+                            buf.extend_from_slice(&p);
+                            Some(buf.freeze())
+                        }
+                        Command::Cancel(p) => {
+                            let mut buf = bytes::BytesMut::with_capacity(1 + p.len());
+                            buf.extend_from_slice(&[0x00]);
+                            buf.extend_from_slice(&p);
+                            Some(buf.freeze())
+                        }
+                        _ => None,
+                    };
+                    if let Some(b) = body {
+                        let mut m = Message::new();
+                        m.push_part(omq_proto::message::Payload::from_bytes(b));
+                        return Ok(Some(m));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
+    /// currently queued. Does not perform I/O; only messages already buffered
+    /// by the background driver are visible.
+    pub fn try_recv(&self) -> Result<Message> {
+        loop {
+            let frame = self.inner.in_rx.try_recv().map_err(|e| match e {
+                flume::TryRecvError::Empty => Error::WouldBlock,
+                flume::TryRecvError::Disconnected => Error::Closed,
+            })?;
+            if let Some(msg) = self.process_inbound_frame(frame)? {
+                return Ok(msg);
+            }
+        }
+    }
+
     /// Snapshot the [`DirectIoState`] iff this socket has exactly one
     /// connected wire peer. Returns `None` for inproc-only sockets,
     /// no-peer sockets, or multi-peer sockets - any of which forces

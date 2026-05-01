@@ -120,6 +120,42 @@ async fn drop_newest_silently_discards_overflow() {
 }
 
 #[tokio::test]
+async fn try_recv_empty_returns_would_block() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(inproc_ep("try-recv-empty-tok")).await.unwrap();
+    assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
+}
+
+#[tokio::test]
+async fn try_recv_returns_buffered_message() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let push = Socket::new(SocketType::Push, Options::default());
+    pull.bind(inproc_ep("try-recv-buffered-tok")).await.unwrap();
+    push.connect(inproc_ep("try-recv-buffered-tok")).await.unwrap();
+    push.send(Message::single("hello")).await.unwrap();
+    tokio::task::yield_now().await;
+    let msg = pull.try_recv().unwrap();
+    assert_eq!(&*msg.parts()[0].coalesce(), b"hello");
+}
+
+#[tokio::test]
+async fn try_send_returns_would_block_when_hwm_full() {
+    // HWM=1 on cmd_tx. Fill it up then verify try_send returns WouldBlock.
+    let push = Socket::new(SocketType::Push, Options::default().send_hwm(1));
+    // No peer connected; send blocks in actor. Flood cmd_tx (cap 1+1=2
+    // from max(1,16)=16... actually the cap is max(hwm,16)=16 in tokio.
+    // Use a large burst to hit the limit reliably.
+    let mut blocked = false;
+    for _ in 0..2048 {
+        if matches!(push.try_send(Message::single("x")), Err(Error::WouldBlock)) {
+            blocked = true;
+            break;
+        }
+    }
+    assert!(blocked, "try_send should return WouldBlock when cmd_tx is full");
+}
+
+#[tokio::test]
 async fn identity_propagates_on_handshake() {
     let ep = inproc_ep("opt-ident");
     let server = Socket::new(SocketType::Router, Options::default());

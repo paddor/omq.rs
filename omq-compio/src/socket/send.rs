@@ -434,4 +434,227 @@ impl Socket {
         }
         Ok(())
     }
+
+    /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket has no
+    /// connected peers yet, or if the chosen peer's outbound channel is full
+    /// (HWM reached). For fan-out socket types (PUB/XPUB/RADIO), delivers to
+    /// all peers that have capacity and succeeds; individual per-peer HWM
+    /// enforcement already handles full peers per `OnMute` policy.
+    pub fn try_send(&self, msg: Message) -> Result<()> {
+        let st = self.inner().socket_type;
+        let msg = if pre_send_needs_type_state(st) {
+            self.inner()
+                .type_state
+                .lock()
+                .expect("type_state lock")
+                .pre_send(st, msg)?
+        } else {
+            msg
+        };
+        match st {
+            SocketType::Push
+            | SocketType::Dealer
+            | SocketType::Req
+            | SocketType::Pair
+            | SocketType::Rep
+            | SocketType::Client
+            | SocketType::Scatter
+            | SocketType::Channel => self.try_send_round_robin(msg),
+            SocketType::Router | SocketType::Server | SocketType::Peer => {
+                self.try_send_identity_routed(&msg)
+            }
+            SocketType::Pub | SocketType::XPub => {
+                self.try_send_pub_filtered(&msg);
+                Ok(())
+            }
+            SocketType::Radio => self.try_send_radio(&msg),
+            SocketType::XSub => {
+                self.try_send_fan_out(&msg);
+                Ok(())
+            }
+            SocketType::Pull | SocketType::Sub | SocketType::Dish | SocketType::Gather => {
+                Err(Error::Protocol(format!(
+                    "send is not supported on recv-only socket type {st:?}"
+                )))
+            }
+        }
+    }
+
+    #[cfg(not(feature = "priority"))]
+    fn try_send_round_robin(&self, msg: Message) -> Result<()> {
+        let inner = self.inner();
+        let peers = inner.out_peers.read().expect("peers lock");
+        if peers.is_empty() {
+            if inner.options.conflate {
+                drop(peers);
+                return self.conflate_shared_queue_send(msg);
+            }
+            return Err(Error::WouldBlock);
+        }
+        let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % peers.len();
+        let chosen = peers[idx].out.clone();
+        let peer_count = peers.len();
+        drop(peers);
+        self.try_slow_round_robin(&chosen, msg, peer_count)
+    }
+
+    #[cfg(not(feature = "priority"))]
+    fn try_slow_round_robin(
+        &self,
+        chosen: &PeerOut,
+        msg: Message,
+        peer_count: usize,
+    ) -> Result<()> {
+        match chosen {
+            PeerOut::Inproc { .. } => chosen.try_send_immediate(msg),
+            PeerOut::Wire(_) if self.inner().options.conflate => {
+                self.conflate_shared_queue_send(msg)
+            }
+            PeerOut::Wire(handle) if peer_count == 1 => {
+                let tx = handle.read().expect("wire peer handle lock").clone();
+                match tx.try_send(DriverCommand::SendMessage(msg.clone())) {
+                    Ok(()) => Ok(()),
+                    Err(flume::TrySendError::Full(_)) => {
+                        let stx = self
+                            .inner()
+                            .shared_send_tx
+                            .read()
+                            .expect("shared_send_tx lock")
+                            .clone()
+                            .ok_or(Error::Closed)?;
+                        stx.try_send(msg).map_err(|e| match e {
+                            flume::TrySendError::Full(_) => Error::WouldBlock,
+                            flume::TrySendError::Disconnected(_) => Error::Closed,
+                        })
+                    }
+                    Err(flume::TrySendError::Disconnected(cmd)) => {
+                        let DriverCommand::SendMessage(msg) = cmd else {
+                            return Err(Error::Closed);
+                        };
+                        let stx = self
+                            .inner()
+                            .shared_send_tx
+                            .read()
+                            .expect("shared_send_tx lock")
+                            .clone()
+                            .ok_or(Error::Closed)?;
+                        stx.try_send(msg).map_err(|e| match e {
+                            flume::TrySendError::Full(_) => Error::WouldBlock,
+                            flume::TrySendError::Disconnected(_) => Error::Closed,
+                        })
+                    }
+                }
+            }
+            PeerOut::Wire(_) => {
+                let stx = self
+                    .inner()
+                    .shared_send_tx
+                    .read()
+                    .expect("shared_send_tx lock")
+                    .clone()
+                    .ok_or(Error::Closed)?;
+                stx.try_send(msg).map_err(|e| match e {
+                    flume::TrySendError::Full(_) => Error::WouldBlock,
+                    flume::TrySendError::Disconnected(_) => Error::Closed,
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "priority")]
+    fn try_send_round_robin(&self, msg: Message) -> Result<()> {
+        match self.try_send_priority_walk(&msg) {
+            PriorityOutcome::Sent => Ok(()),
+            PriorityOutcome::AwaitOn(_) | PriorityOutcome::NoLivePeers => {
+                Err(Error::WouldBlock)
+            }
+        }
+    }
+
+    fn try_send_identity_routed(&self, msg: &Message) -> Result<()> {
+        let parts = msg.parts();
+        if parts.is_empty() {
+            return Err(Error::Unroutable);
+        }
+        let identity = parts[0].coalesce();
+        let target = {
+            let table = self.inner().identity_to_slot.read().expect("identity table");
+            let idx = table.get(&identity).copied();
+            drop(table);
+            idx.and_then(|idx| {
+                let peers = self.inner().out_peers.read().expect("peers lock");
+                peers.get(idx).map(|p| p.out.clone())
+            })
+        };
+        let Some(out) = target else {
+            if self.inner().options.router_mandatory {
+                return Err(Error::Unroutable);
+            }
+            return Ok(());
+        };
+        let mut body = Message::new();
+        for p in parts.iter().skip(1) {
+            body.push_part(p.clone());
+        }
+        out.try_send_immediate(body)
+    }
+
+    fn try_send_pub_filtered(&self, msg: &Message) {
+        let topic = msg
+            .parts()
+            .first()
+            .map(omq_proto::Payload::coalesce)
+            .unwrap_or_default();
+        let targets: Vec<PeerOut> = {
+            let peers = self.inner().out_peers.read().expect("peers lock");
+            peers
+                .iter()
+                .filter_map(|slot| {
+                    let matched = slot
+                        .peer_sub
+                        .as_ref()
+                        .is_some_and(|s| s.read().expect("peer_sub lock").matches(&topic));
+                    matched.then(|| slot.out.clone())
+                })
+                .collect()
+        };
+        for peer in targets {
+            let _ = peer.try_send_immediate(msg.clone());
+        }
+    }
+
+    fn try_send_radio(&self, msg: &Message) -> Result<()> {
+        let parts = msg.parts();
+        if parts.len() != 2 {
+            return Err(Error::Protocol(
+                "RADIO socket requires [group, body] (2 parts)".into(),
+            ));
+        }
+        let group = parts[0].coalesce();
+        let stream_targets: Vec<PeerOut> = {
+            let peers = self.inner().out_peers.read().expect("peers lock");
+            peers
+                .iter()
+                .filter(|p| match &p.peer_groups {
+                    Some(set) => set
+                        .read()
+                        .expect("peer_groups lock")
+                        .contains(&group[..]),
+                    None => true,
+                })
+                .map(|p| p.out.clone())
+                .collect()
+        };
+        for peer in stream_targets {
+            let _ = peer.try_send_immediate(msg.clone());
+        }
+        Ok(())
+    }
+
+    fn try_send_fan_out(&self, msg: &Message) {
+        let peers = self.inner().out_peers.read().expect("peers lock");
+        for p in peers.iter() {
+            let _ = p.out.try_send_immediate(msg.clone());
+        }
+    }
 }

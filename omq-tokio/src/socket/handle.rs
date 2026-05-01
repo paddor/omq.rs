@@ -148,10 +148,36 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
+    /// Non-blocking send. Returns `Err(Error::WouldBlock)` if the socket's
+    /// outbound queue is full (HWM reached). The message is accepted into the
+    /// queue and routed asynchronously; delivery confirmation is not awaited.
+    pub fn try_send(&self, msg: Message) -> Result<()> {
+        use tokio::sync::mpsc::error::TrySendError;
+        let (ack, _rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .try_send(SocketCommand::Send { msg, ack })
+            .map_err(|e| match e {
+                TrySendError::Full(_) => Error::WouldBlock,
+                TrySendError::Closed(_) => Error::Closed,
+            })
+    }
+
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
         self.inner.recv_rx.recv().await.map_err(|_| Error::Closed)
+    }
+
+    /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
+    /// currently queued. Does not drive the I/O engine; messages already
+    /// delivered by the background driver are visible.
+    pub fn try_recv(&self) -> Result<Message> {
+        use async_channel::TryRecvError;
+        self.inner.recv_rx.try_recv().map_err(|e| match e {
+            TryRecvError::Empty => Error::WouldBlock,
+            TryRecvError::Closed => Error::Closed,
+        })
     }
 
     /// Subscribe to a topic prefix. Only valid on SUB / XSUB sockets; other

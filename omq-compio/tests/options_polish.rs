@@ -99,6 +99,34 @@ async fn drop_newest_silently_discards_overflow() {
 }
 
 #[compio::test]
+async fn try_recv_empty_returns_would_block() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(inproc_ep("try-recv-empty-compio")).await.unwrap();
+    assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
+}
+
+#[compio::test]
+async fn try_recv_returns_buffered_message() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let push = Socket::new(SocketType::Push, Options::default());
+    pull.bind(inproc_ep("try-recv-buffered-compio")).await.unwrap();
+    push.connect(inproc_ep("try-recv-buffered-compio")).await.unwrap();
+    push.send(Message::single("hello")).await.unwrap();
+    // Yield so the inproc frame is forwarded through in_tx/in_rx.
+    let _ = compio::runtime::spawn(async {}).await;
+    let msg = pull.try_recv().unwrap();
+    assert_eq!(&*msg.parts()[0].coalesce(), b"hello");
+}
+
+#[compio::test]
+async fn try_send_no_peers_returns_would_block() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.bind(inproc_ep("try-send-nopeer-compio")).await.unwrap();
+    // No peer connected; shared queue has capacity but no peer means WouldBlock.
+    assert!(matches!(push.try_send(Message::single("x")), Err(Error::WouldBlock)));
+}
+
+#[compio::test]
 async fn identity_propagates_on_handshake() {
     let ep = inproc_ep("opt-ident");
     let server = Socket::new(SocketType::Router, Options::default());

@@ -40,6 +40,9 @@ pub enum Error {
     #[error("no route to peer")]
     Unroutable,
 
+    #[error("operation would block")]
+    WouldBlock,
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -99,10 +99,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with: { ruby-version: "3.3" }
       - name: install omq-cli
-        run: |
-          gem install omq-cli
-          # Ensure the gem binary leads PATH ahead of any pre-installed omq snap.
-          echo "$(ruby -e 'puts Gem.bindir')" >> "$GITHUB_PATH"
+        run: gem install omq-cli
       - name: verify omq version
         run: omq --version
       - name: rust ↔ ruby interop (tokio)

@@ -82,7 +82,7 @@ See [BENCHMARKS.md](BENCHMARKS.md).
 
 ### Conventions
 
-- Rust 2024 edition, MSRV 1.87.
+- Rust 2024 edition, MSRV 1.93.
 - Workspace lints: rust `missing_debug_implementations` denied; clippy
   `pedantic` warned with noisy rules silenced.
 - ASCII-only source.

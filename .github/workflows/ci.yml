@@ -97,7 +97,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
-        with: { ruby-version: "3.3" }
+        with: { ruby-version: "4.0" }
       - name: install omq-cli
         run: gem install omq-cli
       - name: verify omq version

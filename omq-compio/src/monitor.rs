@@ -106,4 +106,12 @@ impl MonitorStream {
             Err(flume::TryRecvError::Disconnected) => Err(MonitorTryRecvError::Closed),
         }
     }
+
+    /// Consume the stream and return the raw channel receiver and lag
+    /// counter. Callers that need direct blocking access (e.g. the
+    /// Python bindings which drive recv from any thread) use this to
+    /// avoid the async `recv` wrapper.
+    pub fn into_raw(self) -> (flume::Receiver<MonitorEvent>, Arc<AtomicU64>) {
+        (self.rx, self.lagged)
+    }
 }

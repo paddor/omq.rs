@@ -1065,11 +1065,17 @@ impl SocketDriver {
                                     peer_id,
                                     bytes::Bytes::copy_from_slice(prefix),
                                 );
-                                return;
+                                // XPub surfaces the subscribe notification as a
+                                // message; Pub silently consumes it.
+                                if self.socket_type != SocketType::XPub {
+                                    return;
+                                }
                             }
                             0x00 => {
                                 self.send_strategy.peer_cancel(peer_id, prefix);
-                                return;
+                                if self.socket_type != SocketType::XPub {
+                                    return;
+                                }
                             }
                             _ => {}
                         }
@@ -1106,10 +1112,26 @@ impl SocketDriver {
                 use omq_proto::proto::Command;
                 match cmd {
                     Command::Subscribe(prefix) => {
-                        self.send_strategy.peer_subscribe(peer_id, prefix);
+                        self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                        if self.socket_type == SocketType::XPub {
+                            let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
+                            b.extend_from_slice(&[0x01]);
+                            b.extend_from_slice(&prefix);
+                            let mut m = Message::new();
+                            m.push_part(omq_proto::message::Payload::from_bytes(b.freeze()));
+                            let _ = self.recv_tx.send(m).await;
+                        }
                     }
                     Command::Cancel(prefix) => {
                         self.send_strategy.peer_cancel(peer_id, &prefix);
+                        if self.socket_type == SocketType::XPub {
+                            let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
+                            b.extend_from_slice(&[0x00]);
+                            b.extend_from_slice(&prefix);
+                            let mut m = Message::new();
+                            m.push_part(omq_proto::message::Payload::from_bytes(b.freeze()));
+                            let _ = self.recv_tx.send(m).await;
+                        }
                     }
                     Command::Join(group) => {
                         self.send_strategy.peer_join(peer_id, &group);

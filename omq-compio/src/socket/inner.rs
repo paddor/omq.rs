@@ -324,7 +324,13 @@ impl SocketInner {
     pub(super) fn new(socket_type: SocketType, options: Options) -> Arc<Self> {
         let recv_cap = options.recv_hwm.unwrap_or(1024).max(16) as usize;
         let (in_tx, in_rx) = flume::bounded::<InprocFrame>(recv_cap);
-        let send_cap = options.send_hwm.unwrap_or(1024).max(16) as usize;
+        // Conflate forces cap-1 with drain-before-send semantics so that only
+        // the latest message survives in the queue at any point in time.
+        let send_cap = if options.conflate {
+            1
+        } else {
+            options.send_hwm.unwrap_or(1024).max(16) as usize
+        };
         // With the `priority` feature, round-robin types use per-peer
         // outbound queues instead of one shared queue (so try_send
         // sees Disconnected for dead peers and the picker can advance

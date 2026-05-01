@@ -6,8 +6,8 @@
 //! the driver via an MPSC command inbox + an MPMC recv channel; no shared
 //! mutexes on the hot path.
 
-pub mod actor;
-pub mod dispatch;
+pub(crate) mod actor;
+pub(crate) mod dispatch;
 pub mod handle;
 pub mod monitor;
 pub(crate) mod type_state;

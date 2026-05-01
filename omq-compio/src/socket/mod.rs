@@ -29,8 +29,31 @@ pub use handle::Socket;
 pub(crate) use inner::DirectIoState;
 
 /// Per-peer cmd channel capacity, sized off `Options::send_hwm`.
+/// When conflate is enabled the shared send queue is cap-1 (drain-before-send),
+/// so the per-peer channel only needs to hold the single forwarded message.
 fn cmd_channel_capacity(options: &Options) -> usize {
-    options.send_hwm.unwrap_or(1024).max(16) as usize
+    if options.conflate { 1 } else { options.send_hwm.unwrap_or(1024).max(16) as usize }
+}
+
+/// Socket types for which `Options::conflate(true)` is meaningful.
+/// REQ/REP/ROUTER/SERVER/PEER track per-peer envelope invariants;
+/// PAIR/CHANNEL/CLIENT carry sequence-sensitive state. All of those
+/// are excluded. Matches libzmq's `ZMQ_CONFLATE` semantics.
+pub(super) fn supports_conflate(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Push
+            | SocketType::Pull
+            | SocketType::Pub
+            | SocketType::Sub
+            | SocketType::XPub
+            | SocketType::XSub
+            | SocketType::Radio
+            | SocketType::Dish
+            | SocketType::Dealer
+            | SocketType::Scatter
+            | SocketType::Gather,
+    )
 }
 
 /// Build a fresh empty subscription set for this socket's PUB-side

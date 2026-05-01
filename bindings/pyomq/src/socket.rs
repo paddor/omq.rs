@@ -17,13 +17,16 @@
 //! because it can block for milliseconds.
 
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 use flume::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError};
+use omq_compio::MonitorEvent;
 use omq_proto::error::Error as PError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyType};
+use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 
 use crate::conversions;
 use crate::dispatch;
@@ -154,6 +157,127 @@ impl SocketInner {
     }
 }
 
+/// Monitor event stream returned by `Socket.monitor()`. Delivers
+/// `MonitorEvent` dicts (or raises on lag / close). Thread-safe:
+/// the underlying flume channel is `Send + Sync`, so `Monitor` can
+/// be passed between Python threads.
+#[pyclass(module = "pyomq._native")]
+pub struct Monitor {
+    pub(crate) rx: flume::Receiver<MonitorEvent>,
+    pub(crate) lagged: Arc<AtomicU64>,
+}
+
+fn monitor_event_to_dict(py: Python<'_>, ev: &MonitorEvent) -> PyResult<PyObject> {
+    let d = PyDict::new_bound(py);
+    match ev {
+        MonitorEvent::Listening { endpoint } => {
+            d.set_item("event", "listening")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+        }
+        MonitorEvent::Accepted { endpoint, connection_id, .. } => {
+            d.set_item("event", "accepted")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("connection_id", connection_id)?;
+        }
+        MonitorEvent::Connected { endpoint, connection_id, .. } => {
+            d.set_item("event", "connected")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("connection_id", connection_id)?;
+        }
+        MonitorEvent::HandshakeSucceeded { endpoint, peer } => {
+            d.set_item("event", "handshake_succeeded")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("connection_id", peer.connection_id)?;
+            if let Some(id) = &peer.peer_identity {
+                d.set_item("peer_identity", PyBytes::new_bound(py, id))?;
+            }
+        }
+        MonitorEvent::HandshakeFailed { endpoint, reason, .. } => {
+            d.set_item("event", "handshake_failed")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("reason", reason.as_str())?;
+        }
+        MonitorEvent::ConnectDelayed { endpoint, attempt, .. } => {
+            d.set_item("event", "connect_delayed")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("attempt", attempt)?;
+        }
+        MonitorEvent::Disconnected { endpoint, peer, .. } => {
+            d.set_item("event", "disconnected")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("connection_id", peer.connection_id)?;
+        }
+        MonitorEvent::PeerCommand { endpoint, peer, .. } => {
+            d.set_item("event", "peer_command")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            d.set_item("connection_id", peer.connection_id)?;
+        }
+        MonitorEvent::Closed => {
+            d.set_item("event", "closed")?;
+        }
+    }
+    Ok(d.into())
+}
+
+#[pymethods]
+impl Monitor {
+    /// Receive the next monitor event. Blocks until an event arrives.
+    ///
+    /// Raises `zmq.Again` on timeout (if `timeout_ms >= 0`).
+    /// Returns a dict with at minimum `{"event": "<name>"}` plus
+    /// event-specific keys (`endpoint`, `connection_id`, etc.).
+    #[pyo3(signature = (timeout_ms = -1))]
+    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<PyObject> {
+        let n = self.lagged.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let d = PyDict::new_bound(py);
+            d.set_item("event", "lagged")?;
+            d.set_item("count", n)?;
+            return Ok(d.into());
+        }
+        let ev = py.allow_threads(|| {
+            if timeout_ms < 0 {
+                self.rx.recv().map_err(|_| ())
+            } else {
+                self.rx
+                    .recv_timeout(Duration::from_millis(timeout_ms as u64))
+                    .map_err(|_| ())
+            }
+        });
+        match ev {
+            Ok(ev) => monitor_event_to_dict(py, &ev),
+            Err(()) => Err(timeout_err()),
+        }
+    }
+
+    /// Try to receive without blocking. Raises `zmq.Again` if no event
+    /// is available.
+    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let n = self.lagged.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let d = PyDict::new_bound(py);
+            d.set_item("event", "lagged")?;
+            d.set_item("count", n)?;
+            return Ok(d.into());
+        }
+        match self.rx.try_recv() {
+            Ok(ev) => monitor_event_to_dict(py, &ev),
+            Err(_) => Err(timeout_err()),
+        }
+    }
+}
+
+pub(crate) fn connection_status_to_dict(
+    py: Python<'_>,
+    cs: &omq_compio::ConnectionStatus,
+) -> PyResult<PyObject> {
+    let d = PyDict::new_bound(py);
+    d.set_item("connection_id", cs.connection_id)?;
+    d.set_item("endpoint", cs.endpoint.to_string())?;
+    d.set_item("identity", PyBytes::new_bound(py, &cs.identity))?;
+    Ok(d.into())
+}
+
 #[pyclass(module = "pyomq._native")]
 pub struct Socket {
     pub(crate) inner: Arc<SocketInner>,
@@ -272,6 +396,53 @@ impl Socket {
     fn leave(&self, py: Python<'_>, group: &Bound<'_, PyAny>) -> PyResult<()> {
         let bytes = Bytes::copy_from_slice(group.extract::<&[u8]>()?);
         dispatch::sync_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
+    }
+
+    /// Return a list of dicts describing every live peer connection.
+    fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let id = self.inner.ensure_id()?;
+        let statuses: Vec<omq_compio::ConnectionStatus> = py.allow_threads(|| {
+            runtime::with_socket(id, |s| async move { s.connections().await.unwrap_or_default() })
+                .unwrap_or_default()
+        });
+        let dicts: Vec<PyObject> = statuses
+            .iter()
+            .map(|cs| connection_status_to_dict(py, cs))
+            .collect::<PyResult<_>>()?;
+        Ok(PyList::new_bound(py, dicts))
+    }
+
+    /// Return a dict for the peer with the given `connection_id`, or
+    /// `None` if no such peer is currently connected.
+    fn connection_info<'py>(
+        &self,
+        py: Python<'py>,
+        connection_id: u64,
+    ) -> PyResult<PyObject> {
+        let id = self.inner.ensure_id()?;
+        let status: Option<omq_compio::ConnectionStatus> = py.allow_threads(|| {
+            runtime::with_socket(id, move |s| async move {
+                s.connection_info(connection_id).await.ok().flatten()
+            })
+            .ok()
+            .flatten()
+        });
+        match status {
+            Some(cs) => connection_status_to_dict(py, &cs),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Return a `Monitor` that delivers connection-lifecycle events for
+    /// this socket. Multiple monitors can be active simultaneously.
+    fn monitor(&self, py: Python<'_>) -> PyResult<Monitor> {
+        let id = self.inner.ensure_id()?;
+        let stream = py.allow_threads(|| {
+            runtime::with_socket(id, |s| async move { s.monitor() }).map_err(|_| ())
+        });
+        let stream = stream.map_err(|()| map_err(PError::Closed))?;
+        let (rx, lagged) = stream.into_raw();
+        Ok(Monitor { rx, lagged })
     }
 
     fn setsockopt(

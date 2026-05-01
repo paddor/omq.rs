@@ -88,6 +88,12 @@ impl std::fmt::Debug for Socket {
 
 impl Socket {
     pub fn new(socket_type: SocketType, options: Options) -> Self {
+        assert!(
+            !options.conflate || crate::socket::supports_conflate(socket_type),
+            "Options::conflate(true) is not valid for socket type {socket_type:?} \
+             (no per-peer ordering invariant to preserve; conflate is \
+             meaningless here)"
+        );
         Self {
             inner: SocketInner::new(socket_type, options),
         }
@@ -512,7 +518,8 @@ impl Socket {
     /// Snapshot the live status of one connected peer by
     /// `connection_id`. `Ok(None)` means no peer with that id
     /// exists (never connected, or already disconnected).
-    pub fn connection_info(
+    #[allow(clippy::unused_async)]
+    pub async fn connection_info(
         &self,
         connection_id: u64,
     ) -> Result<Option<crate::monitor::ConnectionStatus>> {
@@ -694,6 +701,11 @@ impl Socket {
                 .map_err(|_| Error::Closed)?;
             match frame {
                 InprocFrame::SinglePart { peer_identity, body } => {
+                    if let Some(max) = self.inner.options.max_message_size {
+                        if body.len() > max {
+                            continue;
+                        }
+                    }
                     // Reconstruct the user-visible Message after the
                     // channel hop. The slot in flight was ~64 B (just
                     // a Bytes + Option<Bytes>) instead of the full
@@ -729,6 +741,11 @@ impl Socket {
                         peer_identity,
                         msg,
                     } = *boxed;
+                    if let Some(max) = self.inner.options.max_message_size {
+                        if msg.byte_len() > max {
+                            continue;
+                        }
+                    }
                     if !self.matches_subscription(&msg) {
                         continue;
                     }
@@ -873,12 +890,19 @@ impl Socket {
         &self,
         frame: InprocFrame,
     ) -> Result<Option<Message>> {
+        let max = self.inner.options.max_message_size;
         match frame {
             InprocFrame::SinglePart { body, .. } => {
+                if max.is_some_and(|m| body.len() > m) {
+                    return Ok(None);
+                }
                 self.post_recv_apply(Message::single(body))
             }
             InprocFrame::Message(boxed) => {
                 let crate::transport::inproc::InprocFullMessage { msg, .. } = *boxed;
+                if max.is_some_and(|m| msg.byte_len() > m) {
+                    return Ok(None);
+                }
                 self.post_recv_apply(msg)
             }
             InprocFrame::Command(_) => Ok(None),
@@ -1154,26 +1178,7 @@ impl Socket {
         }
     }
 
-    pub(super) async fn snapshot_peers(&self) -> Vec<PeerOut> {
-        loop {
-            {
-                let peers = self.inner.out_peers.read().expect("peers lock");
-                if !peers.is_empty() {
-                    return peers.iter().map(|p| p.out.clone()).collect();
-                }
-            }
-            let listener = self.inner.on_peer_ready.listen();
-            {
-                let peers = self.inner.out_peers.read().expect("peers lock");
-                if !peers.is_empty() {
-                    return peers.iter().map(|p| p.out.clone()).collect();
-                }
-            }
-            listener.await;
-        }
-    }
-
-    fn snapshot_peers_now(&self) -> Vec<PeerOut> {
+    pub(super) fn snapshot_peers_now(&self) -> Vec<PeerOut> {
         let peers = self.inner.out_peers.read().expect("peers lock");
         peers.iter().map(|p| p.out.clone()).collect()
     }

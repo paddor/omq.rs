@@ -25,7 +25,7 @@ use crate::transport::{
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
 /// and uses its own Message-typed channel pair (see `AnyConn`).
 #[derive(Debug)]
-pub enum AnyStream {
+pub(crate) enum AnyStream {
     Tcp(TcpStream),
     Ipc(UnixStream),
 }
@@ -87,7 +87,7 @@ impl AsyncWrite for AnyStream {
 /// (TCP / IPC - runs the ZMTP codec via `ConnectionDriver`) or a
 /// pre-paired Message channel (inproc - runs the codec-less
 /// `InprocPeerDriver`).
-pub enum AnyConn {
+pub(crate) enum AnyConn {
     ByteStream { stream: AnyStream, peer_ident: PeerIdent },
     Inproc { conn: InprocConn, peer_ident: PeerIdent },
 }

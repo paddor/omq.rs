@@ -108,15 +108,28 @@ impl Socket {
     /// sends into one `writev`); multi-wire-peer sockets funnel through
     /// `shared_send_tx`, where every driver races the shared queue
     /// (work-stealing + socket-wide `Options::send_hwm`).
+    ///
+    /// When `options.conflate` is true the shared queue is cap-1. Every
+    /// send drains the oldest message first so the queue always holds at
+    /// most the latest. Sends never block waiting for a peer: if no peer
+    /// is connected yet the message is placed in the queue and returns
+    /// immediately; the pump drains it once a peer connects.
     #[cfg(not(feature = "priority"))]
     async fn send_round_robin(&self, msg: Message) -> Result<()> {
+        let inner = self.inner();
         loop {
             let chosen = {
-                let peers = self.inner().out_peers.read().expect("peers lock");
+                let peers = inner.out_peers.read().expect("peers lock");
                 if peers.is_empty() {
+                    if inner.options.conflate {
+                        // No peer yet: buffer into the cap-1 shared queue
+                        // without blocking. Each send evicts the previous
+                        // message, leaving only the latest in the queue.
+                        return self.conflate_shared_queue_send(msg);
+                    }
                     None
                 } else {
-                    let idx = self.inner().rr_index.fetch_add(1, Ordering::Relaxed)
+                    let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed)
                         % peers.len();
                     let p = &peers[idx];
                     Some((p.out.clone(), peers.len()))
@@ -125,12 +138,32 @@ impl Socket {
             if let Some((chosen, peer_count)) = chosen {
                 return self.slow_round_robin(chosen, msg, peer_count).await;
             }
-            let listener = self.inner().on_peer_ready.listen();
-            if !self.inner().out_peers.read().expect("peers lock").is_empty() {
+            let listener = inner.on_peer_ready.listen();
+            if !inner.out_peers.read().expect("peers lock").is_empty() {
                 continue;
             }
             listener.await;
         }
+    }
+
+    /// Drain the oldest message from the shared queue (if any) and push
+    /// `msg` in its place. The queue is cap-1 when conflate is enabled,
+    /// so `try_send` always has room after the drain. Safe without locks
+    /// in compio's cooperative single-threaded runtime: no `.await`
+    /// between the drain and the send means no other task can interpose.
+    #[cfg(not(feature = "priority"))]
+    fn conflate_shared_queue_send(&self, msg: Message) -> Result<()> {
+        let inner = self.inner();
+        let stx = inner
+            .shared_send_tx
+            .read()
+            .expect("shared_send_tx lock")
+            .clone()
+            .ok_or(Error::Closed)?;
+        if let Some(rx) = &inner.shared_send_rx {
+            let _ = rx.try_recv();
+        }
+        stx.try_send(msg).map_err(|_| Error::Closed)
     }
 
     /// `cmd_tx`-routed round-robin send. Used for every wire-side
@@ -146,6 +179,15 @@ impl Socket {
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc { .. } => chosen.send(msg).await,
+            PeerOut::Wire(_) if self.inner().options.conflate => {
+                // Conflate: always use the shared queue with drain-before-send
+                // so the queue holds only the latest message. Skip the single-
+                // peer direct path — its per-peer channel has cap-1, but the
+                // driver might be busy delivering the previous message; going
+                // through the shared queue gives consistent "latest wins"
+                // semantics regardless of peer count.
+                self.conflate_shared_queue_send(msg)
+            }
             PeerOut::Wire(handle) if peer_count == 1 => {
                 // Try the per-peer cmd channel directly. If the
                 // driver died (handshake timeout, peer death,
@@ -306,7 +348,7 @@ impl Socket {
     }
 
     async fn send_fan_out(&self, msg: Message) -> Result<()> {
-        let targets = self.snapshot_peers().await;
+        let targets = self.snapshot_peers_now();
         for peer in targets {
             let _ = peer.send(msg.clone()).await;
         }
@@ -369,7 +411,6 @@ impl Socket {
     /// is treated as match-nothing (the wire peer hasn't said it
     /// wants anything yet).
     async fn send_pub_filtered(&self, msg: Message) -> Result<()> {
-        let _ = self.snapshot_peers().await;
         let topic = msg
             .parts()
             .first()

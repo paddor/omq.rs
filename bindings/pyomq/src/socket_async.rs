@@ -192,6 +192,61 @@ impl AsyncSocket {
         dispatch::async_unit(&self.inner, py, |s| async move { s.leave(bytes).await })
     }
 
+    /// Return an `asyncio.Future` that resolves to a list of connection-
+    /// status dicts (one per live peer).
+    fn connections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let id = self.inner.ensure_id()?;
+        runtime::compio_future_into_py(py, move || async move {
+            let statuses = match runtime::with_socket_async(id, |s| async move {
+                s.connections().await.unwrap_or_default()
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => vec![],
+            };
+            Python::with_gil(|py| {
+                let dicts: Vec<PyObject> = statuses
+                    .iter()
+                    .map(|cs| crate::socket::connection_status_to_dict(py, cs))
+                    .collect::<PyResult<_>>()?;
+                Ok(pyo3::types::PyList::new_bound(py, dicts).into_any().unbind())
+            })
+        })
+    }
+
+    /// Return an `asyncio.Future` that resolves to a connection-status
+    /// dict for `connection_id`, or `None` if no such peer is connected.
+    fn connection_info<'py>(&self, py: Python<'py>, connection_id: u64) -> PyResult<Bound<'py, PyAny>> {
+        let id = self.inner.ensure_id()?;
+        runtime::compio_future_into_py(py, move || async move {
+            let status = match runtime::with_socket_async(id, move |s| async move {
+                s.connection_info(connection_id).await.ok().flatten()
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => None,
+            };
+            Python::with_gil(|py| match status {
+                Some(cs) => crate::socket::connection_status_to_dict(py, &cs),
+                None => Ok(py.None()),
+            })
+        })
+    }
+
+    /// Return a `Monitor` for this socket. Non-async: subscribing is
+    /// instantaneous (just a flume channel allocation on the compio thread).
+    fn monitor(&self, py: Python<'_>) -> PyResult<crate::socket::Monitor> {
+        let id = self.inner.ensure_id()?;
+        let stream = py.allow_threads(|| {
+            runtime::with_socket(id, |s| async move { s.monitor() }).map_err(|_| ())
+        });
+        let stream = stream.map_err(|()| map_err(PError::Closed))?;
+        let (rx, lagged) = stream.into_raw();
+        Ok(crate::socket::Monitor { rx, lagged })
+    }
+
     /// Sync setsockopt (returning None directly) - matches pyzmq's
     /// async API which keeps setsockopt synchronous since it's not I/O.
     fn setsockopt(

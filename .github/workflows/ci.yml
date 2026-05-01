@@ -78,14 +78,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
-      - name: install python deps
-        run: pip install maturin pytest pytest-asyncio pyzmq
+      - name: create virtualenv and install python deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest pytest-asyncio pyzmq
       - name: build pyomq
         working-directory: bindings/pyomq
-        run: maturin develop --release
+        run: ../../.venv/bin/maturin develop --release
       - name: pytest
         working-directory: bindings/pyomq
-        run: pytest -v
+        run: ../../.venv/bin/pytest -v
 
   ruby-interop:
     name: ruby omq interop
@@ -97,7 +99,12 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with: { ruby-version: "3.3" }
       - name: install omq-cli
-        run: gem install omq-cli
+        run: |
+          gem install omq-cli
+          # Ensure the gem binary leads PATH ahead of any pre-installed omq snap.
+          echo "$(ruby -e 'puts Gem.bindir')" >> "$GITHUB_PATH"
+      - name: verify omq version
+        run: omq --version
       - name: rust ↔ ruby interop (tokio)
         run: cargo test -p omq-tokio  --test interop_ruby
       - name: rust ↔ ruby interop (compio)

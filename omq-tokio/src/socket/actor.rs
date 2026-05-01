@@ -29,7 +29,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
-use omq_proto::options::Options;
+use omq_proto::options::{Options, ReconnectPolicy};
 use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageTransform;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
@@ -136,6 +136,9 @@ struct PeerEntry {
     /// Endpoint this peer arrived at (bind side) or dialed to (connect
     /// side). Surfaced in monitor events.
     endpoint: Endpoint,
+    /// True for dialer-initiated connections; false for listener-accepted.
+    /// Used to decide whether to restart the dial after a mid-session drop.
+    is_client: bool,
     /// Per-pipe priority from `connect_with`. Defaults to
     /// `omq_proto::DEFAULT_PRIORITY` for accepted peers and for
     /// `connect()` (without `_with`).
@@ -776,14 +779,30 @@ impl SocketDriver {
             InternalEvent::PeerClosed { peer_id, reason } => {
                 self.send_strategy.connection_removed(peer_id);
                 self.recv_strategy.connection_removed(peer_id);
-                if let Some(peer) = self.peers.remove(&peer_id)
-                    && let Some(info) = peer.info
-                {
-                    self.monitor.publish(MonitorEvent::Disconnected {
-                        endpoint: peer.endpoint,
-                        peer: info,
-                        reason,
-                    });
+                if let Some(peer) = self.peers.remove(&peer_id) {
+                    // Restart the dial loop when a dialer-initiated connection
+                    // drops mid-session and the reconnect policy allows it.
+                    if peer.is_client
+                        && !self.closing
+                        && !matches!(self.options.reconnect, ReconnectPolicy::Disabled)
+                    {
+                        let ep = peer.endpoint.clone();
+                        // Remove the stale entry (its task already exited after
+                        // sending Connected) so the fresh one doesn't duplicate it.
+                        self.dialers.retain(|d| d.endpoint != ep);
+                        self.start_dial(
+                            ep,
+                            #[cfg(feature = "priority")]
+                            peer.priority,
+                        );
+                    }
+                    if let Some(info) = peer.info {
+                        self.monitor.publish(MonitorEvent::Disconnected {
+                            endpoint: peer.endpoint,
+                            peer: info,
+                            reason,
+                        });
+                    }
                 }
             }
         }
@@ -831,6 +850,7 @@ impl SocketDriver {
                     conn,
                     peer_ident,
                     endpoint,
+                    is_server,
                     #[cfg(feature = "priority")]
                     priority,
                 );
@@ -916,6 +936,7 @@ impl SocketDriver {
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
+                is_client: !is_server,
                 #[cfg(feature = "priority")]
                 priority,
             },
@@ -941,6 +962,7 @@ impl SocketDriver {
         conn: InprocConn,
         peer_ident: PeerIdent,
         endpoint: Endpoint,
+        is_server: bool,
         #[cfg(feature = "priority")] priority: u8,
     ) {
         // Honor peer caps just like the byte-stream path.
@@ -990,6 +1012,7 @@ impl SocketDriver {
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint,
+                is_client: !is_server,
                 #[cfg(feature = "priority")]
                 priority,
             },

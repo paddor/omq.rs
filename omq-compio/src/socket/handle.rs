@@ -1167,6 +1167,27 @@ impl Socket {
             .options
             .linger
             .map(|d| std::time::Instant::now() + d);
+        // Cancel listener and dialer tasks immediately. Dropping their
+        // JoinHandles tells the compio runtime to cancel the pending
+        // io_uring submissions (accept, connect, sleep). Without this,
+        // the tasks hold an Arc<SocketInner> reference and the cycle
+        // prevents the SocketInner from being freed even after close()
+        // returns, keeping OS ports and file descriptors live.
+        self.inner
+            .listeners
+            .write()
+            .expect("listeners lock")
+            .clear();
+        self.inner
+            .dialers
+            .write()
+            .expect("dialers lock")
+            .clear();
+        self.inner
+            .udp_dialers
+            .write()
+            .expect("udp_dialers lock")
+            .clear();
         // Round-robin shared queue: drop our last sender clone so
         // pumps see the queue go disconnected after they've drained
         // remaining messages. Pumps then exit and their

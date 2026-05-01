@@ -24,7 +24,7 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - name: workspace tests (default features)
-        run: cargo test --workspace --locked
+        run: cargo test --workspace
 
   feature-matrix:
     name: feature ${{ matrix.feature }}

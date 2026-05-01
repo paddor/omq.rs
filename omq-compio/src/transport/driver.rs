@@ -140,14 +140,14 @@ async fn handle_sub_cmd(
         Command::Subscribe(p) | Command::Cancel(p) => p.clone(),
         _ => return Ok(()),
     };
-    if let Some(ctx) = monitor_ctx {
-        if let Some(set) = &ctx.peer_sub {
-            let mut s = set.write().expect("peer_sub lock");
-            match cmd {
-                Command::Subscribe(_) => s.add(prefix.clone()),
-                Command::Cancel(_) => s.remove(&prefix),
-                _ => {}
-            }
+    if let Some(ctx) = monitor_ctx
+        && let Some(set) = &ctx.peer_sub
+    {
+        let mut s = set.write().expect("peer_sub lock");
+        match cmd {
+            Command::Subscribe(_) => s.add(prefix.clone()),
+            Command::Cancel(_) => s.remove(&prefix),
+            _ => {}
         }
     }
     if matches!(socket_type, SocketType::XPub) {
@@ -397,43 +397,41 @@ pub(crate) async fn run_connection(
                         handle_sub_cmd(socket_type, monitor_ctx.as_ref(), &peer_in_tx, c).await?;
                     }
                     Command::Join(group) => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(set) = &ctx.peer_groups {
-                                set.write().expect("peer_groups lock").insert(group);
-                            }
+                        if let Some(ctx) = &monitor_ctx
+                            && let Some(set) = &ctx.peer_groups
+                        {
+                            set.write().expect("peer_groups lock").insert(group);
                         }
                     }
                     Command::Leave(group) => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(set) = &ctx.peer_groups {
-                                set.write().expect("peer_groups lock").remove(&group);
-                            }
+                        if let Some(ctx) = &monitor_ctx
+                            && let Some(set) = &ctx.peer_groups
+                        {
+                            set.write().expect("peer_groups lock").remove(&group);
                         }
                     }
                     Command::Error { reason } => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(info) =
+                        if let Some(ctx) = &monitor_ctx
+                            && let Some(info) =
                                 ctx.peer_info.read().expect("peer_info lock").clone()
-                            {
-                                ctx.monitor.publish(MonitorEvent::PeerCommand {
-                                    endpoint: ctx.endpoint.clone(),
-                                    peer: info,
-                                    command: PeerCommandKind::Error { reason },
-                                });
-                            }
+                        {
+                            ctx.monitor.publish(MonitorEvent::PeerCommand {
+                                endpoint: ctx.endpoint.clone(),
+                                peer: info,
+                                command: PeerCommandKind::Error { reason },
+                            });
                         }
                     }
                     Command::Unknown { name, body } => {
-                        if let Some(ctx) = &monitor_ctx {
-                            if let Some(info) =
+                        if let Some(ctx) = &monitor_ctx
+                            && let Some(info) =
                                 ctx.peer_info.read().expect("peer_info lock").clone()
-                            {
-                                ctx.monitor.publish(MonitorEvent::PeerCommand {
-                                    endpoint: ctx.endpoint.clone(),
-                                    peer: info,
-                                    command: PeerCommandKind::Unknown { name, body },
-                                });
-                            }
+                        {
+                            ctx.monitor.publish(MonitorEvent::PeerCommand {
+                                endpoint: ctx.endpoint.clone(),
+                                peer: info,
+                                command: PeerCommandKind::Unknown { name, body },
+                            });
                         }
                     }
                     other => {

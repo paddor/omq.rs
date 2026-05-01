@@ -776,14 +776,14 @@ impl SocketDriver {
             InternalEvent::PeerClosed { peer_id, reason } => {
                 self.send_strategy.connection_removed(peer_id);
                 self.recv_strategy.connection_removed(peer_id);
-                if let Some(peer) = self.peers.remove(&peer_id) {
-                    if let Some(info) = peer.info {
-                        self.monitor.publish(MonitorEvent::Disconnected {
-                            endpoint: peer.endpoint,
-                            peer: info,
-                            reason,
-                        });
-                    }
+                if let Some(peer) = self.peers.remove(&peer_id)
+                    && let Some(info) = peer.info
+                {
+                    self.monitor.publish(MonitorEvent::Disconnected {
+                        endpoint: peer.endpoint,
+                        peer: info,
+                        reason,
+                    });
                 }
             }
         }

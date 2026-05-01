@@ -45,23 +45,22 @@ async fn pub_filters_by_subscriber_prefix() {
     while !(news_got && sports_got) && std::time::Instant::now() < deadline {
         let _ = pub_.send(Message::single("news.alpha")).await;
         let _ = pub_.send(Message::single("sports.beta")).await;
-        if !news_got {
-            if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), news.recv()).await {
-                let bytes = m.parts()[0].coalesce();
-                assert!(bytes.starts_with(b"news."), "news got non-news: {bytes:?}");
-                news_got = true;
-            }
+        if !news_got
+            && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), news.recv()).await
+        {
+            let bytes = m.parts()[0].coalesce();
+            assert!(bytes.starts_with(b"news."), "news got non-news: {bytes:?}");
+            news_got = true;
         }
-        if !sports_got {
-            if let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sports.recv()).await
-            {
-                let bytes = m.parts()[0].coalesce();
-                assert!(
-                    bytes.starts_with(b"sports."),
-                    "sports got non-sports: {bytes:?}"
-                );
-                sports_got = true;
-            }
+        if !sports_got
+            && let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(20), sports.recv()).await
+        {
+            let bytes = m.parts()[0].coalesce();
+            assert!(
+                bytes.starts_with(b"sports."),
+                "sports got non-sports: {bytes:?}"
+            );
+            sports_got = true;
         }
     }
     assert!(news_got, "news SUB never received its subscription");

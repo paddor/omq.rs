@@ -206,20 +206,20 @@ impl FanOutSend {
     /// Record a JOIN command from the given peer (RADIO).
     pub(crate) fn peer_join(&self, peer_id: u64, group: &[u8]) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
-        if let Some(p) = g.peers.get_mut(&peer_id) {
-            if let Ok(s) = std::str::from_utf8(group) {
-                p.groups.insert(s.to_string());
-            }
+        if let Some(p) = g.peers.get_mut(&peer_id)
+            && let Ok(s) = std::str::from_utf8(group)
+        {
+            p.groups.insert(s.to_string());
         }
     }
 
     /// Record a LEAVE command from the given peer (RADIO).
     pub(crate) fn peer_leave(&self, peer_id: u64, group: &[u8]) {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
-        if let Some(p) = g.peers.get_mut(&peer_id) {
-            if let Ok(s) = std::str::from_utf8(group) {
-                p.groups.remove(s);
-            }
+        if let Some(p) = g.peers.get_mut(&peer_id)
+            && let Ok(s) = std::str::from_utf8(group)
+        {
+            p.groups.remove(s);
         }
     }
 

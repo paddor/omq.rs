@@ -677,10 +677,10 @@ impl Socket {
     #[allow(clippy::too_many_lines)]
     pub async fn recv(&self) -> Result<Message> {
         let st = self.inner.socket_type;
-        if direct_recv_eligible(st) {
-            if let Some(msg) = self.try_direct_recv().await? {
-                return Ok(msg);
-            }
+        if direct_recv_eligible(st)
+            && let Some(msg) = self.try_direct_recv().await?
+        {
+            return Ok(msg);
         }
         loop {
             let frame = self
@@ -694,10 +694,10 @@ impl Socket {
                     peer_identity,
                     body,
                 } => {
-                    if let Some(max) = self.inner.options.max_message_size {
-                        if body.len() > max {
-                            continue;
-                        }
+                    if let Some(max) = self.inner.options.max_message_size
+                        && body.len() > max
+                    {
+                        continue;
                     }
                     // Reconstruct the user-visible Message after the
                     // channel hop. The slot in flight was ~64 B (just
@@ -731,10 +731,10 @@ impl Socket {
                 }
                 InprocFrame::Message(boxed) => {
                     let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
-                    if let Some(max) = self.inner.options.max_message_size {
-                        if msg.byte_len() > max {
-                            continue;
-                        }
+                    if let Some(max) = self.inner.options.max_message_size
+                        && msg.byte_len() > max
+                    {
+                        continue;
                     }
                     if !self.matches_subscription(&msg) {
                         continue;
@@ -806,10 +806,10 @@ impl Socket {
                 peer_identity,
                 body,
             } => {
-                if let Some(max) = self.inner.options.max_message_size {
-                    if body.len() > max {
-                        return Ok(None);
-                    }
+                if let Some(max) = self.inner.options.max_message_size
+                    && body.len() > max
+                {
+                    return Ok(None);
                 }
                 let msg = if is_identity_recv(st) {
                     let id = peer_identity.unwrap_or_default();
@@ -835,10 +835,10 @@ impl Socket {
             }
             InprocFrame::Message(boxed) => {
                 let crate::transport::inproc::InprocFullMessage { peer_identity, msg } = *boxed;
-                if let Some(max) = self.inner.options.max_message_size {
-                    if msg.byte_len() > max {
-                        return Ok(None);
-                    }
+                if let Some(max) = self.inner.options.max_message_size
+                    && msg.byte_len() > max
+                {
+                    return Ok(None);
                 }
                 if !self.matches_subscription(&msg) {
                     return Ok(None);
@@ -1222,10 +1222,10 @@ impl Socket {
             if !inproc_pending && !wire_alive {
                 break;
             }
-            if let Some(d) = deadline {
-                if std::time::Instant::now() >= d {
-                    break;
-                }
+            if let Some(d) = deadline
+                && std::time::Instant::now() >= d
+            {
+                break;
             }
             compio::time::sleep(Duration::from_millis(5)).await;
         }

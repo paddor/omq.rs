@@ -38,12 +38,12 @@ kicks in - take ±25 % at 8 KiB+ as a rough envelope.
 
 | Size    | inproc                  | ipc                  | tcp                  | lz4+tcp              | zstd+tcp             |
 |---------|-------------------------|----------------------|----------------------|----------------------|----------------------|
-| 128 B   | **2.31M / 296 MB/s**    | 736k / 94.2 MB/s     | 742k / 95.0 MB/s     | 404k / 51.8 MB/s     | 84.0k / 10.7 MB/s    |
-| 512 B   | **2.51M / 1.29 GB/s**   | 650k / 333 MB/s      | 679k / 347 MB/s      | 280k / 144 MB/s      | 90.9k / 46.6 MB/s    |
-| 2 KiB   | **2.50M / 5.11 GB/s**   | 578k / 1.18 GB/s     | 563k / 1.15 GB/s     | 237k / 485 MB/s      | 280k / 573 MB/s      |
-| 8 KiB   | **2.17M / 17.8 GB/s**   | 313k / 2.57 GB/s     | 234k / 1.92 GB/s     | 164k / 1.35 GB/s     | 197k / 1.61 GB/s     |
-| 32 KiB  | **1.96M / 64.2 GB/s**   | 98.0k / 3.21 GB/s    | 76.5k / 2.51 GB/s    | 69.3k / 2.27 GB/s    | 84.8k / 2.78 GB/s    |
-| 128 KiB | **2.24M / 294 GB/s**    | 26.7k / 3.50 GB/s    | 16.8k / 2.21 GB/s    | 21.0k / 2.75 GB/s    | 26.1k / 3.42 GB/s    |
+| 128 B   | **2.32M / 297 MB/s**    | 735k / 94.1 MB/s     | 784k / 100 MB/s      | 550k / 70.5 MB/s     | 89.1k / 11.4 MB/s    |
+| 512 B   | **2.34M / 1.20 GB/s**   | 688k / 352 MB/s      | 718k / 368 MB/s      | 311k / 159 MB/s      | 88.3k / 45.2 MB/s    |
+| 2 KiB   | **2.29M / 4.70 GB/s**   | 566k / 1.16 GB/s     | 563k / 1.15 GB/s     | 315k / 646 MB/s      | 286k / 586 MB/s      |
+| 8 KiB   | **2.32M / 19.0 GB/s**   | 299k / 2.45 GB/s     | 239k / 1.96 GB/s     | 224k / 1.84 GB/s     | 192k / 1.57 GB/s     |
+| 32 KiB  | **2.25M / 73.8 GB/s**   | 95.7k / 3.13 GB/s    | 73.6k / 2.41 GB/s    | 97.1k / 3.18 GB/s    | 84.5k / 2.77 GB/s    |
+| 128 KiB | **2.31M / 303 GB/s**    | 26.6k / 3.49 GB/s    | 20.0k / 2.62 GB/s    | 28.3k / 3.71 GB/s    | 27.1k / 3.55 GB/s    |
 
 Note: large-payload "GB/s" on inproc reflects the zero-copy refcount-
 clone path - bytes never traverse the kernel. lz4 / zstd are wins above
@@ -81,19 +81,19 @@ Loopback throughput (msgs/s · wire MB/s · virtual MB/s):
 
 | size  | tcp                          | lz4+tcp                            | zstd+tcp                           |
 |-------|------------------------------|------------------------------------|------------------------------------|
-| 128 B | 594k / 76.0 MB/s             | 520k / 68.6 MB/s / 66.6 MB/s       | 116k / 15.4 MB/s / 14.9 MB/s       |
-| 256 B | 539k / 138 MB/s              | 513k / 133 MB/s / 131 MB/s         | 122k / 31.6 MB/s / 31.1 MB/s       |
-| 512 B | 640k / 328 MB/s              | 322k / 105 MB/s / 165 MB/s         | 83.4k / 26.4 MB/s / 42.7 MB/s      |
-| 1 KiB | 560k / 573 MB/s              | 313k / 123 MB/s / 321 MB/s         | 192k / 69.2 MB/s / 197 MB/s        |
-| 2 KiB | 452k / 926 MB/s              | 262k / 143 MB/s / 537 MB/s         | 162k / 74.1 MB/s / 331 MB/s        |
-| 4 KiB | 332k / 1.36 GB/s             | 202k / 168 MB/s / 828 MB/s         | 92.5k / 51.1 MB/s / 379 MB/s       |
-| 16 KiB| 122k / 2.01 GB/s             | 80.0k / 203 MB/s / 1.31 GB/s       | 38.3k / 48.8 MB/s / 628 MB/s       |
+| 128 B | 760k / 97.2 MB/s             | 551k / 72.7 MB/s / 70.5 MB/s       | 120k / 15.8 MB/s / 15.3 MB/s       |
+| 256 B | 720k / 184 MB/s              | 545k / 142 MB/s / 139 MB/s         | 120k / 31.2 MB/s / 30.7 MB/s       |
+| 512 B | 686k / 351 MB/s              | 334k / 109 MB/s / 171 MB/s         | 88.1k / 27.8 MB/s / 45.1 MB/s      |
+| 1 KiB | 640k / 655 MB/s              | 304k / 120 MB/s / 311 MB/s         | 225k / 81.0 MB/s / 230 MB/s        |
+| 2 KiB | 565k / 1.16 GB/s             | 258k / 140 MB/s / 528 MB/s         | 165k / 75.6 MB/s / 338 MB/s        |
+| 4 KiB | 429k / 1.76 GB/s             | 198k / 165 MB/s / 810 MB/s         | 105k / 57.9 MB/s / 429 MB/s        |
+| 16 KiB| 142k / 2.33 GB/s             | 86.2k / 218 MB/s / 1.41 GB/s       | 41.2k / 52.5 MB/s / 675 MB/s       |
 
 On loopback, plain TCP wins msgs/s - compression's CPU cost has no
 offsetting wire-bandwidth payoff because there's no bandwidth scarcity.
 **Look at the wire MB/s column** to predict behavior on a bandwidth-
-bounded link: at 16 KiB messages, lz4+tcp ships ~203 MB/s wire while
-delivering ~1.31 GB/s of application data. On a 1 Gbps WAN (~125 MB/s
+bounded link: at 16 KiB messages, lz4+tcp ships ~218 MB/s wire while
+delivering ~1.41 GB/s of application data. On a 1 Gbps WAN (~125 MB/s
 wire ceiling) plain `tcp` would deliver 125 MB/s of application data
 total - `lz4+tcp` would deliver ~810 MB/s and `zstd+tcp` ~1.6 GB/s.
 That's where compression earns its keep.
@@ -128,11 +128,11 @@ Loopback throughput with the same dict (msgs/s · wire MB/s · virt MB/s):
 
 | size  | lz4+tcp                          | zstd+tcp                       |
 |-------|----------------------------------|--------------------------------|
-| 128 B | 260k / 5.7 MB/s / 33.3 MB/s      | 122k / 3.0 MB/s / 15.6 MB/s    |
-| 256 B | 320k / 7.0 MB/s / 82.0 MB/s      | 130k / 3.4 MB/s / 33.3 MB/s    |
-| 512 B | 304k / 7.0 MB/s / 156 MB/s       | 119k / 3.1 MB/s / 60.9 MB/s    |
-| 1 KiB | 274k / 25.0 MB/s / 281 MB/s      | 123k / 3.6 MB/s / 126 MB/s     |
-| 2 KiB | 212k / 51.1 MB/s / 434 MB/s      | 108k / 13.1 MB/s / 222 MB/s    |
+| 128 B | 295k / 6.5 MB/s / 37.8 MB/s     | 131k / 3.3 MB/s / 16.7 MB/s   |
+| 256 B | 300k / 6.6 MB/s / 76.8 MB/s     | 127k / 3.3 MB/s / 32.6 MB/s   |
+| 512 B | 303k / 7.0 MB/s / 155 MB/s      | 125k / 3.3 MB/s / 64.0 MB/s   |
+| 1 KiB | 267k / 24.3 MB/s / 273 MB/s     | 120k / 3.5 MB/s / 123 MB/s    |
+| 2 KiB | 226k / 54.5 MB/s / 463 MB/s     | 106k / 12.9 MB/s / 218 MB/s   |
 
 Same loopback caveat: CPU cost without bandwidth payoff. On a
 bandwidth-bounded link the wire-MB/s column is the actual link
@@ -145,12 +145,12 @@ of plaintext.
 
 | transport | size  | omq-compio    | omq-tokio      |
 |-----------|-------|---------------|----------------|
-| inproc    | 128 B | 29 µs (34.1k) | 64 µs (15.7k)  |
-| inproc    | 2 KiB | 30 µs (33.0k) | 58 µs (17.2k)  |
-| ipc       | 128 B | 53 µs (18.8k) | 153 µs (6.5k)  |
-| ipc       | 2 KiB | 87 µs (11.5k) | 121 µs (8.3k)  |
-| tcp       | 128 B | 66 µs (15.1k) | 146 µs (6.9k)  |
-| tcp       | 2 KiB | 66 µs (15.3k) | 146 µs (6.8k)  |
+| inproc    | 128 B | 30 µs (33.3k) | 56 µs (17.9k)  |
+| inproc    | 2 KiB | 40 µs (24.9k) | 56 µs (18.0k)  |
+| ipc       | 128 B | 54 µs (18.4k) | 110 µs (9.1k)  |
+| ipc       | 2 KiB | 58 µs (17.4k) | 116 µs (8.7k)  |
+| tcp       | 128 B | 62 µs (16.1k) | 144 µs (7.0k)  |
+| tcp       | 2 KiB | 64 µs (15.7k) | 148 µs (6.7k)  |
 
 µs is round-trip wall time; parenthesized number is full request+reply
 pairs per second. compio wins inproc by ~2× (single-thread, no
@@ -247,12 +247,12 @@ workers. Stage 1's single-wire-peer bypass would port to tokio's
 
 | Size    | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---------|---------------|--------------|------------|-----------|------------|-----------|
-| 128 B   | **2.31M**     | 337k         | **736k**   | 184k      | **742k**   | 135k      |
-| 512 B   | **2.51M**     | 352k         | **650k**   | 202k      | **679k**   | 130k      |
-| 2 KiB   | **2.50M**     | 350k         | **578k**   | 137k      | **563k**   | 122k      |
-| 8 KiB   | **2.17M**     | 325k         | **313k**   | 51.6k     | **234k**   | 110k      |
-| 32 KiB  | **1.96M**     | 357k         | **98.0k**  | 16.5k     | **76.5k**  | 37.5k     |
-| 128 KiB | **2.24M**     | 311k         | **26.7k**  | 11.5k     | **16.8k**  | 12.3k     |
+| 128 B   | **2.32M**     | 337k         | **735k**   | 250k      | **784k**   | 129k      |
+| 512 B   | **2.34M**     | 337k         | **688k**   | 206k      | **718k**   | 130k      |
+| 2 KiB   | **2.29M**     | 321k         | **566k**   | 169k      | **563k**   | 126k      |
+| 8 KiB   | **2.32M**     | 332k         | **299k**   | 36.6k     | **239k**   | 113k      |
+| 32 KiB  | **2.25M**     | 369k         | **95.7k**  | 19.4k     | **73.6k**  | 49.9k     |
+| 128 KiB | **2.31M**     | 308k         | **26.6k**  | 13.0k     | **20.0k**  | 14.4k     |
 
 Numbers are msg/s. compio wins at every size on every transport on
 this hardware: io_uring + the direct-routing path beats tokio's
@@ -273,12 +273,12 @@ is better.
 
 |  size   |   NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3) |
 |--------:|----------------:|-------------------------:|----------------------------:|
-|    64 B |    1.68 GB/s    |               44 MB/s    |                  125 MB/s   |
-|   256 B |    5.22 GB/s    |              121 MB/s    |                  290 MB/s   |
-| 1 KiB   |   22.8 GB/s     |              306 MB/s    |                  579 MB/s   |
-| 4 KiB   |   44.5 GB/s     |              447 MB/s    |                  823 MB/s   |
-|16 KiB   |   48.0 GB/s     |              504 MB/s    |             **1.07 GB/s**   |
-|64 KiB   |   43.4 GB/s     |              532 MB/s    |             **1.28 GB/s**   |
+|    64 B |    1.73 GB/s    |               41 MB/s    |                  123 MB/s   |
+|   256 B |    6.56 GB/s    |              132 MB/s    |                  323 MB/s   |
+| 1 KiB   |   22.3 GB/s     |              293 MB/s    |                  573 MB/s   |
+| 4 KiB   |   44.1 GB/s     |              432 MB/s    |                  809 MB/s   |
+|16 KiB   |   47.1 GB/s     |              429 MB/s    |             **1.08 GB/s**   |
+|64 KiB   |   42.8 GB/s     |              509 MB/s    |             **1.31 GB/s**   |
 
 > **Security note on BLAKE3ZMQ.** This mechanism is omq-native and has
 > **not been independently security audited.** It's modelled on Noise
@@ -297,7 +297,7 @@ pins a fork of `chacha20-blake3` adding `#[target_feature(enable =
 surrounding the explicit intrinsic calls. Without that patch,
 BLAKE3ZMQ runs ~20× slower (~52 MB/s at bulk sizes) unless every
 downstream consumer rebuilds with `-C target-cpu=native`. `crypto_box`
-(CURVE) plateaus around ~530 MB/s either way: its salsa20
+(CURVE) plateaus around ~510 MB/s either way: its salsa20
 implementation has no SIMD path. Reproduce with:
 
 ```sh

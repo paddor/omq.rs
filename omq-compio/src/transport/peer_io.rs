@@ -89,15 +89,21 @@ impl WireWriter {
     /// implements `IoVectoredBuf` (via the `bytes` feature on
     /// compio-buf), so the codec's owned chunks go straight into
     /// the syscall - no manual `iovec` construction.
-    pub(crate) async fn write_vectored(&mut self, bufs: Vec<Bytes>) -> std::io::Result<usize> {
+    ///
+    /// Returns the buffer alongside the byte count so callers can
+    /// inspect unwritten chunks on partial writes without cloning.
+    pub(crate) async fn write_vectored(
+        &mut self,
+        bufs: Vec<Bytes>,
+    ) -> (std::io::Result<usize>, Vec<Bytes>) {
         match self {
             Self::Tcp(w) => {
-                let BufResult(res, _) = w.write_vectored(bufs).await;
-                res
+                let BufResult(res, bufs) = w.write_vectored(bufs).await;
+                (res, bufs)
             }
             Self::Ipc(w) => {
-                let BufResult(res, _) = w.write_vectored(bufs).await;
-                res
+                let BufResult(res, bufs) = w.write_vectored(bufs).await;
+                (res, bufs)
             }
         }
     }
@@ -115,12 +121,16 @@ impl From<OwnedWriteHalf<UnixStream>> for WireWriter {
     }
 }
 
-/// Per-peer codec + writer + reader + transform, intended to live
-/// behind a shared async mutex.
+/// Per-peer codec + reader + transform, intended to live behind a
+/// shared async mutex.
+///
+/// The writer half lives separately in [`DirectIoState::writer`] so
+/// the driver can release the codec lock before calling
+/// `write_vectored` — that lets the fast-path sender encode the next
+/// message while the I/O is in flight.
 pub(crate) struct PeerIo {
     pub(crate) codec: Connection,
     pub(crate) transform: Option<MessageTransform>,
-    pub(crate) writer: WireWriter,
     pub(crate) reader: WireReader,
     /// Flipped to `true` once `Event::HandshakeSucceeded` has been
     /// observed. The direct send fast path bails out (falling back to
@@ -133,6 +143,7 @@ impl std::fmt::Debug for PeerIo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerIo")
             .field("handshake_done", &self.handshake_done)
+            .field("pending_bytes", &self.codec.pending_transmit_size())
             .finish_non_exhaustive()
     }
 }

@@ -1017,6 +1017,7 @@ impl Socket {
     ///   - another `recv()` already holds the claim,
     ///   - the handshake hasn't completed yet (driver still owns
     ///     the read path until handshake).
+    #[allow(clippy::too_many_lines)]
     async fn try_direct_recv(&self) -> Result<Option<Message>> {
         const READ_BUF_BYTES: usize = 64 * 1024;
         use futures::FutureExt;
@@ -1096,57 +1097,68 @@ impl Socket {
                 return Err(Error::Closed);
             }
 
-            // 3) Read + handle_input, both under the lock so a
-            //    concurrent driver iteration can't race us. The
-            //    cancellation window is the gap between `read_ready`
-            //    firing and the read SQE completing - bounded and
-            //    small (~5 µs on Linux loopback).
+            // 3) Read + handle_input under the codec lock; flush PONG
+            //    responses via the separate writer lock so the codec
+            //    lock is released before write_vectored. The driver is
+            //    parked on recv_state_changed while the claim is held,
+            //    so it won't race us on the writer. The cancellation
+            //    window (read_ready fire → read SQE complete) is
+            //    bounded and small (~5 µs on Linux loopback).
             let buf = std::mem::replace(&mut local_buf, Vec::with_capacity(READ_BUF_BYTES));
-            let mut io = state.peer_io.lock().await;
-            let (res, filled) = io.reader.read(buf).await;
-            match res {
-                Ok(0) => {
+            let filled = {
+                let mut io = state.peer_io.lock().await;
+                let (res, filled) = io.reader.read(buf).await;
+                match res {
+                    Ok(0) => {
+                        state.eof_signal.notify(usize::MAX);
+                        return Err(Error::Closed);
+                    }
+                    Err(e) => {
+                        state.eof_signal.notify(usize::MAX);
+                        return Err(Error::Io(e));
+                    }
+                    Ok(n) => {
+                        io.codec.handle_input(&filled[..n])?;
+                        state.last_input_nanos.store(
+                            state.hb_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
+                // Codec lock released; writer lock acquired below.
+                drop(io);
+                filled
+            };
+            // Flush any codec output from handle_input (e.g. auto-PONGs).
+            // Use the writer lock, not the codec lock, so the codec lock
+            // is free during the async write — mirrors the driver's
+            // flush path. The driver is parked on recv_state_changed
+            // while the claim is held, so it won't race us on the writer.
+            loop {
+                let chunks = {
+                    let io = state.peer_io.lock().await;
+                    if !io.codec.has_pending_transmit() {
+                        break;
+                    }
+                    let mut c = io.codec.clone_transmit_chunks();
+                    if c.len() > 1024 {
+                        c.truncate(1024);
+                    }
+                    c
+                };
+                if chunks.is_empty() {
+                    break;
+                }
+                let (res, _returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let written = res.map_err(Error::Io)?;
+                if written == 0 {
                     state.eof_signal.notify(usize::MAX);
                     return Err(Error::Closed);
                 }
-                Err(e) => {
-                    state.eof_signal.notify(usize::MAX);
-                    return Err(Error::Io(e));
-                }
-                Ok(n) => {
-                    io.codec.handle_input(&filled[..n])?;
-                    state.last_input_nanos.store(
-                        state.hb_epoch.elapsed().as_nanos() as u64,
-                        Ordering::Relaxed,
-                    );
-                    // Flush any codec output that resulted from
-                    // handle_input - e.g. auto-PONGs to a peer
-                    // PING. The driver is parked on
-                    // `recv_state_changed` while we hold the
-                    // claim, so it can't flush for us; the peer
-                    // would otherwise see no PONG and time us
-                    // out. Hold the lock across the writev: a
-                    // concurrent fast-path send must wait.
-                    while io.codec.has_pending_transmit() {
-                        let mut chunks = io.codec.clone_transmit_chunks();
-                        if chunks.len() > 1024 {
-                            chunks.truncate(1024);
-                        }
-                        if chunks.is_empty() {
-                            break;
-                        }
-                        let written = io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
-                        if written == 0 {
-                            state.eof_signal.notify(usize::MAX);
-                            return Err(Error::Closed);
-                        }
-                        io.codec.advance_transmit(written);
-                    }
-                    drop(io);
-                    local_buf = filled;
-                    local_buf.clear();
-                }
+                state.peer_io.lock().await.codec.advance_transmit(written);
             }
+            local_buf = filled;
+            local_buf.clear();
             // Loop back to drain the freshly-parsed events.
         }
     }

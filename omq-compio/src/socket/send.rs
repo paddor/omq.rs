@@ -21,9 +21,71 @@ use omq_proto::proto::SocketType;
 
 #[cfg(not(feature = "priority"))]
 use crate::transport::driver::DriverCommand;
+use crate::socket::inner::DirectIoState;
 
 use super::handle::Socket;
 use super::inner::PeerOut;
+
+/// Encode `msg` for this peer without going through the driver's cmd channel.
+/// Returns `true` if encoded and the driver was (conditionally) notified,
+/// `false` if the lock was busy, handshake not done, or buffer above cap.
+///
+/// Two sub-paths:
+///
+/// 1. **No transform (fast)** — encodes ZMTP frames directly into
+///    `DirectIoState::encoded_queue` via a sync `Mutex::try_lock`.
+///    Bypasses the codec's async mutex and eliminates the
+///    `clone_transmit_chunks` + `advance_transmit` round-trip.
+///
+/// 2. **Transform active (slow)** — falls back to the codec async mutex;
+///    compression runs inside `codec.send_message`, which we can't replicate
+///    without duplicating the transform machinery.
+///
+/// In both cases the driver is notified via `transmit_ready` only when it is
+/// parked in `select_biased!` (`driver_in_select == true`). When the driver is
+/// actively looping (steps 1-3), it will drain the queue naturally on its next
+/// step-3 pass — no spurious wakeup needed.
+fn try_direct_encode(msg: &Message, state: &Arc<DirectIoState>) -> Result<bool> {
+    const DIRECT_CAP: usize = 512 * 1024;
+
+    if !state.has_transform {
+        if !state.handshake_done.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let Ok(mut eq) = state.encoded_queue.try_lock() else {
+            return Ok(false);
+        };
+        if eq.total_bytes() >= DIRECT_CAP {
+            return Ok(false);
+        }
+        eq.encode_and_push(msg);
+        drop(eq);
+        if state.driver_in_select.load(Ordering::Relaxed) {
+            state.transmit_ready.notify(1);
+        }
+        return Ok(true);
+    }
+
+    // Transform active: must go through the codec (compression lives there).
+    let Some(mut io) = state.peer_io.try_lock() else {
+        return Ok(false);
+    };
+    if !io.handshake_done {
+        return Ok(false);
+    }
+    if io.codec.pending_transmit_size() >= DIRECT_CAP {
+        return Ok(false);
+    }
+    let t = io.transform.as_mut().expect("has_transform set but PeerIo has no transform");
+    for wire in t.encode(msg)? {
+        io.codec.send_message(&wire)?;
+    }
+    drop(io);
+    if state.driver_in_select.load(Ordering::Relaxed) {
+        state.transmit_ready.notify(1);
+    }
+    Ok(true)
+}
 
 /// Whether `Socket::send` must run `TypeState::pre_send` for this
 /// socket type. Stateful for REQ / REP (envelope + alternation);
@@ -130,11 +192,15 @@ impl Socket {
                 } else {
                     let idx = inner.rr_index.fetch_add(1, Ordering::Relaxed) % peers.len();
                     let p = &peers[idx];
-                    Some((p.out.clone(), peers.len()))
+                    // Snapshot direct-io state for the single-peer fast path.
+                    let direct = p.direct_io.as_ref().and_then(|h| {
+                        h.read().expect("direct_io handle lock").clone()
+                    });
+                    Some((p.out.clone(), peers.len(), direct))
                 }
             };
-            if let Some((chosen, peer_count)) = chosen {
-                return self.slow_round_robin(chosen, msg, peer_count).await;
+            if let Some((chosen, peer_count, direct)) = chosen {
+                return self.slow_round_robin(chosen, msg, peer_count, direct).await;
             }
             let listener = inner.on_peer_ready.listen();
             if !inner.out_peers.read().expect("peers lock").is_empty() {
@@ -168,12 +234,19 @@ impl Socket {
     /// dispatch (single peer goes direct to the per-peer cmd channel
     /// to skip the shared queue's work-stealing overhead; multi-peer
     /// goes through the shared queue) and inproc peers.
+    ///
+    /// For single wire peers the fast path is `try_direct_encode`:
+    /// encode into the codec buffer under `try_lock` and notify the
+    /// driver. Falls back to the cmd channel when the codec is busy
+    /// (driver is encoding or flushing) or the transmit buffer is at
+    /// the direct-write cap.
     #[cfg(not(feature = "priority"))]
     async fn slow_round_robin(
         &self,
         chosen: PeerOut,
         msg: Message,
         peer_count: usize,
+        direct: Option<Arc<DirectIoState>>,
     ) -> Result<()> {
         match chosen {
             PeerOut::Inproc { .. } => chosen.send(msg).await,
@@ -187,13 +260,17 @@ impl Socket {
                 self.conflate_shared_queue_send(msg)
             }
             PeerOut::Wire(handle) if peer_count == 1 => {
-                // Try the per-peer cmd channel directly. If the
-                // driver died (handshake timeout, peer death,
-                // reconnect in flight), the channel is
-                // disconnected; fall back to the shared queue
-                // so messages buffer up to `send_hwm` until a
-                // new driver picks them up - matches libzmq's
-                // "no live peer" semantics.
+                // Fast path: encode directly into the codec buffer.
+                if let Some(state) = direct
+                    && try_direct_encode(&msg, &state)?
+                {
+                    return Ok(());
+                }
+                // Fall back to per-peer cmd channel. If the driver died
+                // (handshake timeout, peer death, reconnect in flight),
+                // the channel is disconnected; fall back to the shared
+                // queue so messages buffer up to `send_hwm` until a new
+                // driver picks them up.
                 let tx = handle.read().expect("wire peer handle lock").clone();
                 match tx.send_async(DriverCommand::SendMessage(msg)).await {
                     Ok(()) => Ok(()),

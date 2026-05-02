@@ -125,15 +125,15 @@ pub(super) fn install_accepted_wire_peer(
     let peer_groups = radio_side_peer_groups(inner.socket_type);
     let transform =
         omq_proto::proto::transform::MessageTransform::for_endpoint(&endpoint, &inner.options);
+    let has_transform = transform.is_some();
     let peer_io = crate::transport::driver::build_peer_io(
         role,
         inner.socket_type,
         &inner.options,
         reader,
-        writer,
         transform,
     );
-    let state = DirectIoState::new(peer_io, Arc::new(poll_fd));
+    let state = DirectIoState::new(peer_io, writer, Arc::new(poll_fd), has_transform);
     let direct_io_handle: DirectIoHandle = Arc::new(RwLock::new(Some(state.clone())));
     let out = PeerOut::Wire(handle);
     let slot_idx = {

@@ -8,14 +8,14 @@
 //!
 //! [`Socket`]: super::Socket
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use compio::runtime::fd::PollFd;
 use event_listener::Event;
 
@@ -30,7 +30,7 @@ use omq_proto::type_state::TypeState;
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerInfo};
 use crate::transport::driver::DriverCommand;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
-use crate::transport::peer_io::SharedPeerIo;
+use crate::transport::peer_io::{SharedPeerIo, WireWriter};
 
 pub(super) struct SocketInner {
     pub(super) socket_type: SocketType,
@@ -151,17 +151,152 @@ pub(super) enum PeerOut {
 
 pub(super) type WirePeerHandle = Arc<RwLock<flume::Sender<DriverCommand>>>;
 
+/// Per-peer outbound queue for the direct-encode fast path.
+///
+/// The sender encodes ZMTP frames directly into this `VecDeque<Bytes>`
+/// (headers via inline framing, payload via `Bytes::clone` Arc bumps).
+/// The driver drains it in step 3b via `write_vectored`. Only active
+/// when `DirectIoState::has_transform == false` and the handshake is
+/// done. Avoids `clone_transmit_chunks` + `advance_transmit` on every
+/// flush — eliminating two codec-lock acquisitions and N Arc bumps per
+/// `write_vectored` call on the small-message hot path.
+pub(crate) struct EncodedQueue {
+    chunks: VecDeque<Bytes>,
+    total_bytes: usize,
+    /// Header scratch buffer — reused across frames (zero alloc after
+    /// warm-up). `split().freeze()` hands ownership to the chunk list.
+    scratch: BytesMut,
+}
+
+impl std::fmt::Debug for EncodedQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncodedQueue")
+            .field("chunks", &self.chunks.len())
+            .field("total_bytes", &self.total_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EncodedQueue {
+    fn new() -> Self {
+        Self {
+            chunks: VecDeque::with_capacity(32),
+            total_bytes: 0,
+            scratch: BytesMut::with_capacity(9),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Encode a ZMTP message (NULL mechanism, no transform) directly into
+    /// the queue using inline framing. One header chunk + N payload chunks
+    /// per message part; no copy, only Arc bumps on each `Bytes::clone`.
+    ///
+    /// Frame header: `[flags: u8, size: u8]` for short (≤ 255 byte) frames;
+    /// `[flags | FLAG_LONG, size: u64_be]` for long frames.
+    pub(crate) fn encode_and_push(&mut self, msg: &omq_proto::message::Message) {
+        let parts = msg.parts();
+        let n = parts.len();
+        for (i, part) in parts.iter().enumerate() {
+            let more = i + 1 < n;
+            let flags = u8::from(more); // FLAG_MORE = 0x01
+            let payload_len = part.len(); // total bytes across all Payload chunks
+            self.scratch.clear();
+            if payload_len > 255 {
+                self.scratch.extend_from_slice(&[
+                    flags | 0x02, // FLAG_LONG
+                    (payload_len >> 56) as u8,
+                    (payload_len >> 48) as u8,
+                    (payload_len >> 40) as u8,
+                    (payload_len >> 32) as u8,
+                    (payload_len >> 24) as u8,
+                    (payload_len >> 16) as u8,
+                    (payload_len >> 8) as u8,
+                    payload_len as u8,
+                ]);
+            } else {
+                self.scratch.extend_from_slice(&[flags, payload_len as u8]);
+            }
+            let header = self.scratch.split().freeze();
+            self.total_bytes += header.len();
+            self.chunks.push_back(header);
+            for b in part.chunks() {
+                self.total_bytes += b.len();
+                self.chunks.push_back(b.clone());
+            }
+        }
+    }
+
+    /// Drain up to `max_chunks` entries into a `Vec<Bytes>` for `write_vectored`.
+    /// Decrements `total_bytes` by the byte count of drained chunks (restored
+    /// via `put_back_unwritten` on a partial write).
+    pub(crate) fn drain_into_vec(&mut self, max_chunks: usize) -> Vec<Bytes> {
+        let take = max_chunks.min(self.chunks.len());
+        let v: Vec<Bytes> = self.chunks.drain(..take).collect();
+        let drained: usize = v.iter().map(Bytes::len).sum();
+        self.total_bytes = self.total_bytes.saturating_sub(drained);
+        v
+    }
+
+    /// After a partial write, return the unwritten suffix of `returned` to
+    /// the front of the queue. `written` is the byte count from `write_vectored`.
+    /// `returned` is the same `Vec<Bytes>` the caller passed in, handed back by
+    /// `WireWriter::write_vectored` via `compio::BufResult`.
+    pub(crate) fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
+        let mut consumed = 0usize;
+        let mut to_restore: Vec<Bytes> = Vec::new();
+        for chunk in returned {
+            if consumed >= written {
+                self.total_bytes += chunk.len();
+                to_restore.push(chunk);
+            } else if consumed + chunk.len() <= written {
+                consumed += chunk.len();
+            } else {
+                let skip = written - consumed;
+                consumed = written;
+                let tail = chunk.slice(skip..);
+                self.total_bytes += tail.len();
+                to_restore.push(tail);
+            }
+        }
+        for chunk in to_restore.into_iter().rev() {
+            self.chunks.push_front(chunk);
+        }
+    }
+}
+
 /// Per-connection direct-I/O state shared between the driver and the
 /// fast-path send / direct-recv callers on [`Socket`].
 ///
-/// Holds the `SharedPeerIo` (codec + writer + reader + transform), the
-/// readiness handle for the FD, and the recv-claim state machine that
-/// arbitrates which task (driver vs. recv caller) owns reads at any
-/// given moment.
+/// Holds the `SharedPeerIo` (codec + reader + transform — not writer),
+/// the wire writer behind its own mutex, the readiness handle for the
+/// FD, and the recv-claim state machine that arbitrates which task
+/// (driver vs. recv caller) owns reads at any given moment.
+///
+/// The writer lives here — not inside [`PeerIo`] — so the driver can
+/// release the codec lock before calling `write_vectored`. That opens a
+/// window for the fast-path sender to encode the next message while I/O
+/// is in flight, eliminating the per-message lock round-trip that
+/// dominated throughput at small message sizes.
 ///
 /// [`Socket`]: super::handle::Socket
 pub(crate) struct DirectIoState {
     pub(crate) peer_io: SharedPeerIo,
+    /// Wire writer, behind its own mutex so the codec lock can be
+    /// dropped before `write_vectored`. The driver holds this only
+    /// during the actual I/O call; the encoder (codec lock) and the
+    /// writer (this lock) are now independent.
+    pub(crate) writer: async_lock::Mutex<WireWriter>,
+    /// Notified by the fast-path sender whenever it encodes a message
+    /// directly into the codec buffer while the driver is parked in
+    /// its `select_biased!`. Wakes the driver to flush the new data.
+    pub(crate) transmit_ready: Event,
     /// Cancel-safe FD readiness probe. Shared with the driver task,
     /// which uses it identically to `PollFd::read_ready`.
     pub(crate) poll_fd: Arc<PollFd<socket2::Socket>>,
@@ -182,6 +317,22 @@ pub(crate) struct DirectIoState {
     /// monotonic origin set at construction; fits 584 years).
     pub(crate) last_input_nanos: AtomicU64,
     pub(crate) hb_epoch: Instant,
+    /// Mirrors `PeerIo::handshake_done`. Set by the driver (without the
+    /// codec lock) once `HandshakeSucceeded` fires. Read by the fast-path
+    /// sender to skip the codec-mutex acquisition pre-handshake.
+    pub(crate) handshake_done: AtomicBool,
+    /// True when an active `MessageTransform` (lz4, zstd) is installed.
+    /// The direct-encode fast path falls back to the codec when this is
+    /// set — compression runs inside `codec.send_message`, not here.
+    pub(crate) has_transform: bool,
+    /// Direct-encode queue. Sender encodes ZMTP frames here; driver
+    /// drains them in step 3b. Only used when `!has_transform`.
+    pub(crate) encoded_queue: Mutex<EncodedQueue>,
+    /// Set by the driver just before parking in `select_biased!`, cleared
+    /// at the top of each loop iteration. Sender skips `transmit_ready`
+    /// notification when `false` — the driver is actively processing and
+    /// will drain `encoded_queue` on its own next step-3b pass.
+    pub(crate) driver_in_select: AtomicBool,
 }
 
 impl std::fmt::Debug for DirectIoState {
@@ -193,15 +344,26 @@ impl std::fmt::Debug for DirectIoState {
 }
 
 impl DirectIoState {
-    pub(crate) fn new(peer_io: SharedPeerIo, poll_fd: Arc<PollFd<socket2::Socket>>) -> Arc<Self> {
+    pub(crate) fn new(
+        peer_io: SharedPeerIo,
+        writer: WireWriter,
+        poll_fd: Arc<PollFd<socket2::Socket>>,
+        has_transform: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             peer_io,
+            writer: async_lock::Mutex::new(writer),
+            transmit_ready: Event::new(),
             poll_fd,
             recv_claim: AtomicU8::new(0),
             recv_state_changed: Event::new(),
             eof_signal: Event::new(),
             last_input_nanos: AtomicU64::new(0),
             hb_epoch: Instant::now(),
+            handshake_done: AtomicBool::new(false),
+            has_transform,
+            encoded_queue: Mutex::new(EncodedQueue::new()),
+            driver_in_select: AtomicBool::new(false),
         })
     }
 }

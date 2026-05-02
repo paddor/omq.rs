@@ -38,12 +38,12 @@ kicks in - take ±25 % at 8 KiB+ as a rough envelope.
 
 | Size    | inproc                  | ipc                  | tcp                  | lz4+tcp              | zstd+tcp             |
 |---------|-------------------------|----------------------|----------------------|----------------------|----------------------|
-| 128 B   | **3.30M / 422 MB/s**    | 1.30M / 166 MB/s     | 1.30M / 166 MB/s     | 1.02M / 131 MB/s     | 104k / 13.3 MB/s     |
-| 512 B   | **3.27M / 1.67 GB/s**   | 1.12M / 573 MB/s     | 1.15M / 590 MB/s     | 725k / 371 MB/s      | 106k / 54.2 MB/s     |
-| 2 KiB   | **3.21M / 6.58 GB/s**   | 798k / 1.63 GB/s     | 804k / 1.65 GB/s     | 566k / 1.16 GB/s     | 390k / 800 MB/s      |
-| 8 KiB   | **3.17M / 26.0 GB/s**   | 386k / 3.16 GB/s     | 364k / 2.98 GB/s     | 217k / 1.78 GB/s     | 250k / 2.05 GB/s     |
-| 32 KiB  | **2.83M / 92.8 GB/s**   | 124k / 4.05 GB/s     | 110k / 3.60 GB/s     | 117k / 3.83 GB/s     | 100k / 3.29 GB/s     |
-| 128 KiB | **3.10M / 407 GB/s**    | 31.1k / 4.08 GB/s    | 28.7k / 3.76 GB/s    | 34.8k / 4.56 GB/s    | 29.9k / 3.92 GB/s    |
+| 128 B   | **3.05M / 390 MB/s**    | 1.51M / 193 MB/s     | 1.48M / 190 MB/s     | 893k / 114 MB/s      | 91.3k / 11.7 MB/s    |
+| 512 B   | **2.97M / 1.52 GB/s**   | 1.17M / 599 MB/s     | 1.22M / 624 MB/s     | 349k / 179 MB/s      | 93.5k / 47.8 MB/s    |
+| 2 KiB   | **2.91M / 5.96 GB/s**   | 802k / 1.64 GB/s     | 818k / 1.68 GB/s     | 334k / 685 MB/s      | 291k / 595 MB/s      |
+| 8 KiB   | **3.00M / 24.6 GB/s**   | 392k / 3.21 GB/s     | 366k / 3.00 GB/s     | 264k / 2.16 GB/s     | 210k / 1.72 GB/s     |
+| 32 KiB  | **2.96M / 97.0 GB/s**   | 122k / 4.01 GB/s     | 113k / 3.71 GB/s     | 113k / 3.71 GB/s     | 91.8k / 3.01 GB/s    |
+| 128 KiB | **2.94M / 386 GB/s**    | 30.8k / 4.04 GB/s    | 28.4k / 3.72 GB/s    | 33.5k / 4.39 GB/s    | 28.9k / 3.79 GB/s    |
 
 Note: large-payload "GB/s" on inproc reflects the zero-copy refcount-
 clone path - bytes never traverse the kernel. lz4 / zstd on
@@ -147,12 +147,12 @@ of plaintext.
 
 | transport | size  | omq-compio     | omq-tokio      |
 |-----------|-------|----------------|----------------|
-| inproc    | 128 B | 5.5 µs (183k)  | 32 µs (31.8k)  |
-| inproc    | 2 KiB | 5.5 µs (183k)  | 29 µs (34.2k)  |
-| ipc       | 128 B | 22 µs (45.2k)  | 60 µs (16.5k)  |
-| ipc       | 2 KiB | 23 µs (43.7k)  | 60 µs (16.6k)  |
-| tcp       | 128 B | 29 µs (34.0k)  | 78 µs (12.9k)  |
-| tcp       | 2 KiB | 31 µs (32.7k)  | 81 µs (12.4k)  |
+| inproc    | 128 B | 5.5 µs (181k)  | 27 µs (37.5k)  |
+| inproc    | 2 KiB | 5.5 µs (182k)  | 31 µs (32.5k)  |
+| ipc       | 128 B | 20 µs (48.9k)  | 57 µs (17.5k)  |
+| ipc       | 2 KiB | 22 µs (46.1k)  | 60 µs (16.8k)  |
+| tcp       | 128 B | 28 µs (35.2k)  | 75 µs (13.3k)  |
+| tcp       | 2 KiB | 30 µs (33.9k)  | 90 µs (11.2k)  |
 
 µs is round-trip wall time; parenthesized number is full request+reply
 pairs per second. compio wins inproc by ~6× (single-thread, no
@@ -219,6 +219,25 @@ revealed shaped the final design.
    `omq-compio/src/transport/driver.rs`. Cuts REQ/REP IPC RTT
    roughly in half (recv side is one of two hops per RTT).
 
+4. **EncodedQueue send bypass.** `Socket::send` on single-peer wire
+   connections (no transform) encodes ZMTP frames directly into a
+   `VecDeque<Bytes>` in `DirectIoState` via a sync `Mutex::try_lock`,
+   bypassing the codec's async mutex entirely. This eliminates
+   `clone_transmit_chunks` + `advance_transmit` on the hot path and
+   removes N `Arc` reference-count bumps per `write_vectored` call
+   (chunks move into the iovec rather than being cloned). The driver
+   drains the queue in step 3b, after flushing the codec in step 3a.
+   A `driver_in_select: AtomicBool` flag lets the sender issue
+   `transmit_ready.notify(1)` only when the driver is parked in
+   `select_biased!` — no spurious wakeups while the driver is
+   actively looping. Race-free in compio's cooperative single-threaded
+   runtime: no task switch between `store(true)` and the first
+   `await` inside `select_biased!`. Transform paths (lz4+tcp, zstd+tcp)
+   fall back to the codec mutex path unchanged. Implemented in
+   `omq-compio/src/socket/send.rs` and `omq-compio/src/socket/inner.rs`.
+   Lifts 128 B TCP PUSH/PULL from 1.30M to 1.48M msg/s; large
+   messages see 2-3× wins vs. libzmq (see libzmq comparison below).
+
 #### Stage 4 (tried, reverted): direct-write fast path
 
 Stage 4 put the writer in `SharedPeerIo` and let `Socket::send`
@@ -246,16 +265,46 @@ runtime hides some of the cost by overlapping send/recv on different
 workers. Stage 1's single-wire-peer bypass would port to tokio's
 `routing/round_robin.rs`; tracked as a follow-up.
 
+## libzmq vs omq-compio (two-process TCP, one core each)
+
+Two separate processes on the same machine, each pinned to one core.
+`bench_peer push` binds a TCP port and sends forever; `bench_peer pull`
+connects, warms up for 500 ms, then counts for 3 seconds. The libzmq
+peer is a minimal C binary compiled against the system libzmq (5.2.5).
+
+The omq process is single-threaded (push loop + driver share one
+compio runtime). libzmq spawns a dedicated I/O thread alongside the
+app thread - two threads vs. one, which gives libzmq a small edge
+at small messages where the app loop and I/O thread can overlap.
+omq's advantage at large messages comes from `write_vectored` batching
+multi-chunk frames in a single `writev` call, while libzmq issues
+separate `send()` calls for the frame header and each payload segment.
+
+| Size  | omq msg/s | omq MB/s | zmq msg/s | zmq MB/s | ratio   |
+|-------|-----------|----------|-----------|----------|---------|
+| 128 B | 2,568k    | 329      | 2,960k    | 380      | 0.87×   |
+| 512 B | 2,116k    | 1,083    | 2,010k    | 1,029    | 1.05×   |
+| 2 KiB | 1,442k    | 2,952    | 679k      | 1,390    | **2.1×** |
+| 8 KiB | 540k      | 4,424    | 186k      | 1,524    | **2.9×** |
+| 16 KiB| 309k      | 5,062    | 92k       | 1,508    | **3.4×** |
+
+At 128 B, omq-compio is 13% slower than libzmq; at 512 B they are at
+parity; beyond that omq pulls ahead by 2-3.4×. The crossover is around
+512 B - roughly the TCP MSS threshold where large-message batching pays
+off. The 128 B deficit narrows or closes with two compio runtimes (one
+push + one pull in separate processes is already two processes; within
+a single process the same pinned-runtime pattern applies).
+
 ## Backend comparison: PUSH/PULL throughput, single peer
 
 | Size    | inproc compio | inproc tokio | ipc compio | ipc tokio | tcp compio | tcp tokio |
 |---------|---------------|--------------|------------|-----------|------------|-----------|
-| 128 B   | **3.30M**     | 418k         | **1.30M**  | 215k      | **1.30M**  | 117k      |
-| 512 B   | **3.27M**     | 411k         | **1.12M**  | 139k      | **1.15M**  | 103k      |
-| 2 KiB   | **3.21M**     | 426k         | **798k**   | 208k      | **804k**   | 96.5k     |
-| 8 KiB   | **3.17M**     | 417k         | **386k**   | 109k      | **364k**   | 99.2k     |
-| 32 KiB  | **2.83M**     | 415k         | **124k**   | 46.0k     | **110k**   | 58.8k     |
-| 128 KiB | **3.10M**     | 381k         | **31.1k**  | 20.5k     | **28.7k**  | 21.4k     |
+| 128 B   | **3.05M**     | 408k         | **1.51M**  | 226k      | **1.48M**  | 121k      |
+| 512 B   | **2.97M**     | 404k         | **1.17M**  | 175k      | **1.22M**  | 103k      |
+| 2 KiB   | **2.91M**     | 404k         | **802k**   | 86.5k     | **818k**   | 114k      |
+| 8 KiB   | **3.00M**     | 397k         | **392k**   | 73.8k     | **366k**   | 88.4k     |
+| 32 KiB  | **2.96M**     | 399k         | **122k**   | 34.7k     | **113k**   | 43.7k     |
+| 128 KiB | **2.94M**     | 373k         | **30.8k**  | 13.1k     | **28.4k**  | 18.2k     |
 
 Numbers are msg/s. compio wins at every size on every transport on
 this hardware: io_uring + the direct-routing path beats tokio's
@@ -276,12 +325,12 @@ is better.
 
 |  size   |   NULL (memcpy) | CURVE (XSalsa20Poly1305) | BLAKE3ZMQ (ChaCha20-BLAKE3) |
 |--------:|----------------:|-------------------------:|----------------------------:|
-|    64 B |    4.27 GB/s    |               48 MB/s    |                  154 MB/s   |
-|   256 B |    15.1 GB/s    |              153 MB/s    |                  382 MB/s   |
-| 1 KiB   |   44.5 GB/s     |              331 MB/s    |                  664 MB/s   |
-| 4 KiB   |   65.0 GB/s     |              486 MB/s    |                  920 MB/s   |
-|16 KiB   |   54.6 GB/s     |              540 MB/s    |             **1.25 GB/s**   |
-|64 KiB   |   47.1 GB/s     |              557 MB/s    |             **1.44 GB/s**   |
+|    64 B |    4.57 GB/s    |               48 MB/s    |                  153 MB/s   |
+|   256 B |    15.1 GB/s    |              154 MB/s    |                  380 MB/s   |
+| 1 KiB   |   42.7 GB/s     |              334 MB/s    |                  663 MB/s   |
+| 4 KiB   |   64.0 GB/s     |              483 MB/s    |                  919 MB/s   |
+|16 KiB   |   54.2 GB/s     |              541 MB/s    |             **1.25 GB/s**   |
+|64 KiB   |   47.1 GB/s     |              557 MB/s    |             **1.43 GB/s**   |
 
 > **Security note on BLAKE3ZMQ.** This mechanism is omq-native and has
 > **not been independently security audited.** It's modelled on Noise
@@ -318,4 +367,7 @@ OMQ_BENCH_TRANSPORTS=tcp,lz4+tcp,zstd+tcp \
 OMQ_BENCH_PEERS=3 \
 OMQ_BENCH_SIZES=128,2048,32768 \
   cargo bench -p omq-compio --bench push_pull
+# Two-process libzmq vs omq comparison (requires libzmq installed):
+# build: gcc scripts/libzmq_bench_peer.c -o scripts/libzmq_bench_peer -lzmq
+# then run scripts/bench_compare.sh
 ```

@@ -39,7 +39,7 @@ use omq_proto::subscription::SubscriptionSet;
 use crate::monitor::{MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo};
 use crate::socket::DirectIoState;
 use crate::transport::inproc::{InprocFrame, InprocPeerSnapshot};
-use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader, WireWriter};
+use crate::transport::peer_io::{PeerIo, SharedPeerIo, WireReader};
 
 /// Per-flush byte cap. Once a single drain has buffered this many
 /// bytes we stop pulling more from the inbox and let writev flush.
@@ -160,23 +160,23 @@ async fn handle_sub_cmd(
 }
 
 /// Build the [`SharedPeerIo`] handed to the driver and to the direct
-/// send/recv fast paths. Constructs the codec; reader/writer halves
-/// arrive wrapped in concrete [`WireReader`] / [`WireWriter`] enums so
-/// per-call dispatch is a static `match` and never heap-allocates a
-/// future.
+/// send/recv fast paths. Constructs the codec; the reader half arrives
+/// wrapped in a concrete [`WireReader`] enum so per-call dispatch is a
+/// static `match`. The writer half is stored separately in
+/// [`DirectIoState::writer`] so the codec lock can be released before
+/// `write_vectored`, letting the fast-path sender encode while I/O is
+/// in flight.
 pub(crate) fn build_peer_io(
     role: Role,
     socket_type: SocketType,
     options: &Options,
     reader: WireReader,
-    writer: WireWriter,
     transform: Option<MessageTransform>,
 ) -> SharedPeerIo {
     let codec = make_codec(role, socket_type, options);
     Arc::new(async_lock::Mutex::new(PeerIo {
         codec,
         transform,
-        writer,
         reader,
         handshake_done: false,
     }))
@@ -253,15 +253,26 @@ pub(crate) async fn run_connection(
 
     loop {
         use futures::FutureExt;
+        // Clear the driver_in_select flag at the top of every iteration.
+        // The flag is set again just before we park in select_biased!
+        // so the fast-path sender can tell whether a transmit_ready
+        // notification is worth issuing.
+        state.driver_in_select.store(false, Ordering::Relaxed);
+
         // Close path: once the user has asked to close AND the
         // handshake completed AND every pending command has been
-        // encoded AND the codec has nothing left to write, we exit
-        // cleanly. Pre-handshake closes wait here for the handshake
-        // (or its own timeout); a stuck peer is bounded by
-        // Socket::close's wall-clock budget.
+        // encoded AND the codec + encoded_queue have nothing left to
+        // write, we exit cleanly. Pre-handshake closes wait here for
+        // the handshake (or its own timeout); a stuck peer is bounded
+        // by Socket::close's wall-clock budget.
         if closing {
             let io = peer_io.lock().await;
-            if io.handshake_done && pending_cmds.is_empty() && !io.codec.has_pending_transmit() {
+            let eq = state.encoded_queue.lock().expect("encoded_queue");
+            if io.handshake_done
+                && pending_cmds.is_empty()
+                && !io.codec.has_pending_transmit()
+                && eq.is_empty()
+            {
                 return Ok(());
             }
         }
@@ -281,6 +292,7 @@ pub(crate) async fn run_connection(
                     } => {
                         if !io.handshake_done {
                             io.handshake_done = true;
+                            state.handshake_done.store(true, Ordering::Relaxed);
                             deadline = None;
                             if let Some(iv) = hb_interval {
                                 hb_next = Some(Instant::now() + iv);
@@ -447,35 +459,68 @@ pub(crate) async fn run_connection(
             }
         }
 
-        // 3) Flush pending outbound via gather I/O. Hold the lock
-        //    across the write so a concurrent Socket::send fast
-        //    path can't take the same chunks before we
-        //    `advance_transmit`. compio's `IoVectoredBuf` impl on
-        //    `Vec<bytes::Bytes>` lets the codec's owned chunks go
-        //    directly to `write_vectored` - no unsafe iovec
-        //    adapter.
-        let wrote_something = {
-            let mut io = peer_io.lock().await;
-            if io.codec.has_pending_transmit() {
-                let mut chunks = io.codec.clone_transmit_chunks();
-                if chunks.len() > 1024 {
-                    chunks.truncate(1024);
-                }
-                if chunks.is_empty() {
-                    false
-                } else {
-                    let written = io.writer.write_vectored(chunks).await.map_err(Error::Io)?;
-                    if written == 0 {
-                        return Ok(());
+        // 3a) Flush codec buffer — used for transforms, cmd-channel messages,
+        //     heartbeat PINGs, and pre-handshake traffic. The codec lock is
+        //     released before write_vectored so the fast-path sender can
+        //     encode into `encoded_queue` while I/O is in flight.
+        let wrote_from_codec = {
+            let chunks = {
+                let io = peer_io.lock().await;
+                if io.codec.has_pending_transmit() {
+                    let mut c = io.codec.clone_transmit_chunks();
+                    if c.len() > 1024 {
+                        c.truncate(1024);
                     }
-                    io.codec.advance_transmit(written);
-                    true
+                    c
+                } else {
+                    Vec::new()
                 }
-            } else {
+            }; // codec lock released
+            if chunks.is_empty() {
                 false
+            } else {
+                let (res, _returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let written = res.map_err(Error::Io)?;
+                if written == 0 {
+                    return Ok(());
+                }
+                peer_io.lock().await.codec.advance_transmit(written);
+                true
             }
         };
-        if wrote_something {
+        if wrote_from_codec {
+            continue;
+        }
+
+        // 3b) Flush EncodedQueue — fast-path direct encodes from the sender.
+        //     Drains the queue by moving chunks (no Arc bumps), then
+        //     write_vectored. On partial write, unwritten chunks are returned
+        //     to the front of the queue for the next iteration.
+        let wrote_from_eq = {
+            let chunks = {
+                let mut eq = state.encoded_queue.lock().expect("encoded_queue");
+                eq.drain_into_vec(1024)
+            };
+            if chunks.is_empty() {
+                false
+            } else {
+                let (res, returned) = state.writer.lock().await.write_vectored(chunks).await;
+                let written = res.map_err(Error::Io)?;
+                let total_drained: usize = returned.iter().map(Bytes::len).sum();
+                if written < total_drained {
+                    state
+                        .encoded_queue
+                        .lock()
+                        .expect("encoded_queue")
+                        .put_back_unwritten(returned, written);
+                }
+                if written == 0 {
+                    return Ok(());
+                }
+                true
+            }
+        };
+        if wrote_from_eq {
             continue;
         }
 
@@ -508,6 +553,19 @@ pub(crate) async fn run_connection(
         // observes EOF or a fatal read error, it notifies
         // `eof_signal` so we exit instead of looping.
         let recv_active = state.recv_claim.load(Ordering::Acquire) == 1;
+
+        // Signal that we are about to park. The fast-path sender reads this
+        // to decide whether to issue a transmit_ready notification. Set before
+        // creating the listener so no sender notification is missed: in the
+        // cooperative single-threaded runtime the sender cannot run between
+        // the store and the actual yield inside select_biased!. After setting
+        // the flag, check encoded_queue one last time to close the race where
+        // the sender encoded but saw driver_in_select=false and skipped notify.
+        state.driver_in_select.store(true, Ordering::Relaxed);
+        if !state.encoded_queue.lock().expect("encoded_queue").is_empty() {
+            continue;
+        }
+
         // Avoid per-iteration `event_listener::Listener` allocations
         // when the recv claim isn't held. Most loop iterations on a
         // throughput-bound PULL run with `recv_active == false` (the
@@ -540,12 +598,20 @@ pub(crate) async fn run_connection(
                 None => std::future::pending::<Option<Message>>().await,
             }
         };
+        // Woken by the fast-path sender when it encodes directly into
+        // the codec buffer while we are parked here. The listener is
+        // created after the previous `wrote_something == false` check,
+        // with no `.await` in between, so no sender task can run in
+        // that window (cooperative runtime). Any `notify` from a
+        // sender that runs inside the select is captured.
+        let transmit_ready_fut = state.transmit_ready.listen();
         futures::pin_mut!(read_ready_fut);
         futures::pin_mut!(eof_fut);
         futures::pin_mut!(cmd_fut);
         futures::pin_mut!(timeout_fut);
         futures::pin_mut!(hb_fut);
         futures::pin_mut!(shared_fut);
+        futures::pin_mut!(transmit_ready_fut);
         let cap = max_batch_bytes();
         futures::select_biased! {
             () = eof_fut.fuse() => {
@@ -653,9 +719,7 @@ pub(crate) async fn run_connection(
                         io.codec.pending_transmit_size() >= cap
                     };
                     if cap_reached { break; }
-                    if let Ok(c) = inbox.try_recv() {
-                        next = Some(c);
-                    }
+                    next = inbox.try_recv().ok();
                 }
             }
             msg = shared_fut.fuse() => {
@@ -688,10 +752,13 @@ pub(crate) async fn run_connection(
                         io.codec.pending_transmit_size() >= cap
                     };
                     if cap_reached { break; }
-                    if let Ok(m) = shared.try_recv() {
-                        next = Some(m);
-                    }
+                    next = shared.try_recv().ok();
                 }
+            }
+            () = transmit_ready_fut.fuse() => {
+                // Fast-path sender encoded data directly into the
+                // codec buffer while we were parked. Loop back to
+                // step 3 to flush it.
             }
         }
     }

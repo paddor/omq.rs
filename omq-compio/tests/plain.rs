@@ -11,11 +11,10 @@ use omq_compio::endpoint::Host;
 use omq_compio::{Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
+    // Keep the path short: macOS SUN_LEN is 104 bytes, and
+    // std::env::temp_dir() on macOS is ~50 chars already.
     let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "omq-compio-plain-{name}-{}.sock",
-        std::process::id()
-    ));
+    dir.push(format!("omq-pl-{name}-{:x}.sock", std::process::id()));
     let _ = std::fs::remove_file(&dir);
     Endpoint::Ipc(IpcPath::Filesystem(dir))
 }

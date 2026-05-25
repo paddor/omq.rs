@@ -582,12 +582,10 @@ fn ipv6_tcp_push_pull() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let bind_addr = std::ffi::CString::new("tcp://[::1]:0").unwrap();
-    zmq_bind(pull, bind_addr.as_ptr());
-    let mut ep_buf = [0u8; 256];
-    let ep_len = get_bytes(pull, ZMQ_LAST_ENDPOINT, &mut ep_buf);
-    let connect_addr = std::ffi::CStr::from_bytes_until_nul(&ep_buf[..ep_len]).unwrap();
-    zmq_connect(push, connect_addr.as_ptr());
+    let port = helpers::free_port();
+    let addr = std::ffi::CString::new(format!("tcp://[::1]:{port}")).unwrap();
+    zmq_bind(pull, addr.as_ptr());
+    zmq_connect(push, addr.as_ptr());
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     let timeo: i32 = 2000;
@@ -618,12 +616,10 @@ fn ipv6_req_rep() {
     let rep = zmq_socket(ctx, 4); // ZMQ_REP
     let req = zmq_socket(ctx, 3); // ZMQ_REQ
 
-    let bind_addr = std::ffi::CString::new("tcp://[::1]:0").unwrap();
-    zmq_bind(rep, bind_addr.as_ptr());
-    let mut ep_buf = [0u8; 256];
-    let ep_len = get_bytes(rep, ZMQ_LAST_ENDPOINT, &mut ep_buf);
-    let connect_addr = std::ffi::CStr::from_bytes_until_nul(&ep_buf[..ep_len]).unwrap();
-    zmq_connect(req, connect_addr.as_ptr());
+    let port = helpers::free_port();
+    let addr = std::ffi::CString::new(format!("tcp://[::1]:{port}")).unwrap();
+    zmq_bind(rep, addr.as_ptr());
+    zmq_connect(req, addr.as_ptr());
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     let timeo: i32 = 2000;

@@ -263,7 +263,7 @@ where
         } = self;
         let passthrough = encoder.as_ref().and_then(MessageEncoder::passthrough_info);
         let (mut reader, mut writer) = split(stream);
-        let mut read_buf = BytesMut::with_capacity(READ_BUF_SIZE);
+        let mut read_buf = vec![0u8; READ_BUF_SIZE];
         let mut eq = EncodedQueue::new();
         let mut drain_buf: Vec<Bytes> = Vec::with_capacity(64);
         let mut last_input = Instant::now();
@@ -340,7 +340,7 @@ where
                     return Err(Error::HandshakeFailed("handshake timeout".into()));
                 }
 
-                res = reader.read_buf(&mut read_buf) => {
+                res = reader.read(&mut read_buf) => {
                     last_input = Instant::now();
                     let n = res?;
                     if n == 0 {
@@ -348,18 +348,9 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    let chunk = if decoder.is_some() {
-                        let b = Bytes::copy_from_slice(&read_buf);
-                        read_buf.clear();
-                        b
-                    } else {
-                        let chunk = read_buf.split().freeze();
-                        if read_buf.capacity() < READ_BUF_SIZE {
-                            read_buf.reserve(READ_BUF_SIZE);
-                        }
-                        chunk
-                    };
-                    if let Err(e) = codec.handle_input(chunk) {
+                    if let Err(e) = codec.handle_input(
+                        Bytes::copy_from_slice(&read_buf[..n]),
+                    ) {
                         while let Some(ev) = codec.poll_event() {
                             let _ = peer_out
                                 .send((peer_id, PeerOut::Event(ev)))

@@ -11,7 +11,6 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_compio::endpoint::Host;
-use omq_compio::options::ReconnectPolicy;
 use omq_compio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -21,45 +20,47 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
-/// PUSH conflate: accumulate messages while no peer is connected so the
-/// cap-1 `DropOldest` queue actually rolls over. Then bind PULL and confirm
-/// only the LAST message comes through.
+/// PUSH conflate: the cap-1 `DropOldest` shared queue keeps only the latest
+/// message. Establish the connection first, then blast 100 sends. On compio's
+/// single-threaded cooperative runtime all 100 `conflate_shared_queue_send`
+/// calls complete without yielding (they are synchronous queue operations),
+/// so the driver cannot drain between sends. After the burst, the queue
+/// holds only "m-099".
 ///
-/// Uses TCP (not inproc) because inproc connect fails immediately when
-/// no listener exists; TCP lets the reconnect supervisor retry while the
-/// sends drain into the cap-1 shared queue. A TCP port is grabbed and
-/// released so the bind later succeeds.
+/// Skipped on non-Linux: the conflate send path routes all messages through
+/// a shared flume queue. The wire driver drains it via `recv_async`, but
+/// compio's kqueue backend (macOS) does not wake the driver task when
+/// flume's in-process `Waker` fires, so the driver never sends the message.
+/// This is a compio bug (kqueue waker does not interrupt `kevent()` poll).
+/// The same conflate behavior is verified in `omq-tokio/tests/conflate.rs`.
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: in-process waker does not interrupt kevent() poll"
+)]
 async fn push_conflate_keeps_only_latest() {
-    // Grab a free port by binding a temporary socket, then close it
-    // so PUSH connects to a port with no listener (exercising reconnect).
-    let tmp = Socket::new(SocketType::Pull, Options::default());
-    let ep = tmp.bind(tcp_ep(0)).await.unwrap();
-    tmp.close().await.unwrap();
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
 
     let opts = Options {
         conflate: true,
-        reconnect: ReconnectPolicy::Exponential {
-            min: Duration::from_millis(20),
-            max: Duration::from_millis(80),
-        },
         ..Default::default()
     };
     let push = Socket::new(SocketType::Push, opts);
-    push.connect(ep.clone()).await.unwrap();
+    push.connect(ep).await.unwrap();
 
-    // No peer yet: every send goes into the cap-1 shared queue and
-    // replaces whatever was there. All 100 sends return immediately.
+    // Let the connection + ZMTP handshake settle.
+    compio::time::sleep(Duration::from_millis(50)).await;
+
+    // Tight burst: conflate_shared_queue_send is synchronous, so all
+    // 100 sends complete without yielding. The driver cannot drain
+    // between sends; the cap-1 queue rolls over and retains only the
+    // last message.
     for i in 0..100u32 {
         push.send(Message::single(format!("m-{i:03}")))
             .await
             .unwrap();
     }
-
-    // Now bind PULL. The reconnect supervisor connects PUSH → PULL;
-    // the pump drains the queue (which now holds only "m-099").
-    let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(ep).await.unwrap();
 
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = compio::time::timeout(Duration::from_millis(500), pull.recv()).await {

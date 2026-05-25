@@ -12,6 +12,7 @@ pub(super) enum StreamArmOutcome {
     ClaimFlipped,
     Fed,
     Eof,
+    StreamEnded,
     ProtoErr(Error),
     Err(std::io::Error),
     AccData(Bytes),
@@ -83,7 +84,7 @@ pub(super) async fn pull_stream(
                 )
                 .await;
                 match buf {
-                    None => StreamArmOutcome::Eof,
+                    None => StreamArmOutcome::StreamEnded,
                     Some(Err(e)) => StreamArmOutcome::Err(e),
                     Some(Ok(buf)) if buf.is_empty() => StreamArmOutcome::Eof,
                     Some(Ok(buf)) => {
@@ -120,7 +121,7 @@ pub(super) async fn pull_stream(
             )
             .await;
             match buf {
-                None => StreamArmOutcome::Eof,
+                None => StreamArmOutcome::StreamEnded,
                 Some(Err(e)) => StreamArmOutcome::Err(e),
                 Some(Ok(buf)) => {
                     if buf.is_empty() {

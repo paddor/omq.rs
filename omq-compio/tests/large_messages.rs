@@ -291,11 +291,15 @@ fn consecutive_large_messages_stay_oneshot() {
         // OneShot mode. With the old code, every message would re-arm
         // MultiShot, giving ~20 re-arms. With the fix: 1.
         let rearms = pull.multishot_rearms();
-        assert!(
-            rearms <= 2,
-            "expected at most 2 multishot re-arms for {count} consecutive \
-             large messages, got {rearms}"
-        );
+        // On kqueue, RecvMulti is single-shot so every recv triggers a
+        // rearm; the count is only meaningful on io_uring.
+        if cfg!(target_os = "linux") {
+            assert!(
+                rearms <= 2,
+                "expected at most 2 multishot re-arms for {count} consecutive \
+                 large messages, got {rearms}"
+            );
+        }
     });
 }
 
@@ -341,9 +345,11 @@ fn large_small_large_transitions() {
         // for the small frame. The second large message triggers another
         // ENOBUFS→OneShot transition. Expect 2 re-arms total.
         let rearms = pull.multishot_rearms();
-        assert!(
-            rearms <= 3,
-            "expected at most 3 multishot re-arms for large/small/large, got {rearms}"
-        );
+        if cfg!(target_os = "linux") {
+            assert!(
+                rearms <= 3,
+                "expected at most 3 multishot re-arms for large/small/large, got {rearms}"
+            );
+        }
     });
 }

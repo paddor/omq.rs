@@ -15,9 +15,12 @@ use crate::socket::NotifyFd;
 /// Shared state between the sender and receiver halves of an inproc bypass.
 pub(crate) struct InprocPipe {
     pub(crate) closed: AtomicBool,
-    /// Receiver's recv eventfd. Signaled by the sender when the pipe
-    /// transitions from empty to non-empty.
+    /// Write end: signaled by the sender when the pipe transitions from
+    /// empty to non-empty (eventfd on Linux, pipe write end on macOS).
     pub(crate) recv_signal_fd: std::os::unix::io::RawFd,
+    /// Read end: drained by the receiver when the ring becomes empty
+    /// (same as `recv_signal_fd` on Linux, pipe read end on macOS).
+    pub(crate) recv_drain_fd: std::os::unix::io::RawFd,
 }
 
 impl std::fmt::Debug for InprocPipe {
@@ -46,11 +49,13 @@ pub(crate) struct BypassRecv {
 pub(crate) fn create_bypass(
     capacity: usize,
     recv_signal_fd: std::os::unix::io::RawFd,
+    recv_drain_fd: std::os::unix::io::RawFd,
 ) -> (BypassSend, BypassRecv) {
     let (producer, consumer) = yring::spsc(capacity);
     let pipe = Arc::new(InprocPipe {
         closed: AtomicBool::new(false),
         recv_signal_fd,
+        recv_drain_fd,
     });
     (
         BypassSend {
@@ -85,7 +90,7 @@ impl BypassRecv {
     pub(crate) fn pop(&mut self) -> Option<omq_compio::Message> {
         let msg = self.consumer.prefetch_and_pop();
         if msg.is_some() && self.consumer.is_empty() {
-            drain_recv_fd(self.pipe.recv_signal_fd);
+            drain_recv_fd(self.pipe.recv_drain_fd);
         }
         msg
     }

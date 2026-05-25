@@ -243,6 +243,10 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
     };
 
+    if rx.is_empty() {
+        crate::socket::NotifyFd::drain_recv(&sock.notify);
+    }
+
     Ok(decompose_message(sock, &msg))
 }
 

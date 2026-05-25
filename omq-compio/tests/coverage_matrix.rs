@@ -22,14 +22,11 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-compio-cov-{name}-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("omq-cv-{name}-{:x}-{n}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     Endpoint::Ipc(IpcPath::Filesystem(path))
 }

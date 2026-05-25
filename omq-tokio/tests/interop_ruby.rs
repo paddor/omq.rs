@@ -139,16 +139,9 @@ async fn bind_tcp_or_ipc(sock: &Socket, t: &Transport) -> String {
 }
 
 fn ipc_transport(name: &str) -> Transport {
-    // Filesystem path under the test target dir keeps the socket inside
-    // the cargo workspace and avoids /tmp permission quirks.
-    let path = std::env::temp_dir().join(format!(
-        "omq-interop-{name}-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // Keep the path short: macOS SUN_LEN is 104 bytes and
+    // std::env::temp_dir() on macOS is ~50 chars already.
+    let path = std::env::temp_dir().join(format!("omq-{name}-{}.sock", std::process::id()));
     // Stale leftover from a previous run would prevent bind.
     let _ = std::fs::remove_file(&path);
     let cli = format!("ipc://{}", path.display());

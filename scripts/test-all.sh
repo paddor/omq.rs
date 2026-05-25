@@ -40,14 +40,14 @@ _par_pids=()
 par() {
     # Reap any finished workers and check for failures.
     local new_pids=()
-    for pid in "${_par_pids[@]}"; do
+    for pid in ${_par_pids[@]+"${_par_pids[@]}"}; do
         if kill -0 "$pid" 2>/dev/null; then
             new_pids+=("$pid")
         else
             wait "$pid"  # collect exit status; set -e propagates failure
         fi
     done
-    _par_pids=("${new_pids[@]}")
+    _par_pids=(${new_pids[@]+"${new_pids[@]}"})
 
     # Block until a slot is free.
     while [[ ${#_par_pids[@]} -ge $jobs ]]; do
@@ -60,7 +60,7 @@ par() {
 }
 
 par_wait() {
-    for pid in "${_par_pids[@]}"; do
+    for pid in ${_par_pids[@]+"${_par_pids[@]}"}; do
         wait "$pid"
     done
     _par_pids=()

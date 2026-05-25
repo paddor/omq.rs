@@ -1,9 +1,8 @@
 //! Context: owns N io threads, each running a compio runtime.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_int;
-
-use rustc_hash::FxHashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -31,16 +30,16 @@ pub(crate) struct OmqContext {
     pub max_msg_size: AtomicI64,
     /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
     /// Used to install bypass pipes when both sides are present.
-    pub(crate) inproc_binds: Mutex<FxHashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
+    pub(crate) inproc_binds: Mutex<HashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
     /// Pending inproc connect requests waiting for a bind.
     pub(crate) inproc_waiting:
-        Mutex<FxHashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
+        Mutex<HashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
 }
 
 thread_local! {
     /// Io-thread-local registry: socket id -> Rc<InnerSocket>.
-    pub(crate) static REG: RefCell<FxHashMap<u64, Rc<InnerSocket>>> =
-        RefCell::new(FxHashMap::default());
+    pub(crate) static REG: RefCell<HashMap<u64, Rc<InnerSocket>>> =
+        RefCell::new(HashMap::new());
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -97,8 +96,8 @@ impl OmqContext {
             socket_notify: (Mutex::new(()), Condvar::new()),
             max_sockets: AtomicI32::new(1023),
             max_msg_size: AtomicI64::new(-1),
-            inproc_binds: Mutex::new(FxHashMap::default()),
-            inproc_waiting: Mutex::new(FxHashMap::default()),
+            inproc_binds: Mutex::new(HashMap::new()),
+            inproc_waiting: Mutex::new(HashMap::new()),
         })
     }
 

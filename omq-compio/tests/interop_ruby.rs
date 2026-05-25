@@ -124,13 +124,14 @@ fn cli_addr(sock: &Socket) -> String {
 }
 
 fn ipc_transport(name: &str) -> Transport {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "omq-compio-interop-{name}-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "omq-ri-{}-{:x}.sock",
+        &name[..name.len().min(8)],
+        (nanos as u64) ^ u64::from(std::process::id()),
     ));
     let _ = std::fs::remove_file(&path);
     let cli = format!("ipc://{}", path.display());

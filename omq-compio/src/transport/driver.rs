@@ -687,10 +687,17 @@ impl DriverLoopState {
                 self.codec_maybe_dirty = true;
             }
             StreamArmOutcome::Eof => return Ok(true),
+            StreamArmOutcome::StreamEnded => {
+                if cfg!(target_os = "linux") {
+                    return Ok(true);
+                }
+                let mut sguard = state.recv_stream.0.lock().await;
+                *sguard = Some(crate::socket::RecvStreamState::OneShot);
+                self.codec_maybe_dirty = true;
+            }
             StreamArmOutcome::ProtoErr(e) => return Err(e),
             StreamArmOutcome::Err(e) => {
-                let os = e.raw_os_error();
-                if os != Some(libc::ENOBUFS) && os != Some(libc::ECANCELED) {
+                if e.raw_os_error() != Some(libc::ENOBUFS) {
                     return Ok(true);
                 }
                 if accumulating {

@@ -50,14 +50,9 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 fn ipc_ep(name: &str) -> Endpoint {
-    let path = std::env::temp_dir().join(format!(
-        "omq-cbb-comp-{name}-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // Keep the path short: macOS SUN_LEN is 104 bytes, and
+    // std::env::temp_dir() on macOS is ~50 chars already.
+    let path = std::env::temp_dir().join(format!("omq-{name}-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     Endpoint::Ipc(IpcPath::Filesystem(path))
 }
@@ -90,11 +85,19 @@ async fn push_pull_connect_before_bind_inproc() {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn push_pull_connect_before_bind_ipc() {
     push_pull_connect_before_bind(ipc_ep("cbb-pp-comp")).await;
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn push_pull_connect_before_bind_tcp() {
     push_pull_connect_before_bind(tcp_ep(free_tcp_port())).await;
 }
@@ -131,11 +134,19 @@ async fn req_rep_connect_before_bind_inproc() {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn req_rep_connect_before_bind_ipc() {
     req_rep_connect_before_bind(ipc_ep("cbb-rr-comp")).await;
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn req_rep_connect_before_bind_tcp() {
     req_rep_connect_before_bind(tcp_ep(free_tcp_port())).await;
 }
@@ -172,11 +183,19 @@ async fn pair_connect_before_bind_inproc() {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn pair_connect_before_bind_ipc() {
     pair_connect_before_bind(ipc_ep("cbb-pair-comp")).await;
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn pair_connect_before_bind_tcp() {
     pair_connect_before_bind(tcp_ep(free_tcp_port())).await;
 }
@@ -185,12 +204,20 @@ async fn pair_connect_before_bind_tcp() {
 
 #[cfg(feature = "lz4")]
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn push_pull_connect_before_bind_lz4() {
     push_pull_connect_before_bind(lz4_ep(free_tcp_port())).await;
 }
 
 #[cfg(feature = "lz4")]
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn req_rep_connect_before_bind_lz4() {
     req_rep_connect_before_bind(lz4_ep(free_tcp_port())).await;
 }
@@ -199,12 +226,20 @@ async fn req_rep_connect_before_bind_lz4() {
 
 #[cfg(feature = "zstd")]
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn push_pull_connect_before_bind_zstd() {
     push_pull_connect_before_bind(zstd_ep(free_tcp_port())).await;
 }
 
 #[cfg(feature = "zstd")]
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: reconnect timer does not fire on macOS"
+)]
 async fn req_rep_connect_before_bind_zstd() {
     req_rep_connect_before_bind(zstd_ep(free_tcp_port())).await;
 }

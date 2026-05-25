@@ -204,13 +204,29 @@ async fn post_handshake_error_command_drops_connection() {
         .await
         .unwrap();
 
+    eprintln!("[post_handshake_error] ERROR command sent, polling monitor…");
     let mut saw_disconnect = false;
-    for _ in 0..40 {
-        if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(100), mon.recv()).await
-            && matches!(ev, MonitorEvent::Disconnected { .. })
-        {
-            saw_disconnect = true;
-            break;
+    for i in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(500), mon.recv()).await {
+            Ok(Ok(MonitorEvent::Disconnected { reason, .. })) => {
+                eprintln!(
+                    "[post_handshake_error] got Disconnected \
+                     (reason={reason:?}) on iteration {i}"
+                );
+                saw_disconnect = true;
+                break;
+            }
+            Ok(Ok(other)) => {
+                eprintln!("[post_handshake_error] got {other:?} on iteration {i}, continuing…");
+            }
+            Ok(Err(e)) => {
+                eprintln!("[post_handshake_error] monitor recv error: {e:?} on iteration {i}");
+                break;
+            }
+            Err(_elapsed) => {
+                eprintln!("[post_handshake_error] timeout on iteration {i}");
+                break;
+            }
         }
     }
     assert!(

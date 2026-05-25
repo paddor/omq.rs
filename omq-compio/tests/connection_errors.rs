@@ -17,6 +17,10 @@ fn tcp_ep(port: u16) -> Endpoint {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: waker does not interrupt kevent() poll"
+)]
 async fn server_survives_pre_handshake_drop() {
     // A raw TCP client connects but drops the connection before sending
     // any ZMTP greeting. The server must not crash, panic, or reject
@@ -54,6 +58,10 @@ async fn server_survives_pre_handshake_drop() {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: waker does not interrupt kevent() poll"
+)]
 async fn server_survives_mid_session_abrupt_drop() {
     // Client drops the TCP connection abruptly while the server is live.
     // Server must survive and accept the next connection.
@@ -84,6 +92,10 @@ async fn server_survives_mid_session_abrupt_drop() {
 }
 
 #[compio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "compio-rs/compio#928: waker does not interrupt kevent() poll"
+)]
 async fn abrupt_reset_mid_greeting_does_not_wedge_server() {
     // A peer that sends a partial greeting then drops must not stall the
     // server's accept loop. The server must still serve the next good client.

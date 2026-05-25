@@ -7,11 +7,10 @@ use std::time::Duration;
 use omq_compio::{Blake3ZmqKeypair, Endpoint, IpcPath, Message, Options, Socket, SocketType};
 
 fn temp_ipc(name: &str) -> Endpoint {
+    // Keep the path short: macOS SUN_LEN is 104 bytes, and
+    // std::env::temp_dir() on macOS is ~50 chars already.
     let mut p = std::env::temp_dir();
-    p.push(format!(
-        "omq-compio-blake3-{name}-{}.sock",
-        std::process::id()
-    ));
+    p.push(format!("omq-b3-{name}-{:x}.sock", std::process::id()));
     let _ = std::fs::remove_file(&p);
     Endpoint::Ipc(IpcPath::Filesystem(p))
 }

@@ -80,6 +80,13 @@ impl NotifyFd {
             libc::write(fd, (&raw const val).cast::<libc::c_void>(), 8);
         }
     }
+
+    pub(crate) fn drain_recv(&self) {
+        let mut buf = 0u64;
+        unsafe {
+            libc::read(self.recv_fd, (&raw mut buf).cast::<libc::c_void>(), 8);
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -119,6 +126,22 @@ impl NotifyFd {
         let b: u8 = 1;
         unsafe {
             libc::write(fd, (&raw const b).cast::<libc::c_void>(), 1);
+        }
+    }
+
+    pub(crate) fn drain_recv(&self) {
+        let mut buf = [0u8; 64];
+        loop {
+            let n = unsafe {
+                libc::read(
+                    self.recv_read,
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
         }
     }
 }
@@ -254,11 +277,12 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     };
 
     #[cfg(target_os = "linux")]
-    let recv_fd = receiver.notify.recv_fd;
+    let (recv_signal_fd, recv_drain_fd) = (receiver.notify.recv_fd, receiver.notify.recv_fd);
     #[cfg(not(target_os = "linux"))]
-    let recv_fd = receiver.notify.recv_write;
+    let (recv_signal_fd, recv_drain_fd) = (receiver.notify.recv_write, receiver.notify.recv_read);
 
-    let (bsend, brecv) = crate::inproc_bypass::create_bypass(capacity, recv_fd);
+    let (bsend, brecv) =
+        crate::inproc_bypass::create_bypass(capacity, recv_signal_fd, recv_drain_fd);
     // Safety: called from zmq_bind/zmq_connect before any send/recv.
     unsafe { *sender.bypass_send.get() = Some(bsend) };
     unsafe { *receiver.bypass_recv.get() = Some(brecv) };

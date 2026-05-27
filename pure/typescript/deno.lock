@@ -1,0 +1,23 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@paddor/lz4rip@0.1": "0.1.0"
+  },
+  "jsr": {
+    "@paddor/lz4rip@0.1.0": {
+      "integrity": "23138dacfa464e8338660d9313a3d50f2524b18ba49432ec2499b2a40af96dbb"
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "jsr:@paddor/lz4rip@0.1"
+    ],
+    "packageJson": {
+      "dependencies": [
+        "npm:@types/node@^25.9.1",
+        "npm:typescript@^5.8.0",
+        "npm:vitest@3"
+      ]
+    }
+  }
+}

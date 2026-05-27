@@ -1,0 +1,19 @@
+{
+  "name": "@zeromq/omq",
+  "version": "0.1.0",
+  "license": "ISC",
+  "description": "ZMQ client library for browsers over WebSocket with LZ4 dictionary compression.",
+  "exports": "./src/mod.ts",
+  "imports": {
+    "@paddor/lz4rip": "jsr:@paddor/lz4rip@^0.1.0"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "lib": ["dom", "dom.iterable", "esnext"]
+  },
+  "publish": {
+    "include": ["src/", "deno.json", "LICENSE", "README.md"],
+    "exclude": []
+  }
+}

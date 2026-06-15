@@ -33,9 +33,9 @@ fuzz = []
 soak = []
 
 [dependencies]
-omq-proto = { path = "../omq-proto", version = "0.17.1", default-features = false }
-blume = { path = "../blume", version = "0.4.0" }
-yring = { path = "../yring", version = "0.3.0" }
+omq-proto = { path = "../omq-proto", version = "0.17.2", default-features = false }
+blume = { path = "../blume", version = "0.4.1" }
+yring = { path = "../yring", version = "0.3.1" }
 bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 rustc-hash = "2.1.0"

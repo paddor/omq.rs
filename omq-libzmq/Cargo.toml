@@ -1,6 +1,6 @@
 [package]
 name = "omq-libzmq"
-version = "0.4.5"
+version = "0.4.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,8 +19,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-tokio = { path = "../omq-tokio", version = "0.14.2", features = ["plain", "curve", "lz4"] }
-yring = { path = "../yring", version = "0.3.0" }
+omq-tokio = { path = "../omq-tokio", version = "0.14.3", features = ["plain", "curve", "lz4"] }
+yring = { path = "../yring", version = "0.3.1" }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "sync", "time"] }
 bytes = "1.11.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }

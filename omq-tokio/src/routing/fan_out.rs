@@ -5,10 +5,12 @@
 //! (via `pre_encode`), then the pre-encoded chunks are pushed into
 //! each matching peer's `EncodedQueue`. The driver flushes to the wire.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use smallvec::SmallVec;
 
@@ -23,6 +25,7 @@ use omq_proto::proto::transform::MessageEncoder;
 
 use super::peer_send::PeerSend;
 use super::subscription::SubscriptionSet;
+use crate::engine::wire_slot::TryEncodeResult;
 
 /// Filter mode for a fan-out send strategy.
 #[derive(Debug, Clone, Copy)]
@@ -33,7 +36,81 @@ pub(crate) enum FanOutMode {
     Group,
 }
 
-const YIELD_INTERVAL: u32 = 256;
+fn yield_interval(peer_count: usize) -> u32 {
+    let n = (peer_count as u32).max(1);
+    (256 / n).max(4)
+}
+
+enum CachedResult {
+    SoleWire(TryEncodeResult),
+    Cached {
+        targets: Arc<Vec<PeerSend>>,
+        encoder: Option<Arc<Mutex<MessageEncoder>>>,
+        all_wire: bool,
+    },
+    Miss,
+}
+
+#[derive(Debug)]
+pub(crate) struct FanOutArena {
+    eq: Mutex<EncodedQueue>,
+    data_ready: Notify,
+    pending: AtomicBool,
+}
+
+impl FanOutArena {
+    fn new() -> Self {
+        Self {
+            eq: Mutex::new(EncodedQueue::one_shot()),
+            data_ready: Notify::new(),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    fn encode_and_signal(&self, msg: &Message, encoder: Option<&Mutex<MessageEncoder>>) {
+        let mut eq = self.eq.lock().unwrap();
+        if let Some(enc_mtx) = encoder {
+            let transformed = {
+                let mut enc = enc_mtx.lock().expect("fan_out_encoder poisoned");
+                match enc.encode(msg) {
+                    Ok(t) => t,
+                    Err(_) => return,
+                }
+            };
+            for wire_msg in &transformed {
+                eq.encode_auto(wire_msg);
+            }
+        } else {
+            eq.encode_auto(msg);
+        }
+        drop(eq);
+        if !self.pending.swap(true, Ordering::Release) {
+            self.data_ready.notify_one();
+        }
+    }
+
+    fn drain_to(&self, targets: &[PeerSend], chunks: &mut Vec<Bytes>) {
+        chunks.clear();
+        {
+            let mut eq = self.eq.lock().unwrap();
+            eq.drain_into_vec(chunks, 1024);
+            self.pending.store(false, Ordering::Relaxed);
+        }
+        if chunks.is_empty() {
+            return;
+        }
+        for t in targets {
+            if let PeerSend::Wire { slot, .. } = t {
+                let _ = slot.try_push_encoded(chunks);
+            }
+        }
+    }
+
+    fn drain_to_targets(&self, targets: &[PeerSend]) {
+        let mut chunks = Vec::new();
+        self.drain_to(targets, &mut chunks);
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Submitter {
@@ -43,12 +120,16 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     cached: Mutex<CachedFanOut>,
+    arena: Arc<FanOutArena>,
 }
 
 #[derive(Debug, Default)]
 struct CachedFanOut {
     generation: u64,
     sole_wire: Option<PeerSend>,
+    all_targets: Option<Arc<Vec<PeerSend>>>,
+    encoder: Option<Arc<Mutex<MessageEncoder>>>,
+    all_wire: bool,
 }
 
 impl Clone for Submitter {
@@ -60,6 +141,7 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             cached: Mutex::new(CachedFanOut::default()),
+            arena: self.arena.clone(),
         }
     }
 }
@@ -88,21 +170,49 @@ impl Submitter {
         }
     }
 
-    fn try_sole_wire(&self, msg: &Message) -> Option<crate::engine::wire_slot::TryEncodeResult> {
+    fn try_cached(&self, msg: &Message, group: Option<&str>) -> CachedResult {
+        if group.is_some() {
+            return CachedResult::Miss;
+        }
         let current = self.generation.load(Ordering::Acquire);
         let mut cached = self.cached.lock().unwrap();
         if cached.generation != current {
+            if cached.all_wire
+                && let Some(ref targets) = cached.all_targets
+            {
+                self.arena.drain_to_targets(targets);
+            }
             let g = self.inner.lock().expect("fanout inner poisoned");
-            cached.sole_wire =
-                if g.all_subscribe_all && g.all_targets.len() == 1 && g.fan_out_encoder.is_none() {
-                    Some(g.all_targets[0].clone())
-                } else {
-                    None
-                };
+            if g.all_subscribe_all && g.all_targets.len() == 1 && g.fan_out_encoder.is_none() {
+                cached.sole_wire = Some(g.all_targets[0].clone());
+                cached.all_targets = None;
+                cached.encoder = None;
+                cached.all_wire = false;
+            } else if g.all_subscribe_all && !g.all_targets.is_empty() {
+                cached.sole_wire = None;
+                let targets: Vec<PeerSend> = g.all_targets.to_vec();
+                cached.all_wire = targets.iter().all(|t| matches!(t, PeerSend::Wire { .. }));
+                cached.all_targets = Some(Arc::new(targets));
+                cached.encoder.clone_from(&g.fan_out_encoder);
+            } else {
+                cached.sole_wire = None;
+                cached.all_targets = None;
+                cached.encoder = None;
+                cached.all_wire = false;
+            }
             cached.generation = current;
         }
-        let target = cached.sole_wire.as_ref()?;
-        Some(target.try_encode(msg))
+        if let Some(ref target) = cached.sole_wire {
+            return CachedResult::SoleWire(target.try_encode(msg));
+        }
+        if let Some(ref targets) = cached.all_targets {
+            return CachedResult::Cached {
+                targets: targets.clone(),
+                encoder: cached.encoder.clone(),
+                all_wire: cached.all_wire,
+            };
+        }
+        CachedResult::Miss
     }
 
     pub(crate) fn try_send(
@@ -113,17 +223,30 @@ impl Submitter {
             .prepare(msg)
             .map_err(omq_proto::error::TrySendError::Error)?;
 
-        if group.is_none()
-            && let Some(r) = self.try_sole_wire(&forwarded)
-        {
-            return match r {
-                crate::engine::wire_slot::TryEncodeResult::Ok
-                | crate::engine::wire_slot::TryEncodeResult::Dead
-                | crate::engine::wire_slot::TryEncodeResult::Ineligible => Ok(()),
-                crate::engine::wire_slot::TryEncodeResult::Full => {
-                    Err(omq_proto::error::TrySendError::Full(forwarded))
+        match self.try_cached(&forwarded, group.as_deref()) {
+            CachedResult::SoleWire(r) => {
+                return match r {
+                    TryEncodeResult::Ok | TryEncodeResult::Dead | TryEncodeResult::Ineligible => {
+                        Ok(())
+                    }
+                    TryEncodeResult::Full => Err(omq_proto::error::TrySendError::Full(forwarded)),
+                };
+            }
+            CachedResult::Cached {
+                targets,
+                encoder,
+                all_wire,
+            } => {
+                if all_wire {
+                    self.arena.drain_to_targets(&targets);
                 }
-            };
+                if self.xpub_nodrop && !targets_have_space(&targets) {
+                    return Err(omq_proto::error::TrySendError::Full(forwarded));
+                }
+                dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                return Ok(());
+            }
+            CachedResult::Miss => {}
         }
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
@@ -137,12 +260,34 @@ impl Submitter {
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let (forwarded, group) = self.prepare(msg)?;
 
-        if group.is_none()
-            && self
-                .try_sole_wire(&forwarded)
-                .is_some_and(|r| r == crate::engine::wire_slot::TryEncodeResult::Ok)
-        {
-            return Ok(());
+        match self.try_cached(&forwarded, group.as_deref()) {
+            CachedResult::SoleWire(TryEncodeResult::Ok) => return Ok(()),
+            CachedResult::Cached {
+                targets,
+                encoder,
+                all_wire,
+            } => {
+                if all_wire {
+                    self.arena.encode_and_signal(&forwarded, encoder.as_deref());
+                    let interval = yield_interval(targets.len());
+                    if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
+                        tokio::task::yield_now().await;
+                    }
+                } else {
+                    if self.xpub_nodrop {
+                        while !targets_have_space(&targets) {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
+                    let interval = yield_interval(targets.len());
+                    if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
         }
 
         let (targets, encoder) = self.collect_targets(&forwarded, group.as_deref());
@@ -152,7 +297,8 @@ impl Submitter {
             }
         }
         dispatch_to_targets(&targets, &forwarded, encoder.as_deref());
-        if self.send_count.fetch_add(1, Ordering::Relaxed) % YIELD_INTERVAL == YIELD_INTERVAL - 1 {
+        let interval = yield_interval(targets.len());
+        if self.send_count.fetch_add(1, Ordering::Relaxed) % interval == interval - 1 {
             tokio::task::yield_now().await;
         }
         Ok(())
@@ -192,6 +338,9 @@ pub(crate) struct FanOutSend {
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
     xpub_nodrop: bool,
+    arena: Arc<FanOutArena>,
+    pump_cancel: CancellationToken,
+    pump_spawned: bool,
 }
 
 struct FanOutInner {
@@ -269,6 +418,9 @@ impl FanOutSend {
             generation: Arc::new(AtomicU64::new(0)),
             mode,
             xpub_nodrop: options.xpub_nodrop,
+            arena: Arc::new(FanOutArena::new()),
+            pump_cancel: CancellationToken::new(),
+            pump_spawned: false,
         }
     }
 
@@ -284,6 +436,7 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             cached: Mutex::new(CachedFanOut::default()),
+            arena: self.arena.clone(),
         }
     }
 
@@ -297,6 +450,15 @@ impl FanOutSend {
 
     #[expect(clippy::needless_pass_by_value)]
     fn add_peer(&mut self, peer_id: u64, handle: DriverHandle, any_groups: bool) {
+        if !self.pump_spawned {
+            self.pump_spawned = true;
+            tokio::spawn(fan_out_pump(
+                self.arena.clone(),
+                self.inner.clone(),
+                self.generation.clone(),
+                self.pump_cancel.child_token(),
+            ));
+        }
         let has_transform = handle.wire_slot.as_ref().is_some_and(|s| s.has_transform);
         let target = PeerSend::from_handle(&handle);
         let mut g = self.inner.lock().expect("fanout inner poisoned");
@@ -368,10 +530,16 @@ impl FanOutSend {
         }
     }
 
-    #[expect(clippy::unused_self)]
-    pub(crate) fn shutdown(&self) {}
+    pub(crate) fn shutdown(&self) {
+        self.pump_cancel.cancel();
+    }
 
     pub(crate) fn is_drained(&self) -> bool {
+        let eq = self.arena.eq.lock().unwrap();
+        if !eq.is_empty() {
+            return false;
+        }
+        drop(eq);
         let g = self.inner.lock().expect("fanout inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
     }
@@ -397,12 +565,12 @@ fn dispatch_to_targets(
         _ => {
             use std::cell::RefCell;
             thread_local! {
-                static SCRATCH: RefCell<EncodedQueue> = RefCell::new(
+                static ARENA: RefCell<EncodedQueue> = RefCell::new(
                     EncodedQueue::one_shot(),
                 );
                 static CHUNKS: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
             }
-            SCRATCH.with(|cell| {
+            ARENA.with(|cell| {
                 let eq = &mut *cell.borrow_mut();
                 if let Some(enc_mtx) = encoder {
                     let transformed = {
@@ -418,9 +586,6 @@ fn dispatch_to_targets(
                 } else {
                     eq.encode_auto(msg);
                 }
-                // Freeze the arena into shared Bytes, then distribute by
-                // reference.  Each subscriber gets an Arc clone (nanoseconds)
-                // instead of a full memcpy of the encoded bytes.
                 CHUNKS.with(|drain| {
                     let chunks = &mut *drain.borrow_mut();
                     chunks.clear();
@@ -444,4 +609,44 @@ fn dispatch_to_targets(
 
 fn first_frame_bytes(msg: &Message) -> Bytes {
     msg.part_bytes(0).unwrap_or_default()
+}
+
+async fn fan_out_pump(
+    arena: Arc<FanOutArena>,
+    inner: Arc<Mutex<FanOutInner>>,
+    generation: Arc<AtomicU64>,
+    cancel: CancellationToken,
+) {
+    let mut chunks = Vec::new();
+    let mut cached_gen = 0u64;
+    let mut targets: Vec<PeerSend> = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                refresh_pump_targets(&inner, &generation, &mut cached_gen, &mut targets);
+                arena.drain_to(&targets, &mut chunks);
+                return;
+            }
+            () = async { arena.data_ready.notified().await } => {
+                let current = generation.load(Ordering::Acquire);
+                if cached_gen != current {
+                    refresh_pump_targets(&inner, &generation, &mut cached_gen, &mut targets);
+                }
+                arena.drain_to(&targets, &mut chunks);
+            }
+        }
+    }
+}
+
+fn refresh_pump_targets(
+    inner: &Mutex<FanOutInner>,
+    generation: &AtomicU64,
+    cached_gen: &mut u64,
+    targets: &mut Vec<PeerSend>,
+) {
+    let g = inner.lock().expect("fanout inner poisoned");
+    targets.clear();
+    targets.extend_from_slice(&g.all_targets);
+    *cached_gen = generation.load(Ordering::Acquire);
 }

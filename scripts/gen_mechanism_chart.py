@@ -35,49 +35,8 @@ def _nice_ticks(max_val, target_count=6) -> list[float]:
 
 
 def detect_hardware() -> str | None:
-    try:
-        cpu = None
-        for line in open("/proc/cpuinfo"):
-            if line.startswith("model name"):
-                cpu = line.split(":", 1)[1].strip()
-                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            extras = []
-            try:
-                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
-                if gov == "performance":
-                    extras.append("performance governor")
-            except OSError:
-                pass
-            for path, off_val in [
-                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
-                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
-            ]:
-                try:
-                    if open(path).read().strip() == off_val:
-                        extras.append("turbo off")
-                    break
-                except OSError:
-                    continue
-            postfix = os.environ.get("OMQ_HW_POSTFIX")
-            if postfix:
-                extras = [e.strip() for e in postfix.split(",")]
-            elif not extras:
-                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-                if hw_extras:
-                    extras.extend(hw_extras.split(","))
-            if extras:
-                label += ", " + ", ".join(extras)
-            prefix = os.environ.get("OMQ_HW_PREFIX")
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
-    return None
+    from chart_hw import detect_hardware as _detect
+    return _detect()
 
 
 def load_data(jsonl: Path) -> dict:
@@ -124,8 +83,6 @@ def generate_svg(data: dict, backend: str, *, axis_limits=None) -> str:
     n = len(sizes)
 
     hw_label = detect_hardware()
-    if hw_label:
-        hw_label = "Linux VM on a 2018 Mac Mini, " + hw_label
     hw_offset = 14 if hw_label else 0
 
     x_left, x_right = 90, 760

@@ -2,9 +2,9 @@
 """Generate comparison SVG charts from benchmarks/comparisons.jsonl.
 
 Produces:
-  doc/charts/comparison_tcp.svg    — TCP: throughput + latency (4 impls)
-  doc/charts/comparison_ipc.svg    — IPC: throughput + latency (4 impls)
-  doc/charts/comparison_inproc.svg — inproc: throughput + latency (4 impls)
+  doc/charts/pushpull/omq_tcp.svg  — TCP: throughput + CPU% (omq backends + libzmq)
+  doc/charts/pushpull/omq_ipc.svg  — IPC: throughput + CPU% (omq backends + libzmq)
+  doc/charts/pushpull/omq_inproc.svg — inproc: throughput + CPU% (omq backends + libzmq)
 """
 
 import json
@@ -678,58 +678,16 @@ def nice_step(max_val: float, target_lines: int) -> float:
 # ── chart generation ──────────────────────────────────────────────
 
 def detect_hardware() -> str | None:
-    try:
-        cpu = None
-        for line in open("/proc/cpuinfo"):
-            if line.startswith("model name"):
-                cpu = line.split(":", 1)[1].strip()
-                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            extras = []
-            # Detect governor.
-            try:
-                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
-                if gov == "performance":
-                    extras.append("performance governor")
-            except OSError:
-                pass
-            # Detect turbo boost state (Intel pstate or generic cpufreq).
-            for path, off_val in [
-                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
-                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
-            ]:
-                try:
-                    if open(path).read().strip() == off_val:
-                        extras.append("turbo off")
-                    break
-                except OSError:
-                    continue
-            # Override via env for machines where sysfs isn't available.
-            postfix = os.environ.get("OMQ_HW_POSTFIX")
-            if postfix:
-                extras = [e.strip() for e in postfix.split(",")]
-            elif not extras:
-                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-                if hw_extras:
-                    extras.extend(hw_extras.split(","))
-            if extras:
-                label += ", " + ", ".join(extras)
-            prefix = os.environ.get("OMQ_HW_PREFIX")
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
-    return None
+    from chart_hw import detect_hardware as _detect
+    return _detect()
 
 
 def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float,
-                      label_overrides: dict | None = None):
+                      label_overrides: dict | None = None,
+                      show_st_mt: bool = False) -> float:
+    """Draw impl legend. Returns extra vertical space consumed (0 or 18)."""
     legend_items = [(k, (label_overrides or {}).get(k, LABELS[k])) for k in impls if k in COLORS]
-    item_w = 125
+    item_w = 145 if show_st_mt else 125
     total_w = len(legend_items) * item_w
     start_x = mid_x - total_w / 2
 
@@ -745,6 +703,15 @@ def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float
             f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
             f' font-size="11" font-weight="500">{label}</text>'
         )
+
+    if show_st_mt:
+        L.append(
+            f'  <text x="{mid_x}" y="{leg_y + 18}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="9">'
+            f'ST = single-threaded   MT = multi-threaded</text>'
+        )
+        return 18
+    return 0
 
 
 def generate_chart(data: dict, impls: list[str], transport_label: str,
@@ -886,7 +853,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
                        fixed_msg_max: float | None = None,
                        log_gbs: bool = False,
                        hw_label: str | None = None,
-                       label_overrides: dict | None = None) -> str:
+                       label_overrides: dict | None = None,
+                       show_st_mt: bool = False) -> str:
     """Throughput chart with three axes: CPU% (left), GB/s (inner right),
     msg/s (outer right)."""
     sizes = data["sizes"]
@@ -906,7 +874,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     mid_x = (x_left + x_right) / 2
     right_pad = 15
     svg_w = x_right2 + 80 + right_pad
-    svg_h = 520 + hw_offset
+    st_mt_extra = 18 if show_st_mt else 0
+    svg_h = 520 + hw_offset + st_mt_extra
 
     t1_y_top = 35 + hw_offset
     t1_y_bot = 400 + hw_offset
@@ -923,7 +892,7 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     draw_throughput_cpu_panel(
         L, sizes, xs, tput, tput_cpu, impls,
         x_left, x_right, x_right2, t1_y_top, t1_y_bot,
-        f"PUSH/PULL throughput: {transport_label} (higher is better)",
+        f"PUSH/PULL throughput: {transport_label}",
         fixed_gbs_max=fixed_gbs_max,
         fixed_msg_max=fixed_msg_max,
         log_gbs=log_gbs,
@@ -935,10 +904,12 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
         )
 
     leg_y = t1_y_bot + 40
-    _draw_impl_legend(L, impls, mid_x, leg_y, label_overrides=label_overrides)
+    extra = _draw_impl_legend(L, impls, mid_x, leg_y,
+                              label_overrides=label_overrides,
+                              show_st_mt=show_st_mt)
 
     # line-type legend
-    lt_y = leg_y + 22
+    lt_y = leg_y + 22 + extra
     lt_total = 500
     lt_start = mid_x - lt_total / 2
 
@@ -979,7 +950,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
 def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: str,
                                fixed_lat_max: float | None = None,
                                hw_label: str | None = None,
-                               label_overrides: dict | None = None) -> str:
+                               label_overrides: dict | None = None,
+                               show_st_mt: bool = False) -> str:
     """Latency chart with two axes: p50 latency (left), CPU% (right, dotted)."""
     sizes = data["sizes"]
     lat = data["lat"]
@@ -993,8 +965,9 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
         return ""
 
     hw_offset = 14 if hw_label else 0
+    st_mt_extra = 18 if show_st_mt else 0
     svg_w = 850
-    svg_h = 320 + hw_offset
+    svg_h = 320 + hw_offset + st_mt_extra
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
@@ -1019,15 +992,17 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
 
     draw_latency_cpu_panel(
         L, sizes, xs, lat, lat_cpu, impls, x_left, x_right, y_top, y_bot,
-        f"REQ/REP latency: {transport_label} (p50 µs, lower is better)",
+        f"REQ/REP latency: {transport_label} (p50 µs)",
         fixed_lat_max=fixed_lat_max,
     )
 
     leg_y = y_bot + 40
-    _draw_impl_legend(L, impls, mid_x, leg_y, label_overrides=label_overrides)
+    extra = _draw_impl_legend(L, impls, mid_x, leg_y,
+                              label_overrides=label_overrides,
+                              show_st_mt=show_st_mt)
 
     # line-type legend
-    lt_y = leg_y + 22
+    lt_y = leg_y + 22 + extra
     lt_total = 320
     lt_start = mid_x - lt_total / 2
 
@@ -1063,6 +1038,7 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
               and r.get("peers") == peers]
 
     tput: dict[int, dict[str, tuple[float, float]]] = {}
+    tput_cpu: dict[int, dict[str, float]] = {}
     seen: dict[tuple, str] = {}
 
     for r in t_rows:
@@ -1079,9 +1055,13 @@ def load_pubsub_data(transport: str, impls: list[str], peers: int) -> dict:
             # mbps is already aggregate (per-sub × peers) from run_comparisons.
             gbs = mbps / 1000.0
             tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
+            cpu_time = r.get("cpu_time", 0)
+            elapsed = r.get("elapsed", 0)
+            if elapsed > 0 and cpu_time > 0:
+                tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
     sizes = sorted(s for s in tput if s <= 32768)
-    return {"sizes": sizes, "tput": tput}
+    return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
 
 
 def generate_pubsub_chart(
@@ -1215,6 +1195,7 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
               and r.get("peers") == peers]
 
     tput: dict[int, dict[str, tuple[float, float]]] = {}
+    tput_cpu: dict[int, dict[str, float]] = {}
     seen: dict[tuple, str] = {}
 
     for r in t_rows:
@@ -1230,9 +1211,118 @@ def load_fanio_data(transport: str, impls: list[str], peers: int,
             mbps = r.get("mbps", 0)
             gbs = mbps / 1000.0
             tput.setdefault(size, {})[impl_name] = (msgs_s, gbs)
+            cpu_time = r.get("cpu_time", 0)
+            elapsed = r.get("elapsed", 0)
+            if elapsed > 0 and cpu_time > 0:
+                tput_cpu.setdefault(size, {})[impl_name] = cpu_time / elapsed * 100
 
     sizes = sorted(s for s in tput if s <= 32768)
-    return {"sizes": sizes, "tput": tput}
+    return {"sizes": sizes, "tput": tput, "tput_cpu": tput_cpu}
+
+
+def generate_multi_panel_cpu_chart(
+    panels: list[tuple[int, dict]],
+    impls: list[str], transport_label: str,
+    hw_label: str | None = None,
+    title_fn: "Callable[[int, str], str] | None" = None,
+    label_overrides: dict | None = None,
+    show_st_mt: bool = False,
+) -> str:
+    panels = [(p, d) for p, d in panels if d["sizes"]]
+    if not panels:
+        return ""
+    sizes = panels[0][1]["sizes"]
+    n = len(sizes)
+    if n < 2:
+        return ""
+
+    x_left = 90
+    x_right = 700
+    x_right2 = 780
+    plot_w = x_right - x_left
+    panel_h = 260
+    gap = 70
+    hw_offset = 14 if hw_label else 0
+    st_mt_extra = 18 if show_st_mt else 0
+    right_pad = 15
+    svg_w = x_right2 + 80 + right_pad
+    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + st_mt_extra
+    mid_x = (x_left + x_right) / 2
+
+    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+
+    L = []
+    L.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
+        f' font-family="system-ui, -apple-system, sans-serif">'
+    )
+    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
+
+    if hw_label:
+        L.append(
+            f'  <text x="{mid_x}" y="{hw_offset + 32}" text-anchor="middle"'
+            f' fill="#9ca3af" font-size="10">{hw_label}</text>'
+        )
+
+    for idx, (peers, data) in enumerate(panels):
+        p_sizes = data["sizes"]
+        p_xs = [x_left + i * plot_w / max(len(p_sizes) - 1, 1)
+                for i in range(len(p_sizes))]
+        y_top = hw_offset + 35 + idx * (panel_h + gap)
+        y_bot = y_top + panel_h
+        if title_fn:
+            panel_title = title_fn(peers, transport_label)
+        else:
+            panel_title = f"throughput, {peers} peers: {transport_label}"
+        draw_throughput_cpu_panel(
+            L, p_sizes, p_xs, data["tput"],
+            data.get("tput_cpu", {}), impls,
+            x_left, x_right, x_right2, y_top, y_bot,
+            panel_title,
+        )
+
+    last_bot = hw_offset + 35 + (len(panels) - 1) * (panel_h + gap) + panel_h
+    leg_y = last_bot + 30
+    extra = _draw_impl_legend(L, impls, mid_x, leg_y,
+                              label_overrides=label_overrides,
+                              show_st_mt=show_st_mt)
+
+    lt_y = leg_y + 22 + extra
+    lt_total = 500
+    lt_start = mid_x - lt_total / 2
+
+    L.append(
+        f'  <line x1="{lt_start:.0f}" y1="{lt_y}" x2="{lt_start + 14:.0f}" y2="{lt_y}"'
+        f' stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>'
+    )
+    L.append(
+        f'  <text x="{lt_start + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
+        f' font-size="10">CPU % (left)</text>'
+    )
+
+    lt_mid = lt_start + 145
+    L.append(
+        f'  <line x1="{lt_mid:.0f}" y1="{lt_y}" x2="{lt_mid + 14:.0f}" y2="{lt_y}"'
+        f' stroke="#6b7280" stroke-width="2.5"/>'
+    )
+    L.append(f'  <circle cx="{lt_mid + 7:.0f}" cy="{lt_y}" r="2" fill="#6b7280"/>')
+    L.append(
+        f'  <text x="{lt_mid + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
+        f' font-size="10">GB/s (inner right)</text>'
+    )
+
+    lt_right = lt_mid + 165
+    L.append(
+        f'  <line x1="{lt_right:.0f}" y1="{lt_y}" x2="{lt_right + 14:.0f}" y2="{lt_y}"'
+        f' stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3"/>'
+    )
+    L.append(
+        f'  <text x="{lt_right + 20:.0f}" y="{lt_y + 4}" fill="#6b7280"'
+        f' font-size="10">msg/s (outer right)</text>'
+    )
+
+    L.append("</svg>")
+    return "\n".join(L) + "\n"
 
 
 def main():
@@ -1261,7 +1351,7 @@ def main():
                                  hw_label=hw,
                                  label_overrides=inproc_overrides)
         if svg:
-            out = REPO / "doc" / "charts" / "pushpull" / f"comparison_{transport}.svg"
+            out = REPO / "doc" / "charts" / "pushpull" / f"omq_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
@@ -1271,29 +1361,34 @@ def main():
                                          fixed_lat_max=lat_max, hw_label=hw,
                                          label_overrides=inproc_overrides)
         if svg:
-            out = REPO / "doc" / "charts" / "reqrep" / f"comparison_{transport}.svg"
+            out = REPO / "doc" / "charts" / "reqrep" / f"omq_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
 
-    # ── Alt charts (all impls, with CPU%) ─────────────────────
-    alt_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"]
+    # ── Cross-impl charts (other impls vs slowest omq) ────────
+    alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
+    vs_overrides = {
+        "omq-tokio": "omq-tokio (ST)",
+        "zmq.rs": "zmq.rs v0.6.0 (MT)",
+        "rzmq": "rzmq v0.5.18 (MT)",
+    }
 
     for transport, impls, label, log in [
         ("tcp", alt_impls, "TCP loopback, 2-process", False),
         ("ipc", alt_impls, "IPC, 2-process", False),
-        ("inproc", ["libzmq", "omq-compio", "omq-compio-st", "omq-tokio", "omq-tokio-mt", "rzmq"], "inproc", True),
+        ("inproc", ["libzmq", "omq-tokio", "rzmq"], "inproc", True),
     ]:
         data = load_data(transport, impls)
         if not data["sizes"]:
             continue
 
-        inproc_overrides = {"omq-compio": "omq-compio (MT)"} if transport == "inproc" else None
         svg = generate_chart_cpu(data, impls, label,
                                  fixed_gbs_max=None if log else FIXED_GBS_MAX,
                                  log_gbs=log,
                                  hw_label=hw,
-                                 label_overrides=inproc_overrides)
+                                 label_overrides=vs_overrides,
+                                 show_st_mt=True)
         if svg:
             out = REPO / "doc" / "charts" / "pushpull" / f"alt_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -1303,7 +1398,8 @@ def main():
         lat_max = FIXED_INPROC_LAT_MAX if transport == "inproc" else FIXED_LAT_MAX
         svg = generate_latency_chart_cpu(data, impls, label,
                                          fixed_lat_max=lat_max, hw_label=hw,
-                                         label_overrides=inproc_overrides)
+                                         label_overrides=vs_overrides,
+                                         show_st_mt=True)
         if svg:
             out = REPO / "doc" / "charts" / "reqrep" / f"alt_{transport}.svg"
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -1311,40 +1407,53 @@ def main():
             print(f"Written: {out}", file=sys.stderr)
 
     # ── PUB/SUB charts ──────────────────────────────────────────
-    PUBSUB_MSG_MAX = 10e6
-    PUBSUB_GBS_MAX = 8.0
-    pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
+    pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
+    pubsub_alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
     pubsub_peer_counts = [1, 8, 64]
 
-    for transport, label, log in [
-        ("tcp", "TCP loopback", False),
-        ("ipc", "IPC", False),
+    def pubsub_title(peers, tl):
+        sub_label = "1 subscriber" if peers == 1 else f"{peers} subscribers"
+        return f"PUB/SUB throughput, {sub_label}: {tl}"
+
+    for transport, label in [
+        ("tcp", "TCP loopback"),
+        ("ipc", "IPC"),
     ]:
         panels = [
             (p, load_pubsub_data(transport, pubsub_impls, p))
             for p in pubsub_peer_counts
         ]
-        if not any(d["sizes"] for _, d in panels):
-            continue
-        svg = generate_pubsub_chart(
-            panels, pubsub_impls, label,
-            log_gbs=log,
-            fixed_msg_max=PUBSUB_MSG_MAX,
-            fixed_gbs_max=None if log else PUBSUB_GBS_MAX,
-            scale_overrides={
-                1: (PUBSUB_MSG_MAX, 8.0),
-                8: (2e6, 8.0),
-                64: (300e3, 12.0),
-            },
-            hw_label=hw,
-        )
-        if svg:
-            out = REPO / "doc" / "charts" / "pubsub" / f"comparison_{transport}.svg"
-            out.write_text(svg)
-            print(f"Written: {out}", file=sys.stderr)
+        if any(d["sizes"] for _, d in panels):
+            svg = generate_multi_panel_cpu_chart(
+                panels, pubsub_impls, label,
+                hw_label=hw, title_fn=pubsub_title,
+            )
+            if svg:
+                out = REPO / "doc" / "charts" / "pubsub" / f"omq_{transport}.svg"
+                out.write_text(svg)
+                print(f"Written: {out}", file=sys.stderr)
+
+    # PUB/SUB cross-impl charts
+    for transport, label in [
+        ("tcp", "TCP loopback"),
+    ]:
+        panels = [
+            (p, load_pubsub_data(transport, pubsub_alt_impls, p))
+            for p in pubsub_peer_counts
+        ]
+        if any(d["sizes"] for _, d in panels):
+            svg = generate_multi_panel_cpu_chart(
+                panels, pubsub_alt_impls, label,
+                hw_label=hw, title_fn=pubsub_title,
+                label_overrides=vs_overrides, show_st_mt=True,
+            )
+            if svg:
+                out = REPO / "doc" / "charts" / "pubsub" / f"alt_{transport}.svg"
+                out.write_text(svg)
+                print(f"Written: {out}", file=sys.stderr)
 
     # ── Fan-out / fan-in charts (TCP only) ──────────────────────
-    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "zmq.rs", "rzmq"]
+    fanio_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
     fanio_peers = [2, 4, 8]
 
     def fanout_title(peers, tl):
@@ -1363,7 +1472,7 @@ def main():
         ]
         if not any(d["sizes"] for _, d in panels):
             continue
-        svg = generate_pubsub_chart(
+        svg = generate_multi_panel_cpu_chart(
             panels, fanio_impls, "TCP loopback",
             hw_label=hw,
             title_fn=tfn,
@@ -1374,6 +1483,17 @@ def main():
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(svg)
             print(f"Written: {out}", file=sys.stderr)
+
+
+    # ── Main hero chart (all impls, throughput only) ─────────────
+    from gen_main_chart import generate_main_chart, load_data as load_main_data
+    tput, lat = load_main_data()
+    svg = generate_main_chart(tput, lat, hw)
+    if svg:
+        out = REPO / "doc" / "charts" / "main_tcp.svg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(svg)
+        print(f"Written: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

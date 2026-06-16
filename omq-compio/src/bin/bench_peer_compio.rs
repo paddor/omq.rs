@@ -55,6 +55,72 @@ fn print_bound_port(ep: &Endpoint) {
     }
 }
 
+fn bench_payload(size: usize) -> Bytes {
+    if std::env::var("OMQ_BENCH_PAYLOAD").as_deref() == Ok("json") {
+        json_payload(size)
+    } else {
+        Bytes::from(vec![b'x'; size])
+    }
+}
+
+fn json_payload(target_bytes: usize) -> Bytes {
+    const LEVELS: &[&str] = &["DEBUG", "INFO", "WARN", "ERROR"];
+    const SERVICES: &[&str] = &[
+        "api-gateway",
+        "auth-svc",
+        "order-svc",
+        "payment-svc",
+        "notify-svc",
+    ];
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+    const PATHS: &[&str] = &[
+        "/v1/widgets",
+        "/v1/users",
+        "/v1/orders",
+        "/v2/events",
+        "/v1/health",
+    ];
+    const REGIONS: &[&str] = &[
+        "us-east-1",
+        "us-west-2",
+        "eu-west-1",
+        "ap-south-1",
+        "eu-central-1",
+    ];
+    const STATUSES: &[u16] = &[200, 201, 204, 400, 404, 500, 502, 503];
+    const MSGS: &[&str] = &[
+        "request handled successfully",
+        "resource created",
+        "cache miss, fetched from origin",
+        "rate limit approaching threshold",
+        "upstream timeout, retrying",
+    ];
+
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(target_bytes + 512);
+    let mut counter: u32 = 0;
+    while out.len() < target_bytes {
+        let h = counter.wrapping_mul(0x9E37_79B1) as usize;
+        let id = format!("{h:08x}");
+        let level = LEVELS[h % LEVELS.len()];
+        let service = SERVICES[(h >> 4) % SERVICES.len()];
+        let method = METHODS[(h >> 8) % METHODS.len()];
+        let path = PATHS[(h >> 12) % PATHS.len()];
+        let region = REGIONS[(h >> 16) % REGIONS.len()];
+        let status = STATUSES[(h >> 20) % STATUSES.len()];
+        let latency = (h % 500) as u32 + 1;
+        let msg = MSGS[(h >> 24) % MSGS.len()];
+        let _ = write!(
+            out,
+            r#"{{"ts":"2026-04-27T12:34:56.{id}Z","level":"{level}","service":"{service}","trace_id":"{id}","span_id":"{id}","user_id":"u-{id}","method":"{method}","path":"{path}/{id}","status":{status},"latency_ms":{latency},"region":"{region}","host":"{service}-{id}.svc.cluster.local","msg":"{msg}"}}{nl}"#,
+            nl = '\n',
+        );
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(target_bytes);
+    Bytes::from(out)
+}
+
 extern "C" fn exit_on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(0) };
 }
@@ -193,7 +259,7 @@ async fn run_push(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options_server(size));
     let bound = push.bind(ep).await.expect("push bind");
     print_bound_port(&bound);
-    let payload = vec![b'x'; size];
+    let payload = bench_payload(size);
     if size <= omq_proto::message::MAX_INLINE_MESSAGE {
         loop {
             push.send(Message::from_slice(&payload)).await.unwrap();
@@ -209,7 +275,7 @@ async fn run_push(ep: Endpoint, size: usize) {
 async fn run_push_connect(ep: Endpoint, size: usize) {
     let push = Socket::new(SocketType::Push, bench_options_client(size));
     push.connect(ep).await.expect("push connect");
-    let payload = vec![b'x'; size];
+    let payload = bench_payload(size);
     if size <= omq_proto::message::MAX_INLINE_MESSAGE {
         loop {
             push.send(Message::from_slice(&payload)).await.unwrap();
@@ -561,19 +627,21 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
     }
 
     let mut rtts = Vec::with_capacity(iterations);
+    let wall_start = Instant::now();
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(Message::single(payload.clone())).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+    let elapsed = wall_start.elapsed().as_secs_f64();
 
     rtts.sort_unstable();
     let p50 = percentile(&rtts, 50.0);
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
 }
 
 async fn run_inproc_st_latency(name: String, size: usize, iterations: usize, warmup: usize) {
@@ -602,19 +670,21 @@ async fn run_inproc_st_latency(name: String, size: usize, iterations: usize, war
     }
 
     let mut rtts = Vec::with_capacity(iterations);
+    let wall_start = Instant::now();
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(Message::single(payload.clone())).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+    let elapsed = wall_start.elapsed().as_secs_f64();
 
     rtts.sort_unstable();
     let p50 = percentile(&rtts, 50.0);
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
     std::process::exit(0);
 }
 
@@ -680,7 +750,7 @@ async fn run_pub(ep: Endpoint, size: usize) {
     );
     let bound = pub_.bind(ep).await.expect("pub bind");
     print_bound_port(&bound);
-    let payload = vec![b'x'; size];
+    let payload = bench_payload(size);
     loop {
         pub_.send(Message::from_slice(&payload)).await.unwrap();
     }

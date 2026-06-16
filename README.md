@@ -12,49 +12,52 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 ### vs libzmq and other implementations
 
-[How to beat libzmq](doc/performance.md)
+[How to beat libzmq](doc/performance.md) | [Full comparison charts](COMPARISONS.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_tcp.svg" alt="PUSH/PULL throughput and REQ/REP latency: TCP loopback" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_tcp.svg" alt="PUSH/PULL throughput: TCP, all implementations" width="950">
 </p>
 
 <details>
-<summary>More PUSH/PULL: fan-out, fan-in, IPC, inproc</summary>
+<summary>omq backends: compio, tokio, tokio-mt</summary>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/omq_tcp.svg" alt="REQ/REP latency: TCP" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/omq_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+</p>
+</details>
+
+<details>
+<summary>Fan-out and fan-in</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanout_tcp.svg" alt="PUSH fan-out: TCP" width="850">
 </p>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/fanin_tcp.svg" alt="PUSH fan-in: TCP" width="850">
 </p>
+</details>
+
+<details>
+<summary>PUB/SUB throughput</summary>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_ipc.svg" alt="PUSH/PULL throughput: IPC" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/comparison_inproc.svg" alt="PUSH/PULL throughput: inproc" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/omq_ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
 </p>
 </details>
 
 <details>
-<summary>Compression throughput: lz4+tcp://</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/compression/tokio_2048.svg" alt="Compression throughput: omq-tokio" width="850">
-</p>
+<summary>Compression: lz4+tcp://</summary>
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/lz4_tcp.svg" alt="PUB/SUB lz4+tcp fan-out: projected throughput at link speed" width="850">
-</p>
-</details>
-
-<details>
-<summary>REQ/REP latency: TCP</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/comparison_tcp.svg" alt="REQ/REP latency: TCP" width="850">
-</p>
-</details>
-
-<details>
-<summary>PUB/SUB throughput: TCP</summary>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/comparison_tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
 </p>
 </details>
 
@@ -170,6 +173,8 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Further reading
 
+- [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison
+  charts (libzmq, zmq.rs, rzmq) across all transports.
 - [BENCHMARKS.md](BENCHMARKS.md): throughput / latency tables across
   message patterns, transports, message sizes, and backends.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp

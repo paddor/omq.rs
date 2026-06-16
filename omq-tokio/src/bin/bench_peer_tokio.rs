@@ -550,19 +550,21 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
     }
 
     let mut rtts = Vec::with_capacity(iterations);
+    let wall_start = Instant::now();
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(Message::single(payload.clone())).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }
+    let elapsed = wall_start.elapsed().as_secs_f64();
 
     rtts.sort_unstable();
     let p50 = percentile(&rtts, 50.0);
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = percentile(&rtts, 100.0);
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} 0 {elapsed:.6}");
 }
 
 async fn run_rep(ep: Endpoint, size: usize) {

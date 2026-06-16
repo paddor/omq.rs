@@ -259,6 +259,7 @@ mod inner {
     }
 
     fn set_compression_env(cmd: &mut std::process::Command, dict_path: Option<&Path>) {
+        cmd.env("OMQ_BENCH_PAYLOAD", "json");
         if let Some(p) = dict_path {
             cmd.env("OMQ_BENCH_COMPRESSION_DICT", p);
         }

@@ -505,56 +505,8 @@ THREAD_MODELS = {
 
 
 def detect_hardware() -> str | None:
-    """Read CPU model, core count, governor, and turbo state.
-
-    Env vars for overrides (useful in VMs where sysfs is absent):
-      OMQ_HW_PREFIX  -- prepended, e.g. "Linux VM on a 2018 Mac Mini"
-      OMQ_HW_POSTFIX -- appended, e.g. "performance governor, turbo off"
-      OMQ_HW_EXTRAS  -- legacy fallback for postfix (comma-separated)
-    """
-    try:
-        cpu = None
-        for line in open("/proc/cpuinfo"):
-            if line.startswith("model name"):
-                cpu = line.split(":", 1)[1].strip()
-                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            extras = []
-            try:
-                gov = open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read().strip()
-                if gov == "performance":
-                    extras.append("performance governor")
-            except OSError:
-                pass
-            for path, off_val in [
-                ("/sys/devices/system/cpu/intel_pstate/no_turbo", "1"),
-                ("/sys/devices/system/cpu/cpufreq/boost", "0"),
-            ]:
-                try:
-                    if open(path).read().strip() == off_val:
-                        extras.append("turbo off")
-                    break
-                except OSError:
-                    continue
-            postfix = os.environ.get("OMQ_HW_POSTFIX")
-            if postfix:
-                extras = [e.strip() for e in postfix.split(",")]
-            elif not extras:
-                hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-                if hw_extras:
-                    extras.extend(hw_extras.split(","))
-            if extras:
-                label += ", " + ", ".join(extras)
-            prefix = os.environ.get("OMQ_HW_PREFIX")
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
-    return None
+    from chart_hw import detect_hardware as _detect
+    return _detect()
 
 
 def main():

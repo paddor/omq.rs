@@ -10,6 +10,7 @@ name = "zmqrs_bench_peer"
 path = "src/main.rs"
 
 [dependencies]
-zeromq = { version = "0.6", features = ["ipc-transport"] }
-tokio = { version = "1", features = ["full"] }
 bytes = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["full"] }
+zeromq = { version = "0.6", features = ["ipc-transport"] }

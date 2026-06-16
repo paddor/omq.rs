@@ -10,5 +10,6 @@ name = "rzmq_bench_peer"
 path = "src/main.rs"
 
 [dependencies]
-rzmq = { git = "https://github.com/excsn/rzmq.git", rev = "e3e5745", features = ["io-uring", "curve"] }
+libc = "0.2"
+rzmq = { version = "0.5.18", features = ["io-uring", "curve"] }
 tokio = { version = "1", features = ["full"] }

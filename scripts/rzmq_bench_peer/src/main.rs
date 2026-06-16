@@ -28,6 +28,19 @@ use std::time::{Duration, Instant};
 use rzmq::{Context, Msg, SocketType};
 
 
+fn cpu_time_secs() -> f64 {
+    let mut usage = libc::rusage {
+        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ..unsafe { std::mem::zeroed() }
+    };
+    // SAFETY: passing a valid pointer to a zeroed rusage struct.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let u = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
+    let s = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
+    u + s
+}
+
 fn print_latency(rtts: &[u64], iterations: usize) {
     let percentile = |sorted: &[u64], p: f64| -> f64 {
         let n = sorted.len();
@@ -43,6 +56,23 @@ fn print_latency(rtts: &[u64], iterations: usize) {
     let p999 = percentile(rtts, 99.9);
     let max = rtts[iterations - 1] as f64 / 1000.0;
     println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+}
+
+fn print_latency_cpu(rtts: &[u64], iterations: usize, cpu: f64, elapsed: f64) {
+    let percentile = |sorted: &[u64], p: f64| -> f64 {
+        let n = sorted.len();
+        let mut idx = (n as f64 * p / 100.0) as usize;
+        if idx >= n {
+            idx = n - 1;
+        }
+        sorted[idx] as f64 / 1000.0
+    };
+
+    let p50 = percentile(rtts, 50.0);
+    let p99 = percentile(rtts, 99.0);
+    let p999 = percentile(rtts, 99.9);
+    let max = rtts[iterations - 1] as f64 / 1000.0;
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
 }
 
 fn resolve_addr(s: &str) -> String {
@@ -183,6 +213,8 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
     }
 
+    let cpu_before = cpu_time_secs();
+    let t0 = Instant::now();
     let mut rtts: Vec<u64> = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t = Instant::now();
@@ -190,9 +222,11 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
         rtts.push(t.elapsed().as_nanos() as u64);
     }
+    let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     rtts.sort_unstable();
 
-    print_latency(&rtts, iterations);
+    print_latency_cpu(&rtts, iterations, cpu, elapsed);
     std::process::exit(0);
 }
 
@@ -380,15 +414,17 @@ async fn run_inproc_latency(addr: &str, size: usize, iterations: usize, warmup: 
     }
 
     let mut rtts: Vec<u64> = Vec::with_capacity(iterations);
+    let wall_start = Instant::now();
     for _ in 0..iterations {
         let t = Instant::now();
         req.send(Msg::from_static(payload)).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t.elapsed().as_nanos() as u64);
     }
+    let elapsed = wall_start.elapsed().as_secs_f64();
     rtts.sort_unstable();
 
     rep_handle.abort();
-    print_latency(&rtts, iterations);
+    print_latency_cpu(&rtts, iterations, 0.0, elapsed);
     std::process::exit(0);
 }

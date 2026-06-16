@@ -175,7 +175,7 @@ Each binary speaks a subcommand protocol:
 
 Results go to `~/.cache/omq/comparisons.jsonl`. Charts are generated
 by `scripts/gen_comparison_chart.py` into
-`doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`.
+`doc/charts/{pushpull,pubsub,reqrep}/{omq,alt}_*.svg`.
 
 Per-backend criterion-style benches (separate from comparisons) live in
 `omq-tokio/benches/` and `omq-compio/benches/` with shared scaffolding
@@ -187,20 +187,26 @@ external framework. Results go to
 
 After performance-relevant changes, regenerate the charts before
 releasing. Chart subtitles show hardware info auto-detected from
-`/proc/cpuinfo` and sysfs. `OMQ_HW_PREFIX` prepends a label before
-the CPU model; `OMQ_HW_POSTFIX` replaces the auto-detected
-governor/turbo suffix. Each chart command below includes the correct
-values for this machine.
+`/proc/cpuinfo` and sysfs. On machines where sysfs is absent (VMs),
+create a `.chart_hw` file in the repo root (gitignored):
+
+```
+prefix=Linux VM on a 2018 Mac Mini
+postfix=performance governor, turbo off
+```
+
+All `gen_*_chart.py` scripts read this file automatically via
+`scripts/chart_hw.py`. Environment variables `OMQ_HW_PREFIX` and
+`OMQ_HW_POSTFIX` still work and take precedence over the file.
 
 ### Cross-library comparison charts
 
-Produces `doc/charts/{pushpull,pubsub,reqrep}/comparison_*.svg`,
-`doc/charts/pushpull/fan{out,in}_tcp.svg`:
+Produces `doc/charts/{pushpull,pubsub,reqrep}/{omq,alt}_*.svg`,
+`doc/charts/pushpull/fan{out,in}_tcp.svg`, `doc/charts/main_tcp.svg`:
 
 ```sh
 python3 scripts/run_comparisons.py --impl omq-compio --impl omq-tokio   # omq only, reuse existing libzmq/zmq.rs baselines
-OMQ_HW_PREFIX="Linux VM on a 2018 Mac Mini" OMQ_HW_POSTFIX="performance governor, turbo off" \
-  python3 scripts/gen_comparison_chart.py                                # JSONL → SVG
+python3 scripts/gen_comparison_chart.py                                # JSONL → SVG
 ```
 
 Omit `--impl` to rebench all implementations when libzmq or zmq.rs
@@ -213,21 +219,18 @@ Produces `doc/charts/mechanism/{tokio,compio}.svg`:
 ```sh
 cargo bench -p omq-tokio  --bench mechanism --features plain,curve,blake3zmq
 cargo bench -p omq-compio --bench mechanism --features plain,curve,blake3zmq
-OMQ_HW_PREFIX="Linux VM on a 2018 Mac Mini" OMQ_HW_POSTFIX="performance governor, turbo off" \
-  python3 scripts/gen_mechanism_chart.py
+python3 scripts/gen_mechanism_chart.py
 ```
 
 ### Compression charts
 
-Produces `doc/charts/compression/{compio,tokio}_2048.svg`:
+Produces `doc/charts/pubsub/lz4_tcp.svg`:
 
 ```sh
 cargo bench -p omq-compio --bench compression --features lz4  # → ~/.cache/omq/results_compression_compio.jsonl
 cargo bench -p omq-tokio  --bench compression --features lz4  # → ~/.cache/omq/results_compression_tokio.jsonl
-OMQ_HW_PREFIX="Linux VM on a 2018 Mac Mini" OMQ_HW_POSTFIX="performance governor, turbo off" \
-  python3 scripts/gen_compression_chart.py --backend compio          # JSONL → SVG
-OMQ_HW_PREFIX="Linux VM on a 2018 Mac Mini" OMQ_HW_POSTFIX="performance governor, turbo off" \
-  python3 scripts/gen_compression_chart.py --backend tokio           # JSONL → SVG
+python3 scripts/gen_compression_chart.py --backend compio          # JSONL → SVG
+python3 scripts/gen_compression_chart.py --backend tokio           # JSONL → SVG
 ```
 
 ### pyomq bindings charts

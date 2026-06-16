@@ -597,6 +597,8 @@ done_inproc_pubsub:;
         uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
         if (!rtts) { perror("malloc"); exit(1); }
 
+        struct timespec wall_start, wall_end;
+        clock_gettime(CLOCK_MONOTONIC, &wall_start);
         for (int i = 0; i < iterations; i++) {
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -606,6 +608,7 @@ done_inproc_pubsub:;
             rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
                      + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
         }
+        clock_gettime(CLOCK_MONOTONIC, &wall_end);
 
         int cmp_u64(const void *a, const void *b) {
             uint64_t va = *(const uint64_t *)a;
@@ -624,7 +627,9 @@ done_inproc_pubsub:;
         double p99  = percentile(rtts, iterations, 99);
         double p999 = percentile(rtts, iterations, 99.9);
         double max  = rtts[iterations - 1] / 1000.0;
-        printf("%.3f %.3f %.3f %.3f %d\n", p50, p99, p999, max, iterations);
+        double wall_elapsed = (double)(wall_end.tv_sec - wall_start.tv_sec)
+                             + (double)(wall_end.tv_nsec - wall_start.tv_nsec) / 1e9;
+        printf("%.3f %.3f %.3f %.3f %d 0 %.6f\n", p50, p99, p999, max, iterations, wall_elapsed);
 
         free(rtts);
         free(buf);

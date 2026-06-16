@@ -450,8 +450,6 @@ def main():
     LABELS["lz4+tcp+dict"] = f"lz4+tcp + {ds_label} dict"
 
     hw = detect_hardware()
-    if hw:
-        hw = "Linux VM on a 2018 Mac Mini, " + hw
 
     panels = {}
     for tag, bps, _ in LINK_SPEEDS:

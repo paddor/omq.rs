@@ -187,6 +187,14 @@ overhead on the single-thread runtime.
 - Per-crate versioning, tags are `<crate>-v<version>`.
 - `main` is protected. All changes go through PRs.
 
+## Chart generation
+
+**HARD RULE:** Chart subtitle configuration lives in `.chart_hw`
+(gitignored, repo root). All `scripts/gen_*_chart.py` scripts read
+it automatically via `scripts/chart_hw.py`. Never run chart gen
+scripts without verifying `.chart_hw` exists. See `DEVELOPMENT.md`
+for the exact commands.
+
 ## Adding new transport / mechanism
 
 - **Transport:** `Endpoint` variant + parser in `omq-proto/src/endpoint.rs`,

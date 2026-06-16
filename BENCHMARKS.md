@@ -109,6 +109,6 @@ python3 scripts/gen_mechanism_chart.py            # doc/charts/mechanism/{compio
 #      cargo bench -p omq-tokio  --features lz4 --bench compression
 #      cargo bench -p omq-compio --features lz4 --bench compression
 #   2. Generate chart:
-python3 scripts/gen_compression_chart.py --backend tokio     # doc/charts/compression/tokio_2048.svg
-python3 scripts/gen_compression_chart.py --backend compio    # doc/charts/compression/compio_2048.svg
+python3 scripts/gen_compression_chart.py --backend tokio     # doc/charts/pubsub/lz4_tcp.svg
+python3 scripts/gen_compression_chart.py --backend compio    # doc/charts/pubsub/lz4_tcp.svg
 ```

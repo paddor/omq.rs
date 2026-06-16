@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import random
+import selectors
 import signal
 import subprocess
 import sys
@@ -120,7 +121,6 @@ def spawn_process(binary: str, *args: str, env: dict | None = None) -> subproces
 
 def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
     """Read 'PORT <n>' from the process's first stdout line."""
-    import selectors
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
     ready = sel.select(timeout=timeout)
@@ -131,6 +131,42 @@ def read_bound_port(proc: subprocess.Popen, timeout: float = 5.0) -> int | None:
     if line.startswith("PORT "):
         return int(line.split()[1])
     return None
+
+
+def capture_with_cpu(binary: str, *args: str, timeout: int = 15,
+                     env: dict | None = None) -> tuple[str, float]:
+    """Run a single-process bench and return (stdout, cpu_seconds)."""
+    merged = {**os.environ, **(env or {})} if env else None
+    proc = subprocess.Popen(
+        [binary, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=False,
+        env=merged,
+    )
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    chunks = []
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"WARNING: timeout: {binary} {' '.join(args)}", file=sys.stderr)
+            proc.kill()
+            proc.wait()
+            sel.close()
+            return "", 0.0
+        ready = sel.select(timeout=remaining)
+        if ready:
+            data = proc.stdout.read()
+            if data:
+                chunks.append(data)
+            else:
+                break
+    sel.close()
+    cpu = read_proc_cpu(proc.pid)
+    proc.wait()
+    return b"".join(chunks).decode("utf-8", errors="replace"), cpu
 
 
 def capture_process(binary: str, *args: str, timeout: int = 15,
@@ -266,9 +302,13 @@ def _run_throughput_once(
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
         timeout_s = max(int(duration) + 5, 8)
-        output = capture_process(binary, inproc_subcmd, fresh_name, str(size),
-                                 dur, timeout=timeout_s, env=env)
-        return parse_throughput(output, size)
+        output, cpu = capture_with_cpu(binary, inproc_subcmd, fresh_name,
+                                       str(size), dur,
+                                       timeout=timeout_s, env=env)
+        result = parse_throughput(output, size)
+        if result and cpu > 0:
+            result["cpu_time"] = cpu
+        return result
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
@@ -342,12 +382,16 @@ def _run_pubsub_once(
                                                 str(size), dur))
             time.sleep(0.05)
             output = capture_process(binary, "sub", connect_addr, str(size), dur)
+            pub_cpu = read_proc_cpu(pub_.pid)
         finally:
             kill_process(pub_)
             for s in drain_subs:
                 kill_process(s)
             cleanup_ipc_socket(addr)
         result = parse_throughput(output, size)
+        if result and pub_cpu > 0:
+            pull_cpu = result.get("pull_cpu", 0.0)
+            result["cpu_time"] = pub_cpu + pull_cpu
     if result and peers > 1:
         result["mbps"] *= peers
     return result
@@ -390,12 +434,16 @@ def _run_fanout_once(
         time.sleep(0.05)
         output = capture_process(binary, "pull", connect_addr, str(size),
                                  str(duration))
+        push_cpu = read_proc_cpu(push.pid)
     finally:
         kill_process(push)
         for d in drains:
             kill_process(d)
         cleanup_ipc_socket(addr)
     result = parse_throughput(output, size)
+    if result and push_cpu > 0:
+        pull_cpu = result.get("pull_cpu", 0.0)
+        result["cpu_time"] = push_cpu + pull_cpu
     if result and peers > 1:
         result["mbps"] *= peers
     return result
@@ -437,14 +485,20 @@ def _run_fanin_once(
             pushers.append(spawn_process(binary, "push-connect", connect_addr,
                                          str(size)))
         stdout, _ = pull.communicate(timeout=max(int(duration) + 10, 15))
+        pushers_cpu = sum(read_proc_cpu(p.pid) for p in pushers)
     except subprocess.TimeoutExpired:
         kill_process(pull)
         stdout = ""
+        pushers_cpu = 0.0
     finally:
         for p in pushers:
             kill_process(p)
         cleanup_ipc_socket(addr)
-    return parse_throughput(stdout, size)
+    result = parse_throughput(stdout, size)
+    if result and pushers_cpu > 0:
+        pull_cpu = result.get("pull_cpu", 0.0)
+        result["cpu_time"] = pushers_cpu + pull_cpu
+    return result
 
 
 def run_latency_cell(
@@ -457,12 +511,15 @@ def run_latency_cell(
 ) -> dict | None:
     if transport == "inproc":
         fresh_name = f"{addr}-{next_addr_id()}"
-        output = capture_process(
+        output, cpu = capture_with_cpu(
             binary, inproc_subcmd, fresh_name, str(size),
             str(iterations), str(warmup),
             timeout=timeout, env=env,
         )
-        return parse_latency(output)
+        result = parse_latency(output)
+        if result and cpu > 0:
+            result["cpu_time"] = cpu
+        return result
 
     addr = _fresh_addr(addr)
     cleanup_ipc_socket(addr)
@@ -827,7 +884,7 @@ def run_benchmarks(
                         )
                         cells[name] = result
                         if result:
-                            append_jsonl({
+                            row = {
                                 "run_id": run_id,
                                 "impl": name,
                                 "kind": "pub_sub",
@@ -836,7 +893,12 @@ def run_benchmarks(
                                 "msg_size": size,
                                 "msgs_s": round(result["msgs_s"], 1),
                                 "mbps": round(result["mbps"], 1),
-                            })
+                            }
+                            if "elapsed" in result:
+                                row["elapsed"] = round(result["elapsed"], 6)
+                            if "cpu_time" in result:
+                                row["cpu_time"] = round(result["cpu_time"], 6)
+                            append_jsonl(row)
 
                     line = f"{size_label(size):>10s}"
                     for name in pubsub_active:
@@ -869,7 +931,7 @@ def run_benchmarks(
                         )
                         cells[name] = result
                         if result:
-                            append_jsonl({
+                            row = {
                                 "run_id": run_id,
                                 "impl": name,
                                 "kind": "fan_out",
@@ -878,7 +940,12 @@ def run_benchmarks(
                                 "msg_size": size,
                                 "msgs_s": round(result["msgs_s"], 1),
                                 "mbps": round(result["mbps"], 1),
-                            })
+                            }
+                            if "elapsed" in result:
+                                row["elapsed"] = round(result["elapsed"], 6)
+                            if "cpu_time" in result:
+                                row["cpu_time"] = round(result["cpu_time"], 6)
+                            append_jsonl(row)
 
                     line = f"{size_label(size):>10s}"
                     for name in active:
@@ -911,7 +978,7 @@ def run_benchmarks(
                         )
                         cells[name] = result
                         if result:
-                            append_jsonl({
+                            row = {
                                 "run_id": run_id,
                                 "impl": name,
                                 "kind": "fan_in",
@@ -920,7 +987,12 @@ def run_benchmarks(
                                 "msg_size": size,
                                 "msgs_s": round(result["msgs_s"], 1),
                                 "mbps": round(result["mbps"], 1),
-                            })
+                            }
+                            if "elapsed" in result:
+                                row["elapsed"] = round(result["elapsed"], 6)
+                            if "cpu_time" in result:
+                                row["cpu_time"] = round(result["cpu_time"], 6)
+                            append_jsonl(row)
 
                     line = f"{size_label(size):>10s}"
                     for name in active:

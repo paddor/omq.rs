@@ -27,6 +27,19 @@ use zeromq::{
     SubSocket, ZmqMessage,
 };
 
+fn cpu_time_secs() -> f64 {
+    let mut usage = libc::rusage {
+        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ..unsafe { std::mem::zeroed() }
+    };
+    // SAFETY: passing a valid pointer to a zeroed rusage struct.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let u = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1e6;
+    let s = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1e6;
+    u + s
+}
+
 fn resolve_addr(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_digit()) {
         format!("tcp://127.0.0.1:{s}")
@@ -148,6 +161,8 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
     }
 
+    let cpu_before = cpu_time_secs();
+    let t0 = Instant::now();
     let mut rtts: Vec<u64> = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t = Instant::now();
@@ -155,6 +170,8 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
         req.recv().await.unwrap();
         rtts.push(t.elapsed().as_nanos() as u64);
     }
+    let elapsed = t0.elapsed().as_secs_f64();
+    let cpu = cpu_time_secs() - cpu_before;
     rtts.sort_unstable();
 
     let percentile = |sorted: &[u64], p: f64| -> f64 {
@@ -170,7 +187,7 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     let p99 = percentile(&rtts, 99.0);
     let p999 = percentile(&rtts, 99.9);
     let max = rtts[iterations - 1] as f64 / 1000.0;
-    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations}");
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
     std::process::exit(0);
 }
 

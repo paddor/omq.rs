@@ -4,7 +4,7 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Wire-compatible with libzmq, faster across all message sizes.
 
-- Two async backends: **tokio** (default, Linux/macOS) and **compio** (io_uring, Linux)
+- Two async backends: **tokio** (default, Linux/macOS/Windows) and **compio** (io_uring, Linux)
 - 20 socket types (11 standard + 9 draft), 8 transports (TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`)
 - 3 security mechanisms: PLAIN, CURVE, BLAKE3ZMQ
 - No C compiler, no vendored C, no libzmq, no libsodium
@@ -82,7 +82,7 @@ cargo add omq-tokio               # default: multi-thread tokio (Linux/macOS)
 
 Two backends with identical `Socket` APIs, verified by `coverage_matrix` + `interop_compio` test suites:
 
-- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS)
+- [`omq-tokio`](omq-tokio/): multi-thread tokio + mio (Linux/macOS/Windows)
 - [`omq-compio`](omq-compio/): single-thread io_uring/IOCP (Linux; not yet on crates.io)
 
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
@@ -142,7 +142,7 @@ Seven crates, one repo.
 | Crate | What it does |
 |-------|-------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions |
-| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS) |
+| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) |
 | [`omq-compio`](omq-compio/) | Single-thread io_uring / IOCP backend (Linux) |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq.so` drop-in) |
 | [`blume`](blume/) | Batching MPSC channel with swap-drain consumer |
@@ -163,8 +163,7 @@ covered by integration tests on both backends. The full suite:
   large-message throughput, multi-socket. Each scenario samples
   RSS and file-descriptor counts to detect leaks.
 - **Cross-runtime interop**: omq-compio <-> omq-tokio over TCP.
-- **Wire interop** with libzmq (C), pyzmq, and
-  [Pure Ruby OMQ](https://github.com/zeromq/omq.rb).
+- **Wire interop** with libzmq (C) and pyzmq.
 
 ```sh
 ./scripts/test-all.sh          # full sweep, both backends
@@ -187,13 +186,14 @@ OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 
 ## Platform and requirements
 
-Linux and macOS (and likely other mio targets). `omq-tokio` uses mio /
-epoll / kqueue. `omq-compio` uses io_uring (Linux 6.0+) and is not
-available on macOS.
+Linux, macOS, and Windows. `omq-tokio` uses mio / epoll / kqueue /
+IOCP. `omq-compio` uses io_uring (Linux 6.0+) and is not available on
+macOS or Windows.
 
 - Rust 1.93 or newer (edition 2024).
 - `omq-compio`: Linux 6.0 or newer (io_uring multi-shot recv with
   provided buffers).
+- IPC transport is not available on Windows.
 
 ## Contributing
 

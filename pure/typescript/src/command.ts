@@ -1,6 +1,7 @@
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
+/** ZMQ socket type names as used in the ZMTP handshake. */
 export type SocketTypeName =
   | "REQ" | "REP"
   | "PUB" | "SUB" | "XPUB" | "XSUB"
@@ -8,9 +9,13 @@ export type SocketTypeName =
   | "DEALER" | "ROUTER"
   | "PAIR"
 
+/** Properties received in the peer's READY command during ZMTP handshake. */
 export interface PeerProperties {
+  /** The peer's socket type (e.g. "PUB", "ROUTER"). */
   socketType?: string
+  /** The peer's identity, if set. */
   identity?: Uint8Array
+  /** Any additional properties sent by the peer. */
   other: Map<string, Uint8Array>
 }
 

@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@paddor/lz4rip@*": "0.1.0",
     "jsr:@paddor/lz4rip@0.1": "0.1.0"
   },
   "jsr": {
@@ -11,6 +12,13 @@
   "workspace": {
     "dependencies": [
       "jsr:@paddor/lz4rip@0.1"
-    ]
+    ],
+    "packageJson": {
+      "dependencies": [
+        "npm:@jsr/paddor__lz4rip@0.2",
+        "npm:@types/node@26",
+        "npm:vitest@^4.1.9"
+      ]
+    }
   }
 }

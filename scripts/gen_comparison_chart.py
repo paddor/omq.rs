@@ -25,6 +25,8 @@ COLORS = {
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
     "omq-libzmq": "#06b6d4",
+    "monocoque": "#db2777",
+    "celerity": "#0d9488",
 }
 
 LABELS = {
@@ -36,6 +38,8 @@ LABELS = {
     "zmq.rs": "zmq.rs v0.6.0",
     "rzmq": "rzmq v0.5.18",
     "omq-libzmq": "omq-libzmq",
+    "monocoque": "monocoque v0.1.0",
+    "celerity": "celerity v0.1.1",
 }
 
 
@@ -311,7 +315,7 @@ def draw_throughput_panel(
 
     # dashed msg/s lines
     draw_order = [name for name in
-                  ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["celerity", "monocoque", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio",
                    "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
@@ -378,7 +382,7 @@ def draw_latency_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs",
+                  ["celerity", "monocoque", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq", "zmq.rs",
                    "omq-compio-st", "omq-compio"]
                   if name in impls]
     for name in draw_order:
@@ -537,7 +541,7 @@ def draw_throughput_cpu_panel(
     L.append(svg_text(40, mid_y, "CPU %", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["celerity", "monocoque", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
                    "omq-compio-st", "omq-compio", "rzmq", "zmq.rs"]
                   if name in impls]
 
@@ -637,7 +641,7 @@ def draw_latency_cpu_panel(
     L.append(svg_text(40, mid_y, "p50 latency (µs)", weight="600", rotate=-90))
 
     draw_order = [name for name in
-                  ["libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
+                  ["celerity", "monocoque", "libzmq", "omq-libzmq", "omq-tokio-mt", "omq-tokio",
                    "rzmq", "zmq.rs", "omq-compio-st", "omq-compio"]
                   if name in impls]
 
@@ -682,36 +686,58 @@ def detect_hardware() -> str | None:
     return _detect()
 
 
+def _legend_extra(n_items: int, show_st_mt: bool = False) -> float:
+    """Pre-compute vertical space consumed by the legend."""
+    row_gap = 20
+    n_rows = 2 if n_items > 4 else 1
+    extra = (n_rows - 1) * row_gap
+    if show_st_mt:
+        extra += 18
+    return extra
+
+
 def _draw_impl_legend(L: list[str], impls: list[str], mid_x: float, leg_y: float,
                       label_overrides: dict | None = None,
                       show_st_mt: bool = False) -> float:
-    """Draw impl legend. Returns extra vertical space consumed (0 or 18)."""
+    """Draw impl legend in up to two rows. Returns extra vertical space consumed."""
     legend_items = [(k, (label_overrides or {}).get(k, LABELS[k])) for k in impls if k in COLORS]
     item_w = 145 if show_st_mt else 125
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
+    row_gap = 20
 
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="11" font-weight="500">{label}</text>'
-        )
+    if len(legend_items) > 4:
+        mid = (len(legend_items) + 1) // 2
+        rows = [legend_items[:mid], legend_items[mid:]]
+    else:
+        rows = [legend_items]
+
+    extra = 0
+    for row_idx, row in enumerate(rows):
+        ry = leg_y + row_idx * row_gap
+        total_w = len(row) * item_w
+        start_x = mid_x - total_w / 2
+        for i, (key, label) in enumerate(row):
+            lx = start_x + i * item_w
+            c = COLORS[key]
+            L.append(
+                f'  <line x1="{lx:.0f}" y1="{ry}" x2="{lx + 14:.0f}" y2="{ry}"'
+                f' stroke="{c}" stroke-width="2.5"/>'
+            )
+            L.append(f'  <circle cx="{lx + 7:.0f}" cy="{ry}" r="2.5" fill="{c}"/>')
+            L.append(
+                f'  <text x="{lx + 20:.0f}" y="{ry + 4}" fill="#374151"'
+                f' font-size="11" font-weight="500">{label}</text>'
+            )
+    extra = (len(rows) - 1) * row_gap
 
     if show_st_mt:
+        st_y = leg_y + extra + 18
         L.append(
-            f'  <text x="{mid_x}" y="{leg_y + 18}" text-anchor="middle"'
+            f'  <text x="{mid_x}" y="{st_y}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="9">'
             f'ST = single-threaded   MT = multi-threaded</text>'
         )
-        return 18
-    return 0
+        extra += 18
+    return extra
 
 
 def generate_chart(data: dict, impls: list[str], transport_label: str,
@@ -860,6 +886,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     sizes = data["sizes"]
     tput = data["tput"]
     tput_cpu = data.get("tput_cpu", {})
+    has_data = {name for s in sizes for name in tput.get(s, {})}
+    impls = [i for i in impls if i in has_data]
     n = len(sizes)
     if n < 2:
         print(f"WARNING: only {n} data points for {transport_label}", file=sys.stderr)
@@ -874,8 +902,8 @@ def generate_chart_cpu(data: dict, impls: list[str], transport_label: str,
     mid_x = (x_left + x_right) / 2
     right_pad = 15
     svg_w = x_right2 + 80 + right_pad
-    st_mt_extra = 18 if show_st_mt else 0
-    svg_h = 520 + hw_offset + st_mt_extra
+    leg_extra = _legend_extra(len(impls), show_st_mt)
+    svg_h = 520 + hw_offset + leg_extra
 
     t1_y_top = 35 + hw_offset
     t1_y_bot = 400 + hw_offset
@@ -956,6 +984,8 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
     sizes = data["sizes"]
     lat = data["lat"]
     lat_cpu = data.get("lat_cpu", {})
+    has_data = {name for s in sizes for name in lat.get(s, {})}
+    impls = [i for i in impls if i in has_data]
     n = len(sizes)
     if n < 2:
         return ""
@@ -965,9 +995,9 @@ def generate_latency_chart_cpu(data: dict, impls: list[str], transport_label: st
         return ""
 
     hw_offset = 14 if hw_label else 0
-    st_mt_extra = 18 if show_st_mt else 0
+    leg_extra = _legend_extra(len(impls), show_st_mt)
     svg_w = 850
-    svg_h = 320 + hw_offset + st_mt_extra
+    svg_h = 320 + hw_offset + leg_extra
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
@@ -1086,7 +1116,7 @@ def generate_pubsub_chart(
     gap = 70
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20
+    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + _legend_extra(len(impls))
     x_left, x_right = 90, 760
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
@@ -1137,26 +1167,9 @@ def generate_pubsub_chart(
 
     last_bot = hw_offset + 35 + (len(panels) - 1) * (panel_h + gap) + panel_h
     leg_y = last_bot + 40
+    extra = _draw_impl_legend(L, impls, mid_x, leg_y)
 
-    legend_items = [(k, LABELS[k]) for k in impls if k in COLORS]
-    item_w = 125
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
-
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="11" font-weight="500">{label}</text>'
-        )
-
-    lt_y = leg_y + 22
+    lt_y = leg_y + 22 + extra
     lt_total = 320
     lt_start = mid_x - lt_total / 2
 
@@ -1243,10 +1256,10 @@ def generate_multi_panel_cpu_chart(
     panel_h = 260
     gap = 70
     hw_offset = 14 if hw_label else 0
-    st_mt_extra = 18 if show_st_mt else 0
+    leg_extra = _legend_extra(len(impls), show_st_mt)
     right_pad = 15
     svg_w = x_right2 + 80 + right_pad
-    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + st_mt_extra
+    svg_h = hw_offset + 35 + len(panels) * (panel_h + gap) + 20 + leg_extra
     mid_x = (x_left + x_right) / 2
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
@@ -1367,11 +1380,13 @@ def main():
             print(f"Written: {out}", file=sys.stderr)
 
     # ── Cross-impl charts (other impls vs slowest omq) ────────
-    alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
+    alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq", "monocoque", "celerity"]
     vs_overrides = {
         "omq-tokio": "omq-tokio (ST)",
         "zmq.rs": "zmq.rs v0.6.0 (MT)",
         "rzmq": "rzmq v0.5.18 (MT)",
+        "monocoque": "monocoque v0.1.0 (ST)",
+        "celerity": "celerity v0.1.1 (ST)",
     }
 
     for transport, impls, label, log in [
@@ -1487,8 +1502,8 @@ def main():
 
     # ── Main hero chart (all impls, throughput only) ─────────────
     from gen_main_chart import generate_main_chart, load_data as load_main_data
-    tput, lat = load_main_data()
-    svg = generate_main_chart(tput, lat, hw)
+    tput, lat, msgs = load_main_data()
+    svg = generate_main_chart(tput, lat, msgs, hw)
     if svg:
         out = REPO / "doc" / "charts" / "main_tcp.svg"
         out.parent.mkdir(parents=True, exist_ok=True)

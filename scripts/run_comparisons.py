@@ -654,6 +654,16 @@ IMPLS = {
         "inproc_pubsub_subcmd": "inproc-pubsub",
         "supports_pubsub": True,
     },
+    "monocoque": {
+        "prefix": "n",
+        "transports": ["tcp"],
+        "supports_pubsub": True,
+    },
+    "celerity": {
+        "prefix": "y",
+        "transports": ["tcp"],
+        "supports_pubsub": True,
+    },
 }
 
 PUBSUB_PEER_COUNTS = [1, 8, 64]
@@ -727,6 +737,24 @@ def build_peers(impl_names: set[str], ws_needed: bool):
             check=True,
         )
         binaries["omq-libzmq"] = str(out)
+
+    if "monocoque" in impl_names:
+        print("==> building monocoque bench_peer...", file=sys.stderr)
+        mcq_dir = ROOT / "scripts" / "monocoque_bench_peer"
+        subprocess.run(
+            ["cargo", "build", "--release", "-q"],
+            cwd=mcq_dir, check=True,
+        )
+        binaries["monocoque"] = str(mcq_dir / "target" / "release" / "monocoque_bench_peer")
+
+    if "celerity" in impl_names:
+        print("==> building celerity bench_peer...", file=sys.stderr)
+        cel_dir = ROOT / "scripts" / "celerity_bench_peer"
+        subprocess.run(
+            ["cargo", "build", "--release", "-q"],
+            cwd=cel_dir, check=True,
+        )
+        binaries["celerity"] = str(cel_dir / "target" / "release" / "celerity_bench_peer")
 
     return binaries
 
@@ -1113,6 +1141,10 @@ def main():
         versions.append(f"rzmq {cargo_version('rzmq', manifest=ROOT / 'scripts' / 'rzmq_bench_peer' / 'Cargo.toml')}")
     if "omq-libzmq" in impl_names:
         versions.append(f"omq-libzmq {cargo_version('omq-libzmq')}")
+    if "monocoque" in impl_names:
+        versions.append(f"monocoque {cargo_version('monocoque-rs', manifest=ROOT / 'scripts' / 'monocoque_bench_peer' / 'Cargo.toml')}")
+    if "celerity" in impl_names:
+        versions.append(f"celerity {cargo_version('celerity', manifest=ROOT / 'scripts' / 'celerity_bench_peer' / 'Cargo.toml')}")
     print(" vs ".join(versions), file=sys.stderr)
 
     base_port = args.base_port or random.randint(20_000, 40_000)

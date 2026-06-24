@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 875 534" font-family="system-ui, -apple-system, sans-serif">
-  <rect width="875" height="534" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 875 554" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="875" height="554" fill="white"/>
   <text x="395.0" y="32.0" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH/PULL throughput: inproc</text>
   <line x1="90.0" y1="368.4" x2="700.0" y2="368.4" stroke="#e5e7eb" stroke-width="1"/>
   <text x="82.0" y="368.4" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">50%</text>
@@ -155,26 +155,26 @@
   <text x="649.2" y="428.0" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
   <text x="700.0" y="428.0" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
   <text x="395.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 6 cores, performance governor, turbo off</text>
-  <line x1="82" y1="454" x2="96" y2="454" stroke="#eab308" stroke-width="2.5"/>
-  <circle cx="90" cy="454" r="2.5" fill="#eab308"/>
-  <text x="102" y="458" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5</text>
-  <line x1="208" y1="454" x2="222" y2="454" stroke="#7c3aed" stroke-width="2.5"/>
-  <circle cx="214" cy="454" r="2.5" fill="#7c3aed"/>
-  <text x="228" y="458" fill="#374151" font-size="11" font-weight="500">omq-compio (MT)</text>
-  <line x1="332" y1="454" x2="346" y2="454" stroke="#ff69b4" stroke-width="2.5"/>
-  <circle cx="340" cy="454" r="2.5" fill="#ff69b4"/>
-  <text x="352" y="458" fill="#374151" font-size="11" font-weight="500">omq-compio (ST)</text>
-  <line x1="458" y1="454" x2="472" y2="454" stroke="#f97316" stroke-width="2.5"/>
-  <circle cx="464" cy="454" r="2.5" fill="#f97316"/>
-  <text x="478" y="458" fill="#374151" font-size="11" font-weight="500">omq-tokio</text>
-  <line x1="582" y1="454" x2="596" y2="454" stroke="#dc2626" stroke-width="2.5"/>
-  <circle cx="590" cy="454" r="2.5" fill="#dc2626"/>
-  <text x="602" y="458" fill="#374151" font-size="11" font-weight="500">omq-tokio (MT)</text>
-  <line x1="145" y1="476" x2="159" y2="476" stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>
-  <text x="165" y="480" fill="#6b7280" font-size="10">CPU % (left)</text>
-  <line x1="290" y1="476" x2="304" y2="476" stroke="#6b7280" stroke-width="2.5"/>
-  <circle cx="297" cy="476" r="2" fill="#6b7280"/>
-  <text x="310" y="480" fill="#6b7280" font-size="10">GB/s (inner right, log)</text>
-  <line x1="455" y1="476" x2="469" y2="476" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3"/>
-  <text x="475" y="480" fill="#6b7280" font-size="10">msg/s (outer right)</text>
+  <line x1="208" y1="454" x2="222" y2="454" stroke="#eab308" stroke-width="2.5"/>
+  <circle cx="214" cy="454" r="2.5" fill="#eab308"/>
+  <text x="228" y="458" fill="#374151" font-size="11" font-weight="500">libzmq v4.3.5</text>
+  <line x1="332" y1="454" x2="346" y2="454" stroke="#7c3aed" stroke-width="2.5"/>
+  <circle cx="340" cy="454" r="2.5" fill="#7c3aed"/>
+  <text x="352" y="458" fill="#374151" font-size="11" font-weight="500">omq-compio (MT)</text>
+  <line x1="458" y1="454" x2="472" y2="454" stroke="#ff69b4" stroke-width="2.5"/>
+  <circle cx="464" cy="454" r="2.5" fill="#ff69b4"/>
+  <text x="478" y="458" fill="#374151" font-size="11" font-weight="500">omq-compio (ST)</text>
+  <line x1="270" y1="474" x2="284" y2="474" stroke="#f97316" stroke-width="2.5"/>
+  <circle cx="277" cy="474" r="2.5" fill="#f97316"/>
+  <text x="290" y="478" fill="#374151" font-size="11" font-weight="500">omq-tokio</text>
+  <line x1="395" y1="474" x2="409" y2="474" stroke="#dc2626" stroke-width="2.5"/>
+  <circle cx="402" cy="474" r="2.5" fill="#dc2626"/>
+  <text x="415" y="478" fill="#374151" font-size="11" font-weight="500">omq-tokio (MT)</text>
+  <line x1="145" y1="496" x2="159" y2="496" stroke="#6b7280" stroke-width="2" stroke-dasharray="2,3" opacity="0.7"/>
+  <text x="165" y="500" fill="#6b7280" font-size="10">CPU % (left)</text>
+  <line x1="290" y1="496" x2="304" y2="496" stroke="#6b7280" stroke-width="2.5"/>
+  <circle cx="297" cy="496" r="2" fill="#6b7280"/>
+  <text x="310" y="500" fill="#6b7280" font-size="10">GB/s (inner right, log)</text>
+  <line x1="455" y1="496" x2="469" y2="496" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="475" y="500" fill="#6b7280" font-size="10">msg/s (outer right)</text>
 </svg>

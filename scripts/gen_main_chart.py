@@ -21,7 +21,7 @@ JSONL_PATH = CACHE_DIR / "comparisons.jsonl"
 sys.path.insert(0, str(REPO / "scripts"))
 from chart_hw import detect_hardware
 
-IMPLS = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq"]
+IMPLS = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt", "zmq.rs", "rzmq", "monocoque", "celerity"]
 
 COLORS = {
     "libzmq": "#eab308",
@@ -30,6 +30,8 @@ COLORS = {
     "omq-tokio-mt": "#dc2626",
     "zmq.rs": "#2563eb",
     "rzmq": "#16a34a",
+    "monocoque": "#db2777",
+    "celerity": "#0d9488",
 }
 
 LABELS = {
@@ -39,9 +41,11 @@ LABELS = {
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0 (MT)",
     "rzmq": "rzmq v0.5.18 (MT)",
+    "monocoque": "monocoque v0.1.0 (ST)",
+    "celerity": "celerity v0.1.1 (ST)",
 }
 
-DRAW_ORDER = ["rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio", "omq-compio"]
+DRAW_ORDER = ["celerity", "monocoque", "rzmq", "zmq.rs", "libzmq", "omq-tokio-mt", "omq-tokio", "omq-compio"]
 
 
 def fmt_size(b: int) -> str:
@@ -296,7 +300,7 @@ def draw_latency_panel(
     L.append(svg_line(x_left, y_top, x_left, y_bot, stroke="#9ca3af", width=1.5))
     L.append(svg_line(x_left, y_bot, x_right, y_bot, stroke="#9ca3af", width=1.5))
 
-    lat_draw_order = ["libzmq", "omq-tokio-mt", "omq-tokio", "rzmq",
+    lat_draw_order = ["celerity", "monocoque", "libzmq", "omq-tokio-mt", "omq-tokio", "rzmq",
                       "zmq.rs", "omq-compio"]
     for name in lat_draw_order:
         pts = [
@@ -323,7 +327,7 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
     x_pad_left = 70
     panel_gap_x = 40
     x_pad_right = 70
-    legend_h = 60
+    legend_h = 80
 
     svg_w = 950
     total_w = svg_w - x_pad_left - x_pad_right - panel_gap_x
@@ -366,28 +370,42 @@ def generate_main_chart(tput: dict, lat: dict, msgs: dict,
                           tput, p2_xl, p2_xr, row_top, row_bot,
                           "medium/large messages (higher is better)")
 
-    # Legend
+    # Legend (two rows when > 4 items, only impls with data)
+    all_sizes = small_sizes + large_sizes
+    has_data = {name for s in all_sizes for name in tput.get(s, {})} | \
+               {name for s in all_sizes for name in msgs.get(s, {})}
     leg_y = row_bot + 30
-    legend_items = [(k, LABELS[k]) for k in IMPLS if k in COLORS]
-    item_w = (svg_w - 40) / len(legend_items)
-    start_x = 20
+    legend_items = [(k, LABELS[k]) for k in IMPLS if k in COLORS and k in has_data]
+    row_gap = 20
+    item_w = 170
 
-    for i, (key, label) in enumerate(legend_items):
-        lx = start_x + i * item_w
-        c = COLORS[key]
-        L.append(
-            f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
-            f' stroke="{c}" stroke-width="2.5" stroke-linecap="round"/>'
-        )
-        L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{c}"/>')
-        L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
-            f' font-size="10" font-weight="500">{label}</text>'
-        )
+    if len(legend_items) > 4:
+        mid_leg = (len(legend_items) + 1) // 2
+        rows = [legend_items[:mid_leg], legend_items[mid_leg:]]
+    else:
+        rows = [legend_items]
 
-    abbr_y = leg_y + 18
+    for row_idx, row in enumerate(rows):
+        ry = leg_y + row_idx * row_gap
+        total_w = len(row) * item_w
+        row_start_x = mid_x - total_w / 2
+        for i, (key, label) in enumerate(row):
+            lx = row_start_x + i * item_w
+            c = COLORS[key]
+            L.append(
+                f'  <line x1="{lx:.0f}" y1="{ry}" x2="{lx + 14:.0f}" y2="{ry}"'
+                f' stroke="{c}" stroke-width="2.5" stroke-linecap="round"/>'
+            )
+            L.append(f'  <circle cx="{lx + 7:.0f}" cy="{ry}" r="2.5" fill="{c}"/>')
+            L.append(
+                f'  <text x="{lx + 20:.0f}" y="{ry + 4}" fill="#374151"'
+                f' font-size="10" font-weight="500">{label}</text>'
+            )
+
+    leg_extra = (len(rows) - 1) * row_gap
+    abbr_y = leg_y + leg_extra + 18
     L.append(svg_text(mid_x, abbr_y,
-                       "ST = single-threaded   MT = multi-threaded",
+                       "ST = single-threaded   MT = multi-threaded",
                        size=9, fill="#9ca3af"))
 
     L.append("</svg>")

@@ -29,6 +29,10 @@ export abstract class Socket {
   protected opts: SocketOptions
   /** @ignore */
   protected identity: Uint8Array
+  /** @ignore */
+  protected messageQueue: Message[] = []
+  /** @ignore */
+  protected messageWaiters: Array<(msg: Message) => void> = []
 
   private readyWaiters: Array<(conn: Connection) => void> = []
   private pendingSends: Array<{ msg: Message; resolve: () => void }> = []
@@ -50,6 +54,7 @@ export abstract class Socket {
       maxMessageSize: this.opts.maxMessageSize,
       onReady: (conn) => this.onConnectionReady(conn),
       onMessage: (conn, msg) => this.onConnectionMessage(conn, msg),
+      onCommand: (conn, name, body) => this.onCommand(conn, name, body),
       onClose: (conn) => this.onConnectionClosed(conn),
       onError: (_conn, err) => this.onConnectionError(err),
     }
@@ -112,8 +117,32 @@ export abstract class Socket {
   }
 
   /** @ignore */
+  protected onCommand(_conn: Connection, _name: string, _body: Uint8Array): void {
+    // Subclasses can override
+  }
+
+  /** @ignore */
   protected onConnectionError(_err: Error): void {
     // Subclasses can override
+  }
+
+  /** @ignore */
+  protected enqueueMessage(msg: Message): void {
+    const waiter = this.messageWaiters.shift()
+    if (waiter) {
+      waiter(msg)
+    } else {
+      this.messageQueue.push(msg)
+    }
+  }
+
+  /** @ignore */
+  protected dequeueMessage(): Promise<Message> {
+    const queued = this.messageQueue.shift()
+    if (queued) return Promise.resolve(queued)
+    return new Promise((resolve) => {
+      this.messageWaiters.push(resolve)
+    })
   }
 
   /** @ignore */

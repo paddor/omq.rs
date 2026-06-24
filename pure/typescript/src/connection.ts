@@ -25,6 +25,7 @@ export interface ConnectionOptions {
   maxMessageSize?: number
   onReady?: (conn: Connection) => void
   onMessage?: (conn: Connection, msg: Message) => void
+  onCommand?: (conn: Connection, name: string, body: Uint8Array) => void
   onClose?: (conn: Connection) => void
   onError?: (conn: Connection, error: Error) => void
 }
@@ -132,6 +133,10 @@ export class Connection {
     }
 
     if (frame.flag === FLAG_COMMAND) {
+      if (this.opts.onCommand) {
+        const cmd = decodeCommand(frame.payload)
+        this.opts.onCommand(this, cmd.name, cmd.body)
+      }
       return
     }
 

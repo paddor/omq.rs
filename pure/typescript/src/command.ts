@@ -8,6 +8,10 @@ export type SocketTypeName =
   | "PUSH" | "PULL"
   | "DEALER" | "ROUTER"
   | "PAIR"
+  | "CLIENT" | "SERVER"
+  | "RADIO" | "DISH"
+  | "GATHER" | "SCATTER"
+  | "PEER" | "CHANNEL"
 
 /** Properties received in the peer's READY command during ZMTP handshake. */
 export interface PeerProperties {
@@ -118,5 +122,23 @@ export function encodeCancel(prefix: Uint8Array): Uint8Array {
   buf[0] = name.byteLength
   buf.set(name, 1)
   buf.set(prefix, 1 + name.byteLength)
+  return buf
+}
+
+export function encodeJoin(group: Uint8Array): Uint8Array {
+  const name = encoder.encode("JOIN")
+  const buf = new Uint8Array(1 + name.byteLength + group.byteLength)
+  buf[0] = name.byteLength
+  buf.set(name, 1)
+  buf.set(group, 1 + name.byteLength)
+  return buf
+}
+
+export function encodeLeave(group: Uint8Array): Uint8Array {
+  const name = encoder.encode("LEAVE")
+  const buf = new Uint8Array(1 + name.byteLength + group.byteLength)
+  buf[0] = name.byteLength
+  buf.set(name, 1)
+  buf.set(group, 1 + name.byteLength)
   return buf
 }

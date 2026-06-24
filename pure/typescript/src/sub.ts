@@ -14,8 +14,6 @@ export class Sub extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "SUB"
   private subscriptions: Set<string> = new Set()
-  private messageQueue: Message[] = []
-  private messageWaiters: Array<(msg: Message) => void> = []
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
@@ -43,11 +41,7 @@ export class Sub extends Socket {
 
   /** Wait for the next message. Resolves immediately if one is queued. */
   async recv(): Promise<Message> {
-    const queued = this.messageQueue.shift()
-    if (queued) return queued
-    return new Promise((resolve) => {
-      this.messageWaiters.push(resolve)
-    })
+    return this.dequeueMessage()
   }
 
   /** Async iterator that yields messages until all connections close. */
@@ -67,11 +61,6 @@ export class Sub extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(_conn: Connection, msg: Message): void {
-    const waiter = this.messageWaiters.shift()
-    if (waiter) {
-      waiter(msg)
-    } else {
-      this.messageQueue.push(msg)
-    }
+    this.enqueueMessage(msg)
   }
 }

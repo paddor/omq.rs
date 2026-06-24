@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@paddor/lz4rip": "npm:@jsr/paddor__lz4rip@^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "vitest": "^4.1.9"
+  }
+}

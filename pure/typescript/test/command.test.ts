@@ -5,6 +5,8 @@ import {
   decodeReadyProperties,
   encodeSubscribe,
   encodeCancel,
+  encodeJoin,
+  encodeLeave,
 } from "../src/command.ts"
 
 const enc = new TextEncoder()
@@ -112,6 +114,33 @@ describe("encodeCancel", () => {
   })
 })
 
+describe("encodeJoin", () => {
+  it("encodes JOIN with group name", () => {
+    const group = enc.encode("stocks")
+    const buf = encodeJoin(group)
+    const cmd = decodeCommand(buf)
+    expect(cmd.name).toBe("JOIN")
+    expect(new TextDecoder().decode(cmd.body)).toBe("stocks")
+  })
+
+  it("encodes JOIN with empty group", () => {
+    const buf = encodeJoin(new Uint8Array(0))
+    const cmd = decodeCommand(buf)
+    expect(cmd.name).toBe("JOIN")
+    expect(cmd.body.byteLength).toBe(0)
+  })
+})
+
+describe("encodeLeave", () => {
+  it("encodes LEAVE with group name", () => {
+    const group = enc.encode("stocks")
+    const buf = encodeLeave(group)
+    const cmd = decodeCommand(buf)
+    expect(cmd.name).toBe("LEAVE")
+    expect(new TextDecoder().decode(cmd.body)).toBe("stocks")
+  })
+})
+
 describe("decodeCommand edge cases", () => {
   it("parses unknown command and preserves body", () => {
     const name = enc.encode("FOOBAR")
@@ -157,6 +186,15 @@ describe("encodeReady wire format details", () => {
 
   it("encodes all standard socket types", () => {
     for (const st of ["REQ", "REP", "PUB", "SUB", "PUSH", "PULL", "DEALER", "ROUTER", "PAIR"] as const) {
+      const buf = encodeReady(st, new Uint8Array(0))
+      const cmd = decodeCommand(buf)
+      const props = decodeReadyProperties(cmd.body)
+      expect(props.socketType).toBe(st)
+    }
+  })
+
+  it("encodes all draft socket types", () => {
+    for (const st of ["CLIENT", "SERVER", "RADIO", "DISH", "GATHER", "SCATTER", "PEER", "CHANNEL"] as const) {
       const buf = encodeReady(st, new Uint8Array(0))
       const cmd = decodeCommand(buf)
       const props = decodeReadyProperties(cmd.body)

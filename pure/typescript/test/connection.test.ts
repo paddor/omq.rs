@@ -1,8 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { encodeReady, decodeCommand, decodeReadyProperties } from "../src/command.ts"
+import { readFileSync } from "node:fs"
+import { resolve, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
+import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest"
+import { initSyncFromBytes } from "@paddor/lz4rip"
+import { encodeReady, encodeSubscribe, decodeCommand, decodeReadyProperties } from "../src/command.ts"
 import { encodeZwsFrame, encodeCommandFrame, FLAG_FINAL, FLAG_MORE, FLAG_COMMAND } from "../src/zws.ts"
 import { Connection } from "../src/connection.ts"
 import { Message } from "../src/message.ts"
+
+beforeAll(() => {
+  const wasmPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../node_modules/@paddor/lz4rip/src/pkg/lz4rip.wasm",
+  )
+  initSyncFromBytes(readFileSync(wasmPath))
+})
 
 // Mock WebSocket for Node.js environment
 class MockWebSocket {
@@ -416,7 +428,7 @@ describe("Connection", () => {
     expect(msg2.string(1)).toBe("d")
   })
 
-  it("ignores command frames after handshake", () => {
+  it("does not deliver command frames as messages", () => {
     const onMessage = vi.fn()
     new Connection("ws://localhost:8081", {
       socketType: "SUB",
@@ -427,11 +439,29 @@ describe("Connection", () => {
     lastCreatedWs!.simulateOpen()
     lastCreatedWs!.simulateMessage(serverReady())
 
-    // Server sends a PING command — should be ignored
     const pingCmd = new Uint8Array([4, 0x50, 0x49, 0x4e, 0x47, 0x00, 0x00])
     lastCreatedWs!.simulateMessage(encodeCommandFrame(pingCmd))
 
     expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it("delivers command frames via onCommand callback", () => {
+    const onCommand = vi.fn()
+    new Connection("ws://localhost:8081", {
+      socketType: "PUB",
+      identity: new Uint8Array(0),
+      onCommand,
+    })
+
+    lastCreatedWs!.simulateOpen()
+    lastCreatedWs!.simulateMessage(serverReady())
+
+    const subscribeCmd = encodeSubscribe(new TextEncoder().encode("market."))
+    lastCreatedWs!.simulateMessage(encodeCommandFrame(subscribeCmd))
+
+    expect(onCommand).toHaveBeenCalledTimes(1)
+    expect(onCommand.mock.calls[0]![1]).toBe("SUBSCRIBE")
+    expect(new TextDecoder().decode(onCommand.mock.calls[0]![2])).toBe("market.")
   })
 
   it("sends empty-body part correctly", () => {

@@ -15,4 +15,6 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - run: npm install
+      - run: npx vitest run
       - run: deno publish

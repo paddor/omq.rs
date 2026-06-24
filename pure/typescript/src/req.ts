@@ -3,16 +3,26 @@ import type { Connection } from "./connection.ts"
 import { Message } from "./message.ts"
 import { Socket, type SocketOptions } from "./socket.ts"
 
+/**
+ * REQ (request) socket. Sends a message and awaits exactly one reply
+ * before the next send is allowed (strict request-reply alternation).
+ */
 export class Req extends Socket {
+  /** @ignore */
   protected readonly socketType: SocketTypeName = "REQ"
   private pendingReply: ((msg: Message) => void) | null = null
   private replyConnection: Connection | null = null
   private rrIndex = 0
 
+  /** @ignore */
   constructor(opts?: SocketOptions) {
     super(opts)
   }
 
+  /**
+   * Send a request and wait for the reply. Throws if a previous request
+   * is still pending.
+   */
   async send(msg: Message): Promise<Message> {
     if (this.pendingReply) {
       throw new Error("REQ socket must receive a reply before sending again")
@@ -36,6 +46,7 @@ export class Req extends Socket {
     })
   }
 
+  /** @ignore */
   protected override onConnectionMessage(_conn: Connection, msg: Message): void {
     if (!this.pendingReply) return
 

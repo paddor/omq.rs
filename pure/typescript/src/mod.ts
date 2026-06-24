@@ -20,8 +20,10 @@
  * ```
  */
 
+/** Initialize the LZ4 WASM module. Call once before connecting to `lz4+` URLs. */
 export { init as initLz4 } from "@paddor/lz4rip"
 export { Message } from "./message.ts"
+export { Socket } from "./socket.ts"
 export { Req } from "./req.ts"
 export { Sub } from "./sub.ts"
 export { Push } from "./push.ts"

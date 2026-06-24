@@ -11,13 +11,6 @@
   "workspace": {
     "dependencies": [
       "jsr:@paddor/lz4rip@0.1"
-    ],
-    "packageJson": {
-      "dependencies": [
-        "npm:@types/node@^25.9.1",
-        "npm:typescript@^5.8.0",
-        "npm:vitest@3"
-      ]
-    }
+    ]
   }
 }

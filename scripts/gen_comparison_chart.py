@@ -38,7 +38,7 @@ LABELS = {
     "zmq.rs": "zmq.rs v0.6.0",
     "rzmq": "rzmq v0.5.18",
     "omq-libzmq": "omq-libzmq",
-    "monocoque": "monocoque v0.1.0",
+    "monocoque": "monocoque v0.1.3",
     "celerity": "celerity v0.1.1",
 }
 

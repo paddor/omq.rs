@@ -41,7 +41,7 @@ LABELS = {
     "omq-tokio-mt": "omq-tokio (MT)",
     "zmq.rs": "zmq.rs v0.6.0 (MT)",
     "rzmq": "rzmq v0.5.18 (MT)",
-    "monocoque": "monocoque v0.1.0 (ST)",
+    "monocoque": "monocoque v0.1.3 (ST)",
     "celerity": "celerity v0.1.1 (ST)",
 }
 

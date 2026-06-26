@@ -13,7 +13,30 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use compio::net::{TcpListener, TcpStream};
-use monocoque::zmq::{PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, SubSocket};
+use monocoque::zmq::{
+    PubSocket, PullSocket, PushSocket, RepSocket, ReqSocket, SocketOptions, SubSocket,
+};
+
+const DEFAULT_BUFFER_SIZE: usize = 256 * 1024;
+
+fn buffer_size() -> usize {
+    std::env::var("MCQ_BUFFER_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_BUFFER_SIZE)
+}
+
+fn throughput_push_options() -> SocketOptions {
+    let buf = buffer_size();
+    SocketOptions::new()
+        .with_write_coalescing(true)
+        .with_write_buffer_size(buf)
+}
+
+fn throughput_pull_options() -> SocketOptions {
+    let buf = buffer_size();
+    SocketOptions::new().with_read_buffer_size(buf)
+}
 
 fn cpu_time_secs() -> f64 {
     let mut usage = libc::rusage {
@@ -106,7 +129,10 @@ async fn bind_and_accept(addr: &str) -> (u16, TcpStream) {
 
 async fn run_push(addr: &str, size: usize) {
     let (_, stream) = bind_and_accept(addr).await;
-    let mut push = PushSocket::from_tcp(stream).await.expect("push handshake");
+    let options = throughput_push_options();
+    let mut push = PushSocket::from_tcp_with_options(stream, options)
+        .await
+        .expect("push handshake");
     let payload = Bytes::from(vec![b'x'; size]);
     loop {
         let _ = push.send(vec![payload.clone()]).await;
@@ -114,7 +140,10 @@ async fn run_push(addr: &str, size: usize) {
 }
 
 async fn run_pull(addr: &str, size: usize, duration: Duration) {
-    let mut pull = PullSocket::connect(addr).await.expect("pull connect");
+    let options = throughput_pull_options();
+    let mut pull = PullSocket::connect_with_options(addr, options)
+        .await
+        .expect("pull connect");
 
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();

@@ -38,7 +38,7 @@ LABELS = {
     "zmq.rs": "zmq.rs v0.6.0",
     "rzmq": "rzmq v0.5.18",
     "omq-libzmq": "omq-libzmq",
-    "monocoque": "monocoque v0.1.3",
+    "monocoque": "monocoque v0.1.4",
     "celerity": "celerity v0.1.1",
 }
 
@@ -1385,7 +1385,7 @@ def main():
         "omq-tokio": "omq-tokio (ST)",
         "zmq.rs": "zmq.rs v0.6.0 (MT)",
         "rzmq": "rzmq v0.5.18 (MT)",
-        "monocoque": "monocoque v0.1.0 (ST)",
+        "monocoque": "monocoque v0.1.4 (ST)",
         "celerity": "celerity v0.1.1 (ST)",
     }
 
@@ -1423,7 +1423,7 @@ def main():
 
     # ── PUB/SUB charts ──────────────────────────────────────────
     pubsub_impls = ["libzmq", "omq-compio", "omq-tokio", "omq-tokio-mt"]
-    pubsub_alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq"]
+    pubsub_alt_impls = ["libzmq", "omq-tokio", "zmq.rs", "rzmq", "monocoque", "celerity"]
     pubsub_peer_counts = [1, 8, 64]
 
     def pubsub_title(peers, tl):

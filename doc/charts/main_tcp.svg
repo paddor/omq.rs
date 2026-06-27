@@ -19,7 +19,7 @@
   <line x1="70.0" y1="60.0" x2="70.0" y2="320.0" stroke="#9ca3af" stroke-width="1.5"/>
   <line x1="70.0" y1="320.0" x2="378.0" y2="320.0" stroke="#9ca3af" stroke-width="1.5"/>
   <polyline points="70.0,318.1 131.6,318.1 193.2,318.1 254.8,318.1 316.4,318.1 378.0,318.1" fill="none" stroke="#0d9488" stroke-width="2.5" stroke-dasharray="6,3"/>
-  <polyline points="70.0,196.8 131.6,198.9 193.2,201.5 254.8,208.9 316.4,214.7 378.0,231.9" fill="none" stroke="#db2777" stroke-width="2.5" stroke-dasharray="6,3"/>
+  <polyline points="70.0,202.7 131.6,205.9 193.2,212.0 254.8,221.6 316.4,236.1 378.0,235.7" fill="none" stroke="#db2777" stroke-width="2.5" stroke-dasharray="6,3"/>
   <polyline points="70.0,285.8 131.6,285.4 193.2,285.6 254.8,286.1 316.4,287.1 378.0,289.2" fill="none" stroke="#16a34a" stroke-width="2.5" stroke-dasharray="6,3"/>
   <polyline points="70.0,314.3 131.6,314.6 193.2,315.6 254.8,316.1 316.4,316.3 378.0,316.6" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-dasharray="6,3"/>
   <polyline points="70.0,227.8 131.6,221.5 193.2,224.6 254.8,257.0 316.4,288.6 378.0,291.2" fill="none" stroke="#eab308" stroke-width="2.5" stroke-dasharray="6,3"/>
@@ -65,15 +65,15 @@
   <circle cx="748.0" cy="285.3" r="3" fill="#0d9488" stroke="white" stroke-width="1"/>
   <circle cx="814.0" cy="263.1" r="3" fill="#0d9488" stroke="white" stroke-width="1"/>
   <circle cx="880.0" cy="267.2" r="3" fill="#0d9488" stroke="white" stroke-width="1"/>
-  <polyline points="418.0,255.3 484.0,226.9 550.0,216.3 616.0,208.0 682.0,206.3 748.0,204.7 814.0,205.0 880.0,204.2" fill="none" stroke="#db2777" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="418.0" cy="255.3" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="484.0" cy="226.9" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="550.0" cy="216.3" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="616.0" cy="208.0" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="682.0" cy="206.3" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="748.0" cy="204.7" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="814.0" cy="205.0" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
-  <circle cx="880.0" cy="204.2" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <polyline points="418.0,258.1 484.0,227.5 550.0,214.3 616.0,209.5 682.0,208.2 748.0,209.3 814.0,202.1 880.0,209.0" fill="none" stroke="#db2777" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="418.0" cy="258.1" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="484.0" cy="227.5" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="550.0" cy="214.3" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="616.0" cy="209.5" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="682.0" cy="208.2" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="748.0" cy="209.3" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="814.0" cy="202.1" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
+  <circle cx="880.0" cy="209.0" r="3" fill="#db2777" stroke="white" stroke-width="1"/>
   <polyline points="418.0,297.3 484.0,278.9 550.0,250.6 616.0,216.1 682.0,178.1 748.0,176.5 814.0,175.6 880.0,157.9" fill="none" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="418.0" cy="297.3" r="3" fill="#16a34a" stroke="white" stroke-width="1"/>
   <circle cx="484.0" cy="278.9" r="3" fill="#16a34a" stroke="white" stroke-width="1"/>
@@ -156,7 +156,7 @@
   <text x="325" y="374" fill="#374151" font-size="10" font-weight="500">rzmq v0.5.18 (MT)</text>
   <line x1="475" y1="370" x2="489" y2="370" stroke="#db2777" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="482" cy="370" r="2.5" fill="#db2777"/>
-  <text x="495" y="374" fill="#374151" font-size="10" font-weight="500">monocoque v0.1.3 (ST)</text>
+  <text x="495" y="374" fill="#374151" font-size="10" font-weight="500">monocoque v0.1.4 (ST)</text>
   <line x1="645" y1="370" x2="659" y2="370" stroke="#0d9488" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="652" cy="370" r="2.5" fill="#0d9488"/>
   <text x="665" y="374" fill="#374151" font-size="10" font-weight="500">celerity v0.1.1 (ST)</text>

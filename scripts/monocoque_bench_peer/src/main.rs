@@ -102,7 +102,10 @@ fn main() {
                 )
                 .await;
             }
-            Some("pub") => run_pub(&resolve_bind(&args[2]), args[3].parse().unwrap()).await,
+            Some("pub") => {
+                let peers: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
+                run_pub(&resolve_bind(&args[2]), args[3].parse().unwrap(), peers).await;
+            }
             Some("sub") => {
                 run_sub(
                     &resolve_connect(&args[2]),
@@ -213,11 +216,15 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     std::process::exit(0);
 }
 
-async fn run_pub(addr: &str, size: usize) {
+async fn run_pub(addr: &str, size: usize, peers: usize) {
     let mut pub_ = PubSocket::bind(addr).await.expect("pub bind");
     let port = pub_.local_addr().unwrap().port();
     println!("PORT {port}");
-    pub_.accept_subscriber().await.expect("accept subscriber");
+    for i in 0..peers {
+        pub_.accept_subscriber().await.unwrap_or_else(|e| {
+            panic!("accept subscriber {}/{peers}: {e}", i + 1);
+        });
+    }
 
     let payload = Bytes::from(vec![b'x'; size]);
     loop {

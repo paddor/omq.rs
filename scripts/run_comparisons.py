@@ -365,7 +365,7 @@ def _run_pubsub_once(
     else:
         addr = _fresh_addr(addr)
         cleanup_ipc_socket(addr)
-        pub_ = spawn_process(binary, "pub", addr, str(size))
+        pub_ = spawn_process(binary, "pub", addr, str(size), str(peers))
         if transport in ("ipc", "ws"):
             time.sleep(0.2)
             connect_addr = addr

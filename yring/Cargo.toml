@@ -25,6 +25,7 @@ loom = "0.7"
 [dev-dependencies]
 futures-lite = "2"
 loom = "0.7"
+photon-ring = "2.5.0"
 rtrb = "0.3"
 crossbeam-channel = "0.5"
 

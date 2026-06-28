@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use photon_ring::Pod;
+
 const DURATION: Duration = Duration::from_secs(2);
 
 fn yring_bench<T: Copy + Send + 'static>(cap: usize, batch_size: usize, val: T) -> f64 {
@@ -107,6 +109,38 @@ fn rtrb_chunked<T: Copy + Send + 'static>(cap: usize, batch_size: usize, val: T)
     received as f64 / start.elapsed().as_secs_f64()
 }
 
+fn photon_ring_bench<T: Pod + Send + Sync + 'static>(cap: usize, val: T) -> f64 {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (mut publ, sub) = photon_ring::channel::<T>(cap);
+    let reader = sub.subscribe_tracked();
+    let barrier = photon_ring::DependencyBarrier::from_subscribers(&[&reader]);
+
+    let stop2 = stop.clone();
+    let sender = thread::spawn(move || {
+        while !stop2.load(Ordering::Relaxed) {
+            if publ.sequence().wrapping_sub(barrier.slowest()) >= cap as u64 {
+                thread::yield_now();
+            } else {
+                publ.publish(val);
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let mut reader = reader;
+    let mut received = 0u64;
+    while start.elapsed() < DURATION {
+        match reader.try_recv() {
+            Ok(_) => received += 1,
+            Err(_) => thread::yield_now(),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    sender.join().unwrap();
+
+    received as f64 / start.elapsed().as_secs_f64()
+}
+
 fn crossbeam_bounded<T: Copy + Send + 'static>(cap: usize, val: T) -> f64 {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = crossbeam_channel::bounded::<T>(cap);
@@ -134,7 +168,7 @@ fn crossbeam_bounded<T: Copy + Send + 'static>(cap: usize, val: T) -> f64 {
     received as f64 / start.elapsed().as_secs_f64()
 }
 
-fn run_suite<T: Copy + Send + 'static>(label: &str, cap: usize, batch: usize, val: T) {
+fn run_suite<T: Pod + Send + Sync + 'static>(label: &str, cap: usize, batch: usize, val: T) {
     println!("--- {label} ---");
 
     let m = |x: f64| x / 1_000_000.0;
@@ -156,6 +190,9 @@ fn run_suite<T: Copy + Send + 'static>(label: &str, cap: usize, batch: usize, va
         "  rtrb chunked   (batch={batch:<3})  {:>7.1}M items/s",
         m(r)
     );
+
+    let r = photon_ring_bench(cap, val);
+    println!("  photon-ring                {:>7.1}M items/s", m(r));
 
     let r = crossbeam_bounded(cap, val);
     println!("  crossbeam bounded          {:>7.1}M items/s", m(r));

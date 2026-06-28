@@ -1,60 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 419" font-family="system-ui, -apple-system, sans-serif">
-  <rect width="700" height="419" fill="#0d1117"/>
-  <text x="350.0" y="22" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">SPSC channel throughput (M items/s, higher is better)</text>
-  <text x="350.0" y="38" text-anchor="middle" fill="#7d8590" font-size="10">cap=1024, 2s per config. Linux VM, i7-8700B @ 3.20 GHz, 6 cores, performance governor, turbo off</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 401" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="800" height="401" fill="#0d1117"/>
+  <text x="400.0" y="22" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">SPSC channel throughput (M items/s, higher is better)</text>
+  <text x="400.0" y="38" text-anchor="middle" fill="#7d8590" font-size="10">cap=1024, 2s per config. Linux VM, i7-8700B @ 3.20 GHz, 6 cores, performance governor, turbo off</text>
   <text x="22" y="180.0" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600" transform="rotate(-90,22,180.0)">M items/s</text>
-  <line x1="70" y1="260.3" x2="680" y2="260.3" stroke="#21262d" stroke-width="1"/>
-  <text x="62" y="260.3" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">100</text>
-  <line x1="70" y1="215.6" x2="680" y2="215.6" stroke="#21262d" stroke-width="1"/>
-  <text x="62" y="215.6" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">200</text>
-  <line x1="70" y1="170.9" x2="680" y2="170.9" stroke="#21262d" stroke-width="1"/>
-  <text x="62" y="170.9" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">300</text>
-  <line x1="70" y1="126.2" x2="680" y2="126.2" stroke="#21262d" stroke-width="1"/>
-  <text x="62" y="126.2" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">400</text>
-  <line x1="70" y1="81.5" x2="680" y2="81.5" stroke="#21262d" stroke-width="1"/>
-  <text x="62" y="81.5" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">500</text>
-  <line x1="70" y1="305" x2="680" y2="305" stroke="#30363d" stroke-width="1.5"/>
-  <rect x="92.0" y="245.1" width="28.5" height="59.9" fill="#e85d04" rx="1"/>
-  <text x="106.2" y="240.1" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">134</text>
-  <rect x="124.7" y="132.7" width="28.5" height="172.3" fill="#dc2626" rx="1"/>
-  <text x="138.9" y="127.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">386</text>
-  <rect x="157.4" y="290.8" width="28.5" height="14.2" fill="#2563eb" rx="1"/>
-  <text x="171.7" y="285.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.7</text>
-  <rect x="190.2" y="87.6" width="28.5" height="217.4" fill="#7c3aed" rx="1"/>
-  <text x="204.4" y="82.6" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">486</text>
-  <rect x="222.9" y="298.3" width="28.5" height="6.7" fill="#525c68" rx="1"/>
-  <text x="237.1" y="293.3" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">14.9</text>
-  <text x="171.7" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 32]</text>
-  <rect x="295.3" y="275.7" width="28.5" height="29.3" fill="#e85d04" rx="1"/>
-  <text x="309.5" y="270.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">65.6</text>
-  <rect x="328.0" y="219.2" width="28.5" height="85.8" fill="#dc2626" rx="1"/>
-  <text x="342.3" y="214.2" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">192</text>
-  <rect x="360.8" y="290.8" width="28.5" height="14.2" fill="#2563eb" rx="1"/>
-  <text x="375.0" y="285.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.7</text>
-  <rect x="393.5" y="174.0" width="28.5" height="131.0" fill="#7c3aed" rx="1"/>
-  <text x="407.7" y="169.0" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">293</text>
-  <rect x="426.2" y="298.5" width="28.5" height="6.5" fill="#525c68" rx="1"/>
-  <text x="440.5" y="293.5" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">14.6</text>
-  <text x="375.0" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 64]</text>
-  <rect x="498.6" y="283.1" width="28.5" height="21.9" fill="#e85d04" rx="1"/>
-  <text x="512.9" y="278.1" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">48.9</text>
-  <rect x="531.4" y="255.3" width="28.5" height="49.7" fill="#dc2626" rx="1"/>
-  <text x="545.6" y="250.3" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">111</text>
-  <rect x="564.1" y="290.7" width="28.5" height="14.3" fill="#2563eb" rx="1"/>
-  <text x="578.3" y="285.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.9</text>
-  <rect x="596.8" y="218.3" width="28.5" height="86.7" fill="#7c3aed" rx="1"/>
-  <text x="611.1" y="213.3" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">194</text>
-  <rect x="629.6" y="298.8" width="28.5" height="6.2" fill="#525c68" rx="1"/>
-  <text x="643.8" y="293.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">13.9</text>
-  <text x="578.3" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 128]</text>
-  <rect x="130" y="338" width="12" height="12" fill="#e85d04" rx="2"/>
-  <text x="148" y="348" fill="#e6edf3" font-size="10" font-weight="500">yring (per-item, no batching)</text>
-  <rect x="130" y="356" width="12" height="12" fill="#dc2626" rx="2"/>
-  <text x="148" y="366" fill="#e6edf3" font-size="10" font-weight="500">yring (batch=64)</text>
-  <rect x="130" y="374" width="12" height="12" fill="#2563eb" rx="2"/>
-  <text x="148" y="384" fill="#e6edf3" font-size="10" font-weight="500">rtrb v0.3 (per-item)</text>
-  <rect x="380" y="338" width="12" height="12" fill="#7c3aed" rx="2"/>
-  <text x="398" y="348" fill="#e6edf3" font-size="10" font-weight="500">rtrb v0.3 (chunk API, batch=64)</text>
-  <rect x="380" y="356" width="12" height="12" fill="#525c68" rx="2"/>
-  <text x="398" y="366" fill="#e6edf3" font-size="10" font-weight="500">crossbeam-channel v0.5 (bounded MPMC)</text>
+  <line x1="70" y1="266.3" x2="780" y2="266.3" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="266.3" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">100</text>
+  <line x1="70" y1="227.6" x2="780" y2="227.6" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="227.6" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">200</text>
+  <line x1="70" y1="188.9" x2="780" y2="188.9" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="188.9" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">300</text>
+  <line x1="70" y1="150.2" x2="780" y2="150.2" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="150.2" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">400</text>
+  <line x1="70" y1="111.6" x2="780" y2="111.6" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="111.6" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">500</text>
+  <line x1="70" y1="72.9" x2="780" y2="72.9" stroke="#21262d" stroke-width="1"/>
+  <text x="62" y="72.9" text-anchor="end" dominant-baseline="middle" fill="#7d8590" font-size="10">600</text>
+  <line x1="70" y1="305" x2="780" y2="305" stroke="#30363d" stroke-width="1.5"/>
+  <rect x="95.1" y="269.3" width="27.6" height="35.7" fill="#e85d04" rx="1"/>
+  <text x="109.0" y="264.3" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">92.3</text>
+  <rect x="126.9" y="153.7" width="27.6" height="151.3" fill="#dc2626" rx="1"/>
+  <text x="140.7" y="148.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">391</text>
+  <rect x="158.7" y="292.7" width="27.6" height="12.3" fill="#2563eb" rx="1"/>
+  <text x="172.5" y="287.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.9</text>
+  <rect x="190.4" y="87.6" width="27.6" height="217.4" fill="#7c3aed" rx="1"/>
+  <text x="204.2" y="82.6" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">562</text>
+  <rect x="222.2" y="295.7" width="27.6" height="9.3" fill="#16a34a" rx="1"/>
+  <text x="236.0" y="290.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">24.0</text>
+  <rect x="253.9" y="299.4" width="27.6" height="5.6" fill="#525c68" rx="1"/>
+  <text x="267.7" y="294.4" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">14.4</text>
+  <text x="188.3" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 32]</text>
+  <rect x="331.8" y="286.6" width="27.6" height="18.4" fill="#e85d04" rx="1"/>
+  <text x="345.6" y="281.6" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">47.6</text>
+  <rect x="363.6" y="257.2" width="27.6" height="47.8" fill="#dc2626" rx="1"/>
+  <text x="377.4" y="252.2" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">124</text>
+  <rect x="395.3" y="292.8" width="27.6" height="12.2" fill="#2563eb" rx="1"/>
+  <text x="409.1" y="287.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.6</text>
+  <rect x="427.1" y="191.8" width="27.6" height="113.2" fill="#7c3aed" rx="1"/>
+  <text x="440.9" y="186.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">293</text>
+  <rect x="458.8" y="296.7" width="27.6" height="8.3" fill="#16a34a" rx="1"/>
+  <text x="472.6" y="291.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">21.5</text>
+  <rect x="490.6" y="299.6" width="27.6" height="5.4" fill="#525c68" rx="1"/>
+  <text x="504.4" y="294.6" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">14.0</text>
+  <text x="425.0" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 64]</text>
+  <rect x="568.5" y="292.7" width="27.6" height="12.3" fill="#e85d04" rx="1"/>
+  <text x="582.3" y="287.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.7</text>
+  <rect x="600.2" y="263.8" width="27.6" height="41.2" fill="#dc2626" rx="1"/>
+  <text x="614.0" y="258.8" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">106</text>
+  <rect x="632.0" y="292.7" width="27.6" height="12.3" fill="#2563eb" rx="1"/>
+  <text x="645.8" y="287.7" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">31.9</text>
+  <rect x="663.7" y="233.2" width="27.6" height="71.8" fill="#7c3aed" rx="1"/>
+  <text x="677.5" y="228.2" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">186</text>
+  <rect x="695.5" y="298.3" width="27.6" height="6.7" fill="#16a34a" rx="1"/>
+  <text x="709.3" y="293.3" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">17.2</text>
+  <rect x="727.2" y="299.4" width="27.6" height="5.6" fill="#525c68" rx="1"/>
+  <text x="741.0" y="294.4" text-anchor="middle" fill="#e6edf3" font-size="8" font-weight="600">14.4</text>
+  <text x="661.7" y="321" text-anchor="middle" fill="#e6edf3" font-size="11" font-weight="600">[u8; 128]</text>
+  <rect x="70" y="338" width="12" height="12" fill="#e85d04" rx="2"/>
+  <text x="88" y="348" fill="#e6edf3" font-size="10" font-weight="500">yring (per-item, no batching)</text>
+  <rect x="70" y="356" width="12" height="12" fill="#dc2626" rx="2"/>
+  <text x="88" y="366" fill="#e6edf3" font-size="10" font-weight="500">yring (batch=64)</text>
+  <rect x="300" y="338" width="12" height="12" fill="#2563eb" rx="2"/>
+  <text x="318" y="348" fill="#e6edf3" font-size="10" font-weight="500">rtrb v0.3 (per-item)</text>
+  <rect x="300" y="356" width="12" height="12" fill="#7c3aed" rx="2"/>
+  <text x="318" y="366" fill="#e6edf3" font-size="10" font-weight="500">rtrb v0.3 (chunk API, batch=64)</text>
+  <rect x="530" y="338" width="12" height="12" fill="#16a34a" rx="2"/>
+  <text x="548" y="348" fill="#e6edf3" font-size="10" font-weight="500">photon-ring v2.5 (seqlock SPMC, per-item)</text>
+  <rect x="530" y="356" width="12" height="12" fill="#525c68" rx="2"/>
+  <text x="548" y="366" fill="#e6edf3" font-size="10" font-weight="500">crossbeam-channel v0.5 (bounded MPMC)</text>
 </svg>

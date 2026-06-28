@@ -13,6 +13,7 @@ CHANNEL_ORDER = [
     "yring (batch=64)",
     "rtrb per-item",
     "rtrb chunked",
+    "photon-ring",
     "crossbeam bounded",
 ]
 
@@ -21,6 +22,7 @@ COLORS = {
     "yring (batch=64)":   ("#dc2626", "#a81e1e"),
     "rtrb per-item":      ("#2563eb", "#1d4ed8"),
     "rtrb chunked":       ("#7c3aed", "#6d28d9"),
+    "photon-ring":        ("#16a34a", "#15803d"),
     "crossbeam bounded":  ("#525c68", "#3d454f"),
 }
 
@@ -29,30 +31,34 @@ LABELS = {
     "yring (batch=64)":   "yring (batch=64)",
     "rtrb per-item":      "rtrb v0.3 (per-item)",
     "rtrb chunked":       "rtrb v0.3 (chunk API, batch=64)",
+    "photon-ring":        "photon-ring v2.5 (seqlock SPMC, per-item)",
     "crossbeam bounded":  "crossbeam-channel v0.5 (bounded MPMC)",
 }
 
 RESULTS = {
     "[u8; 32]": {
-        "yring (batch=1)": 134.0,
-        "yring (batch=64)": 385.6,
-        "rtrb per-item": 31.7,
-        "rtrb chunked": 486.4,
-        "crossbeam bounded": 14.9,
+        "yring (batch=1)": 92.3,
+        "yring (batch=64)": 391.2,
+        "rtrb per-item": 31.9,
+        "rtrb chunked": 561.9,
+        "photon-ring": 24.0,
+        "crossbeam bounded": 14.4,
     },
     "[u8; 64]": {
-        "yring (batch=1)": 65.6,
-        "yring (batch=64)": 192.0,
-        "rtrb per-item": 31.7,
-        "rtrb chunked": 293.2,
-        "crossbeam bounded": 14.6,
+        "yring (batch=1)": 47.6,
+        "yring (batch=64)": 123.5,
+        "rtrb per-item": 31.6,
+        "rtrb chunked": 292.6,
+        "photon-ring": 21.5,
+        "crossbeam bounded": 14.0,
     },
     "[u8; 128]": {
-        "yring (batch=1)": 48.9,
-        "yring (batch=64)": 111.2,
+        "yring (batch=1)": 31.7,
+        "yring (batch=64)": 106.4,
         "rtrb per-item": 31.9,
-        "rtrb chunked": 193.9,
-        "crossbeam bounded": 13.9,
+        "rtrb chunked": 185.6,
+        "photon-ring": 17.2,
+        "crossbeam bounded": 14.4,
     },
 }
 
@@ -75,8 +81,8 @@ def generate_chart():
     n_groups = len(GROUPS)
     n_bars = len(CHANNEL_ORDER)
 
-    svg_w = 700
-    x_left, x_right = 70, 680
+    svg_w = 800
+    x_left, x_right = 70, 780
     plot_w = x_right - x_left
 
     top_margin = 55
@@ -99,7 +105,7 @@ def generate_chart():
 
     legend_items = [(k, LABELS[k]) for k in CHANNEL_ORDER]
     leg_row_h = 18
-    leg_cols = 2
+    leg_cols = 3
     leg_rows = math.ceil(len(legend_items) / leg_cols)
 
     svg_h = int(p_bot + 40 + leg_rows * leg_row_h + 20)
@@ -193,7 +199,7 @@ def generate_chart():
 
     # legend
     leg_y = p_bot + 38
-    leg_col_x = [mid_x - 220, mid_x + 30]
+    leg_col_x = [mid_x - 330, mid_x - 100, mid_x + 130]
     for i, (key, label) in enumerate(legend_items):
         col = i // leg_rows
         row = i % leg_rows

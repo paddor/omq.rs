@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.15.0"
+version = "0.15.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -32,9 +32,9 @@ fuzz = []
 soak = []
 
 [dependencies]
-omq-proto = { path = "../omq-proto", version = "0.19.0", default-features = false }
-yring = { path = "../yring", version = "0.3.4" }
-blume = { path = "../blume", version = "0.4.3" }
+omq-proto = { path = "../omq-proto", version = "0.19.1", default-features = false }
+yring = { path = "../yring", version = "0.3.5" }
+blume = { path = "../blume", version = "0.4.4" }
 arc-swap = "1.7.1"
 async-channel = "2.5.0"
 bytes = "1.12.0"

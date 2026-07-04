@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "blume"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "event-listener",
 ]
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bytes",
  "flume",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "atomic-waker",
  "futures-core",

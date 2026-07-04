@@ -42,7 +42,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "blume"
-version = "0.4.2"
+version = "0.4.4"
 dependencies = [
  "event-listener",
 ]
@@ -61,9 +61,9 @@ checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "bytes"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "cc"
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "omq-compio"
-version = "0.12.4"
+version = "0.12.7"
 dependencies = [
  "async-lock",
  "blume",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -1795,7 +1795,10 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.2"
+version = "0.3.5"
+dependencies = [
+ "loom",
+]
 
 [[package]]
 name = "zerocopy"

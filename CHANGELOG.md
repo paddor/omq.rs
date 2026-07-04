@@ -6,26 +6,64 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
-### omq-proto 0.18.2
+## [omq-proto 0.20.0] - 2026-07-04
 
-#### Added
+### Added
 
-- Windows IPC support: `IpcPath::NamedPipe` variant now available on Windows (no longer gated behind `#[cfg(unix)]`). Named pipe names validated for reserved device names, invalid NTFS characters, length (1-256), and control characters.
+- Windows IPC path support: `IpcPath::NamedPipe` is available on
+  Windows, with validation for reserved device names, invalid NTFS
+  characters, length, and control characters.
 
-#### Changed
+### Fixed
 
-- `IpcPath` enum now cross-platform: `Filesystem` and `Abstract` variants gated on Unix, `NamedPipe` variant available on Windows.
+- Harden protocol edge cases around direct receive size checks, UDP
+  datagram flags, and WebSocket handshakes.
 
-### omq-tokio 0.14.7
+## [blume 0.4.4] - 2026-07-04
 
-#### Added
+### Fixed
 
-- Windows named pipes IPC transport support. All 20 socket types (PUSH, PULL, PUB, SUB, REQ, REP, ROUTER, DEALER, PAIR, CLIENT, SERVER, CHANNEL, SCATTER, GATHER, RADIO, DISH, XPUB, XSUB, etc.) now work across all transports (TCP, IPC, inproc, UDP, WS/WSS, lz4+tcp, lz4+ws, lz4+wss) on Windows.
-- Platform-specific IPC variants: Unix filesystem socket (Linux/macOS/BSD), Unix abstract namespace (Linux), Windows named pipes.
+- Harden close/drop handling and sender-count overflow checks.
 
-#### Changed
+## [yring 0.3.5] - 2026-07-04
 
-- `omq-tokio` now fully cross-platform: Windows no longer has transport limitations. IPC transport previously unavailable on Windows is now complete.
+### Fixed
+
+- Harden capacity validation and use wrapping counters for long-running
+  rings.
+
+## [omq-compio 0.12.7] - 2026-07-04
+
+### Changed
+
+- Isolate the remaining unsafe internals behind small wrapper modules
+  and add deterministic guard-drop tests for the cell wrappers.
+- Propagate inproc receive-size limits without changing the public
+  socket API.
+
+## [omq-tokio 0.16.0] - 2026-07-04
+
+### Added
+
+- Windows named-pipe IPC transport support. IPC now works on Windows
+  using the same `ipc://` endpoint surface as Unix-domain IPC.
+
+### Fixed
+
+- Handle busy Windows named pipes during IPC connect retries.
+- Preserve the public `omq_tokio::transport::inproc::connect` API while
+  keeping inproc receive-size limit propagation.
+
+## [omq-libzmq 0.5.0] - 2026-07-04
+
+### Added
+
+- Enable IPC support on Windows through the `omq-tokio` named-pipe
+  transport.
+
+### Fixed
+
+- Harden C API edge cases around options and message properties.
 
 ## 2026-06-17
 

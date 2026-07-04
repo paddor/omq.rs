@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-omq-tokio = { version = "0.14.5", path = "../../../omq-tokio" }
+omq-tokio = { version = "0.16.0", path = "../../../omq-tokio" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 bytes = "1"
 

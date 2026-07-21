@@ -14,7 +14,7 @@ CHANNEL_ORDER = [
     "rtrb per-item",
     "rtrb chunked",
     "crossbeam bounded",
-    "flume bounded",
+    "kanal bounded sync",
 ]
 
 COLORS = {
@@ -23,7 +23,7 @@ COLORS = {
     "rtrb per-item":      ("#2563eb", "#1d4ed8"),
     "rtrb chunked":       ("#7c3aed", "#6d28d9"),
     "crossbeam bounded":  ("#525c68", "#3d454f"),
-    "flume bounded":      ("#16a34a", "#15803d"),
+    "kanal bounded sync": ("#0891b2", "#0e7490"),
 }
 
 LABELS = {
@@ -32,33 +32,33 @@ LABELS = {
     "rtrb per-item":      "rtrb v0.3 (per-item)",
     "rtrb chunked":       "rtrb v0.3 (chunk API, batch=64)",
     "crossbeam bounded":  "crossbeam-channel v0.5 (bounded MPMC)",
-    "flume bounded":      "flume v0.11 (bounded MPMC)",
+    "kanal bounded sync": "kanal v0.1 (bounded sync MPMC)",
 }
 
 RESULTS = {
     "[u8; 32]": {
-        "yring (batch=1)": 207.6,
-        "yring (batch=64)": 393.6,
-        "rtrb per-item": 32.3,
-        "rtrb chunked": 602.5,
-        "crossbeam bounded": 14.8,
-        "flume bounded": 4.8,
+        "yring (batch=1)": 267.7,
+        "yring (batch=64)": 365.7,
+        "rtrb per-item": 31.4,
+        "rtrb chunked": 625.0,
+        "crossbeam bounded": 14.0,
+        "kanal bounded sync": 5.8,
     },
     "[u8; 64]": {
-        "yring (batch=1)": 99.2,
-        "yring (batch=64)": 209.7,
-        "rtrb per-item": 32.1,
-        "rtrb chunked": 312.8,
-        "crossbeam bounded": 14.2,
-        "flume bounded": 5.0,
+        "yring (batch=1)": 98.4,
+        "yring (batch=64)": 243.2,
+        "rtrb per-item": 32.2,
+        "rtrb chunked": 240.4,
+        "crossbeam bounded": 15.3,
+        "kanal bounded sync": 2.7,
     },
     "[u8; 128]": {
-        "yring (batch=1)": 47.7,
-        "yring (batch=64)": 109.3,
-        "rtrb per-item": 31.9,
-        "rtrb chunked": 171.2,
-        "crossbeam bounded": 13.3,
-        "flume bounded": 4.5,
+        "yring (batch=1)": 62.3,
+        "yring (batch=64)": 137.6,
+        "rtrb per-item": 32.3,
+        "rtrb chunked": 172.0,
+        "crossbeam bounded": 14.0,
+        "kanal bounded sync": 0.7,
     },
 }
 

@@ -95,12 +95,12 @@ cap=1024, batch=64:
 
 | Channel | API | u64 (8 B) | [u8; 32] | [u8; 64] | [u8; 128] |
 |---------|-----|----------:|----------:|----------:|----------:|
-| **yring** | per-item, batch=1 | 427 | 208 | 99 | 48 |
-| **yring** | per-item, batch=64 | 569 | 394 | 210 | 109 |
-| rtrb | per-item | 32 | 32 | 32 | 32 |
-| rtrb | chunk, batch=64 | **1937** | **603** | **313** | **171** |
-| crossbeam | bounded | 15 | 15 | 14 | 13 |
-| flume | bounded | 4 | 5 | 5 | 5 |
+| **yring** | per-item, batch=1 | 426 | 268 | 98 | 62 |
+| **yring** | per-item, batch=64 | 585 | 366 | **243** | 138 |
+| rtrb | per-item | 32 | 31 | 32 | 32 |
+| rtrb | chunk, batch=64 | **1567** | **625** | 240 | **172** |
+| crossbeam | bounded | 14 | 14 | 15 | 14 |
+| kanal | bounded sync | 7 | 6 | 3 | 1 |
 
 yring vs rtrb per-item (the natural API comparison): **3x** at 64
 bytes, **6x** at 32 bytes. rtrb's chunk API is faster in raw

@@ -56,6 +56,7 @@ def test_isinstance_sync_socket():
 
 def test_isinstance_async_socket():
     import pyomq.asyncio as zmq_async
+
     ctx = zmq_async.Context()
     s = ctx.socket(zmq.PUSH)
     try:

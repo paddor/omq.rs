@@ -84,9 +84,11 @@ async def test_async_curve_auth_callback_receives_identity(tcp_endpoint):
         router.curve_publickey = server_pub
         router.curve_secretkey = server_sec
         router.set_curve_auth(
-            lambda peer: captured.append(peer.identity) is None
-            and peer.public_key == client_pub
-            and peer.identity == b"async-client"
+            lambda peer: (
+                captured.append(peer.identity) is None
+                and peer.public_key == client_pub
+                and peer.identity == b"async-client"
+            )
         )
 
         dealer.identity = b"async-client"

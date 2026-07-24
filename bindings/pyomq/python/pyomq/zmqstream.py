@@ -13,6 +13,7 @@ import pyomq
 
 def _get_IOLoop():
     from tornado.ioloop import IOLoop
+
     return IOLoop
 
 
@@ -45,17 +46,20 @@ class ZMQStream:
     def stop_on_send(self):
         self._send_callback = None
 
-    def send(self, msg, flags=0, copy=True, track=False, callback=None,
-             **kwargs):
+    def send(self, msg, flags=0, copy=True, track=False, callback=None, **kwargs):
         result = self.socket.send(msg, flags=flags, copy=copy, track=track)
         if self._send_callback:
             self._send_callback(msg, None)
         return result
 
-    def send_multipart(self, msg_list, flags=0, copy=True, track=False,
-                       callback=None, **kwargs):
+    def send_multipart(
+        self, msg_list, flags=0, copy=True, track=False, callback=None, **kwargs
+    ):
         result = self.socket.send_multipart(
-            msg_list, flags=flags, copy=copy, track=track,
+            msg_list,
+            flags=flags,
+            copy=copy,
+            track=track,
         )
         if self._send_callback:
             self._send_callback(msg_list, None)
@@ -80,7 +84,8 @@ class ZMQStream:
         while True:
             try:
                 parts = self.socket.recv_multipart(
-                    pyomq.NOBLOCK, copy=self._recv_copy,
+                    pyomq.NOBLOCK,
+                    copy=self._recv_copy,
                 )
             except pyomq.Again:
                 break

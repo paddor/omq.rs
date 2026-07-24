@@ -35,22 +35,16 @@ def validate_multipart(parts: list[bytes], min_seq: int) -> int:
     )
 
     seq = struct.unpack("<Q", parts[0])[0]
-    assert seq >= min_seq, (
-        f"sequence went backwards: got {seq}, expected >= {min_seq}"
-    )
+    assert seq >= min_seq, f"sequence went backwards: got {seq}, expected >= {min_seq}"
 
     assert len(parts[1]) == FRAME_B, (
         f"body frame size: got {len(parts[1])}, expected {FRAME_B}"
     )
     expected_body = bytes((seq + i) & 0xFF for i in range(FRAME_B))
-    assert parts[1] == expected_body, (
-        f"body corruption at seq {seq}"
-    )
+    assert parts[1] == expected_body, f"body corruption at seq {seq}"
 
     expected_trailer = struct.pack("<Q", seq ^ 0xFFFFFFFFFFFFFFFF)
-    assert parts[2] == expected_trailer, (
-        f"trailer corruption at seq {seq}"
-    )
+    assert parts[2] == expected_trailer, f"trailer corruption at seq {seq}"
 
     return seq
 

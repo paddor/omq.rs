@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-24
+
+### Added
+
+- Windows support, including Win32-backed readiness signals for sync and
+  asyncio sockets.
+- PyPI release workflow now builds Linux, macOS, and Windows wheels.
+- CI now runs ruff linting and ty type checks for pyomq.
+
 ### Fixed
 
 - Windows async readiness drains now consume the latched wakeup bit, avoiding
   repeated stale drain callbacks after a waiter remains blocked.
 - Windows readiness signals no longer latch wakeups when no waiter is armed,
   reducing stale async callbacks during sustained receive drains.
+- Windows shadow sync-over-async waits now recheck readiness after clearing
+  the event, avoiding a lost wake between clear and wait.
 
 ### Changed
 

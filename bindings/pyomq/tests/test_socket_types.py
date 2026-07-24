@@ -59,7 +59,9 @@ def test_push_pull():
     push.connect(ep)
     push.send(b"hello")
     assert pull.recv() == b"hello"
-    push.close(); pull.close(); ctx.term()
+    push.close()
+    pull.close()
+    ctx.term()
 
 
 def test_pub_sub():
@@ -80,7 +82,9 @@ def test_pub_sub():
             continue
     else:
         pytest.fail("SUB never received")
-    pub.close(); sub.close(); ctx.term()
+    pub.close()
+    sub.close()
+    ctx.term()
 
 
 def test_xpub_xsub():
@@ -106,7 +110,9 @@ def test_xpub_xsub():
             time.sleep(0.05)
     else:
         pytest.fail("XSUB never received")
-    xpub.close(); xsub.close(); ctx.term()
+    xpub.close()
+    xsub.close()
+    ctx.term()
 
 
 def test_req_rep():
@@ -120,7 +126,9 @@ def test_req_rep():
     assert rep.recv() == b"q"
     rep.send(b"a")
     assert req.recv() == b"a"
-    req.close(); rep.close(); ctx.term()
+    req.close()
+    rep.close()
+    ctx.term()
 
 
 def test_dealer_router():
@@ -137,7 +145,9 @@ def test_dealer_router():
     assert parts == [b"dlr-1", b"hello"]
     router.send_multipart([b"dlr-1", b"world"])
     assert dealer.recv() == b"world"
-    dealer.close(); router.close(); ctx.term()
+    dealer.close()
+    router.close()
+    ctx.term()
 
 
 def test_pair_pair():
@@ -151,7 +161,9 @@ def test_pair_pair():
     assert b.recv() == b"x"
     b.send(b"y")
     assert a.recv() == b"y"
-    a.close(); b.close(); ctx.term()
+    a.close()
+    b.close()
+    ctx.term()
 
 
 def test_client_server():
@@ -168,7 +180,9 @@ def test_client_server():
     assert parts == [b"cli-1", b"ping"]
     server.send_multipart([b"cli-1", b"pong"])
     assert client.recv() == b"pong"
-    client.close(); server.close(); ctx.term()
+    client.close()
+    server.close()
+    ctx.term()
 
 
 def test_scatter_gather():
@@ -183,7 +197,9 @@ def test_scatter_gather():
         scatter.send(f"m{i}".encode())
     got = sorted([gather.recv() for _ in range(3)])
     assert got == [b"m0", b"m1", b"m2"]
-    scatter.close(); gather.close(); ctx.term()
+    scatter.close()
+    gather.close()
+    ctx.term()
 
 
 def test_channel_pair():
@@ -198,7 +214,9 @@ def test_channel_pair():
     assert b.recv() == b"hi"
     b.send(b"there")
     assert a.recv() == b"there"
-    a.close(); b.close(); ctx.term()
+    a.close()
+    b.close()
+    ctx.term()
 
 
 def test_peer_peer():
@@ -217,7 +235,9 @@ def test_peer_peer():
     a.send_multipart([b"peer-b", b"hello b"])
     parts = b.recv_multipart()
     assert parts == [b"peer-a", b"hello b"]
-    a.close(); b.close(); ctx.term()
+    a.close()
+    b.close()
+    ctx.term()
 
 
 def test_radio_dish_udp_with_groups():
@@ -247,7 +267,9 @@ def test_radio_dish_udp_with_groups():
     assert parts == [b"weather", b"sunny"]
 
     dish.leave(b"weather")
-    radio.close(); dish.close(); ctx.term()
+    radio.close()
+    dish.close()
+    ctx.term()
 
 
 def test_stream_raw_tcp():
@@ -279,4 +301,5 @@ def test_stream_raw_tcp():
     assert echoed == b"world"
 
     raw.close()
-    stream.close(); ctx.term()
+    stream.close()
+    ctx.term()

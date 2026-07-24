@@ -19,7 +19,9 @@ def test_device_forwards_messages(tcp_endpoint):
         sender.connect(fe_ep)
         receiver.connect(be_ep)
 
-        t = threading.Thread(target=zmq.device, args=(zmq.STREAMER, frontend, backend), daemon=True)
+        t = threading.Thread(
+            target=zmq.device, args=(zmq.STREAMER, frontend, backend), daemon=True
+        )
         t.start()
 
         time.sleep(0.1)

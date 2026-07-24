@@ -78,12 +78,9 @@ def test_poller_multi_socket():
                 msg = sock.recv(flags=zmq.NOBLOCK)
                 seq = struct.unpack("<QI", msg[:12])
                 assert seq[1] == ch_idx, (
-                    f"channel mismatch: got {seq[1]}, "
-                    f"expected {ch_idx}"
+                    f"channel mismatch: got {seq[1]}, expected {ch_idx}"
                 )
-                assert msg[12:] == b"P" * 48, (
-                    f"corruption on channel {ch_idx}"
-                )
+                assert msg[12:] == b"P" * 48, f"corruption on channel {ch_idx}"
                 recv_counts[ch_idx] += 1
             except zmq.Again:
                 pass
@@ -93,8 +90,7 @@ def test_poller_multi_socket():
             elapsed = now - start
             total = sum(recv_counts)
             print(
-                f"[poller] {elapsed:.0f}s, "
-                f"total recvd {total}, per-ch: {recv_counts}"
+                f"[poller] {elapsed:.0f}s, total recvd {total}, per-ch: {recv_counts}"
             )
             last_log = now
 
@@ -105,8 +101,7 @@ def test_poller_multi_socket():
     elapsed = time.monotonic() - start
     total = sum(recv_counts)
     print(
-        f"[poller] done: total recvd {total} in {elapsed:.1f}s, "
-        f"per-ch: {recv_counts}"
+        f"[poller] done: total recvd {total} in {elapsed:.1f}s, per-ch: {recv_counts}"
     )
 
     for i, count in enumerate(recv_counts):

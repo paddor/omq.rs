@@ -125,6 +125,7 @@ def test_zmqbaseerror_catches_binderror():
 
 def test_from_native_unknown_errno():
     from pyomq import _native
+
     exc = _native.ZMQError("test error")
     exc.errno = 9999
     promoted = zmq.error.from_native(exc)

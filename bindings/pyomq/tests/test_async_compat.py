@@ -8,6 +8,7 @@ import pyomq.asyncio as zmq_async
 
 async def test_async_again_exception(tcp_endpoint):
     import asyncio
+
     ctx = zmq_async.Context()
     pull = ctx.socket(zmq.PULL)
     try:

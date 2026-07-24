@@ -59,9 +59,7 @@ def test_fan_out():
                 msg = subs[idx].recv()
                 seq = struct.unpack("<Q", msg[:8])[0]
                 expected = bytes([seq & 0xFF] * MSG_SIZE)
-                assert msg[8:] == expected, (
-                    f"sub[{idx}] corruption at seq {seq}"
-                )
+                assert msg[8:] == expected, f"sub[{idx}] corruption at seq {seq}"
                 recv_counts[idx] += 1
             except zmq.Again:
                 pass

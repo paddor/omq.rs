@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-24
+
+### Fixed
+
+- macOS wheels no longer compile the Linux-only `eventfd` wakeup path.
+- PyPI release wheel builds no longer inherit local `target-cpu=native`
+  rustflags from the repository checkout.
+- PyPI release smoke tests now install `pytest-asyncio` so async pytest hooks
+  load correctly.
+
+### Changed
+
+- PyPI release workflow now smoke-tests macOS wheels before publishing.
+
 ## [0.17.0] - 2026-07-24
 
 ### Added

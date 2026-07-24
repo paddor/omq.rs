@@ -67,7 +67,9 @@ pub(crate) fn spawn(
                         }
                         Some(PeerDriverCommand::Close) | None => break,
                         Some(
-                            PeerDriverCommand::SendEncoded(_) | PeerDriverCommand::SendCommand(_),
+                            PeerDriverCommand::ActivateDataPlane
+                            | PeerDriverCommand::SendEncoded(_)
+                            | PeerDriverCommand::SendCommand(_),
                         ) => {}
                     }
                 }

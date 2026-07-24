@@ -418,6 +418,9 @@ pub struct PeerDriverConfig {
 /// Commands accepted by a running [`ConnectionDriver`].
 #[derive(Debug)]
 pub enum PeerDriverCommand {
+    /// Allow application messages to flow after the socket actor has accepted
+    /// this peer as ready.
+    ActivateDataPlane,
     /// Queue an application message for send.
     SendMessage(Message),
     /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
@@ -821,6 +824,7 @@ where
         let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
         tokio::pin!(hb_sleep);
         let mut hb_ping_sent = false;
+        let mut data_plane_active = false;
         // Keep fallback before yring until yring wins once; after that,
         // empty fallback waiting would add a signal waiter-list lock on the
         // hot select path.
@@ -833,36 +837,44 @@ where
             if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
                 return Ok(());
             }
-            match drain_decoded_messages(
-                &mut connection,
-                &mut decoder,
-                receive_profile,
-                &mut recv_direct,
-                &peer_out,
-                peer_id,
-            )
-            .await?
-            {
-                DriverStep::Continue => {}
-                DriverStep::Yield => {
-                    tokio::task::yield_now().await;
-                    continue;
+            if data_plane_active {
+                match drain_decoded_messages(
+                    &mut connection,
+                    &mut decoder,
+                    receive_profile,
+                    &mut recv_direct,
+                    &peer_out,
+                    peer_id,
+                )
+                .await?
+                {
+                    DriverStep::Continue => {}
+                    DriverStep::Yield => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    DriverStep::Close => return Ok(()),
                 }
-                DriverStep::Close => return Ok(()),
             }
 
             // Set handshake_done on the encode slot once the handshake
-            // completes and there's no frame transform (CURVE).
+            // completes, the actor has accepted the peer, and there's no
+            // frame transform (CURVE).
             // The slot stays disabled for crypto connections.
-            enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+            if data_plane_active {
+                enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+            }
 
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
-            let hb_enabled = hb_interval.is_some() && connection.is_ready();
+            let hb_enabled = hb_interval.is_some() && connection.is_ready() && data_plane_active;
 
             // Latency-routed REQ/REP sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
             // reader, avoiding an extra zero-time reactor roundtrip.
-            if latency_profile && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty()) {
+            if latency_profile
+                && data_plane_active
+                && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty())
+            {
                 drain_transmit_slot(
                     transmit_slot.as_ref().unwrap(),
                     &mut drain_buf,
@@ -888,7 +900,7 @@ where
                 // before the next request is written.
                 () = async {
                     transmit_slot.as_ref().unwrap().data_signal.ready().await;
-                }, if latency_profile && transmit_slot.as_ref().is_some_and(|s| {
+                }, if latency_profile && data_plane_active && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
@@ -902,7 +914,9 @@ where
                     return Err(Error::HandshakeFailed("handshake timeout".into()));
                 }
 
-                res = reader.read_buf(&mut read_buf), if !latency_profile || inbox.is_empty() => {
+                res = reader.read_buf(&mut read_buf),
+                    if (!latency_profile || inbox.is_empty())
+                        && (!connection.is_ready() || data_plane_active) => {
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
@@ -942,6 +956,7 @@ where
                     if handle_inbox_command(
                         cmd,
                         &mut inbox,
+                        &mut data_plane_active,
                         &mut outbound,
                         &mut connection,
                         &mut eq,
@@ -966,7 +981,7 @@ where
                     } else {
                         std::future::pending().await
                     }
-                }, if prioritize_shared_rx && connection.is_ready() => {
+                }, if prioritize_shared_rx && connection.is_ready() && data_plane_active => {
                     if handle_shared_queue_message(
                         msg,
                         shared_msg_rx.as_ref(),
@@ -986,7 +1001,7 @@ where
                 // directly, bypassing the local FrameBuffer.
                 () = async {
                     transmit_slot.as_ref().unwrap().data_signal.ready().await;
-                }, if !latency_profile && transmit_slot.as_ref().is_some_and(|s| {
+                }, if !latency_profile && data_plane_active && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
@@ -999,7 +1014,7 @@ where
                 // messages to this driver, which encodes and writes locally.
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
-                }, if send_pipe_rx.is_some() && connection.is_ready() => {
+                }, if send_pipe_rx.is_some() && connection.is_ready() && data_plane_active => {
                     match handle_send_pipe_ready(
                         &mut send_pipe_rx,
                         &mut pipe_batch,
@@ -1162,9 +1177,11 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     handle_large_messages(connection, reader, config, last_input, recv_pool).await
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     cmd: Option<PeerDriverCommand>,
     inbox: &mut mpsc::Receiver<PeerDriverCommand>,
+    data_plane_active: &mut bool,
     outbound: &mut OutboundState,
     connection: &mut Connection,
     eq: &mut FrameBuffer,
@@ -1172,6 +1189,10 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<DriverStep> {
     match cmd {
+        Some(PeerDriverCommand::ActivateDataPlane) => {
+            *data_plane_active = true;
+            Ok(DriverStep::Continue)
+        }
         Some(PeerDriverCommand::SendMessage(first)) => {
             // TODO: Give driver control commands an explicit msg/byte/time
             // budget. Current mixed inbox batches data first, then handles
@@ -1196,6 +1217,9 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
                 .await?;
             for cmd in deferred {
                 match cmd {
+                    PeerDriverCommand::ActivateDataPlane => {
+                        *data_plane_active = true;
+                    }
                     PeerDriverCommand::SendEncoded(chunks) => {
                         eq.push_shared_chunks(&chunks);
                     }
@@ -1915,9 +1939,19 @@ mod tests {
 
     #[tokio::test]
     async fn message_roundtrip_over_inproc() {
-        let (client, mut client_events, _server, mut server_events) = inproc_pair("drv-msg").await;
+        let (client, mut client_events, server, mut server_events) = inproc_pair("drv-msg").await;
         client_events.recv().await.unwrap();
         server_events.recv().await.unwrap();
+        client
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        server
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
 
         client
             .inbox

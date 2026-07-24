@@ -117,7 +117,11 @@ pub(crate) fn spawn_radio_sender(
                             let _ = sock.send(&dgram).await;
                         }
                     }
-                    Some(PeerDriverCommand::SendEncoded(_) | PeerDriverCommand::SendCommand(_)) => {},
+                    Some(
+                        PeerDriverCommand::ActivateDataPlane
+                        | PeerDriverCommand::SendEncoded(_)
+                        | PeerDriverCommand::SendCommand(_),
+                    ) => {},
                     Some(PeerDriverCommand::Close) | None => break,
                 }
             }

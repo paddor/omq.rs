@@ -650,9 +650,10 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
-    /// Wait until at least `min_peers` peers are connected, or `timeout`
-    /// expires. Returns the peer count at the time the threshold was met,
-    /// or `Error::Timeout` if the deadline is reached first.
+    /// Wait until at least `min_peers` peers have completed the ZMTP
+    /// handshake, or `timeout` expires. Returns the peer count at the
+    /// time the threshold was met, or `Error::Timeout` if the deadline
+    /// is reached first.
     ///
     /// This is a data-plane readiness check. It waits for ZMTP peers to
     /// finish handshaking rather than only being accepted by the listener.
@@ -712,8 +713,9 @@ impl Socket {
         }
     }
 
-    /// Snapshot every currently-connected peer. Empty vec when no peers
-    /// are live. Useful for introspection / health checks.
+    /// Snapshot every peer that is ready for data-plane routing. Empty
+    /// vec when no peers are ready. Useful for introspection / health
+    /// checks.
     pub async fn connections(&self) -> Result<Vec<ConnectionStatus>> {
         let (ack, rx) = oneshot::channel();
         self.inner

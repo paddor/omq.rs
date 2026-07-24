@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, InprocConn, MessageEncoder,
     PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType,
-    ZmtpConnection, max_peer_count, mpsc,
+    ZmtpConnection, mpsc,
 };
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
@@ -109,6 +109,7 @@ pub(super) fn spawn_byte_stream_connection(
                 direct_tcp_writer,
                 send_pipe,
             },
+            ready: false,
             identity: bytes::Bytes::new(),
             info: None,
             endpoint,
@@ -130,7 +131,7 @@ pub(super) fn spawn_inproc_peer(
     endpoint: Endpoint,
     is_server: bool,
 ) {
-    if !can_accept_peer(socket) {
+    if !socket.can_accept_ready_peer() {
         return;
     }
     if !omq_proto::proto::is_compatible(socket.socket_type, conn.peer.socket_type) {
@@ -165,6 +166,7 @@ pub(super) fn spawn_inproc_peer(
                 direct_tcp_writer: None,
                 send_pipe,
             },
+            ready: false,
             identity: bytes::Bytes::new(),
             info: None,
             endpoint,
@@ -215,19 +217,10 @@ pub(super) fn spawn_inproc_peer(
 }
 
 fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
-    if !can_accept_peer(socket) {
+    if socket.closing {
         return None;
     }
     Some(next_peer_id(socket))
-}
-
-fn can_accept_peer(socket: &SocketDriver) -> bool {
-    if let Some(max) = max_peer_count(socket.socket_type)
-        && socket.peers.len() >= max
-    {
-        return false;
-    }
-    true
 }
 
 fn next_peer_id(socket: &mut SocketDriver) -> u64 {

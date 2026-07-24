@@ -161,6 +161,7 @@ impl SocketDriver {
             PeerEntry {
                 ident: peer_ident,
                 handle: handle.clone(),
+                ready: true,
                 identity: identity.clone(),
                 info: None,
                 endpoint,
@@ -171,9 +172,7 @@ impl SocketDriver {
             },
         );
 
-        if self.peers.len() > 1 {
-            PeerLifecycle::new(self).update_send_ring();
-        }
+        PeerLifecycle::new(self).update_send_ring();
 
         self.send_strategy
             .connection_added(peer_id, handle, identity.clone(), false, 0);
@@ -209,6 +208,9 @@ impl SocketDriver {
                 if self.closing {
                     return;
                 }
+                if !self.peers.get(&peer_id).is_some_and(|p| p.ready) {
+                    return;
+                }
                 if self.socket_type == SocketType::Rep
                     && self.uses_latency_profile()
                     && self.peers.contains_key(&peer_id)
@@ -239,7 +241,11 @@ impl SocketDriver {
                     self.begin_close(None, Some(Duration::ZERO));
                 }
             }
-            ZmtpEvent::Command(cmd) => self.handle_peer_command(peer_id, cmd).await,
+            ZmtpEvent::Command(cmd) => {
+                if self.peers.get(&peer_id).is_some_and(|p| p.ready) {
+                    self.handle_peer_command(peer_id, cmd).await;
+                }
+            }
         }
     }
 
@@ -249,6 +255,28 @@ impl SocketDriver {
         peer_minor: u8,
         peer_properties: std::sync::Arc<omq_proto::proto::command::PeerProperties>,
     ) {
+        if !self.can_accept_ready_peer() {
+            let (endpoint, peer_ident) = {
+                let Some(p) = self.peers.get(&peer_id) else {
+                    return;
+                };
+                (p.endpoint.clone(), p.ident.clone())
+            };
+            self.monitor.publish(MonitorEvent::HandshakeFailed {
+                endpoint,
+                peer_ident,
+                reason: "socket peer limit reached".into(),
+            });
+            if let Some(mut peer) =
+                PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
+            {
+                peer.handle.cancel.cancel();
+                if let Some(task) = peer.task.take() {
+                    task.abort();
+                }
+            }
+            return;
+        }
         let identity = peer_properties
             .identity
             .clone()
@@ -262,6 +290,7 @@ impl SocketDriver {
             let Some(p) = self.peers.get_mut(&peer_id) else {
                 return;
             };
+            p.ready = true;
             p.identity = identity.clone();
             let info = PeerInfo {
                 connection_id: peer_id,
@@ -282,6 +311,15 @@ impl SocketDriver {
                 p.io_thread,
             )
         };
+        if handle
+            .inbox
+            .send(crate::engine::PeerDriverCommand::ActivateDataPlane)
+            .await
+            .is_err()
+        {
+            let _ = PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::PeerClosed);
+            return;
+        }
         self.send_strategy.connection_added(
             peer_id,
             handle.clone(),
@@ -290,6 +328,7 @@ impl SocketDriver {
             io_thread,
         );
         self.recv_strategy.connection_added(peer_id, identity);
+        PeerLifecycle::new(self).update_send_ring();
         self.replay_state_to_peer(&handle, subs_replay).await;
     }
 
@@ -487,6 +526,7 @@ pub(super) async fn inproc_peer_driver(
     // empty fallback waiting would add a signal waiter-list lock on the
     // hot select path.
     let mut prioritize_shared_rx = shared_rx.is_some();
+    let mut data_plane_active = false;
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
@@ -522,6 +562,9 @@ pub(super) async fn inproc_peer_driver(
                 biased;
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
+                    Some(PeerDriverCommand::ActivateDataPlane) => {
+                        data_plane_active = true;
+                    }
                     Some(PeerDriverCommand::SendMessage(m)) => {
                         if out.send(InboundFrame::Message(m)).await.is_err() {
                             return;
@@ -541,7 +584,7 @@ pub(super) async fn inproc_peer_driver(
                     } else {
                         std::future::pending().await
                     }
-                }, if prioritize_shared_rx => {
+                }, if prioritize_shared_rx && data_plane_active => {
                     let Some(first) = msg else { return; };
                     shared_batch.push(first);
                     let batch_limit = shared_rx
@@ -577,7 +620,7 @@ pub(super) async fn inproc_peer_driver(
                 },
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
-                }, if send_pipe_rx.is_some() => {
+                }, if send_pipe_rx.is_some() && data_plane_active => {
                     let send_pipe_rx = send_pipe_rx.as_mut().unwrap();
                     let drained = send_pipe_rx.drain_into(
                         &mut send_pipe_batch,
@@ -600,7 +643,7 @@ pub(super) async fn inproc_peer_driver(
                         return;
                     }
                 },
-                frame = in_rx.recv() => match frame {
+                frame = in_rx.recv(), if data_plane_active => match frame {
                     Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
                             && m.max_message_size_len() > max

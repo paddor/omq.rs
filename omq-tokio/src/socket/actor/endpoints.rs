@@ -235,19 +235,17 @@ impl SocketDriver {
                 g.remove(&group);
             }
         }
-        // Replay to ZMTP-Ready peers. Skip peers whose handshake has
-        // not finished - the codec rejects `send_command` before
-        // `Ready`, which would tear the connection down. Pre-Ready
-        // peers pick up the join via `handle_peer_event(HandshakeSucceeded)`'s
-        // replay loop. UDP DISH listener tasks see the change through
-        // the shared set, no command needed.
+        // Replay to data-plane-ready peers. Pending peers pick up the join
+        // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
+        // listener tasks see the change through the shared set, no command
+        // needed.
         let cmd = if joining {
             omq_proto::proto::Command::Join(group)
         } else {
             omq_proto::proto::Command::Leave(group)
         };
         for p in self.peers.values() {
-            if p.info.is_none() {
+            if !p.ready {
                 continue;
             }
             let _ = p
@@ -276,20 +274,16 @@ impl SocketDriver {
         } else if let Some(pos) = self.subscriptions.iter().position(|p| p == &prefix) {
             self.subscriptions.remove(pos);
         }
-        // Broadcast to every ZMTP-Ready peer. Peers whose handshake
-        // has not yet completed (`info.is_none()`) are skipped - the
-        // codec rejects `send_command` before `Ready`, which would
-        // bubble up as a Protocol error and tear the connection down
-        // mid-handshake. handle_peer_event(HandshakeSucceeded)
-        // replays `self.subscriptions` for each peer as it transitions
-        // to Ready, so nothing is lost by skipping here.
+        // Broadcast to every data-plane-ready peer. Pending peers are skipped;
+        // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
+        // for each peer as it transitions to ready.
         let cmd = if subscribe {
             omq_proto::proto::Command::Subscribe(prefix)
         } else {
             omq_proto::proto::Command::Cancel(prefix)
         };
         for p in self.peers.values() {
-            if p.info.is_none() {
+            if !p.ready {
                 continue;
             }
             let _ = p

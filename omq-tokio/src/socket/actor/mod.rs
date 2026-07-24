@@ -140,6 +140,11 @@ enum InternalEvent {
 struct PeerEntry {
     ident: PeerIdent,
     handle: PeerDriverHandle,
+    /// True after this peer is eligible for data-plane routing. For
+    /// ZMTP byte streams this flips on `HandshakeSucceeded`; pre-auth
+    /// peers stay pending and must not count against socket-type peer
+    /// limits.
+    ready: bool,
     /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
     identity: bytes::Bytes,
@@ -394,9 +399,8 @@ impl SocketDriver {
             SocketCommand::QueryConnections { ack } => {
                 let snapshot: Vec<ConnectionStatus> = self
                     .peers
-                    .keys()
-                    .copied()
-                    .filter_map(|id| self.peer_status(id))
+                    .iter()
+                    .filter_map(|(id, peer)| peer.ready.then(|| self.peer_status(*id)).flatten())
                     .collect();
                 let _ = ack.send(snapshot);
             }
@@ -542,6 +546,14 @@ impl SocketDriver {
 }
 
 impl SocketDriver {
+    pub(super) fn ready_peer_count(&self) -> usize {
+        self.peers.values().filter(|p| p.ready).count()
+    }
+
+    pub(super) fn can_accept_ready_peer(&self) -> bool {
+        max_peer_count(self.socket_type).is_none_or(|max| self.ready_peer_count() < max)
+    }
+
     fn type_state_needs_transform(&self) -> bool {
         matches!(
             self.socket_type,

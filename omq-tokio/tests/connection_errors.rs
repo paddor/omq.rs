@@ -54,6 +54,68 @@ async fn server_survives_pre_handshake_drop() {
 }
 
 #[tokio::test]
+async fn pending_handshake_does_not_block_pair_slot() {
+    use tokio::net::TcpStream;
+
+    let server = Socket::new(
+        SocketType::Pair,
+        Options {
+            handshake_timeout: Some(Duration::from_secs(5)),
+            ..Options::default()
+        },
+    );
+    let mut mon = server.monitor();
+    let ep = server.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+
+    let _idle = TcpStream::connect(addr).await.unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), mon.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            omq_tokio::MonitorEvent::Accepted { .. } => break,
+            omq_tokio::MonitorEvent::Listening { .. } => {}
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    assert!(
+        server
+            .wait_connected(1, Duration::from_millis(100))
+            .await
+            .is_err(),
+        "pre-handshake connection must not count as data-plane ready"
+    );
+
+    let client = Socket::new(SocketType::Pair, Options::default());
+    client.connect(ep).await.unwrap();
+
+    let handshook = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let omq_tokio::MonitorEvent::HandshakeSucceeded { .. } = mon.recv().await.unwrap() {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok();
+    assert!(handshook, "pending peer blocked legitimate PAIR handshake");
+
+    client.send(Message::single("alive")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
+        .await
+        .expect("recv timed out after legitimate handshake")
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"alive");
+}
+
+#[tokio::test]
 async fn server_survives_mid_session_abrupt_drop() {
     // Client drops the TCP connection abruptly (tokio socket dropped
     // without close) while the server is live. Server must survive and

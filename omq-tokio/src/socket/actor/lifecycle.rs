@@ -33,25 +33,31 @@ impl<'a> PeerLifecycle<'a> {
     }
 
     pub(super) fn after_peer_inserted(&mut self) {
-        if self.driver.peers.len() > 1 {
+        if self.driver.ready_peer_count() > 1 {
             self.update_send_ring();
         }
     }
 
     pub(super) fn update_send_ring(&mut self) {
         let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocTx>> = None;
-        let mut count = 0;
+        let mut ready_count = 0;
         for p in self.driver.peers.values() {
+            if !p.ready {
+                continue;
+            }
+            ready_count += 1;
             if let Some(ref s) = p.spsc {
-                count += 1;
-                if count > 1 {
-                    break;
-                }
                 sole_spsc = Some(s);
+            } else {
+                sole_spsc = None;
+            }
+            if ready_count > 1 {
+                break;
             }
         }
-        if count == 1 && self.driver.peers.len() == 1 {
-            let s = sole_spsc.unwrap();
+        if ready_count == 1
+            && let Some(s) = sole_spsc
+        {
             self.driver.spsc.send_ring.store(Some(s.clone()));
             self.driver
                 .spsc
@@ -146,7 +152,7 @@ impl<'a> PeerLifecycle<'a> {
 
     fn reset_type_state_if_last_peer(&mut self) {
         match self.driver.socket_type {
-            SocketType::Req if self.driver.peers.is_empty() => {
+            SocketType::Req if self.driver.ready_peer_count() == 0 => {
                 self.driver
                     .req_awaiting_reply
                     .store(false, Ordering::Relaxed);
@@ -155,6 +161,14 @@ impl<'a> PeerLifecycle<'a> {
                     .lock()
                     .expect("type_state")
                     .on_peer_disconnected();
+            }
+            SocketType::Rep if self.driver.ready_peer_count() == 0 => {
+                self.driver
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .on_peer_disconnected();
+                self.driver.rep_pending.lock().expect("rep pending").clear();
             }
             _ => {}
         }

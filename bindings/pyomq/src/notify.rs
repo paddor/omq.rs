@@ -51,7 +51,7 @@ impl ReadinessSignal {
         }
         #[cfg(windows)]
         {
-            self.backend.signal();
+            self.backend.signal(self.parking.load(Ordering::Acquire));
         }
     }
 

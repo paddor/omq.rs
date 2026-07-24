@@ -27,6 +27,7 @@ SUBPROCESS_TIMEOUT_S = 30.0
 LATENCY_TIMEOUT_S = 60.0
 SUBPROCESS_RETRIES = 2
 PROXY_DURATION_S = 2.0
+THROUGHPUT_MAX_BYTES = None
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
 _CACHE_DIR = os.path.join(
@@ -269,6 +270,9 @@ def configure_benchmark(args):
     global LATENCY_TIMEOUT_S
     global SUBPROCESS_RETRIES
     global PROXY_DURATION_S
+    global THROUGHPUT_MAX_BYTES
+
+    THROUGHPUT_MAX_BYTES = None
 
     if args.quick:
         SIZES = QUICK_SIZES.copy()
@@ -281,6 +285,7 @@ def configure_benchmark(args):
         LATENCY_TIMEOUT_S = 20.0
         SUBPROCESS_RETRIES = 0
         PROXY_DURATION_S = 1.0
+        THROUGHPUT_MAX_BYTES = 128 * 1024 * 1024
 
     if args.sizes is not None:
         SIZES = args.sizes
@@ -336,6 +341,16 @@ def _run_subprocess(code, label, timeout=None, retries=None):
     return None
 
 
+def _throughput_iters(size, n_target_per_s, *, max_messages=None):
+    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
+    if max_messages is not None:
+        n = min(n, max_messages)
+    if THROUGHPUT_MAX_BYTES is not None:
+        byte_limited = max(100, THROUGHPUT_MAX_BYTES // max(size, 1))
+        n = min(n, byte_limited)
+    return n
+
+
 def _measure_throughput_subprocess(lib_name, transport, size, n_target_per_s=200_000):
     """Run a throughput measurement. TCP uses 2 separate processes (push +
     pull) so each gets its own runtime. Inproc must stay single-process."""
@@ -344,7 +359,7 @@ def _measure_throughput_subprocess(lib_name, transport, size, n_target_per_s=200
     else:
         lib_import = "import pyomq as lib"
 
-    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
+    n = _throughput_iters(size, n_target_per_s)
 
     if transport == "inproc":
         code = f"""
@@ -431,18 +446,25 @@ import os; os._exit(0)
             push_proc.terminate()
             push_proc.wait(timeout=5)
             return 0.0
+        label = f"{lib_name} {transport} {size}B"
         pull_proc = subprocess.Popen(
             [sys.executable, "-c", pull_code, port_line],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            stdout, _ = pull_proc.communicate(timeout=SUBPROCESS_TIMEOUT_S)
+            stdout, stderr = pull_proc.communicate(timeout=SUBPROCESS_TIMEOUT_S)
             result = json.loads(stdout.strip())
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(f"  [{label} timeout]\n")
             pull_proc.kill()
             pull_proc.wait()
+            result = 0.0
+        except (json.JSONDecodeError, ValueError):
+            sys.stderr.write(f"  [{label} invalid output]\n")
+            if stderr:
+                sys.stderr.write(stderr)
             result = 0.0
     finally:
         try:
@@ -498,7 +520,7 @@ def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
         lib_import = "import pyomq as lib; import pyomq.asyncio as alib"
         push_import = "import pyomq as lib"
 
-    n = min(max(int(n_target_per_s * TARGET_RUNTIME_S), 100), 20_000)
+    n = _throughput_iters(size, n_target_per_s, max_messages=20_000)
 
     push_code = f"""
 import sys
@@ -558,18 +580,25 @@ asyncio.run(run())
             push_proc.terminate()
             push_proc.wait(timeout=5)
             return 0.0
+        label = f"{lib_name} async tcp {size}B"
         pull_proc = subprocess.Popen(
             [sys.executable, "-c", pull_code, port_line],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            stdout, _ = pull_proc.communicate(timeout=SUBPROCESS_TIMEOUT_S)
+            stdout, stderr = pull_proc.communicate(timeout=SUBPROCESS_TIMEOUT_S)
             result = json.loads(stdout.strip())
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(f"  [{label} timeout]\n")
             pull_proc.kill()
             pull_proc.wait()
+            result = 0.0
+        except (json.JSONDecodeError, ValueError):
+            sys.stderr.write(f"  [{label} invalid output]\n")
+            if stderr:
+                sys.stderr.write(stderr)
             result = 0.0
     finally:
         try:

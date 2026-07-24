@@ -345,11 +345,13 @@ class Socket:
 
         def _drain_recv_waiters(self):
             """Invoke each waiter until one returns False (not ready)."""
+            waiters = self._recv_waiters
             try:
-                waiters = self._recv_waiters
                 while waiters and waiters[0]():
                     waiters.popleft()
             finally:
+                if not waiters:
+                    self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_recv_drain_complete()
                 # Ensure we drain any notification that arrived in between
                 # the end of the try block and the call to _mark_recv_drain_complete.
@@ -362,11 +364,13 @@ class Socket:
 
         def _drain_send_waiters(self):
             """Invoke each waiter until one returns False (not ready)."""
+            waiters = self._send_waiters
             try:
-                waiters = self._send_waiters
                 while waiters and waiters[0]():
                     waiters.popleft()
             finally:
+                if not waiters:
+                    self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_send_drain_complete()
                 # Ensure we drain any notification that arrived in between
                 # the end of the try block and the call to _mark_send_drain_complete.

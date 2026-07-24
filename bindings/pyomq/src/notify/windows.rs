@@ -142,19 +142,22 @@ impl WindowsSignal {
         }
     }
 
-    pub(crate) fn signal(&self) {
+    pub(crate) fn signal(&self, waiter_armed: bool) {
         let should_invoke = {
             let state = self.state.lock().unwrap();
+            let mode = state.hooks.mode.load(Ordering::Relaxed);
+            let callback_enabled =
+                mode & WAKEUP_MODE_ASYNC != 0 && state.hooks.async_callback.is_some();
+            let sync_enabled = mode & WAKEUP_MODE_SYNC != 0 && state.hooks.sync_event.is_some();
+            if !waiter_armed && !callback_enabled && !sync_enabled {
+                return;
+            }
             let already_pending = state.pending.swap(true, Ordering::AcqRel);
             if !already_pending {
                 unsafe {
                     let _ = SetEvent(state.event);
                 }
             }
-            let mode = state.hooks.mode.load(Ordering::Relaxed);
-            let callback_enabled =
-                mode & WAKEUP_MODE_ASYNC != 0 && state.hooks.async_callback.is_some();
-            let sync_enabled = mode & WAKEUP_MODE_SYNC != 0 && state.hooks.sync_event.is_some();
             if callback_enabled {
                 state.try_schedule_callback()
             } else {
@@ -201,12 +204,12 @@ impl WindowsSignal {
             state.finish_callback()
         };
         if rearm {
-            self.signal();
+            self.signal(true);
         }
     }
 
     pub(crate) fn force_wake(&self) {
-        self.signal();
+        self.signal(true);
     }
 
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> bool {
@@ -247,7 +250,7 @@ impl WindowsSignal {
             state.pending.load(Ordering::Acquire)
         };
         if pending {
-            self.signal();
+            self.signal(true);
         }
     }
 
@@ -320,5 +323,25 @@ mod tests {
             state.callback_state.load(Ordering::Acquire),
             WAKEUP_CALLBACK_IDLE
         );
+    }
+
+    #[test]
+    fn unarmed_signal_does_not_latch_pending_wakeup() {
+        let signal = WindowsSignal::new();
+
+        signal.signal(false);
+
+        let state = signal.state.lock().unwrap();
+        assert!(!state.pending.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn armed_signal_latches_pending_wakeup() {
+        let signal = WindowsSignal::new();
+
+        signal.signal(true);
+
+        let state = signal.state.lock().unwrap();
+        assert!(state.pending.load(Ordering::Acquire));
     }
 }

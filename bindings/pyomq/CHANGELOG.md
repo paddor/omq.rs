@@ -11,11 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Windows async readiness drains now consume the latched wakeup bit, avoiding
   repeated stale drain callbacks after a waiter remains blocked.
+- Windows readiness signals no longer latch wakeups when no waiter is armed,
+  reducing stale async callbacks during sustained receive drains.
 
 ### Changed
 
 - `scripts/update_perf.py` has a `--quick` local-only mode and benchmark
   knobs for shorter diagnostic runs.
+- `scripts/update_perf.py --quick` caps total throughput bytes per cell so
+  large-message checks do not spend the whole timeout on one sample.
+- `scripts/update_perf.py` now reports two-process throughput timeouts instead
+  of silently rendering them as `0`.
 
 ## [0.16.4] - 2026-07-23
 

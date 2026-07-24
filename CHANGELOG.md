@@ -26,6 +26,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 - pyomq Windows async readiness drains consume latched wakeups instead of
   reusing stale wakeups after a waiter remains blocked.
+- pyomq Windows readiness signals skip unarmed wakeups to reduce stale async
+  callbacks during sustained receive drains.
 
 ### Removed
 

@@ -145,7 +145,8 @@ covered by integration tests. The suite is layered:
   safety, compression (lz4), PLAIN / CURVE auth, mechanism reconnect,
   large-message throughput, multi-socket, inproc cross-thread,
   WebSocket throughput and reconnect. Soak runs sample RSS and FD counts.
-- **Loom** coverage for lock-free inproc queue behavior.
+- **Loom** coverage for `yring` SPSC memory ordering, async wakeups, and
+  `omq-tokio` signal race windows.
 - **Miri** on `yring`.
 - **Release semver review** through `release-plz`.
 
@@ -189,7 +190,7 @@ notification fd for `zmq_poll`/`ZMQ_FD` readiness.
 pipes, inproc, UDP, and WebSocket transports. `omq-libzmq` builds and
 tests on Windows for the supported C API surface.
 
-`pyomq` publishes Linux, macOS and Windows wheels and an sdist
+`pyomq` publishes Linux, macOS, and Windows wheels and an sdist.
 
 Requirements:
 

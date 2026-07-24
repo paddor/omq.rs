@@ -78,12 +78,13 @@ Results:
 Dead end. The pump and `try_recv` can't coexist on the same socket
 because they're both consumers of the socket's internal recv channel.
 
-### Send backpressure: eventfd park instead of spin
+### Send backpressure: readiness signal instead of spin
 
-When the send yring is full, the Python thread parked on an eventfd
-(`send_ready`) instead of spinning with `thread::yield_now()`. The
-send pump signals the eventfd after each batch drain (every 256
-messages). No CPU waste under backpressure.
+When the send yring is full, the Python thread parks on `send_ready`
+instead of spinning with `thread::yield_now()`. Linux uses `eventfd`,
+macOS/other Unix uses a nonblocking pipe, and Windows uses a Win32
+event/callback backend. The send pump signals after each batch drain
+(every 256 messages). No CPU waste under backpressure.
 
 ### Send pump yield interval: 64 -> 256
 
@@ -103,9 +104,9 @@ the runtime type.
 
 The yring relay avoids `block_on` entirely. Python does lock-free ring
 push/pop. Pump tasks on the tokio thread batch send/recv operations.
-The eventfd notification for recv uses an atomic flag to skip the
-syscall when the consumer isn't parked. Send backpressure parks on
-eventfd instead of spinning.
+The readiness notification for recv uses an atomic flag to skip the
+syscall when the consumer isn't parked. Send backpressure parks on the
+same readiness signal instead of spinning.
 
 ### Attempted: recv prefetch (drain yring batch under one lock)
 
@@ -127,7 +128,7 @@ Results (8 B TCP, N=15):
 
 Reverted. The gains are too small to justify the complexity, and the
 prefetch buffer breaks `poll()`/`wait_any()`: those check the yring and
-eventfd for readiness but don't know about the prefetch buffer. Messages
+readiness signal but don't know about the prefetch buffer. Messages
 drained into the buffer become invisible to poll, causing hangs in
 ZMQStream/tornado integrations (jupyter-client test suite).
 
@@ -159,7 +160,7 @@ REQ/REP: ~8.4k vs ~4.5k (1.86x).
 ### Materialized slot: Mutex -> RwLock
 
 `SocketInner::materialized` guards the lazily-initialized socket state
-(ring producers/consumers, notify fds, pump handles). Every `send()`
+(ring producers/consumers, readiness signals, pump handles). Every `send()`
 and `recv()` locks it to reach `send_prod` / `recv_cons`.
 
 With `Mutex`, the send thread (Python sender) and recv thread (Python
@@ -184,8 +185,8 @@ acquisition + pipe write to wake the asyncio loop). With two recv
 round-trips per REQ/REP exchange, async latency was ~195 µs.
 
 The fix: send pushes directly into the yring (synchronous, no tokio).
-Recv uses `_try_recv` (poll yring) + `_recv_fd` (eventfd registered
-with `loop.add_reader`). No Rust futures bridged to Python. Removed
+Recv uses `_try_recv` (poll yring) + `_recv_fd` (Unix readiness fd
+registered with `loop.add_reader`). No Rust futures bridged to Python. Removed
 `async_send_message`, `async_recv_message`, `tokio_future_into_py`
 from the send/recv path (kept only for control-plane ops like bind).
 
@@ -222,7 +223,7 @@ in Rust via the PID stored in `Materialized`.
 
 - `tokio::task::yield_now()` instead of `tokio::time::sleep(10 us)`.
   Timer wheel granularity was the root cause of the 27x regression.
-- Send backpressure: eventfd park instead of spin loop.
+- Send backpressure: readiness signal park instead of spin loop.
 - Send pump yield interval 64 -> 256, notify once per batch.
 - yring capacity matches HWM (was hardcoded 65536).
 - `Socket::try_send` now returns the message on `Full` (via

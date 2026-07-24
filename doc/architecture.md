@@ -256,18 +256,32 @@ and other tasks. Standard presets: `DrainBudget::WORKER` (256 messages / 2 MiB)
 for lane workers and deferred fan-out, `DrainBudget::WIRE_DRAIN` (1024 / 1
 MiB) for wire-slot drain.
 
-All producer-to-consumer signaling uses `DataSignal`, an atomic flag plus
-`Notify`. `mark()` fires `notify_one` only on the `false`-to-`true` transition.
-The consumer `clear()`s before draining, then `rearm_if_nonempty()` to self-wake
-if data remains. `reschedule()` fires unconditionally for budget-interrupted
-drains where the consumer already knows data remains. Wire slot, send pipe,
-drop queue, and lane workers all use `DataSignal`.
+Data-ready paths use `DataSignal`, a small atomic state machine plus `Notify`.
+`mark()` fires `notify_one` only on the idle-to-pending transition. The consumer
+calls `begin_drain()` before draining and `clear_after(is_empty)` afterward. A
+producer mark that races with drain clear moves the signal to `DIRTY`, so
+readiness survives stale empty observations. `reschedule()` fires
+unconditionally for budget-interrupted drains where the consumer already knows
+data remains. Wire slots, send pipes, fallback queues, drop queues, and lane
+workers all use `DataSignal`.
+
+State-change waits use `StateSignal`: a generation counter plus `Notify`.
+Waiters capture a generation, enable their waiter, re-check caller state, then
+await only if nothing changed meanwhile. This is used where readiness is not a
+single data queue, for example queue-space release and peer-state changes.
 
 Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
 dedicated channels separate from data. Lane workers, for example, drain all
 control commands unconditionally before draining data up to budget. This
 guarantees control latency is bounded by one data budget drain, not by queue
 depth.
+
+Loom covers the race windows that would lose these wakeups:
+`omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, `StateSignal`
+generation checks, queue-space release, and fallback waits that race with peer
+activation. `yring/tests/loom.rs` covers the lower-level SPSC cursor ordering,
+wraparound, producer drop, async `push_async` wakeups, and upper-layer
+readiness patterns built on the ring.
 
 ## Transports
 
@@ -299,7 +313,8 @@ Protocol: `omq-proto/src/message.rs`, `frame_buffer.rs`, `flow.rs`,
 
 Backend: `omq-tokio/src/socket/actor/`, `socket/handle.rs`,
 `engine/driver.rs`, `engine/send_pipe.rs`, `engine/transmit_slot.rs`,
-`engine/signal.rs`, `routing/`, and `transport/`.
+`engine/signal.rs`, `routing/`, `transport/`, and
+`tests/loom_signal.rs`.
 
 To add a socket type, extend `omq_proto::proto::SocketType`, compatibility
 checks, protocol routing, and the matching backend strategy. To add a

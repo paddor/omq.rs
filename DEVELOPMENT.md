@@ -41,12 +41,25 @@ Miri target for unsafe internals:
 cargo +nightly miri test -p yring
 ```
 
+Loom checks:
+
+```sh
+cargo test -p omq-tokio --test omq_loom_signal
+RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
+```
+
+The `omq-tokio` Loom test models `StateSignal` and `DataSignal` lost-wake
+races. The `yring` Loom suite is behind `cfg(loom)` and covers SPSC cursor
+ordering, wraparound, producer drop, async `push_async` wakeups, and upper-layer
+readiness patterns.
+
 Full sweep:
 
 ```sh
 ./scripts/test-all.sh
 OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
 OMQ_SKIP_PERF=1 ./scripts/test-all.sh
+OMQ_LOOM=1 ./scripts/test-all.sh
 ```
 
 The full sweep runs `omq_perf_verify` locally. With `.perf_hw` present,

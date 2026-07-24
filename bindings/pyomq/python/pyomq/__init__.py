@@ -657,7 +657,7 @@ class _ShadowSocket:
     """Blocking recv bridge over an async socket's native handle.
 
     Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
-    Provides sync recv via select() + eventfd without entering the
+    Provides sync recv via the native readiness signal without entering the
     asyncio event loop, matching pyzmq's shadow(underlying) behavior.
 
     """

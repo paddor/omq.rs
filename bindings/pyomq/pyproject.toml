@@ -29,13 +29,17 @@ classifiers = [
 [dependency-groups]
 test = [
     "pytest>=7",
-    "pytest-asyncio>=0.21",
+    "pytest-asyncio>=0.21,<1.4; python_version < '3.10'",
+    "pytest-asyncio>=1.4.0; python_version >= '3.10'",
     "pyzmq>=25",
+    "tornado>=6",
 ]
-lint = ["ruff"]
+lint = ["ruff==0.15.22"]
+type-check = ["ty==0.0.63"]
 dev = [
   { include-group = "test" },
   { include-group = "lint" },
+  { include-group = "type-check" },
 ]
 
 [project.urls]
@@ -46,6 +50,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "--ignore=tests/soak"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E402", "E702", "F401", "F841"]
+
+[tool.ty.src]
+exclude = ["tests/soak/**"]
 
 [tool.maturin]
 # Stable ABI - one wheel covers all supported Python versions.

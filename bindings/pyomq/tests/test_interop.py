@@ -6,11 +6,16 @@ intentionally absent: pyzmq's inproc and pyomq's inproc each maintain
 their own process-local registry, so they can never see each other.
 """
 
+import sys
 import time
 
 import pytest
 
 zmq_pyzmq = pytest.importorskip("zmq")  # pyzmq
+
+# PyZMQ requires to use the selector event loop on Windows,
+# so we skip the proactor event loop for these tests.
+pytestmark = pytest.mark.event_loop("selector")
 
 import pyomq
 
@@ -29,19 +34,25 @@ def endpoint(request):
 
 _TRANSPORTS = pytest.mark.parametrize(
     "endpoint",
-    ["tcp_endpoint", "ipc_endpoint"],
+    # pyzmq does not support IPC on Windows, so skip that transport there.
+    ["tcp_endpoint"] if sys.platform == "win32" else ["tcp_endpoint", "ipc_endpoint"],
     indirect=True,
 )
 
 
 # ---------- PUSH / PULL ----------
 
+
 @_TRANSPORTS
 def test_pyomq_push_pyzmq_pull(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     pull = py_ctx.socket(zmq_pyzmq.PULL)
     pull.bind(endpoint)
-    ep = pull.last_endpoint.decode() if isinstance(pull.last_endpoint, bytes) else pull.last_endpoint
+    ep = (
+        pull.last_endpoint.decode()
+        if isinstance(pull.last_endpoint, bytes)
+        else pull.last_endpoint
+    )
     try:
         ctx = pyomq.Context()
         push = ctx.socket(pyomq.PUSH)
@@ -73,6 +84,7 @@ def test_pyzmq_push_pyomq_pull(endpoint):
 
 # ---------- PUB / SUB ----------
 
+
 @_TRANSPORTS
 def test_pyomq_pub_pyzmq_sub(endpoint):
     ctx = pyomq.Context()
@@ -99,7 +111,11 @@ def test_pyzmq_pub_pyomq_sub(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     pub = py_ctx.socket(zmq_pyzmq.PUB)
     pub.bind(endpoint)
-    ep = pub.last_endpoint.decode() if isinstance(pub.last_endpoint, bytes) else pub.last_endpoint
+    ep = (
+        pub.last_endpoint.decode()
+        if isinstance(pub.last_endpoint, bytes)
+        else pub.last_endpoint
+    )
     try:
         ctx = pyomq.Context()
         sub = ctx.socket(pyomq.SUB)
@@ -118,12 +134,17 @@ def test_pyzmq_pub_pyomq_sub(endpoint):
 
 # ---------- REQ / REP ----------
 
+
 @_TRANSPORTS
 def test_pyomq_req_pyzmq_rep(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     rep = py_ctx.socket(zmq_pyzmq.REP)
     rep.bind(endpoint)
-    ep = rep.last_endpoint.decode() if isinstance(rep.last_endpoint, bytes) else rep.last_endpoint
+    ep = (
+        rep.last_endpoint.decode()
+        if isinstance(rep.last_endpoint, bytes)
+        else rep.last_endpoint
+    )
     try:
         ctx = pyomq.Context()
         req = ctx.socket(pyomq.REQ)
@@ -159,12 +180,17 @@ def test_pyzmq_req_pyomq_rep(endpoint):
 
 # ---------- DEALER / ROUTER ----------
 
+
 @_TRANSPORTS
 def test_pyomq_dealer_pyzmq_router(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     router = py_ctx.socket(zmq_pyzmq.ROUTER)
     router.bind(endpoint)
-    ep = router.last_endpoint.decode() if isinstance(router.last_endpoint, bytes) else router.last_endpoint
+    ep = (
+        router.last_endpoint.decode()
+        if isinstance(router.last_endpoint, bytes)
+        else router.last_endpoint
+    )
     try:
         ctx = pyomq.Context()
         dealer = ctx.socket(pyomq.DEALER)
@@ -206,12 +232,17 @@ def test_pyzmq_dealer_pyomq_router(endpoint):
 
 # ---------- PAIR ----------
 
+
 @_TRANSPORTS
 def test_pair_both_directions(endpoint):
     py_ctx = zmq_pyzmq.Context.instance()
     a = py_ctx.socket(zmq_pyzmq.PAIR)
     a.bind(endpoint)
-    ep = a.last_endpoint.decode() if isinstance(a.last_endpoint, bytes) else a.last_endpoint
+    ep = (
+        a.last_endpoint.decode()
+        if isinstance(a.last_endpoint, bytes)
+        else a.last_endpoint
+    )
     try:
         ctx = pyomq.Context()
         b = ctx.socket(pyomq.PAIR)
@@ -227,6 +258,7 @@ def test_pair_both_directions(endpoint):
 
 
 # ---------- XPUB / XSUB ----------
+
 
 @_TRANSPORTS
 def test_pyomq_xpub_pyzmq_xsub(endpoint):

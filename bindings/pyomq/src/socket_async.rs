@@ -157,6 +157,7 @@ impl AsyncSocket {
         }
     }
 
+    #[cfg(unix)]
     #[pyo3(name = "_recv_fd")]
     fn recv_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
@@ -173,6 +174,15 @@ impl AsyncSocket {
         Ok(owned_fd.into_raw_fd())
     }
 
+    #[cfg(not(unix))]
+    #[pyo3(name = "_recv_fd")]
+    fn recv_fd(&self) -> PyResult<i32> {
+        Err(crate::error::map_err(omq_proto::error::Error::Protocol(
+            "_recv_fd() is only available on Unix platforms".to_string(),
+        )))
+    }
+
+    #[cfg(unix)]
     #[pyo3(name = "_send_fd")]
     fn send_fd(&self) -> PyResult<i32> {
         self.inner.materialize()?;
@@ -187,6 +197,65 @@ impl AsyncSocket {
         send_ready.park_begin();
         use std::os::fd::IntoRawFd;
         Ok(owned_fd.into_raw_fd())
+    }
+
+    #[cfg(not(unix))]
+    #[pyo3(name = "_send_fd")]
+    fn send_fd(&self) -> PyResult<i32> {
+        Err(crate::error::map_err(omq_proto::error::Error::Protocol(
+            "_send_fd() is only available on Unix platforms".to_string(),
+        )))
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_set_wakeup_hooks")]
+    #[pyo3(signature = (recv_async = None, recv_event = None, send_async = None, send_event = None))]
+    fn set_wakeup_hooks(
+        &self,
+        recv_async: Option<&Bound<'_, PyAny>>,
+        recv_event: Option<&Bound<'_, PyAny>>,
+        send_async: Option<&Bound<'_, PyAny>>,
+        send_event: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.inner.materialize()?;
+        self.inner.set_wakeup_hooks(
+            recv_async.map(|cb| cb.clone().unbind()),
+            recv_event.map(|event| event.clone().unbind()),
+            send_async.map(|cb| cb.clone().unbind()),
+            send_event.map(|event| event.clone().unbind()),
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_set_wakeup_modes")]
+    #[pyo3(signature = (recv_mode = None, send_mode = None))]
+    fn set_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) -> PyResult<()> {
+        self.inner.materialize()?;
+        self.inner.set_wakeup_modes(recv_mode, send_mode);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_clear_wakeup_modes")]
+    #[pyo3(signature = (recv_mode = None, send_mode = None))]
+    fn clear_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) -> PyResult<()> {
+        self.inner.clear_wakeup_modes(recv_mode, send_mode);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_mark_recv_drain_complete")]
+    fn mark_recv_drain_complete(&self) -> PyResult<()> {
+        self.inner.mark_recv_wakeup_drain_complete();
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[pyo3(name = "_mark_send_drain_complete")]
+    fn mark_send_drain_complete(&self) -> PyResult<()> {
+        self.inner.mark_send_wakeup_drain_complete();
+        Ok(())
     }
 
     // ── Subscriptions / groups (sync) ───────────────────────────────

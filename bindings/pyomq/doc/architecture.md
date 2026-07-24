@@ -16,10 +16,14 @@ src/
                     curve_keypair, has_feature
   runtime.rs        tokio runtime on dedicated thread; materialize,
                     wait_any, proxy
-  socket.rs         sync Socket + SocketInner + EventFdSignal (eventfd) +
-                    Monitor (connection event stream)
+  socket.rs         sync Socket + SocketInner + ReadinessSignal (platform
+                    abstraction) + Monitor (connection event stream)
   socket_async.rs   AsyncSocket: send (sync yring push), _try_recv,
-                    _recv_fd / _send_fd for eventfd polling
+                    platform-specific recv wakeup integration
+  notify/
+    mod.rs          ReadinessSignal: platform-agnostic public API
+    unix.rs         Unix EventFdSignal: eventfd(2) + parking flag
+    windows.rs      Windows WindowsSignal: Win32 event handles + async callback
   context.rs        Context / AsyncContext (stateless factories)
   options.rs        setsockopt/getsockopt: Overlay cache, option dispatch
   dispatch.rs       shared bind/connect/subscribe dispatch helpers
@@ -100,13 +104,29 @@ high-volume socket from starving others on the runtime.
 **Recv pump.** Drains `socket.recv()` into a `Producer<Message>` (read
 by Python). On ring-full, waits on `recv_space` (`StateSignal`, signaled
 by the Python consumer after draining). After pushing, signals the
-per-socket `EventFdSignal` and the process-global recv signal used by
+per-socket `ReadinessSignal` and the process-global recv signal used by
 `wait_any`.
 
-## EventFdSignal (eventfd)
+## ReadinessSignal abstraction
+
+The `ReadinessSignal` is a platform-agnostic interface for waking the
+Python asyncio loop when socket readiness changes. It wraps a backend
+chosen at compile time and abstracts away transport differences.
+
+### Common interface
+
+All backends implement:
+
+- `signal()`: notify waiter(s) that readiness state changed.
+- `force_wake()`: unconditional immediate wake (used on socket close).
+- `wait_timeout(duration)`: blocking wait with timeout (used by sync code).
+- `park_begin()` / `park_end()`: arm/disarm the parking flag (closes
+  races in polling loops).
+
+### Unix backend: EventFdSignal (eventfd)
 
 `EventFdSignal` wraps a Linux `eventfd(EFD_NONBLOCK)` plus an
-`AtomicBool parking` flag.
+`AtomicBool parking` flag (`notify/unix.rs`).
 
 - `signal()`: writes to the eventfd only if `parking` is true. On the
   hot path (consumer not parked), this is a single atomic load with no
@@ -120,6 +140,49 @@ per-socket `EventFdSignal` and the process-global recv signal used by
 The parking flag is set before re-checking the consumer. This closes
 the race where a notification arrives between the consumer check and
 the park.
+
+**Async integration:** Python's `asyncio.py` calls `_recv_fd()` to get
+a dup'd eventfd, then registers it with `loop.add_reader(callback)`.
+The recv pump writes the eventfd whenever it pushes a message; the
+kernel wakes the event loop, `callback` fires, and `_try_recv()` is
+invoked.
+
+### Windows backend: WindowsSignal (Win32 event handles + async callbacks)
+
+`WindowsSignal` wraps Win32 event handles with a callback-based
+wakeup model (`notify/windows.rs`).
+
+**State machine:**
+- `mode`: atomic u32 field stores wakeup configuration (ASYNC, SYNC, or NONE).
+  - `WAKEUP_MODE_ASYNC` (1): invoke Python callback when signal() is called.
+  - `WAKEUP_MODE_SYNC` (2): used by sync code for `wait_timeout()`.
+- `pending`: atomic bool latches the wakeup signal (set by `signal()`,
+  cleared by `wait_timeout()`).
+- `draining`: atomic bool tracks if Python callback is currently executing.
+  Additional wakeups during this window are coalesced to prevent callback
+  re-entrancy.
+- `callback_state`: atomic u8 state machine (IDLE, SCHEDULED, PENDING)
+  to prevent duplicate callbacks while draining is in progress.
+
+**Callback lifecycle:**
+1. Python calls `set_wakeup_hooks(async_callback, ...)` to register
+   the Python drain callback.
+2. Python calls `set_wakeup_mode(WAKEUP_MODE_ASYNC)` when adding a waiter.
+3. Rust calls `signal()` when data arrives.
+4. If `mode & WAKEUP_MODE_ASYNC`, `signal()` invokes the Python callback
+   directly (via PyO3).
+5. Python callback drains the waiter queue.
+6. Python calls `_mark_send_drain_complete()` / `_mark_recv_drain_complete()`
+   to clear the draining flag and re-trigger if more work arrived.
+
+**Wakeup modes:**
+- `WAKEUP_MODE_ASYNC`: callback-based. Used by async code.
+- `WAKEUP_MODE_SYNC`: event handle-based. Used by sync code's `wait_timeout()`.
+- `WAKEUP_MODE_NONE`: inactive. No wakeups until mode is re-enabled.
+
+The recv and send signals have independent modes: async code sets
+send to ASYNC, while sync code can set recv to SYNC simultaneously.
+
 
 ## Sync send path
 
@@ -138,7 +201,8 @@ Socket.send(bytes, flags)
 
 SNDMORE frames accumulate in a `SendBuffer` (`Vec<Bytes>`). The final
 `send` (no SNDMORE flag) flushes all buffered frames plus the final
-frame into one multipart `Message`.
+frame into one multipart `Message`. (Platform-independent; yring is
+populated by both Unix and Windows backends.)
 
 ## Sync recv path
 
@@ -148,44 +212,164 @@ Socket.recv(flags)
   -> recv_message()
       lock consumer, try pop (fast path)
       if Some(msg): return first frame, store rest in rxbuf
-      else: release GIL, slow path:
-          park_begin()
-          re-check consumer (closes race)
-          loop:
-              wait_timeout(100 ms or remaining RCVTIMEO)
-              re-check consumer
-              if msg: park_end(), return
-              check RCVTIMEO deadline -> raise EAGAIN
+      else:
+          # Platform: Unix uses eventfd + poll(2)
+          # Platform: Windows uses ReadinessSignal.wait_timeout() with Win32 handles
+          release GIL, slow path:
+              park_begin()
+              re-check consumer (closes race)
+              loop:
+                  wait_timeout(100 ms or remaining RCVTIMEO)
+                  re-check consumer
+                  if msg: park_end(), return
+                  check RCVTIMEO deadline -> raise EAGAIN
 ```
 
 Each `recv()` returns one frame. If the message is multipart, remaining
 frames go into `rxbuf` and are returned by subsequent `recv()` calls.
-`recv_multipart()` returns all frames at once.
+`recv_multipart()` returns all frames at once. Both platforms use
+`ReadinessSignal.wait_timeout()`, which internally handles eventfd
+on Unix or Win32 event handles on Windows.
 
 ## Async send/recv
 
-Both send and recv are completion-based. No Rust futures are bridged
-to Python asyncio. No `tokio_future_into_py`, no `call_soon_threadsafe`.
+Async operations are completion-based with platform-specific wakeup
+mechanisms. No Rust futures are bridged to Python asyncio.
 
-**Send.** `AsyncSocket.send()` pushes directly into the send yring
-(synchronous, returns `()` or raises EAGAIN). The Python wrapper
-returns `_SEND_DONE` (a zero-allocation awaitable). On EAGAIN (ring
-full), it falls back to an eventfd-based wait: `_send_fd()` returns a
-dup'd eventfd for the send-side notification, and a `_RecvFuture`
-retries the push when the fd becomes readable.
+### Async send with backpressure
 
-**Recv.** `_try_recv()` pops from the recv yring (returns the message
-or `None`). If `None`, `_recv_fd()` returns a dup'd eventfd. The
-Python wrapper registers it with `loop.add_reader()`. When the recv
-pump pushes a message and writes the eventfd, the callback fires,
-calls `_try_recv()`, and resolves the pending `asyncio.Future`. The
-fd is registered once per socket (persistent) and shared across recv
-calls via a waiter queue.
+**Happy path (ring not full):**
 
-The recv pump always writes the eventfd when pushing (the parking
-flag is permanently armed via `arm_persistent`). This is correct
-under concurrency: multiple coroutines can await recv on the same
-socket without starving each other.
+```
+AsyncSocket.send(data, flags)
+  -> prod.push_and_flush(msg)
+      if Ok: return
+```
+
+The send yring is an `AsyncProducer`, allowing non-blocking push from
+Python.
+
+**Backpressure (ring full):**
+
+```
+AsyncSocket.send(data, flags)
+  -> prod.push_and_flush(msg)
+      if Err(ring full):
+        raise EAGAIN to Python wrapper
+```
+
+Python wrapper (`asyncio.py`) catches EAGAIN and enters the waiter queue
+pattern:
+
+1. Calls `_add_waitable(try_fn=socket.send, waiters=_send_waiters, set_mode)`.
+2. `set_mode` lambda calls `_set_wakeup_modes(send_mode=WAKEUP_MODE_ASYNC)`.
+3. Appends a waiter closure to `_send_waiters` deque.
+4. Returns future for caller to await.
+
+**Wakeup path (Unix):**
+- Waiter future is pending.
+- recv pump on tokio thread finishes forwarding a message, freeing ring space.
+- recv pump calls `send_ready.signal()`.
+- `EventFdSignal.signal()` writes to the eventfd (because `parking=true`).
+- Kernel wakes asyncio event loop via epoll/select.
+- Loop fires the registered callback, which calls `_drain_send_waiters()`.
+- `_drain_send_waiters()` pops waiters from queue and invokes each:
+  - Waiter calls `try_fn()` (socket.send) -> succeeds, future resolved.
+- After draining, calls `_mark_send_drain_complete()` to clear Rust callback state.
+
+**Wakeup path (Windows):**
+- Waiter future is pending.
+- recv pump on tokio thread finishes forwarding a message, freeing ring space.
+- recv pump calls `send_ready.signal()`.
+- `WindowsSignal.signal()` sees `mode & WAKEUP_MODE_ASYNC` and directly
+  invokes the Python callback (stored during `set_wakeup_hooks()`).
+- Callback is `_schedule_send_drain`, which calls
+  `loop.call_soon_threadsafe(self._drain_send_waiters)`.
+- Asyncio loop invokes `_drain_send_waiters()` in main thread context:
+  - Pops waiters and invokes each, same as Unix.
+- After draining, calls `_mark_send_drain_complete()` which clears the
+  Rust draining flag and re-triggers if follow-up work arrived.
+
+### Async recv with waiter queue
+
+**Setup (registration once per socket):**
+
+```python
+_register_wakeup_hooks()
+  -> sock._set_wakeup_hooks(
+       recv_async=_schedule_recv_drain,
+       send_async=_schedule_send_drain,
+       recv_event=_recv_wakeup_event,
+       send_event=_send_wakeup_event
+     )
+```
+
+This is called once; Rust stores callbacks and event handles.
+
+**Recv with message ready:**
+
+```
+AsyncSocket._try_recv()
+  -> socket.recv_nowait() from yring
+      if Some(msg): return msg
+      else: return None
+```
+
+**Recv with waiter (no message):**
+
+```
+AsyncSocket._add_recv_event(try_fn=_try_recv)
+  -> _add_waitable(try_fn, waiters=_recv_waiters, set_mode)
+```
+
+Similar to send: appends waiter, sets mode, returns future.
+
+**Wakeup path (Unix):**
+- Waiter future is pending, registered with `loop.add_reader(fd, callback)`.
+- send pump on tokio thread drains yring, calls `recv_ready.signal()`.
+- `EventFdSignal.signal()` writes to eventfd.
+- Kernel wakes asyncio event loop.
+- Registered fd callback fires:
+  - Calls `_drain_recv_waiters()` directly (no intermediate deferral).
+  - `_drain_recv_waiters()` pops waiters, invokes each:
+    - Waiter calls `_try_recv()` -> succeeds, future resolved.
+- After draining, clears the parking flag and may re-enable recv in the
+  ReadinessSignal.
+
+**Wakeup path (Windows):**
+- Waiter future is pending.
+- send pump on tokio thread drains yring, calls `recv_ready.signal()`.
+- `WindowsSignal.signal()` sees `mode & WAKEUP_MODE_ASYNC` and directly
+  invokes the Python callback (`_schedule_recv_drain`).
+- Callback queues `_drain_recv_waiters()` to the asyncio event loop.
+- Event loop invokes `_drain_recv_waiters()` in main thread context:
+  - Pops waiters and invokes each.
+- After draining, calls `_mark_recv_drain_complete()` to clear Rust state.
+
+### Waiter queue drain logic (platform-independent)
+
+Both Unix and Windows converge on the same Python code for draining:
+
+```python
+def _drain_send_waiters(self):
+    try:
+        waiters = self._send_waiters
+        while waiters and waiters[0]():
+            waiters.popleft()
+    finally:
+        self._sock._mark_send_drain_complete()
+        # Race window: re-check for notifications that arrived
+        # between the loop end and mark_drain_complete().
+        while waiters and waiters[0]():
+            waiters.popleft()
+        # If waiters remain, re-enable async mode.
+        if waiters:
+            self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
+```
+
+Each waiter is a closure that attempts the operation (send/recv) and
+returns `True` if done or `False` if blocked. The drain stops when a
+waiter returns False, preserving queue order (fairness).
 
 ## Zero-copy conversions
 

@@ -189,9 +189,7 @@ notification fd for `zmq_poll`/`ZMQ_FD` readiness.
 pipes, inproc, UDP, and WebSocket transports. `omq-libzmq` builds and
 tests on Windows for the supported C API surface.
 
-`pyomq` currently publishes Linux wheels and an sdist. Windows pyomq
-support is separate from the Rust backend and is not complete on
-`main` yet.
+`pyomq` publishes Linux, macOS and Windows wheels and an sdist
 
 Requirements:
 

@@ -173,13 +173,30 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install --group test
+          .venv/bin/pip install --group test --group dev
       - name: build pyomq
         working-directory: bindings/pyomq
         run: .venv/bin/pip install .
+      - name: formatting
+        working-directory: bindings/pyomq
+        if: always()
+        run: .venv/bin/ruff format .
+      - name: linting
+        working-directory: bindings/pyomq
+        if: always()
+        run: .venv/bin/ruff check .
+      - name: type check
+        working-directory: bindings/pyomq
+        if: always()
+        run: .venv/bin/ty check .
+      - name: cargo test
+        working-directory: bindings/pyomq
+        if: always()
+        run: cargo test
       - name: pytest
         working-directory: bindings/pyomq
-        run: .venv/bin/pytest -v -k "not test_perf"
+        if: always()
+        run: .venv/bin/pytest -v -k "not test_perf" -W error
 
   ci-success:
     name: CI success

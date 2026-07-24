@@ -8,8 +8,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Added
 
+- **Windows support for pyomq**
+  Compared to pyzmq pyomq can be used with the ProactorEventLoop
 - CI coverage for `i686-unknown-linux-gnu` and
   `armv7-unknown-linux-gnueabihf`.
+- ruff linting and ty type checking added to pyomq CI pipeline.
 
 ### Changed
 
@@ -18,6 +21,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 - 32-bit builds are supported on targets with native 64-bit atomics. Per-frame
   and per-message payloads remain bounded by platform allocation limits
   (below 4 GiB on 32-bit Linux).
+
+### Fixed
+
+- pyomq Windows async readiness drains consume latched wakeups instead of
+  reusing stale wakeups after a waiter remains blocked.
+- pyomq Windows readiness signals skip unarmed wakeups to reduce stale async
+  callbacks during sustained receive drains.
 
 ### Removed
 

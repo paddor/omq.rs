@@ -5,9 +5,17 @@ pyzmq's CURVE server requires a ZAP authenticator; we use CURVE_ALLOW_ANY
 to accept any client with a valid handshake.
 """
 
+import asyncio
+import sys
+
 import pytest
 
 zmq_pyzmq = pytest.importorskip("zmq")
+
+# PyZMQ requires to use the selector event loop on Windows,
+# so we skip the proactor event loop for these tests.
+pytestmark = pytest.mark.event_loop("selector")
+
 
 from zmq.auth.thread import ThreadAuthenticator
 
@@ -85,6 +93,9 @@ def test_pyomq_curve_server_pyzmq_curve_client_req_rep(tcp_endpoint):
 
 @_skip_no_curve
 def test_pyzmq_curve_server_pyomq_curve_client_push_pull(tcp_endpoint):
+    if sys.platform == "win32":
+        with pytest.warns(DeprecationWarning):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     server_pub, server_sec = zmq_pyzmq.curve_keypair()
     client_pub, client_sec = pyomq.curve_keypair()
 
@@ -120,6 +131,9 @@ def test_pyzmq_curve_server_pyomq_curve_client_push_pull(tcp_endpoint):
 
 @_skip_no_curve
 def test_pyzmq_curve_server_pyomq_curve_client_req_rep(tcp_endpoint):
+    if sys.platform == "win32":
+        with pytest.warns(DeprecationWarning):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     server_pub, server_sec = zmq_pyzmq.curve_keypair()
     client_pub, client_sec = pyomq.curve_keypair()
 

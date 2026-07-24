@@ -11,6 +11,10 @@ import pyomq as zmq
 pytestmark = pytest.mark.filterwarnings(
     "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning"
 )
+pytestmark = [
+    pytestmark,
+    pytest.mark.skipif(os.name == "nt", reason="fork is Unix-only"),
+]
 
 FORK_TIMEOUT_MS = 5_000
 FORK_TIMEOUT_S = FORK_TIMEOUT_MS / 1_000

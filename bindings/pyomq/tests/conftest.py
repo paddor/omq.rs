@@ -1,8 +1,38 @@
 """Shared fixtures."""
 
+import asyncio
+import sys
 import time
 
 import pytest
+
+
+def pytest_configure(config):
+    # register an additional marker
+    config.addinivalue_line(
+        "markers", "event_loop: mark test requiring specific event loop type"
+    )
+
+
+def pytest_asyncio_loop_factories(config, item):
+    if sys.platform == "win32":
+        if m := item.get_closest_marker("event_loop"):
+            ev = {}
+            if "selector" in m.args:
+                ev["selector"] = asyncio.SelectorEventLoop
+            if "proactor" in m.args:
+                ev["proactor"] = asyncio.ProactorEventLoop
+            return ev
+        return {"proactor": asyncio.ProactorEventLoop}
+    else:
+        return {
+            "default": asyncio.new_event_loop,
+        }
+
+
+@pytest.fixture
+def require_selector_event_loop():
+    pass
 
 
 @pytest.fixture
@@ -18,9 +48,13 @@ def inproc_endpoint(request) -> str:
 
 @pytest.fixture
 def ipc_endpoint(request) -> str:
-    import os, hashlib
-    # Linux abstract namespace: no filesystem entry, auto-cleaned on close.
+    import hashlib
+    import os
+
     tag = hashlib.sha1(f"{os.getpid()}-{request.node.name}".encode()).hexdigest()[:16]
+    if sys.platform == "win32":
+        return f"ipc://pyomq-{tag}"
+    # Linux abstract namespace: no filesystem entry, auto-cleaned on close.
     return f"ipc://@pyomq-{tag}"
 
 

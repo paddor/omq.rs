@@ -8,6 +8,7 @@ mod context;
 mod conversions;
 mod dispatch;
 mod error;
+mod notify;
 mod options;
 #[cfg(feature = "curve")]
 mod peer_info;

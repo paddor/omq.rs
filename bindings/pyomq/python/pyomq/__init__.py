@@ -19,13 +19,14 @@ import json
 import os
 import pickle
 import select as _select
+import sys
 import threading
 import weakref
 
-from . import _native  # type: ignore[attr-defined]
+from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from . import error as error  # noqa: F401
 
-from ._native import (  # type: ignore[attr-defined]
+from ._native import (  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
     backend_name,
     version,
     # Socket types
@@ -113,6 +114,10 @@ POLLOUT = 2
 POLLERR = 4
 POLLPRI = 32
 HWM = 1
+_WAKEUP_MODE_NONE = 0
+_WAKEUP_MODE_ASYNC = 1
+_WAKEUP_MODE_SYNC = 2
+_IS_WINDOWS = sys.platform == "win32"
 
 ROUTING_ID = 5
 LAST_ENDPOINT = 32
@@ -176,6 +181,7 @@ zmq_version_info = (4, 3, 4)
 
 # ── Top-level functions ──────────────────────────────────────────────
 
+
 def strerror(errnum):
     return os.strerror(errnum)
 
@@ -223,11 +229,26 @@ if hasattr(_native, "PeerInfo"):
 # ── Socket option attribute map ──────────────────────────────────────
 
 _TYPE_NAMES = {
-    PAIR: "PAIR", PUB: "PUB", SUB: "SUB", REQ: "REQ", REP: "REP",
-    DEALER: "DEALER", ROUTER: "ROUTER", PULL: "PULL", PUSH: "PUSH",
-    XPUB: "XPUB", XSUB: "XSUB", SERVER: "SERVER", CLIENT: "CLIENT",
-    RADIO: "RADIO", DISH: "DISH", GATHER: "GATHER", SCATTER: "SCATTER",
-    PEER: "PEER", CHANNEL: "CHANNEL", STREAM: "STREAM",
+    PAIR: "PAIR",
+    PUB: "PUB",
+    SUB: "SUB",
+    REQ: "REQ",
+    REP: "REP",
+    DEALER: "DEALER",
+    ROUTER: "ROUTER",
+    PULL: "PULL",
+    PUSH: "PUSH",
+    XPUB: "XPUB",
+    XSUB: "XSUB",
+    SERVER: "SERVER",
+    CLIENT: "CLIENT",
+    RADIO: "RADIO",
+    DISH: "DISH",
+    GATHER: "GATHER",
+    SCATTER: "SCATTER",
+    PEER: "PEER",
+    CHANNEL: "CHANNEL",
+    STREAM: "STREAM",
 }
 
 _SOCKOPT_NAMES = {
@@ -276,6 +297,7 @@ _SOCKOPT_NAMES = {
 
 # ── MessageTracker / Message / Frame (pyzmq compat) ─────────────────
 
+
 class NotDone(ZMQBaseError):
     pass
 
@@ -309,15 +331,13 @@ Frame = Message
 
 # ── Socket wrapper ───────────────────────────────────────────────────
 
-import sys as _sys
-
 
 class _SocketMeta(type):
     def __instancecheck__(cls, instance):
         if type.__instancecheck__(cls, instance):
             return True
         if cls is Socket:
-            amod = _sys.modules.get("pyomq.asyncio")
+            amod = sys.modules.get("pyomq.asyncio")
             if amod is not None and type.__instancecheck__(amod.Socket, instance):
                 return True
         return False
@@ -343,6 +363,7 @@ class Socket(metaclass=_SocketMeta):
     @classmethod
     def shadow(cls, socket):
         from . import asyncio as _zmq_async
+
         if isinstance(socket, _zmq_async.Socket):
             return _ShadowSocket(socket)
         return socket
@@ -606,8 +627,7 @@ class Socket(metaclass=_SocketMeta):
     def __del__(self):
         self.close()
 
-    def bind_to_random_port(self, addr, min_port=49152, max_port=65536,
-                            max_tries=100):
+    def bind_to_random_port(self, addr, min_port=49152, max_port=65536, max_tries=100):
         ep = self.bind(f"{addr}:0")
         if isinstance(ep, bytes):
             ep = ep.decode()
@@ -632,12 +652,14 @@ class Socket(metaclass=_SocketMeta):
 
 # ── Shadow socket (sync recv bridge over async handle) ──────────────
 
+
 class _ShadowSocket:
     """Blocking recv bridge over an async socket's native handle.
 
     Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
     Provides sync recv via select() + eventfd without entering the
     asyncio event loop, matching pyzmq's shadow(underlying) behavior.
+
     """
 
     def __init__(self, async_socket):
@@ -646,6 +668,11 @@ class _ShadowSocket:
         self._context = async_socket._context
         self._closed = False
         self._last_endpoint = async_socket._last_endpoint
+        if _IS_WINDOWS:
+            self._recv_waiter_pending = False
+            self._send_waiter_pending = False
+            self._recv_wakeup_event = async_socket._recv_wakeup_event
+            self._send_wakeup_event = async_socket._send_wakeup_event
 
     def __getattr__(self, name):
         opt = _SOCKOPT_NAMES.get(name)
@@ -701,16 +728,58 @@ class _ShadowSocket:
     def get(self, option):
         return self.getsockopt(option)
 
-    def _blocking_recv(self, try_fn):
-        try:
-            result = try_fn()
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        if result is not None:
-            return result
+    if _IS_WINDOWS:
 
-        fd = self._native._recv_fd()
-        try:
+        def _register_wakeup_hooks(self):
+            self._async_socket._register_wakeup_hooks()
+    else:
+
+        def _register_wakeup_hooks(self):
+            return None
+
+    if _IS_WINDOWS:
+
+        def _blocking_recv(self, try_fn):
+            if self._recv_waiter_pending:
+                raise RuntimeError(
+                    "cannot have more than one pending recv waiter on a shadow socket"
+                )
+            self._recv_waiter_pending = True
+            self._register_wakeup_hooks()
+            self._async_socket._set_wakeup_modes(
+                recv_mode=_WAKEUP_MODE_SYNC,
+            )
+            try:
+                try:
+                    result = try_fn()
+                except _native.ZMQError as e:
+                    raise error.from_native(e) from None
+                if result is not None:
+                    return result
+
+                while True:
+                    self._recv_wakeup_event.clear()
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
+                    self._recv_wakeup_event.wait()
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
+            finally:
+                self._recv_waiter_pending = False
+                self._async_socket._clear_wakeup_modes(
+                    recv_mode=_WAKEUP_MODE_SYNC,
+                )
+    else:
+
+        def _blocking_recv(self, try_fn):
             try:
                 result = try_fn()
             except _native.ZMQError as e:
@@ -718,20 +787,29 @@ class _ShadowSocket:
             if result is not None:
                 return result
 
-            while True:
-                _select.select([fd], [], [])
-                try:
-                    os.read(fd, 8)
-                except OSError:
-                    pass
+            fd = self._native._recv_fd()
+            try:
                 try:
                     result = try_fn()
                 except _native.ZMQError as e:
                     raise error.from_native(e) from None
                 if result is not None:
                     return result
-        finally:
-            os.close(fd)
+
+                while True:
+                    _select.select([fd], [], [])
+                    try:
+                        os.read(fd, 8)
+                    except OSError:
+                        pass
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
+            finally:
+                os.close(fd)
 
     def recv(self, flags=0, copy=True, track=False):
         data = self._blocking_recv(self._native._try_recv)
@@ -746,29 +824,58 @@ class _ShadowSocket:
         return parts
 
     def send(self, data, flags=0, copy=True, track=False):
-        self._blocking_send(
-            lambda: self._native.send(data, flags)
-        )
+        self._blocking_send(lambda: self._native.send(data, flags))
         if track:
             return MessageTracker(_pending=True)
 
     def send_multipart(self, parts, flags=0, copy=True, track=False):
-        self._blocking_send(
-            lambda: self._native.send_multipart(parts, flags)
-        )
+        self._blocking_send(lambda: self._native.send_multipart(parts, flags))
         if track:
             return MessageTracker(_pending=True)
 
-    def _blocking_send(self, send_fn):
-        try:
-            send_fn()
-            return
-        except _native.ZMQError as e:
-            if getattr(e, "errno", None) != _errno.EAGAIN:
-                raise error.from_native(e) from None
+    if _IS_WINDOWS:
 
-        fd = self._native._send_fd()
-        try:
+        def _blocking_send(self, send_fn):
+            if self._send_waiter_pending:
+                raise RuntimeError(
+                    "cannot have more than one pending send waiter on a shadow socket"
+                )
+            self._send_waiter_pending = True
+            self._register_wakeup_hooks()
+            self._async_socket._set_wakeup_modes(
+                send_mode=_WAKEUP_MODE_SYNC,
+            )
+            try:
+                try:
+                    send_fn()
+                    return
+                except _native.ZMQError as e:
+                    if getattr(e, "errno", None) != _errno.EAGAIN:
+                        raise error.from_native(e) from None
+
+                while True:
+                    self._send_wakeup_event.clear()
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
+                    self._send_wakeup_event.wait()
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
+            finally:
+                self._send_waiter_pending = False
+                self._async_socket._clear_wakeup_modes(
+                    send_mode=_WAKEUP_MODE_SYNC,
+                )
+    else:
+
+        def _blocking_send(self, send_fn):
             try:
                 send_fn()
                 return
@@ -776,20 +883,29 @@ class _ShadowSocket:
                 if getattr(e, "errno", None) != _errno.EAGAIN:
                     raise error.from_native(e) from None
 
-            while True:
-                _select.select([fd], [], [])
-                try:
-                    os.read(fd, 8)
-                except OSError:
-                    pass
+            fd = self._native._send_fd()
+            try:
                 try:
                     send_fn()
                     return
                 except _native.ZMQError as e:
                     if getattr(e, "errno", None) != _errno.EAGAIN:
                         raise error.from_native(e) from None
-        finally:
-            os.close(fd)
+
+                while True:
+                    _select.select([fd], [], [])
+                    try:
+                        os.read(fd, 8)
+                    except OSError:
+                        pass
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
+            finally:
+                os.close(fd)
 
     def close(self, linger=None):
         pass
@@ -831,11 +947,15 @@ class Context:
         ns_bytes = ns_str.encode()
         if isinstance(endpoint, bytes):
             pfx = b"inproc://"
-            if endpoint.startswith(pfx) and not endpoint[len(pfx):].startswith(ns_bytes):
-                return pfx + ns_bytes + endpoint[len(pfx):]
+            if endpoint.startswith(pfx) and not endpoint[len(pfx) :].startswith(
+                ns_bytes
+            ):
+                return pfx + ns_bytes + endpoint[len(pfx) :]
         elif isinstance(endpoint, str):
-            if endpoint.startswith(_INPROC_PREFIX) and not endpoint[len(_INPROC_PREFIX):].startswith(ns_str):
-                return f"inproc://{ns_str}{endpoint[len(_INPROC_PREFIX):]}"
+            if endpoint.startswith(_INPROC_PREFIX) and not endpoint[
+                len(_INPROC_PREFIX) :
+            ].startswith(ns_str):
+                return f"inproc://{ns_str}{endpoint[len(_INPROC_PREFIX) :]}"
         return endpoint
 
     def __class_getitem__(cls, item):
@@ -909,6 +1029,7 @@ Context._socket_class = Socket
 
 # ── Poller ───────────────────────────────────────────────────────────
 
+
 class Poller:
     def __init__(self):
         self._sockets = {}  # native_socket_id -> (Socket, flags)
@@ -931,23 +1052,18 @@ class Poller:
     def poll(self, timeout=None):
         if not self._sockets:
             return []
-        pollin_socks = [
-            s._sock
-            for k, (s, f) in self._sockets.items()
-            if f & POLLIN
-        ]
+        pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
         if not pollin_socks:
             return []
         t = None if (timeout is None or timeout < 0) else int(timeout)
         ready_ids = _native.wait_any(pollin_socks, t)
         return [
-            (self._sockets[rid][0], POLLIN)
-            for rid in ready_ids
-            if rid in self._sockets
+            (self._sockets[rid][0], POLLIN) for rid in ready_ids if rid in self._sockets
         ]
 
 
 # ── select ──────────────────────────────────────────────────────────
+
 
 def select(rlist, wlist, xlist, timeout=None):
     if timeout is not None:
@@ -971,16 +1087,19 @@ def select(rlist, wlist, xlist, timeout=None):
 
 # ── proxy ────────────────────────────────────────────────────────────
 
+
 def proxy(frontend, backend, capture=None):
     _native.native_proxy(
-        frontend._sock, backend._sock,
+        frontend._sock,
+        backend._sock,
         capture._sock if capture is not None else None,
     )
 
 
 def proxy_steerable(frontend, backend, capture=None, control=None):
     _native.native_proxy(
-        frontend._sock, backend._sock,
+        frontend._sock,
+        backend._sock,
         capture._sock if capture is not None else None,
         control._sock if control is not None else None,
     )
@@ -1016,52 +1135,144 @@ __all__ = [
     "select",
     "error",
     # socket types
-    "PAIR", "PUB", "SUB", "REQ", "REP", "DEALER", "ROUTER",
-    "PULL", "PUSH", "XPUB", "XSUB", "STREAM",
+    "PAIR",
+    "PUB",
+    "SUB",
+    "REQ",
+    "REP",
+    "DEALER",
+    "ROUTER",
+    "PULL",
+    "PUSH",
+    "XPUB",
+    "XSUB",
+    "STREAM",
     # draft socket types
-    "SERVER", "CLIENT", "RADIO", "DISH", "GATHER", "SCATTER",
-    "PEER", "CHANNEL",
+    "SERVER",
+    "CLIENT",
+    "RADIO",
+    "DISH",
+    "GATHER",
+    "SCATTER",
+    "PEER",
+    "CHANNEL",
     # options
-    "AFFINITY", "IDENTITY", "ROUTING_ID", "SUBSCRIBE", "UNSUBSCRIBE",
-    "RCVMORE", "TYPE", "LINGER", "RECONNECT_IVL", "RECONNECT_IVL_MAX",
-    "BACKLOG", "MAXMSGSIZE", "SNDHWM", "RCVHWM", "RCVTIMEO", "SNDTIMEO",
-    "ROUTER_MANDATORY", "IMMEDIATE", "IPV6",
-    "HEARTBEAT_IVL", "HEARTBEAT_TTL", "HEARTBEAT_TIMEOUT",
-    "HANDSHAKE_IVL", "CONFLATE",
-    "TCP_KEEPALIVE", "TCP_KEEPALIVE_IDLE", "TCP_KEEPALIVE_CNT",
+    "AFFINITY",
+    "IDENTITY",
+    "ROUTING_ID",
+    "SUBSCRIBE",
+    "UNSUBSCRIBE",
+    "RCVMORE",
+    "TYPE",
+    "LINGER",
+    "RECONNECT_IVL",
+    "RECONNECT_IVL_MAX",
+    "BACKLOG",
+    "MAXMSGSIZE",
+    "SNDHWM",
+    "RCVHWM",
+    "RCVTIMEO",
+    "SNDTIMEO",
+    "ROUTER_MANDATORY",
+    "IMMEDIATE",
+    "IPV6",
+    "HEARTBEAT_IVL",
+    "HEARTBEAT_TTL",
+    "HEARTBEAT_TIMEOUT",
+    "HANDSHAKE_IVL",
+    "CONFLATE",
+    "TCP_KEEPALIVE",
+    "TCP_KEEPALIVE_IDLE",
+    "TCP_KEEPALIVE_CNT",
     "TCP_KEEPALIVE_INTVL",
-    "SNDMORE", "NOBLOCK", "DONTWAIT",
-    "CURVE_SERVER", "CURVE_PUBLICKEY", "CURVE_SECRETKEY", "CURVE_SERVERKEY",
-    "OMQ_ON_MUTE", "OMQ_COMPRESSION_DICT",
+    "SNDMORE",
+    "NOBLOCK",
+    "DONTWAIT",
+    "CURVE_SERVER",
+    "CURVE_PUBLICKEY",
+    "CURVE_SECRETKEY",
+    "CURVE_SERVERKEY",
+    "OMQ_ON_MUTE",
+    "OMQ_COMPRESSION_DICT",
     "OMQ_COMPRESSION_AUTO_TRAIN",
-    "OMQ_ON_MUTE_BLOCK", "OMQ_ON_MUTE_DROP_NEWEST", "OMQ_ON_MUTE_DROP_OLDEST",
+    "OMQ_ON_MUTE_BLOCK",
+    "OMQ_ON_MUTE_DROP_NEWEST",
+    "OMQ_ON_MUTE_DROP_OLDEST",
     # poll / compat constants
-    "POLLIN", "POLLOUT", "POLLERR", "POLLPRI", "HWM",
+    "POLLIN",
+    "POLLOUT",
+    "POLLERR",
+    "POLLPRI",
+    "HWM",
     # additional compat constants
-    "LAST_ENDPOINT", "FD", "EVENTS", "MECHANISM", "SNDBUF", "RCVBUF",
-    "RATE", "CONNECT_TIMEOUT", "XPUB_VERBOSE", "PROBE_ROUTER",
-    "REQ_CORRELATE", "REQ_RELAXED", "ROUTER_HANDOVER", "IPV4ONLY",
-    "TCP_ACCEPT_FILTER", "TCP_MAXRT", "MULTICAST_HOPS", "RECOVERY_IVL",
-    "RECONNECT_STOP", "PLAIN_SERVER", "PLAIN_USERNAME", "PLAIN_PASSWORD",
+    "LAST_ENDPOINT",
+    "FD",
+    "EVENTS",
+    "MECHANISM",
+    "SNDBUF",
+    "RCVBUF",
+    "RATE",
+    "CONNECT_TIMEOUT",
+    "XPUB_VERBOSE",
+    "PROBE_ROUTER",
+    "REQ_CORRELATE",
+    "REQ_RELAXED",
+    "ROUTER_HANDOVER",
+    "IPV4ONLY",
+    "TCP_ACCEPT_FILTER",
+    "TCP_MAXRT",
+    "MULTICAST_HOPS",
+    "RECOVERY_IVL",
+    "RECONNECT_STOP",
+    "PLAIN_SERVER",
+    "PLAIN_USERNAME",
+    "PLAIN_PASSWORD",
     "ZAP_DOMAIN",
     # device types
-    "FORWARDER", "QUEUE", "STREAMER",
+    "FORWARDER",
+    "QUEUE",
+    "STREAMER",
     # security mechanism constants
-    "NULL", "PLAIN", "CURVE",
+    "NULL",
+    "PLAIN",
+    "CURVE",
     # version
-    "__version__", "zmq_version_info", "zmq_version",
-    "pyomq_version", "pyomq_version_info",
+    "__version__",
+    "zmq_version_info",
+    "zmq_version",
+    "pyomq_version",
+    "pyomq_version_info",
     # errno constants
-    "EAGAIN", "ENOTSUP", "EINVAL", "EFAULT", "ENOMEM", "ENODEV",
-    "EMSGSIZE", "EAFNOSUPPORT", "ENETUNREACH", "ECONNABORTED",
-    "ECONNRESET", "ENOTCONN", "ETIMEDOUT", "EHOSTUNREACH", "ENETRESET",
-    "EADDRINUSE", "EADDRNOTAVAIL",
+    "EAGAIN",
+    "ENOTSUP",
+    "EINVAL",
+    "EFAULT",
+    "ENOMEM",
+    "ENODEV",
+    "EMSGSIZE",
+    "EAFNOSUPPORT",
+    "ENETUNREACH",
+    "ECONNABORTED",
+    "ECONNRESET",
+    "ENOTCONN",
+    "ETIMEDOUT",
+    "EHOSTUNREACH",
+    "ENETRESET",
+    "EADDRINUSE",
+    "EADDRNOTAVAIL",
     # pyzmq compat types
-    "NotDone", "MessageTracker", "Message", "Frame",
+    "NotDone",
+    "MessageTracker",
+    "Message",
+    "Frame",
     # extra constants
-    "ETERM", "ENOTSOCK", "COPY_THRESHOLD",
+    "ETERM",
+    "ENOTSOCK",
+    "COPY_THRESHOLD",
     # curve
-    "curve_keypair", "curve_public", "PeerInfo",
+    "curve_keypair",
+    "curve_public",
+    "PeerInfo",
 ]
 
 
@@ -1071,6 +1282,7 @@ __all__ = [
 # mock-based tests and heartbeat code can construct ZMQError(errno, msg).
 _orig_zmqerror_init = _native.ZMQError.__init__
 
+
 def _zmqerror_init(self, *args, **kwargs):
     if args and isinstance(args[0], int):
         _orig_zmqerror_init(self, args[1] if len(args) > 1 else "")
@@ -1078,5 +1290,6 @@ def _zmqerror_init(self, *args, **kwargs):
         self.strerror = args[1] if len(args) > 1 else ""
     else:
         _orig_zmqerror_init(self, *args, **kwargs)
+
 
 _native.ZMQError.__init__ = _zmqerror_init

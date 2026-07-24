@@ -8,8 +8,8 @@ pyzmq's hierarchy. ``ZMQBindError`` is a sibling of ``ZMQError`` under
 import builtins
 import errno as _errno
 
-from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]
-from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]
+from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
+from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 
 
 class Again(ZMQError):

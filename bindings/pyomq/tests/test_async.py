@@ -9,6 +9,8 @@ import pytest
 import pyomq
 import pyomq.asyncio as zmq_async
 
+pytestmark = pytest.mark.event_loop("selector", "proactor")
+
 
 @pytest.mark.asyncio
 async def test_async_push_pull_inproc(inproc_endpoint):
@@ -248,6 +250,7 @@ async def test_async_dealer_router_identity(tcp_endpoint):
 async def test_async_push_pull_bulk_tcp(tcp_endpoint):
     """Async recv with sync sender in a thread."""
     import threading
+
     n = 20_000
     ctx = zmq_async.Context()
     pull = ctx.socket(pyomq.PULL)
@@ -257,7 +260,9 @@ async def test_async_push_pull_bulk_tcp(tcp_endpoint):
         push_sync.connect(ep)
 
         def sender():
-            import time; time.sleep(0.05)
+            import time
+
+            time.sleep(0.05)
             for _ in range(n):
                 push_sync.send(b"x" * 128)
 

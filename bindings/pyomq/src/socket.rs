@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use crate::conversions;
 use crate::dispatch;
 use crate::error::{map_err, timeout_err};
+use crate::notify::ReadinessSignal;
 use crate::options;
 use crate::runtime::ContextInner;
 
@@ -29,125 +30,37 @@ pub(crate) struct SendBuffer {
     pub parts: Vec<Bytes>,
 }
 
-/// Eventfd-backed readiness signal for Python-facing async paths.
-///
-/// The `parking` flag avoids syscalls on the hot path. The consumer
-/// sets it before sleeping; the producer only writes to the eventfd
-/// when it sees the flag.
-pub(crate) struct EventFdSignal {
-    efd: i32,
-    parking: AtomicBool,
-}
-
-unsafe impl Send for EventFdSignal {}
-unsafe impl Sync for EventFdSignal {}
-
-impl EventFdSignal {
-    pub fn new() -> Self {
-        let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(efd >= 0, "eventfd creation failed");
-        Self {
-            efd,
-            parking: AtomicBool::new(false),
-        }
-    }
-
-    pub fn signal(&self) {
-        if self.parking.load(Ordering::Acquire) {
-            self.write_eventfd();
-        }
-    }
-
-    pub fn force_wake(&self) {
-        self.write_eventfd();
-    }
-
-    fn write_eventfd(&self) {
-        let val: u64 = 1;
-        while unsafe { libc::write(self.efd, &val as *const u64 as *const libc::c_void, 8) } < 0 {
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
-            }
-        }
-    }
-
-    pub fn park_begin(&self) {
-        self.parking.store(true, Ordering::Release);
-    }
-
-    pub fn park_end(&self) {
-        self.parking.store(false, Ordering::Relaxed);
-    }
-
-    pub fn wait_timeout(&self, timeout: Duration) -> bool {
-        let mut pfd = libc::pollfd {
-            fd: self.efd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ret > 0 {
-            let mut val: u64 = 0;
-            unsafe {
-                libc::read(self.efd, &mut val as *mut u64 as *mut libc::c_void, 8);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn fd(&self) -> i32 {
-        self.efd
-    }
-
-    /// Permanently arm the eventfd so the recv pump always writes on
-    /// message arrival. Required when the fd is exposed to an external
-    /// event loop (tornado/ZMQStream, asyncio) that polls it for
-    /// readiness.
-    pub fn arm_persistent(&self) {
-        self.parking.store(true, Ordering::Release);
-    }
-
-    pub fn dup_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
-        use std::os::fd::{FromRawFd, OwnedFd};
-        let fd = unsafe { libc::dup(self.efd) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-impl Drop for EventFdSignal {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.efd) };
-    }
-}
-
 use std::sync::atomic::AtomicU32;
 
 static FORK_GEN: AtomicU32 = AtomicU32::new(0);
 static PARENT_FORK_GEN: AtomicU32 = AtomicU32::new(0);
 static FORKED: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
+#[cfg(unix)]
 extern "C" fn atfork_child() {
     FORKED.store(true, Ordering::Relaxed);
     FORK_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 extern "C" fn atfork_parent() {
     // The parent's runtime remains valid, but sockets materialized before
     // fork need one safe receive to resynchronize with child-side peers.
     PARENT_FORK_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
         libc::pthread_atfork(Some(atfork_parent), None, Some(atfork_child));
     });
+}
+
+#[cfg(not(unix))]
+pub(crate) fn register_atfork() {
+    // No-op on non-Unix platforms
 }
 
 /// State that exists once the underlying omq Socket is materialized.
@@ -158,8 +71,8 @@ pub(crate) struct Materialized {
     pub socket: Arc<omq_tokio::Socket>,
     pub send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
     pub recv_cons: Mutex<yring::Consumer<omq_tokio::Message>>,
-    pub recv_ready: Arc<EventFdSignal>,
-    pub send_ready: Arc<EventFdSignal>,
+    pub recv_ready: Arc<ReadinessSignal>,
+    pub send_ready: Arc<ReadinessSignal>,
     pub recv_space: Arc<omq_tokio::engine::StateSignal>,
     pub send_pump: JoinHandle<()>,
     pub recv_pump: JoinHandle<()>,
@@ -242,8 +155,8 @@ impl SocketInner {
         let recv_cap = opts.recv_hwm.max(1) as usize;
         let (send_prod, send_cons) = yring::async_spsc(send_cap);
         let (recv_prod, recv_cons) = yring::spsc(recv_cap);
-        let recv_ready = Arc::new(EventFdSignal::new());
-        let send_ready = Arc::new(EventFdSignal::new());
+        let recv_ready = Arc::new(ReadinessSignal::new());
+        let send_ready = Arc::new(ReadinessSignal::new());
         let recv_space = Arc::new(omq_tokio::engine::StateSignal::new());
         let socket_type = self.socket_type;
         let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
@@ -402,6 +315,7 @@ impl SocketInner {
         let materialized = self.materialized.write().unwrap().take();
         if let Some(ref state) = materialized {
             state.recv_ready.force_wake();
+            state.send_ready.force_wake();
         }
         materialized
     }
@@ -416,6 +330,67 @@ impl SocketInner {
             || self.overlay.lock().unwrap().linger,
             options::duration_from_millis,
         )
+    }
+
+    #[cfg(windows)]
+    pub fn set_wakeup_hooks(
+        &self,
+        recv_async: Option<Py<PyAny>>,
+        recv_event: Option<Py<PyAny>>,
+        send_async: Option<Py<PyAny>>,
+        send_event: Option<Py<PyAny>>,
+    ) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized
+                .recv_ready
+                .set_wakeup_hooks(recv_async, recv_event);
+            materialized
+                .send_ready
+                .set_wakeup_hooks(send_async, send_event);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            if let Some(mode) = recv_mode {
+                materialized.recv_ready.set_wakeup_mode(mode);
+            }
+            if let Some(mode) = send_mode {
+                materialized.send_ready.set_wakeup_mode(mode);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn clear_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            if let Some(mode) = recv_mode {
+                materialized.recv_ready.clear_wakeup_mode(mode);
+            }
+            if let Some(mode) = send_mode {
+                materialized.send_ready.clear_wakeup_mode(mode);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn mark_recv_wakeup_drain_complete(&self) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized.recv_ready.mark_drain_complete();
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn mark_send_wakeup_drain_complete(&self) {
+        let materialized_guard = self.materialized.read().unwrap();
+        if let Some(materialized) = materialized_guard.as_ref() {
+            materialized.send_ready.mark_drain_complete();
+        }
     }
 }
 

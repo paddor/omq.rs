@@ -26,6 +26,8 @@ use pyo3::prelude::*;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
+use crate::notify::ReadinessSignal;
+
 struct RuntimeState {
     pid: u32,
     ctx: omq_tokio::Context,
@@ -33,13 +35,12 @@ struct RuntimeState {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-static GLOBAL_RECV_SIGNAL: Mutex<Option<(u32, Arc<crate::socket::EventFdSignal>)>> =
-    Mutex::new(None);
+static GLOBAL_RECV_SIGNAL: Mutex<Option<(u32, Arc<ReadinessSignal>)>> = Mutex::new(None);
 
 /// Process-global recv signal for `wait_any`. Recv pumps from all
 /// contexts signal this after pushing a message; `wait_any` parks on it.
 /// Recreated after fork (PID guard).
-pub(crate) fn global_recv_signal() -> Arc<crate::socket::EventFdSignal> {
+pub(crate) fn global_recv_signal() -> Arc<ReadinessSignal> {
     let mut guard = GLOBAL_RECV_SIGNAL.lock().unwrap();
     let pid = std::process::id();
     if let Some((cached_pid, signal)) = guard.as_ref()
@@ -47,7 +48,7 @@ pub(crate) fn global_recv_signal() -> Arc<crate::socket::EventFdSignal> {
     {
         return signal.clone();
     }
-    let signal = Arc::new(crate::socket::EventFdSignal::new());
+    let signal = Arc::new(ReadinessSignal::new());
     *guard = Some((pid, signal.clone()));
     signal
 }
@@ -149,8 +150,8 @@ impl ContextInner {
         options: omq_tokio::Options,
         send_cons: yring::AsyncConsumer<omq_tokio::Message>,
         mut recv_prod: yring::Producer<omq_tokio::Message>,
-        recv_ready: Arc<crate::socket::EventFdSignal>,
-        send_ready: Arc<crate::socket::EventFdSignal>,
+        recv_ready: Arc<ReadinessSignal>,
+        send_ready: Arc<ReadinessSignal>,
         recv_space: Arc<omq_tokio::engine::StateSignal>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let handle = self.ensure_runtime()?;
@@ -167,6 +168,7 @@ impl ContextInner {
                 let mut batch = 0u32;
                 while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
                     let _ = send_socket.send(msg).await;
+                    send_cons.as_mut().get_mut().release();
                     send_ready.signal();
                     batch += 1;
                     if batch >= SEND_YIELD_INTERVAL {

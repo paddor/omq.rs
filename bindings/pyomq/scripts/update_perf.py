@@ -421,8 +421,12 @@ import os; os._exit(0)
         stdin=subprocess.PIPE,
         text=True,
     )
+    push_stdout = push_proc.stdout
+    push_stdin = push_proc.stdin
+    assert push_stdout is not None
+    assert push_stdin is not None
     try:
-        port_line = push_proc.stdout.readline().strip()
+        port_line = push_stdout.readline().strip()
         if not port_line:
             push_proc.terminate()
             push_proc.wait(timeout=5)
@@ -442,8 +446,8 @@ import os; os._exit(0)
             result = 0.0
     finally:
         try:
-            push_proc.stdin.write("\n")
-            push_proc.stdin.flush()
+            push_stdin.write("\n")
+            push_stdin.flush()
         except OSError:
             pass
         push_proc.terminate()
@@ -544,8 +548,12 @@ asyncio.run(run())
         stdin=subprocess.PIPE,
         text=True,
     )
+    push_stdout = push_proc.stdout
+    push_stdin = push_proc.stdin
+    assert push_stdout is not None
+    assert push_stdin is not None
     try:
-        port_line = push_proc.stdout.readline().strip()
+        port_line = push_stdout.readline().strip()
         if not port_line:
             push_proc.terminate()
             push_proc.wait(timeout=5)
@@ -565,8 +573,8 @@ asyncio.run(run())
             result = 0.0
     finally:
         try:
-            push_proc.stdin.write("\n")
-            push_proc.stdin.flush()
+            push_stdin.write("\n")
+            push_stdin.flush()
         except OSError:
             pass
         push_proc.terminate()
@@ -822,8 +830,10 @@ except Exception:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    proxy_stdout = proxy_proc.stdout
+    assert proxy_stdout is not None
     try:
-        line = proxy_proc.stdout.readline()
+        line = proxy_stdout.readline()
         fe_port, be_port = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         proxy_proc.terminate()
@@ -958,8 +968,10 @@ except Exception:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    proxy_stdout = proxy_proc.stdout
+    assert proxy_stdout is not None
     try:
-        line = proxy_proc.stdout.readline()
+        line = proxy_stdout.readline()
         fe_port, be_port = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         proxy_proc.terminate()

@@ -23,10 +23,10 @@ import sys
 import threading
 import weakref
 
-from . import _native  # type: ignore[attr-defined]
+from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from . import error as error  # noqa: F401
 
-from ._native import (  # type: ignore[attr-defined]
+from ._native import (  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
     backend_name,
     version,
     # Socket types

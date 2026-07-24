@@ -61,7 +61,7 @@ class _DoneFuture:
 
     def __await__(self):
         return
-        yield  # noqa: unreachable -- makes this a generator
+        yield  # makes this a generator
 
     def result(self):
         return None

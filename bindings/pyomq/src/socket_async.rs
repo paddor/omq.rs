@@ -239,11 +239,7 @@ impl AsyncSocket {
     #[cfg(windows)]
     #[pyo3(name = "_clear_wakeup_modes")]
     #[pyo3(signature = (recv_mode = None, send_mode = None))]
-    fn clear_wakeup_modes(
-        &self,
-        recv_mode: Option<u32>,
-        send_mode: Option<u32>,
-    ) -> PyResult<()> {
+    fn clear_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) -> PyResult<()> {
         self.inner.clear_wakeup_modes(recv_mode, send_mode);
         Ok(())
     }

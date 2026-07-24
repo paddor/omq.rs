@@ -116,6 +116,13 @@ impl WindowsWakeupState {
             }
         }
     }
+
+    fn consume_pending(&self) {
+        self.pending.store(false, Ordering::Release);
+        unsafe {
+            let _ = ResetEvent(self.event);
+        }
+    }
 }
 
 impl Drop for WindowsWakeupState {
@@ -190,6 +197,7 @@ impl WindowsSignal {
     pub(crate) fn mark_drain_complete(&self) {
         let rearm = {
             let state = self.state.lock().unwrap();
+            state.consume_pending();
             state.finish_callback()
         };
         if rearm {
@@ -291,5 +299,26 @@ mod tests {
         assert!(state.try_schedule_callback());
         assert!(!state.try_schedule_callback());
         assert!(state.finish_callback());
+    }
+
+    #[test]
+    fn completed_async_drain_consumes_pending_wakeup() {
+        let signal = WindowsSignal::new();
+
+        {
+            let state = signal.state.lock().unwrap();
+            state.pending.store(true, Ordering::Release);
+            assert!(state.try_schedule_callback());
+        }
+
+        signal.mark_drain_complete();
+
+        let state = signal.state.lock().unwrap();
+        assert!(!state.pending.load(Ordering::Acquire));
+        assert!(!state.draining.load(Ordering::Acquire));
+        assert_eq!(
+            state.callback_state.load(Ordering::Acquire),
+            WAKEUP_CALLBACK_IDLE
+        );
     }
 }

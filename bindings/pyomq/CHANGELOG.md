@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows async readiness drains now consume the latched wakeup bit, avoiding
+  repeated stale drain callbacks after a waiter remains blocked.
+
+### Changed
+
+- `scripts/update_perf.py` has a `--quick` local-only mode and benchmark
+  knobs for shorter diagnostic runs.
+
 ## [0.16.4] - 2026-07-23
 
 ### Fixed

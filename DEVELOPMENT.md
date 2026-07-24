@@ -274,6 +274,12 @@ python scripts/update_perf.py --impl pyomq
 python scripts/update_perf.py --chart-only
 ```
 
+For a local smoke run that does not append JSONL or update docs:
+
+```sh
+python scripts/update_perf.py --quick --impl pyomq
+```
+
 ## Releasing
 
 ### Automation

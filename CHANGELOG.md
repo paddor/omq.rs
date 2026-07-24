@@ -22,6 +22,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   and per-message payloads remain bounded by platform allocation limits
   (below 4 GiB on 32-bit Linux).
 
+### Fixed
+
+- pyomq Windows async readiness drains consume latched wakeups instead of
+  reusing stale wakeups after a waiter remains blocked.
+
 ### Removed
 
 - `blume` workspace crate and unused `omq-tokio` dependency.

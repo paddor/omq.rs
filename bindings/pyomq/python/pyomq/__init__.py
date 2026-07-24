@@ -331,15 +331,13 @@ Frame = Message
 
 # ── Socket wrapper ───────────────────────────────────────────────────
 
-import sys as _sys
-
 
 class _SocketMeta(type):
     def __instancecheck__(cls, instance):
         if type.__instancecheck__(cls, instance):
             return True
         if cls is Socket:
-            amod = _sys.modules.get("pyomq.asyncio")
+            amod = sys.modules.get("pyomq.asyncio")
             if amod is not None and type.__instancecheck__(amod.Socket, instance):
                 return True
         return False
@@ -761,6 +759,12 @@ class _ShadowSocket:
 
                 while True:
                     self._recv_wakeup_event.clear()
+                    try:
+                        result = try_fn()
+                    except _native.ZMQError as e:
+                        raise error.from_native(e) from None
+                    if result is not None:
+                        return result
                     self._recv_wakeup_event.wait()
                     try:
                         result = try_fn()
@@ -851,6 +855,12 @@ class _ShadowSocket:
 
                 while True:
                     self._send_wakeup_event.clear()
+                    try:
+                        send_fn()
+                        return
+                    except _native.ZMQError as e:
+                        if getattr(e, "errno", None) != _errno.EAGAIN:
+                            raise error.from_native(e) from None
                     self._send_wakeup_event.wait()
                     try:
                         send_fn()

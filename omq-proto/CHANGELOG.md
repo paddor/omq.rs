@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** Add `CurveServerOptions` for CURVE server configuration.
+
+### Changed
+
+- **Breaking:** Replace the public CURVE server cookie keyring with a
+  per-connection cookie key. `MechanismSetup::CurveServer` now stores
+  `CurveServerOptions`, and `Options::curve_server_with_options()` accepts
+  explicit CURVE server configuration.
+
+### Removed
+
+- **Breaking:** Remove `CurveCookieKeyring`, `Options::authenticator()`, and
+  `MechanismSetup::curve_cookie_keyring()` from the public API.
+
+### Security
+
+- Reject captured CURVE `HELLO` + `INITIATE` replays on fresh TCP
+  connections. CURVE cookies are now bound to the connection that issued
+  them and consumed when `INITIATE` is processed.
+
 ## [0.23.2] - 2026-07-23
 
 ### Added

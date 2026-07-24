@@ -28,7 +28,7 @@ pub use omq_proto::IpcPath;
 #[cfg(any(feature = "curve", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
-pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
+pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, KeepAlive, MechanismConfig,
     MechanismSetup, Message, MessageIter, OnMute, Options, PartCountError, ReconnectPolicy, Result,

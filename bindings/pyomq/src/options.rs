@@ -168,13 +168,14 @@ impl Overlay {
                 let secret = backend::CurveSecretKey::from_z85(sk_str)
                     .map_err(|e| bad_key_detail("CURVE_SECRETKEY", &e))?;
                 let keypair = backend::CurveKeypair { public, secret };
+                let mut curve_options = backend::CurveServerOptions::default();
+                curve_options.authenticator = self
+                    .curve_authenticator
+                    .as_ref()
+                    .map(crate::auth::build_authenticator);
                 opts.mechanism = omq_proto::options::MechanismConfig::CurveServer {
                     our_keypair: keypair,
-                    cookie_keyring: std::sync::Arc::new(backend::CurveCookieKeyring::new()),
-                    authenticator: self
-                        .curve_authenticator
-                        .as_ref()
-                        .map(crate::auth::build_authenticator),
+                    options: curve_options,
                 };
             }
         } else if let (Some(pk), Some(sk), Some(svk)) = (

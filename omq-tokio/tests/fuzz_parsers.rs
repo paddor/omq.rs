@@ -1409,16 +1409,14 @@ mod mech_fuzz {
     #[cfg(feature = "curve")]
     #[test]
     fn fuzz_curve_server_input() {
-        use omq_tokio::{CurveCookieKeyring, CurveKeypair};
-        let keyring = std::sync::Arc::new(CurveCookieKeyring::new());
+        use omq_tokio::{CurveKeypair, CurveServerOptions};
         let mut rng = rng();
         for i in 0..iters() / 8 {
             let kp = CurveKeypair::generate();
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
                     our_keypair: kp,
-                    cookie_keyring: keyring.clone(),
-                    authenticator: None,
+                    options: CurveServerOptions::default(),
                 },
             );
             let mut conn = Connection::new(cfg);
@@ -1434,8 +1432,7 @@ mod mech_fuzz {
     #[cfg(feature = "curve")]
     #[test]
     fn fuzz_curve_hello_body() {
-        use omq_tokio::{CurveCookieKeyring, CurveKeypair};
-        let keyring = std::sync::Arc::new(CurveCookieKeyring::new());
+        use omq_tokio::{CurveKeypair, CurveServerOptions};
         let greeting = greeting_bytes(b"CURVE");
         let mut rng = rng();
         for i in 0..iters() / 8 {
@@ -1443,8 +1440,7 @@ mod mech_fuzz {
             let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
                 MechanismSetup::CurveServer {
                     our_keypair: kp,
-                    cookie_keyring: keyring.clone(),
-                    authenticator: None,
+                    options: CurveServerOptions::default(),
                 },
             );
             let mut conn = Connection::new(cfg);

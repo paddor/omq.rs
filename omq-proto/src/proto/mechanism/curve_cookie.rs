@@ -1,11 +1,10 @@
-//! Server-side cookie keyring with periodic rotation for CURVE (RFC 26).
+//! Server-side cookie key for CURVE (RFC 26).
 //!
-//! The cookie seals `(C', s')` with XSalsa20-Poly1305 so the server can
-//! be completely stateless between WELCOME and INITIATE. A current +
-//! previous key pair handles the case where the key rotates while an
-//! INITIATE is in flight.
+//! The cookie seals `(C', s')` with XSalsa20-Poly1305. Each server
+//! connection gets its own key so a cookie issued on one TCP connection
+//! cannot be replayed on another. The key expires after a short
+//! lifetime and is consumed when INITIATE is processed.
 
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crypto_secretbox::XSalsa20Poly1305;
@@ -17,7 +16,7 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 
 const NONCE_COOKIE_PREFIX: &[u8; 8] = b"COOKIE--";
-const DEFAULT_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_COOKIE_LIFETIME: Duration = Duration::from_mins(1);
 
 #[expect(clippy::trivially_copy_pass_by_ref)]
 fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
@@ -28,57 +27,37 @@ fn nonce_long(prefix: &[u8; 8], suffix: &[u8; 16]) -> [u8; 24] {
 }
 
 #[derive(Debug)]
-pub struct CurveCookieKeyring {
-    inner: Mutex<Inner>,
+pub(crate) struct CurveCookieKey {
+    key: Zeroizing<[u8; 32]>,
+    created_at: Instant,
+    lifetime: Duration,
 }
 
-#[derive(Debug)]
-struct Inner {
-    current: Zeroizing<[u8; 32]>,
-    previous: Option<Zeroizing<[u8; 32]>>,
-    last_rotated: Instant,
-    rotation_interval: Duration,
-}
-
-impl CurveCookieKeyring {
-    pub fn new() -> Self {
-        Self::with_interval(DEFAULT_ROTATION_INTERVAL)
+impl CurveCookieKey {
+    pub(crate) fn new() -> Self {
+        Self::with_lifetime(DEFAULT_COOKIE_LIFETIME)
     }
 
-    pub fn with_interval(rotation_interval: Duration) -> Self {
+    pub(crate) fn with_lifetime(lifetime: Duration) -> Self {
         let mut k = Zeroizing::new([0u8; 32]);
         rand::rng().fill_bytes(k.as_mut());
         Self {
-            inner: Mutex::new(Inner {
-                current: k,
-                previous: None,
-                last_rotated: Instant::now(),
-                rotation_interval,
-            }),
+            key: k,
+            created_at: Instant::now(),
+            lifetime,
         }
-    }
-
-    fn current_key(&self) -> Zeroizing<[u8; 32]> {
-        let mut g = self.inner.lock().expect("cookie keyring poisoned");
-        if g.last_rotated.elapsed() >= g.rotation_interval {
-            g.previous = Some(g.current.clone());
-            rand::rng().fill_bytes(g.current.as_mut());
-            g.last_rotated = Instant::now();
-        }
-        g.current.clone()
     }
 
     /// Seal `C'(32) || s'(32)` under the current key. Returns the
     /// 96-byte cookie: `nonce_suffix(16) || ciphertext(80)`.
-    pub fn encrypt_cookie(&self, cp: &[u8; 32], sn_secret: &[u8; 32]) -> Vec<u8> {
-        let key = self.current_key();
+    pub(crate) fn encrypt_cookie(&self, cp: &[u8; 32], sn_secret: &[u8; 32]) -> Vec<u8> {
         let mut suffix = [0u8; 16];
         rand::rng().fill_bytes(&mut suffix);
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
         let mut plaintext = [0u8; 64];
         plaintext[..32].copy_from_slice(cp);
         plaintext[32..].copy_from_slice(sn_secret);
-        let ciphertext = XSalsa20Poly1305::new(GenericArray::from_slice(&*key))
+        let ciphertext = XSalsa20Poly1305::new(GenericArray::from_slice(&*self.key))
             .encrypt(GenericArray::from_slice(&nonce), &plaintext[..])
             .expect("cookie encrypt infallible");
         let mut out = Vec::with_capacity(96);
@@ -88,26 +67,19 @@ impl CurveCookieKeyring {
         out
     }
 
-    /// Open a 96-byte cookie, trying the current key first, then the
-    /// previous. Returns `(C', s')` on success.
-    pub fn decrypt_cookie(&self, cookie: &[u8]) -> Result<([u8; 32], [u8; 32])> {
+    /// Open a 96-byte cookie. Returns `(C', s')` on success.
+    pub(crate) fn decrypt_cookie(&self, cookie: &[u8]) -> Result<([u8; 32], [u8; 32])> {
         if cookie.len() != 96 {
             return Err(Error::HandshakeFailed("CURVE cookie wrong length".into()));
+        }
+        if self.created_at.elapsed() >= self.lifetime {
+            return Err(Error::HandshakeFailed("CURVE cookie expired".into()));
         }
         let suffix: [u8; 16] = cookie[..16].try_into().unwrap();
         let ciphertext = &cookie[16..];
         let nonce = nonce_long(NONCE_COOKIE_PREFIX, &suffix);
 
-        let (current, previous) = {
-            let g = self.inner.lock().expect("cookie keyring poisoned");
-            (g.current.clone(), g.previous.clone())
-        };
-
-        let plaintext =
-            Self::try_decrypt(&current, &nonce, ciphertext).or_else(|_| match &previous {
-                Some(prev) => Self::try_decrypt(prev, &nonce, ciphertext),
-                None => Err(Error::HandshakeFailed("CURVE cookie invalid".into())),
-            })?;
+        let plaintext = Self::try_decrypt(&self.key, &nonce, ciphertext)?;
 
         if plaintext.len() != 64 {
             return Err(Error::HandshakeFailed(
@@ -126,15 +98,12 @@ impl CurveCookieKeyring {
     }
 
     #[cfg(test)]
-    pub fn rotate_now(&self) {
-        let mut g = self.inner.lock().expect("cookie keyring poisoned");
-        g.previous = Some(g.current.clone());
-        rand::rng().fill_bytes(g.current.as_mut());
-        g.last_rotated = Instant::now();
+    pub(crate) fn expire_now(&mut self) {
+        self.lifetime = Duration::ZERO;
     }
 }
 
-impl Default for CurveCookieKeyring {
+impl Default for CurveCookieKey {
     fn default() -> Self {
         Self::new()
     }
@@ -146,7 +115,7 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let kr = CurveCookieKeyring::new();
+        let kr = CurveCookieKey::new();
         let cp = [0xAAu8; 32];
         let sn = [0xBBu8; 32];
         let cookie = kr.encrypt_cookie(&cp, &sn);
@@ -157,28 +126,26 @@ mod tests {
     }
 
     #[test]
-    fn survives_one_rotation() {
-        let kr = CurveCookieKeyring::new();
-        let cookie = kr.encrypt_cookie(&[1u8; 32], &[2u8; 32]);
-        kr.rotate_now();
-        let (cp, sn) = kr.decrypt_cookie(&cookie).unwrap();
-        assert_eq!(cp, [1u8; 32]);
-        assert_eq!(sn, [2u8; 32]);
+    fn wrong_length_rejected() {
+        let kr = CurveCookieKey::new();
+        assert!(kr.decrypt_cookie(&[0u8; 95]).is_err());
+        assert!(kr.decrypt_cookie(&[0u8; 97]).is_err());
     }
 
     #[test]
-    fn fails_after_two_rotations() {
-        let kr = CurveCookieKeyring::new();
+    fn expired_cookie_rejected() {
+        let mut kr = CurveCookieKey::new();
         let cookie = kr.encrypt_cookie(&[1u8; 32], &[2u8; 32]);
-        kr.rotate_now();
-        kr.rotate_now();
+        kr.expire_now();
         assert!(kr.decrypt_cookie(&cookie).is_err());
     }
 
     #[test]
-    fn wrong_length_rejected() {
-        let kr = CurveCookieKeyring::new();
-        assert!(kr.decrypt_cookie(&[0u8; 95]).is_err());
-        assert!(kr.decrypt_cookie(&[0u8; 97]).is_err());
+    fn corrupted_cookie_rejected() {
+        let kr = CurveCookieKey::new();
+        let cookie = kr.encrypt_cookie(&[1u8; 32], &[2u8; 32]);
+        let mut corrupted = cookie.clone();
+        corrupted[20] ^= 0x01;
+        assert!(kr.decrypt_cookie(&corrupted).is_err());
     }
 }

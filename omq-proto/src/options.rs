@@ -8,10 +8,10 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "plain"))]
+#[cfg(feature = "plain")]
 use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
-use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
+use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveServerOptions};
 use crate::socket_ref::SocketRef;
 /// Upper bound for `Options::compression_dict`. Both transports
 /// cap at 8 KiB. Inlined as a const so the `compression_dict`
@@ -294,6 +294,14 @@ impl Options {
                 )));
             }
         }
+        #[cfg(feature = "curve")]
+        if let MechanismSetup::CurveServer { ref options, .. } = self.mechanism
+            && options.cookie_lifetime.is_zero()
+        {
+            return Err(crate::error::Error::Config(
+                "CURVE cookie lifetime must be greater than zero".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -441,20 +449,27 @@ impl Options {
         self
     }
 
-    /// Configure this socket as a CURVE server with the given long-term
-    /// keypair. Incoming clients must present the matching server public
-    /// key during their handshake. A fresh cookie keyring with the
-    /// default rotation interval (~30 s) is created. Reach in via
-    /// [`MechanismSetup::curve_cookie_keyring`] to configure or share
-    /// it. Use [`Self::authenticator`] to add a per-client admission
-    /// callback.
+    /// Configure this socket as a CURVE server with default CURVE
+    /// server options.
     #[cfg(feature = "curve")]
     #[must_use]
-    pub fn curve_server(mut self, our_keypair: CurveKeypair) -> Self {
+    pub fn curve_server(self, our_keypair: CurveKeypair) -> Self {
+        self.curve_server_with_options(our_keypair, CurveServerOptions::default())
+    }
+
+    /// Configure this socket as a CURVE server with explicit CURVE
+    /// server options. Incoming clients must present the matching
+    /// server public key during their handshake.
+    #[cfg(feature = "curve")]
+    #[must_use]
+    pub fn curve_server_with_options(
+        mut self,
+        our_keypair: CurveKeypair,
+        options: CurveServerOptions,
+    ) -> Self {
         self.mechanism = MechanismSetup::CurveServer {
             our_keypair,
-            cookie_keyring: std::sync::Arc::new(crate::proto::mechanism::CurveCookieKeyring::new()),
-            authenticator: None,
+            options,
         };
         self
     }
@@ -474,39 +489,10 @@ impl Options {
         self
     }
 
-    /// Install a server-side authenticator. Called once per handshake
-    /// after the underlying mechanism has cryptographically verified
-    /// the peer (CURVE: vouch decrypt).
-    /// The callback receives the peer's long-term public key plus a
-    /// tag identifying which mechanism produced it. Return `false` to
-    /// reject the client; the handshake aborts.
-    ///
-    /// Works for CURVE server configurations.
-    /// Panics if the current mechanism is not a server configuration
-    /// of an encrypting mechanism (i.e., `curve_server`
-    /// must be called before this method).
-    #[cfg(feature = "curve")]
-    #[must_use]
-    #[track_caller]
-    pub fn authenticator<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
-    {
-        let auth = Authenticator::new(f);
-        match &mut self.mechanism {
-            #[cfg(feature = "curve")]
-            MechanismSetup::CurveServer { authenticator, .. } => {
-                *authenticator = Some(auth);
-            }
-            _ => panic!("authenticator requires a server-side encrypting mechanism"),
-        }
-        self
-    }
-
     /// Configure this socket as a PLAIN server (RFC 24). The
     /// authenticator receives [`MechanismPeerInfo`] with `username`
     /// and `password` populated; return `true` to admit the client.
-    /// No encryption is applied — use on trusted networks only.
+    /// No encryption is applied; use on trusted networks only.
     #[cfg(feature = "plain")]
     #[must_use]
     pub fn plain_server<F>(mut self, f: F) -> Self

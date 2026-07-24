@@ -254,7 +254,7 @@ fn streaming_one_byte_at_a_time_handshake() {
 #[cfg(feature = "curve")]
 #[test]
 fn curve_handshake_and_message_roundtrip() {
-    use omq_proto::proto::mechanism::{CurveKeypair, MechanismSetup};
+    use omq_proto::proto::mechanism::{CurveKeypair, CurveServerOptions, MechanismSetup};
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
@@ -263,8 +263,7 @@ fn curve_handshake_and_message_roundtrip() {
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
                 our_keypair: server_kp,
-                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
-                authenticator: None,
+                options: CurveServerOptions::default(),
             },
         ),
     );
@@ -325,7 +324,7 @@ fn curve_handshake_and_message_roundtrip() {
 #[test]
 fn curve_command_demux() {
     use omq_proto::proto::command::Command;
-    use omq_proto::proto::mechanism::{CurveKeypair, MechanismSetup};
+    use omq_proto::proto::mechanism::{CurveKeypair, CurveServerOptions, MechanismSetup};
 
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
@@ -335,8 +334,7 @@ fn curve_command_demux() {
         ConnectionConfig::new(Role::Server, SocketType::Pub).mechanism(
             MechanismSetup::CurveServer {
                 our_keypair: server_kp,
-                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
-                authenticator: None,
+                options: CurveServerOptions::default(),
             },
         ),
     );
@@ -579,7 +577,7 @@ fn ready_resumes_after_supply_payload() {
 #[cfg(feature = "curve")]
 #[test]
 fn supply_payload_through_curve() {
-    use omq_proto::proto::mechanism::{CurveKeypair, MechanismSetup};
+    use omq_proto::proto::mechanism::{CurveKeypair, CurveServerOptions, MechanismSetup};
     let server_kp = CurveKeypair::generate();
     let client_kp = CurveKeypair::generate();
     let server_pub = server_kp.public;
@@ -587,8 +585,7 @@ fn supply_payload_through_curve() {
         ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
             MechanismSetup::CurveServer {
                 our_keypair: server_kp,
-                cookie_keyring: std::sync::Arc::new(omq_proto::CurveCookieKeyring::new()),
-                authenticator: None,
+                options: CurveServerOptions::default(),
             },
         ),
     );

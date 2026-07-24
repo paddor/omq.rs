@@ -138,8 +138,7 @@ impl SocketOverlay {
                         secret: sec,
                         public: pubk,
                     },
-                    cookie_keyring: std::sync::Arc::new(omq_tokio::CurveCookieKeyring::new()),
-                    authenticator: None,
+                    options: omq_tokio::CurveServerOptions::default(),
                 }
             }
             MechanismOverlay::CurveClient {

@@ -143,7 +143,10 @@ impl Overlay {
             compression_dict: self.compression_dict.clone(),
             compression_auto_train: self.compression_auto_train,
             arena_threshold: Some(64 * 1024),
-            transmit_slot_cap: None,
+            // Windows TCP PUSH/PULL throughput falls off when the fast-path
+            // transmit slot hits its byte cap before the default message HWM.
+            // 2 MiB keeps medium payloads batched without huge per-peer slack.
+            transmit_slot_cap: Some(2 * 1024 * 1024),
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
             ..Default::default()
         };

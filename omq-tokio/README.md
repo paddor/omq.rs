@@ -11,12 +11,12 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 | | |
 |-|-|
 | Multi-threaded | Concurrent `send`/`recv` from multiple tasks is safe |
-| Actor with bypass | `SocketDriver` actor owns mutable state. Common message path bypasses it: `send` pushes into the routing strategy directly, `recv` pulls from the user channel directly. |
-| Arena encoding | Small messages (< 96 KiB) packed into one `BytesMut`, one `write_all` per batch |
-| Shared-queue work stealing | Round-robin types (PUSH/DEALER) share one `flume` queue. Each connection driver polls it in a `select!` arm, draining up to 256 messages per wakeup. |
+| Actor with bypass | `SocketDriver` owns mutable socket state. Common send/recv paths bypass it for non-REQ/REP sockets. |
+| Arena encoding | Small messages (< 4 KiB) pack into a `FrameBuffer` arena. Larger payloads use zero-copy gather-write. |
+| Bounded wakeups | Per-peer transmit slots and `yring` send pipes use `DataSignal` to coalesce wakeups without losing readiness. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_classic_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="850">
 </p>
 
 ## Usage

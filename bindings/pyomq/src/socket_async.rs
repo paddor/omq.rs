@@ -6,9 +6,9 @@
 //! - **Send**: `_send_direct` pushes into the send yring (EAGAIN if
 //!   full). The send pump relays to the omq Socket on the tokio thread.
 //! - **Recv**: `_try_recv` pops from the recv yring (returns `None` if
-//!   empty). `_recv_fd` returns a dup'd eventfd that becomes readable
-//!   when the recv pump pushes a message. The Python asyncio wrapper
-//!   registers this fd with `loop.add_reader` to wake the coroutine.
+//!   empty). `_recv_fd` returns a dup'd Unix readiness fd that becomes
+//!   readable when the recv pump pushes a message. The Python asyncio
+//!   wrapper registers this fd with `loop.add_reader` to wake the coroutine.
 //!
 //! Control-plane ops (bind, connect, subscribe, ...) use the sync
 //! dispatch helpers (block on a tokio oneshot).
@@ -105,7 +105,7 @@ impl AsyncSocket {
         }
     }
 
-    // ── Recv (try-poll + eventfd for async notification) ─────────────
+    // ── Recv (try-poll + readiness fd for async notification) ────────
 
     #[pyo3(name = "_try_recv")]
     fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

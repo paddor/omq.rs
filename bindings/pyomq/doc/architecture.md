@@ -22,7 +22,7 @@ src/
                     platform-specific recv wakeup integration
   notify/
     mod.rs          ReadinessSignal: platform-agnostic public API
-    unix.rs         Unix EventFdSignal: eventfd(2) + parking flag
+    unix.rs         Unix signal backend: eventfd on Linux, pipe elsewhere
     windows.rs      Windows WindowsSignal: Win32 event handles + async callback
   context.rs        Context / AsyncContext (stateless factories)
   options.rs        setsockopt/getsockopt: Overlay cache, option dispatch
@@ -38,7 +38,7 @@ src/
 ```
 Python threads ──────────────▶ tokio thread (current_thread, "pyomq-tokio")
   Arc<omq_tokio::Socket>            ├─ send pump per socket (drain yring → socket)
-  held in SocketInner               ├─ recv pump per socket (socket → yring, signal eventfd)
+  held in SocketInner               ├─ recv pump per socket (socket → yring, signal readiness)
                                     └─ socket driver tasks (ConnectionDriver, actor)
 ```
 
@@ -123,16 +123,18 @@ All backends implement:
 - `park_begin()` / `park_end()`: arm/disarm the parking flag (closes
   races in polling loops).
 
-### Unix backend: EventFdSignal (eventfd)
+### Unix backend: EventFdSignal (eventfd or pipe)
 
-`EventFdSignal` wraps a Linux `eventfd(EFD_NONBLOCK)` plus an
-`AtomicBool parking` flag (`notify/unix.rs`).
+`EventFdSignal` is the Unix readiness backend (`notify/unix.rs`). On
+Linux/Android it uses `eventfd(EFD_NONBLOCK | EFD_CLOEXEC)`. On other Unix
+targets, including macOS, it uses a nonblocking close-on-exec pipe. The shared
+`ReadinessSignal` owns the `AtomicBool parking` flag.
 
-- `signal()`: writes to the eventfd only if `parking` is true. On the
+- `signal()`: writes to the backend fd only if `parking` is true. On the
   hot path (consumer not parked), this is a single atomic load with no
   syscall.
 - `park_begin()` / `park_end()`: arm/disarm the parking flag.
-- `wait_timeout(dur)`: `poll(2)` on the eventfd with a timeout.
+- `wait_timeout(dur)`: `poll(2)` on the backend fd with a timeout.
 - `force_wake()`: unconditional write. Used on socket close to unblock
   any parked recv.
 - `dup_fd()`: duplicate the fd for async recv integration.
@@ -142,10 +144,9 @@ the race where a notification arrives between the consumer check and
 the park.
 
 **Async integration:** Python's `asyncio.py` calls `_recv_fd()` to get
-a dup'd eventfd, then registers it with `loop.add_reader(callback)`.
-The recv pump writes the eventfd whenever it pushes a message; the
-kernel wakes the event loop, `callback` fires, and `_try_recv()` is
-invoked.
+a dup'd backend fd, then registers it with `loop.add_reader(callback)`.
+The recv pump writes the fd whenever it pushes a message; the kernel
+wakes the event loop, `callback` fires, and `_try_recv()` is invoked.
 
 ### Windows backend: WindowsSignal (Win32 event handles + async callbacks)
 
@@ -213,7 +214,7 @@ Socket.recv(flags)
       lock consumer, try pop (fast path)
       if Some(msg): return first frame, store rest in rxbuf
       else:
-          # Platform: Unix uses eventfd + poll(2)
+          # Platform: Unix uses ReadinessSignal.wait_timeout() + poll(2)
           # Platform: Windows uses ReadinessSignal.wait_timeout() with Win32 handles
           release GIL, slow path:
               park_begin()
@@ -228,7 +229,7 @@ Socket.recv(flags)
 Each `recv()` returns one frame. If the message is multipart, remaining
 frames go into `rxbuf` and are returned by subsequent `recv()` calls.
 `recv_multipart()` returns all frames at once. Both platforms use
-`ReadinessSignal.wait_timeout()`, which internally handles eventfd
+`ReadinessSignal.wait_timeout()`, which internally handles eventfd/pipe
 on Unix or Win32 event handles on Windows.
 
 ## Async send/recv
@@ -270,7 +271,7 @@ pattern:
 - Waiter future is pending.
 - recv pump on tokio thread finishes forwarding a message, freeing ring space.
 - recv pump calls `send_ready.signal()`.
-- `EventFdSignal.signal()` writes to the eventfd (because `parking=true`).
+- `EventFdSignal.signal()` writes to the backend fd (because `parking=true`).
 - Kernel wakes asyncio event loop via epoll/select.
 - Loop fires the registered callback, which calls `_drain_send_waiters()`.
 - `_drain_send_waiters()` pops waiters from queue and invokes each:
@@ -327,7 +328,7 @@ Similar to send: appends waiter, sets mode, returns future.
 **Wakeup path (Unix):**
 - Waiter future is pending, registered with `loop.add_reader(fd, callback)`.
 - send pump on tokio thread drains yring, calls `recv_ready.signal()`.
-- `EventFdSignal.signal()` writes to eventfd.
+- `EventFdSignal.signal()` writes to the backend fd.
 - Kernel wakes asyncio event loop.
 - Registered fd callback fires:
   - Calls `_drain_recv_waiters()` directly (no intermediate deferral).

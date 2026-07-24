@@ -2,7 +2,7 @@
 //! the sync and async wrappers.
 //!
 //! The synchronous wrapper uses `omq_tokio::blocking::Socket` directly.
-//! The asyncio wrapper retains its yring relay and eventfd adapter.
+//! The asyncio wrapper retains its yring relay and readiness adapter.
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

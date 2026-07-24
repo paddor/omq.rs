@@ -29,8 +29,8 @@ type SignalBackend = WindowsSignal;
 /// Platform-agnostic readiness signal for async socket wake-up paths.
 ///
 /// The `parking` flag avoids syscalls on the hot path. The consumer
-/// sets it before sleeping; the producer only writes to the eventfd
-/// when it sees the flag.
+/// sets it before sleeping; the producer only writes to the backend
+/// wake transport when it sees the flag.
 pub(crate) struct ReadinessSignal {
     parking: AtomicBool,
     backend: SignalBackend,

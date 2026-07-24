@@ -90,6 +90,21 @@ The `async` feature (opt-in) adds `AsyncProducer`/`AsyncConsumer` with
 waker integration: the producer wakes the consumer on flush, the
 consumer wakes the producer on release.
 
+## Correctness checks
+
+The unsafe ring core is checked with Miri:
+
+```sh
+cargo +nightly miri test -p yring
+```
+
+The Loom suite models SPSC cursor ordering, wraparound, producer drop,
+`push_async` wakeups, and upper-layer readiness patterns:
+
+```sh
+RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
+```
+
 ## Benchmarks
 
 Cross-thread throughput (M items/s), 2 seconds per configuration,

@@ -697,9 +697,9 @@ pub fn wait_any(
             None => Duration::from_millis(100),
         };
 
-        // Native blocking sockets have thread wakeups, not an eventfd.
+        // Native blocking sockets have thread wakeups, not a readiness fd.
         // Poll their try-recv path periodically while retaining the
-        // eventfd fast path for asyncio sockets.
+        // readiness-fd fast path for asyncio sockets.
         recv_signal.wait_timeout(wait_dur.min(Duration::from_millis(10)));
 
         let ready = poll_ready(&sockets);

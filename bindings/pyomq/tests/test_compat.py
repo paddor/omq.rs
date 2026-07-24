@@ -5,6 +5,7 @@ import pyomq as zmq
 
 # ── Serialization methods ────────────────────────────────────────────
 
+
 def test_send_recv_string(tcp_endpoint):
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
@@ -83,6 +84,7 @@ def test_send_recv_pyobj(tcp_endpoint):
 
 def test_send_recv_pyobj_protocol(tcp_endpoint):
     import pickle
+
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
@@ -100,6 +102,7 @@ def test_send_recv_pyobj_protocol(tcp_endpoint):
 
 
 # ── Socket properties & aliases ─────────────────────────────────────
+
 
 def test_socket_type_property():
     ctx = zmq.Context()
@@ -218,6 +221,7 @@ def test_track_true_send_returns_tracker():
 
 # ── bind_to_random_port ─────────────────────────────────────────────
 
+
 def test_bind_to_random_port():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
@@ -246,6 +250,7 @@ def test_bind_to_random_port_returns_different_ports():
 
 # ── Context.instance() ──────────────────────────────────────────────
 
+
 def test_context_instance_singleton():
     # Reset singleton state for isolation
     zmq.Context._instance = None
@@ -271,6 +276,7 @@ def test_context_instance_survives_close():
 
 # ── send_serialized / recv_serialized ───────────────────────────────
 
+
 def test_send_recv_serialized(tcp_endpoint):
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
@@ -295,6 +301,7 @@ def test_send_recv_serialized(tcp_endpoint):
 
 
 # ── set_hwm / get_hwm ──────────────────────────────────────────────
+
 
 def test_set_hwm_get_hwm():
     ctx = zmq.Context()
@@ -322,6 +329,7 @@ def test_hwm_property():
 
 # ── set_string / get_string aliases ────────────────────────────────
 
+
 def test_set_string_get_string():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.DEALER)
@@ -334,6 +342,7 @@ def test_set_string_get_string():
 
 
 # ── Socket.poll() ──────────────────────────────────────────────────
+
 
 def test_socket_poll_timeout():
     ctx = zmq.Context()
@@ -356,6 +365,7 @@ def test_socket_poll_ready(tcp_endpoint):
         push.connect(ep)
         push.send(b"data")
         import time
+
         time.sleep(0.05)
         result = pull.poll(timeout=1000)
         assert result & zmq.POLLIN
@@ -366,6 +376,7 @@ def test_socket_poll_ready(tcp_endpoint):
 
 
 # ── Socket.__repr__() ──────────────────────────────────────────────
+
 
 def test_socket_repr():
     ctx = zmq.Context()
@@ -381,6 +392,7 @@ def test_socket_repr():
 
 # ── Socket.underlying ──────────────────────────────────────────────
 
+
 def test_socket_underlying():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PUSH)
@@ -393,6 +405,7 @@ def test_socket_underlying():
 
 # ── Context.closed ─────────────────────────────────────────────────
 
+
 def test_context_closed_property():
     ctx = zmq.Context()
     assert ctx.closed is False
@@ -401,6 +414,7 @@ def test_context_closed_property():
 
 
 # ── Context.destroy(linger) ────────────────────────────────────────
+
 
 def test_context_destroy_closes_sockets():
     ctx = zmq.Context()
@@ -425,6 +439,7 @@ def test_context_destroy_no_linger():
 
 # ── Poller.sockets property ────────────────────────────────────────
 
+
 def test_poller_sockets_property():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
@@ -443,6 +458,7 @@ def test_poller_sockets_property():
 
 # ── select() ───────────────────────────────────────────────────────
 
+
 def test_select_timeout():
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
@@ -459,6 +475,7 @@ def test_select_timeout():
 
 def test_select_ready(tcp_endpoint):
     import time
+
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
@@ -476,6 +493,7 @@ def test_select_ready(tcp_endpoint):
 
 
 # ── Constants ────────────────────────────────────────────────────────
+
 
 def test_dontwait_constant():
     assert zmq.DONTWAIT == 1
@@ -530,6 +548,7 @@ def test_new_constants_match_pyzmq():
 
 # ── Version & module attributes ─────────────────────────────────────
 
+
 def test_version_string():
     assert isinstance(zmq.__version__, str)
     assert len(zmq.__version__) > 0
@@ -582,12 +601,14 @@ def test_strerror():
 
 # ── Exceptions ─────────────────────────────────────────────────────
 
+
 def test_zmq_version_error():
     assert issubclass(zmq.ZMQVersionError, zmq.ZMQBaseError)
     assert issubclass(zmq.ZMQVersionError, NotImplementedError)
 
 
 # ── proxy ────────────────────────────────────────────────────────────
+
 
 def test_proxy_req_rep(tcp_endpoint):
     import threading
@@ -608,7 +629,9 @@ def test_proxy_req_rep(tcp_endpoint):
         client.connect(fe_ep)
 
         proxy_thread = threading.Thread(
-            target=zmq.proxy, args=(frontend, backend), daemon=True,
+            target=zmq.proxy,
+            args=(frontend, backend),
+            daemon=True,
         )
         proxy_thread.start()
 
@@ -647,7 +670,9 @@ def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
         client_b.connect(fe_ep)
 
         proxy_thread = threading.Thread(
-            target=zmq.proxy, args=(frontend, backend), daemon=True,
+            target=zmq.proxy,
+            args=(frontend, backend),
+            daemon=True,
         )
         proxy_thread.start()
 
@@ -694,7 +719,8 @@ def test_proxy_with_capture(tcp_endpoint):
         client.connect(fe_ep)
 
         proxy_thread = threading.Thread(
-            target=zmq.proxy, args=(frontend, backend, capture),
+            target=zmq.proxy,
+            args=(frontend, backend, capture),
             daemon=True,
         )
         proxy_thread.start()

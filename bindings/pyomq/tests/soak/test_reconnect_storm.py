@@ -14,10 +14,9 @@ from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 
 def _is_eaddrinuse(exc):
-    return (
-        getattr(exc, "errno", None) == errno.EADDRINUSE
-        or "Address already in use" in str(exc)
-    )
+    return getattr(
+        exc, "errno", None
+    ) == errno.EADDRINUSE or "Address already in use" in str(exc)
 
 
 def _new_pull(ctx):

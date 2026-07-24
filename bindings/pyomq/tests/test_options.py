@@ -15,6 +15,7 @@ def _push():
 
 # Group A: direct value mapping.
 
+
 def test_linger_round_trip():
     ctx, s = _push()
     try:
@@ -94,6 +95,7 @@ def test_type_is_readonly():
 
 # Group B: wrapper-only.
 
+
 def test_rcvtimeo_raises_eagain():
     ctx = zmq.Context()
     s = ctx.socket(zmq.PULL)
@@ -124,6 +126,7 @@ def test_immediate_and_ipv6_accepted_as_noops():
 
 # Group C: TCP keepalive.
 
+
 def test_tcp_keepalive_round_trip():
     ctx, s = _push()
     try:
@@ -152,6 +155,7 @@ def test_tcp_keepalive_disabled():
 
 # Group C "not implemented" raises ZMQError.
 
+
 def test_unsupported_options_raise():
     ctx, s = _push()
     try:
@@ -164,6 +168,7 @@ def test_unsupported_options_raise():
 
 
 # Group D: newly readable options (Phase 4).
+
 
 def test_reconnect_ivl_round_trip():
     ctx, s = _push()
@@ -211,6 +216,7 @@ def test_handshake_ivl_round_trip():
 
 # Group E: SNDBUF / RCVBUF round-trip.
 
+
 def test_sndbuf_round_trip():
     ctx, s = _push()
     try:
@@ -233,6 +239,7 @@ def test_rcvbuf_round_trip():
 
 # Group F: PLAIN auth option round-trip.
 
+
 def test_plain_options_round_trip():
     ctx, s = _push()
     try:
@@ -249,12 +256,21 @@ def test_plain_options_round_trip():
 
 # Group G: no-op options don't raise.
 
+
 def test_noop_options_accepted():
     ctx, s = _push()
     try:
-        for opt in (zmq.XPUB_VERBOSE, zmq.PROBE_ROUTER, zmq.REQ_CORRELATE,
-                     zmq.REQ_RELAXED, zmq.ROUTER_HANDOVER, zmq.ZAP_DOMAIN,
-                     zmq.RATE, zmq.CONNECT_TIMEOUT, zmq.RECOVERY_IVL):
+        for opt in (
+            zmq.XPUB_VERBOSE,
+            zmq.PROBE_ROUTER,
+            zmq.REQ_CORRELATE,
+            zmq.REQ_RELAXED,
+            zmq.ROUTER_HANDOVER,
+            zmq.ZAP_DOMAIN,
+            zmq.RATE,
+            zmq.CONNECT_TIMEOUT,
+            zmq.RECOVERY_IVL,
+        ):
             s.setsockopt(opt, 0)
     finally:
         s.close()
@@ -299,7 +315,6 @@ def test_on_mute_rejects_invalid():
     finally:
         s.close()
         ctx.term()
-
 
         ctx.term()
 

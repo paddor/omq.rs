@@ -20,8 +20,10 @@ TCP_BIND_RETRIES = 20
 
 # ── helpers ──────────────────────────────────────────────────────────
 
+
 def _unbound_tcp_endpoint():
     import socket
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -29,10 +31,9 @@ def _unbound_tcp_endpoint():
 
 
 def _is_eaddrinuse(exc):
-    return (
-        getattr(exc, "errno", None) == errno.EADDRINUSE
-        or "Address already in use" in str(exc)
-    )
+    return getattr(
+        exc, "errno", None
+    ) == errno.EADDRINUSE or "Address already in use" in str(exc)
 
 
 def _run_tcp_cbb(run, delay):
@@ -62,6 +63,7 @@ async def _run_tcp_cbb_async(run, delay):
 
 
 # ── sync PUSH/PULL ──────────────────────────────────────────────────
+
 
 def _sync_push_pull_cbb(ep, delay):
     ctx = zmq.Context()
@@ -95,6 +97,7 @@ def test_sync_push_pull_cbb_tcp(delay):
 
 
 # ── sync REQ/REP ────────────────────────────────────────────────────
+
 
 def _sync_req_rep_cbb(ep, delay):
     ctx = zmq.Context()
@@ -131,6 +134,7 @@ def test_sync_req_rep_cbb_tcp(delay):
 
 # ── sync PAIR ───────────────────────────────────────────────────────
 
+
 def _sync_pair_cbb(ep, delay):
     ctx = zmq.Context()
     a = ctx.socket(zmq.PAIR)
@@ -166,8 +170,10 @@ def test_sync_pair_cbb_tcp(delay):
 
 # ── async PUSH/PULL ─────────────────────────────────────────────────
 
+
 async def _async_push_pull_cbb(ep, delay):
     import asyncio
+
     ctx = zmq_async.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
@@ -202,8 +208,10 @@ async def test_async_push_pull_cbb_tcp(delay):
 
 # ── async REQ/REP ───────────────────────────────────────────────────
 
+
 async def _async_req_rep_cbb(ep, delay):
     import asyncio
+
     ctx = zmq_async.Context()
     req = ctx.socket(zmq.REQ)
     rep = ctx.socket(zmq.REP)
@@ -240,8 +248,10 @@ async def test_async_req_rep_cbb_tcp(delay):
 
 # ── async PAIR ──────────────────────────────────────────────────────
 
+
 async def _async_pair_cbb(ep, delay):
     import asyncio
+
     ctx = zmq_async.Context()
     a = ctx.socket(zmq.PAIR)
     b = ctx.socket(zmq.PAIR)

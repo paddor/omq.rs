@@ -17,7 +17,7 @@ import time
 
 from conftest import soak_duration
 
-WORKER_SCRIPT = '''
+WORKER_SCRIPT = """
 import struct
 import sys
 import threading
@@ -121,7 +121,7 @@ print(f"io_threads={IO_THREADS} throughput={tput:.0f}msg/s recvd={recvd} "
       f"corrupt={corrupt} cycles={cycles} rtt={rtt:.0f}us "
       f"ok={throughput_ok and latency_ok}")
 sys.exit(0 if throughput_ok and latency_ok else 1)
-'''
+"""
 
 
 def test_io_threads_variants():
@@ -130,11 +130,12 @@ def test_io_threads_variants():
 
     results = {}
     for n_threads in [1, 2, 4]:
-        print(f"\n[io_threads] running with io_threads={n_threads}, "
-              f"duration={per_variant:.0f}s")
+        print(
+            f"\n[io_threads] running with io_threads={n_threads}, "
+            f"duration={per_variant:.0f}s"
+        )
         result = subprocess.run(
-            [sys.executable, "-c", WORKER_SCRIPT,
-             str(n_threads), str(per_variant)],
+            [sys.executable, "-c", WORKER_SCRIPT, str(n_threads), str(per_variant)],
             capture_output=True,
             text=True,
             timeout=per_variant + 30,

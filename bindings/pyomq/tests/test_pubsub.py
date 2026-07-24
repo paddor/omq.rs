@@ -17,8 +17,8 @@ def test_pub_sub_prefix_filter(tcp_endpoint):
         # to propagate.
         time.sleep(0.2)
         pub.send(b"sports/score-12")  # filtered
-        pub.send(b"weather/sunny")    # delivered
-        pub.send(b"weather/rain")     # delivered
+        pub.send(b"weather/sunny")  # delivered
+        pub.send(b"weather/rain")  # delivered
         sub.setsockopt(zmq.RCVTIMEO, 500)
         got = [sub.recv() for _ in range(2)]
         assert got == [b"weather/sunny", b"weather/rain"]

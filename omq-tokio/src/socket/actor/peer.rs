@@ -5,6 +5,7 @@ use super::{
     generated_identity, mpsc, peer_ident_socket_addr, supports_groups, supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
+use crate::socket::actor::peer_materialize::ByteStreamConnection;
 use omq_proto::WorkloadProfile;
 use std::sync::atomic::Ordering;
 
@@ -161,7 +162,7 @@ impl SocketDriver {
                 if self.socket_type == SocketType::Stream {
                     self.spawn_stream_connection(stream, peer_ident, endpoint, is_server, route_id);
                 } else {
-                    self.spawn_byte_stream_connection(
+                    self.spawn_byte_stream_connection(ByteStreamConnection {
                         stream,
                         peer_ident,
                         endpoint,
@@ -169,7 +170,7 @@ impl SocketDriver {
                         route_id,
                         send_pipe_rx,
                         leftover,
-                    );
+                    });
                 }
             }
             AnyConn::Inproc { conn, peer_ident } => {
@@ -185,26 +186,8 @@ impl SocketDriver {
         }
     }
 
-    fn spawn_byte_stream_connection(
-        &mut self,
-        stream: AnyStream,
-        peer_ident: PeerIdent,
-        endpoint: Endpoint,
-        is_server: bool,
-        route_id: u64,
-        send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
-        leftover: bytes::Bytes,
-    ) {
-        super::peer_materialize::spawn_byte_stream_connection(
-            self,
-            stream,
-            peer_ident,
-            endpoint,
-            is_server,
-            route_id,
-            send_pipe_rx,
-            leftover,
-        );
+    fn spawn_byte_stream_connection(&mut self, conn: ByteStreamConnection) {
+        super::peer_materialize::spawn_byte_stream_connection(self, conn);
     }
 
     fn spawn_stream_connection(

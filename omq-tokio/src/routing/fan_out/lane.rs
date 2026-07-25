@@ -103,6 +103,7 @@ pub(super) struct FanOutLanes {
     state: Mutex<FanOutLaneState>,
     active_flags: Arc<Vec<AtomicBool>>,
     distributor: Mutex<LaneDistributor>,
+    lossy: bool,
 }
 
 impl std::fmt::Debug for LaneDistributor {
@@ -272,6 +273,7 @@ impl FanOutLanes {
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
             distributor: Mutex::new(distributor),
+            lossy,
         })
     }
 
@@ -401,11 +403,40 @@ impl FanOutLanes {
 
     /// Push a raw message into lane 0's data ring. Lane 0 distributes
     /// to secondary lanes in batches.
-    pub(super) fn dispatch(&self, dispatch: LaneDispatch) {
+    pub(super) fn try_dispatch(
+        &self,
+        dispatch: LaneDispatch,
+    ) -> core::result::Result<(), LaneDispatch> {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
-        if dist.data_tx.push(dispatch).is_ok() {
-            dist.data_tx.flush();
-            dist.data_signal.mark();
+        match dist.data_tx.push(dispatch) {
+            Ok(()) => {
+                dist.data_tx.flush();
+                dist.data_signal.mark();
+                Ok(())
+            }
+            Err(returned) if self.lossy => {
+                dist.data_tx.flush();
+                dist.data_signal.mark();
+                drop(returned);
+                Ok(())
+            }
+            Err(returned) => {
+                dist.data_tx.flush();
+                dist.data_signal.mark();
+                Err(returned)
+            }
+        }
+    }
+
+    pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
+        loop {
+            match self.try_dispatch(dispatch) {
+                Ok(()) => return,
+                Err(returned) => {
+                    dispatch = returned;
+                    tokio::task::yield_now().await;
+                }
+            }
         }
     }
 
@@ -877,6 +908,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             distributor: test_distributor(),
+            lossy: true,
         }
     }
 

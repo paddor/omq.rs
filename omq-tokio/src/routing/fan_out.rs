@@ -115,7 +115,77 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
-    fn dispatch_raw(
+    fn try_dispatch_raw(
+        &self,
+        lanes: &FanOutLanes,
+        msg: &Message,
+        group: Option<String>,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        let topic = filter::first_frame_bytes(msg);
+
+        // Fast path: no fallback peers, push raw message directly to lanes.
+        if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
+            let lane_count = self.lane_peer_count.load(Ordering::Acquire);
+            if lane_count > 0 {
+                let dispatch = LaneDispatch {
+                    msg: msg.clone(),
+                    topic,
+                    group,
+                };
+                if let Err(returned) = lanes.try_dispatch(dispatch) {
+                    return Err(omq_proto::error::TrySendError::Full(returned.msg));
+                }
+            }
+            return Ok(());
+        }
+
+        // Slow path: fallback peers exist, acquire inner mutex.
+        let (fallback_targets, has_lane_peers) = {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            let all_subscribe_all =
+                filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
+            let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
+                .peers
+                .values()
+                .filter(|p| p.lane.is_none())
+                .filter(|p| p.fanout_active)
+                .filter(|p| {
+                    all_subscribe_all
+                        || filter::peer_matches(
+                            self.mode,
+                            &p.subscriptions,
+                            &p.groups,
+                            p.any_groups,
+                            &topic,
+                            group.as_deref(),
+                        )
+                })
+                .map(|p| p.target.clone())
+                .collect();
+            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
+            (fallback_targets, has_lane_peers)
+        };
+
+        if !fallback_targets.is_empty() {
+            let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
+            fallback::dispatch_to_targets(&fallback_targets, msg, self.lossy, &mut deactivate)
+                .map_err(omq_proto::error::TrySendError::Error)?;
+        }
+
+        if has_lane_peers {
+            let dispatch = LaneDispatch {
+                msg: msg.clone(),
+                topic,
+                group,
+            };
+            if let Err(returned) = lanes.try_dispatch(dispatch) {
+                return Err(omq_proto::error::TrySendError::Full(returned.msg));
+            }
+        }
+        Ok(())
+    }
+
+    async fn dispatch_raw(
         &self,
         lanes: &FanOutLanes,
         msg: &Message,
@@ -127,51 +197,57 @@ impl Submitter {
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
-                lanes.dispatch(LaneDispatch {
-                    msg: msg.clone(),
-                    topic,
-                    group,
-                });
+                lanes
+                    .dispatch(LaneDispatch {
+                        msg: msg.clone(),
+                        topic,
+                        group,
+                    })
+                    .await;
             }
             return Ok(());
         }
 
         // Slow path: fallback peers exist, acquire inner mutex.
-        let g = self.inner.lock().expect("fanout inner poisoned");
-        let all_subscribe_all =
-            filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
-        let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
-            .peers
-            .values()
-            .filter(|p| p.lane.is_none())
-            .filter(|p| p.fanout_active)
-            .filter(|p| {
-                all_subscribe_all
-                    || filter::peer_matches(
-                        self.mode,
-                        &p.subscriptions,
-                        &p.groups,
-                        p.any_groups,
-                        &topic,
-                        group.as_deref(),
-                    )
-            })
-            .map(|p| p.target.clone())
-            .collect();
-        let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
-        drop(g);
+        let (fallback_targets, has_lane_peers) = {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            let all_subscribe_all =
+                filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
+            let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
+                .peers
+                .values()
+                .filter(|p| p.lane.is_none())
+                .filter(|p| p.fanout_active)
+                .filter(|p| {
+                    all_subscribe_all
+                        || filter::peer_matches(
+                            self.mode,
+                            &p.subscriptions,
+                            &p.groups,
+                            p.any_groups,
+                            &topic,
+                            group.as_deref(),
+                        )
+                })
+                .map(|p| p.target.clone())
+                .collect();
+            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
+            (fallback_targets, has_lane_peers)
+        };
 
         if !fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-            fallback::dispatch_to_targets(&fallback_targets, msg, true, &mut deactivate)?;
+            fallback::dispatch_to_targets(&fallback_targets, msg, self.lossy, &mut deactivate)?;
         }
 
         if has_lane_peers {
-            lanes.dispatch(LaneDispatch {
-                msg: msg.clone(),
-                topic,
-                group,
-            });
+            lanes
+                .dispatch(LaneDispatch {
+                    msg: msg.clone(),
+                    topic,
+                    group,
+                })
+                .await;
         }
         Ok(())
     }
@@ -190,8 +266,7 @@ impl Submitter {
         let (forwarded, group) =
             filter::prepare(self.mode, msg).map_err(omq_proto::error::TrySendError::Error)?;
 
-        self.dispatch_raw(&self.lanes, &forwarded, group)
-            .map_err(omq_proto::error::TrySendError::Error)?;
+        self.try_dispatch_raw(&self.lanes, &forwarded, group)?;
         Ok(())
     }
 
@@ -202,7 +277,7 @@ impl Submitter {
         #[cfg(feature = "lz4")]
         compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
 
-        self.dispatch_raw(&self.lanes, &forwarded, group)?;
+        self.dispatch_raw(&self.lanes, &forwarded, group).await?;
         let target_count = self.lane_peer_count.load(Ordering::Relaxed)
             + self.fallback_peer_count.load(Ordering::Relaxed);
         self.maybe_yield(target_count, msg_bytes).await;

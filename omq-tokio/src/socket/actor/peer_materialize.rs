@@ -5,24 +5,36 @@ use super::{
     PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType,
     ZmtpConnection, mpsc,
 };
-use crate::engine::SendPipeConsumer;
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
+use crate::engine::{SendPipeConsumer, SendPipeMode};
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer::{InprocDriverCtx, inproc_peer_driver};
 use omq_proto::WorkloadProfile;
 
 const PEER_INBOX_CAP: usize = 64;
 
+pub(super) struct ByteStreamConnection {
+    pub(super) stream: AnyStream,
+    pub(super) peer_ident: PeerIdent,
+    pub(super) endpoint: Endpoint,
+    pub(super) is_server: bool,
+    pub(super) route_id: u64,
+    pub(super) send_pipe_rx: Option<SendPipeConsumer>,
+    pub(super) leftover: bytes::Bytes,
+}
+
 pub(super) fn spawn_byte_stream_connection(
     socket: &mut SocketDriver,
-    stream: AnyStream,
-    peer_ident: PeerIdent,
-    endpoint: Endpoint,
-    is_server: bool,
-    route_id: u64,
-    pre_ready_send_pipe_rx: Option<SendPipeConsumer>,
-    leftover: bytes::Bytes,
+    ByteStreamConnection {
+        stream,
+        peer_ident,
+        endpoint,
+        is_server,
+        route_id,
+        send_pipe_rx: pre_ready_send_pipe_rx,
+        leftover,
+    }: ByteStreamConnection,
 ) {
     let Some(peer_id) = allocate_peer_id(socket) else {
         drop(stream);
@@ -437,8 +449,12 @@ fn make_send_pipe(
     if !socket.send_strategy.needs_peer_send_pipe() {
         return (None, None);
     }
-    let pipe_cap = socket.options.send_hwm.max(1) as usize;
-    let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
+    let (pipe_cap, pipe_mode) = if socket.options.conflate {
+        (1, SendPipeMode::Conflate)
+    } else {
+        (socket.options.send_hwm.max(1) as usize, SendPipeMode::Queue)
+    };
+    let (send_pipe, send_pipe_rx) = crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode);
     (
         Some(Arc::new(Mutex::new(Some(send_pipe)))),
         Some(send_pipe_rx),

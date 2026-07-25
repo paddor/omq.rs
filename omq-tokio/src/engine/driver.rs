@@ -1033,8 +1033,7 @@ where
                         &mut drain_buf,
                         &mut writer,
                     ).await? {
-                        DriverStep::Continue => {}
-                        DriverStep::Yield => {}
+                        DriverStep::Continue | DriverStep::Yield => {}
                         DriverStep::Close => {
                             drain_writes(&mut writer, &mut connection).await.ok();
                             return Ok(());

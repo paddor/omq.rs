@@ -185,7 +185,7 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
     } else {
         crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
             loop {
-                match s.wait_connected(1, Duration::from_secs(86_400)).await {
+                match s.wait_connected(1, Duration::from_hours(24)).await {
                     Ok(_) => return Ok(()),
                     Err(omq_tokio::Error::Timeout) => {}
                     Err(e) => return Err(e),

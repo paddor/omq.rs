@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::engine::signal::StateSignal;
-use crate::engine::{PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
+use crate::engine::{
+    PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
+};
 use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -370,6 +372,7 @@ pub(crate) struct RoundRobinSend {
     active: Arc<Mutex<ActivePipes>>,
     active_changed: Arc<StateSignal>,
     pipe_cap: usize,
+    pipe_mode: SendPipeMode,
     closed: Arc<AtomicBool>,
 }
 
@@ -378,13 +381,22 @@ impl RoundRobinSend {
         Self {
             active: Arc::new(Mutex::new(ActivePipes::default())),
             active_changed: Arc::new(StateSignal::new()),
-            pipe_cap: options.send_hwm.max(1) as usize,
+            pipe_cap: if options.conflate {
+                1
+            } else {
+                options.send_hwm.max(1) as usize
+            },
+            pipe_mode: if options.conflate {
+                SendPipeMode::Conflate
+            } else {
+                SendPipeMode::Queue
+            },
             closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
-        let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
+        let (tx, rx) = crate::engine::send_pipe_with_mode(self.pipe_cap, self.pipe_mode);
         let mut active = self.active.lock().expect("round_robin active");
         active.insert_pipe(route_id, tx);
         self.active_changed.notify_changed();

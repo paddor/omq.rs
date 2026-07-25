@@ -237,6 +237,17 @@ async fn linger_forever_returns_when_connected_idle() {
 }
 
 #[tokio::test]
+async fn linger_forever_bound_no_peer_returns_when_empty() {
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    push.bind(tcp_ep(0)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_millis(500), push.close())
+        .await
+        .expect("bound no-peer close with empty queue hung")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn linger_zero_returns_immediately_on_close() {
     // Default linger (ZERO): close() does not wait for pending queue;
     // messages that have not yet been delivered are silently dropped.

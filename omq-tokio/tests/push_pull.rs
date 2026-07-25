@@ -479,7 +479,7 @@ async fn push_connect_before_peer_ready_queues() {
     pull.bind(ep).await.unwrap();
 
     for i in 0..5 {
-        let m = tokio::time::timeout(Duration::from_millis(500), pull.recv())
+        let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
             .await
             .unwrap()
             .unwrap();

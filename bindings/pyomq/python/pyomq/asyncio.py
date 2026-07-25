@@ -225,13 +225,7 @@ class Socket(_BaseSocket):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> Awaitable[bytes | Any]:
         if not copy:
-            from pyomq import Frame
-
-            async def _wrap() -> Any:
-                data = await self._add_recv_event(self._sock._try_recv)
-                return Frame(data)
-
-            return asyncio.ensure_future(_wrap())
+            return self._add_recv_event(self._sock._try_recv_frame)
         return self._add_recv_event(self._sock._try_recv)
 
     def send_multipart(
@@ -253,13 +247,7 @@ class Socket(_BaseSocket):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> Awaitable[list[bytes] | list[Any]]:
         if not copy:
-            from pyomq import Frame
-
-            async def _wrap() -> list[Any]:
-                parts = await self._add_recv_event(self._sock._try_recv_multipart)
-                return [Frame(p) for p in parts]
-
-            return asyncio.ensure_future(_wrap())
+            return self._add_recv_event(self._sock._try_recv_multipart_frames)
         return self._add_recv_event(self._sock._try_recv_multipart)
 
     if _IS_WINDOWS:

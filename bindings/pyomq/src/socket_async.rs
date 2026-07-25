@@ -25,6 +25,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 use crate::conversions;
 use crate::dispatch;
 use crate::error::map_err;
+use crate::frame::Frame;
 use crate::runtime::ContextInner;
 use crate::socket::SocketInner;
 
@@ -135,6 +136,35 @@ impl AsyncSocket {
         }
     }
 
+    #[pyo3(name = "_try_recv_frame")]
+    fn try_recv_frame<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some((head, more)) = self.inner.pop_rxbuf_head_with_more() {
+            return Ok(Bound::new(py, Frame::from_bytes_more(head, more))?.into_any());
+        }
+        self.inner.materialize()?;
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = materialized.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            materialized.recv_space.notify_changed();
+            let mut parts: Vec<Bytes> = msg.iter().collect();
+            let head = if parts.is_empty() {
+                Bytes::new()
+            } else {
+                parts.remove(0)
+            };
+            let more = !parts.is_empty();
+            if more {
+                self.inner.store_rxbuf(parts);
+            }
+            Ok(Bound::new(py, Frame::from_bytes_more(head, more))?.into_any())
+        } else {
+            Ok(py.None().bind(py).clone())
+        }
+    }
+
     #[pyo3(name = "_try_recv_multipart")]
     fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let leftover = self.inner.take_rxbuf();
@@ -152,6 +182,26 @@ impl AsyncSocket {
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
             Ok(conversions::parts_to_pylist(py, msg)?.into_any())
+        } else {
+            Ok(py.None().bind(py).clone())
+        }
+    }
+
+    #[pyo3(name = "_try_recv_multipart_frames")]
+    fn try_recv_multipart_frames<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let leftover = self.inner.take_rxbuf();
+        if !leftover.is_empty() {
+            return Ok(conversions::frames_to_pylist(py, leftover)?.into_any());
+        }
+        self.inner.materialize()?;
+        let materialized_guard = self.inner.materialized.read().unwrap();
+        let materialized = materialized_guard
+            .as_ref()
+            .ok_or_else(|| map_err(PError::Closed))?;
+        let mut cons = materialized.recv_cons.lock().unwrap();
+        if let Some(msg) = cons.prefetch_and_pop() {
+            materialized.recv_space.notify_changed();
+            Ok(conversions::message_to_frame_list(py, msg)?.into_any())
         } else {
             Ok(py.None().bind(py).clone())
         }

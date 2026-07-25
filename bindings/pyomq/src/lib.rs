@@ -8,6 +8,7 @@ mod context;
 mod conversions;
 mod dispatch;
 mod error;
+mod frame;
 mod notify;
 mod options;
 #[cfg(feature = "curve")]
@@ -47,6 +48,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(py, m)?;
     m.add_class::<context::Context>()?;
     m.add_class::<context::AsyncContext>()?;
+    m.add_class::<frame::Frame>()?;
     m.add_class::<socket::Monitor>()?;
     m.add_class::<socket::Socket>()?;
     m.add_class::<socket_async::AsyncSocket>()?;

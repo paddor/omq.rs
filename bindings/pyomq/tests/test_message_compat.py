@@ -13,10 +13,10 @@ def test_message_buffer_property():
     assert bytes(m.buffer) == b"world"
 
 
-def test_message_is_bytes():
+def test_message_bytes_conversion():
     m = zmq.Message(b"test")
-    assert isinstance(m, bytes)
-    assert m == b"test"
+    assert not isinstance(m, bytes)
+    assert bytes(m) == b"test"
 
 
 def test_frame_alias():
@@ -25,7 +25,7 @@ def test_frame_alias():
 
 def test_message_default_empty():
     m = zmq.Message()
-    assert m == b""
+    assert bytes(m) == b""
 
 
 def test_message_tracker_done():

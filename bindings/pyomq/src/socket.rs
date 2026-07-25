@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use crate::conversions;
 use crate::dispatch;
 use crate::error::{map_err, timeout_err};
+use crate::frame::Frame;
 use crate::notify::ReadinessSignal;
 use crate::options;
 use crate::runtime::ContextInner;
@@ -299,6 +300,16 @@ impl SocketInner {
             None
         } else {
             Some(rx.remove(0))
+        }
+    }
+
+    pub fn pop_rxbuf_head_with_more(&self) -> Option<(Bytes, bool)> {
+        let mut rx = self.rxbuf.lock().unwrap();
+        if rx.is_empty() {
+            None
+        } else {
+            let head = rx.remove(0);
+            Some((head, !rx.is_empty()))
         }
     }
 
@@ -689,6 +700,29 @@ impl Socket {
     }
 
     #[pyo3(signature = (flags = 0))]
+    fn recv_frame<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, Frame>> {
+        if let Some((head, more)) = self.inner.pop_rxbuf_head_with_more() {
+            return Bound::new(py, Frame::from_bytes_more(head, more));
+        }
+        let msg = if flags & crate::constants::NOBLOCK != 0 {
+            self.try_recv_message()?
+        } else {
+            self.recv_message(py)?
+        };
+        let mut parts: Vec<Bytes> = msg.iter().collect();
+        let head = if parts.is_empty() {
+            Bytes::new()
+        } else {
+            parts.remove(0)
+        };
+        let more = !parts.is_empty();
+        if more {
+            self.inner.store_rxbuf(parts);
+        }
+        Bound::new(py, Frame::from_bytes_more(head, more))
+    }
+
+    #[pyo3(signature = (flags = 0))]
     fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyList>> {
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
@@ -700,6 +734,24 @@ impl Socket {
             self.recv_message(py)?
         };
         conversions::parts_to_pylist(py, msg)
+    }
+
+    #[pyo3(signature = (flags = 0))]
+    fn recv_multipart_frames<'py>(
+        &self,
+        py: Python<'py>,
+        flags: i32,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let leftover = self.inner.take_rxbuf();
+        if !leftover.is_empty() {
+            return conversions::frames_to_pylist(py, leftover);
+        }
+        let msg = if flags & crate::constants::NOBLOCK != 0 {
+            self.try_recv_message()?
+        } else {
+            self.recv_message(py)?
+        };
+        conversions::message_to_frame_list(py, msg)
     }
 
     fn subscribe(&self, py: Python<'_>, prefix: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -820,9 +872,7 @@ impl Socket {
         let fork_gen = FORK_GEN.load(Ordering::Acquire);
         let child_fork = self.inner.send_fork_gen.load(Ordering::Acquire) != fork_gen;
         if child_fork {
-            self.inner
-                .send_fork_gen
-                .store(fork_gen, Ordering::Release);
+            self.inner.send_fork_gen.store(fork_gen, Ordering::Release);
         }
         let parent_fork_gen = PARENT_FORK_GEN.load(Ordering::Acquire);
         let parent_fork =

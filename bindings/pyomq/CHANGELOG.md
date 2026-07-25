@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native `Frame`/`Message` objects now back `recv(copy=False)` and
+  `recv_multipart(copy=False)`, allowing received frames to be re-sent
+  without copying payload bytes back through Python `bytes`.
+
 ## [0.17.1] - 2026-07-24
 
 ### Fixed

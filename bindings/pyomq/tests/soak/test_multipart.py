@@ -15,6 +15,7 @@ import threading
 import time
 
 import pyomq as zmq
+from typing import List
 
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
@@ -22,14 +23,14 @@ FRAME_B = 128
 NUM_FRAMES = 3
 
 
-def build_multipart(seq: int) -> list[bytes]:
+def build_multipart(seq: int) -> List[bytes]:
     header = struct.pack("<Q", seq)
     body = bytes((seq + i) & 0xFF for i in range(FRAME_B))
     trailer = struct.pack("<Q", seq ^ 0xFFFFFFFFFFFFFFFF)
     return [header, body, trailer]
 
 
-def validate_multipart(parts: list[bytes], min_seq: int) -> int:
+def validate_multipart(parts: List[bytes], min_seq: int) -> int:
     assert len(parts) == NUM_FRAMES, (
         f"frame count mismatch: got {len(parts)}, expected {NUM_FRAMES}"
     )

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, List
 
 import pyomq
 
@@ -83,7 +83,7 @@ class ZMQStream:
 
     def send_multipart(
         self,
-        msg_list: list[Union[bytes, str]],
+        msg_list: List[Union[bytes, str]],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,

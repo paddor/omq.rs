@@ -2,6 +2,7 @@
 
 import os
 import time
+from typing import List, Tuple
 
 
 def soak_duration() -> float:
@@ -35,7 +36,7 @@ class ResourceMonitor:
     def __init__(self):
         import threading
 
-        self._samples: list[tuple[float, int]] = []
+        self._samples: List[Tuple[float, int]] = []
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -52,7 +53,7 @@ class ResourceMonitor:
 
 
 class ResourceReport:
-    def __init__(self, samples: list[tuple[float, int]]):
+    def __init__(self, samples: List[Tuple[float, int]]):
         self.samples = samples
 
     def assert_no_leak(self, label: str):

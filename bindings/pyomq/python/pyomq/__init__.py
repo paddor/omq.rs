@@ -38,8 +38,6 @@ from typing import (
     Tuple,
     Type,
     Union,
-    SupportsIndex,
-    SupportsBytes,
     overload,
 )
 

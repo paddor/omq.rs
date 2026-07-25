@@ -13,9 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pending handshakes no longer block PAIR/CHANNEL slots before authentication
   or ZMTP readiness.
 - Add `Options::max_pending_handshakes` to cap simultaneous inbound
-  byte-stream handshakes before peer driver allocation.
+  byte-stream handshakes before peer driver allocation. Lower values reduce
+  pre-auth resource exposure but can reject legitimate connection bursts;
+  higher values allow bigger bursts while consuming more memory/tasks.
 - Reject encrypted socket configurations that disable the ZMTP handshake
-  timeout.
+  timeout. Longer timeouts let slow peers complete authentication but also let
+  stalled peers hold pending-handshake slots longer.
 
 ## [0.19.3] - 2026-07-23
 

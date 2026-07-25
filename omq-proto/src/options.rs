@@ -64,11 +64,21 @@ pub struct Options {
     pub heartbeat_timeout: Option<Duration>,
 
     /// Max time allowed to complete the ZMTP handshake.
+    ///
+    /// Encrypted mechanisms require a timeout. Longer values give slow peers
+    /// more time to finish authentication, but also let stalled or malicious
+    /// peers hold pending-handshake slots longer.
     pub handshake_timeout: Option<Duration>,
 
     /// Maximum byte-stream peers allowed to sit in the ZMTP handshake state
     /// at once. The tokio backend applies this before spawning a peer driver
     /// for newly accepted TCP/IPC connections.
+    ///
+    /// Lower values reduce memory/task pressure from unauthenticated peers,
+    /// but can reject legitimate connection bursts while the cap is full.
+    /// Higher values admit larger bursts, at the cost of more pre-auth
+    /// resource use. Completed handshakes leave this pool immediately; timed
+    /// out or failed handshakes release their slot when the peer is closed.
     pub max_pending_handshakes: usize,
 
     /// Reject incoming messages larger than this. Accounting includes payload
@@ -385,12 +395,21 @@ impl Options {
         self
     }
 
+    /// Set max time allowed to complete the ZMTP handshake.
+    ///
+    /// For encrypted mechanisms this also controls how long a stalled peer can
+    /// occupy one `max_pending_handshakes` slot.
     #[must_use]
     pub fn handshake_timeout(mut self, d: Duration) -> Self {
         self.handshake_timeout = Some(d);
         self
     }
 
+    /// Set max simultaneous inbound byte-stream handshakes.
+    ///
+    /// This caps pre-auth TCP/IPC resource use. If full, new accepted peers
+    /// are rejected before a peer driver is spawned and monitors receive
+    /// `HandshakeFailed`.
     #[must_use]
     pub fn max_pending_handshakes(mut self, n: usize) -> Self {
         self.max_pending_handshakes = n;

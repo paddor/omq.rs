@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Breaking:** Add `CurveServerOptions` for CURVE server configuration.
+- Add `Options::max_pending_handshakes` to bound simultaneous inbound
+  byte-stream handshakes. Lower values reduce pre-auth resource exposure but
+  can reject legitimate connection bursts; higher values allow bigger bursts
+  while consuming more memory/tasks.
 
 ### Changed
 
@@ -17,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-connection cookie key. `MechanismSetup::CurveServer` now stores
   `CurveServerOptions`, and `Options::curve_server_with_options()` accepts
   explicit CURVE server configuration.
+- Encrypted mechanisms require `handshake_timeout`. Longer timeouts let slow
+  peers complete authentication but also let stalled peers hold
+  pending-handshake slots longer.
 
 ### Removed
 

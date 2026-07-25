@@ -37,9 +37,8 @@ from . import (
     SNDHWM,
     RCVHWM,
     LINGER,
-    LAST_ENDPOINT,
     _TYPE_NAMES,
-    _SOCKOPT_NAMES,
+    _SocketOptionsBase,
 )
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -178,13 +177,12 @@ class _RecvFuture:
         return (yield from fut.__await__())
 
 
-class Socket:
+class Socket(_SocketOptionsBase):
     """Async ZMQ socket wrapper."""
 
     _sock: _native.AsyncSocket
     _context: Context
     _closed: bool
-    _last_endpoint: Optional[Union[bytes, str]]
     _loop: Optional[asyncio.AbstractEventLoop]
     _recv_waiters: deque[Callable[[], bool]]
     _send_waiters: deque[Callable[[], bool]]
@@ -207,26 +205,6 @@ class Socket:
 
     def __init__(self, _sock: _native.AsyncSocket, _context: Context) -> None:
         self._init_socket_state(_sock, _context)
-
-    def __getattr__(self, name: str) -> Any:
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            if opt == LAST_ENDPOINT:
-                return self._last_endpoint
-            return self.getsockopt(opt)
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}'"
-        )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            self.setsockopt(opt, value)
-            return
-        object.__setattr__(self, name, value)
 
     def __repr__(self) -> str:
         st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))

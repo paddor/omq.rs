@@ -269,49 +269,6 @@ _TYPE_NAMES: Final[Dict[int, str]] = {
     STREAM: "STREAM",
 }
 
-_SOCKOPT_NAMES: Final[Dict[str, int]] = {
-    "affinity": AFFINITY,
-    "identity": IDENTITY,
-    "routing_id": ROUTING_ID,
-    "subscribe": SUBSCRIBE,
-    "unsubscribe": UNSUBSCRIBE,
-    "rcvmore": RCVMORE,
-    "sndhwm": SNDHWM,
-    "rcvhwm": RCVHWM,
-    "linger": LINGER,
-    "reconnect_ivl": RECONNECT_IVL,
-    "reconnect_ivl_max": RECONNECT_IVL_MAX,
-    "backlog": BACKLOG,
-    "maxmsgsize": MAXMSGSIZE,
-    "rcvtimeo": RCVTIMEO,
-    "sndtimeo": SNDTIMEO,
-    "ipv6": IPV6,
-    "immediate": IMMEDIATE,
-    "router_mandatory": ROUTER_MANDATORY,
-    "tcp_keepalive": TCP_KEEPALIVE,
-    "tcp_keepalive_idle": TCP_KEEPALIVE_IDLE,
-    "tcp_keepalive_cnt": TCP_KEEPALIVE_CNT,
-    "tcp_keepalive_intvl": TCP_KEEPALIVE_INTVL,
-    "heartbeat_ivl": HEARTBEAT_IVL,
-    "heartbeat_ttl": HEARTBEAT_TTL,
-    "heartbeat_timeout": HEARTBEAT_TIMEOUT,
-    "handshake_ivl": HANDSHAKE_IVL,
-    "conflate": CONFLATE,
-    "curve_server": CURVE_SERVER,
-    "curve_publickey": CURVE_PUBLICKEY,
-    "curve_secretkey": CURVE_SECRETKEY,
-    "curve_serverkey": CURVE_SERVERKEY,
-    "on_mute": OMQ_ON_MUTE,
-    "compression_dict": OMQ_COMPRESSION_DICT,
-    "compression_auto_train": OMQ_COMPRESSION_AUTO_TRAIN,
-    "sndbuf": SNDBUF,
-    "rcvbuf": RCVBUF,
-    "mechanism": MECHANISM,
-    "plain_server": PLAIN_SERVER,
-    "plain_username": PLAIN_USERNAME,
-    "plain_password": PLAIN_PASSWORD,
-}
-
 
 # ── MessageTracker / Message / Frame (pyzmq compat) ─────────────────
 
@@ -362,6 +319,76 @@ Frame = Message
 # ── Socket wrapper ───────────────────────────────────────────────────
 
 
+# Socket option descriptor for IDE autocomplete support
+class _SocketOptionDescriptor:
+    """Descriptor for socket options providing IDE autocomplete."""
+
+    def __init__(self, option_code: int) -> None:
+        self.option_code = option_code
+
+    def __get__(self, obj: Any, objtype: Optional[Type[Any]] = None) -> Any:
+        if obj is None:
+            return self
+        if self.option_code == LAST_ENDPOINT:
+            return obj._last_endpoint
+        return obj.getsockopt(self.option_code)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        obj.setsockopt(self.option_code, value)
+
+
+class _SocketOptionsBase:
+    """Base class with socket option descriptors for IDE autocomplete."""
+
+    # Socket options
+    affinity = _SocketOptionDescriptor(AFFINITY)
+    identity = _SocketOptionDescriptor(IDENTITY)
+    routing_id = _SocketOptionDescriptor(ROUTING_ID)
+    subscribe = _SocketOptionDescriptor(SUBSCRIBE)
+    unsubscribe = _SocketOptionDescriptor(UNSUBSCRIBE)
+    rcvmore = _SocketOptionDescriptor(RCVMORE)
+    sndhwm = _SocketOptionDescriptor(SNDHWM)
+    rcvhwm = _SocketOptionDescriptor(RCVHWM)
+    linger = _SocketOptionDescriptor(LINGER)
+    reconnect_ivl = _SocketOptionDescriptor(RECONNECT_IVL)
+    reconnect_ivl_max = _SocketOptionDescriptor(RECONNECT_IVL_MAX)
+    backlog = _SocketOptionDescriptor(BACKLOG)
+    maxmsgsize = _SocketOptionDescriptor(MAXMSGSIZE)
+    rcvtimeo = _SocketOptionDescriptor(RCVTIMEO)
+    sndtimeo = _SocketOptionDescriptor(SNDTIMEO)
+    ipv6 = _SocketOptionDescriptor(IPV6)
+    immediate = _SocketOptionDescriptor(IMMEDIATE)
+    router_mandatory = _SocketOptionDescriptor(ROUTER_MANDATORY)
+    tcp_keepalive = _SocketOptionDescriptor(TCP_KEEPALIVE)
+    tcp_keepalive_idle = _SocketOptionDescriptor(TCP_KEEPALIVE_IDLE)
+    tcp_keepalive_cnt = _SocketOptionDescriptor(TCP_KEEPALIVE_CNT)
+    tcp_keepalive_intvl = _SocketOptionDescriptor(TCP_KEEPALIVE_INTVL)
+    heartbeat_ivl = _SocketOptionDescriptor(HEARTBEAT_IVL)
+    heartbeat_ttl = _SocketOptionDescriptor(HEARTBEAT_TTL)
+    heartbeat_timeout = _SocketOptionDescriptor(HEARTBEAT_TIMEOUT)
+    handshake_ivl = _SocketOptionDescriptor(HANDSHAKE_IVL)
+    conflate = _SocketOptionDescriptor(CONFLATE)
+    curve_server = _SocketOptionDescriptor(CURVE_SERVER)
+    curve_publickey = _SocketOptionDescriptor(CURVE_PUBLICKEY)
+    curve_secretkey = _SocketOptionDescriptor(CURVE_SECRETKEY)
+    curve_serverkey = _SocketOptionDescriptor(CURVE_SERVERKEY)
+    on_mute = _SocketOptionDescriptor(OMQ_ON_MUTE)
+    compression_dict = _SocketOptionDescriptor(OMQ_COMPRESSION_DICT)
+    compression_auto_train = _SocketOptionDescriptor(OMQ_COMPRESSION_AUTO_TRAIN)
+    sndbuf = _SocketOptionDescriptor(SNDBUF)
+    rcvbuf = _SocketOptionDescriptor(RCVBUF)
+    mechanism = _SocketOptionDescriptor(MECHANISM)
+    plain_server = _SocketOptionDescriptor(PLAIN_SERVER)
+    plain_username = _SocketOptionDescriptor(PLAIN_USERNAME)
+    plain_password = _SocketOptionDescriptor(PLAIN_PASSWORD)
+
+    @property
+    def last_endpoint(self) -> Optional[Union[bytes, str]]:
+        return self._last_endpoint
+
+    _last_endpoint: Optional[Union[bytes, str]]
+
+
 class _SocketMeta(type):
     """Metaclass for Socket that allows checking for async Socket instances."""
 
@@ -375,13 +402,12 @@ class _SocketMeta(type):
         return False
 
 
-class Socket(metaclass=_SocketMeta):
+class Socket(_SocketOptionsBase, metaclass=_SocketMeta):
     """Synchronous ZMQ socket wrapper."""
 
     _sock: _native.Socket
     _context: Context
     _closed: bool
-    _last_endpoint: Optional[Union[bytes, str]]
     _pid: int
     _binds: List[Union[str, bytes]]
     _connects: List[Union[str, bytes]]
@@ -405,26 +431,6 @@ class Socket(metaclass=_SocketMeta):
         if isinstance(socket, _zmq_async.Socket):
             return _ShadowSocket(socket)
         return socket
-
-    def __getattr__(self, name: str) -> Any:
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            if opt == LAST_ENDPOINT:
-                return self._last_endpoint
-            return self.getsockopt(opt)
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}'"
-        )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            self.setsockopt(opt, value)
-            return
-        object.__setattr__(self, name, value)
 
     def __repr__(self) -> str:
         st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
@@ -735,7 +741,7 @@ class Socket(metaclass=_SocketMeta):
 # ── Shadow socket (sync recv bridge over async handle) ──────────────
 
 
-class _ShadowSocket:
+class _ShadowSocket(_SocketOptionsBase):
     """Blocking recv bridge over an async socket's native handle.
 
     Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
@@ -748,7 +754,6 @@ class _ShadowSocket:
     _native: _native.AsyncSocket
     _context: Context
     _closed: bool
-    _last_endpoint: Optional[Union[bytes, str]]
     _recv_waiter_pending: bool
     _send_waiter_pending: bool
     _recv_wakeup_event: threading.Event
@@ -765,26 +770,6 @@ class _ShadowSocket:
             self._send_waiter_pending = False
             self._recv_wakeup_event = async_socket._recv_wakeup_event
             self._send_wakeup_event = async_socket._send_wakeup_event
-
-    def __getattr__(self, name: str) -> Any:
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            if opt == LAST_ENDPOINT:
-                return self._last_endpoint
-            return self.getsockopt(opt)
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}'"
-        )
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
-        opt = _SOCKOPT_NAMES.get(name)
-        if opt is not None:
-            self.setsockopt(opt, value)
-            return
-        object.__setattr__(self, name, value)
 
     @property
     def closed(self) -> bool:

@@ -145,6 +145,10 @@ struct PeerEntry {
     /// peers stay pending and must not count against socket-type peer
     /// limits.
     ready: bool,
+    /// True only for byte-stream peers still inside the ZMTP handshake.
+    /// Inproc has a synthetic handshake and raw STREAM has no ZMTP
+    /// handshake, so neither consumes the pending-handshake cap.
+    pending_handshake: bool,
     /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
     identity: bytes::Bytes,
@@ -330,9 +334,10 @@ impl SocketDriver {
                     use crate::engine::PeerEvent;
                     let evt = match peer_out {
                         PeerEvent::Event(e) => InternalEvent::PeerEvent { peer_id, event: e },
-                        PeerEvent::Closed => InternalEvent::PeerClosed {
+                        PeerEvent::Closed { error } => InternalEvent::PeerClosed {
                             peer_id,
-                            reason: DisconnectReason::PeerClosed,
+                            reason: error
+                                .map_or(DisconnectReason::PeerClosed, DisconnectReason::Error),
                         },
                     };
                     self.handle_internal_event(evt).await;
@@ -548,6 +553,14 @@ impl SocketDriver {
 impl SocketDriver {
     pub(super) fn ready_peer_count(&self) -> usize {
         self.peers.values().filter(|p| p.ready).count()
+    }
+
+    pub(super) fn pending_handshake_count(&self) -> usize {
+        self.peers.values().filter(|p| p.pending_handshake).count()
+    }
+
+    pub(super) fn can_accept_pending_handshake(&self) -> bool {
+        self.pending_handshake_count() < self.options.max_pending_handshakes
     }
 
     pub(super) fn can_accept_ready_peer(&self) -> bool {

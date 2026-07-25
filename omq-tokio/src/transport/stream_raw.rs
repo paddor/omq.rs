@@ -79,7 +79,9 @@ pub(crate) fn spawn(
         // Disconnect notification.
         let notif = ZmtpEvent::Message(Message::single(Bytes::new()));
         let _ = peer_out_tx.send((peer_id, PeerEvent::Event(notif))).await;
-        let _ = peer_out_tx.send((peer_id, PeerEvent::Closed)).await;
+        let _ = peer_out_tx
+            .send((peer_id, PeerEvent::Closed { error: None }))
+            .await;
     });
 
     PeerDriverHandle {

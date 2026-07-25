@@ -98,6 +98,53 @@ impl ModelDataSignal {
     }
 }
 
+#[derive(Debug)]
+struct ModelBlockingRecvWaker {
+    registered: AtomicBool,
+    sleeping: AtomicBool,
+    unparked: AtomicBool,
+}
+
+impl ModelBlockingRecvWaker {
+    fn new() -> Self {
+        Self {
+            registered: AtomicBool::new(false),
+            sleeping: AtomicBool::new(false),
+            unparked: AtomicBool::new(false),
+        }
+    }
+
+    fn register(&self) {
+        self.registered.store(true, Ordering::Release);
+    }
+
+    fn prepare_sleep(&self) {
+        self.sleeping.store(true, Ordering::Release);
+    }
+
+    fn cancel_sleep(&self) {
+        self.sleeping.store(false, Ordering::Release);
+    }
+
+    fn wake(&self) {
+        if !self.sleeping.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .sleeping
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && self.registered.load(Ordering::Acquire)
+        {
+            self.unparked.store(true, Ordering::Release);
+        }
+    }
+
+    fn was_unparked(&self) -> bool {
+        self.unparked.load(Ordering::Acquire)
+    }
+}
+
 #[test]
 fn state_signal_catches_change_between_check_and_wait_registration() {
     loom::model(|| {
@@ -135,6 +182,75 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
         assert!(
             observed.load(Ordering::SeqCst) || signal.has_woken_waiter(),
             "generation change must be observed or wake a registered waiter"
+        );
+    });
+}
+
+#[test]
+fn blocking_recv_waker_does_not_lose_wake_around_sleep_prepare() {
+    loom::model(|| {
+        let waker = Arc::new(ModelBlockingRecvWaker::new());
+        let has_message = Arc::new(AtomicBool::new(false));
+        let observed = Arc::new(AtomicBool::new(false));
+        let parked = Arc::new(AtomicBool::new(false));
+        let lost = Arc::new(AtomicBool::new(false));
+
+        let recv_waker = waker.clone();
+        let recv_has_message = has_message.clone();
+        let recv_observed = observed.clone();
+        let recv_parked = parked.clone();
+        let recv_lost = lost.clone();
+        let receiver = thread::spawn(move || {
+            recv_waker.register();
+            if recv_has_message.load(Ordering::Acquire) {
+                recv_observed.store(true, Ordering::Release);
+                return;
+            }
+
+            thread::yield_now();
+            recv_waker.prepare_sleep();
+            thread::yield_now();
+
+            if recv_has_message.load(Ordering::Acquire) {
+                recv_waker.cancel_sleep();
+                recv_observed.store(true, Ordering::Release);
+                return;
+            }
+
+            thread::yield_now();
+            if recv_has_message.load(Ordering::Acquire) {
+                recv_waker.cancel_sleep();
+                recv_observed.store(true, Ordering::Release);
+                return;
+            }
+
+            recv_parked.store(true, Ordering::Release);
+            thread::yield_now();
+            if recv_has_message.load(Ordering::Acquire) && !recv_waker.was_unparked() {
+                recv_lost.store(true, Ordering::Release);
+            }
+        });
+
+        let send_waker = waker.clone();
+        let send_has_message = has_message.clone();
+        let sender = thread::spawn(move || {
+            thread::yield_now();
+            send_has_message.store(true, Ordering::Release);
+            send_waker.wake();
+        });
+
+        receiver.join().unwrap();
+        sender.join().unwrap();
+
+        assert!(
+            !lost.load(Ordering::Acquire),
+            "message became available while receiver could park without an unpark token"
+        );
+        assert!(
+            observed.load(Ordering::Acquire)
+                || !parked.load(Ordering::Acquire)
+                || waker.was_unparked(),
+            "receiver must observe message or get an unpark token"
         );
     });
 }

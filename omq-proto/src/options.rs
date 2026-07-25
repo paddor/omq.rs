@@ -18,6 +18,10 @@ use crate::socket_ref::SocketRef;
 /// setter works regardless of which compression features are enabled.
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
+/// Default cap for byte-stream peers that are accepted but have not
+/// completed the ZMTP handshake.
+pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
+
 /// Per-socket configuration.
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
@@ -61,6 +65,11 @@ pub struct Options {
 
     /// Max time allowed to complete the ZMTP handshake.
     pub handshake_timeout: Option<Duration>,
+
+    /// Maximum byte-stream peers allowed to sit in the ZMTP handshake state
+    /// at once. The tokio backend applies this before spawning a peer driver
+    /// for newly accepted TCP/IPC connections.
+    pub max_pending_handshakes: usize,
 
     /// Reject incoming messages larger than this. Accounting includes payload
     /// bytes plus one internal payload slot per part. `None` = no limit.
@@ -210,6 +219,7 @@ impl Default for Options {
             heartbeat_ttl: None,
             heartbeat_timeout: None,
             handshake_timeout: Some(Duration::from_secs(30)),
+            max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_message_size: None,
             conflate: false,
             router_mandatory: false,
@@ -266,6 +276,16 @@ impl Options {
             return Err(crate::error::Error::Config(format!(
                 "heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
             )));
+        }
+        if self.max_pending_handshakes == 0 {
+            return Err(crate::error::Error::Config(
+                "max_pending_handshakes must be greater than zero".into(),
+            ));
+        }
+        if self.handshake_timeout.is_none() && self.mechanism.has_frame_transform() {
+            return Err(crate::error::Error::Config(
+                "encrypted mechanisms require handshake_timeout".into(),
+            ));
         }
         if let Some(ref dict) = self.compression_dict
             && (dict.is_empty() || dict.len() > COMPRESSION_DICT_MAX)
@@ -368,6 +388,12 @@ impl Options {
     #[must_use]
     pub fn handshake_timeout(mut self, d: Duration) -> Self {
         self.handshake_timeout = Some(d);
+        self
+    }
+
+    #[must_use]
+    pub fn max_pending_handshakes(mut self, n: usize) -> Self {
+        self.max_pending_handshakes = n;
         self
     }
 
@@ -694,6 +720,7 @@ mod tests {
         assert_eq!(o.recv_hwm, 1000);
         assert_eq!(o.linger, Some(Duration::ZERO));
         assert_eq!(o.handshake_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(o.max_pending_handshakes, DEFAULT_MAX_PENDING_HANDSHAKES);
         assert_eq!(o.heartbeat_interval, None);
         assert_eq!(o.max_message_size, None);
         assert_eq!(o.tcp_keepalive, KeepAlive::Default);
@@ -708,6 +735,28 @@ mod tests {
         // Native OMQ intentionally differs from libzmq here: async socket
         // close should not wait forever unless the user asks for it.
         assert_eq!(Options::default().linger, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn rejects_zero_pending_handshake_cap() {
+        let o = Options {
+            max_pending_handshakes: 0,
+            ..Options::default()
+        };
+        assert!(o.validate().is_err());
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn curve_requires_handshake_timeout() {
+        let mut o = Options::default().curve_server(CurveKeypair::generate());
+        o.handshake_timeout = None;
+        assert!(o.validate().is_err());
+
+        let server_kp = CurveKeypair::generate();
+        let mut o = Options::default().curve_client(CurveKeypair::generate(), server_kp.public);
+        o.handshake_timeout = None;
+        assert!(o.validate().is_err());
     }
 
     #[test]

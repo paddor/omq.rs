@@ -116,6 +116,122 @@ async fn pending_handshake_does_not_block_pair_slot() {
 }
 
 #[tokio::test]
+async fn max_pending_handshakes_rejects_excess_idle_connections() {
+    use tokio::net::TcpStream;
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options {
+            handshake_timeout: Some(Duration::from_secs(5)),
+            max_pending_handshakes: 1,
+            ..Options::default()
+        },
+    );
+    let mut mon = server.monitor();
+    let ep = server.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+
+    let idle = TcpStream::connect(addr).await.unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), mon.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            omq_tokio::MonitorEvent::Accepted { .. } => break,
+            omq_tokio::MonitorEvent::Listening { .. } => {}
+            other => panic!("expected first Accepted, got {other:?}"),
+        }
+    }
+
+    let _rejected = TcpStream::connect(addr).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match mon.recv().await.unwrap() {
+                omq_tokio::MonitorEvent::HandshakeFailed { reason, .. }
+                    if reason.contains("pending-handshake") =>
+                {
+                    return;
+                }
+                omq_tokio::MonitorEvent::Accepted { .. } => {
+                    panic!("over-cap idle connection was accepted")
+                }
+                omq_tokio::MonitorEvent::Listening { .. } => {}
+                other => panic!("expected pending cap failure, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("second idle connection did not hit pending-handshake cap");
+
+    drop(idle);
+    let client = Socket::new(SocketType::Push, Options::default());
+    client.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&client).await;
+
+    client.send(Message::single("alive")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
+        .await
+        .expect("recv timed out after pending slot released")
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"alive");
+}
+
+#[tokio::test]
+async fn pending_handshake_timeout_emits_failure_and_releases_slot() {
+    use tokio::net::TcpStream;
+
+    let server = Socket::new(
+        SocketType::Pull,
+        Options {
+            handshake_timeout: Some(Duration::from_millis(50)),
+            max_pending_handshakes: 1,
+            ..Options::default()
+        },
+    );
+    let mut mon = server.monitor();
+    let ep = server.bind(tcp_ep(0)).await.unwrap();
+    let port = match &ep {
+        Endpoint::Tcp { port, .. } => *port,
+        _ => unreachable!(),
+    };
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+
+    let _idle = TcpStream::connect(addr).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match mon.recv().await.unwrap() {
+                omq_tokio::MonitorEvent::HandshakeFailed { reason, .. }
+                    if reason.contains("handshake timeout") =>
+                {
+                    return;
+                }
+                omq_tokio::MonitorEvent::Listening { .. }
+                | omq_tokio::MonitorEvent::Accepted { .. } => {}
+                other => panic!("expected handshake timeout, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("pending handshake did not time out");
+
+    let client = Socket::new(SocketType::Push, Options::default());
+    client.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&client).await;
+
+    client.send(Message::single("alive")).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(1), server.recv())
+        .await
+        .expect("recv timed out after timed-out pending handshake")
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"alive");
+}
+
+#[tokio::test]
 async fn server_survives_mid_session_abrupt_drop() {
     // Client drops the TCP connection abruptly (tokio socket dropped
     // without close) while the server is live. Server must survive and

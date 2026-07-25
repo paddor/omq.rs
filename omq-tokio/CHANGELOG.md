@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Do not count pre-handshake TCP/IPC peers against data-plane peer limits.
   Pending handshakes no longer block PAIR/CHANNEL slots before authentication
   or ZMTP readiness.
+- Add `Options::max_pending_handshakes` to cap simultaneous inbound
+  byte-stream handshakes before peer driver allocation.
+- Reject encrypted socket configurations that disable the ZMTP handshake
+  timeout.
 
 ## [0.19.3] - 2026-07-23
 

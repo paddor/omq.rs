@@ -45,7 +45,6 @@ pub struct Socket {
 
 impl Socket {
     pub(crate) fn new(inner: AsyncSocket, ctx: Context) -> Self {
-        inner.register_blocking_recv();
         Self { inner, ctx }
     }
 

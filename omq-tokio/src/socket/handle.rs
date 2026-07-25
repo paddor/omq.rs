@@ -443,13 +443,8 @@ impl Socket {
         }
     }
 
-    /// Register the calling thread for `blocking_recv()` wakeups.
-    pub(crate) fn register_blocking_recv(&self) {
-        self.inner.recv_rx.register_blocking_thread();
-    }
-
-    /// Blocking receive for sync callers. The calling thread parks
-    /// until data arrives. Call `register_blocking_recv()` first.
+    /// Blocking receive for sync callers. The calling thread registers
+    /// itself and parks until data arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
         match self.inner.socket_type {
             SocketType::Req => loop {

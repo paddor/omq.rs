@@ -231,6 +231,7 @@ impl std::fmt::Debug for YringSink {
 }
 
 impl YringSink {
+    #[inline]
     fn flush_and_signal(&mut self) {
         self.producer.flush();
         (self.signal)();
@@ -452,13 +453,20 @@ pub struct PeerDriverHandle {
 #[derive(Debug)]
 pub enum PeerEvent {
     Event(Event),
-    Closed,
+    Closed { error: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriverStep {
     Continue,
     Yield,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreActivationStep {
+    Continue,
+    Activate,
     Close,
 }
 
@@ -768,7 +776,8 @@ where
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
+        let error = result.as_ref().err().map(close_error_reason);
+        let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
         result
     }
 
@@ -824,11 +833,7 @@ where
         let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
         tokio::pin!(hb_sleep);
         let mut hb_ping_sent = false;
-        let mut data_plane_active = false;
-        // Keep fallback before yring until yring wins once; after that,
-        // empty fallback waiting would add a signal waiter-list lock on the
-        // hot select path.
-        let mut prioritize_shared_rx = shared_msg_rx.is_some();
+
         loop {
             if handshake_deadline.is_some() && connection.is_ready() {
                 handshake_deadline = None;
@@ -837,44 +842,103 @@ where
             if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
                 return Ok(());
             }
-            if data_plane_active {
-                match drain_decoded_messages(
-                    &mut connection,
-                    &mut decoder,
-                    receive_profile,
-                    &mut recv_direct,
-                    &peer_out,
-                    peer_id,
-                )
-                .await?
-                {
-                    DriverStep::Continue => {}
-                    DriverStep::Yield => {
-                        tokio::task::yield_now().await;
-                        continue;
+
+            let want_write = connection.has_pending_transmit() || !eq.is_empty();
+
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    if let Some(ref slot) = transmit_slot {
+                        slot.mark_dead();
                     }
-                    DriverStep::Close => return Ok(()),
+                    return Ok(());
+                }
+
+                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
+                    return Err(Error::HandshakeFailed("handshake timeout".into()));
+                }
+
+                res = reader.read_buf(&mut read_buf), if !connection.is_ready() => {
+                    let n = res?;
+                    if n == 0 {
+                        mark_peer_dead(transmit_slot.as_deref());
+                        cancel.cancel();
+                        inbox.close();
+                        return Ok(());
+                    }
+                    read_stream_input(
+                        n,
+                        &mut reader,
+                        &mut connection,
+                        &mut read_buf,
+                        &mut read_buf_target,
+                        &mut read_buf_full_reads,
+                        &config,
+                        &mut last_input,
+                        &recv_pool,
+                        &peer_out,
+                        peer_id,
+                    ).await?;
+                }
+
+                res = async {
+                    flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
+                    flush_once(&mut writer, &mut connection).await
+                }, if want_write => {
+                    res?;
+                }
+
+                cmd = inbox.recv() => {
+                    match handle_pre_activation_inbox_command(
+                        cmd,
+                        &mut connection,
+                    )? {
+                        PreActivationStep::Continue => {}
+                        PreActivationStep::Activate => break,
+                        PreActivationStep::Close => {
+                            drain_writes(&mut writer, &mut connection).await.ok();
+                            return Ok(());
+                        }
+                    }
                 }
             }
+        }
 
-            // Set handshake_done on the encode slot once the handshake
-            // completes, the actor has accepted the peer, and there's no
-            // frame transform (CURVE).
-            // The slot stays disabled for crypto connections.
-            if data_plane_active {
-                enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+        enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+
+        // Keep fallback before yring until yring wins once; after that,
+        // empty fallback waiting would add a signal waiter-list lock on the
+        // hot select path.
+        let mut prioritize_shared_rx = shared_msg_rx.is_some();
+        loop {
+            if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
+                return Ok(());
+            }
+            match drain_decoded_messages(
+                &mut connection,
+                &mut decoder,
+                receive_profile,
+                &mut recv_direct,
+                &peer_out,
+                peer_id,
+            )
+            .await?
+            {
+                DriverStep::Continue => {}
+                DriverStep::Yield => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                DriverStep::Close => return Ok(()),
             }
 
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
-            let hb_enabled = hb_interval.is_some() && connection.is_ready() && data_plane_active;
+            let hb_enabled = hb_interval.is_some();
 
             // Latency-routed REQ/REP sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
             // reader, avoiding an extra zero-time reactor roundtrip.
-            if latency_profile
-                && data_plane_active
-                && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty())
-            {
+            if latency_profile && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty()) {
                 drain_transmit_slot(
                     transmit_slot.as_ref().unwrap(),
                     &mut drain_buf,
@@ -900,7 +964,7 @@ where
                 // before the next request is written.
                 () = async {
                     transmit_slot.as_ref().unwrap().data_signal.ready().await;
-                }, if latency_profile && data_plane_active && transmit_slot.as_ref().is_some_and(|s| {
+                }, if latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
@@ -909,14 +973,7 @@ where
                     ).await?;
                 }
 
-                // Handshake deadline; disabled once handshake completes.
-                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
-                    return Err(Error::HandshakeFailed("handshake timeout".into()));
-                }
-
-                res = reader.read_buf(&mut read_buf),
-                    if (!latency_profile || inbox.is_empty())
-                        && (!connection.is_ready() || data_plane_active) => {
+                res = reader.read_buf(&mut read_buf), if !latency_profile || inbox.is_empty() => {
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
@@ -956,7 +1013,6 @@ where
                     if handle_inbox_command(
                         cmd,
                         &mut inbox,
-                        &mut data_plane_active,
                         &mut outbound,
                         &mut connection,
                         &mut eq,
@@ -981,7 +1037,7 @@ where
                     } else {
                         std::future::pending().await
                     }
-                }, if prioritize_shared_rx && connection.is_ready() && data_plane_active => {
+                }, if prioritize_shared_rx => {
                     if handle_shared_queue_message(
                         msg,
                         shared_msg_rx.as_ref(),
@@ -1001,7 +1057,7 @@ where
                 // directly, bypassing the local FrameBuffer.
                 () = async {
                     transmit_slot.as_ref().unwrap().data_signal.ready().await;
-                }, if !latency_profile && data_plane_active && transmit_slot.as_ref().is_some_and(|s| {
+                }, if !latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) => {
                     drain_transmit_slot(
@@ -1014,7 +1070,7 @@ where
                 // messages to this driver, which encodes and writes locally.
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
-                }, if send_pipe_rx.is_some() && connection.is_ready() && data_plane_active => {
+                }, if send_pipe_rx.is_some() => {
                     match handle_send_pipe_ready(
                         &mut send_pipe_rx,
                         &mut pipe_batch,
@@ -1058,6 +1114,13 @@ where
 
             }
         }
+    }
+}
+
+fn close_error_reason(err: &Error) -> String {
+    match err {
+        Error::HandshakeFailed(reason) => reason.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -1177,11 +1240,26 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     handle_large_messages(connection, reader, config, last_input, recv_pool).await
 }
 
-#[expect(clippy::too_many_arguments)]
+fn handle_pre_activation_inbox_command(
+    cmd: Option<PeerDriverCommand>,
+    connection: &mut Connection,
+) -> Result<PreActivationStep> {
+    match cmd {
+        Some(PeerDriverCommand::ActivateDataPlane) => Ok(PreActivationStep::Activate),
+        Some(PeerDriverCommand::SendCommand(c)) => {
+            connection.send_command(&c)?;
+            Ok(PreActivationStep::Continue)
+        }
+        Some(PeerDriverCommand::Close) | None => Ok(PreActivationStep::Close),
+        Some(PeerDriverCommand::SendMessage(_) | PeerDriverCommand::SendEncoded(_)) => Err(
+            Error::Protocol("peer data command before activation".into()),
+        ),
+    }
+}
+
 async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     cmd: Option<PeerDriverCommand>,
     inbox: &mut mpsc::Receiver<PeerDriverCommand>,
-    data_plane_active: &mut bool,
     outbound: &mut OutboundState,
     connection: &mut Connection,
     eq: &mut FrameBuffer,
@@ -1189,10 +1267,7 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<DriverStep> {
     match cmd {
-        Some(PeerDriverCommand::ActivateDataPlane) => {
-            *data_plane_active = true;
-            Ok(DriverStep::Continue)
-        }
+        Some(PeerDriverCommand::ActivateDataPlane) => Ok(DriverStep::Continue),
         Some(PeerDriverCommand::SendMessage(first)) => {
             // TODO: Give driver control commands an explicit msg/byte/time
             // budget. Current mixed inbox batches data first, then handles
@@ -1217,9 +1292,7 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
                 .await?;
             for cmd in deferred {
                 match cmd {
-                    PeerDriverCommand::ActivateDataPlane => {
-                        *data_plane_active = true;
-                    }
+                    PeerDriverCommand::ActivateDataPlane => {}
                     PeerDriverCommand::SendEncoded(chunks) => {
                         eq.push_shared_chunks(&chunks);
                     }
@@ -1850,7 +1923,7 @@ mod tests {
         pub(super) async fn recv(&mut self) -> Option<Event> {
             match self.rx.recv().await? {
                 (_, PeerEvent::Event(e)) => Some(e),
-                (_, PeerEvent::Closed) => None,
+                (_, PeerEvent::Closed { .. }) => None,
             }
         }
     }
@@ -2113,7 +2186,7 @@ mod tests {
         // Collect all events from the server driver.
         let mut events = Vec::new();
         while let Some((_, out)) = s_evt_rx.recv().await {
-            let is_closed = matches!(out, PeerEvent::Closed);
+            let is_closed = matches!(out, PeerEvent::Closed { .. });
             events.push(out);
             if is_closed {
                 break;

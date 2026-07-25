@@ -166,6 +166,7 @@ impl SocketOverlay {
             handshake_timeout: match (self.handshake_ivl, self.connect_timeout) {
                 (Some(h), t) if t > 0 => Some(h.min(Duration::from_millis(t as u64))),
                 (None, t) if t > 0 => Some(Duration::from_millis(t as u64)),
+                (None, _) => Some(Duration::from_millis(DEFAULT_HANDSHAKE_IVL_MS as u64)),
                 (h, _) => h,
             },
             conflate: self.conflate,
@@ -1321,6 +1322,16 @@ mod tests {
         assert_eq!(
             overlay.to_options().handshake_timeout,
             Some(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn default_handshake_ivl_is_materialized() {
+        let overlay = SocketOverlay::default();
+
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            Some(Duration::from_millis(DEFAULT_HANDSHAKE_IVL_MS as u64))
         );
     }
 

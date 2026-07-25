@@ -39,6 +39,16 @@ impl SocketDriver {
                 self.handle_peer_event(peer_id, event).await;
             }
             InternalEvent::PeerClosed { peer_id, reason } => {
+                if let Some(peer) = self.peers.get(&peer_id)
+                    && peer.pending_handshake
+                    && let DisconnectReason::Error(reason_text) = &reason
+                {
+                    self.monitor.publish(MonitorEvent::HandshakeFailed {
+                        endpoint: peer.endpoint.clone(),
+                        peer_ident: peer.ident.clone(),
+                        reason: reason_text.clone(),
+                    });
+                }
                 if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
                     if let Some(task) = peer.task.take() {
                         let _ = task.await;
@@ -80,6 +90,18 @@ impl SocketDriver {
         // Spawn anyway so queued messages can drain; teardown cancels once
         // the queue empties or linger expires.
         if self.closing && self.send_strategy.is_drained() {
+            return;
+        }
+        if accepted
+            && self.socket_type != SocketType::Stream
+            && matches!(conn, AnyConn::ByteStream { .. })
+            && !self.can_accept_pending_handshake()
+        {
+            self.monitor.publish(MonitorEvent::HandshakeFailed {
+                endpoint,
+                peer_ident: conn.peer_ident().clone(),
+                reason: "socket pending-handshake limit reached".into(),
+            });
             return;
         }
         let conn_id = self.next_peer_id;
@@ -162,6 +184,7 @@ impl SocketDriver {
                 ident: peer_ident,
                 handle: handle.clone(),
                 ready: true,
+                pending_handshake: false,
                 identity: identity.clone(),
                 info: None,
                 endpoint,
@@ -291,6 +314,7 @@ impl SocketDriver {
                 return;
             };
             p.ready = true;
+            p.pending_handshake = false;
             p.identity = identity.clone();
             let info = PeerInfo {
                 connection_id: peer_id,
@@ -685,7 +709,9 @@ pub(super) async fn inproc_peer_driver(
         ring.recv_signal.wake_all();
     }
     blocking_recv_waker.wake();
-    let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
+    let _ = peer_out
+        .send((peer_id, PeerEvent::Closed { error: None }))
+        .await;
 }
 
 /// Route a message to `recv_direct` or through the actor via `emit_event`.

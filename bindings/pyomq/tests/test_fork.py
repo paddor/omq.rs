@@ -2,6 +2,7 @@
 
 import os
 import select
+import sys
 import time
 
 import pytest
@@ -14,6 +15,10 @@ pytestmark = pytest.mark.filterwarnings(
 pytestmark = [
     pytestmark,
     pytest.mark.skipif(os.name == "nt", reason="fork is Unix-only"),
+    pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="macOS does not reliably fork after Rust runtime threads exist",
+    ),
 ]
 
 FORK_TIMEOUT_MS = 5_000

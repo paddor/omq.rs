@@ -97,6 +97,17 @@ impl ContextInner {
         Ok(handle)
     }
 
+    pub fn can_drive_runtime(&self) -> bool {
+        if self.terminated.load(Ordering::Acquire) {
+            return false;
+        }
+        self.state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|rt| rt.pid == std::process::id())
+    }
+
     pub fn runtime_handle(&self) -> PyResult<Handle> {
         self.ensure_runtime()
     }
@@ -285,7 +296,11 @@ impl ContextInner {
         self.terminated.store(true, Ordering::Release);
         let state = self.state.lock().unwrap().take();
         if let Some(s) = state {
-            s.ctx.term();
+            if s.pid == std::process::id() {
+                s.ctx.term();
+            } else {
+                std::mem::forget(s);
+            }
         }
     }
 
@@ -333,7 +348,11 @@ impl ContextInner {
 impl Drop for ContextInner {
     fn drop(&mut self) {
         if let Some(s) = self.state.get_mut().unwrap().take() {
-            s.ctx.term();
+            if s.pid == std::process::id() {
+                s.ctx.term();
+            } else {
+                std::mem::forget(s);
+            }
         }
     }
 }

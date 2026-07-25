@@ -289,6 +289,7 @@ enum RuntimeOwnership {
 
 struct ContextInner {
     ownership: RuntimeOwnership,
+    owner_pid: u32,
     io_threads: usize,
     terminated: AtomicBool,
 }
@@ -297,6 +298,7 @@ impl std::fmt::Debug for ContextInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContextInner")
             .field("io_threads", &self.io_threads)
+            .field("owner_pid", &self.owner_pid)
             .field(
                 "owned",
                 &matches!(self.ownership, RuntimeOwnership::Owned { .. }),
@@ -307,6 +309,10 @@ impl std::fmt::Debug for ContextInner {
 }
 
 impl ContextInner {
+    fn is_owner_process(&self) -> bool {
+        self.owner_pid == std::process::id()
+    }
+
     fn primary_handle(&self) -> &Handle {
         match &self.ownership {
             RuntimeOwnership::Owned { pool } => pool.primary_handle(),
@@ -347,6 +353,7 @@ impl Context {
         Self {
             inner: Arc::new(ContextInner {
                 ownership: RuntimeOwnership::Owned { pool },
+                owner_pid: std::process::id(),
                 io_threads,
                 terminated: AtomicBool::new(false),
             }),
@@ -367,6 +374,7 @@ impl Context {
         Self {
             inner: Arc::new(ContextInner {
                 ownership: RuntimeOwnership::Borrowed { handle },
+                owner_pid: std::process::id(),
                 io_threads: 0,
                 terminated: AtomicBool::new(false),
             }),
@@ -400,6 +408,10 @@ impl Context {
             !self.inner.terminated.load(Ordering::Acquire),
             "Context::socket() called on a terminated context"
         );
+        assert!(
+            self.inner.is_owner_process(),
+            "Context::socket() called on a context inherited across fork"
+        );
         let _guard = self.inner.primary_handle().enter();
         let io_pool = self.inner.io_pool_handle();
         Socket::new_with_io_pool(socket_type, options, &io_pool)
@@ -429,6 +441,10 @@ impl Context {
         assert!(
             !self.inner.terminated.load(Ordering::Acquire),
             "Context::block_on() called on a terminated context"
+        );
+        assert!(
+            self.inner.is_owner_process(),
+            "Context::block_on() called on a context inherited across fork"
         );
         let guard = pool.primary_job_tx.lock().expect("job_tx poisoned");
         let job_tx = guard
@@ -466,6 +482,9 @@ impl Context {
         if self.inner.terminated.swap(true, Ordering::AcqRel) {
             return;
         }
+        if !self.inner.is_owner_process() {
+            return;
+        }
         if let RuntimeOwnership::Owned { ref pool } = self.inner.ownership {
             pool.shutdown();
         }
@@ -480,6 +499,9 @@ impl Default for Context {
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        if !self.is_owner_process() {
+            return;
+        }
         if let RuntimeOwnership::Owned { ref pool } = self.ownership {
             pool.shutdown();
         }

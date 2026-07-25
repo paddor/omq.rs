@@ -54,7 +54,7 @@ extern "C" fn atfork_parent() {
 #[cfg(unix)]
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
-        libc::pthread_atfork(Some(atfork_parent), None, Some(atfork_child));
+        libc::pthread_atfork(None, Some(atfork_parent), Some(atfork_child));
     });
 }
 
@@ -313,6 +313,14 @@ impl SocketInner {
     pub fn take_materialized(&self) -> Option<Materialized> {
         self.closed.store(true, Ordering::Relaxed);
         let materialized = self.materialized.write().unwrap().take();
+        let fork_gen = FORK_GEN.load(Ordering::Relaxed);
+        if materialized
+            .as_ref()
+            .is_some_and(|state| state.fork_gen != fork_gen)
+        {
+            std::mem::forget(materialized);
+            return None;
+        }
         if let Some(ref state) = materialized {
             state.recv_ready.force_wake();
             state.send_ready.force_wake();
@@ -322,7 +330,15 @@ impl SocketInner {
 
     pub fn take_blocking_materialized(&self) -> Option<BlockingMaterialized> {
         self.closed.store(true, Ordering::Relaxed);
-        self.blocking_materialized.write().unwrap().take()
+        let materialized = self.blocking_materialized.write().unwrap().take();
+        if materialized
+            .as_ref()
+            .is_some_and(|state| state.fork_gen != FORK_GEN.load(Ordering::Relaxed))
+        {
+            std::mem::forget(materialized);
+            return None;
+        }
+        materialized
     }
 
     pub fn close_linger(&self, linger: Option<i64>) -> Option<Duration> {
@@ -760,7 +776,9 @@ impl Socket {
     #[pyo3(signature = (linger=None))]
     fn close(&self, py: Python<'_>, linger: Option<i64>) -> PyResult<()> {
         let linger = self.inner.close_linger(linger);
-        if let Some(m) = self.inner.take_blocking_materialized() {
+        if let Some(m) = self.inner.take_blocking_materialized()
+            && self.inner.ctx.can_drive_runtime()
+        {
             py.detach(|| m.socket.close_with_linger(linger))
                 .map_err(map_err)?;
         }

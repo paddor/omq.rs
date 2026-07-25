@@ -157,8 +157,8 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo clippy --workspace --all-targets --all-features
 
-  pyomq:
-    name: pyomq
+  pyomq-lint:
+    name: pyomq-lint
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
     runs-on: ubuntu-latest
@@ -166,8 +166,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v6
-        with: { python-version: "3.14" }
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
       - name: create virtualenv and install python deps
         working-directory: bindings/pyomq
         run: |
@@ -189,18 +190,49 @@ jobs:
         working-directory: bindings/pyomq
         if: always()
         run: .venv/bin/ty check .
+
+  pyomq-test:
+    name: pyomq-test
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - python-version: "3.9"
+            os: ubuntu-latest
+          - python-version: "3.14"
+            os: ubuntu-latest
+          - python-version: "3.14"
+            os: windows-latest
+          - python-version: "3.14"
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: create virtualenv and install python deps
+        working-directory: bindings/pyomq
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install --group test --group dev
+      - name: build pyomq
+        working-directory: bindings/pyomq
+        run: .venv/bin/pip install .
       - name: cargo test
         working-directory: bindings/pyomq
-        if: always()
         run: cargo test
       - name: pytest
         working-directory: bindings/pyomq
-        if: always()
         run: .venv/bin/pytest -v -k "not test_perf" -W error
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, linux-32bit, lint, pyomq]
+    needs: [changes, test, encryption, compression, linux-32bit, lint, pyomq-lint, pyomq-test]
     runs-on: ubuntu-latest
     if: always()
     steps:

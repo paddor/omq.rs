@@ -21,6 +21,11 @@ impl<'a> PeerLifecycle<'a> {
         self.driver.recv_strategy.connection_removed(peer_id);
         let peer = self.driver.peers.remove(&peer_id);
         if let Some(ref p) = peer {
+            if p.ready {
+                self.driver
+                    .ready_peer_count_shared
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
             self.driver.io_pool.release_thread(p.io_thread);
         }
         self.publish_disconnect(peer.as_ref(), reason);

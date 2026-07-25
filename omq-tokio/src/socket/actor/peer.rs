@@ -194,6 +194,8 @@ impl SocketDriver {
                 io_thread: 0,
             },
         );
+        self.ready_peer_count_shared
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
         PeerLifecycle::new(self).update_send_ring();
 
@@ -309,10 +311,11 @@ impl SocketDriver {
         {
             self.evict_peer_for_handover(old_id);
         }
-        let (handle, subs_replay, peer_ident, io_thread) = {
+        let (handle, subs_replay, peer_ident, io_thread, became_ready) = {
             let Some(p) = self.peers.get_mut(&peer_id) else {
                 return;
             };
+            let became_ready = !p.ready;
             p.ready = true;
             p.pending_handshake = false;
             p.identity = identity.clone();
@@ -333,8 +336,13 @@ impl SocketDriver {
                 self.subscriptions.clone(),
                 p.ident.clone(),
                 p.io_thread,
+                became_ready,
             )
         };
+        if became_ready {
+            self.ready_peer_count_shared
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         if handle
             .inbox
             .send(crate::engine::PeerDriverCommand::ActivateDataPlane)

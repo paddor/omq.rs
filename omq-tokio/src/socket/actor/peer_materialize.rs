@@ -219,7 +219,7 @@ pub(super) fn spawn_inproc_peer(
 }
 
 fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
-    if socket.closing {
+    if socket.closing && socket.send_strategy.is_drained() {
         return None;
     }
     Some(next_peer_id(socket))

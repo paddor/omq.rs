@@ -230,6 +230,7 @@ pub(crate) struct SocketDriver {
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     subscribe_count: Arc<AtomicU64>,
+    ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
 }
 
@@ -249,6 +250,7 @@ impl SocketDriver {
         req_awaiting_reply: Arc<AtomicBool>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
+        ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
         io_pool: crate::context::IoPoolHandle,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
@@ -286,6 +288,7 @@ impl SocketDriver {
             compression_pool: None,
             recv_sink_config,
             subscribe_count,
+            ready_peer_count_shared,
             io_pool,
         }
     }
@@ -323,8 +326,9 @@ impl SocketDriver {
                 cmd = self.cmd_rx.recv(), if !self.closing => match cmd {
                     Some(c) => self.handle_command(c).await,
                     None => {
-                        // All handles dropped -- begin close with zero linger.
-                        self.begin_close(None, Some(Duration::ZERO));
+                        // All handles dropped. No caller can await an ack here,
+                        // but configured linger still controls background drain.
+                        self.begin_close(None, self.options.linger);
                     }
                 },
                 Some(evt) = self.internal_rx.recv() => {
@@ -432,18 +436,23 @@ impl SocketDriver {
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
         // close() sets the closed flag; existing ring data can still be drained.
-        // Stop accepting new peers.
+        // Non-zero linger keeps endpoints alive so late peers can take queued
+        // sends before the deadline.
+        self.close_deadline = linger.map(|d| Instant::now() + d);
+        // If linger is zero, shut down the strategy now so in-flight
+        // pumps bail immediately.
+        if matches!(linger, Some(Duration::ZERO)) {
+            self.cancel_endpoints();
+            self.send_strategy.shutdown();
+        }
+    }
+
+    fn cancel_endpoints(&self) {
         for l in &self.listeners {
             l.cancel.cancel();
         }
         for d in &self.dialers {
             d.cancel.cancel();
-        }
-        self.close_deadline = linger.map(|d| Instant::now() + d);
-        // If linger is zero, shut down the strategy now so in-flight
-        // pumps bail immediately.
-        if matches!(linger, Some(Duration::ZERO)) {
-            self.send_strategy.shutdown();
         }
     }
 
@@ -509,6 +518,8 @@ impl SocketDriver {
         self.internal_rx.close();
         self.peer_out_rx.close();
         self.send_strategy.shutdown();
+        self.ready_peer_count_shared
+            .store(0, std::sync::atomic::Ordering::Release);
         let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
             if let Some(ref slot) = p.handle.transmit_slot {

@@ -143,6 +143,75 @@ async fn linger_forever_waits_until_drained() {
 }
 
 #[tokio::test]
+async fn linger_forever_close_keeps_listener_until_late_peer_drains() {
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    let ep = push.bind(tcp_ep(0)).await.unwrap();
+
+    push.send(Message::single("queued-before-peer"))
+        .await
+        .unwrap();
+
+    let close_task = tokio::spawn(async move { push.close().await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !close_task.is_finished(),
+        "close returned before queued message could drain"
+    );
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.connect(ep).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("late peer did not receive queued message")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"queued-before-peer");
+
+    tokio::time::timeout(Duration::from_secs(2), close_task)
+        .await
+        .expect("close did not finish after late peer drained")
+        .unwrap()
+        .unwrap();
+    pull.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn drop_with_linger_forever_keeps_listener_until_late_peer_drains() {
+    let push = Socket::new(SocketType::Push, Options::default().linger_forever());
+    let ep = push.bind(tcp_ep(0)).await.unwrap();
+
+    push.send(Message::single("queued-before-drop"))
+        .await
+        .unwrap();
+    drop(push);
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.connect(ep).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .expect("late peer did not receive queued message after drop")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"queued-before-drop");
+
+    pull.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn drop_default_linger_zero_drops_peerless_queue() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let ep = push.bind(tcp_ep(0)).await.unwrap();
+
+    push.send(Message::single("drop-me")).await.unwrap();
+    drop(push);
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.connect(ep).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
+    assert!(got.is_err(), "default linger=0 delivered a queued message");
+
+    pull.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn linger_forever_returns_when_connected_idle() {
     let ep = inproc_ep("linger-forever-idle-tok");
     let pull = Socket::new(SocketType::Pull, Options::default());

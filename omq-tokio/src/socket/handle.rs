@@ -23,8 +23,9 @@ use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 pub use omq_proto::error::TrySendError;
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
-/// driver task. Close happens via the explicit [`Socket::close`] method
-/// (the last handle drop cancels the driver without waiting for drain).
+/// driver task. [`Socket::close`] waits for configured linger and joins the
+/// driver. Dropping the last handle starts the same configured linger in the
+/// background, but no caller waits for the result.
 ///
 /// # Concurrency
 ///
@@ -45,7 +46,6 @@ struct Inner {
     cmd_tx: mpsc::Sender<SocketCommand>,
     recv_rx: SpscAwareRecv,
     monitor: MonitorPublisher,
-    root_cancel: CancellationToken,
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
@@ -65,6 +65,8 @@ struct Inner {
     /// Subscription commands received from peers. Incremented by the
     /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
     subscribe_count: Arc<AtomicU64>,
+    /// Peers that have completed handshaking and can accept data-plane sends.
+    ready_peer_count: Arc<std::sync::atomic::AtomicUsize>,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -151,6 +153,7 @@ impl Socket {
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
+        let ready_peer_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -165,6 +168,7 @@ impl Socket {
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),
+            ready_peer_count.clone(),
             io_pool.clone(),
         );
         let actor_task = spawn_driver(driver, io_pool);
@@ -180,7 +184,6 @@ impl Socket {
                     latency_profile,
                 ),
                 monitor,
-                root_cancel: cancel,
                 send_submitter,
                 type_state,
                 rep_pending,
@@ -189,6 +192,7 @@ impl Socket {
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
                 subscribe_count,
+                ready_peer_count,
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),
@@ -205,6 +209,13 @@ impl Socket {
     /// The socket type.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
+    }
+
+    #[doc(hidden)]
+    pub fn ready_peer_count(&self) -> usize {
+        self.inner
+            .ready_peer_count
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Bind to an endpoint. Returns the resolved endpoint once the
@@ -721,19 +732,23 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
-    /// Graceful close. Stops accepting new work, drains pending sends up to
-    /// `options.linger`, then cancels the driver. Consumes the handle; other
-    /// clones remain valid until they also drop (subsequent calls on them
-    /// return `Error::Closed`).
+    /// Graceful close. Stops accepting new app work, drains pending sends up
+    /// to `options.linger`, then cancels the driver. Non-zero linger keeps
+    /// bind/connect endpoints alive while draining, so late peers can receive
+    /// queued no-peer sends before the deadline. Zero linger cancels endpoints
+    /// and drops queued sends immediately.
+    ///
+    /// Consumes the handle; other clones remain valid until they also drop
+    /// (subsequent calls on them return `Error::Closed`).
     pub async fn close(self) -> Result<()> {
         self.close_inner(CloseLinger::Configured).await
     }
 
     /// Graceful close with a one-shot linger override.
     ///
-    /// `None` waits forever; `Some(Duration::ZERO)` drops immediately.
-    /// This is mainly for compatibility layers whose close call accepts a
-    /// per-call linger value.
+    /// `None` waits forever; `Some(Duration::ZERO)` drops immediately. This
+    /// override only applies to this close call. It is mainly for compatibility
+    /// layers whose close call accepts a per-call linger value.
     pub async fn close_with_linger(self, linger: Option<std::time::Duration>) -> Result<()> {
         self.close_inner(CloseLinger::Override(linger)).await
     }
@@ -922,8 +937,9 @@ impl Socket {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.root_cancel.cancel();
-        self.send_submitter.shutdown();
+        // The actor observes `cmd_tx` closing and applies configured linger.
+        // Do not cancel the root token here: that would force zero-linger
+        // teardown and discard queued sends even when linger was configured.
         self.recv_rx.shutdown();
     }
 }

@@ -381,14 +381,15 @@ pub(crate) fn build_tls_acceptor(
     cert_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<tokio_rustls::TlsAcceptor> {
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| Error::Protocol(format!("invalid cert PEM: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .map_err(|e| Error::Protocol(format!("invalid key PEM: {e}")))?
-        .ok_or_else(|| Error::Protocol("no private key in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| Error::Protocol(format!("invalid key PEM: {e}")))?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)

@@ -6,7 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
-use crate::engine::signal::DataSignal;
+use crate::engine::signal::{DataSignal, StateSignal};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::subscription::SubscriptionSet;
 use omq_proto::fan_out_frame::{
@@ -85,14 +85,16 @@ struct LaneEndpoint {
 }
 
 struct LaneDistributor {
-    data_tx: yring::Producer<LaneDispatch>,
-    data_signal: Arc<DataSignal>,
+    tx: yring::Producer<LaneDispatch>,
+    signal: Arc<DataSignal>,
+    space: Arc<StateSignal>,
 }
 
 struct LaneDistributionTarget {
     lane: usize,
     data_tx: yring::Producer<LaneDispatch>,
     data_signal: Arc<DataSignal>,
+    data_space: Arc<StateSignal>,
 }
 
 struct FanOutLaneState {
@@ -148,6 +150,7 @@ struct LaneWorker {
     data_rx: yring::Consumer<LaneDispatch>,
     ctrl_rx: yring::Consumer<LaneControl>,
     data_signal: Arc<DataSignal>,
+    data_space: Arc<StateSignal>,
     ctrl_notify: Arc<DataSignal>,
     mode: FanOutMode,
     lossy: bool,
@@ -192,7 +195,8 @@ impl FanOutLanes {
             .map(|_| {
                 let (tx, rx) = yring::spsc(pipe_cap);
                 let sig = Arc::new(DataSignal::new());
-                (tx, rx, sig)
+                let space = Arc::new(StateSignal::new());
+                (tx, rx, sig, space)
             })
             .collect();
         let mut ctrl_channels: Vec<_> = (0..lane_count)
@@ -205,42 +209,49 @@ impl FanOutLanes {
 
         // Lane 0 receives user sends. It copies each batch to active
         // secondary lanes first, then processes its own peers.
-        let (dist_tx, dist_rx, dist_signal) = data_channels.remove(0);
+        let (dist_tx, dist_rx, dist_signal, dist_space) = data_channels.remove(0);
         let distributor = LaneDistributor {
-            data_tx: dist_tx,
-            data_signal: Arc::clone(&dist_signal),
+            tx: dist_tx,
+            signal: Arc::clone(&dist_signal),
+            space: Arc::clone(&dist_space),
         };
 
         let mut distribution_targets: Vec<LaneDistributionTarget> =
             Vec::with_capacity(data_channels.len());
-        let mut secondary_data: Vec<(yring::Consumer<LaneDispatch>, Arc<DataSignal>)> =
-            Vec::with_capacity(data_channels.len());
-        for (i, (tx, rx, sig)) in data_channels.into_iter().enumerate() {
+        let mut secondary_data: Vec<(
+            yring::Consumer<LaneDispatch>,
+            Arc<DataSignal>,
+            Arc<StateSignal>,
+        )> = Vec::with_capacity(data_channels.len());
+        for (i, (tx, rx, sig, space)) in data_channels.into_iter().enumerate() {
             distribution_targets.push(LaneDistributionTarget {
                 lane: i + 1,
                 data_tx: tx,
                 data_signal: Arc::clone(&sig),
+                data_space: Arc::clone(&space),
             });
-            secondary_data.push((rx, sig));
+            secondary_data.push((rx, sig, space));
         }
 
         // Build endpoints (ctrl only) and spawn workers.
         let mut dist_rx = Some(dist_rx);
         let mut dist_signal = Some(dist_signal);
+        let mut dist_space = Some(dist_space);
         let mut endpoints = Vec::with_capacity(lane_count);
         for i in 0..lane_count {
             let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
 
-            let (data_rx, data_signal, dist_targets, flags) = if i == 0 {
+            let (data_rx, data_signal, data_space, dist_targets, flags) = if i == 0 {
                 (
                     dist_rx.take().expect("lane 0 data_rx"),
                     dist_signal.take().expect("lane 0 data_signal"),
+                    dist_space.take().expect("lane 0 data_space"),
                     std::mem::take(&mut distribution_targets),
                     Some(Arc::clone(&active_flags)),
                 )
             } else {
-                let (rx, sig) = secondary_data.remove(0);
-                (rx, sig, Vec::new(), None)
+                let (rx, sig, space) = secondary_data.remove(0);
+                (rx, sig, space, Vec::new(), None)
             };
 
             io_pool.spawn_on(
@@ -249,6 +260,7 @@ impl FanOutLanes {
                     data_rx,
                     ctrl_rx,
                     data_signal,
+                    data_space,
                     ctrl_notify: ctrl_notify.clone(),
                     mode,
                     lossy,
@@ -408,21 +420,21 @@ impl FanOutLanes {
         dispatch: LaneDispatch,
     ) -> core::result::Result<(), LaneDispatch> {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
-        match dist.data_tx.push(dispatch) {
+        match dist.tx.push(dispatch) {
             Ok(()) => {
-                dist.data_tx.flush();
-                dist.data_signal.mark();
+                dist.tx.flush();
+                dist.signal.mark();
                 Ok(())
             }
             Err(returned) if self.lossy => {
-                dist.data_tx.flush();
-                dist.data_signal.mark();
+                dist.tx.flush();
+                dist.signal.mark();
                 drop(returned);
                 Ok(())
             }
             Err(returned) => {
-                dist.data_tx.flush();
-                dist.data_signal.mark();
+                dist.tx.flush();
+                dist.signal.mark();
                 Err(returned)
             }
         }
@@ -430,13 +442,31 @@ impl FanOutLanes {
 
     pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
         loop {
-            match self.try_dispatch(dispatch) {
-                Ok(()) => return,
-                Err(returned) => {
-                    dispatch = returned;
-                    tokio::task::yield_now().await;
+            let wait = {
+                let mut dist = self.distributor.lock().expect("distributor poisoned");
+                match dist.tx.push(dispatch) {
+                    Ok(()) => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        return;
+                    }
+                    Err(returned) if self.lossy => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        drop(returned);
+                        return;
+                    }
+                    Err(returned) => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        let seen = dist.space.generation();
+                        let space = dist.space.clone();
+                        dispatch = returned;
+                        (space, seen)
+                    }
                 }
-            }
+            };
+            wait.0.changed_after(wait.1).await;
         }
     }
 
@@ -453,7 +483,7 @@ impl FanOutLanes {
 
     pub(super) fn is_empty(&self) -> bool {
         let dist = self.distributor.lock().expect("distributor poisoned");
-        let dist_empty = dist.data_tx.is_empty();
+        let dist_empty = dist.tx.is_empty();
         drop(dist);
         dist_empty
             && self
@@ -500,6 +530,9 @@ impl LaneWorker {
                     batch.push(dispatch);
                 }
                 self.data_rx.release();
+                if drained {
+                    self.notify_data_space();
+                }
 
                 if !batch.is_empty() {
                     // Control sent before this data can race with the first
@@ -511,9 +544,19 @@ impl LaneWorker {
                         self.subscribe_all_count = 0;
                         return;
                     }
-                    self.distribute_batch(&batch);
+                    if self.distribute_batch(&batch).await {
+                        self.flush_touched(&mut touched);
+                        self.peers.clear();
+                        self.subscribe_all_count = 0;
+                        return;
+                    }
                     for dispatch in &batch {
-                        self.dispatch(dispatch, &mut touched).await;
+                        if self.dispatch(dispatch, &mut touched).await {
+                            self.flush_touched(&mut touched);
+                            self.peers.clear();
+                            self.subscribe_all_count = 0;
+                            return;
+                        }
                     }
                 }
             } else {
@@ -528,6 +571,9 @@ impl LaneWorker {
                     }
                 }
                 self.data_rx.release();
+                if drained {
+                    self.notify_data_space();
+                }
 
                 if !batch.is_empty() {
                     if self.drain_control() {
@@ -537,7 +583,12 @@ impl LaneWorker {
                         return;
                     }
                     for dispatch in &batch {
-                        self.dispatch(dispatch, &mut touched).await;
+                        if self.dispatch(dispatch, &mut touched).await {
+                            self.flush_touched(&mut touched);
+                            self.peers.clear();
+                            self.subscribe_all_count = 0;
+                            return;
+                        }
                     }
                 }
             }
@@ -555,6 +606,10 @@ impl LaneWorker {
         }
     }
 
+    fn notify_data_space(&self) {
+        self.data_space.notify_changed();
+    }
+
     fn drain_control(&mut self) -> bool {
         let mut shutdown = false;
         self.ctrl_notify.begin_drain();
@@ -569,7 +624,61 @@ impl LaneWorker {
         shutdown
     }
 
-    fn distribute_batch(&mut self, batch: &[LaneDispatch]) {
+    async fn distribute_batch(&mut self, batch: &[LaneDispatch]) -> bool {
+        if self.lossy {
+            self.distribute_batch_lossy(batch);
+            return false;
+        }
+        let Some(active_flags) = self.active_flags.clone() else {
+            return false;
+        };
+        for target_idx in 0..self.distribution_targets.len() {
+            if !active_flags[self.distribution_targets[target_idx].lane].load(Ordering::Acquire) {
+                continue;
+            }
+            for dispatch in batch {
+                loop {
+                    let wait = {
+                        let target = &mut self.distribution_targets[target_idx];
+                        match target.data_tx.push(dispatch.clone()) {
+                            Ok(()) => None,
+                            Err(returned) if self.lossy => {
+                                drop(returned);
+                                None
+                            }
+                            Err(returned) => {
+                                target.data_tx.flush();
+                                target.data_signal.mark();
+                                let seen = target.data_space.generation();
+                                let space = target.data_space.clone();
+                                drop(returned);
+                                Some((space, seen))
+                            }
+                        }
+                    };
+                    let Some((space, seen)) = wait else {
+                        break;
+                    };
+                    let changed = space.changed_after(seen);
+                    tokio::pin!(changed);
+                    tokio::select! {
+                        () = &mut changed => {}
+                        () = self.ctrl_notify.ready() => {
+                            if self.drain_control() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            let target = &mut self.distribution_targets[target_idx];
+            target.data_tx.flush();
+            target.data_signal.mark();
+        }
+        false
+    }
+
+    fn distribute_batch_lossy(&mut self, batch: &[LaneDispatch]) {
         let Some(ref active_flags) = self.active_flags else {
             return;
         };
@@ -672,7 +781,16 @@ impl LaneWorker {
         }
     }
 
-    async fn dispatch(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
+    #[expect(clippy::too_many_lines)]
+    async fn dispatch(
+        &mut self,
+        dispatch: &LaneDispatch,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        if self.lossy {
+            self.dispatch_lossy(dispatch, touched);
+            return false;
+        }
         let mut peer_ids = SmallVec::<[u64; 32]>::new();
         let all_subscribe_all =
             filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
@@ -692,7 +810,7 @@ impl LaneWorker {
             }
         }
         if peer_ids.is_empty() {
-            return;
+            return false;
         }
 
         // Compress if an encoder is active (lz4+tcp:// peers present).
@@ -700,7 +818,7 @@ impl LaneWorker {
         let wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
             match enc.encode(&dispatch.msg) {
                 Ok(transformed) => transformed,
-                Err(_) => return,
+                Err(_) => return false,
             }
         } else {
             smallvec::smallvec![dispatch.msg.clone()]
@@ -724,9 +842,137 @@ impl LaneWorker {
         let (dict_msg, payload_start): (Option<&Message>, usize) = (None, 0);
 
         let target_count = peer_ids.len();
+        let mut eq = std::mem::replace(&mut self.eq, FrameBuffer::one_shot());
+        let mut chunks = std::mem::take(&mut self.chunks);
+        let mut shutdown = false;
 
         // Encode dict and payload into per-peer slots. Both go through
         // push_frame_to_peer (direct FrameBuffer push) to preserve ordering.
+        let has_dict = dict_msg.is_some();
+        if let Some(dict) = dict_msg {
+            {
+                let frame = build_fan_out_frame(
+                    &mut eq,
+                    dict,
+                    &mut chunks,
+                    target_count,
+                    FAN_OUT_TOTAL_COPY_BUDGET,
+                );
+                for &peer_id in &peer_ids {
+                    if self
+                        .peers
+                        .get(&peer_id)
+                        .is_some_and(|peer| !peer.dict_shipped)
+                    {
+                        match self.push_frame_to_peer(peer_id, &frame, touched).await {
+                            PushFrameResult::Pushed => {
+                                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                                    peer.dict_shipped = true;
+                                    peer.slot.mark_fanout_dict_shipped();
+                                }
+                            }
+                            PushFrameResult::Skipped => {}
+                            PushFrameResult::Shutdown => {
+                                shutdown = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            clear_fan_out_frame(&mut eq, &mut chunks);
+        }
+
+        if !shutdown {
+            // Encode the payload messages into the FrameBuffer.
+            for wire_msg in &wire_messages[payload_start..] {
+                encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
+            }
+
+            {
+                let encoded = finish_fan_out_frame(
+                    &mut eq,
+                    &mut chunks,
+                    target_count,
+                    FAN_OUT_TOTAL_COPY_BUDGET,
+                );
+
+                for peer_id in peer_ids {
+                    if has_dict
+                        && self
+                            .peers
+                            .get(&peer_id)
+                            .is_none_or(|peer| !peer.dict_shipped)
+                    {
+                        continue;
+                    }
+                    if matches!(
+                        self.push_frame_to_peer(peer_id, &encoded, touched).await,
+                        PushFrameResult::Shutdown
+                    ) {
+                        shutdown = true;
+                        break;
+                    }
+                }
+            }
+            clear_fan_out_frame(&mut eq, &mut chunks);
+        }
+
+        self.eq = eq;
+        self.chunks = chunks;
+        shutdown
+    }
+
+    fn dispatch_lossy(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
+        let mut peer_ids = SmallVec::<[u64; 32]>::new();
+        let all_subscribe_all =
+            filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
+        for (&peer_id, peer) in &self.peers {
+            if peer.slot.fanout_active()
+                && (all_subscribe_all
+                    || filter::peer_matches(
+                        self.mode,
+                        &peer.subscriptions,
+                        &peer.groups,
+                        peer.any_groups,
+                        &dispatch.topic,
+                        dispatch.group.as_deref(),
+                    ))
+            {
+                peer_ids.push(peer_id);
+            }
+        }
+        if peer_ids.is_empty() {
+            return;
+        }
+
+        #[cfg(feature = "lz4")]
+        let wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
+            match enc.encode(&dispatch.msg) {
+                Ok(transformed) => transformed,
+                Err(_) => return,
+            }
+        } else {
+            smallvec::smallvec![dispatch.msg.clone()]
+        };
+        #[cfg(not(feature = "lz4"))]
+        let wire_messages: SmallVec<[Message; 2]> = smallvec::smallvec![dispatch.msg.clone()];
+
+        #[cfg(feature = "lz4")]
+        let (dict_msg, payload_start) = {
+            if wire_messages
+                .first()
+                .is_some_and(omq_proto::proto::transform::lz4::is_dict_shipment)
+            {
+                (Some(&wire_messages[0]), 1)
+            } else {
+                (None, 0)
+            }
+        };
+        #[cfg(not(feature = "lz4"))]
+        let (dict_msg, payload_start): (Option<&Message>, usize) = (None, 0);
+
+        let target_count = peer_ids.len();
         let has_dict = dict_msg.is_some();
         if let Some(dict) = dict_msg {
             let frame = build_fan_out_frame(
@@ -739,7 +985,7 @@ impl LaneWorker {
             for &peer_id in &peer_ids {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && !peer.dict_shipped
-                    && Self::push_frame_to_peer(self.lossy, peer_id, peer, &frame, touched).await
+                    && Self::push_frame_to_peer_lossy(peer_id, peer, &frame, touched)
                 {
                     peer.dict_shipped = true;
                     peer.slot.mark_fanout_dict_shipped();
@@ -748,7 +994,6 @@ impl LaneWorker {
             clear_fan_out_frame(&mut self.eq, &mut self.chunks);
         }
 
-        // Encode the payload messages into the FrameBuffer.
         for wire_msg in &wire_messages[payload_start..] {
             encode_fan_out_message(
                 &mut self.eq,
@@ -770,59 +1015,81 @@ impl LaneWorker {
                 if has_dict && !peer.dict_shipped {
                     continue;
                 }
-                Self::push_frame_to_peer(self.lossy, peer_id, peer, &encoded, touched).await;
+                Self::push_frame_to_peer_lossy(peer_id, peer, &encoded, touched);
             }
         }
 
         clear_fan_out_frame(&mut self.eq, &mut self.chunks);
     }
 
-    async fn push_frame_to_peer(
-        lossy: bool,
+    fn push_frame_to_peer_lossy(
         peer_id: u64,
         peer: &mut LanePeer,
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
+        let result = match frame {
+            FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
+            FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+        };
+        match result {
+            TryFrameResult::Ok => {
+                touched.push(peer_id);
+                true
+            }
+            TryFrameResult::Dead | TryFrameResult::Ineligible => false,
+            TryFrameResult::Full => {
+                peer.slot.deactivate_fanout();
+                false
+            }
+        }
+    }
+
+    async fn push_frame_to_peer(
+        &mut self,
+        peer_id: u64,
+        frame: &FanOutFrame<'_>,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> PushFrameResult {
         loop {
-            let result = match frame {
-                FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
-            };
-            match result {
-                TryFrameResult::Ok => {
-                    touched.push(peer_id);
-                    return true;
-                }
-                TryFrameResult::Dead => return false,
-                TryFrameResult::Full if lossy => {
-                    peer.slot.deactivate_fanout();
-                    return false;
-                }
-                TryFrameResult::Full => {
-                    let seen = peer.slot.space_available.generation();
-                    let changed = peer.slot.space_available.changed_after(seen);
-                    tokio::pin!(changed);
-                    peer.slot.signal_encoded();
-                    let result = match frame {
-                        FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-                        FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
-                    };
-                    match result {
-                        TryFrameResult::Ok => {
-                            touched.push(peer_id);
-                            return true;
-                        }
-                        TryFrameResult::Dead => return false,
-                        TryFrameResult::Full => changed.await,
-                        TryFrameResult::Ineligible => {
-                            unreachable!("pre-framed fanout push cannot be ineligible")
-                        }
+            let wait = {
+                let Some(peer) = self.peers.get_mut(&peer_id) else {
+                    return PushFrameResult::Skipped;
+                };
+                let result = match frame {
+                    FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
+                    FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+                };
+                match result {
+                    TryFrameResult::Ok => {
+                        touched.push(peer_id);
+                        return PushFrameResult::Pushed;
+                    }
+                    TryFrameResult::Dead => return PushFrameResult::Skipped,
+                    TryFrameResult::Full if self.lossy => {
+                        peer.slot.deactivate_fanout();
+                        return PushFrameResult::Skipped;
+                    }
+                    TryFrameResult::Full => {
+                        let seen = peer.slot.space_available.generation();
+                        let space = peer.slot.space_available.clone();
+                        peer.slot.signal_encoded();
+                        (space, seen)
+                    }
+                    TryFrameResult::Ineligible if self.lossy => return PushFrameResult::Skipped,
+                    TryFrameResult::Ineligible => {
+                        unreachable!("pre-framed fanout push cannot be ineligible")
                     }
                 }
-                TryFrameResult::Ineligible if lossy => return false,
-                TryFrameResult::Ineligible => {
-                    unreachable!("pre-framed fanout push cannot be ineligible")
+            };
+            let changed = wait.0.changed_after(wait.1);
+            tokio::pin!(changed);
+            tokio::select! {
+                () = &mut changed => {}
+                () = self.ctrl_notify.ready() => {
+                    if self.drain_control() {
+                        return PushFrameResult::Shutdown;
+                    }
                 }
             }
         }
@@ -837,6 +1104,13 @@ impl LaneWorker {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushFrameResult {
+    Pushed,
+    Skipped,
+    Shutdown,
 }
 
 #[cfg(test)]
@@ -897,6 +1171,49 @@ mod tests {
         assert_eq!(state.endpoints[1].peer_count, 0);
     }
 
+    #[tokio::test]
+    async fn dispatch_waits_for_space_signal_when_nodrop_ring_full() {
+        let (data_tx, mut data_rx) = yring::spsc::<LaneDispatch>(1);
+        let data_space = Arc::new(crate::engine::signal::StateSignal::new());
+        let lanes = FanOutLanes {
+            state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
+            active_flags: Arc::new(vec![AtomicBool::new(false)]),
+            distributor: Mutex::new(LaneDistributor {
+                tx: data_tx,
+                signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                space: data_space.clone(),
+            }),
+            lossy: false,
+        };
+
+        lanes.try_dispatch(test_dispatch("one")).unwrap();
+
+        let send_second = lanes.dispatch(test_dispatch("two"));
+        tokio::pin!(send_second);
+        tokio::select! {
+            () = &mut send_second => panic!("dispatch completed while ring stayed full"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+
+        data_rx.prefetch();
+        assert_eq!(
+            data_rx
+                .pop()
+                .expect("first dispatch present")
+                .msg
+                .part_bytes(0)
+                .unwrap()
+                .as_ref(),
+            b"one"
+        );
+        data_rx.release();
+        data_space.notify_changed();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
+            .await
+            .expect("dispatch did not wake after space signal");
+    }
+
     fn test_lanes(count: usize) -> FanOutLanes {
         FanOutLanes {
             state: std::sync::Mutex::new(FanOutLaneState {
@@ -944,8 +1261,18 @@ mod tests {
     fn test_distributor() -> Mutex<LaneDistributor> {
         let (data_tx, _data_rx) = yring::spsc::<LaneDispatch>(4);
         Mutex::new(LaneDistributor {
-            data_tx,
-            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            tx: data_tx,
+            signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            space: Arc::new(crate::engine::signal::StateSignal::new()),
         })
+    }
+
+    fn test_dispatch(body: &str) -> LaneDispatch {
+        let msg = omq_proto::message::Message::from_slice(body.as_bytes());
+        LaneDispatch {
+            topic: msg.part_bytes(0).unwrap(),
+            msg,
+            group: None,
+        }
     }
 }

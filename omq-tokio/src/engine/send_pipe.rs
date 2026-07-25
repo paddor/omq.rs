@@ -348,6 +348,6 @@ mod tests {
         let mut batch = Vec::new();
         assert_eq!(rx.drain_into(&mut batch, 8, usize::MAX), 1);
         assert_eq!(batch[0].part_bytes(0).unwrap().as_ref(), b"c");
-        assert!(rx.drain_into(&mut batch, 8, usize::MAX) == 0);
+        assert_eq!(rx.drain_into(&mut batch, 8, usize::MAX), 0);
     }
 }

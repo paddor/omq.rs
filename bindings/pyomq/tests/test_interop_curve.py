@@ -95,7 +95,9 @@ def test_pyomq_curve_server_pyzmq_curve_client_req_rep(tcp_endpoint):
 def test_pyzmq_curve_server_pyomq_curve_client_push_pull(tcp_endpoint):
     if sys.platform == "win32":
         with pytest.warns(DeprecationWarning):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # ty: ignore
+            asyncio.set_event_loop_policy(  # ty: ignore[deprecated, unused-ignore-comment, unused-ignore-comment]
+                asyncio.WindowsSelectorEventLoopPolicy()
+            )
     server_pub, server_sec = zmq_pyzmq.curve_keypair()
     client_pub, client_sec = pyomq.curve_keypair()
 
@@ -133,7 +135,9 @@ def test_pyzmq_curve_server_pyomq_curve_client_push_pull(tcp_endpoint):
 def test_pyzmq_curve_server_pyomq_curve_client_req_rep(tcp_endpoint):
     if sys.platform == "win32":
         with pytest.warns(DeprecationWarning):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # ty: ignore
+            asyncio.set_event_loop_policy(  # ty: ignore[deprecated, unused-ignore-comment, unused-ignore-comment]
+                asyncio.WindowsSelectorEventLoopPolicy()
+            )
     server_pub, server_sec = zmq_pyzmq.curve_keypair()
     client_pub, client_sec = pyomq.curve_keypair()
 

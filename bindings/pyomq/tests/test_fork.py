@@ -24,7 +24,7 @@ def _waitpid_timeout(pid):
     """Reap a child, killing it if the forked operation wedges."""
     deadline = time.monotonic() + FORK_TIMEOUT_S
     while time.monotonic() < deadline:
-        waited, status = os.waitpid(pid, os.WNOHANG)  # ty: ignore
+        waited, status = os.waitpid(pid, os.WNOHANG)  # ty: ignore[unresolved-attribute, unused-ignore-comment, unused-ignore-comment]
         if waited == pid:
             if os.waitstatus_to_exitcode(status) != 0:
                 pytest.fail("forked child exited with an error")
@@ -54,7 +54,7 @@ def test_socket_works_after_fork():
     ep = push.bind("tcp://127.0.0.1:0")
 
     r, w = os.pipe()
-    pid = os.fork()  # ty: ignore
+    pid = os.fork()  # ty: ignore[unresolved-attribute, unused-ignore-comment, unused-ignore-comment]
     if pid == 0:
         os.close(r)
         _child_recv(ep, w)
@@ -92,7 +92,7 @@ def test_pre_materialized_socket_works_after_fork():
 
     r, w = os.pipe()
     ack_r, ack_w = os.pipe()
-    pid = os.fork()  # ty: ignore
+    pid = os.fork()  # ty: ignore[unresolved-attribute, unused-ignore-comment, unused-ignore-comment]
     if pid == 0:
         os.close(r)
         # Child: the parent's push socket is stale. Create a fresh one.

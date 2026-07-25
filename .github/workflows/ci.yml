@@ -189,7 +189,9 @@ jobs:
       - name: type check
         working-directory: bindings/pyomq
         if: always()
-        run: .venv/bin/ty check .
+        run: |
+          .venv/bin/ty check . --python-platform linux
+          .venv/bin/ty check . --python-platform win32
 
   pyomq-test:
     name: pyomq-test
@@ -217,18 +219,17 @@ jobs:
       - name: create virtualenv and install python deps
         working-directory: bindings/pyomq
         run: |
-          python -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install --group test --group dev
+          pip install --upgrade pip
+          pip install --group test --group dev
       - name: build pyomq
         working-directory: bindings/pyomq
-        run: .venv/bin/pip install .
+        run: pip install .
       - name: cargo test
         working-directory: bindings/pyomq
         run: cargo test
       - name: pytest
         working-directory: bindings/pyomq
-        run: .venv/bin/pytest -v -k "not test_perf" -W error
+        run: pytest -v -k "not test_perf" -W error
 
   ci-success:
     name: CI success

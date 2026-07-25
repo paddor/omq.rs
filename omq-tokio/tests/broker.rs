@@ -110,6 +110,11 @@ async fn router_dealer_rep_single_cycle_with(frontend: Endpoint, backend: Endpoi
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
 
+    test_support::wait_for_handshake(&router).await;
+    test_support::wait_for_handshake(&dealer).await;
+    test_support::wait_for_handshake(&req).await;
+    test_support::wait_for_handshake(&rep).await;
+
     // Broker: transparently forward one request and one reply.
     let router_c = router.clone();
     let dealer_c = dealer.clone();
@@ -160,6 +165,11 @@ async fn router_dealer_rep_multi_hop_envelope_with(frontend: Endpoint, backend: 
 
     let rep = Socket::new(SocketType::Rep, Options::default());
     rep.connect(backend).await.unwrap();
+
+    test_support::wait_for_handshake(&router).await;
+    test_support::wait_for_handshake(&dealer).await;
+    test_support::wait_for_handshake(&client).await;
+    test_support::wait_for_handshake(&rep).await;
 
     let router_c = router.clone();
     let dealer_c = dealer.clone();

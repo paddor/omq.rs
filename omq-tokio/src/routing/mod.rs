@@ -37,6 +37,7 @@ use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
+use tokio::sync::oneshot;
 
 /// Max messages one shared-queue consumer batch-encodes before flushing.
 /// Scaled down per peer by [`RoundRobinSend`] to improve distribution
@@ -273,10 +274,15 @@ impl SendStrategy {
     }
 
     /// Record a SUBSCRIBE from a peer. No-op except for `FanOut`.
-    pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
+    pub(crate) fn peer_subscribe(
+        &self,
+        peer_id: u64,
+        prefix: Bytes,
+    ) -> Option<oneshot::Receiver<()>> {
         if let Self::FanOut(s) = self {
-            s.peer_subscribe(peer_id, prefix);
+            return s.peer_subscribe(peer_id, prefix);
         }
+        None
     }
 
     /// Record a CANCEL from a peer. No-op except for `FanOut`.

@@ -6,6 +6,7 @@ use super::{
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use omq_proto::WorkloadProfile;
+use std::sync::atomic::Ordering;
 
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
@@ -296,9 +297,8 @@ impl SocketDriver {
         use omq_proto::proto::Command;
         match cmd {
             Command::Subscribe(prefix) => {
-                self.send_strategy.peer_subscribe(peer_id, prefix.clone());
-                self.subscribe_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+                let applied = self.send_strategy.peer_subscribe(peer_id, prefix.clone());
+                self.count_subscription_after(applied);
                 self.monitor.publish(MonitorEvent::SubscribeReceived {
                     prefix: prefix.clone(),
                 });
@@ -335,6 +335,19 @@ impl SocketDriver {
             }
             _ => {}
         }
+    }
+
+    fn count_subscription_after(&self, applied: Option<tokio::sync::oneshot::Receiver<()>>) {
+        let Some(applied) = applied else {
+            self.subscribe_count.fetch_add(1, Ordering::Release);
+            return;
+        };
+        let subscribe_count = self.subscribe_count.clone();
+        std::mem::drop(tokio::spawn(async move {
+            if applied.await.is_ok() {
+                subscribe_count.fetch_add(1, Ordering::Release);
+            }
+        }));
     }
 
     /// Handle legacy ZMTP 3.0 subscribe/cancel (single-frame message with

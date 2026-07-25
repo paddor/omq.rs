@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use tokio::sync::oneshot;
 
 use crate::engine::PeerDriverHandle;
 use omq_proto::error::Result;
@@ -450,7 +451,11 @@ impl FanOutSend {
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    pub(crate) fn peer_subscribe(&self, peer_id: u64, prefix: Bytes) {
+    pub(crate) fn peer_subscribe(
+        &self,
+        peer_id: u64,
+        prefix: Bytes,
+    ) -> Option<oneshot::Receiver<()>> {
         let mut g = self.inner.lock().expect("fanout inner poisoned");
         if let Some(p) = g.peers.get_mut(&peer_id) {
             let became_subscribe_all = filter::add_subscription(&mut p.subscriptions, &prefix);
@@ -459,11 +464,15 @@ impl FanOutSend {
                 g.subscribe_all_count += 1;
             }
             drop(g);
-            if let Some(lane) = lane {
-                self.lanes.send_subscribe(lane, peer_id, prefix.clone());
-            }
+            let ack = if let Some(lane) = lane {
+                self.lanes.send_subscribe(lane, peer_id, prefix.clone())
+            } else {
+                None
+            };
             self.bump_generation();
+            return ack;
         }
+        None
     }
 
     pub(crate) fn peer_cancel(&self, peer_id: u64, prefix: &[u8]) {

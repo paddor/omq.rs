@@ -484,6 +484,14 @@ class _SocketOptionsBase:
     set_string = setsockopt_string
     get_string = getsockopt_string
 
+
+class _BaseSocket(_SocketOptionsBase):
+    """Base class for Socket and asyncio.Socket.
+
+    Split from _SocketOptionsBase since _ShadowSocket has a smaller API.
+
+    """
+
     def set_curve_auth(self, auth: Any) -> Any:
         try:
             return self._sock.set_curve_auth(auth)
@@ -611,7 +619,7 @@ class _SocketMeta(type):
         return False
 
 
-class Socket(_SocketOptionsBase, metaclass=_SocketMeta):
+class Socket(_BaseSocket, metaclass=_SocketMeta):
     """Synchronous ZMQ socket wrapper."""
 
     _sock: _native.Socket

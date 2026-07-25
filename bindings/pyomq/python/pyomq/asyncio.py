@@ -35,7 +35,7 @@ from . import (
     LINGER,
     _TYPE_NAMES,
     POLLIN,
-    _SocketOptionsBase,
+    _BaseSocket,
 )
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -174,7 +174,7 @@ class _RecvFuture:
         return (yield from fut.__await__())
 
 
-class Socket(_SocketOptionsBase):
+class Socket(_BaseSocket):
     """Async ZMQ socket wrapper."""
 
     _sock: _native.AsyncSocket

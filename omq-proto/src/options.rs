@@ -2,8 +2,9 @@
 //!
 //! Defaults differ from libzmq in a few places. Native OMQ linger defaults to
 //! zero, while libzmq `ZMQ_LINGER` defaults to forever. Native OMQ
-//! `send_hwm`/`recv_hwm` are socket-level message-count caps, not byte caps
-//! and not exact libzmq pipe-credit accounting.
+//! `send_hwm`/`recv_hwm` are message-count caps, not byte caps. Native OMQ
+//! applies `send_hwm` per outbound pipe; it is not a single socket-wide byte
+//! or message budget.
 
 use std::time::Duration;
 
@@ -32,11 +33,15 @@ pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 ///
 /// - `linger` defaults to zero. libzmq `ZMQ_LINGER` defaults to forever.
 /// - `send_hwm` and `recv_hwm` count complete messages, not bytes.
-/// - Native `send_hwm` is not an exact total queued-message cap. No-peer
-///   fallback, per-peer queues, and transmit slots are separate buffers.
+/// - Native `send_hwm` is not an exact total queued-message cap. Connect-side
+///   pre-ready pipes, per-peer pipes, fan-out lane rings, and transmit slots
+///   are separate buffers.
 /// - Native round-robin sends (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`)
-///   with no ready peer queue into fallback up to `send_hwm`. libzmq mutes a
-///   bound no-peer socket instead.
+///   with a bound endpoint and no ready pipe mute like libzmq: blocking
+///   `send()` waits and `try_send()` returns `Full`.
+/// - The same socket types with a `connect()` endpoint allocate a pre-ready
+///   pipe at `connect()` time. Sends may queue there before the peer reaches
+///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
 // every backend file that accesses them.
@@ -54,11 +59,11 @@ pub struct Options {
     /// Send-side high-water mark as a message count.
     ///
     /// This is not a byte cap. One 16-byte message and one 16-MiB message
-    /// each consume one HWM slot. Native OMQ applies this as a socket-level
-    /// cap on the shared no-peer/pre-connect fallback and as per-pipe caps
-    /// after peers materialize, so effective queued capacity can be higher
-    /// than this value. `omq-libzmq` exposes this as `ZMQ_SNDHWM`, but it
-    /// still does not provide exact libzmq per-pipe credit accounting yet.
+    /// each consume one HWM slot. Native OMQ applies this per outbound pipe:
+    /// connect-side pre-ready pipes, materialized peer pipes, and fan-out lane
+    /// rings each have their own HWM. Effective socket-wide queued capacity
+    /// can therefore exceed this value when multiple pipes or transmit slots
+    /// exist. `omq-libzmq` exposes this as `ZMQ_SNDHWM`.
     pub send_hwm: u32,
 
     /// Receive-side high-water mark as a message count.
@@ -127,9 +132,9 @@ pub struct Options {
     /// this setting is ignored and they drop newest unless `xpub_nodrop`
     /// is set.
     ///
-    /// Native round-robin no-peer sends use the fallback queue first. This
-    /// setting only applies once that fallback reaches `send_hwm`. libzmq
-    /// instead mutes bound no-peer round-robin sockets immediately.
+    /// Native bound no-peer round-robin sends mute immediately. Connected
+    /// no-peer round-robin sends queue into their connect-side pre-ready pipe
+    /// until that pipe reaches `send_hwm`, then this policy applies.
     pub on_mute: OnMute,
 
     /// TCP keepalive policy. Applied to every accepted / dialed TCP
@@ -371,8 +376,9 @@ impl Options {
     /// Set send-side HWM as a message count.
     ///
     /// This is not a byte limit. Large messages count the same as small
-    /// messages. Native OMQ may hold more than this value once fallback
-    /// messages have moved into per-peer queues.
+    /// messages. Native OMQ may hold more than this value across multiple
+    /// connect-side pre-ready pipes, per-peer pipes, fan-out lane rings, and
+    /// transmit slots.
     #[must_use]
     pub fn send_hwm(mut self, hwm: u32) -> Self {
         self.send_hwm = hwm;
@@ -705,10 +711,10 @@ impl Default for ReconnectPolicy {
 
 /// What to do when native send HWM is reached and a new message arrives.
 ///
-/// Native round-robin sockets with no ready peer queue into fallback until
-/// `send_hwm` is reached, then apply this policy. This differs from libzmq:
-/// a bound no-peer `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` socket is muted
-/// immediately there.
+/// Native bound no-peer round-robin sockets mute immediately. Connected
+/// no-peer round-robin sockets queue into a pre-ready pipe until `send_hwm`
+/// is reached, then apply this policy. Native OMQ has no `ZMQ_IMMEDIATE`
+/// option; `omq-libzmq` implements `ZMQ_IMMEDIATE` at the C layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OnMute {

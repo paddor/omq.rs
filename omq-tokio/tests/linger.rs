@@ -2,7 +2,7 @@
 //! returning. Exercises the send-queue drain path that linger=0 (the
 //! default) never touches.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
@@ -13,6 +13,11 @@ fn tcp_ep(port: u16) -> Endpoint {
         host: Host::Ip(Ipv4Addr::LOCALHOST.into()),
         port,
     }
+}
+
+fn free_tcp_ep() -> Endpoint {
+    let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    tcp_ep(listener.local_addr().unwrap().port())
 }
 
 fn inproc_ep(name: &str) -> Endpoint {
@@ -143,9 +148,10 @@ async fn linger_forever_waits_until_drained() {
 }
 
 #[tokio::test]
-async fn linger_forever_close_keeps_listener_until_late_peer_drains() {
+async fn linger_forever_close_keeps_dialer_until_late_peer_drains() {
+    let ep = free_tcp_ep();
     let push = Socket::new(SocketType::Push, Options::default().linger_forever());
-    let ep = push.bind(tcp_ep(0)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     push.send(Message::single("queued-before-peer"))
         .await
@@ -159,7 +165,7 @@ async fn linger_forever_close_keeps_listener_until_late_peer_drains() {
     );
 
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.connect(ep).await.unwrap();
+    pull.bind(ep).await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
         .expect("late peer did not receive queued message")
@@ -175,9 +181,10 @@ async fn linger_forever_close_keeps_listener_until_late_peer_drains() {
 }
 
 #[tokio::test]
-async fn drop_with_linger_forever_keeps_listener_until_late_peer_drains() {
+async fn drop_with_linger_forever_keeps_dialer_until_late_peer_drains() {
+    let ep = free_tcp_ep();
     let push = Socket::new(SocketType::Push, Options::default().linger_forever());
-    let ep = push.bind(tcp_ep(0)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     push.send(Message::single("queued-before-drop"))
         .await
@@ -185,7 +192,7 @@ async fn drop_with_linger_forever_keeps_listener_until_late_peer_drains() {
     drop(push);
 
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.connect(ep).await.unwrap();
+    pull.bind(ep).await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
         .await
         .expect("late peer did not receive queued message after drop")
@@ -197,14 +204,15 @@ async fn drop_with_linger_forever_keeps_listener_until_late_peer_drains() {
 
 #[tokio::test]
 async fn drop_default_linger_zero_drops_peerless_queue() {
+    let ep = free_tcp_ep();
     let push = Socket::new(SocketType::Push, Options::default());
-    let ep = push.bind(tcp_ep(0)).await.unwrap();
+    push.connect(ep.clone()).await.unwrap();
 
     push.send(Message::single("drop-me")).await.unwrap();
     drop(push);
 
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.connect(ep).await.unwrap();
+    pull.bind(ep).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(300), pull.recv()).await;
     assert!(got.is_err(), "default linger=0 delivered a queued message");
 
@@ -238,7 +246,7 @@ async fn linger_zero_returns_immediately_on_close() {
     let push = Socket::new(SocketType::Push, Options::default()); // linger = ZERO by default
     push.bind(ep.clone()).await.unwrap();
 
-    // No peer — send blocks in actor; close with linger=0 must return quickly.
+    // No pipe: bound no-peer sends mute; linger=0 must still close quickly.
     let _ = tokio::time::timeout(
         Duration::from_millis(10),
         push.send(Message::single("queued")),

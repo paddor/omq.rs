@@ -17,10 +17,12 @@ impl<'a> PeerLifecycle<'a> {
         peer_id: u64,
         reason: DisconnectReason,
     ) -> Option<PeerEntry> {
-        self.driver.send_strategy.connection_removed(peer_id);
         self.driver.recv_strategy.connection_removed(peer_id);
         let peer = self.driver.peers.remove(&peer_id);
         if let Some(ref p) = peer {
+            self.driver
+                .send_strategy
+                .connection_removed(peer_id, p.route_id);
             if p.ready {
                 self.driver
                     .ready_peer_count_shared

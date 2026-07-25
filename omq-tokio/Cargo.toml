@@ -221,6 +221,10 @@ name = "omq_linger"
 path = "tests/linger.rs"
 
 [[test]]
+name = "omq_no_peer_send"
+path = "tests/no_peer_send.rs"
+
+[[test]]
 name = "omq_lz4_pub_sub"
 path = "tests/lz4_pub_sub.rs"
 

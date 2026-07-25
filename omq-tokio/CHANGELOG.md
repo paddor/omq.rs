@@ -23,13 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `Socket::close()` with non-zero or forever linger now keeps bind/connect
-  endpoints alive while queued no-peer sends drain to late peers.
+  endpoints alive while queued connect-side pre-ready sends drain to late
+  peers.
 - Dropping the last socket handle now applies configured linger in the
   background instead of forcing zero-linger teardown.
 
 ### Changed
 
-- Document native no-peer fallback, linger, and HWM edge cases against libzmq.
+- Replace the shared round-robin no-peer fallback queue with connect-side
+  pre-ready pipes allocated during `connect()`.
+- Bound no-peer round-robin sends now mute like libzmq: async `send()` waits
+  and `try_send()` returns `Full`.
+- Document native no-peer, linger, and HWM edge cases against libzmq.
 
 ## [0.19.3] - 2026-07-23
 

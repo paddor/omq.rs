@@ -118,9 +118,11 @@ enum InternalEvent {
     Connected {
         conn: AnyConn,
         endpoint: Endpoint,
+        route_id: u64,
     },
     ConnectGaveUp {
         endpoint: Endpoint,
+        route_id: u64,
     },
     ConnectDelayed {
         endpoint: Endpoint,
@@ -161,6 +163,9 @@ struct PeerEntry {
     /// True for dialer-initiated connections; false for listener-accepted.
     /// Used to decide whether to restart the dial after a mid-session drop.
     is_client: bool,
+    /// Send-strategy route id. For connect-side round-robin pipes this is
+    /// allocated at `connect()` time and can differ from the peer id.
+    route_id: u64,
     /// SPSC ring for this inproc peer (None for wire/stream peers).
     spsc: Option<Arc<crate::transport::inproc::InprocTx>>,
     task: Option<JoinHandle<()>>,
@@ -177,6 +182,8 @@ struct ListenerEntry {
 struct DialerEntry {
     endpoint: Endpoint,
     cancel: CancellationToken,
+    route_id: u64,
+    send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     _task: JoinHandle<()>,
 }
 

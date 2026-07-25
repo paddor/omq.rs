@@ -178,7 +178,7 @@ impl FanOutLanes {
         lossy: bool,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
-        let pipe_cap = options.send_hwm.max(16) as usize;
+        let pipe_cap = options.send_hwm.max(1) as usize;
         let lane_count = io_pool.thread_count().max(1);
         let active_flags = Arc::new(
             (0..lane_count)

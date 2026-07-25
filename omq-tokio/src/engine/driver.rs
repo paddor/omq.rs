@@ -23,7 +23,7 @@ use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
-use crate::routing::{RepEnvelope, fallback_queue::FallbackReceiver};
+use crate::routing::RepEnvelope;
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
 use crate::socket::recv::RecvItem;
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
@@ -394,7 +394,7 @@ const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
 const READ_BUF_MAX: usize = 128 * 1024;
 const READ_BUF_GROW_FULL_READS: usize = 2;
 
-use crate::routing::SHARED_MAX_BATCH_MSGS;
+use crate::routing::OUTBOUND_BATCH_MAX_MSGS;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -584,10 +584,6 @@ where
     encoder: Option<MessageEncoder>,
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
-    /// Shared round-robin send queue. When set, the driver reads outbound
-    /// messages directly from this queue. `None` for non-round-robin
-    /// socket types.
-    shared_msg_rx: Option<FallbackReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
     /// the `SocketDriver` actor's event loop. Only set for socket types where
@@ -651,7 +647,6 @@ where
             config,
             encoder: None,
             decoder: None,
-            shared_msg_rx: None,
             recv_direct: None,
             compression_pool: None,
             offload_threshold: 0,
@@ -686,14 +681,6 @@ where
     ) -> Self {
         self.compression_pool = Some(pool);
         self.offload_threshold = threshold;
-        self
-    }
-
-    /// Provide the shared round-robin send queue. The driver polls this
-    /// directly after handshake.
-    #[must_use]
-    pub(crate) fn with_shared_rx(mut self, rx: FallbackReceiver) -> Self {
-        self.shared_msg_rx = Some(rx);
         self
     }
 
@@ -793,7 +780,6 @@ where
             config,
             encoder,
             mut decoder,
-            shared_msg_rx,
             mut recv_direct,
             compression_pool,
             offload_threshold,
@@ -905,11 +891,6 @@ where
         }
 
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
-
-        // Keep fallback before yring until yring wins once; after that,
-        // empty fallback waiting would add a signal waiter-list lock on the
-        // hot select path.
-        let mut prioritize_shared_rx = shared_msg_rx.is_some();
         loop {
             if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
                 return Ok(());
@@ -1024,34 +1005,6 @@ where
                     }
                 },
 
-                // Shared-queue arm: batch-encodes up to
-                // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
-                // them all in one or a few write_vectored calls.
-                //
-                // Higher priority than transmit_slot: messages queued before
-                // the transmit-slot fast path was enabled (pre-handshake or
-                // post-reconnect) must drain first to preserve ordering.
-                msg = async {
-                    if let Some(ref rx) = shared_msg_rx {
-                        rx.recv_with_drain().await
-                    } else {
-                        std::future::pending().await
-                    }
-                }, if prioritize_shared_rx => {
-                    if handle_shared_queue_message(
-                        msg,
-                        shared_msg_rx.as_ref(),
-                        &mut outbound,
-                        &mut connection,
-                        &mut eq,
-                        &mut drain_buf,
-                        &mut writer,
-                    ).await? == DriverStep::Close {
-                        drain_writes(&mut writer, &mut connection).await.ok();
-                        return Ok(());
-                    }
-                },
-
                 // Wire-slot arm: the socket handle encoded ZMTP frames
                 // into the per-peer PeerTransmitSlot. Drain and write
                 // directly, bypassing the local FrameBuffer.
@@ -1080,7 +1033,7 @@ where
                         &mut drain_buf,
                         &mut writer,
                     ).await? {
-                        DriverStep::Continue => prioritize_shared_rx = false,
+                        DriverStep::Continue => {}
                         DriverStep::Yield => {}
                         DriverStep::Close => {
                             drain_writes(&mut writer, &mut connection).await.ok();
@@ -1285,7 +1238,7 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
                         }
                         Err(_) => None,
                     },
-                    SHARED_MAX_BATCH_MSGS,
+                    OUTBOUND_BATCH_MAX_MSGS,
                     connection,
                     eq,
                 )
@@ -1322,49 +1275,6 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     }
 }
 
-async fn handle_shared_queue_message<W: AsyncWrite + Unpin>(
-    msg: Option<Message>,
-    shared_msg_rx: Option<&FallbackReceiver>,
-    outbound: &mut OutboundState,
-    connection: &mut Connection,
-    eq: &mut FrameBuffer,
-    drain_buf: &mut Vec<Bytes>,
-    writer: &mut W,
-) -> Result<DriverStep> {
-    let Some(first) = msg else {
-        return Ok(DriverStep::Close);
-    };
-    let batch_limit = shared_msg_rx.map_or(SHARED_MAX_BATCH_MSGS, FallbackReceiver::batch_limit);
-    let mut popped = 1usize;
-    let encode_result = outbound
-        .batch_encode(
-            &first,
-            || {
-                let msg = shared_msg_rx.and_then(FallbackReceiver::try_pop);
-                if msg.is_some() {
-                    popped += 1;
-                }
-                msg
-            },
-            batch_limit,
-            connection,
-            eq,
-        )
-        .await;
-    let result: Result<()> = match encode_result {
-        Ok(_) => flush_all(writer, eq, drain_buf, connection)
-            .await
-            .map_err(Into::into),
-        Err(e) => Err(e),
-    };
-    if let Some(rx) = shared_msg_rx {
-        rx.release_permits(popped);
-        rx.finish_drain();
-    }
-    result?;
-    Ok(DriverStep::Continue)
-}
-
 async fn handle_send_pipe_ready<W: AsyncWrite + Unpin>(
     send_pipe_rx: &mut Option<SendPipeConsumer>,
     pipe_batch: &mut Vec<Message>,
@@ -1375,7 +1285,11 @@ async fn handle_send_pipe_ready<W: AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<DriverStep> {
     let rx = send_pipe_rx.as_mut().expect("send pipe select guard");
-    let drained = rx.drain_into(pipe_batch, SHARED_MAX_BATCH_MSGS, max_batch_bytes());
+    let drained = rx.drain_into(
+        pipe_batch,
+        crate::routing::OUTBOUND_BATCH_MAX_MSGS,
+        max_batch_bytes(),
+    );
     if drained == 0 {
         if rx.is_disconnected() {
             return Ok(DriverStep::Close);
@@ -1474,7 +1388,7 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
             .batch_encode(
                 &first,
                 || batch.pop(),
-                SHARED_MAX_BATCH_MSGS,
+                OUTBOUND_BATCH_MAX_MSGS,
                 connection,
                 eq,
             )

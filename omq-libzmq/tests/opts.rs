@@ -436,6 +436,8 @@ fn reconnect_ivl_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
+    assert_eq!(get_i32(s, ZMQ_RECONNECT_IVL), 100);
+
     set_i32(s, ZMQ_RECONNECT_IVL, 200);
     assert_eq!(get_i32(s, ZMQ_RECONNECT_IVL), 200);
 

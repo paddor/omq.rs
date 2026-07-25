@@ -27,7 +27,7 @@ macro_rules! lock_overlay {
     };
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[expect(clippy::struct_excessive_bools)]
 pub(crate) struct SocketOverlay {
     pub send_hwm: Option<u32>,
@@ -60,6 +60,43 @@ pub(crate) struct SocketOverlay {
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
     pub reconnect_stop: i32,
+}
+
+impl Default for SocketOverlay {
+    fn default() -> Self {
+        Self {
+            send_hwm: None,
+            recv_hwm: None,
+            linger: LingerSetting::Unset,
+            identity: Bytes::new(),
+            router_mandatory: false,
+            reconnect_ivl: Some(Duration::from_millis(100)),
+            reconnect_ivl_max: None,
+            heartbeat_ivl: None,
+            heartbeat_ttl: None,
+            heartbeat_timeout: None,
+            handshake_ivl: None,
+            max_message_size: None,
+            conflate: false,
+            tcp_keepalive: 0,
+            tcp_keepalive_cnt: None,
+            tcp_keepalive_idle: None,
+            tcp_keepalive_intvl: None,
+            mechanism: MechanismOverlay::Null,
+            sndbuf: None,
+            rcvbuf: None,
+            xpub_verbose: false,
+            ipv6: false,
+            backlog: 0,
+            immediate: false,
+            connect_timeout: 0,
+            probe_router: false,
+            req_correlate: false,
+            req_relaxed: false,
+            xpub_nodrop: false,
+            reconnect_stop: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -7,16 +7,14 @@
 //! pipe cannot reorder and bias the cursor toward another peer.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::engine::signal::StateSignal;
-use crate::engine::{PeerDriverHandle, SendPipeError, SendPipeProducer};
+use crate::engine::{PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
 use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-
-use super::fallback_queue::{FallbackQueue, FallbackReceiver};
 
 #[derive(Debug)]
 struct ActivePipe {
@@ -29,7 +27,6 @@ struct ActivePipes {
     active: Vec<ActivePipe>,
     inactive: Vec<ActivePipe>,
     pipe_peers: HashSet<u64>,
-    fallback_peers: HashSet<u64>,
     cursor: usize,
     random_state: u64,
     inactive_cursor: usize,
@@ -45,7 +42,6 @@ impl Default for ActivePipes {
             active: Vec::new(),
             inactive: Vec::new(),
             pipe_peers: HashSet::new(),
-            fallback_peers: HashSet::new(),
             cursor: 0,
             random_state: seed,
             inactive_cursor: 0,
@@ -64,7 +60,6 @@ impl ActivePipes {
         self.active.clear();
         self.inactive.clear();
         self.pipe_peers.clear();
-        self.fallback_peers.clear();
         self.cursor = 0;
         self.inactive_cursor = 0;
     }
@@ -124,7 +119,6 @@ impl ActivePipes {
 
     fn remove_peer(&mut self, peer_id: u64) {
         self.pipe_peers.remove(&peer_id);
-        self.fallback_peers.remove(&peer_id);
         if let Some(pos) = self.active.iter().position(|p| p.peer_id == peer_id) {
             self.active.remove(pos);
             if self.active.is_empty() {
@@ -147,8 +141,22 @@ impl ActivePipes {
         }
     }
 
-    fn should_use_fallback(&self) -> bool {
-        (self.active.is_empty() && self.inactive.is_empty()) || !self.fallback_peers.is_empty()
+    fn has_pipe(&self, peer_id: u64) -> bool {
+        self.pipe_peers.contains(&peer_id)
+    }
+
+    fn insert_pipe(&mut self, peer_id: u64, tx: SendPipeProducer) {
+        self.remove_peer(peer_id);
+        self.pipe_peers.insert(peer_id);
+        let pos = {
+            let len = self.active.len() + 1;
+            self.random_index(len)
+        };
+        self.active.insert(pos, ActivePipe { peer_id, tx });
+    }
+
+    fn has_any_pipe(&self) -> bool {
+        !self.active.is_empty() || !self.inactive.is_empty()
     }
 
     fn random_index(&mut self, len: usize) -> usize {
@@ -164,14 +172,14 @@ impl ActivePipes {
 /// Cloneable handle for submitting messages into a [`RoundRobinSend`].
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
-    queue: FallbackQueue,
     active: Arc<Mutex<ActivePipes>>,
     active_changed: Arc<StateSignal>,
+    closed: Arc<AtomicBool>,
 }
 
 impl Submitter {
     pub(crate) fn shutdown(&self) {
-        self.queue.shutdown();
+        self.closed.store(true, Ordering::Release);
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
         self.active_changed.notify_changed();
@@ -192,22 +200,15 @@ impl Submitter {
 
             let space_available = {
                 let mut active = self.active.lock().expect("round_robin active");
-                if active.should_use_fallback() {
-                    None
-                } else {
-                    active.next_space_notify_any()
-                }
+                active.next_space_notify_any()
             };
 
             let Some(space_available) = space_available else {
-                if self.queue.is_closed() {
+                if self.closed.load(Ordering::Acquire) {
                     return Err(omq_proto::error::Error::Closed);
                 }
-                let queue_seen = self.queue.space_generation();
                 let active_seen = self.active_changed.generation();
-                let queue_space = self.queue.wait_space_changed_after(queue_seen);
                 let active_changed = self.active_changed.changed_after(active_seen);
-                tokio::pin!(queue_space);
                 tokio::pin!(active_changed);
 
                 match self.try_send(msg) {
@@ -221,10 +222,7 @@ impl Submitter {
                     }
                 }
 
-                tokio::select! {
-                    () = queue_space => {}
-                    () = active_changed => {}
-                }
+                active_changed.await;
                 continue;
             };
 
@@ -248,27 +246,17 @@ impl Submitter {
     pub(crate) async fn wait_send_progress(&self) {
         let space_available = {
             let mut active = self.active.lock().expect("round_robin active");
-            if active.should_use_fallback() {
-                None
-            } else {
-                active.next_space_notify_any()
-            }
+            active.next_space_notify_any()
         };
 
         let Some(space_available) = space_available else {
-            if self.queue.is_closed() {
+            if self.closed.load(Ordering::Acquire) {
                 return;
             }
-            let queue_seen = self.queue.space_generation();
             let active_seen = self.active_changed.generation();
-            let queue_space = self.queue.wait_space_changed_after(queue_seen);
             let active_changed = self.active_changed.changed_after(active_seen);
-            tokio::pin!(queue_space);
             tokio::pin!(active_changed);
-            tokio::select! {
-                () = queue_space => {}
-                () = active_changed => {}
-            }
+            active_changed.await;
             return;
         };
 
@@ -280,12 +268,12 @@ impl Submitter {
         &self,
         mut msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(omq_proto::error::TrySendError::Closed);
+        }
         let mut active = self.active.lock().expect("round_robin active");
-        if active.should_use_fallback() {
-            return self
-                .queue
-                .try_send(msg)
-                .map_err(omq_proto::error::TrySendError::Full);
+        if !active.has_any_pipe() {
+            return Err(omq_proto::error::TrySendError::Full(msg));
         }
 
         if active.active.is_empty() {
@@ -379,69 +367,58 @@ impl ActivePipes {
 /// Round-robin send strategy.
 #[derive(Debug)]
 pub(crate) struct RoundRobinSend {
-    queue: FallbackQueue,
-    shared_rx: FallbackReceiver,
     active: Arc<Mutex<ActivePipes>>,
     active_changed: Arc<StateSignal>,
-    peer_count: usize,
+    pipe_cap: usize,
+    closed: Arc<AtomicBool>,
 }
 
 impl RoundRobinSend {
     pub(crate) fn new(options: &Options) -> Self {
-        let (cap, policy) = super::effective_queue_params(options);
-        let (queue, shared_rx) = FallbackQueue::new(cap, policy);
         Self {
-            queue,
-            shared_rx,
             active: Arc::new(Mutex::new(ActivePipes::default())),
             active_changed: Arc::new(StateSignal::new()),
-            peer_count: 0,
+            pipe_cap: options.send_hwm.max(1) as usize,
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Returns a clone of the shared receive end. Each connection driver
-    /// calls this once and holds the clone for the lifetime of the connection.
-    pub(crate) fn shared_rx(&self) -> FallbackReceiver {
-        self.shared_rx.clone()
+    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
+        let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
+        let mut active = self.active.lock().expect("round_robin active");
+        active.insert_pipe(route_id, tx);
+        self.active_changed.notify_changed();
+        rx
     }
 
     pub(crate) fn connection_added(
         &mut self,
-        peer_id: u64,
+        route_id: u64,
         handle: &PeerDriverHandle,
         _is_inproc: bool,
     ) {
-        self.peer_count += 1;
-        self.shared_rx.set_peer_count(self.peer_count);
+        let mut active = self.active.lock().expect("round_robin active");
+        if active.has_pipe(route_id) {
+            self.active_changed.notify_changed();
+            return;
+        }
 
         let send_pipe = handle
             .send_pipe
             .as_ref()
             .and_then(|pipe| pipe.lock().expect("round_robin send pipe").take());
 
-        let mut active = self.active.lock().expect("round_robin active");
         if let Some(tx) = send_pipe {
-            active.remove_peer(peer_id);
-            active.pipe_peers.insert(peer_id);
-            let pos = {
-                let len = active.active.len() + 1;
-                active.random_index(len)
-            };
-            active.active.insert(pos, ActivePipe { peer_id, tx });
+            active.insert_pipe(route_id, tx);
             self.active_changed.notify_changed();
-            return;
         }
-        active.fallback_peers.insert(peer_id);
-        self.active_changed.notify_changed();
     }
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        self.peer_count = self.peer_count.saturating_sub(1);
-        self.shared_rx.set_peer_count(self.peer_count);
+    pub(crate) fn connection_removed(&mut self, route_id: u64) {
         self.active
             .lock()
             .expect("round_robin active")
-            .remove_peer(peer_id);
+            .remove_peer(route_id);
         self.active_changed.notify_changed();
     }
 
@@ -450,14 +427,14 @@ impl RoundRobinSend {
     /// blocks on HWM backpressure.
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
-            queue: self.queue.clone(),
             active: self.active.clone(),
             active_changed: self.active_changed.clone(),
+            closed: self.closed.clone(),
         }
     }
 
     pub(crate) fn shutdown(&self) {
-        self.queue.shutdown();
+        self.closed.store(true, Ordering::Release);
         let mut active = self.active.lock().expect("round_robin active");
         active.clear();
         self.active_changed.notify_changed();
@@ -467,7 +444,7 @@ impl RoundRobinSend {
         let guard = self.active.lock().expect("round_robin active");
         let active_empty = guard.active.iter().all(|pipe| pipe.tx.is_empty());
         let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
-        self.queue.len() == 0 && active_empty && inactive_empty
+        active_empty && inactive_empty
     }
 }
 
@@ -558,22 +535,42 @@ mod tests {
         assert_eq!(pipes.active[0].peer_id, 0);
     }
 
-    #[tokio::test]
-    async fn blocked_fallback_send_retries_pipe_on_activation() {
+    #[test]
+    fn no_pipe_try_send_is_full() {
+        let send = RoundRobinSend::new(&Options::default().send_hwm(1));
+        let submitter = send.submitter();
+
+        let err = submitter.try_send(Message::single("mute")).unwrap_err();
+        match err {
+            omq_proto::error::TrySendError::Full(msg) => {
+                assert_eq!(msg.part_bytes(0).unwrap(), &b"mute"[..]);
+            }
+            other => panic!("expected Full, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_pipe_buffers_before_peer_ready() {
         let mut send = RoundRobinSend::new(&Options::default().send_hwm(1));
         let submitter = send.submitter();
-        submitter.send(Message::single("fallback")).await.unwrap();
+        let mut rx = send.make_connect_pipe(7);
 
-        let mut blocked = {
-            let submitter = submitter.clone();
-            tokio::spawn(async move { submitter.send(Message::single("pipe")).await })
-        };
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut blocked)
-                .await
-                .is_err(),
-            "second send should wait while fallback queue is full"
-        );
+        submitter.try_send(Message::single("pre")).unwrap();
+        let err = submitter.try_send(Message::single("full")).unwrap_err();
+        assert!(matches!(err, omq_proto::error::TrySendError::Full(_)));
+
+        let mut batch = Vec::new();
+        assert_eq!(rx.drain_into(&mut batch, 1, usize::MAX), 1);
+        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pre"[..]);
+    }
+
+    #[test]
+    fn connection_added_reuses_connect_pipe() {
+        let mut send = RoundRobinSend::new(&Options::default().send_hwm(2));
+        let submitter = send.submitter();
+        let mut rx = send.make_connect_pipe(7);
+
+        submitter.try_send(Message::single("pre")).unwrap();
 
         let (send_pipe, mut send_pipe_rx) = send_pipe(1);
         let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
@@ -586,15 +583,12 @@ mod tests {
         };
         send.connection_added(7, &handle, false);
 
-        blocked.await.unwrap().unwrap();
-
-        let shared_rx = send.shared_rx();
-        let first = shared_rx.try_pop().unwrap();
-        assert_eq!(first.part_bytes(0).unwrap(), &b"fallback"[..]);
-        assert!(shared_rx.try_pop().is_none(), "retry must skip fallback");
+        submitter.try_send(Message::single("post")).unwrap();
 
         let mut batch = Vec::new();
-        assert_eq!(send_pipe_rx.drain_into(&mut batch, 1, usize::MAX), 1);
-        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pipe"[..]);
+        assert_eq!(rx.drain_into(&mut batch, 2, usize::MAX), 2);
+        assert_eq!(batch[0].part_bytes(0).unwrap(), &b"pre"[..]);
+        assert_eq!(batch[1].part_bytes(0).unwrap(), &b"post"[..]);
+        assert_eq!(send_pipe_rx.drain_into(&mut batch, 1, usize::MAX), 0);
     }
 }

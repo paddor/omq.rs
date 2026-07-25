@@ -335,42 +335,42 @@ fn space_signal_catches_release_or_drop_after_full_retry() {
 }
 
 #[test]
-fn fallback_wait_tracks_queue_space_and_active_peer_changes() {
+fn pipe_wait_tracks_space_and_route_activation() {
     loom::model(|| {
-        let queue_space = Arc::new(ModelStateSignal::new());
-        let active_changed = Arc::new(ModelStateSignal::new());
-        let queue_full = Arc::new(AtomicBool::new(true));
-        let active_peer = Arc::new(AtomicBool::new(false));
+        let pipe_space = Arc::new(ModelStateSignal::new());
+        let route_changed = Arc::new(ModelStateSignal::new());
+        let pipe_full = Arc::new(AtomicBool::new(true));
+        let route_available = Arc::new(AtomicBool::new(false));
         let observed = Arc::new(AtomicBool::new(false));
 
-        let sender_queue_space = queue_space.clone();
-        let sender_active_changed = active_changed.clone();
-        let sender_queue_full = queue_full.clone();
-        let sender_active_peer = active_peer.clone();
+        let sender_pipe_space = pipe_space.clone();
+        let sender_route_changed = route_changed.clone();
+        let sender_pipe_full = pipe_full.clone();
+        let sender_route_available = route_available.clone();
         let sender_observed = observed.clone();
         let sender = thread::spawn(move || {
-            let queue_seen = sender_queue_space.generation();
-            let active_seen = sender_active_changed.generation();
+            let pipe_seen = sender_pipe_space.generation();
+            let route_seen = sender_route_changed.generation();
             thread::yield_now();
-            if sender_queue_space.register_and_check(queue_seen)
-                || sender_active_changed.register_and_check(active_seen)
-                || !sender_queue_full.load(Ordering::SeqCst)
-                || sender_active_peer.load(Ordering::SeqCst)
+            if sender_pipe_space.register_and_check(pipe_seen)
+                || sender_route_changed.register_and_check(route_seen)
+                || !sender_pipe_full.load(Ordering::SeqCst)
+                || sender_route_available.load(Ordering::SeqCst)
             {
                 sender_observed.store(true, Ordering::SeqCst);
             }
         });
 
-        let releaser_queue_space = queue_space.clone();
-        let releaser_active_changed = active_changed.clone();
-        let releaser_queue_full = queue_full.clone();
-        let releaser_active_peer = active_peer.clone();
+        let releaser_pipe_space = pipe_space.clone();
+        let releaser_route_changed = route_changed.clone();
+        let releaser_pipe_full = pipe_full.clone();
+        let releaser_route_available = route_available.clone();
         let releaser = thread::spawn(move || {
-            releaser_queue_full.store(false, Ordering::SeqCst);
-            releaser_queue_space.notify_changed();
+            releaser_pipe_full.store(false, Ordering::SeqCst);
+            releaser_pipe_space.notify_changed();
             thread::yield_now();
-            releaser_active_peer.store(true, Ordering::SeqCst);
-            releaser_active_changed.notify_changed();
+            releaser_route_available.store(true, Ordering::SeqCst);
+            releaser_route_changed.notify_changed();
         });
 
         sender.join().unwrap();
@@ -378,9 +378,9 @@ fn fallback_wait_tracks_queue_space_and_active_peer_changes() {
 
         assert!(
             observed.load(Ordering::SeqCst)
-                || queue_space.has_woken_waiter()
-                || active_changed.has_woken_waiter(),
-            "fallback wait must wake on either queue space or pipe activation"
+                || pipe_space.has_woken_waiter()
+                || route_changed.has_woken_waiter(),
+            "pipe wait must wake on either pipe space or route activation"
         );
     });
 }

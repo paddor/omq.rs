@@ -13,8 +13,9 @@
 //!
 //! Native `Options::linger` defaults to zero, unlike libzmq's forever linger
 //! default. Native `Options::send_hwm` counts messages, not bytes, and is not
-//! an exact total queue cap. Native round-robin no-peer sends queue into
-//! fallback up to `send_hwm`; libzmq mutes bound no-peer sockets instead.
+//! an exact total queue cap. Bound no-peer round-robin sends mute like libzmq.
+//! Connected no-peer round-robin sends queue in a connect-side pre-ready pipe
+//! unless `omq-libzmq` has `ZMQ_IMMEDIATE=1`.
 #![forbid(unsafe_code)]
 
 #[cfg(not(target_has_atomic = "64"))]

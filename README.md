@@ -110,7 +110,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | Feature | Details |
 |---------|---------|
 | **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
-| **Message-count HWM** | `send_hwm`/`recv_hwm` count complete messages, not bytes. Native effective capacity can exceed `send_hwm` because fallback, per-peer queues, and transmit slots are separate. |
+| **Message-count HWM** | `send_hwm`/`recv_hwm` count complete messages, not bytes. Send HWM is per outbound pipe/ring, so total native buffered messages can exceed one `send_hwm` when several pipes or transmit slots exist. |
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |

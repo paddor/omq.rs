@@ -24,11 +24,11 @@ Behavior by case:
 
 | Socket case | libzmq behavior | `omq-libzmq` behavior | Native `omq-tokio` behavior |
 |-------------|-----------------|-----------------------|-----------------------------|
-| `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` bound, no ready peer | Mute. Blocking `send()` waits. `DONTWAIT` or `SNDTIMEO=0` returns `EAGAIN`. No message is accepted and dropped. | Same. | Different: queues complete messages in the no-peer fallback up to `send_hwm`, then applies `on_mute`. |
-| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=0` | Accepts and queues to the incomplete/reconnecting pipe, bounded by HWM. | Same. | Similar: native has no `ZMQ_IMMEDIATE` option and queues in fallback. |
-| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=1` | Mute. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | No native `ZMQ_IMMEDIATE` option. |
-| Bound socket had a peer, then all peers disconnected | Mute once no ready pipe remains. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | Different: falls back to no-peer queue up to `send_hwm`. |
-| Connected socket had a peer, then peer disconnected | With `ZMQ_IMMEDIATE=0`, queues to the reconnecting pipe. With `ZMQ_IMMEDIATE=1`, mute until reconnect completes. | Same. | Queues in fallback while reconnecting. |
+| `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` bound, no ready peer | Mute. Blocking `send()` waits. `DONTWAIT` or `SNDTIMEO=0` returns `EAGAIN`. No message is accepted and dropped. | Same. | Same, except native nonblocking reports `TrySendError::Full(msg)`. |
+| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=0` | Accepts and queues to the incomplete/reconnecting pipe, bounded by HWM. | Same. | Queues to a connect-side pre-ready pipe allocated by `connect()`, bounded by `send_hwm`. |
+| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=1` | Mute. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | No native `ZMQ_IMMEDIATE` option; native always uses the pre-ready pipe. |
+| Bound socket had a peer, then all peers disconnected | Mute once no ready pipe remains. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | Same for sockets with only bind endpoints, except native nonblocking reports `TrySendError::Full(msg)`. |
+| Connected socket had a peer, then peer disconnected | With `ZMQ_IMMEDIATE=0`, queues to the reconnecting pipe. With `ZMQ_IMMEDIATE=1`, mute until reconnect completes. | Same for sends issued after reconnect is scheduled. | Queues to a connect-side pre-ready pipe while reconnecting. Native has no `ZMQ_IMMEDIATE` option. Messages already accepted by a dead transport are not delivery-guaranteed. |
 | `PUB`/`XPUB`/`RADIO` no matching ready subscriber | Lossy. Send succeeds and message is dropped, unless `XPUB_NODROP` makes mute visible. | Same for supported options. | Same lossy default; `xpub_nodrop` exposes direct-path backpressure. |
 | `ROUTER` unknown identity | Drops by default. With `ROUTER_MANDATORY`, returns `EHOSTUNREACH`. | Same public behavior. | Returns `Error::Unroutable` when `router_mandatory` is set. |
 | `PAIR`/`CHANNEL` no ready peer | Mute. Blocking send waits; nonblocking returns `EAGAIN`. | Blocking send waits; nonblocking returns `EAGAIN`. No connect-side pre-ready queue. | `send().await` waits for the exclusive peer; `try_send()` returns `Full`. |
@@ -56,8 +56,9 @@ keep polling for that background close to make progress.
   work.
 
 Finite or forever linger keeps bind/connect endpoints alive while draining.
-Late peers can receive queued no-peer sends before the deadline. Zero linger
-cancels endpoints and drops queued sends immediately.
+Late peers can receive queued connect-side pre-ready sends before the deadline.
+Bound no-peer sends are mute, so there is no bound no-peer queue to drain. Zero
+linger cancels endpoints and drops queued sends immediately.
 
 ## HWM
 
@@ -69,15 +70,16 @@ libzmq accounting is per pipe. Total process memory can grow with peer count:
 roughly `hwm * ready_pipe_count * average_message_size`, plus codec and OS
 buffers. HWM is backpressure, not a memory cap.
 
-Native OMQ exposes `Options::send_hwm` and `Options::recv_hwm` as socket-level
-message-count settings, but implementation queues are split:
+Native OMQ exposes `Options::send_hwm` and `Options::recv_hwm` as message-count
+settings, but implementation queues are split:
 
-- no-peer/pre-connect fallback queue: capped by `send_hwm`;
-- round-robin per-peer send pipes: capped by `send_hwm.max(16)`;
-- fan-out and routed peers: per-peer queues and transmit slots add more
-  buffering;
-- internal `yring` capacities are rounded for batching.
+- connect-side pre-ready pipes: capped by `send_hwm`;
+- round-robin materialized peer pipes: capped by `send_hwm`;
+- fan-out lane rings: capped by `send_hwm`;
+- routed/fan-out transmit slots: capped separately by message count and bytes;
+- actor/control channels are separate and are not data HWM pipes.
 
-Therefore native effective queued capacity can exceed `send_hwm`. This is
-deliberate today. Treat native HWM as the point where backpressure starts, not
-as an exact total queue length and not as a byte cap.
+Therefore native effective queued capacity can exceed one `send_hwm` when a
+socket owns multiple pipes/rings or transmit slots. Treat native HWM as
+per-pipe backpressure, not as an exact total socket queue length and not as a
+byte cap.

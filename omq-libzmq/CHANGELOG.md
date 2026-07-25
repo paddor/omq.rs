@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bound no-peer `PUSH` sends now match libzmq: blocking sends wait for a
   route, while nonblocking or zero-timeout sends return `EAGAIN` instead of
-  queuing into native fallback.
+  entering a native pre-ready connect pipe.
 - `ZMQ_IMMEDIATE=1` now mutes connected no-peer round-robin sends until a peer
   completes handshaking, matching libzmq.
+- `ZMQ_RECONNECT_IVL` now defaults to 100 ms, matching libzmq. The previous
+  disabled default could remove connect-side pre-ready pipes after an initial
+  `ECONNREFUSED`.
 
 ## [0.5.6] - 2026-07-23
 

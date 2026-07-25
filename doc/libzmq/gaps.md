@@ -119,7 +119,7 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| HWM enforcement | per-pipe complete-message credits | Split bounded queues; effective capacity can exceed `send_hwm` | **~** |
+| HWM enforcement | per-pipe complete-message credits | Per-pipe/ring message caps; transmit slots separate, so effective capacity can exceed one `send_hwm` | **~** |
 | LWM re-activation at half | (hwm+1)/2 triggers activate_write | Channel internal (flume/async_channel) | **~** |
 | Round-robin HWM exceeded | Blocks / EAGAIN to user | Block / DropNewest / DropOldest | **=** superset |
 | PUB/XPUB mute | Drop on HWM (`XPUB_NODROP` excepted) | Drop on HWM (`xpub_nodrop` excepted) | **=** |
@@ -134,7 +134,7 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes; no ready bound pipe mutes sends | Active per-peer pipes plus shared fallback; C wrapper gates no-peer sends | **~** |
+| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes; no ready bound pipe mutes sends; connect pipes can queue before READY | Active per-peer pipes plus connect-side pre-ready pipes; bound no-pipe sends mute | **~** |
 | FQ round-robin (PULL/ROUTER recv) | Index-based, assert on mid-msg pipe death | Per-peer drivers feed bounded recv queue | **~** |
 | PUB fan-out: slow sub blocks all | No; slow sub mutes and drops | Per-sub independent queues; slow sub drops | **=** |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |

@@ -60,14 +60,19 @@ impl SocketDriver {
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
         let before = self.dialers.len() + self.udp_dialers.len();
+        let mut removed_routes = Vec::new();
         self.dialers.retain(|d| {
             if &d.endpoint == endpoint {
                 d.cancel.cancel();
+                removed_routes.push(d.route_id);
                 false
             } else {
                 true
             }
         });
+        for route_id in removed_routes {
+            self.send_strategy.connect_pipe_removed(route_id);
+        }
         // Cancel matching UDP dialers AND tell the SendStrategy the
         // synthetic peer is gone so RADIO stops queuing through it.
         let mut removed_peers = Vec::new();
@@ -82,7 +87,7 @@ impl SocketDriver {
         });
         let removed_udp_peers = removed_peers.len();
         for pid in removed_peers {
-            self.send_strategy.connection_removed(pid);
+            self.send_strategy.connection_removed(pid, pid);
         }
 
         let peer_ids: Vec<u64> = self
@@ -385,6 +390,9 @@ impl SocketDriver {
     }
 
     pub(super) fn start_dial(&mut self, endpoint: Endpoint) {
+        let route_id = self.next_peer_id;
+        self.next_peer_id += 1;
+        let send_pipe_rx = self.send_strategy.make_connect_pipe(route_id);
         let cancel = self.cancel.child_token();
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();
@@ -441,6 +449,7 @@ impl SocketDriver {
                         .send(InternalEvent::Connected {
                             conn,
                             endpoint: dialer_ep,
+                            route_id,
                         })
                         .await;
                 }
@@ -448,6 +457,7 @@ impl SocketDriver {
                     let _ = tx
                         .send(InternalEvent::ConnectGaveUp {
                             endpoint: dialer_ep,
+                            route_id,
                         })
                         .await;
                 }
@@ -456,6 +466,8 @@ impl SocketDriver {
         self.dialers.push(DialerEntry {
             endpoint,
             cancel,
+            route_id,
+            send_pipe_rx,
             _task: task,
         });
     }

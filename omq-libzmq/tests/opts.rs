@@ -187,12 +187,16 @@ fn explicit_linger_zero_close_after_connect_without_peer_does_not_hang() {
 
 #[test]
 fn linger_delays_context_term_after_close() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_DEALER);
     set_i32(s, ZMQ_LINGER, 200);
 
-    let endpoint = std::ffi::CString::new("inproc://linger-delays-term").unwrap();
-    assert_eq!(zmq_bind(s, endpoint.as_ptr()), 0);
+    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+    assert_eq!(zmq_connect(s, endpoint.as_ptr()), 0);
 
     let payload = b"queued";
     assert_eq!(
@@ -218,6 +222,130 @@ fn linger_delays_context_term_after_close() {
         elapsed < Duration::from_secs(2),
         "ctx_term linger wait took too long: {elapsed:?}"
     );
+}
+
+#[test]
+fn bound_push_without_peer_is_muted_like_libzmq() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_i32(push, ZMQ_LINGER, 0);
+    set_i32(push, ZMQ_SNDTIMEO, 50);
+
+    let endpoint = std::ffi::CString::new("tcp://127.0.0.1:0").unwrap();
+    assert_eq!(zmq_bind(push, endpoint.as_ptr()), 0);
+
+    let payload = b"x";
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    let start = Instant::now();
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(
+        start.elapsed() >= Duration::from_millis(40),
+        "blocking send did not wait for SNDTIMEO"
+    );
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn bound_push_after_last_peer_disconnect_is_muted_like_libzmq() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_i32(push, ZMQ_LINGER, 0);
+    set_i32(pull, ZMQ_LINGER, 0);
+    set_i32(push, ZMQ_SNDTIMEO, 500);
+    set_i32(pull, ZMQ_RCVTIMEO, 500);
+
+    let port = helpers::free_port();
+    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+    assert_eq!(zmq_bind(push, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(pull, endpoint.as_ptr()), 0);
+
+    let first = b"first";
+    assert_eq!(
+        zmq_send(push, first.as_ptr().cast(), first.len(), 0),
+        i32::try_from(first.len()).unwrap()
+    );
+    let mut buf = [0u8; 16];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
+    assert_eq!(&buf[..5], first);
+
+    assert_eq!(zmq_close(pull), 0);
+
+    let payload = b"x";
+    let mut muted = false;
+    for _ in 0..50 {
+        let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT);
+        if rc == -1 {
+            assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+            muted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(muted, "bound PUSH stayed writable after last peer closed");
+
+    set_i32(push, ZMQ_SNDTIMEO, 50);
+    let start = Instant::now();
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(
+        start.elapsed() >= Duration::from_millis(40),
+        "blocking send did not wait for SNDTIMEO after disconnect"
+    );
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn immediate_push_connect_without_peer_is_muted_like_libzmq() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_i32(push, ZMQ_LINGER, 0);
+    set_i32(push, ZMQ_IMMEDIATE, 1);
+    set_i32(push, ZMQ_SNDTIMEO, 50);
+
+    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+
+    let payload = b"x";
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
+    let start = Instant::now();
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(
+        start.elapsed() >= Duration::from_millis(40),
+        "blocking send did not wait for SNDTIMEO"
+    );
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
 }
 
 #[test]

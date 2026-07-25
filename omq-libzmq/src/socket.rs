@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_int, c_void};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::net::{IpAddr, Ipv6Addr};
@@ -82,6 +82,7 @@ pub(crate) struct OmqSocket {
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: Arc<PlatformNotifyHandle>,
     pub bound_or_connected: AtomicBool,
+    pub connect_count: AtomicUsize,
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
 }
 
@@ -277,6 +278,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         last_endpoint: Mutex::new(None),
         notify,
         bound_or_connected: AtomicBool::new(false),
+        connect_count: AtomicUsize::new(0),
         recv_pump: std::sync::OnceLock::new(),
     });
     sock.ctx.socket_opened();
@@ -564,6 +566,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         }
         if let Endpoint::Inproc { .. } = endpoint {
             register_inproc_connect(sock, &addr_str);
+            sock.connect_count.fetch_add(1, Ordering::AcqRel);
             if let Ok(mut ep) = sock.last_endpoint.lock() {
                 *ep = Some(addr_str);
             }
@@ -585,6 +588,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
     match result {
         Ok(Ok(())) => {
+            sock.connect_count.fetch_add(1, Ordering::AcqRel);
             if let Ok(mut ep) = sock.last_endpoint.lock() {
                 *ep = Some(addr_str.clone());
             }
@@ -631,7 +635,18 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
         s.disconnect(endpoint).await
     });
 
-    result_to_rc(&result)
+    match result {
+        Ok(Ok(())) => {
+            let _ = sock
+                .connect_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    Some(n.saturating_sub(1))
+                });
+            0
+        }
+        Ok(Err(ref e)) => fail(map_omq_err(e)),
+        Err(()) => fail(ETERM),
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -94,6 +94,8 @@ pub(crate) struct SocketInner {
     pub subscriptions: Mutex<Vec<Bytes>>,
     pub endpoints: Mutex<Vec<(omq_tokio::Endpoint, bool)>>,
     has_tcp_endpoint: AtomicBool,
+    send_fork_gen: AtomicU32,
+    parent_send_fork_gen: AtomicU32,
     parent_fork_gen: AtomicU32,
     post_fork: AtomicBool,
     pub sndbuf: Mutex<SendBuffer>,
@@ -115,6 +117,8 @@ impl SocketInner {
             subscriptions: Mutex::new(Vec::new()),
             endpoints: Mutex::new(Vec::new()),
             has_tcp_endpoint: AtomicBool::new(false),
+            send_fork_gen: AtomicU32::new(FORK_GEN.load(Ordering::Relaxed)),
+            parent_send_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
             parent_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
             post_fork: AtomicBool::new(FORKED.load(Ordering::Relaxed)),
             sndbuf: Mutex::new(SendBuffer::default()),
@@ -813,12 +817,29 @@ impl Socket {
     fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message) -> PyResult<()> {
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-        let post_fork = self.inner.post_fork.swap(false, Ordering::AcqRel);
+        let fork_gen = FORK_GEN.load(Ordering::Acquire);
+        let child_fork = self.inner.send_fork_gen.load(Ordering::Acquire) != fork_gen;
+        if child_fork {
+            self.inner
+                .send_fork_gen
+                .store(fork_gen, Ordering::Release);
+        }
+        let parent_fork_gen = PARENT_FORK_GEN.load(Ordering::Acquire);
+        let parent_fork =
+            self.inner.parent_send_fork_gen.load(Ordering::Acquire) != parent_fork_gen;
+        if parent_fork {
+            self.inner
+                .parent_send_fork_gen
+                .store(parent_fork_gen, Ordering::Release);
+        }
+        let post_fork =
+            self.inner.post_fork.swap(false, Ordering::AcqRel) || child_fork || parent_fork;
         if post_fork {
             let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
+            let wait = timeout.unwrap_or(Duration::from_secs(1));
             py.detach(|| {
                 if tcp {
-                    let _ = sock.wait_connected(1, Duration::from_secs(1));
+                    let _ = sock.wait_connected(1, wait);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             });

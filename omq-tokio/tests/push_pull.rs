@@ -482,6 +482,36 @@ async fn push_send_before_peer_connects_queues() {
     }
 }
 
+#[tokio::test]
+async fn push_tcp_send_before_peer_connects_queues() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let port = test_support::bind_loopback(&push).await;
+
+    for i in 0..5 {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            push.send(Message::single(format!("early-{i}"))),
+        )
+        .await
+        .expect("send before TCP peer must not block")
+        .unwrap();
+    }
+
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+
+    for i in 0..5 {
+        let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let expected = format!("early-{i}");
+        assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
+    }
+}
+
 /// TCP PUSH/PULL with peer churn: PULL connects, receives, disconnects;
 /// new PULL connects and must receive subsequent messages.
 #[tokio::test]

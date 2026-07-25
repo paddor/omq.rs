@@ -25,8 +25,7 @@ import sys
 import threading
 import weakref
 from collections import deque
-from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple, Union
-
+from typing import Any, Awaitable, Callable, Final
 from . import _native  # type: ignore[attr-defined]
 from . import error
 from . import Context as _SyncContext
@@ -80,7 +79,7 @@ class _RecvFuture:
     _try_fn: Callable[[], Any]
     _fd: int
     _result: Any
-    _exception: Optional[Exception]
+    _exception: Exception | None
 
     def __init__(self, try_fn: Callable[[], Any], fd: int) -> None:
         self._try_fn = try_fn
@@ -180,7 +179,7 @@ class Socket(_BaseSocket):
     _sock: _native.AsyncSocket
     _context: Context
     _closed: bool
-    _loop: Optional[asyncio.AbstractEventLoop]
+    _loop: asyncio.AbstractEventLoop | None
     _recv_waiters: deque[Callable[[], bool]]
     _send_waiters: deque[Callable[[], bool]]
     _recv_wakeup_event: threading.Event
@@ -209,11 +208,11 @@ class Socket(_BaseSocket):
 
     def send(
         self,
-        data: Union[bytes, str],
+        data: bytes | str,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         try:
             self._sock.send(data, flags)
         except _native.ZMQError as e:
@@ -224,7 +223,7 @@ class Socket(_BaseSocket):
 
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> Awaitable[Union[bytes, Any]]:
+    ) -> Awaitable[bytes | Any]:
         if not copy:
             from pyomq import Frame
 
@@ -237,11 +236,11 @@ class Socket(_BaseSocket):
 
     def send_multipart(
         self,
-        parts: List[Union[bytes, str]],
+        parts: list[bytes | str],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         try:
             self._sock.send_multipart(parts, flags)
         except _native.ZMQError as e:
@@ -252,11 +251,11 @@ class Socket(_BaseSocket):
 
     def recv_multipart(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> Awaitable[Union[List[bytes], List[Any]]]:
+    ) -> Awaitable[list[bytes] | list[Any]]:
         if not copy:
             from pyomq import Frame
 
-            async def _wrap() -> List[Any]:
+            async def _wrap() -> list[Any]:
                 parts = await self._add_recv_event(self._sock._try_recv_multipart)
                 return [Frame(p) for p in parts]
 
@@ -278,16 +277,16 @@ class Socket(_BaseSocket):
         def _set_wakeup_modes(
             self,
             *,
-            recv_mode: Optional[int] = None,
-            send_mode: Optional[int] = None,
+            recv_mode: int | None = None,
+            send_mode: int | None = None,
         ) -> None:
             self._sock._set_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
 
         def _clear_wakeup_modes(
             self,
             *,
-            recv_mode: Optional[int] = None,
-            send_mode: Optional[int] = None,
+            recv_mode: int | None = None,
+            send_mode: int | None = None,
         ) -> None:
             self._sock._clear_wakeup_modes(recv_mode=recv_mode, send_mode=send_mode)
 
@@ -412,9 +411,9 @@ class Socket(_BaseSocket):
             )
 
         def _send_with_backpressure(
-            self, data: Union[bytes, str], flags: int
+            self, data: bytes | str, flags: int
         ) -> asyncio.Future[Any]:
-            def try_send() -> Optional[bool]:
+            def try_send() -> bool | None:
                 try:
                     self._sock.send(data, flags)
                     return True
@@ -431,9 +430,9 @@ class Socket(_BaseSocket):
             )
 
         def _send_multipart_with_backpressure(
-            self, parts: List[Union[bytes, str]], flags: int
+            self, parts: list[bytes | str], flags: int
         ) -> asyncio.Future[Any]:
-            def try_send() -> Optional[bool]:
+            def try_send() -> bool | None:
                 try:
                     self._sock.send_multipart(parts, flags)
                     return True
@@ -452,7 +451,7 @@ class Socket(_BaseSocket):
 
         def _add_recv_event(
             self, try_fn: Callable[[], Any]
-        ) -> Union[asyncio.Future[Any], _RecvFuture]:
+        ) -> asyncio.Future[Any] | _RecvFuture:
             # Fast path: message already available, no event loop needed.
             try:
                 result = try_fn()
@@ -474,12 +473,10 @@ class Socket(_BaseSocket):
 
             return _RecvFuture(try_fn, fd)
 
-        def _send_with_backpressure(
-            self, data: Union[bytes, str], flags: int
-        ) -> _RecvFuture:
+        def _send_with_backpressure(self, data: bytes | str, flags: int) -> _RecvFuture:
             fd = self._sock._send_fd()
 
-            def try_send() -> Optional[bool]:
+            def try_send() -> bool | None:
                 try:
                     self._sock.send(data, flags)
                     return True
@@ -491,11 +488,11 @@ class Socket(_BaseSocket):
             return _RecvFuture(try_send, fd)
 
         def _send_multipart_with_backpressure(
-            self, parts: List[Union[bytes, str]], flags: int
+            self, parts: list[bytes | str], flags: int
         ) -> _RecvFuture:
             fd = self._sock._send_fd()
 
-            def try_send() -> Optional[bool]:
+            def try_send() -> bool | None:
                 try:
                     self._sock.send_multipart(parts, flags)
                     return True
@@ -510,7 +507,7 @@ class Socket(_BaseSocket):
 
     def send_string(
         self, u: str, flags: int = 0, encoding: str = "utf-8"
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         return self.send(u.encode(encoding), flags)
 
     async def recv_string(self, flags: int = 0, encoding: str = "utf-8") -> str:
@@ -518,7 +515,7 @@ class Socket(_BaseSocket):
 
     def send_json(
         self, obj: Any, flags: int = 0, **kwargs: Any
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
 
     async def recv_json(self, flags: int = 0, **kwargs: Any) -> Any:
@@ -526,7 +523,7 @@ class Socket(_BaseSocket):
 
     def send_pyobj(
         self, obj: Any, flags: int = 0, protocol: int = -1
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         return self.send(pickle.dumps(obj, protocol), flags)
 
     async def recv_pyobj(self, flags: int = 0) -> Any:
@@ -535,17 +532,17 @@ class Socket(_BaseSocket):
     def send_serialized(
         self,
         msg: Any,
-        serialize: Callable[[Any], List[Union[bytes, str]]],
+        serialize: Callable[[Any], list[bytes | str]],
         flags: int = 0,
         copy: bool = True,
         **kwargs: Any,
-    ) -> Awaitable[Optional[Any]]:
+    ) -> Awaitable[Any | None]:
         frames = serialize(msg)
         return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
     async def recv_serialized(
         self,
-        deserialize: Callable[[List[bytes]], Any],
+        deserialize: Callable[[list[bytes]], Any],
         flags: int = 0,
         copy: bool = True,
     ) -> Any:
@@ -562,7 +559,7 @@ class Socket(_BaseSocket):
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    async def poll(self, timeout: Optional[int] = None, flags: int = POLLIN) -> int:
+    async def poll(self, timeout: int | None = None, flags: int = POLLIN) -> int:
         p = Poller()
         p.register(self, flags)
         evts = await p.poll(timeout)
@@ -582,7 +579,7 @@ class Socket(_BaseSocket):
 class Poller:
     """Async poller for ZMQ sockets."""
 
-    _sockets: Dict[int, Tuple[Socket, int]]
+    _sockets: dict[int, tuple[Socket, int]]
 
     def __init__(self) -> None:
         self._sockets = {}
@@ -599,10 +596,10 @@ class Poller:
             self._sockets[k] = (socket, flags)
 
     @property
-    def sockets(self) -> List[Tuple[Socket, int]]:
+    def sockets(self) -> list[tuple[Socket, int]]:
         return [(s, f) for s, f in self._sockets.values()]
 
-    async def poll(self, timeout: Optional[int] = None) -> List[Tuple[Socket, int]]:
+    async def poll(self, timeout: int | None = None) -> list[tuple[Socket, int]]:
         if not self._sockets:
             return []
         pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
@@ -619,14 +616,14 @@ class Poller:
 class Context(_SyncContext):
     """Async context for creating ZMQ sockets."""
 
-    _socket_class: Optional[type] = None
+    _socket_class: type | None = None
     _ctx: _native.AsyncContext
     _closed: bool
     _sockets: weakref.WeakSet[Socket]
     _ctx_id: int
 
     def __init__(
-        self, io_threads: int = 1, *, _shadow_ctx: Optional[_SyncContext] = None
+        self, io_threads: int = 1, *, _shadow_ctx: _SyncContext | None = None
     ) -> None:
         if _shadow_ctx is not None:
             self._ctx = _shadow_ctx._ctx
@@ -645,7 +642,7 @@ class Context(_SyncContext):
     def socket(
         self,
         socket_type: int,
-        socket_class: Optional[type[Socket]] = None,
+        socket_class: type[Socket] | None = None,
         **kwargs: Any,
     ) -> Socket:  # ty: ignore
         native = self._ctx.socket(socket_type)
@@ -669,7 +666,7 @@ class Context(_SyncContext):
                 s.close()
         self._sockets.clear()
 
-    def destroy(self, linger: Optional[int] = None) -> None:
+    def destroy(self, linger: int | None = None) -> None:
         for s in list(self._sockets):
             if not s.closed:
                 if linger is not None:

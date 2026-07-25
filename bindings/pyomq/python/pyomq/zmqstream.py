@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Callable, Optional, Union, List
+from typing import Any, Callable
 
 import pyomq
 
@@ -25,14 +25,14 @@ class ZMQStream:
 
     socket: pyomq.Socket
     io_loop: Any  # tornado.ioloop.IOLoop
-    _recv_callback: Optional[Callable[[Any], Any]]
+    _recv_callback: Callable[[Any], Any] | None
     _recv_copy: bool
-    _send_callback: Optional[Callable[[Any, Optional[Any]], Any]]
+    _send_callback: Callable[[Any, Any | None], Any] | None
     _closed: bool
     _fd: int
     _watching: bool
 
-    def __init__(self, socket: pyomq.Socket, io_loop: Optional[Any] = None) -> None:
+    def __init__(self, socket: pyomq.Socket, io_loop: Any | None = None) -> None:
         IOLoop = _get_IOLoop()
         self.socket = socket
         self.io_loop = io_loop or IOLoop.current()  # type: ignore[ty:unresolved-attribute]
@@ -43,9 +43,7 @@ class ZMQStream:
         self._fd = socket.getsockopt(pyomq.FD)
         self._watching = False
 
-    def on_recv(
-        self, callback: Optional[Callable[[Any], Any]], copy: bool = True
-    ) -> None:
+    def on_recv(self, callback: Callable[[Any], Any] | None, copy: bool = True) -> None:
         """Set a callback to be invoked when messages are received."""
         self._recv_callback = callback
         self._recv_copy = copy
@@ -54,7 +52,7 @@ class ZMQStream:
         else:
             self._stop_watching()
 
-    def on_send(self, callback: Optional[Callable[[Any, Optional[Any]], Any]]) -> None:
+    def on_send(self, callback: Callable[[Any, Any | None], Any] | None) -> None:
         """Set a callback to be invoked when sends complete."""
         self._send_callback = callback
 
@@ -68,11 +66,11 @@ class ZMQStream:
 
     def send(
         self,
-        msg: Union[bytes, str],
+        msg: bytes | str,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-        callback: Optional[Callable[[Any, Any], Any]] = None,
+        callback: Callable[[Any, Any], Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Send a message."""
@@ -83,11 +81,11 @@ class ZMQStream:
 
     def send_multipart(
         self,
-        msg_list: List[Union[bytes, str]],
+        msg_list: list[bytes | str],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-        callback: Optional[Callable[[Any, Any], Any]] = None,
+        callback: Callable[[Any, Any], Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Send a multipart message."""
@@ -101,14 +99,12 @@ class ZMQStream:
             self._send_callback(msg_list, None)
         return result
 
-    def flush(self, flag: int = 3, limit: Optional[int] = None) -> None:
+    def flush(self, flag: int = 3, limit: int | None = None) -> None:
         """Flush pending messages."""
         if flag & 1 and self._recv_callback:
             self._handle_recv()
 
-    def _handle_events(
-        self, fd: Optional[int] = None, events: Optional[int] = None
-    ) -> None:
+    def _handle_events(self, fd: int | None = None, events: int | None = None) -> None:
         """Internal handler for IOLoop events."""
         if self._closed:
             return
@@ -168,7 +164,7 @@ class ZMQStream:
         except Exception:
             pass
 
-    def close(self, linger: Optional[int] = None) -> None:
+    def close(self, linger: int | None = None) -> None:
         """Close the stream and unregister from IOLoop."""
         if self._closed:
             return

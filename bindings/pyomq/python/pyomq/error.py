@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import builtins
 import errno as _errno
-from typing import Dict, Type, Final
+from typing import Final
 
 from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
@@ -39,7 +39,7 @@ class ZMQVersionError(builtins.NotImplementedError, ZMQBaseError):
     """Feature requires a newer libzmq than the emulated version."""
 
 
-_BY_ERRNO: Final[Dict[int, Type[ZMQError]]] = {
+_BY_ERRNO: Final[dict[int, type[ZMQError]]] = {
     _errno.EAGAIN: Again,
     _errno.ETIMEDOUT: Again,
     156: ContextTerminated,

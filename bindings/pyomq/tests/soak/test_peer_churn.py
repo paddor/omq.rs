@@ -34,7 +34,7 @@ def test_peer_churn():
     push.setsockopt(zmq.SNDHWM, 1024)
     ep = push.bind(tcp_ep())
 
-    peers: List[Tuple[Socket, bool]] = []
+    peers: list[tuple[Socket, bool]] = []
     for _ in range(NUM_PEERS):
         p = ctx.socket(zmq.PULL)
         p.setsockopt(zmq.RCVTIMEO, 0)

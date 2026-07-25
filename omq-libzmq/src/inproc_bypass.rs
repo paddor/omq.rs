@@ -509,7 +509,8 @@ mod tests {
             tx.send(result).expect("send result");
         });
 
-        for _ in 0..1000 {
+        let wait_until = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < wait_until {
             if pipe.sender_waiting.load(Ordering::Acquire) {
                 break;
             }

@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encrypted mechanisms require `handshake_timeout`. Longer timeouts let slow
   peers complete authentication but also let stalled peers hold
   pending-handshake slots longer.
+- Clarify that `Options::send_hwm` is a complete-message count, not a byte cap,
+  and that native HWM does not exactly match libzmq per-pipe accounting.
+- Clarify native zero-linger default and `linger_forever()` edge cases.
 
 ### Removed
 

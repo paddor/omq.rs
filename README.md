@@ -46,6 +46,8 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 - Transport failures are normal: reconnect, connect-before-bind, peer churn, and bind-side restarts are part of the design.
 - Peer failures do not become user errors: `send()` and `recv()` keep working through disconnects, reconnects, slow consumers, and bind-side restarts.
 - HWM back-pressure and routing fairness under load, not only in empty-queue examples.
+- Documented libzmq compatibility edges for no-peer sends, linger, and HWM:
+  [doc/libzmq/semantics.md](doc/libzmq/semantics.md).
 - The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
 - The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are assigned to IO lanes automatically.
 - Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
@@ -108,7 +110,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | Feature | Details |
 |---------|---------|
 | **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
-| **Per-socket HWM** | Work-stealing send pumps on round-robin patterns; per-connection queues on fan-out and identity-routed patterns. |
+| **Message-count HWM** | `send_hwm`/`recv_hwm` count complete messages, not bytes. Native effective capacity can exceed `send_hwm` because fallback, per-peer queues, and transmit slots are separate. |
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
 | **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
@@ -172,6 +174,8 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   throughput on bandwidth-limited links.
 - [doc/architecture.md](doc/architecture.md): architecture and tokio
   backend internals.
+- [doc/libzmq/semantics.md](doc/libzmq/semantics.md): exact compatibility
+  notes for no-peer sends, linger, and HWM.
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
   format and dictionary shipping rules.
 

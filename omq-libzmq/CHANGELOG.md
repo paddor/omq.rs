@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound no-peer `PUSH` sends now match libzmq: blocking sends wait for a
+  route, while nonblocking or zero-timeout sends return `EAGAIN` instead of
+  queuing into native fallback.
+- `ZMQ_IMMEDIATE=1` now mutes connected no-peer round-robin sends until a peer
+  completes handshaking, matching libzmq.
+
 ## [0.5.6] - 2026-07-23
 
 ### Fixed

@@ -197,9 +197,18 @@ Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) use per-peer
 active pipes from a moving cursor. If every active pipe is full, async send
 waits on a rotating peer and `try_send` reports HWM backpressure.
 
-`FallbackQueue` remains only as the no-peer/pre-connect fallback. Peer tasks drain
-it before newer pipe-fed sends, so messages queued before handshake are not
-overtaken.
+`FallbackQueue` remains only as the native no-peer/pre-connect fallback. It is
+capped by `Options::send_hwm`, which is a complete-message count and not a byte
+cap. Peer tasks drain fallback before newer pipe-fed sends, so messages queued
+before handshake are not overtaken.
+
+This differs from libzmq for bound round-robin sockets with no ready peer:
+libzmq mutes the send path, so blocking `send()` waits and nonblocking
+`send()` returns `EAGAIN`. Native OMQ accepts into fallback up to `send_hwm`.
+`omq-libzmq` adds C-layer routing checks so `ZMQ_IMMEDIATE` and bound no-peer
+send behavior match libzmq while the native Rust API keeps fallback semantics.
+Effective native capacity can exceed `send_hwm` after peers materialize because
+fallback, per-peer pipes, and transmit slots are separate buffers.
 
 Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use lane workers for parallel
 subscription matching and encoding. With N owned IO threads, N lane workers run,

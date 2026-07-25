@@ -27,6 +27,17 @@ pub use omq_proto::error::TrySendError;
 /// driver. Dropping the last handle starts the same configured linger in the
 /// background, but no caller waits for the result.
 ///
+/// # Native send semantics
+///
+/// `PUSH`, `DEALER`, `REQ`, `CLIENT`, and `SCATTER` sends with no ready peer
+/// queue into native fallback up to `Options::send_hwm`. libzmq does not do
+/// this for bound no-peer sockets: it mutes them, so blocking `send()` waits
+/// and nonblocking `send()` returns `EAGAIN`.
+///
+/// `Options::send_hwm` counts complete messages, not bytes. It is not an
+/// exact total queue cap because fallback, per-peer queues, and transmit slots
+/// are separate buffers.
+///
 /// # Concurrency
 ///
 /// The tokio backend is multi-threaded. `recv` drains a set of
@@ -250,8 +261,15 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
-    /// Send a message. Awaits until the message has been accepted by a ready
-    /// peer's driver inbox (not waited-on-wire).
+    /// Send a message.
+    ///
+    /// This waits until the message is accepted into OMQ's outbound routing
+    /// buffers. It does not wait for bytes to reach the peer or the kernel.
+    ///
+    /// Native round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`,
+    /// `SCATTER`) accept no-peer sends into fallback up to `Options::send_hwm`.
+    /// This differs from libzmq for bound no-peer sockets, which mute instead:
+    /// blocking `send()` waits and nonblocking `send()` returns `EAGAIN`.
     pub async fn send(&self, msg: Message) -> Result<()> {
         if self
             .inner
@@ -323,10 +341,16 @@ impl Socket {
         }
     }
 
-    /// Non-blocking send. Routes through the `SendSubmitter` directly
-    /// (no actor hop), mirroring `send()` but synchronously. Returns
-    /// `Full(msg)` when the outbound queue is at HWM so the caller can
-    /// retry or fall back to the async `send()`.
+    /// Non-blocking send.
+    ///
+    /// Routes through the `SendSubmitter` directly (no actor hop), mirroring
+    /// `send()` but synchronously. Returns `Full(msg)` when native outbound
+    /// buffers are at HWM so the caller can retry or fall back to async
+    /// `send()`.
+    ///
+    /// For native round-robin sockets, no-peer fallback counts as an outbound
+    /// buffer. `try_send()` can therefore succeed before any peer is ready.
+    /// libzmq bound no-peer sockets return `EAGAIN` instead.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {

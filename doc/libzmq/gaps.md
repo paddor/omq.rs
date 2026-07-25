@@ -1,7 +1,8 @@
 # libzmq v4.3.5 vs omq.rs: Error Handling Gap Analysis
 
 Compares error/edge-case handling in libzmq v4.3.5 against what omq.rs
-implements today. See `errors.md` for the full libzmq catalog.
+implements today. See `errors.md` for the full libzmq catalog and
+`semantics.md` for no-peer send, linger, and HWM behavior.
 
 ## Legend
 
@@ -118,7 +119,7 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| HWM enforcement | msgs_written - peers_msgs_read >= hwm | Bounded channel capacity | **=** |
+| HWM enforcement | per-pipe complete-message credits | Split bounded queues; effective capacity can exceed `send_hwm` | **~** |
 | LWM re-activation at half | (hwm+1)/2 triggers activate_write | Channel internal (flume/async_channel) | **~** |
 | Round-robin HWM exceeded | Blocks / EAGAIN to user | Block / DropNewest / DropOldest | **=** superset |
 | PUB/XPUB mute | Drop on HWM (`XPUB_NODROP` excepted) | Drop on HWM (`xpub_nodrop` excepted) | **=** |
@@ -133,7 +134,7 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes | Active per-peer pipes plus shared fallback | **~** |
+| LB round-robin (PUSH/DEALER) | Index-based, skip full pipes; no ready bound pipe mutes sends | Active per-peer pipes plus shared fallback; C wrapper gates no-peer sends | **~** |
 | FQ round-robin (PULL/ROUTER recv) | Index-based, assert on mid-msg pipe death | Per-peer drivers feed bounded recv queue | **~** |
 | PUB fan-out: slow sub blocks all | No; slow sub mutes and drops | Per-sub independent queues; slow sub drops | **=** |
 | PUB fan-out: ref counting | Manual rm_refs on failure | Bytes Arc clone | **=** equivalent |

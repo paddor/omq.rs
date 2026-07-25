@@ -186,6 +186,24 @@ extern "C" {
 #define ZMQ_MULTICAST_LOOP          96
 #define ZMQ_ROUTER_NOTIFY           97
 
+/*  omq-libzmq send/HWM option notes ---------------------------------------- */
+/*
+    ZMQ_SNDHWM and ZMQ_RCVHWM are message-count limits, not byte limits.
+    A complete multipart message consumes one HWM slot regardless of payload
+    byte size.
+
+    ZMQ_LINGER defaults to -1, matching libzmq. zmq_close() returns quickly;
+    context termination waits for active linger work.
+
+    ZMQ_IMMEDIATE defaults to 0. Connected sockets may queue before a peer is
+    ready. With ZMQ_IMMEDIATE=1, connected no-peer round-robin sends mute
+    until handshake completes.
+
+    Bound PUSH/DEALER/REQ/CLIENT/SCATTER sockets with no ready peer are muted:
+    blocking zmq_send() waits for a route, while ZMQ_DONTWAIT or SNDTIMEO=0
+    returns EAGAIN. omq-libzmq does not accept and drop these messages.
+*/
+
 /*  Message options ---------------------------------------------------------- */
 #define ZMQ_MORE                    1
 #define ZMQ_SHARED                  3

@@ -80,10 +80,14 @@ impl Error {
     }
 }
 
-/// Error returned by `Socket::try_send`.
+/// Error returned by native `Socket::try_send`.
 #[derive(Debug)]
 pub enum TrySendError {
-    /// Channel full (HWM reached). Contains the message for retry.
+    /// Native outbound buffers are full. Contains the message for retry.
+    ///
+    /// `Options::send_hwm` counts complete messages, not bytes. Native OMQ
+    /// has separate fallback, per-peer, and transmit-slot buffers, so this is
+    /// not exact libzmq per-pipe HWM accounting.
     Full(Message),
     /// Socket closed.
     Closed,

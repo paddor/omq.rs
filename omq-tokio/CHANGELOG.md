@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout. Longer timeouts let slow peers complete authentication but also let
   stalled peers hold pending-handshake slots longer.
 
+### Fixed
+
+- `Socket::close()` with non-zero or forever linger now keeps bind/connect
+  endpoints alive while queued no-peer sends drain to late peers.
+- Dropping the last socket handle now applies configured linger in the
+  background instead of forcing zero-linger teardown.
+
+### Changed
+
+- Document native no-peer fallback, linger, and HWM edge cases against libzmq.
+
 ## [0.19.3] - 2026-07-23
 
 ### Added

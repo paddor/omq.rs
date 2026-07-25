@@ -8,6 +8,13 @@
 //! algorithms live in the runtime-agnostic `omq-proto` crate.
 //! This crate provides the tokio glue: per-connection drivers,
 //! transport implementations, and the public `Socket` actor.
+//!
+//! # Compatibility warnings
+//!
+//! Native `Options::linger` defaults to zero, unlike libzmq's forever linger
+//! default. Native `Options::send_hwm` counts messages, not bytes, and is not
+//! an exact total queue cap. Native round-robin no-peer sends queue into
+//! fallback up to `send_hwm`; libzmq mutes bound no-peer sockets instead.
 #![forbid(unsafe_code)]
 
 #[cfg(not(target_has_atomic = "64"))]

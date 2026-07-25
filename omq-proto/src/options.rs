@@ -1,7 +1,9 @@
 //! Socket options: typed builder.
 //!
-//! Defaults differ from libzmq in a few places: linger defaults to zero,
-//! HWM is per-socket, and conflate is restricted to `FanOut` patterns.
+//! Defaults differ from libzmq in a few places. Native OMQ linger defaults to
+//! zero, while libzmq `ZMQ_LINGER` defaults to forever. Native OMQ
+//! `send_hwm`/`recv_hwm` are socket-level message-count caps, not byte caps
+//! and not exact libzmq pipe-credit accounting.
 
 use std::time::Duration;
 
@@ -23,6 +25,18 @@ const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 
 /// Per-socket configuration.
+///
+/// # Compatibility warnings
+///
+/// Native OMQ does not copy every libzmq socket default or HWM detail:
+///
+/// - `linger` defaults to zero. libzmq `ZMQ_LINGER` defaults to forever.
+/// - `send_hwm` and `recv_hwm` count complete messages, not bytes.
+/// - Native `send_hwm` is not an exact total queued-message cap. No-peer
+///   fallback, per-peer queues, and transmit slots are separate buffers.
+/// - Native round-robin sends (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`)
+///   with no ready peer queue into fallback up to `send_hwm`. libzmq mutes a
+///   bound no-peer socket instead.
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
 // every backend file that accesses them.
@@ -37,14 +51,29 @@ pub struct Options {
     /// explicitly on both endpoints.
     pub workload_profile: Option<WorkloadProfile>,
 
-    /// Send-side high-water mark, total for the socket.
+    /// Send-side high-water mark as a message count.
+    ///
+    /// This is not a byte cap. One 16-byte message and one 16-MiB message
+    /// each consume one HWM slot. Native OMQ applies this as a socket-level
+    /// cap on the shared no-peer/pre-connect fallback and as per-pipe caps
+    /// after peers materialize, so effective queued capacity can be higher
+    /// than this value. `omq-libzmq` exposes this as `ZMQ_SNDHWM`, but it
+    /// still does not provide exact libzmq per-pipe credit accounting yet.
     pub send_hwm: u32,
 
-    /// Receive-side high-water mark, total for the socket.
+    /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
     /// Time to wait on close for the send queue to drain.
-    /// `None` = wait forever. `Some(Duration::ZERO)` = drop immediately.
+    ///
+    /// Native OMQ defaults to `Some(Duration::ZERO)`: close/drop discard
+    /// unsent queued messages immediately. This intentionally differs from
+    /// libzmq, where `ZMQ_LINGER` defaults to `-1` (forever). `omq-libzmq`
+    /// maps its C default back to forever for compatibility.
+    ///
+    /// `None` waits forever. `Some(Duration::ZERO)` drops immediately.
+    /// Finite non-zero values keep bind/connect endpoints alive until queued
+    /// sends drain or the deadline expires.
     pub linger: Option<Duration>,
 
     /// Identity used for ROUTER / DEALER / SERVER / PEER routing. Empty = auto.
@@ -92,11 +121,15 @@ pub struct Options {
     /// ROUTER: fail `send` with `Error::Unroutable` for unknown identities.
     pub router_mandatory: bool,
 
-    /// Behaviour when the socket's send HWM is reached.
+    /// Behavior when the socket's send HWM is reached.
     ///
     /// Fan-out sockets (`PUB`, `XPUB`, `RADIO`) are always lossy on mute:
     /// this setting is ignored and they drop newest unless `xpub_nodrop`
     /// is set.
+    ///
+    /// Native round-robin no-peer sends use the fallback queue first. This
+    /// setting only applies once that fallback reaches `send_hwm`. libzmq
+    /// instead mutes bound no-peer round-robin sockets immediately.
     pub on_mute: OnMute,
 
     /// TCP keepalive policy. Applied to every accepted / dialed TCP
@@ -335,6 +368,11 @@ impl Options {
         Ok(())
     }
 
+    /// Set send-side HWM as a message count.
+    ///
+    /// This is not a byte limit. Large messages count the same as small
+    /// messages. Native OMQ may hold more than this value once fallback
+    /// messages have moved into per-peer queues.
     #[must_use]
     pub fn send_hwm(mut self, hwm: u32) -> Self {
         self.send_hwm = hwm;
@@ -347,12 +385,21 @@ impl Options {
         self
     }
 
+    /// Set close linger to a finite duration.
+    ///
+    /// `Duration::ZERO` means drop queued outbound messages immediately.
+    /// Non-zero values keep endpoints alive so queued sends can drain to
+    /// existing or late peers before the deadline.
     #[must_use]
     pub fn linger(mut self, d: Duration) -> Self {
         self.linger = Some(d);
         self
     }
 
+    /// Wait forever for queued outbound messages to drain on close/drop.
+    ///
+    /// This can wait forever if queued messages have no peer and no peer ever
+    /// arrives. Use finite linger for services that need bounded shutdown.
     #[must_use]
     pub fn linger_forever(mut self) -> Self {
         self.linger = None;
@@ -656,7 +703,12 @@ impl Default for ReconnectPolicy {
     }
 }
 
-/// What to do when the send HWM is reached and a new message arrives.
+/// What to do when native send HWM is reached and a new message arrives.
+///
+/// Native round-robin sockets with no ready peer queue into fallback until
+/// `send_hwm` is reached, then apply this policy. This differs from libzmq:
+/// a bound no-peer `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` socket is muted
+/// immediately there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OnMute {

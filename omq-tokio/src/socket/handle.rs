@@ -654,9 +654,9 @@ impl Socket {
     /// expires. Returns the peer count at the time the threshold was met,
     /// or `Error::Timeout` if the deadline is reached first.
     ///
-    /// This is a data-plane readiness check. It polls `connections()`
-    /// rather than relying on `MonitorStream` events, which are
-    /// diagnostic and may lag under load.
+    /// This is a data-plane readiness check. It waits for ZMTP peers to
+    /// finish handshaking rather than only being accepted by the listener.
+    /// `STREAM` peers are ready as soon as the raw TCP connection exists.
     pub async fn wait_connected(
         &self,
         min_peers: usize,
@@ -665,8 +665,13 @@ impl Socket {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let conns = self.connections().await?;
-            if conns.len() >= min_peers {
-                return Ok(conns.len());
+            let ready = if self.inner.socket_type == SocketType::Stream {
+                conns.len()
+            } else {
+                conns.iter().filter(|conn| conn.peer_info.is_some()).count()
+            };
+            if ready >= min_peers {
+                return Ok(ready);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::Timeout);

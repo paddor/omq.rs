@@ -25,6 +25,9 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: System :: Networking",
 ]
+dependencies = [
+    "typing_extensions>=4.0.0; python_version < '3.11'",
+]
 
 [dependency-groups]
 test = [

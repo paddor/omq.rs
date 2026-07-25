@@ -25,19 +25,16 @@ import sys
 import threading
 import weakref
 from collections import deque
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple, Union
 
 from . import _native  # type: ignore[attr-defined]
 from . import error
 from . import Context as _SyncContext
 from . import _next_ctx_id
 from . import (
-    FD,
-    POLLIN,
-    SNDHWM,
-    RCVHWM,
     LINGER,
     _TYPE_NAMES,
+    POLLIN,
     _SocketOptionsBase,
 )
 
@@ -54,8 +51,8 @@ def _resolved_future(result: Any) -> asyncio.Future[Any]:
     return fut
 
 
-_EAGAIN = _errno.EAGAIN
-_MISSING = object()
+_EAGAIN: Final[int] = _errno.EAGAIN
+_MISSING: Final[object] = object()
 
 
 class _DoneFuture:
@@ -72,7 +69,7 @@ class _DoneFuture:
         return True
 
 
-_SEND_DONE = _DoneFuture()
+_SEND_DONE: Final[_DoneFuture] = _DoneFuture()
 
 
 class _RecvFuture:
@@ -209,60 +206,6 @@ class Socket(_SocketOptionsBase):
     def __repr__(self) -> str:
         st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
         return f"<pyomq.asyncio.Socket(pyomq.{st}) at {id(self):#x}>"
-
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-    @property
-    def context(self) -> Context:
-        return self._context
-
-    @property
-    def last_endpoint(self) -> Optional[Union[bytes, str]]:
-        return self._last_endpoint
-
-    @property
-    def socket_type(self) -> int:
-        return self._sock.getsockopt(_native.TYPE)
-
-    @property
-    def underlying(self) -> Socket:
-        return self
-
-    # ── I/O ──────────────────────────────────────────────────────────
-
-    def fileno(self) -> int:
-        return self.getsockopt(FD)
-
-    def bind(self, endpoint: Union[str, bytes]) -> Union[str, bytes]:
-        try:
-            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
-            return ep
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def connect(self, endpoint: Union[str, bytes]) -> None:
-        try:
-            self._sock.connect(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = (
-                endpoint.encode() if isinstance(endpoint, str) else endpoint
-            )
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def unbind(self, endpoint: Union[str, bytes]) -> None:
-        try:
-            return self._sock.unbind(self._context._namespace_inproc(endpoint))
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def disconnect(self, endpoint: Union[str, bytes]) -> None:
-        try:
-            return self._sock.disconnect(self._context._namespace_inproc(endpoint))
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
 
     def send(
         self,
@@ -609,109 +552,15 @@ class Socket(_SocketOptionsBase):
         frames = await self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
-    # ── Options (sync -- matches pyzmq) ──────────────────────────────
-
-    def setsockopt(self, option: int, value: Any) -> Any:
-        try:
-            return self._sock.setsockopt(option, value)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def getsockopt(self, option: int) -> Any:
-        from pyomq import LAST_ENDPOINT
-
-        if option == LAST_ENDPOINT:
-            return self._last_endpoint
-        try:
-            return self._sock.getsockopt(option)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def set(self, option: int, value: Any) -> Any:
-        return self.setsockopt(option, value)
-
-    def get(self, option: int) -> Any:
-        return self.getsockopt(option)
-
-    def setsockopt_string(
-        self, option: int, value: str, encoding: str = "utf-8"
-    ) -> Any:
-        return self.setsockopt(option, value.encode(encoding))
-
-    def getsockopt_string(self, option: int, encoding: str = "utf-8") -> str:
-        v = self.getsockopt(option)
-        if isinstance(v, bytes):
-            return v.decode(encoding)
-        return str(v)
-
-    set_string = setsockopt_string
-    get_string = getsockopt_string
-
-    def set_curve_auth(self, auth: Any) -> Any:
-        try:
-            return self._sock.set_curve_auth(auth)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        except AttributeError:
-            from . import ZMQNotImplementedError
-
-            raise ZMQNotImplementedError("curve feature not compiled")
-
-    def set_hwm(self, value: int) -> None:
-        self.setsockopt(SNDHWM, value)
-        self.setsockopt(RCVHWM, value)
-
-    def get_hwm(self) -> int:
-        return self.getsockopt(SNDHWM)
-
-    hwm = property(get_hwm, set_hwm)
-
     # ── Subscriptions ────────────────────────────────────────────────
 
-    def subscribe(self, prefix: Union[bytes, str]) -> None:
-        try:
-            return self._sock.subscribe(prefix)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def unsubscribe(self, prefix: Union[bytes, str]) -> None:
-        try:
-            return self._sock.unsubscribe(prefix)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def join(self, group: Union[bytes, str]) -> None:
-        try:
-            return self._sock.join(group)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def leave(self, group: Union[bytes, str]) -> None:
-        try:
-            return self._sock.leave(group)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
+    # Note: subscribe(), unsubscribe(), join(), leave() inherited from base
 
     # ── Monitoring ───────────────────────────────────────────────────
 
-    def monitor(self) -> Any:
-        return self._sock.monitor()
-
-    def connections(self) -> Any:
-        return self._sock.connections()
-
-    def connection_info(self, connection_id: int) -> Any:
-        return self._sock.connection_info(connection_id)
+    # Note: monitor(), connections(), connection_info() inherited from base
 
     # ── Lifecycle ────────────────────────────────────────────────────
-
-    def close(self, linger: Optional[int] = None) -> None:
-        if not self._closed:
-            self._closed = True
-            self._sock.close(linger)
-
-    def __del__(self) -> None:
-        self.close()
 
     async def poll(self, timeout: Optional[int] = None, flags: int = POLLIN) -> int:
         p = Poller()
@@ -721,13 +570,6 @@ class Socket(_SocketOptionsBase):
             if sock is self:
                 return mask
         return 0
-
-    def __enter__(self) -> Socket:
-        return self
-
-    def __exit__(self, *args: Any) -> bool:
-        self.close()
-        return False
 
     async def __aenter__(self) -> Socket:
         return self
@@ -801,8 +643,11 @@ class Context(_SyncContext):
         return self._closed
 
     def socket(
-        self, socket_type: int, socket_class: Optional[type] = None, **kwargs: Any
-    ) -> Any:
+        self,
+        socket_type: int,
+        socket_class: Optional[type[Socket]] = None,
+        **kwargs: Any,
+    ) -> Socket:  # ty: ignore
         native = self._ctx.socket(socket_type)
         cls = socket_class or Socket
         s = object.__new__(cls)

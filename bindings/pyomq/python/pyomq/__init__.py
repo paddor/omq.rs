@@ -14,8 +14,8 @@ For asynchronous code::
 """
 
 from __future__ import annotations
-from collections.abc import Buffer
 
+import builtins
 import errno as _errno
 import itertools
 import json
@@ -34,12 +34,19 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Protocol,
     Tuple,
     Type,
     Union,
     SupportsIndex,
     SupportsBytes,
+    overload,
 )
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from . import error as error  # noqa: F401
@@ -132,10 +139,12 @@ POLLOUT: Final[int] = 2
 POLLERR: Final[int] = 4
 POLLPRI: Final[int] = 32
 HWM: Final[int] = 1
+
+# Windows specific constants
+_IS_WINDOWS: Final[bool] = sys.platform == "win32"
 _WAKEUP_MODE_NONE: Final[int] = 0
 _WAKEUP_MODE_ASYNC: Final[int] = 1
 _WAKEUP_MODE_SYNC: Final[int] = 2
-_IS_WINDOWS: Final[bool] = sys.platform == "win32"
 
 ROUTING_ID: Final[int] = 5
 LAST_ENDPOINT: Final[int] = 32
@@ -297,19 +306,18 @@ class Message(bytes):
 
     def __new__(
         cls,
-        data: Union[
-            Iterable[SupportsIndex], SupportsIndex, SupportsBytes, Buffer
-        ] = b"",
+        # Work around teh fact in the scope bytes is the descriptor
+        data: builtins.bytes = b"",
         track: bool = False,
     ):
         return super().__new__(cls, data)
 
     @property
-    def bytes(self):
+    def bytes(self) -> builtins.bytes:
         return bytes(self)
 
     @property
-    def buffer(self):
+    def buffer(self) -> memoryview:
         return memoryview(bytes(self))
 
 
@@ -317,6 +325,40 @@ Frame = Message
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
+
+
+class _NativeSocket(Protocol):
+    """Protocol for native socket implementation (sync or async)."""
+
+    def getsockopt(self, option: int) -> Any: ...
+
+    def setsockopt(self, option: int, value: Any) -> Any: ...
+
+    def bind(self, endpoint: Union[str, bytes]) -> Union[str, bytes]: ...
+
+    def connect(self, endpoint: Union[str, bytes]) -> None: ...
+
+    def unbind(self, endpoint: Union[str, bytes]) -> None: ...
+
+    def disconnect(self, endpoint: Union[str, bytes]) -> None: ...
+
+    def subscribe(self, prefix: Union[bytes, str]) -> None: ...
+
+    def unsubscribe(self, prefix: Union[bytes, str]) -> None: ...
+
+    def join(self, group: Union[bytes, str]) -> None: ...
+
+    def leave(self, group: Union[bytes, str]) -> None: ...
+
+    def monitor(self) -> Any: ...
+
+    def connections(self) -> Any: ...
+
+    def connection_info(self, connection_id: int) -> Any: ...
+
+    def set_curve_auth(self, auth: Any) -> Any: ...
+
+    def close(self, linger: Optional[int] = None) -> None: ...
 
 
 # Socket option descriptor for IDE autocomplete support
@@ -338,14 +380,18 @@ class _SocketOptionDescriptor:
 
 
 class _SocketOptionsBase:
-    """Base class with socket option descriptors for IDE autocomplete."""
+    """Base class with socket option descriptors and shared methods."""
+
+    # Attributes (subclasses must define these)
+    _sock: _NativeSocket
+    _context: Context
+    _closed: bool
+    _last_endpoint: Optional[Union[bytes, str]]
 
     # Socket options
     affinity = _SocketOptionDescriptor(AFFINITY)
     identity = _SocketOptionDescriptor(IDENTITY)
     routing_id = _SocketOptionDescriptor(ROUTING_ID)
-    subscribe = _SocketOptionDescriptor(SUBSCRIBE)
-    unsubscribe = _SocketOptionDescriptor(UNSUBSCRIBE)
     rcvmore = _SocketOptionDescriptor(RCVMORE)
     sndhwm = _SocketOptionDescriptor(SNDHWM)
     rcvhwm = _SocketOptionDescriptor(RCVHWM)
@@ -382,11 +428,176 @@ class _SocketOptionsBase:
     plain_username = _SocketOptionDescriptor(PLAIN_USERNAME)
     plain_password = _SocketOptionDescriptor(PLAIN_PASSWORD)
 
+    # ── Shared properties ────────────────────────────────────────────
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def context(self) -> Context:
+        return self._context
+
+    @property
+    def socket_type(self) -> int:
+        return self._sock.getsockopt(TYPE)
+
     @property
     def last_endpoint(self) -> Optional[Union[bytes, str]]:
         return self._last_endpoint
 
-    _last_endpoint: Optional[Union[bytes, str]]
+    @property
+    def underlying(self) -> _SocketOptionsBase:
+        return self
+
+    # ── Options ──────────────────────────────────────────────────────
+
+    def setsockopt(self, option: int, value: Any) -> Any:
+        try:
+            return self._sock.setsockopt(option, value)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def getsockopt(self, option: int) -> Any:
+        if option == LAST_ENDPOINT:
+            return self._last_endpoint
+        try:
+            return self._sock.getsockopt(option)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def set(self, option: int, value: Any) -> Any:
+        return self.setsockopt(option, value)
+
+    def get(self, option: int) -> Any:
+        return self.getsockopt(option)
+
+    def setsockopt_string(
+        self, option: int, value: str, encoding: str = "utf-8"
+    ) -> Any:
+        return self.setsockopt(option, value.encode(encoding))
+
+    def getsockopt_string(self, option: int, encoding: str = "utf-8") -> str:
+        v = self.getsockopt(option)
+        if isinstance(v, bytes):
+            return v.decode(encoding)
+        return str(v)
+
+    set_string = setsockopt_string
+    get_string = getsockopt_string
+
+    def set_curve_auth(self, auth: Any) -> Any:
+        try:
+            return self._sock.set_curve_auth(auth)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+        except AttributeError:
+            raise ZMQNotImplementedError("curve feature not compiled")
+
+    def set_hwm(self, value: int) -> None:
+        self.setsockopt(SNDHWM, value)
+        self.setsockopt(RCVHWM, value)
+
+    def get_hwm(self) -> int:
+        return self.getsockopt(SNDHWM)
+
+    hwm = property(get_hwm, set_hwm)
+
+    # ── Shared I/O methods ───────────────────────────────────────────
+
+    def fileno(self) -> int:
+        return self.getsockopt(FD)
+
+    @overload
+    def bind(self, endpoint: str) -> str: ...
+
+    @overload
+    def bind(self, endpoint: bytes) -> bytes: ...
+
+    def bind(self, endpoint):
+        try:
+            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
+            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
+            return ep
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def connect(self, endpoint: Union[str, bytes]) -> None:
+        if isinstance(endpoint, bytes):
+            endpoint = endpoint.decode("utf-8")
+        try:
+            self._sock.connect(self._context._namespace_inproc(endpoint))
+            self._last_endpoint = (
+                endpoint.encode() if isinstance(endpoint, str) else endpoint
+            )
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def unbind(self, endpoint: Union[str, bytes]) -> None:
+        try:
+            return self._sock.unbind(self._context._namespace_inproc(endpoint))
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def disconnect(self, endpoint: Union[str, bytes]) -> None:
+        try:
+            return self._sock.disconnect(self._context._namespace_inproc(endpoint))
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    # ── Subscriptions ────────────────────────────────────────────────
+
+    def subscribe(self, prefix: Union[bytes, str]) -> None:
+        try:
+            return self._sock.subscribe(prefix)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def unsubscribe(self, prefix: Union[bytes, str]) -> None:
+        try:
+            return self._sock.unsubscribe(prefix)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def join(self, group: Union[bytes, str]) -> None:
+        try:
+            return self._sock.join(group)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    def leave(self, group: Union[bytes, str]) -> None:
+        try:
+            return self._sock.leave(group)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+
+    # ── Monitoring ───────────────────────────────────────────────────
+
+    def monitor(self) -> Any:
+        return self._sock.monitor()
+
+    def connections(self) -> Any:
+        return self._sock.connections()
+
+    def connection_info(self, connection_id: int) -> Any:
+        return self._sock.connection_info(connection_id)
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    def close(self, linger: Optional[int] = None) -> None:
+        if not self._closed:
+            self._closed = True
+            self._sock.close(linger)
+
+    def __del__(self) -> None:
+        self.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: Any) -> bool:
+        self.close()
+        return False
 
 
 class _SocketMeta(type):
@@ -436,79 +647,7 @@ class Socket(_SocketOptionsBase, metaclass=_SocketMeta):
         st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
         return f"<pyomq.Socket(pyomq.{st}) at {id(self):#x}>"
 
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-    @property
-    def context(self) -> Context:
-        return self._context
-
-    @property
-    def socket_type(self) -> int:
-        return self._sock.getsockopt(TYPE)
-
-    @property
-    def underlying(self) -> Socket:
-        return self
-
     # ── I/O ──────────────────────────────────────────────────────────
-
-    def fileno(self) -> int:
-        return self.getsockopt(FD)
-
-    @property
-    def last_endpoint(self) -> Optional[Union[bytes, str]]:
-        return self._last_endpoint
-
-    def _check_fork(self) -> None:
-        pid = os.getpid()
-        if pid == self._pid:
-            return
-        self._pid = pid
-        for ep in self._binds:
-            try:
-                self._sock.bind(self._context._namespace_inproc(ep))
-            except _native.ZMQError:
-                pass
-        for ep in self._connects:
-            try:
-                self._sock.connect(self._context._namespace_inproc(ep))
-            except _native.ZMQError:
-                pass
-
-    def bind(self, endpoint: Union[str, bytes]) -> Union[str, bytes]:
-        try:
-            ep = self._sock.bind(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
-            self._binds.append(endpoint)
-            return ep
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def connect(self, endpoint: Union[str, bytes]) -> None:
-        if isinstance(endpoint, bytes):
-            endpoint = endpoint.decode("utf-8")
-        try:
-            self._sock.connect(self._context._namespace_inproc(endpoint))
-            self._last_endpoint = (
-                endpoint.encode() if isinstance(endpoint, str) else endpoint
-            )
-            self._connects.append(endpoint)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def unbind(self, endpoint: Union[str, bytes]) -> None:
-        try:
-            return self._sock.unbind(self._context._namespace_inproc(endpoint))
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def disconnect(self, endpoint: Union[str, bytes]) -> None:
-        try:
-            return self._sock.disconnect(self._context._namespace_inproc(endpoint))
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
 
     def send(
         self,
@@ -609,106 +748,6 @@ class Socket(_SocketOptionsBase, metaclass=_SocketMeta):
         frames = self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
-    # ── Options ──────────────────────────────────────────────────────
-
-    def setsockopt(self, option: int, value: Any) -> Any:
-        try:
-            return self._sock.setsockopt(option, value)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def getsockopt(self, option: int) -> Any:
-        if option == LAST_ENDPOINT:
-            return self._last_endpoint
-        try:
-            return self._sock.getsockopt(option)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def set(self, option: int, value: Any) -> Any:
-        return self.setsockopt(option, value)
-
-    def get(self, option: int) -> Any:
-        return self.getsockopt(option)
-
-    def setsockopt_string(
-        self, option: int, value: str, encoding: str = "utf-8"
-    ) -> Any:
-        return self.setsockopt(option, value.encode(encoding))
-
-    def getsockopt_string(self, option: int, encoding: str = "utf-8") -> str:
-        v = self.getsockopt(option)
-        if isinstance(v, bytes):
-            return v.decode(encoding)
-        return str(v)
-
-    set_string = setsockopt_string
-    get_string = getsockopt_string
-
-    def set_curve_auth(self, auth: Any) -> Any:
-        try:
-            return self._sock.set_curve_auth(auth)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-        except AttributeError:
-            raise ZMQNotImplementedError("curve feature not compiled")
-
-    def set_hwm(self, value: int) -> None:
-        self.setsockopt(SNDHWM, value)
-        self.setsockopt(RCVHWM, value)
-
-    def get_hwm(self) -> int:
-        return self.getsockopt(SNDHWM)
-
-    hwm = property(get_hwm, set_hwm)
-
-    # ── Subscriptions ────────────────────────────────────────────────
-
-    def subscribe(self, prefix: Union[bytes, str]) -> None:
-        try:
-            return self._sock.subscribe(prefix)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def unsubscribe(self, prefix: Union[bytes, str]) -> None:
-        try:
-            return self._sock.unsubscribe(prefix)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def join(self, group: Union[bytes, str]) -> None:
-        try:
-            return self._sock.join(group)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    def leave(self, group: Union[bytes, str]) -> None:
-        try:
-            return self._sock.leave(group)
-        except _native.ZMQError as e:
-            raise error.from_native(e) from None
-
-    # ── Monitoring ───────────────────────────────────────────────────
-
-    def monitor(self) -> Any:
-        return self._sock.monitor()
-
-    def connections(self) -> Any:
-        return self._sock.connections()
-
-    def connection_info(self, connection_id: int) -> Any:
-        return self._sock.connection_info(connection_id)
-
-    # ── Lifecycle ────────────────────────────────────────────────────
-
-    def close(self, linger: Optional[int] = None) -> None:
-        if not self._closed:
-            self._closed = True
-            self._sock.close(linger)
-
-    def __del__(self) -> None:
-        self.close()
-
     def bind_to_random_port(
         self,
         addr: str,
@@ -729,13 +768,6 @@ class Socket(_SocketOptionsBase, metaclass=_SocketMeta):
             if sock is self:
                 return mask
         return 0
-
-    def __enter__(self) -> Socket:
-        return self
-
-    def __exit__(self, *args: Any) -> bool:
-        self.close()
-        return False
 
 
 # ── Shadow socket (sync recv bridge over async handle) ──────────────
@@ -1083,8 +1115,6 @@ class Context:
         s._closed = False
         s._last_endpoint = None
         s._pid = os.getpid()
-        s._binds = []
-        s._connects = []
         self._sockets.add(s)
         return s
 

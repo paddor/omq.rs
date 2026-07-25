@@ -35,7 +35,7 @@ class ZMQStream:
     def __init__(self, socket: pyomq.Socket, io_loop: Optional[Any] = None) -> None:
         IOLoop = _get_IOLoop()
         self.socket = socket
-        self.io_loop = io_loop or IOLoop.current()
+        self.io_loop = io_loop or IOLoop.current()  # type: ignore[ty:unresolved-attribute]
         self._recv_callback = None
         self._recv_copy = True
         self._send_callback = None
@@ -148,7 +148,7 @@ class ZMQStream:
             if self._closed or self._watching:
                 return
             try:
-                io_loop.add_handler(fd, handler, _get_IOLoop().READ)
+                io_loop.add_handler(fd, handler, _get_IOLoop().READ)  # type: ignore[ty:unresolved-attribute]
                 self._watching = True
             except Exception:
                 pass

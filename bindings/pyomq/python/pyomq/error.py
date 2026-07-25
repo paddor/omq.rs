@@ -5,8 +5,11 @@ pyzmq's hierarchy. ``ZMQBindError`` is a sibling of ``ZMQError`` under
 ``ZMQBaseError``, not a subclass of ``ZMQError``.
 """
 
+from __future__ import annotations
+
 import builtins
 import errno as _errno
+from typing import Any, Dict, Optional, Type
 
 from ._native import ZMQBaseError as ZMQBaseError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from ._native import ZMQError as ZMQError  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
@@ -36,7 +39,7 @@ class ZMQVersionError(builtins.NotImplementedError, ZMQBaseError):
     """Feature requires a newer libzmq than the emulated version."""
 
 
-_BY_ERRNO = {
+_BY_ERRNO: Dict[int, Type[ZMQError]] = {
     _errno.EAGAIN: Again,
     _errno.ETIMEDOUT: Again,
     156: ContextTerminated,

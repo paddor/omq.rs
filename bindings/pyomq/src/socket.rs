@@ -54,7 +54,7 @@ extern "C" fn atfork_parent() {
 #[cfg(unix)]
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
-        libc::pthread_atfork(Some(atfork_parent), None, Some(atfork_child));
+        libc::pthread_atfork(None, Some(atfork_parent), Some(atfork_child));
     });
 }
 
@@ -94,6 +94,8 @@ pub(crate) struct SocketInner {
     pub subscriptions: Mutex<Vec<Bytes>>,
     pub endpoints: Mutex<Vec<(omq_tokio::Endpoint, bool)>>,
     has_tcp_endpoint: AtomicBool,
+    send_fork_gen: AtomicU32,
+    parent_send_fork_gen: AtomicU32,
     parent_fork_gen: AtomicU32,
     post_fork: AtomicBool,
     pub sndbuf: Mutex<SendBuffer>,
@@ -115,6 +117,8 @@ impl SocketInner {
             subscriptions: Mutex::new(Vec::new()),
             endpoints: Mutex::new(Vec::new()),
             has_tcp_endpoint: AtomicBool::new(false),
+            send_fork_gen: AtomicU32::new(FORK_GEN.load(Ordering::Relaxed)),
+            parent_send_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
             parent_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
             post_fork: AtomicBool::new(FORKED.load(Ordering::Relaxed)),
             sndbuf: Mutex::new(SendBuffer::default()),
@@ -313,6 +317,14 @@ impl SocketInner {
     pub fn take_materialized(&self) -> Option<Materialized> {
         self.closed.store(true, Ordering::Relaxed);
         let materialized = self.materialized.write().unwrap().take();
+        let fork_gen = FORK_GEN.load(Ordering::Relaxed);
+        if materialized
+            .as_ref()
+            .is_some_and(|state| state.fork_gen != fork_gen)
+        {
+            std::mem::forget(materialized);
+            return None;
+        }
         if let Some(ref state) = materialized {
             state.recv_ready.force_wake();
             state.send_ready.force_wake();
@@ -322,7 +334,15 @@ impl SocketInner {
 
     pub fn take_blocking_materialized(&self) -> Option<BlockingMaterialized> {
         self.closed.store(true, Ordering::Relaxed);
-        self.blocking_materialized.write().unwrap().take()
+        let materialized = self.blocking_materialized.write().unwrap().take();
+        if materialized
+            .as_ref()
+            .is_some_and(|state| state.fork_gen != FORK_GEN.load(Ordering::Relaxed))
+        {
+            std::mem::forget(materialized);
+            return None;
+        }
+        materialized
     }
 
     pub fn close_linger(&self, linger: Option<i64>) -> Option<Duration> {
@@ -760,7 +780,9 @@ impl Socket {
     #[pyo3(signature = (linger=None))]
     fn close(&self, py: Python<'_>, linger: Option<i64>) -> PyResult<()> {
         let linger = self.inner.close_linger(linger);
-        if let Some(m) = self.inner.take_blocking_materialized() {
+        if let Some(m) = self.inner.take_blocking_materialized()
+            && self.inner.ctx.can_drive_runtime()
+        {
             py.detach(|| m.socket.close_with_linger(linger))
                 .map_err(map_err)?;
         }
@@ -795,12 +817,29 @@ impl Socket {
     fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message) -> PyResult<()> {
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-        let post_fork = self.inner.post_fork.swap(false, Ordering::AcqRel);
+        let fork_gen = FORK_GEN.load(Ordering::Acquire);
+        let child_fork = self.inner.send_fork_gen.load(Ordering::Acquire) != fork_gen;
+        if child_fork {
+            self.inner
+                .send_fork_gen
+                .store(fork_gen, Ordering::Release);
+        }
+        let parent_fork_gen = PARENT_FORK_GEN.load(Ordering::Acquire);
+        let parent_fork =
+            self.inner.parent_send_fork_gen.load(Ordering::Acquire) != parent_fork_gen;
+        if parent_fork {
+            self.inner
+                .parent_send_fork_gen
+                .store(parent_fork_gen, Ordering::Release);
+        }
+        let post_fork =
+            self.inner.post_fork.swap(false, Ordering::AcqRel) || child_fork || parent_fork;
         if post_fork {
             let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
+            let wait = timeout.unwrap_or(Duration::from_secs(1));
             py.detach(|| {
                 if tcp {
-                    let _ = sock.wait_connected(1, Duration::from_secs(1));
+                    let _ = sock.wait_connected(1, wait);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             });

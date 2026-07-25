@@ -1,11 +1,14 @@
 //! Monitor stream integration tests.
 
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::{
     ConnectionStatus, DisconnectReason, Endpoint, Message, MonitorEvent, Options, Socket,
     SocketType,
 };
+use tokio::net::TcpStream;
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -298,6 +301,34 @@ async fn connection_info_returns_status_post_handshake() {
 
     // Unknown id → None.
     assert!(server.connection_info(999_999).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn wait_connected_ignores_pre_handshake_tcp_peers() {
+    let server = Socket::new(SocketType::Pair, Options::default());
+    let port = test_support::bind_loopback(&server).await;
+    let mut mon = server.monitor();
+
+    let _raw = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::Accepted { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before Accepted: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("raw TCP peer was not accepted");
+
+    assert!(
+        server
+            .wait_connected(1, Duration::from_millis(50))
+            .await
+            .is_err(),
+        "pre-handshake peer must not satisfy wait_connected"
+    );
 }
 
 #[tokio::test]

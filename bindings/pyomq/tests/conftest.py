@@ -55,7 +55,10 @@ def ipc_endpoint(request) -> str:
     if sys.platform == "win32":
         return f"ipc://pyomq-{tag}"
     # Linux abstract namespace: no filesystem entry, auto-cleaned on close.
-    return f"ipc://@pyomq-{tag}"
+    elif sys.platform == "linux":
+        return f"ipc://@pyomq-{tag}"
+    else:
+        return f"ipc://pyomq-{tag}"
 
 
 def wait_for(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:

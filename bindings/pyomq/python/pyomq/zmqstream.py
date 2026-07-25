@@ -5,23 +5,37 @@ signals readability, drains available messages and invokes the
 on_recv callback.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
+from typing import Any, Callable
 
 import pyomq
 
 
-def _get_IOLoop():
+def _get_IOLoop() -> type:
     from tornado.ioloop import IOLoop
 
     return IOLoop
 
 
 class ZMQStream:
-    def __init__(self, socket, io_loop=None):
+    """Integration layer for pyomq sockets with Tornado IOLoop."""
+
+    socket: pyomq.Socket
+    io_loop: Any  # tornado.ioloop.IOLoop
+    _recv_callback: Callable[[Any], Any] | None
+    _recv_copy: bool
+    _send_callback: Callable[[Any, Any | None], Any] | None
+    _closed: bool
+    _fd: int
+    _watching: bool
+
+    def __init__(self, socket: pyomq.Socket, io_loop: Any | None = None) -> None:
         IOLoop = _get_IOLoop()
         self.socket = socket
-        self.io_loop = io_loop or IOLoop.current()
+        self.io_loop = io_loop or IOLoop.current()  # type: ignore[ty:unresolved-attribute]
         self._recv_callback = None
         self._recv_copy = True
         self._send_callback = None
@@ -29,7 +43,8 @@ class ZMQStream:
         self._fd = socket.getsockopt(pyomq.FD)
         self._watching = False
 
-    def on_recv(self, callback, copy=True):
+    def on_recv(self, callback: Callable[[Any], Any] | None, copy: bool = True) -> None:
+        """Set a callback to be invoked when messages are received."""
         self._recv_callback = callback
         self._recv_copy = copy
         if callback is not None:
@@ -37,24 +52,43 @@ class ZMQStream:
         else:
             self._stop_watching()
 
-    def on_send(self, callback):
+    def on_send(self, callback: Callable[[Any, Any | None], Any] | None) -> None:
+        """Set a callback to be invoked when sends complete."""
         self._send_callback = callback
 
-    def stop_on_recv(self):
+    def stop_on_recv(self) -> None:
+        """Stop receiving messages."""
         self.on_recv(None)
 
-    def stop_on_send(self):
+    def stop_on_send(self) -> None:
+        """Stop receiving send completion callbacks."""
         self._send_callback = None
 
-    def send(self, msg, flags=0, copy=True, track=False, callback=None, **kwargs):
+    def send(
+        self,
+        msg: bytes | str,
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
+        callback: Callable[[Any, Any], Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Send a message."""
         result = self.socket.send(msg, flags=flags, copy=copy, track=track)
         if self._send_callback:
             self._send_callback(msg, None)
         return result
 
     def send_multipart(
-        self, msg_list, flags=0, copy=True, track=False, callback=None, **kwargs
-    ):
+        self,
+        msg_list: list[bytes | str],
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
+        callback: Callable[[Any, Any], Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Send a multipart message."""
         result = self.socket.send_multipart(
             msg_list,
             flags=flags,
@@ -65,11 +99,13 @@ class ZMQStream:
             self._send_callback(msg_list, None)
         return result
 
-    def flush(self, flag=3, limit=None):
+    def flush(self, flag: int = 3, limit: int | None = None) -> None:
+        """Flush pending messages."""
         if flag & 1 and self._recv_callback:
             self._handle_recv()
 
-    def _handle_events(self, fd=None, events=None):
+    def _handle_events(self, fd: int | None = None, events: int | None = None) -> None:
+        """Internal handler for IOLoop events."""
         if self._closed:
             return
         try:
@@ -78,7 +114,8 @@ class ZMQStream:
             pass
         self._handle_recv()
 
-    def _handle_recv(self):
+    def _handle_recv(self) -> None:
+        """Drain and invoke callback for all available messages."""
         if self._recv_callback is None:
             return
         while True:
@@ -95,18 +132,19 @@ class ZMQStream:
             if asyncio.iscoroutine(result):
                 asyncio.ensure_future(result)
 
-    def _start_watching(self):
+    def _start_watching(self) -> None:
+        """Register the socket FD with the IOLoop."""
         if self._closed or self._watching:
             return
         fd = self._fd
         handler = self._handle_events
         io_loop = self.io_loop
 
-        def _do_add():
+        def _do_add() -> None:
             if self._closed or self._watching:
                 return
             try:
-                io_loop.add_handler(fd, handler, _get_IOLoop().READ)
+                io_loop.add_handler(fd, handler, _get_IOLoop().READ)  # type: ignore[ty:unresolved-attribute]
                 self._watching = True
             except Exception:
                 pass
@@ -116,7 +154,8 @@ class ZMQStream:
         except RuntimeError:
             _do_add()
 
-    def _stop_watching(self):
+    def _stop_watching(self) -> None:
+        """Unregister the socket FD from the IOLoop."""
         if not self._watching:
             return
         self._watching = False
@@ -125,18 +164,22 @@ class ZMQStream:
         except Exception:
             pass
 
-    def close(self, linger=None):
+    def close(self, linger: int | None = None) -> None:
+        """Close the stream and unregister from IOLoop."""
         if self._closed:
             return
         self._closed = True
         self._stop_watching()
 
-    def setsockopt(self, opt, value):
-        self.socket.setsockopt(opt, value)
+    def setsockopt(self, opt: int, value: Any) -> Any:
+        """Set a socket option."""
+        return self.socket.setsockopt(opt, value)
 
-    def getsockopt(self, opt):
+    def getsockopt(self, opt: int) -> Any:
+        """Get a socket option."""
         return self.socket.getsockopt(opt)
 
     @property
-    def closed(self):
+    def closed(self) -> bool:
+        """Whether the stream is closed."""
         return self._closed

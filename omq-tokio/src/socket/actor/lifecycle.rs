@@ -22,23 +22,6 @@ impl<'a> PeerLifecycle<'a> {
         let peer = self.driver.peers.remove(&peer_id);
         if let Some(ref p) = peer {
             self.driver.io_pool.release_thread(p.io_thread);
-            if self.driver.socket_type == SocketType::Rep && self.driver.uses_latency_profile() {
-                if self
-                    .driver
-                    .rep_current
-                    .lock()
-                    .expect("rep current")
-                    .as_ref()
-                    .is_some_and(|(current_peer_id, _)| *current_peer_id == peer_id)
-                {
-                    self.driver.rep_current.lock().expect("rep current").take();
-                }
-                self.driver
-                    .rep_pending
-                    .lock()
-                    .expect("rep pending")
-                    .retain(|(pending_peer_id, _)| *pending_peer_id != peer_id);
-            }
         }
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
@@ -172,14 +155,6 @@ impl<'a> PeerLifecycle<'a> {
                     .lock()
                     .expect("type_state")
                     .on_peer_disconnected();
-            }
-            SocketType::Rep if self.driver.peers.is_empty() => {
-                self.driver
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .on_peer_disconnected();
-                self.driver.rep_pending.lock().expect("rep pending").clear();
             }
             _ => {}
         }

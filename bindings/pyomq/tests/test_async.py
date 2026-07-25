@@ -286,7 +286,7 @@ async def test_async_close_wakes_pending_recv(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     try:
         pull.bind(tcp_endpoint)
-        recv_task = asyncio.create_task(pull.recv())
+        recv_task = pull.recv()
         await asyncio.sleep(0.05)
         pull.close()
         with pytest.raises(Exception):

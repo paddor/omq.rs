@@ -8,7 +8,7 @@ version = "0.17.1"
 description = "Python binding for omq.rs (Rust libzmq port). Drop-in pyzmq replacement on the common path."
 readme = "README.md"
 license = { text = "ISC" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Patrik Wenger", email = "paddor@gmail.com" }]
 keywords = ["zeromq", "omq", "messaging", "pyzmq", "zmq"]
 classifiers = [
@@ -24,6 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.15",
     "Programming Language :: Rust",
     "Topic :: System :: Networking",
+]
+dependencies = [
+    "typing_extensions>=4.0.0; python_version < '3.11'",
 ]
 
 [dependency-groups]

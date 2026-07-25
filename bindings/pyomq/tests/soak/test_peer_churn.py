@@ -11,8 +11,10 @@ in a realistic range (well under 10/sec on average).
 
 import random
 import time
+from typing import List, Tuple
 
 import pyomq as zmq
+from pyomq import Socket
 
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
@@ -32,7 +34,7 @@ def test_peer_churn():
     push.setsockopt(zmq.SNDHWM, 1024)
     ep = push.bind(tcp_ep())
 
-    peers: list[tuple[object, bool]] = []
+    peers: list[tuple[Socket, bool]] = []
     for _ in range(NUM_PEERS):
         p = ctx.socket(zmq.PULL)
         p.setsockopt(zmq.RCVTIMEO, 0)

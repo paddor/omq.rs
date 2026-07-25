@@ -200,6 +200,36 @@ async fn rep_survives_client_disconnect_mid_cycle() {
 }
 
 #[tokio::test]
+async fn rep_reply_to_disconnected_client_is_accepted() {
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&req).await;
+
+    req.send(Message::single("drop-me")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), rep.recv())
+        .await
+        .expect("REP recv timed out")
+        .unwrap();
+    assert_eq!(got, Message::single("drop-me"));
+
+    req.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !rep.connections().await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("REP still had live peer");
+
+    rep.send(Message::single("dropped-reply"))
+        .await
+        .expect("REP reply to a disconnected peer must be accepted");
+}
+
+#[tokio::test]
 async fn req_rep_1000_cycles_tcp() {
     // 1 000 sequential request-reply cycles over TCP.
     // Scales beyond inproc to reveal framing races, backpressure issues,

@@ -162,7 +162,6 @@ impl Socket {
             spsc.clone(),
             type_state.clone(),
             rep_pending.clone(),
-            rep_current.clone(),
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),

@@ -195,9 +195,8 @@ pub(crate) struct SocketDriver {
     /// REQ / REP envelope + alternation state. Shared with the socket
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
     type_state: Arc<Mutex<TypeState>>,
-    /// REP latency route: envelope of the request currently being served.
+    /// REP latency route: envelopes for requests waiting in the receive pipe.
     rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
-    rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Shared with the socket handle for lock-free
     /// send/recv on REQ. Actor resets on peer disconnect.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -238,7 +237,6 @@ impl SocketDriver {
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
         rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
-        rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
         req_awaiting_reply: Arc<AtomicBool>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
@@ -265,7 +263,6 @@ impl SocketDriver {
             recv_strategy,
             type_state,
             rep_pending,
-            rep_current,
             req_awaiting_reply,
             monitor,
             subscriptions: Vec::new(),

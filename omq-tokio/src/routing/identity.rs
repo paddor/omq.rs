@@ -88,6 +88,7 @@ pub(crate) struct Submitter {
 impl Submitter {
     pub(crate) fn shutdown(&self) {
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.closed = true;
         g.peers.clear();
         g.identity_to_peer.clear();
     }
@@ -209,13 +210,18 @@ impl Submitter {
         msg: Message,
     ) -> core::result::Result<(), TrySendError> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        let closed = g.closed;
         let Some(peer) = g.peers.get_mut(&peer_id) else {
-            return Err(TrySendError::Error(Error::Unroutable));
+            if closed {
+                return Err(TrySendError::Closed);
+            }
+            return Ok(());
         };
-        peer.target.try_send(msg).map_err(|e| match e {
-            SendPipeError::Full(m) => TrySendError::Full(m),
-            SendPipeError::Closed(_) => TrySendError::Closed,
-        })
+        match peer.target.try_send(msg) {
+            Err(SendPipeError::Full(m)) => Err(TrySendError::Full(m)),
+            Err(SendPipeError::Closed(_)) if closed => Err(TrySendError::Closed),
+            Ok(()) | Err(SendPipeError::Closed(_)) => Ok(()),
+        }
     }
 
     fn try_send_to(
@@ -259,6 +265,7 @@ pub(crate) struct IdentitySend {
 struct IdentityInner {
     peers: FxHashMap<u64, IdentityPeer>,
     identity_to_peer: FxHashMap<Bytes, u64>,
+    closed: bool,
 }
 
 #[derive(Debug)]
@@ -282,6 +289,7 @@ impl IdentitySend {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),
                 identity_to_peer: FxHashMap::default(),
+                closed: false,
             })),
             router_mandatory: options.router_mandatory,
             latency_profile,
@@ -355,6 +363,7 @@ impl IdentitySend {
 
     pub(crate) fn shutdown(&self) {
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.closed = true;
         g.peers.clear();
         g.identity_to_peer.clear();
     }

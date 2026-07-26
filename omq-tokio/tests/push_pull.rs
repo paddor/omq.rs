@@ -489,19 +489,25 @@ async fn push_connect_before_peer_ready_queues() {
 }
 
 #[tokio::test]
-async fn push_tcp_send_before_peer_connects_queues() {
+async fn push_tcp_send_before_peer_connects_waits_for_pipe() {
     let push = Socket::new(SocketType::Push, Options::default());
     let port = test_support::bind_loopback(&push).await;
 
-    for i in 0..5 {
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            push.send(Message::single(format!("early-{i}"))),
-        )
-        .await
-        .expect("send before TCP peer must not block")
-        .unwrap();
-    }
+    let mut send_task = tokio::spawn({
+        let push = push.clone();
+        async move {
+            for i in 0..5 {
+                push.send(Message::single(format!("early-{i}"))).await?;
+            }
+            omq_tokio::Result::<()>::Ok(())
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut send_task)
+            .await
+            .is_err(),
+        "bound no-peer send must wait for a pipe"
+    );
 
     let pull = Socket::new(SocketType::Pull, Options::default());
     pull.connect(test_support::tcp_loopback(port))
@@ -516,6 +522,11 @@ async fn push_tcp_send_before_peer_connects_queues() {
         let expected = format!("early-{i}");
         assert_eq!(m.part_bytes(0).unwrap(), expected.as_bytes());
     }
+    tokio::time::timeout(Duration::from_secs(1), send_task)
+        .await
+        .expect("send task did not finish after TCP peer connected")
+        .unwrap()
+        .unwrap();
 }
 
 /// TCP PUSH/PULL with peer churn: PULL connects, receives, disconnects;

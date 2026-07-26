@@ -31,13 +31,9 @@ from typing import (
     Iterable,
     Iterator,
     Protocol,
+    Self,
     overload,
 )
-
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
 
 from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from . import error as error  # noqa: F401

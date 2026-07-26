@@ -2,8 +2,11 @@
 
 use bytes::Bytes;
 use pyo3::basic::CompareOp;
+use pyo3::exceptions::PyBufferError;
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyMemoryView};
+use std::ffi::{c_int, c_void};
 
 #[pyclass(module = "pyomq._native")]
 pub struct Frame {
@@ -50,9 +53,8 @@ impl Frame {
     }
 
     #[getter]
-    fn buffer<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyMemoryView>> {
-        let bytes = PyBytes::new(py, &self.data).into_any();
-        PyMemoryView::from(&bytes)
+    fn buffer<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyMemoryView>> {
+        PyMemoryView::from(slf.as_any())
     }
 
     #[getter]
@@ -96,5 +98,40 @@ impl Frame {
             return Ok(PyBool::new(py, result).to_owned().into_any());
         }
         Ok(py.NotImplemented().bind(py).clone())
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("view is null"));
+        }
+        if flags & ffi::PyBUF_WRITABLE == ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("Frame is not writable"));
+        }
+
+        let frame = slf.borrow();
+        let data = frame.data.as_ref();
+        // SAFETY: `view` is non-null. `PyBuffer_FillInfo` stores a new
+        // reference to `slf`, so `frame.data` outlives the exported view.
+        // The C API takes `*mut c_void`, but the buffer is marked read-only
+        // and `Bytes` is immutable.
+        let result = unsafe {
+            ffi::PyBuffer_FillInfo(
+                view,
+                slf.as_ptr(),
+                data.as_ptr().cast::<c_void>().cast_mut(),
+                data.len() as ffi::Py_ssize_t,
+                1,
+                flags,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(PyErr::fetch(slf.py()))
+        }
     }
 }

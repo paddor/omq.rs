@@ -8,15 +8,13 @@ version = "0.17.1"
 description = "Python binding for omq.rs (Rust libzmq port). Drop-in pyzmq replacement on the common path."
 readme = "README.md"
 license = { text = "ISC" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Patrik Wenger", email = "paddor@gmail.com" }]
 keywords = ["zeromq", "omq", "messaging", "pyzmq", "zmq"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: ISC License (ISCL)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -25,15 +23,12 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: System :: Networking",
 ]
-dependencies = [
-    "typing_extensions>=4.0.0; python_version < '3.11'",
-]
+dependencies = []
 
 [dependency-groups]
 test = [
     "pytest>=7",
-    "pytest-asyncio>=0.21,<1.4; python_version < '3.10'",
-    "pytest-asyncio>=1.4.0; python_version >= '3.10'",
+    "pytest-asyncio>=1.4.0",
     "pyzmq>=25",
     "tornado>=6",
 ]
@@ -62,7 +57,7 @@ exclude = ["tests/soak/**"]
 
 [tool.maturin]
 # Stable ABI - one wheel covers all supported Python versions.
-features = ["pyo3/abi3-py39", "plain", "curve", "lz4"]
+features = ["pyo3/abi3-py311", "plain", "curve", "lz4"]
 # The native module lives at pyomq._native; pyomq itself is a pure
 # Python package re-exporting from it.
 module-name = "pyomq._native"

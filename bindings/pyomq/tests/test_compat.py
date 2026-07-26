@@ -183,6 +183,7 @@ def test_copy_false_recv_returns_frame():
         assert isinstance(frame, zmq.Frame)
         assert not isinstance(frame, bytes)
         assert bytes(frame) == b"hello"
+        assert frame.buffer.obj is frame
         assert bytes(frame.buffer) == b"hello"
         assert frame.bytes == b"hello"
     finally:

@@ -1,7 +1,7 @@
 # pyomq Architecture
 
 PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python (sync and
-async). Single stable-ABI wheel (`abi3-py39`, Python 3.9+) via maturin.
+async). Single stable-ABI wheel (`abi3-py311`, Python 3.11+) via maturin.
 
 ## Source layout
 
@@ -385,8 +385,8 @@ bytes are immutable, the pointer is stable for the object's lifetime.
 Passing such frames to `send` or `send_multipart` clones the `Bytes`
 handle, so broker reroute paths avoid converting frame payloads through
 Python `bytes`. `bytes(frame)` and `frame.bytes` still allocate a Python
-`bytes` object on demand. `frame.buffer` returns a memoryview over that
-Python bytes object because `abi3-py310` does not expose PyO3 buffer slots.
+`bytes` object on demand. `frame.buffer` returns a memoryview directly
+over the immutable Rust `Bytes` storage via the Python buffer protocol.
 
 Other buffer types (`bytearray`, `memoryview`) go through
 `copy_from_slice` because their contents can be mutated from Python.
@@ -484,7 +484,4 @@ that drains the tokio broadcast channel into a `flume::Receiver`. A
 ## Known limitations
 
 - `Poller` registers POLLIN only; POLLOUT is ignored.
-- `copy=False` frames expose `.buffer`, but under `abi3-py39` that
-  memoryview is built from a Python `bytes` copy. Re-sending the frame
-  itself remains zero-copy at the Rust payload layer.
 - `wait_any` returns socket IDs, not file descriptors.

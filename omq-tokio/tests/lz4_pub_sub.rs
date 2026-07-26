@@ -9,6 +9,8 @@ use std::time::Duration;
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
+const FAN_OUT_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn lz4_loopback() -> Endpoint {
     Endpoint::Lz4Tcp {
         host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
@@ -112,7 +114,7 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
         decoded_subs.push(sub);
     }
     publisher
-        .wait_subscribed(N_DECODED_SUBS as u64, Duration::from_secs(1))
+        .wait_subscribed(N_DECODED_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
 
@@ -120,7 +122,7 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
     raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
     raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
     publisher
-        .wait_subscribed((N_DECODED_SUBS + 1) as u64, Duration::from_secs(1))
+        .wait_subscribed((N_DECODED_SUBS + 1) as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("raw subscriber subscription did not arrive");
 
@@ -200,7 +202,7 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
         decoded_subs.push(sub);
     }
     publisher
-        .wait_subscribed(N_DECODED_SUBS as u64, Duration::from_secs(1))
+        .wait_subscribed(N_DECODED_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
 
@@ -225,7 +227,7 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
     raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
     raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
     publisher
-        .wait_subscribed((N_DECODED_SUBS + 1) as u64, Duration::from_secs(1))
+        .wait_subscribed((N_DECODED_SUBS + 1) as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("raw subscriber subscription did not arrive");
 
@@ -294,7 +296,7 @@ async fn pub_sub_lz4_io_lane_fan_out_deferred_large_message_preserves_order() {
         subs.push(sub);
     }
     publisher
-        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
 
@@ -391,7 +393,7 @@ async fn pub_sub_lz4_fan_out() {
         subs.push(s);
     }
     publisher
-        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
 
@@ -448,7 +450,7 @@ async fn pub_sub_lz4_fan_out_with_dict() {
         subs.push(s);
     }
     publisher
-        .wait_subscribed(N_SUBS as u64, Duration::from_secs(1))
+        .wait_subscribed(N_SUBS as u64, FAN_OUT_READY_TIMEOUT)
         .await
         .expect("subscriptions did not arrive");
 

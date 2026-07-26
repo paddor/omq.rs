@@ -386,7 +386,7 @@ Passing such frames to `send` or `send_multipart` clones the `Bytes`
 handle, so broker reroute paths avoid converting frame payloads through
 Python `bytes`. `bytes(frame)` and `frame.bytes` still allocate a Python
 `bytes` object on demand. `frame.buffer` returns a memoryview over that
-Python bytes object because `abi3-py39` does not expose PyO3 buffer slots.
+Python bytes object because `abi3-py310` does not expose PyO3 buffer slots.
 
 Other buffer types (`bytearray`, `memoryview`) go through
 `copy_from_slice` because their contents can be mutated from Python.

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use tokio::sync::oneshot;
 
 use crate::engine::signal::DataSignal;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
@@ -33,6 +34,7 @@ enum LaneControl {
     Subscribe {
         peer_id: u64,
         prefix: Bytes,
+        ack: Option<oneshot::Sender<()>>,
     },
     Cancel {
         peer_id: u64,
@@ -325,8 +327,28 @@ impl FanOutLanes {
         }
     }
 
-    pub(super) fn send_subscribe(&self, lane: usize, peer_id: u64, prefix: Bytes) {
-        self.send_to_lane(lane, LaneControl::Subscribe { peer_id, prefix });
+    pub(super) fn send_subscribe(
+        &self,
+        lane: usize,
+        peer_id: u64,
+        prefix: Bytes,
+    ) -> Option<oneshot::Receiver<()>> {
+        let (ack, rx) = oneshot::channel();
+        let lane = self.normalize_lane(lane);
+        let mut state = self.state.lock().expect("fanout lanes poisoned");
+        if let Some(endpoint) = state.endpoints.get_mut(lane) {
+            Self::push_control(
+                endpoint,
+                LaneControl::Subscribe {
+                    peer_id,
+                    prefix,
+                    ack: Some(ack),
+                },
+            );
+            Some(rx)
+        } else {
+            None
+        }
     }
 
     pub(super) fn send_cancel(&self, lane: usize, peer_id: u64, prefix: Bytes) {
@@ -418,21 +440,10 @@ impl LaneWorker {
         let mut budget = DrainBudget::WORKER;
         loop {
             let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
-            let mut shutdown = false;
-            self.ctrl_notify.begin_drain();
             self.data_signal.begin_drain();
 
             // 1. ALL control commands, unconditionally.
-            self.ctrl_rx.prefetch();
-            while let Some(cmd) = self.ctrl_rx.pop() {
-                if self.handle_control(cmd) {
-                    shutdown = true;
-                }
-            }
-            self.ctrl_rx.release();
-            self.ctrl_notify.clear_after(self.ctrl_rx.is_empty());
-
-            if shutdown {
+            if self.drain_control() {
                 self.flush_touched(&mut touched);
                 self.peers.clear();
                 self.subscribe_all_count = 0;
@@ -460,22 +471,44 @@ impl LaneWorker {
                 self.data_rx.release();
 
                 if !batch.is_empty() {
+                    // Control sent before this data can race with the first
+                    // control drain. Drain once more after observing data so
+                    // subscriptions and compression updates apply first.
+                    if self.drain_control() {
+                        self.flush_touched(&mut touched);
+                        self.peers.clear();
+                        self.subscribe_all_count = 0;
+                        return;
+                    }
                     self.distribute_batch(&batch);
                     for dispatch in &batch {
                         self.dispatch(dispatch, &mut touched).await;
                     }
                 }
             } else {
+                let mut batch: SmallVec<[LaneDispatch; 32]> = SmallVec::new();
                 self.data_rx.prefetch();
                 while let Some(dispatch) = self.data_rx.pop() {
                     drained = true;
                     let msg_bytes = dispatch.msg.byte_len();
-                    self.dispatch(&dispatch, &mut touched).await;
+                    batch.push(dispatch);
                     if !budget.account(msg_bytes) {
                         break;
                     }
                 }
                 self.data_rx.release();
+
+                if !batch.is_empty() {
+                    if self.drain_control() {
+                        self.flush_touched(&mut touched);
+                        self.peers.clear();
+                        self.subscribe_all_count = 0;
+                        return;
+                    }
+                    for dispatch in &batch {
+                        self.dispatch(dispatch, &mut touched).await;
+                    }
+                }
             }
 
             self.flush_touched(&mut touched);
@@ -489,6 +522,20 @@ impl LaneWorker {
                 () = self.data_signal.ready() => {}
             }
         }
+    }
+
+    fn drain_control(&mut self) -> bool {
+        let mut shutdown = false;
+        self.ctrl_notify.begin_drain();
+        self.ctrl_rx.prefetch();
+        while let Some(cmd) = self.ctrl_rx.pop() {
+            if self.handle_control(cmd) {
+                shutdown = true;
+            }
+        }
+        self.ctrl_rx.release();
+        self.ctrl_notify.clear_after(self.ctrl_rx.is_empty());
+        shutdown
     }
 
     fn distribute_batch(&mut self, batch: &[LaneDispatch]) {
@@ -528,11 +575,18 @@ impl LaneWorker {
                     self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
                 }
             }
-            LaneControl::Subscribe { peer_id, prefix } => {
+            LaneControl::Subscribe {
+                peer_id,
+                prefix,
+                ack,
+            } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && filter::add_subscription(&mut peer.subscriptions, &prefix)
                 {
                     self.subscribe_all_count += 1;
+                }
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
                 }
             }
             LaneControl::Cancel { peer_id, prefix } => {

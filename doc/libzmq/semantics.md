@@ -1,85 +1,74 @@
 # libzmq Send, Linger, and HWM Semantics
 
-Reference point: libzmq 4.3.5.
+Reference: libzmq 4.3.5.
 
 ## No-Peer Sends
 
-Terminology:
+Terms:
 
-- **Ready peer:** ZMTP handshake completed and the pipe can accept data-plane
-  messages.
-- **Bound no-peer:** socket called `bind()` but no peer is currently ready.
-- **Connected no-peer:** socket called `connect()` but no peer is currently
-  ready. This includes first connect-before-bind and reconnect after loss.
-- **Mute:** socket cannot currently route a send. Blocking sends wait;
-  nonblocking sends return `EAGAIN`, except lossy socket types.
+- **Ready peer:** ZMTP handshake completed; pipe accepts data messages.
+- **Bound no-peer:** `bind()` socket with no ready peer.
+- **Connected no-peer:** `connect()` socket before first connection or during
+  reconnect.
+- **Mute:** socket cannot route. Blocking send waits. Nonblocking send returns
+  `EAGAIN`, except lossy socket types.
 
-`ZMQ_IMMEDIATE` controls connected no-peer sends. Default is `0`.
+`ZMQ_IMMEDIATE` only affects connected no-peer sends:
 
-- `ZMQ_IMMEDIATE=0`: queue to incomplete/reconnecting connect pipes.
-- `ZMQ_IMMEDIATE=1`: only queue to completed connections. No ready peer means
-  mute.
+- `0`: queue to incomplete or reconnecting connect pipes.
+- `1`: require a completed connection; otherwise mute.
 
-Behavior by case:
+| Case | libzmq and `omq-libzmq` | `omq-tokio` API |
+|------|-------------------------|-----------------|
+| `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` bound, no ready peer | Mute. Nonblocking send returns `EAGAIN`. No accept-then-drop. | `send().await` waits. `try_send()` returns `Full`. |
+| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=0` | Queue to incomplete or reconnecting pipe, bounded by HWM. | Queue to connect-side pre-ready pipe, bounded by `send_hwm`. |
+| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=1` | Mute. Nonblocking send returns `EAGAIN`. | No `ZMQ_IMMEDIATE` option. `connect()` always creates a pre-ready pipe. |
+| Bound socket lost all peers | Mute once no ready pipe remains. | Bind-only sockets wait; `try_send()` returns `Full`. |
+| Connected socket lost peer | `ZMQ_IMMEDIATE=0` queues to the reconnecting pipe. `ZMQ_IMMEDIATE=1` mutes until reconnect completes. | Queue to connect-side pre-ready pipe while reconnecting. Messages already accepted by a failed transport have no delivery guarantee. |
+| `PUB`/`XPUB`/`RADIO` no matching ready subscriber | Lossy. Send succeeds and drops, unless `XPUB_NODROP` exposes mute. | Lossy default. `xpub_nodrop` exposes backpressure. |
+| `ROUTER` unknown identity | Drop by default. `ROUTER_MANDATORY` returns `EHOSTUNREACH`. | Drop by default. `router_mandatory` returns `Error::Unroutable`. |
+| `PAIR`/`CHANNEL` no ready peer | Mute. Nonblocking send returns `EAGAIN`. No connect-side pre-ready queue. | `send().await` waits. `try_send()` returns `Full`. |
 
-| Socket case | libzmq behavior | `omq-libzmq` behavior | Native `omq-tokio` behavior |
-|-------------|-----------------|-----------------------|-----------------------------|
-| `PUSH`/`DEALER`/`REQ`/`CLIENT`/`SCATTER` bound, no ready peer | Mute. Blocking `send()` waits. `DONTWAIT` or `SNDTIMEO=0` returns `EAGAIN`. No message is accepted and dropped. | Same. | Same, except native nonblocking reports `TrySendError::Full(msg)`. |
-| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=0` | Accepts and queues to the incomplete/reconnecting pipe, bounded by HWM. | Same. | Queues to a connect-side pre-ready pipe allocated by `connect()`, bounded by `send_hwm`. |
-| Same sockets connected, no ready peer, `ZMQ_IMMEDIATE=1` | Mute. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | No native `ZMQ_IMMEDIATE` option; native always uses the pre-ready pipe. |
-| Bound socket had a peer, then all peers disconnected | Mute once no ready pipe remains. Blocking `send()` waits; nonblocking returns `EAGAIN`. | Same. | Same for sockets with only bind endpoints, except native nonblocking reports `TrySendError::Full(msg)`. |
-| Connected socket had a peer, then peer disconnected | With `ZMQ_IMMEDIATE=0`, queues to the reconnecting pipe. With `ZMQ_IMMEDIATE=1`, mute until reconnect completes. | Same for sends issued after reconnect is scheduled. | Queues to a connect-side pre-ready pipe while reconnecting. Native has no `ZMQ_IMMEDIATE` option. Messages already accepted by a dead transport are not delivery-guaranteed. |
-| `PUB`/`XPUB`/`RADIO` no matching ready subscriber | Lossy. Send succeeds and message is dropped, unless `XPUB_NODROP` makes mute visible. | Same for supported options. | Same lossy default; `xpub_nodrop` exposes direct-path backpressure. |
-| `ROUTER` unknown identity | Drops by default. With `ROUTER_MANDATORY`, returns `EHOSTUNREACH`. | Same public behavior. | Returns `Error::Unroutable` when `router_mandatory` is set. |
-| `PAIR`/`CHANNEL` no ready peer | Mute. Blocking send waits; nonblocking returns `EAGAIN`. | Blocking send waits; nonblocking returns `EAGAIN`. No connect-side pre-ready queue. | `send().await` waits for the exclusive peer; `try_send()` returns `Full`. |
-
-Important edge case: libzmq does not accept then drop `PUSH` messages when a
-bound socket has no ready peer. The call does not complete until a pipe can
-take the message, or it returns `EAGAIN` under nonblocking or timed send.
+Bound no-peer `PUSH` is not lossy. It waits or returns `EAGAIN`; it does not
+accept and drop the message.
 
 ## Linger
 
-libzmq default `ZMQ_LINGER` is `-1`: wait forever for queued outbound messages
-to drain. `zmq_close()` returns immediately. `zmq_ctx_term()` waits for socket
-linger work to finish, or forever for `-1`.
+libzmq default `ZMQ_LINGER=-1` waits forever for queued outbound messages.
+`zmq_close()` returns immediately. `zmq_ctx_term()` waits for linger work.
 
-Native OMQ default linger is zero. `Socket::close().await` waits for configured
-linger itself, then joins the driver. Dropping the last handle starts configured
-linger in the background. With `Context::current()`, the caller's runtime must
-keep polling for that background close to make progress.
+`omq-tokio` default linger is zero. `Socket::close().await` waits for the
+configured linger and joins the driver. Dropping the last handle starts linger
+in the background. With `Context::current()`, the caller runtime must keep
+polling for that close to progress.
 
-`omq-libzmq` maps the C API back to libzmq defaults:
+`omq-libzmq` maps the C API to libzmq defaults:
 
-- default `ZMQ_LINGER=-1` maps to native `linger_forever()`;
-- explicit `ZMQ_LINGER=0` maps to native zero linger;
-- `zmq_close()` returns quickly and context termination waits for active linger
-  work.
+- default `ZMQ_LINGER=-1` maps to `linger_forever()`;
+- explicit `ZMQ_LINGER=0` maps to zero linger;
+- `zmq_close()` returns quickly, and context termination waits for active
+  linger work.
 
-Finite or forever linger keeps bind/connect endpoints alive while draining.
-Late peers can receive queued connect-side pre-ready sends before the deadline.
-Bound no-peer sends are mute, so there is no bound no-peer queue to drain. Zero
-linger cancels endpoints and drops queued sends immediately.
+Finite or forever linger keeps endpoints alive while draining. Late peers can
+receive queued connect-side sends before the deadline. Bound no-peer sends are
+mute, so no bound no-peer queue exists. Zero linger cancels endpoints and drops
+queued sends immediately.
 
 ## HWM
 
-libzmq `ZMQ_SNDHWM` and `ZMQ_RCVHWM` are message-count limits, not byte
-limits. A complete multipart message consumes one HWM credit. A 16-byte
-message and a 16-MiB message both consume one credit.
+libzmq `ZMQ_SNDHWM` and `ZMQ_RCVHWM` are message-count limits per pipe, not
+byte limits. A complete multipart message consumes one HWM credit. HWM is
+backpressure, not a memory cap; memory grows with peer count and message size.
 
-libzmq accounting is per pipe. Total process memory can grow with peer count:
-roughly `hwm * ready_pipe_count * average_message_size`, plus codec and OS
-buffers. HWM is backpressure, not a memory cap.
-
-Native OMQ exposes `Options::send_hwm` and `Options::recv_hwm` as message-count
-settings, but implementation queues are split:
+`omq-tokio` exposes `Options::send_hwm` and `Options::recv_hwm` as
+message-count settings. Data queues are split:
 
 - connect-side pre-ready pipes: capped by `send_hwm`;
 - round-robin materialized peer pipes: capped by `send_hwm`;
 - fan-out lane rings: capped by `send_hwm`;
 - routed/fan-out transmit slots: capped separately by message count and bytes;
-- actor/control channels are separate and are not data HWM pipes.
+- actor/control channels: separate from data HWM pipes.
 
-Therefore native effective queued capacity can exceed one `send_hwm` when a
-socket owns multiple pipes/rings or transmit slots. Treat native HWM as
-per-pipe backpressure, not as an exact total socket queue length and not as a
-byte cap.
+Effective queued capacity can exceed one `send_hwm` when a socket owns multiple
+pipes, rings, or transmit slots. Treat HWM as per-pipe backpressure, not an
+exact socket queue length or byte cap.

@@ -1,24 +1,47 @@
 //! Socket options: typed builder.
 //!
-//! Defaults differ from libzmq in a few places: linger defaults to zero,
-//! HWM is per-socket, and conflate is restricted to `FanOut` patterns.
+//! Defaults differ from libzmq in a few places. Native OMQ linger defaults to
+//! zero, while libzmq `ZMQ_LINGER` defaults to forever. Native OMQ
+//! `send_hwm`/`recv_hwm` are message-count caps, not byte caps. Native OMQ
+//! applies `send_hwm` per outbound pipe; it is not a single socket-wide byte
+//! or message budget.
 
 use std::time::Duration;
 
 use bytes::Bytes;
 
 use crate::proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "plain"))]
+#[cfg(feature = "plain")]
 use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
-use crate::proto::mechanism::{CurveKeypair, CurvePublicKey};
+use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveServerOptions};
 use crate::socket_ref::SocketRef;
 /// Upper bound for `Options::compression_dict`. Both transports
 /// cap at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
+/// Default cap for byte-stream peers that are accepted but have not
+/// completed the ZMTP handshake.
+pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
+
 /// Per-socket configuration.
+///
+/// # Compatibility warnings
+///
+/// Native OMQ does not copy every libzmq socket default or HWM detail:
+///
+/// - `linger` defaults to zero. libzmq `ZMQ_LINGER` defaults to forever.
+/// - `send_hwm` and `recv_hwm` count complete messages, not bytes.
+/// - Native `send_hwm` is not an exact total queued-message cap. Connect-side
+///   pre-ready pipes, per-peer pipes, fan-out lane rings, and transmit slots
+///   are separate buffers.
+/// - Native round-robin sends (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`)
+///   with a bound endpoint and no ready pipe mute like libzmq: blocking
+///   `send()` waits and `try_send()` returns `Full`.
+/// - The same socket types with a `connect()` endpoint allocate a pre-ready
+///   pipe at `connect()` time. Sends may queue there before the peer reaches
+///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
 // every backend file that accesses them.
@@ -33,14 +56,29 @@ pub struct Options {
     /// explicitly on both endpoints.
     pub workload_profile: Option<WorkloadProfile>,
 
-    /// Send-side high-water mark, total for the socket.
+    /// Send-side high-water mark as a message count.
+    ///
+    /// This is not a byte cap. One 16-byte message and one 16-MiB message
+    /// each consume one HWM slot. Native OMQ applies this per outbound pipe:
+    /// connect-side pre-ready pipes, materialized peer pipes, and fan-out lane
+    /// rings each have their own HWM. Effective socket-wide queued capacity
+    /// can therefore exceed this value when multiple pipes or transmit slots
+    /// exist. `omq-libzmq` exposes this as `ZMQ_SNDHWM`.
     pub send_hwm: u32,
 
-    /// Receive-side high-water mark, total for the socket.
+    /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
     /// Time to wait on close for the send queue to drain.
-    /// `None` = wait forever. `Some(Duration::ZERO)` = drop immediately.
+    ///
+    /// Native OMQ defaults to `Some(Duration::ZERO)`: close/drop discard
+    /// unsent queued messages immediately. This intentionally differs from
+    /// libzmq, where `ZMQ_LINGER` defaults to `-1` (forever). `omq-libzmq`
+    /// maps its C default back to forever for compatibility.
+    ///
+    /// `None` waits forever. `Some(Duration::ZERO)` drops immediately.
+    /// Finite non-zero values keep bind/connect endpoints alive until queued
+    /// sends drain or the deadline expires.
     pub linger: Option<Duration>,
 
     /// Identity used for ROUTER / DEALER / SERVER / PEER routing. Empty = auto.
@@ -60,7 +98,22 @@ pub struct Options {
     pub heartbeat_timeout: Option<Duration>,
 
     /// Max time allowed to complete the ZMTP handshake.
+    ///
+    /// Encrypted mechanisms require a timeout. Longer values give slow peers
+    /// more time to finish authentication, but also let stalled or malicious
+    /// peers hold pending-handshake slots longer.
     pub handshake_timeout: Option<Duration>,
+
+    /// Maximum byte-stream peers allowed to sit in the ZMTP handshake state
+    /// at once. The tokio backend applies this before spawning a peer driver
+    /// for newly accepted TCP/IPC connections.
+    ///
+    /// Lower values reduce memory/task pressure from unauthenticated peers,
+    /// but can reject legitimate connection bursts while the cap is full.
+    /// Higher values admit larger bursts, at the cost of more pre-auth
+    /// resource use. Completed handshakes leave this pool immediately; timed
+    /// out or failed handshakes release their slot when the peer is closed.
+    pub max_pending_handshakes: usize,
 
     /// Reject incoming messages larger than this. Accounting includes payload
     /// bytes plus one internal payload slot per part. `None` = no limit.
@@ -73,11 +126,15 @@ pub struct Options {
     /// ROUTER: fail `send` with `Error::Unroutable` for unknown identities.
     pub router_mandatory: bool,
 
-    /// Behaviour when the socket's send HWM is reached.
+    /// Behavior when the socket's send HWM is reached.
     ///
     /// Fan-out sockets (`PUB`, `XPUB`, `RADIO`) are always lossy on mute:
     /// this setting is ignored and they drop newest unless `xpub_nodrop`
     /// is set.
+    ///
+    /// Native bound no-peer round-robin sends mute immediately. Connected
+    /// no-peer round-robin sends queue into their connect-side pre-ready pipe
+    /// until that pipe reaches `send_hwm`, then this policy applies.
     pub on_mute: OnMute,
 
     /// TCP keepalive policy. Applied to every accepted / dialed TCP
@@ -210,6 +267,7 @@ impl Default for Options {
             heartbeat_ttl: None,
             heartbeat_timeout: None,
             handshake_timeout: Some(Duration::from_secs(30)),
+            max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_message_size: None,
             conflate: false,
             router_mandatory: false,
@@ -267,6 +325,16 @@ impl Options {
                 "heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
             )));
         }
+        if self.max_pending_handshakes == 0 {
+            return Err(crate::error::Error::Config(
+                "max_pending_handshakes must be greater than zero".into(),
+            ));
+        }
+        if self.handshake_timeout.is_none() && self.mechanism.has_frame_transform() {
+            return Err(crate::error::Error::Config(
+                "encrypted mechanisms require handshake_timeout".into(),
+            ));
+        }
         if let Some(ref dict) = self.compression_dict
             && (dict.is_empty() || dict.len() > COMPRESSION_DICT_MAX)
         {
@@ -294,9 +362,23 @@ impl Options {
                 )));
             }
         }
+        #[cfg(feature = "curve")]
+        if let MechanismSetup::CurveServer { ref options, .. } = self.mechanism
+            && options.cookie_lifetime.is_zero()
+        {
+            return Err(crate::error::Error::Config(
+                "CURVE cookie lifetime must be greater than zero".into(),
+            ));
+        }
         Ok(())
     }
 
+    /// Set send-side HWM as a message count.
+    ///
+    /// This is not a byte limit. Large messages count the same as small
+    /// messages. Native OMQ may hold more than this value across multiple
+    /// connect-side pre-ready pipes, per-peer pipes, fan-out lane rings, and
+    /// transmit slots.
     #[must_use]
     pub fn send_hwm(mut self, hwm: u32) -> Self {
         self.send_hwm = hwm;
@@ -309,12 +391,21 @@ impl Options {
         self
     }
 
+    /// Set close linger to a finite duration.
+    ///
+    /// `Duration::ZERO` means drop queued outbound messages immediately.
+    /// Non-zero values keep endpoints alive so queued sends can drain to
+    /// existing or late peers before the deadline.
     #[must_use]
     pub fn linger(mut self, d: Duration) -> Self {
         self.linger = Some(d);
         self
     }
 
+    /// Wait forever for queued outbound messages to drain on close/drop.
+    ///
+    /// This can wait forever if queued messages have no peer and no peer ever
+    /// arrives. Use finite linger for services that need bounded shutdown.
     #[must_use]
     pub fn linger_forever(mut self) -> Self {
         self.linger = None;
@@ -357,9 +448,24 @@ impl Options {
         self
     }
 
+    /// Set max time allowed to complete the ZMTP handshake.
+    ///
+    /// For encrypted mechanisms this also controls how long a stalled peer can
+    /// occupy one `max_pending_handshakes` slot.
     #[must_use]
     pub fn handshake_timeout(mut self, d: Duration) -> Self {
         self.handshake_timeout = Some(d);
+        self
+    }
+
+    /// Set max simultaneous inbound byte-stream handshakes.
+    ///
+    /// This caps pre-auth TCP/IPC resource use. If full, new accepted peers
+    /// are rejected before a peer driver is spawned and monitors receive
+    /// `HandshakeFailed`.
+    #[must_use]
+    pub fn max_pending_handshakes(mut self, n: usize) -> Self {
+        self.max_pending_handshakes = n;
         self
     }
 
@@ -441,20 +547,27 @@ impl Options {
         self
     }
 
-    /// Configure this socket as a CURVE server with the given long-term
-    /// keypair. Incoming clients must present the matching server public
-    /// key during their handshake. A fresh cookie keyring with the
-    /// default rotation interval (~30 s) is created. Reach in via
-    /// [`MechanismSetup::curve_cookie_keyring`] to configure or share
-    /// it. Use [`Self::authenticator`] to add a per-client admission
-    /// callback.
+    /// Configure this socket as a CURVE server with default CURVE
+    /// server options.
     #[cfg(feature = "curve")]
     #[must_use]
-    pub fn curve_server(mut self, our_keypair: CurveKeypair) -> Self {
+    pub fn curve_server(self, our_keypair: CurveKeypair) -> Self {
+        self.curve_server_with_options(our_keypair, CurveServerOptions::default())
+    }
+
+    /// Configure this socket as a CURVE server with explicit CURVE
+    /// server options. Incoming clients must present the matching
+    /// server public key during their handshake.
+    #[cfg(feature = "curve")]
+    #[must_use]
+    pub fn curve_server_with_options(
+        mut self,
+        our_keypair: CurveKeypair,
+        options: CurveServerOptions,
+    ) -> Self {
         self.mechanism = MechanismSetup::CurveServer {
             our_keypair,
-            cookie_keyring: std::sync::Arc::new(crate::proto::mechanism::CurveCookieKeyring::new()),
-            authenticator: None,
+            options,
         };
         self
     }
@@ -474,39 +587,10 @@ impl Options {
         self
     }
 
-    /// Install a server-side authenticator. Called once per handshake
-    /// after the underlying mechanism has cryptographically verified
-    /// the peer (CURVE: vouch decrypt).
-    /// The callback receives the peer's long-term public key plus a
-    /// tag identifying which mechanism produced it. Return `false` to
-    /// reject the client; the handshake aborts.
-    ///
-    /// Works for CURVE server configurations.
-    /// Panics if the current mechanism is not a server configuration
-    /// of an encrypting mechanism (i.e., `curve_server`
-    /// must be called before this method).
-    #[cfg(feature = "curve")]
-    #[must_use]
-    #[track_caller]
-    pub fn authenticator<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
-    {
-        let auth = Authenticator::new(f);
-        match &mut self.mechanism {
-            #[cfg(feature = "curve")]
-            MechanismSetup::CurveServer { authenticator, .. } => {
-                *authenticator = Some(auth);
-            }
-            _ => panic!("authenticator requires a server-side encrypting mechanism"),
-        }
-        self
-    }
-
     /// Configure this socket as a PLAIN server (RFC 24). The
     /// authenticator receives [`MechanismPeerInfo`] with `username`
     /// and `password` populated; return `true` to admit the client.
-    /// No encryption is applied — use on trusted networks only.
+    /// No encryption is applied; use on trusted networks only.
     #[cfg(feature = "plain")]
     #[must_use]
     pub fn plain_server<F>(mut self, f: F) -> Self
@@ -625,7 +709,12 @@ impl Default for ReconnectPolicy {
     }
 }
 
-/// What to do when the send HWM is reached and a new message arrives.
+/// What to do when native send HWM is reached and a new message arrives.
+///
+/// Native bound no-peer round-robin sockets mute immediately. Connected
+/// no-peer round-robin sockets queue into a pre-ready pipe until `send_hwm`
+/// is reached, then apply this policy. Native OMQ has no `ZMQ_IMMEDIATE`
+/// option; `omq-libzmq` implements `ZMQ_IMMEDIATE` at the C layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OnMute {
@@ -708,6 +797,7 @@ mod tests {
         assert_eq!(o.recv_hwm, 1000);
         assert_eq!(o.linger, Some(Duration::ZERO));
         assert_eq!(o.handshake_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(o.max_pending_handshakes, DEFAULT_MAX_PENDING_HANDSHAKES);
         assert_eq!(o.heartbeat_interval, None);
         assert_eq!(o.max_message_size, None);
         assert_eq!(o.tcp_keepalive, KeepAlive::Default);
@@ -722,6 +812,28 @@ mod tests {
         // Native OMQ intentionally differs from libzmq here: async socket
         // close should not wait forever unless the user asks for it.
         assert_eq!(Options::default().linger, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn rejects_zero_pending_handshake_cap() {
+        let o = Options {
+            max_pending_handshakes: 0,
+            ..Options::default()
+        };
+        assert!(o.validate().is_err());
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn curve_requires_handshake_timeout() {
+        let mut o = Options::default().curve_server(CurveKeypair::generate());
+        o.handshake_timeout = None;
+        assert!(o.validate().is_err());
+
+        let server_kp = CurveKeypair::generate();
+        let mut o = Options::default().curve_client(CurveKeypair::generate(), server_kp.public);
+        o.handshake_timeout = None;
+        assert!(o.validate().is_err());
     }
 
     #[test]

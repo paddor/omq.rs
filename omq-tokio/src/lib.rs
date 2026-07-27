@@ -8,6 +8,14 @@
 //! algorithms live in the runtime-agnostic `omq-proto` crate.
 //! This crate provides the tokio glue: per-connection drivers,
 //! transport implementations, and the public `Socket` actor.
+//!
+//! # Compatibility warnings
+//!
+//! Native `Options::linger` defaults to zero, unlike libzmq's forever linger
+//! default. Native `Options::send_hwm` counts messages, not bytes, and is not
+//! an exact total queue cap. Bound no-peer round-robin sends mute like libzmq.
+//! Connected no-peer round-robin sends queue in a connect-side pre-ready pipe
+//! unless `omq-libzmq` has `ZMQ_IMMEDIATE=1`.
 #![forbid(unsafe_code)]
 
 #[cfg(not(target_has_atomic = "64"))]
@@ -28,7 +36,7 @@ pub use omq_proto::IpcPath;
 #[cfg(any(feature = "curve", feature = "plain"))]
 pub use omq_proto::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
-pub use omq_proto::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
+pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, KeepAlive, MechanismConfig,
     MechanismSetup, Message, MessageIter, OnMute, Options, PartCountError, ReconnectPolicy, Result,

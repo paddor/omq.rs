@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Do not count pre-handshake TCP/IPC peers against data-plane peer limits.
+  Pending handshakes no longer block PAIR/CHANNEL slots before authentication
+  or ZMTP readiness.
+- Add `Options::max_pending_handshakes` to cap simultaneous inbound
+  byte-stream handshakes before peer driver allocation. Lower values reduce
+  pre-auth resource exposure but can reject legitimate connection bursts;
+  higher values allow bigger bursts while consuming more memory/tasks.
+- Reject encrypted socket configurations that disable the ZMTP handshake
+  timeout. Longer timeouts let slow peers complete authentication but also let
+  stalled peers hold pending-handshake slots longer.
+
+### Fixed
+
+- `Socket::close()` with non-zero or forever linger now keeps bind/connect
+  endpoints alive while queued connect-side pre-ready sends drain to late
+  peers.
+- Dropping the last socket handle now applies configured linger in the
+  background instead of forcing zero-linger teardown.
+
+### Changed
+
+- Replace the shared round-robin no-peer fallback queue with connect-side
+  pre-ready pipes allocated during `connect()`.
+- Bound no-peer round-robin sends now mute like libzmq: async `send()` waits
+  and `try_send()` returns `Full`.
+- Document native no-peer, linger, and HWM edge cases against libzmq.
+
 ## [0.19.3] - 2026-07-23
 
 ### Added

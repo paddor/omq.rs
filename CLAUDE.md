@@ -73,16 +73,15 @@ go through actor for identity routing. PUB fan-out lane workers
 (`LaneWorker`) use split channels: a `yring` control channel
 (drained unconditionally) and a `yring` data channel (drained up to
 `DrainBudget::WORKER`). All producer-to-consumer signaling uses
-`DataSignal` (transmit slot, send pipe, fallback queue, lane
-workers).
+`DataSignal` (transmit slot, send pipe, lane workers).
 
 **Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
 register `yring` send pipes. Byte-stream consumers drain in
 `ConnectionDriver`; inproc consumers drain in `inproc_peer_driver` and
 forward to the socket inbound queue. Same-thread delivery uses direct
-`yring::ProducerOwner` access where applicable. `FallbackQueue` is only
-the no-peer/pre-connect fallback; peer tasks drain it before newer
-pipe-fed sends.
+`yring::ProducerOwner` access where applicable. Connect-side
+round-robin endpoints allocate a pre-ready send pipe at `connect()`;
+bind-side round-robin sockets with no ready pipe mute like libzmq.
 
 ## Build / test / bench / charts / releasing
 

@@ -23,7 +23,7 @@ use super::compression_pool::CompressionPool;
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
-use crate::routing::{RepEnvelope, fallback_queue::FallbackReceiver};
+use crate::routing::RepEnvelope;
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
 use crate::socket::recv::RecvItem;
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
@@ -231,6 +231,7 @@ impl std::fmt::Debug for YringSink {
 }
 
 impl YringSink {
+    #[inline]
     fn flush_and_signal(&mut self) {
         self.producer.flush();
         (self.signal)();
@@ -393,7 +394,7 @@ const READ_BUF_INITIAL_THROUGHPUT: usize = 4 * 1024;
 const READ_BUF_MAX: usize = 128 * 1024;
 const READ_BUF_GROW_FULL_READS: usize = 2;
 
-use crate::routing::SHARED_MAX_BATCH_MSGS;
+use crate::routing::OUTBOUND_BATCH_MAX_MSGS;
 
 /// Driver-level timing configuration: handshake deadline, heartbeat
 /// cadence, idle-close timeout.
@@ -418,6 +419,9 @@ pub struct PeerDriverConfig {
 /// Commands accepted by a running [`ConnectionDriver`].
 #[derive(Debug)]
 pub enum PeerDriverCommand {
+    /// Allow application messages to flow after the socket actor has accepted
+    /// this peer as ready.
+    ActivateDataPlane,
     /// Queue an application message for send.
     SendMessage(Message),
     /// Pre-encoded wire bytes. Pushed directly into the transmit buffer,
@@ -449,13 +453,20 @@ pub struct PeerDriverHandle {
 #[derive(Debug)]
 pub enum PeerEvent {
     Event(Event),
-    Closed,
+    Closed { error: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriverStep {
     Continue,
     Yield,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreActivationStep {
+    Continue,
+    Activate,
     Close,
 }
 
@@ -573,10 +584,6 @@ where
     encoder: Option<MessageEncoder>,
     /// Receive-side message decoder. Symmetric to `encoder`.
     decoder: Option<MessageDecoder>,
-    /// Shared round-robin send queue. When set, the driver reads outbound
-    /// messages directly from this queue. `None` for non-round-robin
-    /// socket types.
-    shared_msg_rx: Option<FallbackReceiver>,
     /// Direct recv channel. When set, inbound `Event::Message` frames are
     /// pushed straight into the user-facing recv channel without going through
     /// the `SocketDriver` actor's event loop. Only set for socket types where
@@ -640,7 +647,6 @@ where
             config,
             encoder: None,
             decoder: None,
-            shared_msg_rx: None,
             recv_direct: None,
             compression_pool: None,
             offload_threshold: 0,
@@ -675,14 +681,6 @@ where
     ) -> Self {
         self.compression_pool = Some(pool);
         self.offload_threshold = threshold;
-        self
-    }
-
-    /// Provide the shared round-robin send queue. The driver polls this
-    /// directly after handshake.
-    #[must_use]
-    pub(crate) fn with_shared_rx(mut self, rx: FallbackReceiver) -> Self {
-        self.shared_msg_rx = Some(rx);
         self
     }
 
@@ -765,7 +763,8 @@ where
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
         let result = self.run_inner_body().await;
-        let _ = peer_out.send((peer_id, PeerEvent::Closed)).await;
+        let error = result.as_ref().err().map(close_error_reason);
+        let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
         result
     }
 
@@ -781,7 +780,6 @@ where
             config,
             encoder,
             mut decoder,
-            shared_msg_rx,
             mut recv_direct,
             compression_pool,
             offload_threshold,
@@ -821,15 +819,79 @@ where
         let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
         tokio::pin!(hb_sleep);
         let mut hb_ping_sent = false;
-        // Keep fallback before yring until yring wins once; after that,
-        // empty fallback waiting would add a signal waiter-list lock on the
-        // hot select path.
-        let mut prioritize_shared_rx = shared_msg_rx.is_some();
+
         loop {
             if handshake_deadline.is_some() && connection.is_ready() {
                 handshake_deadline = None;
             }
 
+            if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
+                return Ok(());
+            }
+
+            let want_write = connection.has_pending_transmit() || !eq.is_empty();
+
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    if let Some(ref slot) = transmit_slot {
+                        slot.mark_dead();
+                    }
+                    return Ok(());
+                }
+
+                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
+                    return Err(Error::HandshakeFailed("handshake timeout".into()));
+                }
+
+                res = reader.read_buf(&mut read_buf), if !connection.is_ready() => {
+                    let n = res?;
+                    if n == 0 {
+                        mark_peer_dead(transmit_slot.as_deref());
+                        cancel.cancel();
+                        inbox.close();
+                        return Ok(());
+                    }
+                    read_stream_input(
+                        n,
+                        &mut reader,
+                        &mut connection,
+                        &mut read_buf,
+                        &mut read_buf_target,
+                        &mut read_buf_full_reads,
+                        &config,
+                        &mut last_input,
+                        &recv_pool,
+                        &peer_out,
+                        peer_id,
+                    ).await?;
+                }
+
+                res = async {
+                    flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
+                    flush_once(&mut writer, &mut connection).await
+                }, if want_write => {
+                    res?;
+                }
+
+                cmd = inbox.recv() => {
+                    match handle_pre_activation_inbox_command(
+                        cmd,
+                        &mut connection,
+                    )? {
+                        PreActivationStep::Continue => {}
+                        PreActivationStep::Activate => break,
+                        PreActivationStep::Close => {
+                            drain_writes(&mut writer, &mut connection).await.ok();
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+        loop {
             if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
                 return Ok(());
             }
@@ -851,13 +913,8 @@ where
                 DriverStep::Close => return Ok(()),
             }
 
-            // Set handshake_done on the encode slot once the handshake
-            // completes and there's no frame transform (CURVE).
-            // The slot stays disabled for crypto connections.
-            enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
-
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
-            let hb_enabled = hb_interval.is_some() && connection.is_ready();
+            let hb_enabled = hb_interval.is_some();
 
             // Latency-routed REQ/REP sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
@@ -895,11 +952,6 @@ where
                         transmit_slot.as_ref().unwrap(), &mut drain_buf,
                         &mut arena_buf, &mut writer,
                     ).await?;
-                }
-
-                // Handshake deadline; disabled once handshake completes.
-                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
-                    return Err(Error::HandshakeFailed("handshake timeout".into()));
                 }
 
                 res = reader.read_buf(&mut read_buf), if !latency_profile || inbox.is_empty() => {
@@ -953,34 +1005,6 @@ where
                     }
                 },
 
-                // Shared-queue arm: batch-encodes up to
-                // SHARED_MAX_BATCH_MSGS messages per wakeup then flushes
-                // them all in one or a few write_vectored calls.
-                //
-                // Higher priority than transmit_slot: messages queued before
-                // the transmit-slot fast path was enabled (pre-handshake or
-                // post-reconnect) must drain first to preserve ordering.
-                msg = async {
-                    if let Some(ref rx) = shared_msg_rx {
-                        rx.recv_with_drain().await
-                    } else {
-                        std::future::pending().await
-                    }
-                }, if prioritize_shared_rx && connection.is_ready() => {
-                    if handle_shared_queue_message(
-                        msg,
-                        shared_msg_rx.as_ref(),
-                        &mut outbound,
-                        &mut connection,
-                        &mut eq,
-                        &mut drain_buf,
-                        &mut writer,
-                    ).await? == DriverStep::Close {
-                        drain_writes(&mut writer, &mut connection).await.ok();
-                        return Ok(());
-                    }
-                },
-
                 // Wire-slot arm: the socket handle encoded ZMTP frames
                 // into the per-peer PeerTransmitSlot. Drain and write
                 // directly, bypassing the local FrameBuffer.
@@ -999,7 +1023,7 @@ where
                 // messages to this driver, which encodes and writes locally.
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
-                }, if send_pipe_rx.is_some() && connection.is_ready() => {
+                }, if send_pipe_rx.is_some() => {
                     match handle_send_pipe_ready(
                         &mut send_pipe_rx,
                         &mut pipe_batch,
@@ -1009,8 +1033,7 @@ where
                         &mut drain_buf,
                         &mut writer,
                     ).await? {
-                        DriverStep::Continue => prioritize_shared_rx = false,
-                        DriverStep::Yield => {}
+                        DriverStep::Continue | DriverStep::Yield => {}
                         DriverStep::Close => {
                             drain_writes(&mut writer, &mut connection).await.ok();
                             return Ok(());
@@ -1043,6 +1066,13 @@ where
 
             }
         }
+    }
+}
+
+fn close_error_reason(err: &Error) -> String {
+    match err {
+        Error::HandshakeFailed(reason) => reason.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -1162,6 +1192,23 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     handle_large_messages(connection, reader, config, last_input, recv_pool).await
 }
 
+fn handle_pre_activation_inbox_command(
+    cmd: Option<PeerDriverCommand>,
+    connection: &mut Connection,
+) -> Result<PreActivationStep> {
+    match cmd {
+        Some(PeerDriverCommand::ActivateDataPlane) => Ok(PreActivationStep::Activate),
+        Some(PeerDriverCommand::SendCommand(c)) => {
+            connection.send_command(&c)?;
+            Ok(PreActivationStep::Continue)
+        }
+        Some(PeerDriverCommand::Close) | None => Ok(PreActivationStep::Close),
+        Some(PeerDriverCommand::SendMessage(_) | PeerDriverCommand::SendEncoded(_)) => Err(
+            Error::Protocol("peer data command before activation".into()),
+        ),
+    }
+}
+
 async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     cmd: Option<PeerDriverCommand>,
     inbox: &mut mpsc::Receiver<PeerDriverCommand>,
@@ -1172,6 +1219,7 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<DriverStep> {
     match cmd {
+        Some(PeerDriverCommand::ActivateDataPlane) => Ok(DriverStep::Continue),
         Some(PeerDriverCommand::SendMessage(first)) => {
             // TODO: Give driver control commands an explicit msg/byte/time
             // budget. Current mixed inbox batches data first, then handles
@@ -1189,13 +1237,14 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
                         }
                         Err(_) => None,
                     },
-                    SHARED_MAX_BATCH_MSGS,
+                    OUTBOUND_BATCH_MAX_MSGS,
                     connection,
                     eq,
                 )
                 .await?;
             for cmd in deferred {
                 match cmd {
+                    PeerDriverCommand::ActivateDataPlane => {}
                     PeerDriverCommand::SendEncoded(chunks) => {
                         eq.push_shared_chunks(&chunks);
                     }
@@ -1225,49 +1274,6 @@ async fn handle_inbox_command<W: AsyncWrite + Unpin>(
     }
 }
 
-async fn handle_shared_queue_message<W: AsyncWrite + Unpin>(
-    msg: Option<Message>,
-    shared_msg_rx: Option<&FallbackReceiver>,
-    outbound: &mut OutboundState,
-    connection: &mut Connection,
-    eq: &mut FrameBuffer,
-    drain_buf: &mut Vec<Bytes>,
-    writer: &mut W,
-) -> Result<DriverStep> {
-    let Some(first) = msg else {
-        return Ok(DriverStep::Close);
-    };
-    let batch_limit = shared_msg_rx.map_or(SHARED_MAX_BATCH_MSGS, FallbackReceiver::batch_limit);
-    let mut popped = 1usize;
-    let encode_result = outbound
-        .batch_encode(
-            &first,
-            || {
-                let msg = shared_msg_rx.and_then(FallbackReceiver::try_pop);
-                if msg.is_some() {
-                    popped += 1;
-                }
-                msg
-            },
-            batch_limit,
-            connection,
-            eq,
-        )
-        .await;
-    let result: Result<()> = match encode_result {
-        Ok(_) => flush_all(writer, eq, drain_buf, connection)
-            .await
-            .map_err(Into::into),
-        Err(e) => Err(e),
-    };
-    if let Some(rx) = shared_msg_rx {
-        rx.release_permits(popped);
-        rx.finish_drain();
-    }
-    result?;
-    Ok(DriverStep::Continue)
-}
-
 async fn handle_send_pipe_ready<W: AsyncWrite + Unpin>(
     send_pipe_rx: &mut Option<SendPipeConsumer>,
     pipe_batch: &mut Vec<Message>,
@@ -1278,7 +1284,11 @@ async fn handle_send_pipe_ready<W: AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<DriverStep> {
     let rx = send_pipe_rx.as_mut().expect("send pipe select guard");
-    let drained = rx.drain_into(pipe_batch, SHARED_MAX_BATCH_MSGS, max_batch_bytes());
+    let drained = rx.drain_into(
+        pipe_batch,
+        crate::routing::OUTBOUND_BATCH_MAX_MSGS,
+        max_batch_bytes(),
+    );
     if drained == 0 {
         if rx.is_disconnected() {
             return Ok(DriverStep::Close);
@@ -1377,7 +1387,7 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
             .batch_encode(
                 &first,
                 || batch.pop(),
-                SHARED_MAX_BATCH_MSGS,
+                OUTBOUND_BATCH_MAX_MSGS,
                 connection,
                 eq,
             )
@@ -1826,7 +1836,7 @@ mod tests {
         pub(super) async fn recv(&mut self) -> Option<Event> {
             match self.rx.recv().await? {
                 (_, PeerEvent::Event(e)) => Some(e),
-                (_, PeerEvent::Closed) => None,
+                (_, PeerEvent::Closed { .. }) => None,
             }
         }
     }
@@ -1915,9 +1925,19 @@ mod tests {
 
     #[tokio::test]
     async fn message_roundtrip_over_inproc() {
-        let (client, mut client_events, _server, mut server_events) = inproc_pair("drv-msg").await;
+        let (client, mut client_events, server, mut server_events) = inproc_pair("drv-msg").await;
         client_events.recv().await.unwrap();
         server_events.recv().await.unwrap();
+        client
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        server
+            .inbox
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
 
         client
             .inbox
@@ -2079,7 +2099,7 @@ mod tests {
         // Collect all events from the server driver.
         let mut events = Vec::new();
         while let Some((_, out)) = s_evt_rx.recv().await {
-            let is_closed = matches!(out, PeerEvent::Closed);
+            let is_closed = matches!(out, PeerEvent::Closed { .. });
             events.push(out);
             if is_closed {
                 break;

@@ -88,6 +88,7 @@ pub(crate) struct BlockingRecvWaker {
 }
 
 impl BlockingRecvWaker {
+    #[inline]
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             registered: AtomicBool::new(false),
@@ -96,21 +97,32 @@ impl BlockingRecvWaker {
         })
     }
 
+    #[inline]
     pub(crate) fn register(&self, thread: std::thread::Thread) {
         *self.thread.lock().unwrap() = Some(thread);
         self.registered.store(true, Ordering::Release);
     }
 
+    #[inline]
     pub(crate) fn prepare_sleep(&self) {
         self.sleeping.store(true, Ordering::Release);
     }
 
+    #[inline]
     pub(crate) fn cancel_sleep(&self) {
         self.sleeping.store(false, Ordering::Release);
     }
 
+    #[inline]
     pub(crate) fn wake(&self) {
-        if !self.sleeping.swap(false, Ordering::AcqRel) || !self.registered.load(Ordering::Acquire)
+        if !self.sleeping.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .sleeping
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+            || !self.registered.load(Ordering::Acquire)
         {
             return;
         }
@@ -512,10 +524,6 @@ impl SpscAwareRecv {
                 latency,
             }),
         }
-    }
-
-    pub(crate) fn register_blocking_thread(&self) {
-        self.blocking_recv_waker.register(std::thread::current());
     }
 
     pub(crate) fn blocking_recv(&self) -> Result<Message> {

@@ -17,7 +17,6 @@
 
 pub(crate) mod exclusive;
 pub(crate) mod fair_queue;
-pub(crate) mod fallback_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
 pub(crate) mod latency;
@@ -31,7 +30,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::engine::PeerDriverHandle;
+use crate::engine::{PeerDriverHandle, SendPipeConsumer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -39,10 +38,8 @@ use omq_proto::proto::SocketType;
 use omq_proto::routing::{FanOutKind, RecvCategory, SendCategory, recv_category, send_category};
 use tokio::sync::oneshot;
 
-/// Max messages one shared-queue consumer batch-encodes before flushing.
-/// Scaled down per peer by [`RoundRobinSend`] to improve distribution
-/// fairness when multiple drivers compete on the same queue.
-pub(crate) const SHARED_MAX_BATCH_MSGS: usize = 512;
+/// Max messages one outbound drain batch encodes before flushing.
+pub(crate) const OUTBOUND_BATCH_MAX_MSGS: usize = 512;
 
 pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
 pub(crate) use fair_queue::FairQueueRecv;
@@ -226,6 +223,7 @@ impl SendStrategy {
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
+        route_id: u64,
         handle: PeerDriverHandle,
         peer_identity: Bytes,
         is_inproc: bool,
@@ -233,8 +231,8 @@ impl SendStrategy {
     ) {
         match self {
             Self::None => {}
-            Self::RoundRobin(s) => s.connection_added(peer_id, &handle, is_inproc),
-            Self::Latency(s) => s.connection_added(peer_id, &handle),
+            Self::RoundRobin(s) => s.connection_added(route_id, &handle, is_inproc),
+            Self::Latency(s) => s.connection_added(route_id, &handle),
             Self::Exclusive(s) => s.connection_added(peer_id, handle),
             Self::FanOut(s) => s.connection_added(peer_id, handle, io_thread),
             Self::Identity(s) => s.connection_added(peer_id, handle, peer_identity, is_inproc),
@@ -255,14 +253,22 @@ impl SendStrategy {
         }
     }
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
+    pub(crate) fn connection_removed(&mut self, peer_id: u64, route_id: u64) {
         match self {
             Self::None => {}
-            Self::RoundRobin(s) => s.connection_removed(peer_id),
-            Self::Latency(s) => s.connection_removed(peer_id),
+            Self::RoundRobin(s) => s.connection_removed(route_id),
+            Self::Latency(s) => s.connection_removed(route_id),
             Self::Exclusive(s) => s.connection_removed(peer_id),
             Self::FanOut(s) => s.connection_removed(peer_id),
             Self::Identity(s) => s.connection_removed(peer_id),
+        }
+    }
+
+    pub(crate) fn connect_pipe_removed(&mut self, route_id: u64) {
+        match self {
+            Self::RoundRobin(s) => s.connection_removed(route_id),
+            Self::Latency(s) => s.connection_removed(route_id),
+            Self::None | Self::Exclusive(_) | Self::FanOut(_) | Self::Identity(_) => {}
         }
     }
 
@@ -306,14 +312,13 @@ impl SendStrategy {
         }
     }
 
-    /// Returns a clone of the round-robin shared receive queue, if this
-    /// socket type uses round-robin send. `None` for fan-out, identity,
-    /// and no-send strategies. The connection driver polls this directly
-    /// after handshake for messages queued before any peer was available.
-    pub(crate) fn shared_rx(&self) -> Option<fallback_queue::FallbackReceiver> {
+    /// Allocate a connect-side pre-ready pipe. The producer is immediately
+    /// eligible for routing; the dialer keeps the consumer until a connection
+    /// completes the handshake.
+    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> Option<SendPipeConsumer> {
         match self {
-            Self::RoundRobin(s) => Some(s.shared_rx()),
-            Self::Latency(s) => Some(s.shared_rx()),
+            Self::RoundRobin(s) => Some(s.make_connect_pipe(route_id)),
+            Self::Latency(s) => Some(s.make_connect_pipe(route_id)),
             _ => None,
         }
     }
@@ -435,17 +440,3 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
 }
 
 pub(crate) use omq_proto::routing::supports_conflate;
-
-/// Resolve queue capacity + drop policy for `options`. When
-/// `conflate` is set, both are forced to (1, `DropOldest`) - that
-/// gives the "queue is just the latest message" semantics
-/// regardless of the user's other settings.
-pub(crate) fn effective_queue_params(
-    options: &omq_proto::options::Options,
-) -> (usize, omq_proto::options::OnMute) {
-    if options.conflate {
-        (1, omq_proto::options::OnMute::DropOldest)
-    } else {
-        (options.send_hwm as usize, options.on_mute)
-    }
-}

@@ -60,14 +60,19 @@ impl SocketDriver {
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
         let before = self.dialers.len() + self.udp_dialers.len();
+        let mut removed_routes = Vec::new();
         self.dialers.retain(|d| {
             if &d.endpoint == endpoint {
                 d.cancel.cancel();
+                removed_routes.push(d.route_id);
                 false
             } else {
                 true
             }
         });
+        for route_id in removed_routes {
+            self.send_strategy.connect_pipe_removed(route_id);
+        }
         // Cancel matching UDP dialers AND tell the SendStrategy the
         // synthetic peer is gone so RADIO stops queuing through it.
         let mut removed_peers = Vec::new();
@@ -82,7 +87,7 @@ impl SocketDriver {
         });
         let removed_udp_peers = removed_peers.len();
         for pid in removed_peers {
-            self.send_strategy.connection_removed(pid);
+            self.send_strategy.connection_removed(pid, pid);
         }
 
         let peer_ids: Vec<u64> = self
@@ -235,19 +240,17 @@ impl SocketDriver {
                 g.remove(&group);
             }
         }
-        // Replay to ZMTP-Ready peers. Skip peers whose handshake has
-        // not finished - the codec rejects `send_command` before
-        // `Ready`, which would tear the connection down. Pre-Ready
-        // peers pick up the join via `handle_peer_event(HandshakeSucceeded)`'s
-        // replay loop. UDP DISH listener tasks see the change through
-        // the shared set, no command needed.
+        // Replay to data-plane-ready peers. Pending peers pick up the join
+        // via `handle_peer_event(HandshakeSucceeded)`'s replay loop. UDP DISH
+        // listener tasks see the change through the shared set, no command
+        // needed.
         let cmd = if joining {
             omq_proto::proto::Command::Join(group)
         } else {
             omq_proto::proto::Command::Leave(group)
         };
         for p in self.peers.values() {
-            if p.info.is_none() {
+            if !p.ready {
                 continue;
             }
             let _ = p
@@ -276,20 +279,16 @@ impl SocketDriver {
         } else if let Some(pos) = self.subscriptions.iter().position(|p| p == &prefix) {
             self.subscriptions.remove(pos);
         }
-        // Broadcast to every ZMTP-Ready peer. Peers whose handshake
-        // has not yet completed (`info.is_none()`) are skipped - the
-        // codec rejects `send_command` before `Ready`, which would
-        // bubble up as a Protocol error and tear the connection down
-        // mid-handshake. handle_peer_event(HandshakeSucceeded)
-        // replays `self.subscriptions` for each peer as it transitions
-        // to Ready, so nothing is lost by skipping here.
+        // Broadcast to every data-plane-ready peer. Pending peers are skipped;
+        // `handle_peer_event(HandshakeSucceeded)` replays `self.subscriptions`
+        // for each peer as it transitions to ready.
         let cmd = if subscribe {
             omq_proto::proto::Command::Subscribe(prefix)
         } else {
             omq_proto::proto::Command::Cancel(prefix)
         };
         for p in self.peers.values() {
-            if p.info.is_none() {
+            if !p.ready {
                 continue;
             }
             let _ = p
@@ -391,6 +390,9 @@ impl SocketDriver {
     }
 
     pub(super) fn start_dial(&mut self, endpoint: Endpoint) {
+        let route_id = self.next_peer_id;
+        self.next_peer_id += 1;
+        let send_pipe_rx = self.send_strategy.make_connect_pipe(route_id);
         let cancel = self.cancel.child_token();
         let tx = self.internal_tx.clone();
         let child_cancel = cancel.clone();
@@ -447,6 +449,7 @@ impl SocketDriver {
                         .send(InternalEvent::Connected {
                             conn,
                             endpoint: dialer_ep,
+                            route_id,
                         })
                         .await;
                 }
@@ -454,6 +457,7 @@ impl SocketDriver {
                     let _ = tx
                         .send(InternalEvent::ConnectGaveUp {
                             endpoint: dialer_ep,
+                            route_id,
                         })
                         .await;
                 }
@@ -462,6 +466,8 @@ impl SocketDriver {
         self.dialers.push(DialerEntry {
             endpoint,
             cancel,
+            route_id,
+            send_pipe_rx,
             _task: task,
         });
     }

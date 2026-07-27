@@ -3,23 +3,38 @@ use std::sync::{Arc, Mutex};
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, InprocConn, MessageEncoder,
     PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType,
-    ZmtpConnection, max_peer_count, mpsc,
+    ZmtpConnection, mpsc,
 };
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
+use crate::engine::{SendPipeConsumer, SendPipeMode};
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer::{InprocDriverCtx, inproc_peer_driver};
 use omq_proto::WorkloadProfile;
 
 const PEER_INBOX_CAP: usize = 64;
 
+pub(super) struct ByteStreamConnection {
+    pub(super) stream: AnyStream,
+    pub(super) peer_ident: PeerIdent,
+    pub(super) endpoint: Endpoint,
+    pub(super) is_server: bool,
+    pub(super) route_id: u64,
+    pub(super) send_pipe_rx: Option<SendPipeConsumer>,
+    pub(super) leftover: bytes::Bytes,
+}
+
 pub(super) fn spawn_byte_stream_connection(
     socket: &mut SocketDriver,
-    stream: AnyStream,
-    peer_ident: PeerIdent,
-    endpoint: Endpoint,
-    is_server: bool,
-    leftover: bytes::Bytes,
+    ByteStreamConnection {
+        stream,
+        peer_ident,
+        endpoint,
+        is_server,
+        route_id,
+        send_pipe_rx: pre_ready_send_pipe_rx,
+        leftover,
+    }: ByteStreamConnection,
 ) {
     let Some(peer_id) = allocate_peer_id(socket) else {
         drop(stream);
@@ -70,10 +85,6 @@ pub(super) fn spawn_byte_stream_connection(
         ),
     );
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
-    let peer_driver = match socket.send_strategy.shared_rx() {
-        Some(rx) => peer_driver.with_shared_rx(rx),
-        None => peer_driver,
-    };
 
     let arena = arena_config(&endpoint, latency_profile, socket);
     let transmit_slot = build_transmit_slot(
@@ -94,7 +105,7 @@ pub(super) fn spawn_byte_stream_connection(
         Some(ref slot) => peer_driver.with_transmit_slot(slot.clone()),
         None => peer_driver,
     };
-    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver);
+    let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, pre_ready_send_pipe_rx);
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
     let io_thread = socket.io_pool.assign_thread();
 
@@ -109,10 +120,13 @@ pub(super) fn spawn_byte_stream_connection(
                 direct_tcp_writer,
                 send_pipe,
             },
+            ready: false,
+            pending_handshake: true,
             identity: bytes::Bytes::new(),
             info: None,
             endpoint,
             is_client: !is_server,
+            route_id,
             spsc: None,
             task: None,
             io_thread,
@@ -129,8 +143,10 @@ pub(super) fn spawn_inproc_peer(
     peer_ident: PeerIdent,
     endpoint: Endpoint,
     is_server: bool,
+    route_id: u64,
+    pre_ready_send_pipe_rx: Option<SendPipeConsumer>,
 ) {
-    if !can_accept_peer(socket) {
+    if !socket.can_accept_ready_peer() {
         return;
     }
     if !omq_proto::proto::is_compatible(socket.socket_type, conn.peer.socket_type) {
@@ -140,7 +156,7 @@ pub(super) fn spawn_inproc_peer(
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
-    let (send_pipe, send_pipe_rx) = make_send_pipe(socket);
+    let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
     let peer_props = omq_proto::proto::command::PeerProperties::default()
         .with_socket_type(conn.peer.socket_type)
         .with_identity(conn.peer.identity.clone());
@@ -165,10 +181,13 @@ pub(super) fn spawn_inproc_peer(
                 direct_tcp_writer: None,
                 send_pipe,
             },
+            ready: false,
+            pending_handshake: false,
             identity: bytes::Bytes::new(),
             info: None,
             endpoint,
             is_client: !is_server,
+            route_id,
             spsc: tx.clone(),
             task: None,
             io_thread,
@@ -203,7 +222,6 @@ pub(super) fn spawn_inproc_peer(
                 recv_direct,
                 spsc: recv_spsc,
                 recv_sink,
-                shared_rx: socket.send_strategy.shared_rx(),
                 send_pipe_rx,
                 blocking_recv_waker: socket.spsc.blocking_recv_waker.clone(),
             },
@@ -215,19 +233,10 @@ pub(super) fn spawn_inproc_peer(
 }
 
 fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
-    if !can_accept_peer(socket) {
+    if socket.closing && socket.send_strategy.is_drained() {
         return None;
     }
     Some(next_peer_id(socket))
-}
-
-fn can_accept_peer(socket: &SocketDriver) -> bool {
-    if let Some(max) = max_peer_count(socket.socket_type)
-        && socket.peers.len() >= max
-    {
-        return false;
-    }
-    true
 }
 
 fn next_peer_id(socket: &mut SocketDriver) -> u64 {
@@ -419,8 +428,9 @@ fn build_transmit_slot(
 fn attach_send_pipe(
     socket: &SocketDriver,
     peer_driver: ConnectionDriver<AnyStream>,
+    pre_ready_send_pipe_rx: Option<SendPipeConsumer>,
 ) -> (Option<SendPipeProducerHandle>, ConnectionDriver<AnyStream>) {
-    let (send_pipe, Some(send_pipe_rx)) = make_send_pipe(socket) else {
+    let (send_pipe, Some(send_pipe_rx)) = make_send_pipe(socket, pre_ready_send_pipe_rx) else {
         return (None, peer_driver);
     };
     (send_pipe, peer_driver.with_send_pipe(send_pipe_rx))
@@ -428,15 +438,23 @@ fn attach_send_pipe(
 
 fn make_send_pipe(
     socket: &SocketDriver,
+    pre_ready_send_pipe_rx: Option<SendPipeConsumer>,
 ) -> (
     Option<SendPipeProducerHandle>,
     Option<crate::engine::SendPipeConsumer>,
 ) {
+    if let Some(rx) = pre_ready_send_pipe_rx {
+        return (None, Some(rx));
+    }
     if !socket.send_strategy.needs_peer_send_pipe() {
         return (None, None);
     }
-    let pipe_cap = socket.options.send_hwm.max(16) as usize;
-    let (send_pipe, send_pipe_rx) = crate::engine::send_pipe(pipe_cap);
+    let (pipe_cap, pipe_mode) = if socket.options.conflate {
+        (1, SendPipeMode::Conflate)
+    } else {
+        (socket.options.send_hwm.max(1) as usize, SendPipeMode::Queue)
+    };
+    let (send_pipe, send_pipe_rx) = crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode);
     (
         Some(Arc::new(Mutex::new(Some(send_pipe)))),
         Some(send_pipe_rx),

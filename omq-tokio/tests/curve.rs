@@ -5,20 +5,31 @@
 
 mod test_support;
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::time::Duration;
+use std::time::Instant;
 
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{CurveKeypair, Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{CurveKeypair, CurveServerOptions, Endpoint, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
     use std::net::{IpAddr, Ipv4Addr};
     Endpoint::Tcp {
         host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         port,
+    }
+}
+
+fn url_of(ep: &Endpoint) -> String {
+    match ep {
+        Endpoint::Tcp { host, port } => format!("{host}:{port}"),
+        other => panic!("expected tcp endpoint, got {other:?}"),
     }
 }
 
@@ -32,6 +43,160 @@ fn auth_ep(name: &str) -> Endpoint {
 #[cfg(not(unix))]
 fn auth_ep(_name: &str) -> Endpoint {
     "tcp://127.0.0.1:0".parse().unwrap()
+}
+
+fn handshake_prefix(stream: &[u8]) -> Option<Vec<u8>> {
+    let mut off = 64usize;
+    for _ in 0..2 {
+        let flags = *stream.get(off)?;
+        let (hdr, len) = if flags & 0x02 != 0 {
+            let raw = stream.get(off + 1..off + 9)?;
+            (9usize, u64::from_be_bytes(raw.try_into().ok()?) as usize)
+        } else {
+            (2usize, *stream.get(off + 1)? as usize)
+        };
+        off = off.checked_add(hdr)?.checked_add(len)?;
+        if stream.len() < off {
+            return None;
+        }
+    }
+    Some(stream[..off].to_vec())
+}
+
+fn recording_proxy(upstream: String) -> (String, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let cap = Arc::new(Mutex::new(Vec::new()));
+    let cap_thread = cap.clone();
+    std::thread::spawn(move || {
+        let (inbound, _) = listener.accept().unwrap();
+        let outbound = TcpStream::connect(&upstream).unwrap();
+        let (mut c_in, mut s_out) = (inbound.try_clone().unwrap(), outbound.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = c_in.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                cap_thread.lock().unwrap().extend_from_slice(&buf[..n]);
+                if s_out.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        });
+        let (mut s_in, mut c_out) = (outbound, inbound);
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = s_in.read(&mut buf) {
+            if n == 0 || c_out.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+    });
+    (addr, cap)
+}
+
+fn replay(addr: &str, prefix: &[u8]) -> Vec<u8> {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(1500)))
+        .unwrap();
+    s.write_all(prefix).unwrap();
+    let (mut got, mut buf) = (Vec::new(), [0u8; 8192]);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && got.len() <= 4096 {
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
+    got
+}
+
+fn handshake_completed(resp: &[u8]) -> bool {
+    resp.len() > 64 + 172 && resp.windows(8).skip(64 + 170).any(|w| w == b"\x07MESSAGE")
+}
+
+#[test]
+fn curve_rejects_captured_hello_initiate_replay() {
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let client_kp = CurveKeypair::generate();
+
+    let (url_tx, url_rx) = mpsc::channel::<String>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let push =
+                    Socket::new(SocketType::Push, Options::default().curve_server(server_kp));
+                let ep = push.bind(tcp_ep(0)).await.unwrap();
+                url_tx.send(url_of(&ep)).unwrap();
+                while stop_rx.try_recv().is_err() {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        push.send(Message::single(vec![0xAB; 256])),
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+    });
+    let server_addr = url_rx.recv().unwrap();
+
+    let (proxy_addr, cap) = recording_proxy(server_addr.clone());
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pull = Socket::new(
+                SocketType::Pull,
+                Options::default().curve_client(client_kp, server_pub),
+            );
+            let ep: Endpoint = format!("tcp://{proxy_addr}").parse().unwrap();
+            pull.connect(ep).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(8), pull.recv())
+                .await
+                .expect("legit handshake timed out")
+                .expect("legit handshake failed");
+        });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    let captured = cap.lock().unwrap().clone();
+    let prefix = handshake_prefix(&captured).expect("could not split handshake prefix");
+
+    let greeting_only = replay(&server_addr, &prefix[..64]);
+    assert!(
+        !handshake_completed(&greeting_only),
+        "control failed: greeting alone completed handshake"
+    );
+
+    let mut bad_box = prefix.clone();
+    let off = bad_box.len() - 100;
+    bad_box[off] ^= 0x01;
+    assert!(
+        !handshake_completed(&replay(&server_addr, &bad_box)),
+        "control failed: corrupted INITIATE box was accepted"
+    );
+
+    let mut bad_cookie = prefix.clone();
+    bad_cookie[268 + 20] ^= 0x01;
+    assert!(
+        !handshake_completed(&replay(&server_addr, &bad_cookie)),
+        "control failed: corrupted cookie was accepted"
+    );
+
+    let resp = replay(&server_addr, &prefix);
+    let accepted = handshake_completed(&resp);
+
+    let _ = stop_tx.send(());
+    let _ = server.join();
+
+    assert!(
+        !accepted,
+        "verbatim HELLO+INITIATE replay accepted by peer with no key material \
+         ({} bytes returned)",
+        resp.len()
+    );
 }
 
 #[tokio::test]
@@ -164,12 +329,13 @@ async fn curve_authenticator_admits_known_client() {
 
     let server = Socket::new(
         SocketType::Pull,
-        Options::default()
-            .curve_server(server_kp)
-            .authenticator(move |peer| {
+        Options::default().curve_server_with_options(
+            server_kp,
+            CurveServerOptions::default().authenticator(move |peer| {
                 saw_callback_cb.store(true, Ordering::SeqCst);
                 peer.public_key == allowed
             }),
+        ),
     );
     let ep = server.bind(auth_ep("auth-allow")).await.unwrap();
 
@@ -202,14 +368,15 @@ async fn curve_authenticator_identity_matches_router_message() {
 
     let router = Socket::new(
         SocketType::Router,
-        Options::default()
-            .curve_server(server_kp)
-            .authenticator(move |peer| {
+        Options::default().curve_server_with_options(
+            server_kp,
+            CurveServerOptions::default().authenticator(move |peer| {
                 if let Some(identity) = &peer.identity {
                     auth_identities_cb.lock().unwrap().push(identity.clone());
                 }
                 true
             }),
+        ),
     );
     let ep = router.bind(auth_ep("auth-router-identity")).await.unwrap();
 
@@ -271,9 +438,10 @@ async fn curve_authenticator_rejects_unknown_client() {
 
     let server = Socket::new(
         SocketType::Pull,
-        Options::default()
-            .curve_server(server_kp)
-            .authenticator(|_peer| false),
+        Options::default().curve_server_with_options(
+            server_kp,
+            CurveServerOptions::default().authenticator(|_peer| false),
+        ),
     );
     let ep = server.bind(auth_ep("auth-deny")).await.unwrap();
 

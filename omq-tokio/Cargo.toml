@@ -23,7 +23,7 @@ default = []
 curve = ["omq-proto/curve"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
-ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:tokio-rustls"]
+ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
@@ -47,7 +47,6 @@ socket2 = "0.6"
 libc = "0.2"
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-native-certs = { version = "0.8", optional = true }
-rustls-pemfile = { version = "2.2", optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 
@@ -219,6 +218,10 @@ path = "tests/large_messages.rs"
 [[test]]
 name = "omq_linger"
 path = "tests/linger.rs"
+
+[[test]]
+name = "omq_no_peer_send"
+path = "tests/no_peer_send.rs"
 
 [[test]]
 name = "omq_lz4_pub_sub"

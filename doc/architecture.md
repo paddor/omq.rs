@@ -197,9 +197,23 @@ Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) use per-peer
 active pipes from a moving cursor. If every active pipe is full, async send
 waits on a rotating peer and `try_send` reports HWM backpressure.
 
-`FallbackQueue` remains only as the no-peer/pre-connect fallback. Peer tasks drain
-it before newer pipe-fed sends, so messages queued before handshake are not
-overtaken.
+Connect-side round-robin endpoints allocate a pre-ready pipe during
+`connect()`. The producer is immediately eligible for routing, so
+connect-before-bind sends can queue before ZMTP READY. When the handshake
+completes, the peer driver drains the same pipe; messages queued before READY
+are not overtaken by later sends.
+
+Bind-side round-robin sockets with no ready pipe are mute, matching libzmq:
+blocking `send()` waits and `try_send()` returns `Full`. `omq-libzmq` maps that
+native `Full` to `EAGAIN` for `DONTWAIT`/zero-timeout C sends. Native
+`omq-tokio` has no `ZMQ_IMMEDIATE` option; `omq-libzmq` implements
+`ZMQ_IMMEDIATE=1` by gating connected no-ready sends before they enter the
+pre-ready pipe.
+
+`Options::send_hwm` is a complete-message count, not a byte cap. It applies per
+outbound pipe/ring: connect-side pre-ready pipes, materialized peer pipes, and
+fan-out lane rings each have their own cap. Effective native capacity can
+exceed `send_hwm` when multiple pipes or transmit slots exist.
 
 Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use lane workers for parallel
 subscription matching and encoding. With N owned IO threads, N lane workers run,
@@ -262,13 +276,13 @@ calls `begin_drain()` before draining and `clear_after(is_empty)` afterward. A
 producer mark that races with drain clear moves the signal to `DIRTY`, so
 readiness survives stale empty observations. `reschedule()` fires
 unconditionally for budget-interrupted drains where the consumer already knows
-data remains. Wire slots, send pipes, fallback queues, drop queues, and lane
-workers all use `DataSignal`.
+data remains. Wire slots, send pipes, drop queues, and lane workers all use
+`DataSignal`.
 
 State-change waits use `StateSignal`: a generation counter plus `Notify`.
 Waiters capture a generation, enable their waiter, re-check caller state, then
 await only if nothing changed meanwhile. This is used where readiness is not a
-single data queue, for example queue-space release and peer-state changes.
+single data queue, for example pipe-space release and route-state changes.
 
 Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
 dedicated channels separate from data. Lane workers, for example, drain all
@@ -278,7 +292,7 @@ depth.
 
 Loom covers the race windows that would lose these wakeups:
 `omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, `StateSignal`
-generation checks, queue-space release, and fallback waits that race with peer
+generation checks, pipe-space release, and route waits that race with peer
 activation. `yring/tests/loom.rs` covers the lower-level SPSC cursor ordering,
 wraparound, producer drop, async `push_async` wakeups, and upper-layer
 readiness patterns built on the ring.
@@ -294,8 +308,9 @@ readiness patterns built on the ring.
 | `lz4+tcp://host:port` | TCP plus LZ4 transform |
 | `ws://...`, `wss://...` | ZWS over WebSocket, optional TLS |
 
-Reconnect supervisors replay subscriptions and groups after reconnect. Handles
-with no active peer fall back to bounded pre-connect queues.
+Reconnect supervisors replay subscriptions and groups after reconnect.
+Connect-side round-robin sends use bounded pre-ready pipes; bind-side
+round-robin sends with no ready pipe mute.
 
 ## Mechanisms And Monitoring
 

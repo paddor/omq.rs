@@ -37,5 +37,5 @@ pub use proto::mechanism::MechanismSetup;
 #[cfg(any(feature = "curve", feature = "plain"))]
 pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
-pub use proto::mechanism::{CurveCookieKeyring, CurveKeypair, CurvePublicKey, CurveSecretKey};
+pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use proto::{SocketType, is_compatible};

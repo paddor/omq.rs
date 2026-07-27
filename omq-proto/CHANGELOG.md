@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Breaking:** Add `CurveServerOptions` for CURVE server configuration.
+- Add `Options::max_pending_handshakes` to bound simultaneous inbound
+  byte-stream handshakes. Lower values reduce pre-auth resource exposure but
+  can reject legitimate connection bursts; higher values allow bigger bursts
+  while consuming more memory/tasks.
+
+### Changed
+
+- **Breaking:** Replace the public CURVE server cookie keyring with a
+  per-connection cookie key. `MechanismSetup::CurveServer` now stores
+  `CurveServerOptions`, and `Options::curve_server_with_options()` accepts
+  explicit CURVE server configuration.
+- Encrypted mechanisms require `handshake_timeout`. Longer timeouts let slow
+  peers complete authentication but also let stalled peers hold
+  pending-handshake slots longer.
+- Clarify that `Options::send_hwm` is a complete-message count, not a byte cap,
+  and that native HWM is per outbound pipe/ring rather than one socket-wide
+  cap.
+- Clarify native zero-linger default and `linger_forever()` edge cases.
+
+### Removed
+
+- **Breaking:** Remove `CurveCookieKeyring`, `Options::authenticator()`, and
+  `MechanismSetup::curve_cookie_keyring()` from the public API.
+
+### Security
+
+- Reject captured CURVE `HELLO` + `INITIATE` replays on fresh TCP
+  connections. CURVE cookies are now bound to the connection that issued
+  them and consumed when `INITIATE` is processed.
+
 ## [0.23.2] - 2026-07-23
 
 ### Added

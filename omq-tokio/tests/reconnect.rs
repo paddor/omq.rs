@@ -153,11 +153,10 @@ async fn peer_drop_mid_send_is_handled_cleanly() {
     assert!(bound, "pull2 failed to bind after pull1 was dropped");
 
     // Wait for the second handshake on the push side. Without this, a `send`
-    // racing the disconnect can be committed to the dying peer's queue and
-    // lost (ZMQ semantic: messages queued for a vanished peer are dropped on
-    // the floor; the shared queue spans drivers, so some survive, but this
-    // is not guaranteed).
-    // Synchronising on the new HandshakeSucceeded means the next send routes
+    // racing the disconnect can be committed to the dying peer's pipe and
+    // lost. ZMQ does not guarantee delivery for messages already accepted by
+    // a transport that dies before the peer reads them.
+    // Synchronizing on the new HandshakeSucceeded means the next send routes
     // to the live peer, exercising "reconnects and resumes delivery" without
     // depending on in-flight survival.
     let mut handshakes = 0;

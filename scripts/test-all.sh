@@ -19,7 +19,7 @@
 #                       procs remain (default 10)
 #   OMQ_STRESS=1        run ignored local stress tests
 #   OMQ_STRESS_ROUNDS=N connect-before-bind stress rounds (default 40)
-#   OMQ_LOOM=1          run yring loom tests
+#   OMQ_LOOM=1          run loom tests
 set -euo pipefail
 
 _repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -329,6 +329,7 @@ fi
 
 if [[ "${OMQ_LOOM:-}" == "1" ]]; then
     run omq_cargo_with_loom test -p yring --features async --test loom
+    run omq_cargo_with_rust_tools test -p omq-tokio --test omq_loom_signal
 else
     echo "skip: OMQ_LOOM=1"
 fi

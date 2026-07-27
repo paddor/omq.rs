@@ -23,8 +23,21 @@ use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 pub use omq_proto::error::TrySendError;
 
 /// A ZMQ-style socket. Clone-able; all clones talk to the same underlying
-/// driver task. Close happens via the explicit [`Socket::close`] method
-/// (the last handle drop cancels the driver without waiting for drain).
+/// driver task. [`Socket::close`] waits for configured linger and joins the
+/// driver. Dropping the last handle starts the same configured linger in the
+/// background, but no caller waits for the result.
+///
+/// # Native send semantics
+///
+/// `PUSH`, `DEALER`, `REQ`, `CLIENT`, and `SCATTER` sends with a bound
+/// endpoint and no ready peer mute like libzmq: blocking `send()` waits and
+/// `try_send()` returns `Full`. The same sockets with a `connect()` endpoint
+/// allocate a pre-ready pipe at `connect()` time, so sends may queue before
+/// the peer reaches READY.
+///
+/// `Options::send_hwm` counts complete messages, not bytes. It is not an
+/// exact total queue cap because connect-side pre-ready pipes, per-peer pipes,
+/// fan-out lane rings, and transmit slots are separate buffers.
 ///
 /// # Concurrency
 ///
@@ -45,7 +58,6 @@ struct Inner {
     cmd_tx: mpsc::Sender<SocketCommand>,
     recv_rx: SpscAwareRecv,
     monitor: MonitorPublisher,
-    root_cancel: CancellationToken,
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
@@ -65,6 +77,8 @@ struct Inner {
     /// Subscription commands received from peers. Incremented by the
     /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
     subscribe_count: Arc<AtomicU64>,
+    /// Peers that have completed handshaking and can accept data-plane sends.
+    ready_peer_count: Arc<std::sync::atomic::AtomicUsize>,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -151,6 +165,7 @@ impl Socket {
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
+        let ready_peer_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let driver = SocketDriver::new(
             socket_type,
             options,
@@ -165,6 +180,7 @@ impl Socket {
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),
+            ready_peer_count.clone(),
             io_pool.clone(),
         );
         let actor_task = spawn_driver(driver, io_pool);
@@ -180,7 +196,6 @@ impl Socket {
                     latency_profile,
                 ),
                 monitor,
-                root_cancel: cancel,
                 send_submitter,
                 type_state,
                 rep_pending,
@@ -189,6 +204,7 @@ impl Socket {
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
                 subscribe_count,
+                ready_peer_count,
                 last_bound_endpoint: RwLock::new(None),
                 actor_task: Mutex::new(Some(actor_task)),
             }),
@@ -205,6 +221,13 @@ impl Socket {
     /// The socket type.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
+    }
+
+    #[doc(hidden)]
+    pub fn ready_peer_count(&self) -> usize {
+        self.inner
+            .ready_peer_count
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Bind to an endpoint. Returns the resolved endpoint once the
@@ -239,8 +262,15 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)?
     }
 
-    /// Send a message. Awaits until the message has been accepted by a ready
-    /// peer's driver inbox (not waited-on-wire).
+    /// Send a message.
+    ///
+    /// This waits until the message is accepted into OMQ's outbound routing
+    /// buffers. It does not wait for bytes to reach the peer or the kernel.
+    ///
+    /// Native round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`,
+    /// `SCATTER`) with no ready bound peer mute like libzmq: this waits until
+    /// a pipe exists and has space. Connected no-peer sends queue in the
+    /// endpoint's pre-ready pipe up to `Options::send_hwm`.
     pub async fn send(&self, msg: Message) -> Result<()> {
         if self
             .inner
@@ -312,10 +342,16 @@ impl Socket {
         }
     }
 
-    /// Non-blocking send. Routes through the `SendSubmitter` directly
-    /// (no actor hop), mirroring `send()` but synchronously. Returns
-    /// `Full(msg)` when the outbound queue is at HWM so the caller can
-    /// retry or fall back to the async `send()`.
+    /// Non-blocking send.
+    ///
+    /// Routes through the `SendSubmitter` directly (no actor hop), mirroring
+    /// `send()` but synchronously. Returns `Full(msg)` when native outbound
+    /// buffers are at HWM so the caller can retry or fall back to async
+    /// `send()`.
+    ///
+    /// For native round-robin sockets, a connect-side pre-ready pipe counts as
+    /// an outbound buffer. `try_send()` can therefore succeed before any peer
+    /// is ready. Bound no-peer sockets return `Full`.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {
@@ -443,13 +479,8 @@ impl Socket {
         }
     }
 
-    /// Register the calling thread for `blocking_recv()` wakeups.
-    pub(crate) fn register_blocking_recv(&self) {
-        self.inner.recv_rx.register_blocking_thread();
-    }
-
-    /// Blocking receive for sync callers. The calling thread parks
-    /// until data arrives. Call `register_blocking_recv()` first.
+    /// Blocking receive for sync callers. The calling thread registers
+    /// itself and parks until data arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
         match self.inner.socket_type {
             SocketType::Req => loop {
@@ -650,9 +681,10 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
-    /// Wait until at least `min_peers` peers are connected, or `timeout`
-    /// expires. Returns the peer count at the time the threshold was met,
-    /// or `Error::Timeout` if the deadline is reached first.
+    /// Wait until at least `min_peers` peers have completed the ZMTP
+    /// handshake, or `timeout` expires. Returns the peer count at the
+    /// time the threshold was met, or `Error::Timeout` if the deadline
+    /// is reached first.
     ///
     /// This is a data-plane readiness check. It waits for ZMTP peers to
     /// finish handshaking rather than only being accepted by the listener.
@@ -712,8 +744,9 @@ impl Socket {
         }
     }
 
-    /// Snapshot every currently-connected peer. Empty vec when no peers
-    /// are live. Useful for introspection / health checks.
+    /// Snapshot every peer that is ready for data-plane routing. Empty
+    /// vec when no peers are ready. Useful for introspection / health
+    /// checks.
     pub async fn connections(&self) -> Result<Vec<ConnectionStatus>> {
         let (ack, rx) = oneshot::channel();
         self.inner
@@ -724,19 +757,23 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
-    /// Graceful close. Stops accepting new work, drains pending sends up to
-    /// `options.linger`, then cancels the driver. Consumes the handle; other
-    /// clones remain valid until they also drop (subsequent calls on them
-    /// return `Error::Closed`).
+    /// Graceful close. Stops accepting new app work, drains pending sends up
+    /// to `options.linger`, then cancels the driver. Non-zero linger keeps
+    /// bind/connect endpoints alive while draining, so late peers can receive
+    /// queued connect-side pre-ready sends before the deadline. Zero linger
+    /// cancels endpoints and drops queued sends immediately.
+    ///
+    /// Consumes the handle; other clones remain valid until they also drop
+    /// (subsequent calls on them return `Error::Closed`).
     pub async fn close(self) -> Result<()> {
         self.close_inner(CloseLinger::Configured).await
     }
 
     /// Graceful close with a one-shot linger override.
     ///
-    /// `None` waits forever; `Some(Duration::ZERO)` drops immediately.
-    /// This is mainly for compatibility layers whose close call accepts a
-    /// per-call linger value.
+    /// `None` waits forever; `Some(Duration::ZERO)` drops immediately. This
+    /// override only applies to this close call. It is mainly for compatibility
+    /// layers whose close call accepts a per-call linger value.
     pub async fn close_with_linger(self, linger: Option<std::time::Duration>) -> Result<()> {
         self.close_inner(CloseLinger::Override(linger)).await
     }
@@ -925,8 +962,9 @@ impl Socket {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.root_cancel.cancel();
-        self.send_submitter.shutdown();
+        // The actor observes `cmd_tx` closing and applies configured linger.
+        // Do not cancel the root token here: that would force zero-linger
+        // teardown and discard queued sends even when linger was configured.
         self.recv_rx.shutdown();
     }
 }

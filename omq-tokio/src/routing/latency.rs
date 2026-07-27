@@ -4,11 +4,11 @@
 //! generic yring send pipe, which is the right tradeoff for one-message-at-a-
 //! time REQ/REP but not for throughput-oriented routing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::engine::PeerDriverHandle;
 use crate::engine::transmit_slot::TryFrameResult;
-use crate::routing::fallback_queue::{FallbackQueue, FallbackReceiver};
+use crate::engine::{PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
@@ -20,94 +20,101 @@ struct Peer {
     target: PeerOutbound,
 }
 
+#[derive(Debug)]
+struct PendingPipe {
+    route_id: u64,
+    tx: SendPipeProducer,
+}
+
 #[derive(Debug, Default)]
 struct State {
     peers: Vec<Peer>,
+    pending: Vec<PendingPipe>,
     cursor: usize,
+    pending_cursor: usize,
 }
 
 #[derive(Debug)]
 pub(crate) struct LatencySend {
-    queue: FallbackQueue,
-    shared_rx: FallbackReceiver,
     state: Arc<Mutex<State>>,
-    peer_count: usize,
+    pipe_cap: usize,
+    changed: Arc<crate::engine::signal::StateSignal>,
+    closed: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
-    queue: FallbackQueue,
     state: Arc<Mutex<State>>,
+    changed: Arc<crate::engine::signal::StateSignal>,
+    closed: Arc<AtomicBool>,
 }
 
 impl LatencySend {
     pub(crate) fn new(options: &Options) -> Self {
-        let (cap, policy) = super::effective_queue_params(options);
-        let (queue, shared_rx) = FallbackQueue::new(cap, policy);
         Self {
-            queue,
-            shared_rx,
             state: Arc::new(Mutex::new(State::default())),
-            peer_count: 0,
+            pipe_cap: options.send_hwm.max(1) as usize,
+            changed: Arc::new(crate::engine::signal::StateSignal::new()),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
-            queue: self.queue.clone(),
             state: self.state.clone(),
+            changed: self.changed.clone(),
+            closed: self.closed.clone(),
         }
     }
 
-    pub(crate) fn shared_rx(&self) -> FallbackReceiver {
-        self.shared_rx.clone()
+    pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
+        let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
+        let mut state = self.state.lock().expect("latency send state");
+        state.remove_route(route_id);
+        state.pending.push(PendingPipe { route_id, tx });
+        self.changed.notify_changed();
+        rx
     }
 
-    pub(crate) fn connection_added(&mut self, peer_id: u64, handle: &PeerDriverHandle) {
-        self.peer_count += 1;
-        self.shared_rx.set_peer_count(self.peer_count);
+    pub(crate) fn connection_added(&mut self, route_id: u64, handle: &PeerDriverHandle) {
         let mut state = self.state.lock().expect("latency send state");
-        state.peers.retain(|peer| peer.id != peer_id);
+        state.remove_peer(route_id);
         state.peers.push(Peer {
-            id: peer_id,
+            id: route_id,
             target: PeerOutbound::from_handle(handle),
         });
         state.cursor %= state.peers.len();
+        self.changed.notify_changed();
     }
 
-    pub(crate) fn connection_removed(&mut self, peer_id: u64) {
-        self.peer_count = self.peer_count.saturating_sub(1);
-        self.shared_rx.set_peer_count(self.peer_count);
+    pub(crate) fn connection_removed(&mut self, route_id: u64) {
         let mut state = self.state.lock().expect("latency send state");
-        state.peers.retain(|peer| peer.id != peer_id);
-        if state.peers.is_empty() {
-            state.cursor = 0;
-        } else {
-            state.cursor %= state.peers.len();
-        }
+        state.remove_route(route_id);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn shutdown(&self) {
-        self.queue.shutdown();
-        self.state.lock().expect("latency send state").peers.clear();
+        self.closed.store(true, Ordering::Release);
+        let mut state = self.state.lock().expect("latency send state");
+        state.peers.clear();
+        state.pending.clear();
+        self.changed.notify_changed();
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        self.queue.len() == 0
-            && self
-                .state
-                .lock()
-                .expect("latency send state")
-                .peers
-                .iter()
-                .all(|peer| peer.target.is_empty())
+        let state = self.state.lock().expect("latency send state");
+        state.peers.iter().all(|peer| peer.target.is_empty())
+            && state.pending.iter().all(|pipe| pipe.tx.is_empty())
     }
 }
 
 impl Submitter {
     pub(crate) fn shutdown(&self) {
-        self.queue.shutdown();
-        self.state.lock().expect("latency send state").peers.clear();
+        self.closed.store(true, Ordering::Release);
+        let mut state = self.state.lock().expect("latency send state");
+        state.peers.clear();
+        state.pending.clear();
+        self.changed.notify_changed();
     }
 
     pub(crate) async fn send(&self, mut msg: Message) -> Result<()> {
@@ -132,16 +139,30 @@ impl Submitter {
                         .peers
                         .iter()
                         .find_map(|peer| peer.target.space_available())
+                        .or_else(|| {
+                            state
+                                .pending
+                                .iter()
+                                .map(|pipe| pipe.tx.space_available())
+                                .next()
+                        })
                 }
             };
             let Some(notified) = notified else {
-                tokio::task::yield_now().await;
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(Error::Closed);
+                }
+                let seen = self.changed.generation();
+                let changed = self.changed.changed_after(seen);
+                tokio::pin!(changed);
                 match self.try_send(msg) {
                     Ok(()) => return Ok(()),
-                    Err(TrySendError::Full(msg)) => return self.queue.send(msg).await,
+                    Err(TrySendError::Full(returned)) => msg = returned,
                     Err(TrySendError::Error(error)) => return Err(error),
                     Err(TrySendError::Closed) => return Err(Error::Closed),
                 }
+                changed.await;
+                continue;
             };
             let seen = notified.generation();
             let notified = notified.changed_after(seen);
@@ -170,26 +191,32 @@ impl Submitter {
                     .peers
                     .iter()
                     .find_map(|peer| peer.target.space_available())
+                    .or_else(|| {
+                        state
+                            .pending
+                            .iter()
+                            .map(|pipe| pipe.tx.space_available())
+                            .next()
+                    })
             }
         };
         if let Some(notified) = notified {
             let seen = notified.generation();
             notified.changed_after(seen).await;
-        } else if self.queue.len() != 0 {
-            self.queue.wait_space_available().await;
         } else {
-            tokio::task::yield_now().await;
+            let seen = self.changed.generation();
+            self.changed.changed_after(seen).await;
         }
     }
 
     pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
-        if self.queue.len() != 0 {
-            return self.queue.try_send(msg).map_err(TrySendError::Full);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(TrySendError::Closed);
         }
 
         let mut state = self.state.lock().expect("latency send state");
         if state.peers.is_empty() {
-            return self.queue.try_send(msg).map_err(TrySendError::Full);
+            return state.try_send_pending(msg);
         }
 
         let mut full = false;
@@ -201,7 +228,7 @@ impl Submitter {
                 TryFrameResult::Ok => return Ok(()),
                 TryFrameResult::Full => full = true,
                 TryFrameResult::Dead => return Err(TrySendError::Closed),
-                TryFrameResult::Ineligible => unreachable!("inbox fallback handles ineligible"),
+                TryFrameResult::Ineligible => unreachable!("latency route needs direct target"),
             }
         }
         if full {
@@ -209,5 +236,53 @@ impl Submitter {
         } else {
             Err(TrySendError::Closed)
         }
+    }
+}
+
+impl State {
+    fn remove_peer(&mut self, route_id: u64) {
+        self.peers.retain(|peer| peer.id != route_id);
+        if self.peers.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor %= self.peers.len();
+        }
+    }
+
+    fn remove_route(&mut self, route_id: u64) {
+        self.remove_peer(route_id);
+        self.pending.retain(|pipe| pipe.route_id != route_id);
+        if self.pending.is_empty() {
+            self.pending_cursor = 0;
+        } else {
+            self.pending_cursor %= self.pending.len();
+        }
+    }
+
+    fn try_send_pending(&mut self, mut msg: Message) -> core::result::Result<(), TrySendError> {
+        if self.pending.is_empty() {
+            return Err(TrySendError::Full(msg));
+        }
+        let mut scanned = 0usize;
+        while scanned < self.pending.len() {
+            let index = self.pending_cursor % self.pending.len();
+            self.pending_cursor = (index + 1) % self.pending.len();
+            scanned += 1;
+            match self.pending[index].tx.try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err(SendPipeError::Full(returned)) => msg = returned,
+                Err(SendPipeError::Closed(returned)) => {
+                    self.pending.remove(index);
+                    msg = returned;
+                    if self.pending.is_empty() {
+                        self.pending_cursor = 0;
+                        break;
+                    }
+                    self.pending_cursor %= self.pending.len();
+                    scanned = scanned.saturating_sub(1);
+                }
+            }
+        }
+        Err(TrySendError::Full(msg))
     }
 }

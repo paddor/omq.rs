@@ -69,9 +69,9 @@ async fn push_distributes_across_three_pulls() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn push_distributes_fairly_over_tcp() {
     // Regression guard for multi-peer PUSH round-robin on the WIRE path.
-    // The inproc test above never exercised it: previously every wire
-    // peer drained a single shared queue, which let one connection driver
-    // monopolize the stream and starve the others (a 0/100 split).
+    // The inproc test above never exercised it: previously the wire path
+    // could let one connection driver monopolize outbound work and starve
+    // the others (a 0/100 split).
     //
     // The starvation only appears under SUSTAINED load with peers draining
     // CONCURRENTLY (so PUSH drivers never block on a full TCP buffer).

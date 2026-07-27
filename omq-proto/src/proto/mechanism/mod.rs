@@ -8,15 +8,16 @@
 #[cfg(feature = "curve")]
 pub mod curve;
 #[cfg(feature = "curve")]
-pub mod curve_cookie;
+mod curve_cookie;
 #[cfg(feature = "curve")]
 pub mod curve_keys;
 #[cfg(feature = "curve")]
 pub(crate) use curve::{CurveMechanism, CurveTransform};
 #[cfg(feature = "curve")]
-pub use curve_cookie::CurveCookieKeyring;
-#[cfg(feature = "curve")]
 pub use curve_keys::{CurveKeypair, CurvePublicKey, CurveSecretKey};
+
+#[cfg(feature = "curve")]
+use curve_cookie::DEFAULT_COOKIE_LIFETIME;
 
 #[cfg(feature = "plain")]
 pub mod plain;
@@ -33,15 +34,13 @@ pub enum MechanismSetup {
     #[default]
     Null,
     /// CURVE server side: this socket accepts incoming CURVE clients
-    /// authenticated against `our_keypair.public`. `authenticator`
-    /// (if set) is invoked after vouch verification with the peer's
-    /// long-term public key. The cookie keyring is shared across all
-    /// server-side connections so its rotation timeline stays global.
+    /// authenticated against `our_keypair.public`. Server-specific
+    /// CURVE behavior lives in `options`; each connection still gets
+    /// its own cookie key.
     #[cfg(feature = "curve")]
     CurveServer {
         our_keypair: CurveKeypair,
-        cookie_keyring: std::sync::Arc<CurveCookieKeyring>,
-        authenticator: Option<Authenticator>,
+        options: CurveServerOptions,
     },
     /// CURVE client side: this socket connects to a server identified by
     /// `server_public`, authenticating with `our_keypair`.
@@ -102,30 +101,14 @@ impl MechanismSetup {
         }
     }
 
-    /// Access the CURVE server's cookie keyring so callers can
-    /// configure its rotation interval or share it across multiple
-    /// Sockets. `None` for non-CURVE-server configs.
-    #[cfg(feature = "curve")]
-    pub fn curve_cookie_keyring(&self) -> Option<&std::sync::Arc<CurveCookieKeyring>> {
-        match self {
-            Self::CurveServer { cookie_keyring, .. } => Some(cookie_keyring),
-            _ => None,
-        }
-    }
-
     pub(crate) fn build(self) -> SecurityMechanism {
         match self {
             Self::Null => SecurityMechanism::Null(NullMechanism::new()),
             #[cfg(feature = "curve")]
             Self::CurveServer {
                 our_keypair,
-                cookie_keyring,
-                authenticator,
-            } => SecurityMechanism::Curve(CurveMechanism::new_server(
-                our_keypair,
-                cookie_keyring,
-                authenticator,
-            )),
+                options,
+            } => SecurityMechanism::Curve(CurveMechanism::new_server(our_keypair, options)),
             #[cfg(feature = "curve")]
             Self::CurveClient {
                 our_keypair,
@@ -150,6 +133,52 @@ use bytes::Bytes;
 use super::command::{Command, PeerProperties};
 use super::greeting::MechanismName;
 use crate::error::{Error, Result};
+
+/// Server-side CURVE configuration.
+#[cfg(feature = "curve")]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct CurveServerOptions {
+    /// Maximum time a WELCOME cookie remains usable before INITIATE.
+    ///
+    /// The cookie key is per connection and is consumed when INITIATE is
+    /// processed, so this is a lifetime, not a shared-key rotation period.
+    pub cookie_lifetime: std::time::Duration,
+    /// Optional admission callback invoked after CURVE vouch verification.
+    pub authenticator: Option<Authenticator>,
+}
+
+#[cfg(feature = "curve")]
+impl CurveServerOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn cookie_lifetime(mut self, lifetime: std::time::Duration) -> Self {
+        self.cookie_lifetime = lifetime;
+        self
+    }
+
+    #[must_use]
+    pub fn authenticator<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
+    {
+        self.authenticator = Some(Authenticator::new(f));
+        self
+    }
+}
+
+#[cfg(feature = "curve")]
+impl Default for CurveServerOptions {
+    fn default() -> Self {
+        Self {
+            cookie_lifetime: DEFAULT_COOKIE_LIFETIME,
+            authenticator: None,
+        }
+    }
+}
 
 /// If `cmd` is an `ERROR` command, parse the length-prefixed reason
 /// string and return a `HandshakeFailed` error. Returns `None` for

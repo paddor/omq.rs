@@ -80,10 +80,16 @@ impl Error {
     }
 }
 
-/// Error returned by `Socket::try_send`.
+/// Error returned by native `Socket::try_send`.
 #[derive(Debug)]
 pub enum TrySendError {
-    /// Channel full (HWM reached). Contains the message for retry.
+    /// Native outbound buffers are full. Contains the message for retry.
+    ///
+    /// `Options::send_hwm` counts complete messages, not bytes. `Full` can
+    /// mean no writable pipe exists, or every eligible pipe is at HWM.
+    /// Native OMQ has separate connect-side pre-ready pipes, per-peer pipes,
+    /// fan-out lane rings, and transmit slots, so this is not a single
+    /// socket-wide capacity signal.
     Full(Message),
     /// Socket closed.
     Closed,

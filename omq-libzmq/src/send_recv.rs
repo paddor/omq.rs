@@ -133,12 +133,92 @@ pub(crate) fn try_send_message(
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
+    if round_robin_send_mutes_without_ready_peer(sock)
+        && !can_queue_without_ready_peer(sock)?
+        && inner.ready_peer_count() == 0
+    {
+        return Ok(SendMessageAttempt::Full(msg));
+    }
     match inner.try_send(msg) {
         Ok(()) => Ok(SendMessageAttempt::Sent),
         Err(omq_tokio::TrySendError::Full(msg)) => Ok(SendMessageAttempt::Full(msg)),
         Err(omq_tokio::TrySendError::Closed) => Err(ETERM),
         Err(omq_tokio::TrySendError::Error(e)) => Err(map_omq_err(&e)),
     }
+}
+
+fn round_robin_send_mutes_without_ready_peer(sock: &OmqSocket) -> bool {
+    matches!(
+        sock.socket_type,
+        omq_tokio::SocketType::Push
+            | omq_tokio::SocketType::Dealer
+            | omq_tokio::SocketType::Req
+            | omq_tokio::SocketType::Client
+            | omq_tokio::SocketType::Scatter
+    )
+}
+
+fn can_queue_without_ready_peer(sock: &OmqSocket) -> Result<bool, c_int> {
+    let Ok(overlay) = sock.overlay.lock() else {
+        return Err(ETERM);
+    };
+    Ok(!overlay.immediate
+        && sock
+            .connect_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0)
+}
+
+fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
+    let Some(inner) = sock.inner.get() else {
+        return Err(ETERM);
+    };
+    if inner.ready_peer_count() != 0 {
+        return Ok(());
+    }
+
+    let result = if sndtimeo > 0 {
+        let timeout = Duration::from_millis(sndtimeo as u64);
+        crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+            s.wait_connected(1, timeout).await.map(|_| ())
+        })
+    } else {
+        crate::socket::with_socket(&sock.ctx, inner, move |s| async move {
+            loop {
+                match s.wait_connected(1, Duration::from_hours(24)).await {
+                    Ok(_) => return Ok(()),
+                    Err(omq_tokio::Error::Timeout) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+    };
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(omq_tokio::Error::Timeout)) => Err(libc::EAGAIN),
+        Ok(Err(ref e)) => Err(map_omq_err(e)),
+        Err(()) => Err(ETERM),
+    }
+}
+
+fn ensure_libzmq_send_route(sock: &OmqSocket, flags: c_int, sndtimeo: i64) -> Result<(), c_int> {
+    if !round_robin_send_mutes_without_ready_peer(sock) {
+        return Ok(());
+    }
+    if can_queue_without_ready_peer(sock)? {
+        return Ok(());
+    }
+    let Some(inner) = sock.inner.get() else {
+        return Err(ETERM);
+    };
+    if inner.ready_peer_count() != 0 {
+        return Ok(());
+    }
+    if (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0 {
+        return Err(libc::EAGAIN);
+    }
+    wait_for_ready_peer(sock, sndtimeo)
 }
 
 fn block_recv<T>(
@@ -327,6 +407,11 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         }
     }
 
+    let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = ensure_libzmq_send_route(sock, flags, sndtimeo) {
+        return fail(e);
+    }
+
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let accum = unsafe { sock.send_accum.get() };
 
@@ -348,7 +433,6 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
-    let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
 
     match inner.try_send(msg) {

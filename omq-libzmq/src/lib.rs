@@ -7,6 +7,13 @@
 //! in `AssertUnwindSafe` would weaken static guarantees for marginal
 //! benefit. libzmq itself aborts on internal errors, so abort-on-panic
 //! is acceptable behavior for a drop-in replacement.
+//!
+//! # Send and HWM semantics
+//!
+//! `ZMQ_SNDHWM` and `ZMQ_RCVHWM` count complete messages, not bytes.
+//! `ZMQ_LINGER` defaults to `-1`, matching libzmq. Bound round-robin sockets
+//! with no ready peer are muted: blocking `zmq_send()` waits, while
+//! `ZMQ_DONTWAIT` or `ZMQ_SNDTIMEO=0` returns `EAGAIN`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 // Crate-level: 53 of 64 extern "C" fns trigger this lint. Per-function

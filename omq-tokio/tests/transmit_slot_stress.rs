@@ -118,8 +118,8 @@ stress_test!(push_pull_peer_churn_transmit_slot, {
     assert_eq!(&m.part_bytes(0).unwrap()[..], b"a");
 
     // Verify messages still flow after the initial single-peer test.
-    // (The encode slot was active for single-peer; this confirms the
-    // submitter fallback also works.)
+    // The encode slot was active for single-peer; this confirms the
+    // submitter path still drains through the send pipe.
     drop(pull2);
 
     for i in 0..100u32 {

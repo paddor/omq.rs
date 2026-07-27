@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-27
+
 ### Security
 
 - Do not count pre-handshake TCP/IPC peers against data-plane peer limits.
@@ -35,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound no-peer round-robin sends now mute like libzmq: async `send()` waits
   and `try_send()` returns `Full`.
 - Document native no-peer, linger, and HWM edge cases against libzmq.
+- *(deps)* Bump `omq-proto` to 0.24.0.
 
 ## [0.19.3] - 2026-07-23
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-07-27
+
 ### Fixed
 
 - Bound no-peer `PUSH` sends now match libzmq: blocking sends wait for a
@@ -17,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZMQ_RECONNECT_IVL` now defaults to 100 ms, matching libzmq. The previous
   disabled default could remove connect-side pre-ready pipes after an initial
   `ECONNREFUSED`.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.20.0.
 
 ## [0.5.6] - 2026-07-23
 

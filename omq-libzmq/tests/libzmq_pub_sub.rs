@@ -67,14 +67,11 @@ fn pub_sub_basic_inproc() {
 
 #[test]
 fn pub_sub_topic_filter_tcp() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let pub_ = zmq_socket(ctx, ZMQ_PUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
 
-    zmq_bind(pub_, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pub_);
     subscribe(sub, b"topic.A");
     zmq_connect(sub, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(200));

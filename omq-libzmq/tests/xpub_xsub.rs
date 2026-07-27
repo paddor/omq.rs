@@ -106,9 +106,7 @@ fn xpub_receives_sub_notifications() {
     set_linger_zero(xpub);
     set_linger_zero(sub);
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-    zmq_bind(xpub, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(xpub);
     set_timeo(xpub, 2000);
 
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"news".as_ptr().cast(), 4);
@@ -164,17 +162,12 @@ fn xpub_xsub_proxy_pattern() {
     set_linger_zero(xpub);
     set_linger_zero(sub);
 
-    let port_be = helpers::free_port();
-    let port_fe = helpers::free_port();
-    let addr_be = CString::new(format!("tcp://127.0.0.1:{port_be}")).unwrap();
-    let addr_fe = CString::new(format!("tcp://127.0.0.1:{port_fe}")).unwrap();
-
     // Backend: PUB -> XSUB
-    zmq_bind(xsub, addr_be.as_ptr());
+    let addr_be = helpers::bind_random_tcp(xsub);
     zmq_connect(pub_, addr_be.as_ptr());
 
     // Frontend: XPUB -> SUB
-    zmq_bind(xpub, addr_fe.as_ptr());
+    let addr_fe = helpers::bind_random_tcp(xpub);
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr_fe.as_ptr());
 

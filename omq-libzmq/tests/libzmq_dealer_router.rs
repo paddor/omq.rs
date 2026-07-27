@@ -118,14 +118,11 @@ fn dealer_router_identity_routing() {
 /// DEALER/ROUTER over TCP
 #[test]
 fn dealer_router_tcp() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let router = zmq_socket(ctx, ZMQ_ROUTER);
     let dealer = zmq_socket(ctx, ZMQ_DEALER);
 
-    zmq_bind(router, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(router);
     set_identity(dealer, b"d1");
     zmq_connect(dealer, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
@@ -205,10 +202,7 @@ fn multiple_dealers_one_router() {
     let ctx = zmq_ctx_new();
     let router = zmq_socket(ctx, ZMQ_ROUTER);
 
-    let port = helpers::free_port();
-    let addr_str = format!("tcp://127.0.0.1:{port}");
-    let addr = CString::new(addr_str.clone()).unwrap();
-    zmq_bind(router, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(router);
 
     set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(router, ZMQ_SNDTIMEO, TIMEOUT_MS);
@@ -216,8 +210,7 @@ fn multiple_dealers_one_router() {
     for i in 0..N {
         let d = zmq_socket(ctx, ZMQ_DEALER);
         set_identity(d, format!("d{i}").as_bytes());
-        let a = CString::new(addr_str.clone()).unwrap();
-        zmq_connect(d, a.as_ptr());
+        zmq_connect(d, addr.as_ptr());
         set_timeo(d, ZMQ_RCVTIMEO, TIMEOUT_MS);
         dealers.push(d);
     }
@@ -293,13 +286,8 @@ fn req_through_dealer_router() {
     let req = zmq_socket(ctx, ZMQ_REQ);
     let rep = zmq_socket(ctx, ZMQ_REP);
 
-    let port_fe = helpers::free_port();
-    let port_be = helpers::free_port();
-    let addr_fe = CString::new(format!("tcp://127.0.0.1:{port_fe}")).unwrap();
-    let addr_be = CString::new(format!("tcp://127.0.0.1:{port_be}")).unwrap();
-
-    zmq_bind(router_fe, addr_fe.as_ptr());
-    zmq_bind(dealer_be, addr_be.as_ptr());
+    let addr_fe = helpers::bind_random_tcp(router_fe);
+    let addr_be = helpers::bind_random_tcp(dealer_be);
     zmq_connect(req, addr_fe.as_ptr());
     zmq_connect(rep, addr_be.as_ptr());
     std::thread::sleep(Duration::from_millis(150));

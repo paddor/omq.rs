@@ -26,15 +26,12 @@ fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
 /// from `libzmq/tests/test_pair_tcp.cpp`
 #[test]
 fn pair_tcp_basic() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let sb = zmq_socket(ctx, ZMQ_PAIR); // server/bind
     let sc = zmq_socket(ctx, ZMQ_PAIR); // client/connect
     assert!(!sb.is_null() && !sc.is_null());
 
-    assert_eq!(zmq_bind(sb, addr.as_ptr()), 0, "bind failed");
+    let addr = helpers::bind_random_tcp(sb);
     assert_eq!(zmq_connect(sc, addr.as_ptr()), 0, "connect failed");
 
     // Allow handshake time.
@@ -69,14 +66,11 @@ fn pair_tcp_basic() {
 
 #[test]
 fn pair_tcp_multipart() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let sb = zmq_socket(ctx, ZMQ_PAIR);
     let sc = zmq_socket(ctx, ZMQ_PAIR);
 
-    zmq_bind(sb, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 
@@ -109,14 +103,11 @@ fn pair_tcp_multipart() {
 fn pair_tcp_many_messages() {
     const N: usize = 100;
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let sb = zmq_socket(ctx, ZMQ_PAIR);
     let sc = zmq_socket(ctx, ZMQ_PAIR);
 
-    zmq_bind(sb, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 
@@ -152,14 +143,11 @@ fn pair_tcp_many_messages() {
 #[test]
 fn pair_tcp_truncation() {
     // libzmq behavior: zmq_recv truncates to buf_len but returns actual frame length.
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let sb = zmq_socket(ctx, ZMQ_PAIR);
     let sc = zmq_socket(ctx, ZMQ_PAIR);
 
-    zmq_bind(sb, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 

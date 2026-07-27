@@ -75,14 +75,11 @@ fn req_rep_basic_inproc() {
 
 #[test]
 fn req_rep_basic_tcp() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
     let req = zmq_socket(ctx, ZMQ_REQ);
 
-    zmq_bind(rep, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(rep);
     zmq_connect(req, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 
@@ -160,18 +157,14 @@ fn req_rep_multiple_clients() {
     let ctx = zmq_ctx_new();
     let rep = zmq_socket(ctx, ZMQ_REP);
 
-    let port = helpers::free_port();
-    let addr_str = format!("tcp://127.0.0.1:{port}");
-    let addr = CString::new(addr_str.clone()).unwrap();
-    zmq_bind(rep, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(rep);
 
     set_timeo(rep, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(rep, ZMQ_SNDTIMEO, TIMEOUT_MS);
     let mut reqs = Vec::new();
     for _ in 0..N {
         let r = zmq_socket(ctx, ZMQ_REQ);
-        let a = CString::new(addr_str.clone()).unwrap();
-        zmq_connect(r, a.as_ptr());
+        zmq_connect(r, addr.as_ptr());
         set_timeo(r, ZMQ_RCVTIMEO, TIMEOUT_MS);
         set_timeo(r, ZMQ_SNDTIMEO, TIMEOUT_MS);
         reqs.push(r);

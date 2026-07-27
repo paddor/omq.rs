@@ -20,8 +20,8 @@ use omq_proto::options::Options;
 #[cfg(feature = "lz4")]
 use omq_proto::proto::transform::MessageEncoder;
 
-use super::FAN_OUT_TOTAL_COPY_BUDGET;
 use super::filter::{self, FanOutMode};
+use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
 const LANE_CTRL_RING_CAP: usize = 64;
 
@@ -105,7 +105,7 @@ pub(super) struct FanOutLanes {
     state: Mutex<FanOutLaneState>,
     active_flags: Arc<Vec<AtomicBool>>,
     distributor: Mutex<LaneDistributor>,
-    lossy: bool,
+    mute_policy: FanOutMutePolicy,
 }
 
 impl std::fmt::Debug for LaneDistributor {
@@ -153,7 +153,7 @@ struct LaneWorker {
     data_space: Arc<StateSignal>,
     ctrl_notify: Arc<DataSignal>,
     mode: FanOutMode,
-    lossy: bool,
+    mute_policy: FanOutMutePolicy,
     peers: FxHashMap<u64, LanePeer>,
     subscribe_all_count: usize,
     eq: FrameBuffer,
@@ -168,7 +168,7 @@ impl std::fmt::Debug for LaneWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LaneWorker")
             .field("mode", &self.mode)
-            .field("lossy", &self.lossy)
+            .field("mute_policy", &self.mute_policy)
             .field("peers", &self.peers.len())
             .field("distribution_targets", &self.distribution_targets.len())
             .finish_non_exhaustive()
@@ -179,7 +179,7 @@ impl FanOutLanes {
     pub(super) fn spawn(
         options: &Options,
         mode: FanOutMode,
-        lossy: bool,
+        mute_policy: FanOutMutePolicy,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Arc<Self> {
         let pipe_cap = options.send_hwm.max(1) as usize;
@@ -263,7 +263,7 @@ impl FanOutLanes {
                     data_space,
                     ctrl_notify: ctrl_notify.clone(),
                     mode,
-                    lossy,
+                    mute_policy,
                     peers: FxHashMap::default(),
                     subscribe_all_count: 0,
                     eq: FrameBuffer::one_shot(),
@@ -285,7 +285,7 @@ impl FanOutLanes {
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
             distributor: Mutex::new(distributor),
-            lossy,
+            mute_policy,
         })
     }
 
@@ -426,7 +426,7 @@ impl FanOutLanes {
                 dist.signal.mark();
                 Ok(())
             }
-            Err(returned) if self.lossy => {
+            Err(returned) if self.mute_policy.is_lossy() => {
                 dist.tx.flush();
                 dist.signal.mark();
                 drop(returned);
@@ -450,7 +450,7 @@ impl FanOutLanes {
                         dist.signal.mark();
                         return;
                     }
-                    Err(returned) if self.lossy => {
+                    Err(returned) if self.mute_policy.is_lossy() => {
                         dist.tx.flush();
                         dist.signal.mark();
                         drop(returned);
@@ -625,7 +625,7 @@ impl LaneWorker {
     }
 
     async fn distribute_batch(&mut self, batch: &[LaneDispatch]) -> bool {
-        if self.lossy {
+        if self.mute_policy.is_lossy() {
             self.distribute_batch_lossy(batch);
             return false;
         }
@@ -642,7 +642,7 @@ impl LaneWorker {
                         let target = &mut self.distribution_targets[target_idx];
                         match target.data_tx.push(dispatch.clone()) {
                             Ok(()) => None,
-                            Err(returned) if self.lossy => {
+                            Err(returned) if self.mute_policy.is_lossy() => {
                                 drop(returned);
                                 None
                             }
@@ -787,7 +787,7 @@ impl LaneWorker {
         dispatch: &LaneDispatch,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        if self.lossy {
+        if self.mute_policy.is_lossy() {
             self.dispatch_lossy(dispatch, touched);
             return false;
         }
@@ -985,7 +985,13 @@ impl LaneWorker {
             for &peer_id in &peer_ids {
                 if let Some(peer) = self.peers.get_mut(&peer_id)
                     && !peer.dict_shipped
-                    && Self::push_frame_to_peer_lossy(peer_id, peer, &frame, touched)
+                    && Self::push_frame_to_peer_lossy(
+                        self.mute_policy,
+                        peer_id,
+                        peer,
+                        &frame,
+                        touched,
+                    )
                 {
                     peer.dict_shipped = true;
                     peer.slot.mark_fanout_dict_shipped();
@@ -1015,7 +1021,7 @@ impl LaneWorker {
                 if has_dict && !peer.dict_shipped {
                     continue;
                 }
-                Self::push_frame_to_peer_lossy(peer_id, peer, &encoded, touched);
+                Self::push_frame_to_peer_lossy(self.mute_policy, peer_id, peer, &encoded, touched);
             }
         }
 
@@ -1023,14 +1029,18 @@ impl LaneWorker {
     }
 
     fn push_frame_to_peer_lossy(
+        mute_policy: FanOutMutePolicy,
         peer_id: u64,
         peer: &mut LanePeer,
         frame: &FanOutFrame<'_>,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
-        let result = match frame {
-            FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-            FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+        let result = match mute_policy {
+            FanOutMutePolicy::DropOldest => peer.slot.try_push_fanout_drop_oldest(frame),
+            FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => match frame {
+                FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
+                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+            },
         };
         match result {
             TryFrameResult::Ok => {
@@ -1039,7 +1049,9 @@ impl LaneWorker {
             }
             TryFrameResult::Dead | TryFrameResult::Ineligible => false,
             TryFrameResult::Full => {
-                peer.slot.deactivate_fanout();
+                if mute_policy == FanOutMutePolicy::DropNewest {
+                    peer.slot.deactivate_fanout();
+                }
                 false
             }
         }
@@ -1066,7 +1078,7 @@ impl LaneWorker {
                         return PushFrameResult::Pushed;
                     }
                     TryFrameResult::Dead => return PushFrameResult::Skipped,
-                    TryFrameResult::Full if self.lossy => {
+                    TryFrameResult::Full if self.mute_policy.is_lossy() => {
                         peer.slot.deactivate_fanout();
                         return PushFrameResult::Skipped;
                     }
@@ -1076,7 +1088,9 @@ impl LaneWorker {
                         peer.slot.signal_encoded();
                         (space, seen)
                     }
-                    TryFrameResult::Ineligible if self.lossy => return PushFrameResult::Skipped,
+                    TryFrameResult::Ineligible if self.mute_policy.is_lossy() => {
+                        return PushFrameResult::Skipped;
+                    }
                     TryFrameResult::Ineligible => {
                         unreachable!("pre-framed fanout push cannot be ineligible")
                     }
@@ -1118,8 +1132,17 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
+    use bytes::Bytes;
+    use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
+    use omq_proto::frame_buffer::FrameBuffer;
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use smallvec::SmallVec;
+
+    use crate::routing::subscription::SubscriptionSet;
+
     use super::{
-        FanOutLaneState, FanOutLanes, LaneDispatch, LaneDistributor, LaneEndpoint, LanePeerAdd,
+        FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneDispatch, LaneDistributor,
+        LaneEndpoint, LanePeer, LanePeerAdd, LaneWorker,
     };
 
     #[test]
@@ -1183,7 +1206,7 @@ mod tests {
                 signal: Arc::new(crate::engine::signal::DataSignal::new()),
                 space: data_space.clone(),
             }),
-            lossy: false,
+            mute_policy: FanOutMutePolicy::Block,
         };
 
         lanes.try_dispatch(test_dispatch("one")).unwrap();
@@ -1214,6 +1237,102 @@ mod tests {
             .expect("dispatch did not wake after space signal");
     }
 
+    #[test]
+    fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
+        let (_data_tx, data_rx) = yring::spsc::<LaneDispatch>(4);
+        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
+        let slot = test_slot_with_msg_cap(7, 2);
+        let mut subscriptions = SubscriptionSet::new();
+        subscriptions.add(b"");
+        let mut peers = FxHashMap::default();
+        peers.insert(
+            7,
+            LanePeer {
+                subscriptions,
+                groups: FxHashSet::default(),
+                any_groups: false,
+                slot: slot.clone(),
+                dict_shipped: false,
+            },
+        );
+        let mut worker = LaneWorker {
+            data_rx,
+            ctrl_rx,
+            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            data_space: Arc::new(crate::engine::signal::StateSignal::new()),
+            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+            mode: FanOutMode::SubscriptionPrefix,
+            mute_policy: FanOutMutePolicy::DropOldest,
+            peers,
+            subscribe_all_count: 1,
+            eq: FrameBuffer::one_shot(),
+            chunks: Vec::new(),
+            #[cfg(feature = "lz4")]
+            encoder: None,
+            distribution_targets: Vec::new(),
+            active_flags: None,
+        };
+        let mut touched = SmallVec::new();
+
+        for body in ["first", "second", "third"] {
+            worker.dispatch_lossy(&test_dispatch(body), &mut touched);
+        }
+
+        let mut actual = Vec::new();
+        slot.drain(&mut actual, 1024);
+        assert_eq!(
+            actual,
+            vec![encoded_dispatch("second"), encoded_dispatch("third")]
+        );
+    }
+
+    #[test]
+    fn drop_newest_lossy_dispatch_keeps_oldest_per_peer_frames() {
+        let (_data_tx, data_rx) = yring::spsc::<LaneDispatch>(4);
+        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
+        let slot = test_slot_with_msg_cap(7, 2);
+        let mut subscriptions = SubscriptionSet::new();
+        subscriptions.add(b"");
+        let mut peers = FxHashMap::default();
+        peers.insert(
+            7,
+            LanePeer {
+                subscriptions,
+                groups: FxHashSet::default(),
+                any_groups: false,
+                slot: slot.clone(),
+                dict_shipped: false,
+            },
+        );
+        let mut worker = LaneWorker {
+            data_rx,
+            ctrl_rx,
+            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            data_space: Arc::new(crate::engine::signal::StateSignal::new()),
+            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+            mode: FanOutMode::SubscriptionPrefix,
+            mute_policy: FanOutMutePolicy::DropNewest,
+            peers,
+            subscribe_all_count: 1,
+            eq: FrameBuffer::one_shot(),
+            chunks: Vec::new(),
+            #[cfg(feature = "lz4")]
+            encoder: None,
+            distribution_targets: Vec::new(),
+            active_flags: None,
+        };
+        let mut touched = SmallVec::new();
+
+        for body in ["first", "second", "third"] {
+            worker.dispatch_lossy(&test_dispatch(body), &mut touched);
+        }
+
+        assert!(!slot.fanout_active());
+        let mut actual = Vec::new();
+        slot.drain(&mut actual, 1024);
+        assert_eq!(actual, vec![encoded_dispatches(&["first", "second"])]);
+    }
+
     fn test_lanes(count: usize) -> FanOutLanes {
         FanOutLanes {
             state: std::sync::Mutex::new(FanOutLaneState {
@@ -1225,7 +1344,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             distributor: test_distributor(),
-            lossy: true,
+            mute_policy: FanOutMutePolicy::DropNewest,
         }
     }
 
@@ -1243,6 +1362,13 @@ mod tests {
     }
 
     fn test_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
+        test_slot_with_msg_cap(peer_id, 16)
+    }
+
+    fn test_slot_with_msg_cap(
+        peer_id: u64,
+        msg_cap: usize,
+    ) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
         crate::engine::transmit_slot::PeerTransmitSlot::new(
             peer_id,
             false,
@@ -1250,7 +1376,7 @@ mod tests {
             4096,
             16 * 1024,
             64 * 1024,
-            16,
+            msg_cap,
             #[cfg(feature = "ws")]
             false,
             #[cfg(feature = "ws")]
@@ -1274,5 +1400,37 @@ mod tests {
             msg,
             group: None,
         }
+    }
+
+    fn encoded_dispatch(body: &str) -> Bytes {
+        let msg = omq_proto::message::Message::from_slice(body.as_bytes());
+        let mut eq = FrameBuffer::one_shot();
+        let mut chunks = Vec::new();
+        let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, 1, 8 * 1024);
+        let bytes = match frame {
+            omq_proto::fan_out_frame::FanOutFrame::Arena(raw) => Bytes::copy_from_slice(raw),
+            omq_proto::fan_out_frame::FanOutFrame::Chunks(chunks) if chunks.len() == 1 => {
+                chunks[0].clone()
+            }
+            omq_proto::fan_out_frame::FanOutFrame::Chunks(chunks) => {
+                let len = chunks.iter().map(Bytes::len).sum();
+                let mut buf = bytes::BytesMut::with_capacity(len);
+                for chunk in chunks {
+                    buf.extend_from_slice(chunk);
+                }
+                buf.freeze()
+            }
+        };
+        clear_fan_out_frame(&mut eq, &mut chunks);
+        bytes
+    }
+
+    fn encoded_dispatches(bodies: &[&str]) -> Bytes {
+        let mut bytes = bytes::BytesMut::new();
+        for body in bodies {
+            let encoded = encoded_dispatch(body);
+            bytes.extend_from_slice(&encoded);
+        }
+        bytes.freeze()
     }
 }

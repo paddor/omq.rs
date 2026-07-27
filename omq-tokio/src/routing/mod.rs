@@ -182,12 +182,13 @@ impl SendStrategy {
         match send_category(t) {
             SendCategory::None => Self::None,
             SendCategory::FanOut(FanOutKind::SubscriptionPrefix) => Self::FanOut(FanOutSend::new(
+                t,
                 options,
                 FanOutMode::SubscriptionPrefix,
                 io_pool,
             )),
             SendCategory::FanOut(FanOutKind::Group) => {
-                Self::FanOut(FanOutSend::new(options, FanOutMode::Group, io_pool))
+                Self::FanOut(FanOutSend::new(t, options, FanOutMode::Group, io_pool))
             }
             SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(t, options)),
             SendCategory::RoundRobin

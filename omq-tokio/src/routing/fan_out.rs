@@ -22,7 +22,8 @@ use tokio::sync::oneshot;
 use crate::engine::PeerDriverHandle;
 use omq_proto::error::Result;
 use omq_proto::message::Message;
-use omq_proto::options::Options;
+use omq_proto::options::{OnMute, Options};
+use omq_proto::proto::SocketType;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
@@ -50,6 +51,19 @@ fn yield_interval(peer_count: usize, msg_bytes: usize) -> u32 {
     peer_interval.min(byte_interval)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FanOutMutePolicy {
+    Block,
+    DropNewest,
+    DropOldest,
+}
+
+impl FanOutMutePolicy {
+    pub(super) fn is_lossy(self) -> bool {
+        !matches!(self, Self::Block)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Submitter {
     lanes: Arc<FanOutLanes>,
@@ -60,7 +74,7 @@ pub(crate) struct Submitter {
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
-    lossy: bool,
+    mute_policy: FanOutMutePolicy,
     #[cfg(feature = "lz4")]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
@@ -76,17 +90,23 @@ impl Clone for Submitter {
             mode: self.mode,
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
-            lossy: self.lossy,
+            mute_policy: self.mute_policy,
             #[cfg(feature = "lz4")]
             dict_training: self.dict_training.clone(),
         }
     }
 }
 
-fn fan_out_is_lossy(options: &Options) -> bool {
-    // TODO: Fan-out mute currently drops newest. Supporting DropOldest needs
-    // per-peer oldest eviction in PeerTransmitSlot or a fan-out-specific queue.
-    !options.xpub_nodrop
+fn fan_out_mute_policy(socket_type: SocketType, options: &Options) -> FanOutMutePolicy {
+    if options.xpub_nodrop {
+        return FanOutMutePolicy::Block;
+    }
+    match (socket_type, options.on_mute) {
+        (SocketType::Pub | SocketType::XPub | SocketType::Radio, OnMute::DropOldest) => {
+            FanOutMutePolicy::DropOldest
+        }
+        _ => FanOutMutePolicy::DropNewest,
+    }
 }
 
 fn deactivate_fanout_target(
@@ -168,8 +188,13 @@ impl Submitter {
 
         if !fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-            fallback::dispatch_to_targets(&fallback_targets, msg, self.lossy, &mut deactivate)
-                .map_err(omq_proto::error::TrySendError::Error)?;
+            fallback::dispatch_to_targets(
+                &fallback_targets,
+                msg,
+                self.mute_policy,
+                &mut deactivate,
+            )
+            .map_err(omq_proto::error::TrySendError::Error)?;
         }
 
         if has_lane_peers {
@@ -237,7 +262,12 @@ impl Submitter {
 
         if !fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
-            fallback::dispatch_to_targets(&fallback_targets, msg, self.lossy, &mut deactivate)?;
+            fallback::dispatch_to_targets(
+                &fallback_targets,
+                msg,
+                self.mute_policy,
+                &mut deactivate,
+            )?;
         }
 
         if has_lane_peers {
@@ -295,7 +325,7 @@ pub(crate) struct FanOutSend {
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
     xpub_nodrop: bool,
-    lossy: bool,
+    mute_policy: FanOutMutePolicy,
     #[cfg(feature = "lz4")]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
@@ -352,12 +382,13 @@ impl FanOutInner {
 
 impl FanOutSend {
     pub(crate) fn new(
+        socket_type: SocketType,
         options: &Options,
         mode: FanOutMode,
         io_pool: &crate::context::IoPoolHandle,
     ) -> Self {
-        let lossy = fan_out_is_lossy(options);
-        let lanes = FanOutLanes::spawn(options, mode, lossy, io_pool);
+        let mute_policy = fan_out_mute_policy(socket_type, options);
+        let lanes = FanOutLanes::spawn(options, mode, mute_policy, io_pool);
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
             subscribe_all_count: 0,
@@ -376,7 +407,7 @@ impl FanOutSend {
             generation,
             mode,
             xpub_nodrop: options.xpub_nodrop,
-            lossy,
+            mute_policy,
             #[cfg(feature = "lz4")]
             dict_training: Arc::new(Mutex::new(compression::new_dict_training(options))),
         }
@@ -396,7 +427,7 @@ impl FanOutSend {
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
-            lossy: self.lossy,
+            mute_policy: self.mute_policy,
             #[cfg(feature = "lz4")]
             dict_training: self.dict_training.clone(),
         }
@@ -619,7 +650,9 @@ impl FanOutSend {
 
 #[cfg(test)]
 mod tests {
-    use super::yield_interval;
+    use super::{FanOutMode, FanOutMutePolicy, FanOutSend, fan_out_mute_policy, yield_interval};
+    use omq_proto::options::{OnMute, Options};
+    use omq_proto::proto::SocketType;
 
     #[test]
     fn yield_interval_scales_with_message_size() {
@@ -634,5 +667,46 @@ mod tests {
     fn yield_interval_yields_every_send_without_active_targets() {
         assert_eq!(yield_interval(0, 16), 1);
         assert_eq!(yield_interval(0, 16 * 1024), 1);
+    }
+
+    #[test]
+    fn drop_oldest_policy_is_pub_xpub_radio_only() {
+        let options = Options::default().on_mute(OnMute::DropOldest);
+
+        assert_eq!(
+            fan_out_mute_policy(SocketType::Pub, &options),
+            FanOutMutePolicy::DropOldest
+        );
+        assert_eq!(
+            fan_out_mute_policy(SocketType::Radio, &options),
+            FanOutMutePolicy::DropOldest
+        );
+        assert_eq!(
+            fan_out_mute_policy(SocketType::XPub, &options),
+            FanOutMutePolicy::DropOldest
+        );
+
+        let mut nodrop_options = options;
+        nodrop_options.xpub_nodrop = true;
+        assert_eq!(
+            fan_out_mute_policy(SocketType::XPub, &nodrop_options),
+            FanOutMutePolicy::Block
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_send_new_wires_drop_oldest_policy() {
+        let options = Options::default().on_mute(OnMute::DropOldest);
+        let io_pool = crate::context::IoPoolHandle::none();
+
+        for (socket_type, mode) in [
+            (SocketType::Pub, FanOutMode::SubscriptionPrefix),
+            (SocketType::XPub, FanOutMode::SubscriptionPrefix),
+            (SocketType::Radio, FanOutMode::Group),
+        ] {
+            let send = FanOutSend::new(socket_type, &options, mode, &io_pool);
+            assert_eq!(send.mute_policy, FanOutMutePolicy::DropOldest);
+            send.shutdown();
+        }
     }
 }

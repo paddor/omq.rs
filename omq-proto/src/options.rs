@@ -715,6 +715,10 @@ impl Default for ReconnectPolicy {
 /// no-peer round-robin sockets queue into a pre-ready pipe until `send_hwm`
 /// is reached, then apply this policy. Native OMQ has no `ZMQ_IMMEDIATE`
 /// option; `omq-libzmq` implements `ZMQ_IMMEDIATE` at the C layer.
+///
+/// `PUB`, `XPUB`, and `RADIO` honor `DropOldest` for per-peer fan-out
+/// queues. Other fan-out sockets keep the native drop-newest behavior unless
+/// `xpub_nodrop` asks them to wait.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OnMute {

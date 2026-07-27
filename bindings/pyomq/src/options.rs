@@ -149,14 +149,9 @@ impl Overlay {
         };
         #[cfg(feature = "plain")]
         if self.plain_server {
-            opts.mechanism = omq_proto::options::MechanismConfig::PlainServer {
-                authenticator: omq_proto::proto::mechanism::Authenticator::new(|_| true),
-            };
+            opts = opts.plain_server(|_| true);
         } else if let (Some(u), Some(p)) = (&self.plain_username, &self.plain_password) {
-            opts.mechanism = omq_proto::options::MechanismConfig::PlainClient {
-                username: u.clone(),
-                password: p.clone(),
-            };
+            opts = opts.plain_client(u.clone(), p.clone());
         }
         #[cfg(feature = "curve")]
         if self.curve_server {
@@ -173,10 +168,7 @@ impl Overlay {
                     .curve_authenticator
                     .as_ref()
                     .map(crate::auth::build_authenticator);
-                opts.mechanism = omq_proto::options::MechanismConfig::CurveServer {
-                    our_keypair: keypair,
-                    options: curve_options,
-                };
+                opts = opts.curve_server_with_options(keypair, curve_options);
             }
         } else if let (Some(pk), Some(sk), Some(svk)) = (
             &self.curve_publickey,
@@ -193,10 +185,7 @@ impl Overlay {
             let server_public = backend::CurvePublicKey::from_z85(svk_str)
                 .map_err(|e| bad_key_detail("CURVE_SERVERKEY", &e))?;
             let keypair = backend::CurveKeypair { public, secret };
-            opts.mechanism = omq_proto::options::MechanismConfig::CurveClient {
-                our_keypair: keypair,
-                server_public,
-            };
+            opts = opts.curve_client(keypair, server_public);
         }
         Ok(opts)
     }

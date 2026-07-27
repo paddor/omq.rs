@@ -15,7 +15,6 @@ For asynchronous code::
 
 from __future__ import annotations
 
-import builtins
 import errno as _errno
 import itertools
 import json
@@ -32,13 +31,9 @@ from typing import (
     Iterable,
     Iterator,
     Protocol,
+    Self,
     overload,
 )
-
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
 
 from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
 from . import error as error  # noqa: F401
@@ -46,6 +41,7 @@ from . import error as error  # noqa: F401
 from ._native import (  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
     backend_name,
     version,
+    Frame,
     # Socket types
     PAIR,
     PUB,
@@ -291,29 +287,7 @@ class MessageTracker:
             raise NotDone
 
 
-class Message(bytes):
-    """Message class that extends bytes (pyzmq compatibility)."""
-
-    tracker: MessageTracker | None = None
-
-    def __new__(
-        cls,
-        # Work around teh fact in the scope bytes is the descriptor
-        data: builtins.bytes = b"",
-        track: bool = False,
-    ):
-        return super().__new__(cls, data)
-
-    @property
-    def bytes(self) -> builtins.bytes:
-        return bytes(self)
-
-    @property
-    def buffer(self) -> memoryview:
-        return memoryview(bytes(self))
-
-
-Frame = Message
+Message = Frame
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
@@ -668,12 +642,11 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame:
         try:
-            data = self._sock.recv(flags)
+            if copy:
+                return self._sock.recv(flags)
+            return self._sock.recv_frame(flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
-        if not copy:
-            return Frame(data)
-        return data
 
     def send_multipart(
         self,
@@ -695,12 +668,11 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> list[bytes | Frame]:
         try:
-            parts = self._sock.recv_multipart(flags)
+            if copy:
+                return self._sock.recv_multipart(flags)
+            return self._sock.recv_multipart_frames(flags)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
-        if not copy:
-            return [Frame(p) for p in parts]
-        return parts
 
     # ── Serialization helpers ────────────────────────────────────────
 
@@ -923,18 +895,16 @@ class _ShadowSocket(_SocketOptionsBase):
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame:
-        data = self._blocking_recv(self._native._try_recv)
-        if not copy:
-            return Frame(data)
-        return data
+        if copy:
+            return self._blocking_recv(self._native._try_recv)
+        return self._blocking_recv(self._native._try_recv_frame)
 
     def recv_multipart(
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> list[bytes | Frame]:
-        parts = self._blocking_recv(self._native._try_recv_multipart)
-        if not copy:
-            return [Frame(p) for p in parts]
-        return parts
+        if copy:
+            return self._blocking_recv(self._native._try_recv_multipart)
+        return self._blocking_recv(self._native._try_recv_multipart_frames)
 
     def send(
         self,
@@ -1264,7 +1234,7 @@ def device(device_type: int, frontend: Socket, backend: Socket) -> None:
     proxy(frontend, backend)
 
 
-# ── builtins reference (for copy/track errors) ──────────────────────
+# ── ZMQStream re-export ─────────────────────────────────────────────
 
 from .zmqstream import ZMQStream  # noqa: E402
 

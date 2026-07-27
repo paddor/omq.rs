@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native `Frame`/`Message` objects now back `recv(copy=False)` and
+  `recv_multipart(copy=False)`, allowing received frames to be re-sent
+  without copying payload bytes back through Python `bytes`.
+- `Frame`/`Message` now expose direct read-only buffer views over their
+  Rust `Bytes` storage.
+
+### Changed
+
+- Minimum supported Python version is now 3.11.
+
 ## [0.17.1] - 2026-07-24
 
 ### Fixed

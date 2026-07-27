@@ -1,7 +1,7 @@
 # pyomq Architecture
 
 PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python (sync and
-async). Single stable-ABI wheel (`abi3-py39`, Python 3.9+) via maturin.
+async). Single stable-ABI wheel (`abi3-py311`, Python 3.11+) via maturin.
 
 ## Source layout
 
@@ -29,6 +29,7 @@ src/
   dispatch.rs       shared bind/connect/subscribe dispatch helpers
   constants.rs      libzmq-compatible socket type + option constants
   conversions.rs    zero-copy PyBytes via PyBytesOwner + Bytes::from_owner
+  frame.rs          native Frame/Message object backed by bytes::Bytes
   error.rs          ZMQError with errno (EAGAIN, ETERM, etc.)
   auth.rs           CURVE authenticator: key-list or Python callable
 ```
@@ -379,6 +380,14 @@ raw `*const u8` + `len` under the GIL at construction. Because Python
 bytes are immutable, the pointer is stable for the object's lifetime.
 `Bytes::from_owner(PyBytesOwner)` borrows the buffer without copying.
 
+`Frame`/`Message` is a native Python class backed by `Bytes`.
+`recv(copy=False)` and `recv_multipart(copy=False)` return these frames.
+Passing such frames to `send` or `send_multipart` clones the `Bytes`
+handle, so broker reroute paths avoid converting frame payloads through
+Python `bytes`. `bytes(frame)` and `frame.bytes` still allocate a Python
+`bytes` object on demand. `frame.buffer` returns a memoryview directly
+over the immutable Rust `Bytes` storage via the Python buffer protocol.
+
 Other buffer types (`bytearray`, `memoryview`) go through
 `copy_from_slice` because their contents can be mutated from Python.
 
@@ -386,8 +395,9 @@ Other buffer types (`bytearray`, `memoryview`) go through
 
 pyzmq's `track=True` tracks whether the zero-copy send buffer has
 been flushed to the wire (so the caller knows when it's safe to
-mutate the buffer). pyomq copies on send (no zero-copy send path),
-so the buffer is always safe to reuse immediately.
+mutate the buffer). pyomq copies mutable Python buffers on send, so the
+buffer is always safe to reuse immediately. Received `Frame`/`Message`
+objects use immutable `Bytes` storage and can be re-sent without copying.
 `send(track=True)` returns a `MessageTracker` that reports done
 immediately.
 
@@ -474,5 +484,4 @@ that drains the tokio broadcast channel into a `flume::Receiver`. A
 ## Known limitations
 
 - `Poller` registers POLLIN only; POLLOUT is ignored.
-- `send(copy=False)` and `send(track=True)` raise `NotImplementedError`.
 - `wait_any` returns socket IDs, not file descriptors.

@@ -5,6 +5,8 @@ use omq_proto::message::Message;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
+use crate::frame::Frame;
+
 /// Owner that holds a Python `bytes` object alive while exposing its
 /// backing storage as `&[u8]`. Lets us construct `bytes::Bytes` via
 /// `Bytes::from_owner(...)` without copying the payload, since
@@ -50,6 +52,9 @@ impl AsRef<[u8]> for PyBytesOwner {
 /// `memoryview` / other buffer-protocol types whose backing storage
 /// might be mutable or transient.
 pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+    if let Ok(frame) = b.cast::<Frame>() {
+        return Ok(frame.borrow().bytes_clone());
+    }
     if let Ok(pb) = b.cast::<PyBytes>() {
         return Ok(Bytes::from_owner(PyBytesOwner::from_pybytes(pb)));
     }
@@ -73,4 +78,18 @@ pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
 /// Return a Python list of bytes - one per message frame.
 pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> PyResult<Bound<'py, PyList>> {
     PyList::new(py, msg.iter().map(|b| PyBytes::new(py, &b)))
+}
+
+pub fn frames_to_pylist<'py>(py: Python<'py>, parts: Vec<Bytes>) -> PyResult<Bound<'py, PyList>> {
+    let len = parts.len();
+    let frames = parts
+        .into_iter()
+        .enumerate()
+        .map(|(idx, part)| Bound::new(py, Frame::from_bytes_more(part, idx + 1 < len)))
+        .collect::<PyResult<Vec<_>>>()?;
+    PyList::new(py, frames)
+}
+
+pub fn message_to_frame_list<'py>(py: Python<'py>, msg: Message) -> PyResult<Bound<'py, PyList>> {
+    frames_to_pylist(py, msg.iter().collect())
 }

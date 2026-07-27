@@ -181,9 +181,53 @@ def test_copy_false_recv_returns_frame():
         push.send(b"hello")
         frame = pull.recv(copy=False)
         assert isinstance(frame, zmq.Frame)
+        assert not isinstance(frame, bytes)
         assert bytes(frame) == b"hello"
+        assert frame.buffer.obj is frame
+        assert bytes(frame.buffer) == b"hello"
+        assert frame.bytes == b"hello"
     finally:
         push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_copy_false_multipart_recv_returns_frames():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind("tcp://127.0.0.1:0")
+        push.connect(ep)
+        push.send_multipart([b"a", b"bb", b"ccc"])
+        frames = pull.recv_multipart(copy=False)
+        assert [bytes(frame) for frame in frames] == [b"a", b"bb", b"ccc"]
+        assert all(isinstance(frame, zmq.Frame) for frame in frames)
+        assert [getattr(frame, "more") for frame in frames] == [True, True, False]
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_copy_false_frames_can_be_rerouted():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    broker_in = ctx.socket(zmq.PULL)
+    broker_out = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep_in = broker_in.bind("tcp://127.0.0.1:0")
+        ep_out = pull.bind("tcp://127.0.0.1:0")
+        push.connect(ep_in)
+        broker_out.connect(ep_out)
+        push.send_multipart([b"route", b"body"])
+        broker_out.send_multipart(broker_in.recv_multipart(copy=False))
+        assert pull.recv_multipart() == [b"route", b"body"]
+    finally:
+        push.close()
+        broker_in.close()
+        broker_out.close()
         pull.close()
         ctx.term()
 

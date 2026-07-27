@@ -10,13 +10,36 @@ def test_message_bytes_property():
 
 def test_message_buffer_property():
     m = zmq.Message(b"world")
-    assert bytes(m.buffer) == b"world"
+    view = m.buffer
+    assert isinstance(view, memoryview)
+    assert view.readonly
+    assert view.obj is m
+    assert view.format == "B"
+    assert view.itemsize == 1
+    assert bytes(view) == b"world"
 
 
-def test_message_is_bytes():
+def test_message_memoryview_direct():
+    m = zmq.Message(b"direct")
+    view = memoryview(m)
+    assert view.readonly
+    assert view.obj is m
+    assert view.format == "B"
+    assert view.itemsize == 1
+    assert bytes(view) == b"direct"
+
+
+def test_message_memoryview_keeps_frame_alive():
+    m = zmq.Message(b"owned")
+    view = memoryview(m)
+    del m
+    assert bytes(view) == b"owned"
+
+
+def test_message_bytes_conversion():
     m = zmq.Message(b"test")
-    assert isinstance(m, bytes)
-    assert m == b"test"
+    assert not isinstance(m, bytes)
+    assert bytes(m) == b"test"
 
 
 def test_frame_alias():
@@ -25,7 +48,7 @@ def test_frame_alias():
 
 def test_message_default_empty():
     m = zmq.Message()
-    assert m == b""
+    assert bytes(m) == b""
 
 
 def test_message_tracker_done():

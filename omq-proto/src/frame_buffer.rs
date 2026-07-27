@@ -286,6 +286,23 @@ impl FrameBuffer {
         }
     }
 
+    pub fn pop_front_entry(&mut self) -> bool {
+        self.commit_arena_range();
+        let Some(entry) = self.entries.pop_front() else {
+            return false;
+        };
+        let len = match entry {
+            Entry::Arena { len, .. } => len as usize,
+            Entry::External(bytes) => bytes.len(),
+        };
+        self.total_bytes = self.total_bytes.saturating_sub(len);
+        if self.entries.is_empty() && self.arena.len() == self.arena_mark as usize {
+            self.arena.clear();
+            self.arena_mark = 0;
+        }
+        true
+    }
+
     pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
         self.commit_arena_range();
         for chunk in chunks {
@@ -555,5 +572,19 @@ mod tests {
 
         let drained: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
         assert_eq!(raw, drained);
+    }
+
+    #[test]
+    fn pop_front_entry_drops_oldest_committed_chunk() {
+        let mut eq = FrameBuffer::one_shot();
+        eq.push_raw(vec![Bytes::from_static(b"first")]);
+        eq.push_raw(vec![Bytes::from_static(b"second")]);
+
+        assert!(eq.pop_front_entry());
+
+        let mut chunks = Vec::new();
+        eq.drain(&mut chunks, 1024);
+        assert_eq!(chunks, vec![Bytes::from_static(b"second")]);
+        assert!(eq.is_empty());
     }
 }

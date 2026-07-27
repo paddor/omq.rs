@@ -15,8 +15,19 @@ use std::time::Duration;
 
 const HELPER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/helpers/zmq_ws_peer");
 
-fn helper_exists() -> bool {
-    std::path::Path::new(HELPER).exists()
+/// The helper is optional locally and mandatory in CI. With
+/// `OMQ_INTEROP_REQUIRED=1` a missing helper fails the test instead of
+/// letting the suite pass without exercising any interop.
+fn skip_if_no_helper() -> bool {
+    if !std::path::Path::new(HELPER).exists() {
+        assert!(
+            std::env::var_os("OMQ_INTEROP_REQUIRED").is_none(),
+            "OMQ_INTEROP_REQUIRED=1 but zmq_ws_peer helper not found at {HELPER}",
+        );
+        eprintln!("SKIP: zmq_ws_peer helper not found at {HELPER}");
+        return true;
+    }
+    false
 }
 
 fn ws_ep(port: u16) -> Endpoint {
@@ -33,8 +44,7 @@ fn get_port(ep: &Endpoint) -> u16 {
 /// omq PULL (bind) <- libzmq PUSH (connect)
 #[tokio::test]
 async fn libzmq_push_to_omq_pull() {
-    if !helper_exists() {
-        eprintln!("SKIP: zmq_ws_peer helper not found at {HELPER}");
+    if skip_if_no_helper() {
         return;
     }
     let pull = Socket::new(SocketType::Pull, Options::default());
@@ -73,8 +83,7 @@ async fn libzmq_push_to_omq_pull() {
 /// omq PUSH (connect) -> libzmq PULL (bind)
 #[tokio::test]
 async fn omq_push_to_libzmq_pull() {
-    if !helper_exists() {
-        eprintln!("SKIP: zmq_ws_peer helper not found at {HELPER}");
+    if skip_if_no_helper() {
         return;
     }
     let port = {

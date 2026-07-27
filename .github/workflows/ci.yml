@@ -98,6 +98,99 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test -p omq-tokio --features lz4 -- --test-threads=1
 
+  interop:
+    name: interop (pyzmq)
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # pyzmq wheels bundle libzmq + libsodium: the peer is the real
+    # reference implementation.
+    env:
+      OMQ_INTEROP_REQUIRED: "1" # missing peer fails instead of skipping
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        id: python
+        with: { python-version: "3.14" }
+      - name: install pyzmq
+        run: python -m pip install --upgrade pip "pyzmq>=25"
+      - name: report peer versions
+        run: python -c "import zmq; print('pyzmq', zmq.__version__, 'libzmq', zmq.zmq_version(), 'curve', zmq.has('curve'))"
+      - name: interop (PLAIN)
+        env:
+          OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
+        run: cargo test -p omq-tokio --features plain --test omq_interop_pyzmq_plain
+      - name: interop (CURVE)
+        env:
+          OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
+        run: cargo test -p omq-tokio --features curve --test omq_interop_pyzmq_curve
+
+  loom:
+    name: loom (yring)
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # omq-tokio's loom_signal test needs no cfg and runs in `test`.
+    # RUSTFLAGS replaces the workflow-level value, so repeat -D warnings.
+    env:
+      RUSTFLAGS: --cfg loom -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: loom model check
+        run: cargo test -p yring --features async --test loom --release
+
+  miri:
+    name: miri (yring)
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # yring holds the only Miri-checkable unsafe: omq-proto is
+    # forbid(unsafe_code) and omq-tokio's tests are real socket I/O.
+    # No -D warnings: nightly adds lints on its own schedule.
+    env:
+      RUSTFLAGS: ""
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly # falls back if nightly lacks miri
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri setup
+      - name: miri test
+        run: cargo miri test -p yring --features async
+
+  fuzz-smoke:
+    name: fuzz smoke
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # OMQ_FUZZ_ITERS means something different per target, so the two
+    # get separate budgets: a parser iteration is a buffer parse, a
+    # socket-action iteration drives a live socket (~90ms). The
+    # `extended` workflow runs both far deeper.
+    # --nocapture surfaces OMQ_FUZZ_SEED for reproduction.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fuzz parsers
+        env:
+          OMQ_FUZZ_ITERS: "1000000"
+        run: >
+          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release
+          --test omq_fuzz_parsers -- --nocapture
+      - name: fuzz socket actions
+        env:
+          OMQ_FUZZ_ITERS: "200"
+        run: >
+          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release
+          --test omq_fuzz_socket_actions -- --nocapture
+
   linux-32bit:
     name: 32-bit linux (${{ matrix.target }})
     needs: [changes, lint]
@@ -234,7 +327,20 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, linux-32bit, lint, pyomq-test]
+    needs:
+      [
+        changes,
+        test,
+        encryption,
+        compression,
+        interop,
+        loom,
+        miri,
+        fuzz-smoke,
+        linux-32bit,
+        lint,
+        pyomq-test,
+      ]
     runs-on: ubuntu-latest
     if: always()
     steps:

@@ -18,10 +18,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "ws")]
-use super::dispatch::AnyListener;
 use super::dispatch::{
     AnyConn, AnyStream, bind_any, connect_any, generated_identity, peer_ident_socket_addr,
+    preflight_connect_endpoint_resolution,
 };
 use super::monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorPublisher, PeerCommandKind, PeerInfo,
@@ -379,6 +378,8 @@ impl SocketDriver {
                     let res = self.start_dial_udp(endpoint).await;
                     let _ = ack.send(res);
                 } else if let Err(e) = reject_encrypted_inproc(&endpoint, &self.options.mechanism) {
+                    let _ = ack.send(Err(e));
+                } else if let Err(e) = preflight_connect_endpoint_resolution(&endpoint).await {
                     let _ = ack.send(Err(e));
                 } else if self.should_ignore_duplicate_connect(&endpoint) {
                     let _ = ack.send(Ok(()));

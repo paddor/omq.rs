@@ -1,5 +1,3 @@
-#[cfg(feature = "ws")]
-use super::AnyListener;
 use super::{
     Canceled, ConnectionStatus, DialerEntry, DisconnectReason, Duration, Endpoint, Error,
     InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType,
@@ -311,7 +309,7 @@ impl SocketDriver {
         }
         reject_encrypted_inproc(&endpoint, &self.options.mechanism)?;
         let snapshot = self.inproc_snapshot();
-        let mut listener = bind_any(
+        let bound = bind_any(
             &endpoint,
             &snapshot,
             &self.spsc.recv_signal,
@@ -321,32 +319,8 @@ impl SocketDriver {
             &self.options.wss_tls,
         )
         .await?;
-        #[cfg(feature = "ws")]
-        let resolved = if endpoint.is_ws_family() {
-            let local = match &listener {
-                AnyListener::Ws(l) => l.local_addr,
-                _ => unreachable!(),
-            };
-            let plain = endpoint.underlying_ws();
-            let resolved_plain = match &plain {
-                Endpoint::Ws { path, .. } => Endpoint::Ws {
-                    host: omq_proto::endpoint::Host::Ip(local.ip()),
-                    port: local.port(),
-                    path: path.clone(),
-                },
-                Endpoint::Wss { path, .. } => Endpoint::Wss {
-                    host: omq_proto::endpoint::Host::Ip(local.ip()),
-                    port: local.port(),
-                    path: path.clone(),
-                },
-                _ => unreachable!(),
-            };
-            endpoint.rewrap_ws(resolved_plain)
-        } else {
-            endpoint.rewrap_tcp(listener.local_endpoint().clone())
-        };
-        #[cfg(not(feature = "ws"))]
-        let resolved = endpoint.rewrap_tcp(listener.local_endpoint().clone());
+        let mut listener = bound.listener;
+        let resolved = bound.endpoint;
         self.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
         });

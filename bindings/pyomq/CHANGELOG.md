@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-27
+
 ### Added
 
 - Native `Frame`/`Message` objects now back `recv(copy=False)` and
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Minimum supported Python version is now 3.11.
+- *(deps)* Bump `omq-tokio` to 0.20.0 and `omq-proto` to 0.24.0.
 
 ## [0.17.1] - 2026-07-24
 

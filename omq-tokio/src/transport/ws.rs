@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::error::{Error, Result};
 use omq_proto::proto::ws_handshake;
 
@@ -139,22 +140,35 @@ fn ws_err(e: impl std::fmt::Display) -> Error {
 
 pub(crate) struct WsListener {
     pub(crate) inner: TcpListener,
-    pub(crate) local_addr: SocketAddr,
+    endpoint: Endpoint,
     pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 }
 
+impl WsListener {
+    pub(crate) fn local_endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+}
+
 pub(crate) async fn bind(
-    host: &omq_proto::endpoint::Host,
-    port: u16,
+    endpoint: &Endpoint,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<WsListener> {
     use std::net::{IpAddr, Ipv4Addr};
-    let addr = match host {
-        omq_proto::endpoint::Host::Wildcard => {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
+    let (host, port, path) = match endpoint {
+        Endpoint::Ws { host, port, path } | Endpoint::Wss { host, port, path } => {
+            (host, *port, path)
         }
-        omq_proto::endpoint::Host::Ip(ip) => SocketAddr::new(*ip, port),
-        omq_proto::endpoint::Host::Name(name) => tokio::net::lookup_host(format!("{name}:{port}"))
+        other => {
+            return Err(Error::InvalidEndpoint(format!(
+                "WS transport got non-WS endpoint: {other}"
+            )));
+        }
+    };
+    let addr = match host {
+        Host::Wildcard => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+        Host::Ip(ip) => SocketAddr::new(*ip, port),
+        Host::Name(name) => tokio::net::lookup_host(format!("{name}:{port}"))
             .await
             .map_err(Error::Io)?
             .next()
@@ -163,9 +177,22 @@ pub(crate) async fn bind(
     };
     let listener = super::tcp::reuse_addr_bind(addr)?;
     let local = listener.local_addr().map_err(Error::Io)?;
+    let resolved = match endpoint {
+        Endpoint::Ws { .. } => Endpoint::Ws {
+            host: Host::Ip(local.ip()),
+            port: local.port(),
+            path: path.clone(),
+        },
+        Endpoint::Wss { .. } => Endpoint::Wss {
+            host: Host::Ip(local.ip()),
+            port: local.port(),
+            path: path.clone(),
+        },
+        _ => unreachable!(),
+    };
     Ok(WsListener {
         inner: listener,
-        local_addr: local,
+        endpoint: resolved,
         tls_acceptor,
     })
 }

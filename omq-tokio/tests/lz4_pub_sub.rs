@@ -185,7 +185,7 @@ async fn pub_sub_lz4_io_lane_fan_out_ships_dict_to_late_subscriber() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
     const N_DECODED_SUBS: usize = 4;
     const N_TRAINING_MSGS: usize = 100;
@@ -211,18 +211,21 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
             "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{i},\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
             "A".repeat(160)
         ));
-        publisher.send(Message::single(payload)).await.unwrap();
-    }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            publisher.send(Message::single(payload)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("publisher send timed out for training payload {i}"))
+        .unwrap();
 
-    for (idx, sub) in decoded_subs.iter().enumerate() {
-        for i in 0..N_TRAINING_MSGS {
+        for (idx, sub) in decoded_subs.iter().enumerate() {
             tokio::time::timeout(Duration::from_secs(5), sub.recv())
                 .await
                 .unwrap_or_else(|_| panic!("decoded sub {idx} missed training payload {i}"))
                 .unwrap();
         }
     }
-
     let raw_sub = Socket::new(SocketType::Sub, Options::default());
     raw_sub.connect(tcp_from_lz4(&ep)).await.unwrap();
     raw_sub.subscribe(bytes::Bytes::new()).await.unwrap();
@@ -235,10 +238,13 @@ async fn pub_sub_lz4_io_lane_fan_out_auto_trains_dict_for_late_subscriber() {
         "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":1000,\"bid\":101.25,\"ask\":101.27,\"depth\":[10125,10126,10127],\"pad\":\"{}\"}}",
         "A".repeat(192)
     ));
-    publisher
-        .send(Message::single(late_payload.clone()))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        publisher.send(Message::single(late_payload.clone())),
+    )
+    .await
+    .expect("publisher send timed out for late payload")
+    .unwrap();
 
     let dict_msg = tokio::time::timeout(Duration::from_secs(5), raw_sub.recv())
         .await

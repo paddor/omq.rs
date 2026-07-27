@@ -33,6 +33,13 @@ fn tcp_ep(port: u16) -> Endpoint {
     }
 }
 
+fn tcp_name_ep(host: &str, port: u16) -> Endpoint {
+    Endpoint::Tcp {
+        host: Host::Name(host.into()),
+        port,
+    }
+}
+
 #[cfg(feature = "lz4")]
 fn lz4_ep(port: u16) -> Endpoint {
     Endpoint::Lz4Tcp {
@@ -84,6 +91,19 @@ async fn push_pull_connect_before_bind_ipc() {
 #[tokio::test]
 async fn push_pull_connect_before_bind_tcp() {
     push_pull_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+#[tokio::test]
+async fn push_pull_named_tcp_connect_before_bind() {
+    push_pull_connect_before_bind(tcp_name_ep("127.0.0.1", free_tcp_port())).await;
+}
+
+#[tokio::test]
+async fn unresolved_tcp_name_connect_fails_immediately() {
+    let push = Socket::new(SocketType::Push, opts());
+    let endpoint = tcp_name_ep("omq-connect-preflight.invalid", 5555);
+
+    assert!(push.connect(endpoint).await.is_err());
 }
 
 // -- REQ/REP -----------------------------------------------------------------

@@ -49,7 +49,7 @@ impl DirectTcpWriter {
     }
 }
 
-use omq_proto::endpoint::Endpoint;
+use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::error::{Error, Result};
 
 use crate::transport::ipc::IpcStream;
@@ -339,6 +339,11 @@ impl AnyConn {
     }
 }
 
+pub(super) struct BoundListener {
+    pub(super) listener: AnyListener,
+    pub(super) endpoint: Endpoint,
+}
+
 pub(super) enum AnyListener {
     Tcp(crate::transport::tcp::TcpListener),
     Inproc(crate::transport::InprocListener),
@@ -354,13 +359,7 @@ impl AnyListener {
             Self::Inproc(l) => l.local_endpoint(),
             Self::Ipc(l) => l.local_endpoint(),
             #[cfg(feature = "ws")]
-            Self::Ws(_) => {
-                static DUMMY: Endpoint = Endpoint::Tcp {
-                    host: omq_proto::endpoint::Host::Wildcard,
-                    port: 0,
-                };
-                &DUMMY
-            }
+            Self::Ws(l) => l.local_endpoint(),
         }
     }
 
@@ -407,19 +406,18 @@ pub(super) async fn bind_any(
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
     #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
-) -> Result<AnyListener> {
+) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
-        return Ok(AnyListener::Tcp(
-            TcpTransport::bind(&endpoint.underlying_tcp()).await?,
-        ));
+        let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.underlying_tcp()).await?);
+        let resolved = endpoint.rewrap_tcp(listener.local_endpoint().clone());
+        return Ok(BoundListener {
+            listener,
+            endpoint: resolved,
+        });
     }
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         let plain = endpoint.underlying_ws();
-        let (host, port) = match &plain {
-            Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
-            _ => unreachable!(),
-        };
         let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
             let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
                 Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
@@ -431,19 +429,84 @@ pub(super) async fn bind_any(
         } else {
             None
         };
-        let l = crate::transport::ws::bind(host, port, tls_acc).await?;
-        return Ok(AnyListener::Ws(l));
+        let listener = AnyListener::Ws(crate::transport::ws::bind(&plain, tls_acc).await?);
+        let resolved = endpoint.rewrap_ws(listener.local_endpoint().clone());
+        return Ok(BoundListener {
+            listener,
+            endpoint: resolved,
+        });
     }
     match endpoint {
-        Endpoint::Inproc { name } => Ok(AnyListener::Inproc(inproc_transport::bind(
-            name,
-            snapshot.clone(),
-            recv_signal.clone(),
-            blocking_recv_waker.clone(),
-            max_message_size,
-        )?)),
-        Endpoint::Ipc(_) => Ok(AnyListener::Ipc(IpcTransport::bind(endpoint).await?)),
+        Endpoint::Inproc { name } => {
+            let listener = AnyListener::Inproc(inproc_transport::bind(
+                name,
+                snapshot.clone(),
+                recv_signal.clone(),
+                blocking_recv_waker.clone(),
+                max_message_size,
+            )?);
+            let resolved = listener.local_endpoint().clone();
+            Ok(BoundListener {
+                listener,
+                endpoint: resolved,
+            })
+        }
+        Endpoint::Ipc(_) => {
+            let listener = AnyListener::Ipc(IpcTransport::bind(endpoint).await?);
+            let resolved = listener.local_endpoint().clone();
+            Ok(BoundListener {
+                listener,
+                endpoint: resolved,
+            })
+        }
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
+    }
+}
+
+/// Validate connect-side DNS synchronously before registering a dialer.
+/// No socket connect happens here; reconnect attempts resolve again later.
+pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -> Result<()> {
+    if endpoint.is_tcp_family() {
+        let plain = endpoint.underlying_tcp();
+        let Endpoint::Tcp { host, port } = &plain else {
+            unreachable!();
+        };
+        return preflight_connect_host(host, *port).await;
+    }
+    #[cfg(feature = "ws")]
+    if endpoint.is_ws_family() {
+        let plain = endpoint.underlying_ws();
+        let (host, port) = match &plain {
+            Endpoint::Ws { host, port, .. } | Endpoint::Wss { host, port, .. } => (host, *port),
+            _ => unreachable!(),
+        };
+        return preflight_connect_host(host, port).await;
+    }
+    match endpoint {
+        Endpoint::Inproc { .. } | Endpoint::Ipc(_) => Ok(()),
+        other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
+    }
+}
+
+async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
+    match host {
+        Host::Wildcard => Err(Error::InvalidEndpoint(
+            "cannot connect to wildcard host".into(),
+        )),
+        Host::Ip(_) => Ok(()),
+        Host::Name(name) => {
+            let mut addrs = tokio::net::lookup_host(format!("{name}:{port}"))
+                .await
+                .map_err(Error::Io)?;
+            if addrs.next().is_some() {
+                Ok(())
+            } else {
+                Err(Error::Io(io::Error::other(format!(
+                    "no addresses for {name}:{port}"
+                ))))
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -542,9 +605,45 @@ pub(super) use omq_proto::message::generated_identity;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use omq_proto::proto::SocketType;
     use tokio::io::AsyncWrite;
     #[cfg(unix)]
     use tokio::net::UnixStream;
+
+    fn snapshot() -> InprocPeerSnapshot {
+        InprocPeerSnapshot {
+            socket_type: SocketType::Pair,
+            identity: Bytes::new(),
+        }
+    }
+
+    fn recv_signal() -> Arc<DataSignal> {
+        Arc::new(DataSignal::new())
+    }
+
+    fn blocking_recv_waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
+        crate::socket::recv::BlockingRecvWaker::new()
+    }
+
+    async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
+        #[cfg(feature = "ws")]
+        let wss_tls = omq_proto::options::WssTls::default();
+        bind_any(
+            endpoint,
+            &snapshot(),
+            &recv_signal(),
+            &blocking_recv_waker(),
+            None,
+            #[cfg(feature = "ws")]
+            &wss_tls,
+        )
+        .await
+    }
+
+    async fn bind_for_test(endpoint: &Endpoint) -> BoundListener {
+        bind_result_for_test(endpoint).await.unwrap()
+    }
 
     #[test]
     fn any_stream_tcp_reports_write_vectored() {
@@ -581,5 +680,203 @@ mod tests {
             assert!(any.is_write_vectored());
             let _ = std::fs::remove_file(&path);
         });
+    }
+
+    #[tokio::test]
+    async fn bind_any_returns_resolved_tcp_endpoint() {
+        let endpoint = Endpoint::Tcp {
+            host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+            port: 0,
+        };
+        let bound = bind_for_test(&endpoint).await;
+
+        match bound.endpoint {
+            Endpoint::Tcp {
+                host: Host::Ip(ip),
+                port,
+            } => {
+                assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                assert_ne!(port, 0);
+            }
+            other => panic!("expected resolved TCP endpoint, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_any_rejects_unresolved_tcp_name() {
+        let endpoint = Endpoint::Tcp {
+            host: Host::Name("omq-bind-preflight.invalid".into()),
+            port: 5555,
+        };
+
+        assert!(bind_result_for_test(&endpoint).await.is_err());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn bind_any_returns_resolved_ws_endpoint() {
+        let endpoint = Endpoint::Ws {
+            host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+            port: 0,
+            path: "/z".into(),
+        };
+        let bound = bind_for_test(&endpoint).await;
+
+        match bound.listener.local_endpoint() {
+            Endpoint::Ws {
+                host: Host::Ip(ip),
+                port,
+                path,
+            } => {
+                assert_eq!(*ip, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                assert_ne!(*port, 0);
+                assert_eq!(path, "/z");
+            }
+            other => panic!("expected resolved WS listener endpoint, got {other:?}"),
+        }
+        match bound.endpoint {
+            Endpoint::Ws {
+                host: Host::Ip(ip),
+                port,
+                path,
+            } => {
+                assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                assert_ne!(port, 0);
+                assert_eq!(path, "/z");
+            }
+            other => panic!("expected resolved WS endpoint, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn bind_any_rejects_unresolved_ws_name() {
+        let endpoint = Endpoint::Ws {
+            host: Host::Name("omq-bind-ws-preflight.invalid".into()),
+            port: 5555,
+            path: "/z".into(),
+        };
+
+        assert!(bind_result_for_test(&endpoint).await.is_err());
+    }
+
+    #[cfg(all(feature = "lz4", feature = "ws"))]
+    #[tokio::test]
+    async fn bind_any_returns_resolved_lz4_ws_endpoint() {
+        let endpoint = Endpoint::Lz4Ws {
+            host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+            port: 0,
+            path: "/lz4".into(),
+        };
+        let bound = bind_for_test(&endpoint).await;
+
+        match bound.endpoint {
+            Endpoint::Lz4Ws {
+                host: Host::Ip(ip),
+                port,
+                path,
+            } => {
+                assert_eq!(ip, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+                assert_ne!(port, 0);
+                assert_eq!(path, "/lz4");
+            }
+            other => panic!("expected resolved LZ4 WS endpoint, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_preflight_rejects_tcp_wildcard() {
+        let endpoint = Endpoint::Tcp {
+            host: Host::Wildcard,
+            port: 5555,
+        };
+
+        assert!(matches!(
+            preflight_connect_endpoint_resolution(&endpoint).await,
+            Err(Error::InvalidEndpoint(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_preflight_rejects_unresolved_tcp_name() {
+        let endpoint = Endpoint::Tcp {
+            host: Host::Name("omq-connect-preflight.invalid".into()),
+            port: 5555,
+        };
+
+        assert!(
+            preflight_connect_endpoint_resolution(&endpoint)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_preflight_accepts_named_tcp_without_socket_connect() {
+        let endpoint = Endpoint::Tcp {
+            host: Host::Name("127.0.0.1".into()),
+            port: 9,
+        };
+
+        preflight_connect_endpoint_resolution(&endpoint)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "lz4")]
+    #[tokio::test]
+    async fn connect_preflight_accepts_named_lz4_tcp_without_socket_connect() {
+        let endpoint = Endpoint::Lz4Tcp {
+            host: Host::Name("127.0.0.1".into()),
+            port: 9,
+        };
+
+        preflight_connect_endpoint_resolution(&endpoint)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn connect_preflight_rejects_unresolved_ws_name() {
+        let endpoint = Endpoint::Ws {
+            host: Host::Name("omq-connect-ws-preflight.invalid".into()),
+            port: 5555,
+            path: "/z".into(),
+        };
+
+        assert!(
+            preflight_connect_endpoint_resolution(&endpoint)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn connect_preflight_accepts_named_ws_without_socket_connect() {
+        let endpoint = Endpoint::Ws {
+            host: Host::Name("127.0.0.1".into()),
+            port: 9,
+            path: "/z".into(),
+        };
+
+        preflight_connect_endpoint_resolution(&endpoint)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(all(feature = "lz4", feature = "ws"))]
+    #[tokio::test]
+    async fn connect_preflight_accepts_named_lz4_ws_without_socket_connect() {
+        let endpoint = Endpoint::Lz4Ws {
+            host: Host::Name("127.0.0.1".into()),
+            port: 9,
+            path: "/z".into(),
+        };
+
+        preflight_connect_endpoint_resolution(&endpoint)
+            .await
+            .unwrap();
     }
 }

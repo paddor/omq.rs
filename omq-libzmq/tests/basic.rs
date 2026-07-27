@@ -148,15 +148,11 @@ fn push_pull_inproc() {
 
 #[test]
 fn push_pull_tcp() {
-    let port = helpers::free_port();
-    let addr_str = format!("tcp://127.0.0.1:{port}");
-    let addr = CString::new(addr_str).unwrap();
-
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
 
-    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    let addr = helpers::bind_random_tcp(pull);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
 
     std::thread::sleep(Duration::from_millis(50));

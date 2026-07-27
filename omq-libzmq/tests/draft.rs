@@ -132,16 +132,13 @@ fn server_client_roundtrip() {
 /// SCATTER/GATHER over TCP.
 #[test]
 fn scatter_gather_tcp() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let scatter = zmq_socket(ctx, ZMQ_SCATTER);
     let gather = zmq_socket(ctx, ZMQ_GATHER);
     assert_eq!(get_type(scatter), ZMQ_SCATTER);
     assert_eq!(get_type(gather), ZMQ_GATHER);
 
-    zmq_bind(gather, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(gather);
     zmq_connect(scatter, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
     set_timeo(scatter, 2000);
@@ -322,12 +319,9 @@ fn peer_inproc() {
 /// SERVER/CLIENT over TCP with multiple clients.
 #[test]
 fn server_multiple_clients_tcp() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let server = zmq_socket(ctx, ZMQ_SERVER);
-    zmq_bind(server, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(server);
     set_timeo(server, 2000);
 
     let mut clients = Vec::new();

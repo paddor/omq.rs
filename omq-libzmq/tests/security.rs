@@ -3,14 +3,13 @@
 
 mod helpers;
 
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_curve_keypair,
-    zmq_curve_public, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket, zmq_z85_decode,
-    zmq_z85_encode,
+    zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_curve_keypair, zmq_curve_public,
+    zmq_recv, zmq_send, zmq_setsockopt, zmq_socket, zmq_z85_decode, zmq_z85_encode,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -134,13 +133,10 @@ fn curve_req_rep_tcp() {
     zmq_curve_keypair(cli_pub.as_mut_ptr().cast(), cli_sec.as_mut_ptr().cast());
 
     let ctx = zmq_ctx_new();
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let rep = zmq_socket(ctx, ZMQ_REP);
     set_i32(rep, ZMQ_CURVE_SERVER, 1);
     set_bytes(rep, ZMQ_CURVE_SECRETKEY, &srv_sec[..40]);
-    zmq_bind(rep, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(rep);
     set_timeo(rep, 5000);
 
     let req = zmq_socket(ctx, ZMQ_REQ);
@@ -185,12 +181,9 @@ fn curve_req_rep_tcp() {
 #[test]
 fn plain_push_pull_tcp() {
     let ctx = zmq_ctx_new();
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let pull = zmq_socket(ctx, ZMQ_PULL);
     set_i32(pull, ZMQ_PLAIN_SERVER, 1);
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pull);
     set_timeo(pull, 5000);
 
     let push = zmq_socket(ctx, ZMQ_PUSH);

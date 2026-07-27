@@ -266,9 +266,7 @@ fn bound_push_after_last_peer_disconnect_is_muted_like_libzmq() {
     set_i32(push, ZMQ_SNDTIMEO, 500);
     set_i32(pull, ZMQ_RCVTIMEO, 500);
 
-    let port = helpers::free_port();
-    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-    assert_eq!(zmq_bind(push, endpoint.as_ptr()), 0);
+    let endpoint = helpers::bind_random_tcp(push);
     assert_eq!(zmq_connect(pull, endpoint.as_ptr()), 0);
 
     let first = b"first";
@@ -748,10 +746,8 @@ fn silent_noop_options_accepted() {
 fn last_endpoint_after_bind() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PULL);
-    let port = helpers::free_port();
-    let addr_str = format!("tcp://127.0.0.1:{port}");
-    let addr = std::ffi::CString::new(addr_str.clone()).unwrap();
-    zmq_bind(s, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(s);
+    let addr_str = addr.to_str().unwrap();
 
     let mut buf = [0u8; 256];
     let len = get_bytes(s, ZMQ_LAST_ENDPOINT, &mut buf);

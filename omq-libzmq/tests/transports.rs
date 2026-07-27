@@ -181,14 +181,11 @@ fn ipc_abstract_pub_sub() {
 
 #[test]
 fn tcp_pub_sub() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let pub_ = zmq_socket(ctx, ZMQ_PUB);
     let sub = zmq_socket(ctx, ZMQ_SUB);
 
-    zmq_bind(pub_, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pub_);
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
@@ -208,15 +205,12 @@ fn tcp_pub_sub() {
 
 #[test]
 fn tcp_pub_sub_multiple_subscribers() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let pub_ = zmq_socket(ctx, ZMQ_PUB);
     let sub1 = zmq_socket(ctx, ZMQ_SUB);
     let sub2 = zmq_socket(ctx, ZMQ_SUB);
 
-    zmq_bind(pub_, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pub_);
     zmq_setsockopt(sub1, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_setsockopt(sub2, ZMQ_SUBSCRIBE, b"".as_ptr().cast(), 0);
     zmq_connect(sub1, addr.as_ptr());
@@ -246,14 +240,11 @@ fn tcp_pub_sub_multiple_subscribers() {
 
 #[test]
 fn lz4_tcp_push_pull() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("lz4+tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_lz4_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
     set_timeo(push, 2000);
@@ -275,14 +266,11 @@ fn lz4_tcp_push_pull() {
 
 #[test]
 fn lz4_tcp_multiple_messages() {
-    let port = helpers::free_port();
-    let addr = CString::new(format!("lz4+tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_lz4_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
     set_timeo(push, 2000);

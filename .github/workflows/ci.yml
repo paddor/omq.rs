@@ -17,6 +17,7 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       test_matrix: ${{ steps.matrix.outputs.test_matrix }}
       os_matrix: ${{ steps.matrix.outputs.os_matrix }}
+      lint_matrix: ${{ steps.matrix.outputs.lint_matrix }}
       run_pyomq: ${{ steps.matrix.outputs.run_pyomq }}
     steps:
       - uses: actions/checkout@v7
@@ -29,12 +30,12 @@ jobs:
               - '**'
               - '!**/*.md'
               - '!**/*.svg'
-              - '!**/*.py'
               - '!doc/**'
       - id: matrix
         run: |
           echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
           echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","macos-15","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
           echo 'run_pyomq=true' >> "$GITHUB_OUTPUT"
 
   test:
@@ -133,62 +134,62 @@ jobs:
           cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_draft
 
   lint:
-    name: fmt + clippy
+    name: fmt + clippy (${{ matrix.name }})
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
+      matrix: ${{ fromJSON(needs.changes.outputs.lint_matrix) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: install Rust (fmt/clippy)
+        if: matrix.kind == 'rust'
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: install Rust (pyomq)
+        if: matrix.kind == 'pyomq'
+        uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      - name: cargo fmt
+        if: matrix.kind == 'rust'
+        run: cargo fmt --all --check
       - name: clippy (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.kind == 'rust' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features
       - name: clippy (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.kind == 'rust' && runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --all-features
       - name: clippy (macOS)
-        if: runner.os == 'macOS'
+        if: matrix.kind == 'rust' && runner.os == 'macOS'
         run: cargo clippy --workspace --all-targets --all-features
-
-  pyomq-lint:
-    name: pyomq-lint
-    needs: [changes, lint]
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v7
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         with:
           python-version: "3.14"
       - name: create virtualenv and install python deps
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install --group test --group dev
       - name: build pyomq
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
         run: .venv/bin/pip install .
       - name: formatting
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
-        if: always()
         run: .venv/bin/ruff format .
       - name: linting
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
-        if: always()
         run: .venv/bin/ruff check .
       - name: type check
+        if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
-        if: always()
         run: |
           .venv/bin/ty check . --python-platform linux
           .venv/bin/ty check . --python-platform win32
@@ -233,7 +234,7 @@ jobs:
 
   ci-success:
     name: CI success
-    needs: [changes, test, encryption, compression, linux-32bit, lint, pyomq-lint, pyomq-test]
+    needs: [changes, test, encryption, compression, linux-32bit, lint, pyomq-test]
     runs-on: ubuntu-latest
     if: always()
     steps:

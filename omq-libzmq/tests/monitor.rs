@@ -8,8 +8,8 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_setsockopt,
-    zmq_socket, zmq_socket_monitor,
+    zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_setsockopt, zmq_socket,
+    zmq_socket_monitor,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -77,19 +77,14 @@ fn monitor_receives_listening_and_accepted() {
     zmq_connect(mon, mon_addr.as_ptr());
     set_timeo(mon, 2000);
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pull);
 
     // Should receive LISTENING event.
     let ev = recv_monitor_event(mon);
     assert!(ev.is_some(), "expected LISTENING event");
     let (id, ep) = ev.unwrap();
     assert_eq!(id, ZMQ_EVENT_LISTENING, "event={id:#06x}");
-    assert!(
-        ep.contains(&port.to_string()),
-        "endpoint should contain port"
-    );
+    assert_eq!(ep, addr.to_str().unwrap());
 
     // Connect a PUSH socket.
     let push = zmq_socket(ctx, ZMQ_PUSH);
@@ -134,9 +129,7 @@ fn monitor_event_filter() {
     zmq_connect(mon, mon_addr.as_ptr());
     set_timeo(mon, 1000);
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pull);
 
     // Connect a peer (generates ACCEPTED, but we're not subscribed).
     let push = zmq_socket(ctx, ZMQ_PUSH);

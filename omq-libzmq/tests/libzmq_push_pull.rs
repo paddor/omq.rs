@@ -29,14 +29,11 @@ fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
 fn push_pull_basic_tcp() {
     const N: usize = 10;
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
     let push = zmq_socket(ctx, ZMQ_PUSH);
 
-    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    let addr = helpers::bind_random_tcp(pull);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(Duration::from_millis(100));
 
@@ -68,19 +65,14 @@ fn push_pull_multiple_pushers() {
     const N_PUSHERS: usize = 3;
     const MSG_PER_PUSHER: usize = 5;
 
-    let port = helpers::free_port();
-    let addr_str = format!("tcp://127.0.0.1:{port}");
-    let addr = CString::new(addr_str.clone()).unwrap();
-
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pull);
 
     let mut pushers = Vec::new();
     for _ in 0..N_PUSHERS {
         let p = zmq_socket(ctx, ZMQ_PUSH);
-        let a = CString::new(addr_str.clone()).unwrap();
-        zmq_connect(p, a.as_ptr());
+        zmq_connect(p, addr.as_ptr());
         pushers.push(p);
     }
 
@@ -113,18 +105,14 @@ fn push_pull_multiple_pullers() {
     const N_PULLERS: usize = 3;
     const TOTAL: usize = 30;
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
-    zmq_bind(push, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(push);
 
     let mut pullers = Vec::new();
     for _ in 0..N_PULLERS {
         let p = zmq_socket(ctx, ZMQ_PULL);
-        let a = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-        zmq_connect(p, a.as_ptr());
+        zmq_connect(p, addr.as_ptr());
         pullers.push(p);
     }
 
@@ -208,9 +196,7 @@ fn push_dontwait_eagain_semantics() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let port = helpers::free_port();
-    let addr = CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
-    zmq_bind(pull, addr.as_ptr());
+    let addr = helpers::bind_random_tcp(pull);
     zmq_connect(push, addr.as_ptr());
     std::thread::sleep(Duration::from_millis(100));
 

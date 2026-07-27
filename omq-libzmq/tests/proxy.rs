@@ -509,14 +509,10 @@ fn proxy_large_message() {
     let ctrl_a = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_b = zmq_socket(ctx, ZMQ_PAIR);
 
-    let port_fe = helpers::free_port();
-    let port_be = helpers::free_port();
-    let addr_fe = CString::new(format!("tcp://127.0.0.1:{port_fe}")).unwrap();
-    let addr_be = CString::new(format!("tcp://127.0.0.1:{port_be}")).unwrap();
     let addr_ctrl = CString::new("inproc://proxy-ctrl-large").unwrap();
 
-    zmq_bind(fe, addr_fe.as_ptr());
-    zmq_bind(be, addr_be.as_ptr());
+    let addr_fe = helpers::bind_random_tcp(fe);
+    let addr_be = helpers::bind_random_tcp(be);
     zmq_bind(ctrl_a, addr_ctrl.as_ptr());
     zmq_connect(src, addr_fe.as_ptr());
     zmq_connect(dst, addr_be.as_ptr());

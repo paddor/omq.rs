@@ -105,8 +105,8 @@ jobs:
       - name: transmit slot
         run: cargo test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
 
-  interop-ws:
-    name: interop (libzmq ws)
+  interop-libzmq-draft:
+    name: interop (libzmq draft)
     if: github.repository == 'paddor/omq.rs'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -141,10 +141,19 @@ jobs:
           cc -O2 -o omq-tokio/tests/helpers/zmq_ws_peer \
             omq-tokio/tests/helpers/zmq_ws_peer.c \
             -I"$LIBZMQ_PREFIX/include" -L"$LIBZMQ_PREFIX/lib" -lzmq
+      - name: build zmq_draft_peer helper
+        run: |
+          cc -O2 -o omq-tokio/tests/helpers/zmq_draft_peer \
+            omq-tokio/tests/helpers/zmq_draft_peer.c \
+            -I"$LIBZMQ_PREFIX/include" -L"$LIBZMQ_PREFIX/lib" -lzmq
       - name: interop (ws)
         env:
           LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
         run: cargo test -p omq-tokio --features ws --test omq_interop_libzmq_ws
+      - name: interop (draft sockets)
+        env:
+          LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
+        run: cargo test -p omq-tokio --test omq_interop_libzmq_draft
 
   miri-seeds:
     name: miri (yring, many seeds)

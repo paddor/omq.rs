@@ -118,6 +118,10 @@ jobs:
         run: python -m pip install --upgrade pip "pyzmq>=25"
       - name: report peer versions
         run: python -c "import zmq; print('pyzmq', zmq.__version__, 'libzmq', zmq.zmq_version(), 'curve', zmq.has('curve'))"
+      - name: interop (NULL + STREAM)
+        env:
+          OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
+        run: cargo test -p omq-tokio --test omq_interop_pyzmq_null
       - name: interop (PLAIN)
         env:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}

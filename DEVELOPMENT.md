@@ -89,7 +89,7 @@ runs, on Linux only:
 
 | job | what |
 |-----|------|
-| `interop` | pyzmq PLAIN + CURVE (pyzmq wheels bundle libzmq) |
+| `interop` | pyzmq NULL/STREAM + PLAIN + CURVE |
 | `loom` | `yring` loom suite under `--cfg loom`, release |
 | `miri` | `cargo miri test -p yring --features async`, nightly |
 | `fuzz-smoke` | parsers at 1M iters, socket actions at 200 |
@@ -97,17 +97,17 @@ runs, on Linux only:
 `.github/workflows/extended.yml` runs nightly at 03:00 UTC and on
 `workflow_dispatch` (with `soak_duration_secs` / `fuzz_scale` inputs):
 the fuzz targets at 100M / 2000 iters, the soak suite in five groups,
-the `--ignored` stress tests, libzmq `ws://` interop, and Miri under
-`-Zmiri-many-seeds`.
+the `--ignored` stress tests, libzmq draft interop (`ws://`,
+RADIO/DISH, and draft socket types), and Miri under `-Zmiri-many-seeds`.
 
 The interop tests skip when their peer is missing so local runs stay
-green without pyzmq or the `zmq_ws_peer` helper. CI sets
+green without pyzmq or the libzmq helper binaries. CI sets
 `OMQ_INTEROP_REQUIRED=1`, which turns a missing peer into a failure so
 the job cannot pass without testing anything.
 
-The libzmq `ws://` interop job builds libzmq from source with
+The libzmq draft interop job builds libzmq from source with
 `ENABLE_DRAFTS=ON` (distro packages omit it, and without drafts libzmq
-has no `ws://` transport) and caches the install.
+has no `ws://` transport or draft socket API) and caches the install.
 
 ## Fuzz Tests
 

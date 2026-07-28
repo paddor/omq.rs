@@ -1,6 +1,7 @@
 """pyzmq-compatible API surface tests."""
 
 import pyomq as zmq
+import pyomq.asyncio as zmq_async
 
 
 # ── Serialization methods ────────────────────────────────────────────
@@ -301,7 +302,9 @@ def test_context_instance_singleton():
     try:
         a = zmq.Context.instance()
         b = zmq.Context.instance()
+        c = zmq_async.Context.instance()
         assert a is b
+        assert a is not c
     finally:
         zmq.Context._instance = None
 

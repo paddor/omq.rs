@@ -1015,11 +1015,26 @@ _next_ctx_id: Iterator[int] = itertools.count(1)
 _INPROC_PREFIX: Final[str] = "inproc://"
 
 
-class Context:
+class _ContextMeta(type):
+    """Context meta class tracking last"""
+
+    def __init__(
+        cls, name: str, bases: tuple[type[Any], ...], namespace: dict[str, Any]
+    ) -> None:
+        super().__init__(name, bases, namespace)
+        cls._instance_lock = threading.Lock()
+        cls._instance = None
+
+    def instance(cls, io_threads: int = 1) -> Context:
+        with cls._instance_lock:
+            if cls._instance is None or cls._instance._closed:
+                cls._instance = cls(io_threads)
+            return cls._instance
+
+
+class Context(metaclass=_ContextMeta):
     """Synchronous ZMQ context."""
 
-    _instance: Context | None = None
-    _instance_lock: threading.Lock = threading.Lock()
     _socket_class: type[Socket] | None = None  # set after Socket is defined
     _ctx: _native.Context
     _is_shadow: bool
@@ -1089,19 +1104,12 @@ class Context:
         return s
 
     @classmethod
-    def shadow(cls, address: Context | int) -> Context:
+    def shadow(cls, address: Context | int) -> Self:
         if isinstance(address, Context):
             return cls(_shadow_ctx=address)
         if isinstance(address, int):
             return cls(_shadow_ctx=cls.instance())
         raise TypeError(f"expected Context or int, got {type(address).__name__}")
-
-    @classmethod
-    def instance(cls, io_threads: int = 1) -> Context:
-        with cls._instance_lock:
-            if cls._instance is None or cls._instance._closed:
-                cls._instance = cls(io_threads)
-            return cls._instance
 
     def term(self) -> None:
         self._closed = True

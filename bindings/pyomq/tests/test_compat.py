@@ -1,6 +1,9 @@
 """pyzmq-compatible API surface tests."""
 
+import pytest
+
 import pyomq as zmq
+import pyomq.asyncio as zmq_async
 
 
 # ── Serialization methods ────────────────────────────────────────────
@@ -266,8 +269,9 @@ def test_track_true_send_returns_tracker():
 # ── bind_to_random_port ─────────────────────────────────────────────
 
 
-def test_bind_to_random_port():
-    ctx = zmq.Context()
+@pytest.mark.parametrize("ctx_factory", [zmq.Context, zmq.asyncio.Context])
+def test_bind_to_random_port(ctx_factory):
+    ctx = ctx_factory()
     sock = ctx.socket(zmq.PULL)
     try:
         port = sock.bind_to_random_port("tcp://127.0.0.1")

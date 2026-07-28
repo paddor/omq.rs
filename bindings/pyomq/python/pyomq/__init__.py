@@ -496,6 +496,18 @@ class _BaseSocket(_SocketOptionsBase):
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
+    def bind_to_random_port(
+        self,
+        addr: str,
+        min_port: int = 49152,
+        max_port: int = 65536,
+        max_tries: int = 100,
+    ) -> int:
+        ep = self.bind(f"{addr}:0")
+        if isinstance(ep, bytes):
+            ep = ep.decode()
+        return int(ep.rsplit(":", 1)[1])
+
     def connect(self, endpoint: str | bytes) -> None:
         if isinstance(endpoint, bytes):
             endpoint = endpoint.decode("utf-8")
@@ -719,18 +731,6 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
     ) -> Any:
         frames = self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
-
-    def bind_to_random_port(
-        self,
-        addr: str,
-        min_port: int = 49152,
-        max_port: int = 65536,
-        max_tries: int = 100,
-    ) -> int:
-        ep = self.bind(f"{addr}:0")
-        if isinstance(ep, bytes):
-            ep = ep.decode()
-        return int(ep.rsplit(":", 1)[1])
 
     def poll(self, timeout: int | None = None, flags: int = POLLIN) -> int:
         p = Poller()

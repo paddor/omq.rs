@@ -27,6 +27,7 @@ import weakref
 from typing import (
     Any,
     Callable,
+    cast,
     Final,
     Iterable,
     Iterator,
@@ -1016,7 +1017,7 @@ _INPROC_PREFIX: Final[str] = "inproc://"
 
 
 class _ContextMeta(type):
-    """Context meta class tracking last"""
+    """Context metaclass with per-subclass singleton storage."""
 
     def __init__(
         cls, name: str, bases: tuple[type[Any], ...], namespace: dict[str, Any]
@@ -1025,16 +1026,12 @@ class _ContextMeta(type):
         cls._instance_lock = threading.Lock()
         cls._instance = None
 
-    def instance(cls, io_threads: int = 1) -> Context:
-        with cls._instance_lock:
-            if cls._instance is None or cls._instance._closed:
-                cls._instance = cls(io_threads)
-            return cls._instance
-
 
 class Context(metaclass=_ContextMeta):
     """Synchronous ZMQ context."""
 
+    _instance: Context | None
+    _instance_lock: threading.Lock
     _socket_class: type[Socket] | None = None  # set after Socket is defined
     _ctx: _native.Context
     _is_shadow: bool
@@ -1110,6 +1107,13 @@ class Context(metaclass=_ContextMeta):
         if isinstance(address, int):
             return cls(_shadow_ctx=cls.instance())
         raise TypeError(f"expected Context or int, got {type(address).__name__}")
+
+    @classmethod
+    def instance(cls, io_threads: int = 1) -> Self:
+        with cls._instance_lock:
+            if cls._instance is None or cls._instance._closed:
+                cls._instance = cls(io_threads)
+            return cast(Self, cls._instance)
 
     def term(self) -> None:
         self._closed = True

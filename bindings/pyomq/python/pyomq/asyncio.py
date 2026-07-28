@@ -614,14 +614,19 @@ class Context(_SyncContext):
         self, io_threads: int = 1, *, _shadow_ctx: _SyncContext | None = None
     ) -> None:
         if _shadow_ctx is not None:
-            self._ctx = _shadow_ctx._ctx
+            if isinstance(_shadow_ctx._ctx, _native.Context):
+                self._ctx = _native.AsyncContext.shadow_sync(_shadow_ctx._ctx)
+            else:
+                self._ctx = _shadow_ctx._ctx
             self._is_shadow = True
         else:
             self._ctx = _native.AsyncContext(io_threads)
             self._is_shadow = False
         self._closed = False
         self._sockets = weakref.WeakSet()
-        self._ctx_id = next(_next_ctx_id)
+        self._ctx_id = (
+            _shadow_ctx._ctx_id if _shadow_ctx is not None else next(_next_ctx_id)
+        )
 
     @property
     def closed(self) -> bool:

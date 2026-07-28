@@ -1,5 +1,7 @@
 """_ShadowSocket, Socket.shadow(), and Context.shadow() tests."""
 
+import asyncio
+
 import pytest
 
 import pyomq as zmq
@@ -46,6 +48,55 @@ def test_context_shadow_int_uses_instance():
     shadow = zmq.Context.shadow(0)
     assert shadow._ctx is zmq.Context.instance()._ctx
     shadow.term()
+
+
+@pytest.mark.asyncio
+async def test_context_shadow_async_creates_sync_native_socket(inproc_endpoint):
+    ctx = zmq_async.Context()
+    shadow = zmq.Context.shadow(ctx)
+    pull = shadow.socket(zmq.PULL)
+    push = ctx.socket(zmq.PUSH)
+    try:
+        assert type(shadow) is zmq.Context
+        assert type(shadow._ctx) is zmq._native.Context
+        assert shadow._ctx_id == ctx._ctx_id
+        assert type(pull) is zmq.Socket
+        assert type(pull._sock) is zmq._native.Socket
+
+        pull.setsockopt(zmq.RCVTIMEO, 1000)
+        ep = pull.bind(inproc_endpoint)
+        push.connect(ep)
+        await push.send(b"hello")
+        assert pull.recv() == b"hello"
+    finally:
+        pull.close()
+        push.close()
+        shadow.term()
+        ctx.term()
+
+
+@pytest.mark.asyncio
+async def test_async_context_shadow_sync_creates_async_native_socket(inproc_endpoint):
+    ctx = zmq.Context()
+    shadow = zmq_async.Context.shadow(ctx)
+    pull = shadow.socket(zmq.PULL)
+    push = ctx.socket(zmq.PUSH)
+    try:
+        assert type(shadow) is zmq_async.Context
+        assert type(shadow._ctx) is zmq._native.AsyncContext
+        assert shadow._ctx_id == ctx._ctx_id
+        assert type(pull) is zmq_async.Socket
+        assert type(pull._sock) is zmq._native.AsyncSocket
+
+        ep = pull.bind(inproc_endpoint)
+        push.connect(ep)
+        push.send(b"hello")
+        assert await asyncio.wait_for(pull.recv(), timeout=1.0) == b"hello"
+    finally:
+        pull.close()
+        push.close()
+        shadow.term()
+        ctx.term()
 
 
 # ── Socket.shadow ───────────────────────────────────────────────────

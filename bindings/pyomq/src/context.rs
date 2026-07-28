@@ -57,6 +57,13 @@ impl Context {
         }
     }
 
+    #[staticmethod]
+    fn shadow_async(context: PyRef<'_, AsyncContext>) -> Self {
+        Context {
+            ctx: context.ctx.clone(),
+        }
+    }
+
     /// Construct a new socket of the given libzmq type code.
     #[pyo3(signature = (socket_type, /))]
     fn socket(&self, py: Python<'_>, socket_type: i32) -> PyResult<Socket> {
@@ -101,6 +108,13 @@ impl AsyncContext {
     fn new(io_threads: i32) -> Self {
         AsyncContext {
             ctx: ContextInner::new(io_threads.max(1) as usize),
+        }
+    }
+
+    #[staticmethod]
+    fn shadow_sync(context: PyRef<'_, Context>) -> Self {
+        AsyncContext {
+            ctx: context.ctx.clone(),
         }
     }
 

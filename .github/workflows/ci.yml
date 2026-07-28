@@ -53,9 +53,9 @@ jobs:
           echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
           echo 'os_matrix={"os":["ubuntu-latest","macos-15","windows-latest"]}' >> "$GITHUB_OUTPUT"
           if [[ "${{ steps.scope.outputs.pyomq }}" == "true" ]]; then
-            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"}]}' >> "$GITHUB_OUTPUT"
           fi
 
   linux-gate:

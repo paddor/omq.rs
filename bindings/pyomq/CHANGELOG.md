@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-07-28
+
+### Added
+
+- `pyomq.asyncio.Socket` now exposes `bind_to_random_port()`.
+
+### Fixed
+
+- `pyomq.Context.instance()` and `pyomq.asyncio.Context.instance()` now keep
+  separate singleton contexts.
+- `Context().instance()` remains available on sync and asyncio context objects.
+
 ## [0.18.1] - 2026-07-28
 
 ### Changed

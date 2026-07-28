@@ -40,7 +40,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 omq-tokio = { path = "../omq-tokio" }
 libc = "0.2"
-serial_test = "3.2"
+serial_test = "4"
 
 [[test]]
 name = "omq_libzmq_basic"

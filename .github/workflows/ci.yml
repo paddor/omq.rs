@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -18,7 +22,7 @@ jobs:
       test_matrix: ${{ steps.matrix.outputs.test_matrix }}
       os_matrix: ${{ steps.matrix.outputs.os_matrix }}
       lint_matrix: ${{ steps.matrix.outputs.lint_matrix }}
-      run_pyomq: ${{ steps.matrix.outputs.run_pyomq }}
+      run_pyomq: ${{ steps.scope.outputs.pyomq }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -31,16 +35,46 @@ jobs:
               - '!**/*.md'
               - '!**/*.svg'
               - '!doc/**'
+      - uses: dorny/paths-filter@v3
+        id: scope
+        with:
+          filters: |
+            pyomq:
+              - 'bindings/pyomq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release-pyomq.yml'
       - id: matrix
         run: |
-          echo 'test_matrix={"include":[{"toolchain":"stable","os":"ubuntu-latest"},{"toolchain":"stable","os":"ubuntu-24.04-arm"},{"toolchain":"stable","os":"macos-15-intel"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
-          echo 'os_matrix={"os":["ubuntu-latest","macos-15-intel","macos-15","windows-latest"]}' >> "$GITHUB_OUTPUT"
-          echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
-          echo 'run_pyomq=true' >> "$GITHUB_OUTPUT"
+          echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
+          echo 'os_matrix={"os":["ubuntu-latest","macos-15","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          if [[ "${{ steps.scope.outputs.pyomq }}" == "true" ]]; then
+            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"pyomq","kind":"pyomq","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  linux-gate:
+    name: linux gate
+    needs: [changes, lint]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
 
   test:
     name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -62,7 +96,7 @@ jobs:
 
   encryption:
     name: encryption (curve, ${{ matrix.os }})
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -81,7 +115,7 @@ jobs:
 
   compression:
     name: compression (${{ matrix.os }})
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -100,7 +134,7 @@ jobs:
 
   interop:
     name: interop (pyzmq)
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # pyzmq wheels bundle libzmq + libsodium: the peer is the real
@@ -133,7 +167,7 @@ jobs:
 
   loom:
     name: loom (yring)
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # omq-tokio's loom_signal test needs no cfg and runs in `test`.
@@ -149,7 +183,7 @@ jobs:
 
   miri:
     name: miri (yring)
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # yring holds the only Miri-checkable unsafe: omq-proto is
@@ -170,7 +204,7 @@ jobs:
 
   fuzz-smoke:
     name: fuzz smoke
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # OMQ_FUZZ_ITERS means something different per target, so the two
@@ -197,7 +231,7 @@ jobs:
 
   linux-32bit:
     name: 32-bit linux (${{ matrix.target }})
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -293,7 +327,7 @@ jobs:
 
   pyomq-test:
     name: pyomq-test
-    needs: [changes, lint]
+    needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -306,7 +340,7 @@ jobs:
           - python-version: "3.14"
             os: windows-latest
           - python-version: "3.14"
-            os: macos-latest
+            os: macos-15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -334,6 +368,7 @@ jobs:
     needs:
       [
         changes,
+        linux-gate,
         test,
         encryption,
         compression,

@@ -1,7 +1,7 @@
 name: extended
 
-# Long-running suites that would dominate PR CI. `ci.yml` carries the
-# short versions (fuzz smoke, pyzmq interop, loom, miri).
+# Long-running or expensive suites that would dominate PR CI. `ci.yml`
+# carries the short versions (fuzz smoke, pyzmq interop, loom, miri).
 
 on:
   schedule:
@@ -104,6 +104,18 @@ jobs:
         run: cargo test -p omq-tokio --test omq_push_pull -- --ignored
       - name: transmit slot
         run: cargo test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
+
+  ubuntu-arm:
+    name: cargo test (ubuntu-24.04-arm)
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
 
   interop-libzmq-draft:
     name: interop (libzmq draft)

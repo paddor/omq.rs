@@ -38,7 +38,16 @@ cargo test -p omq-tokio --features lz4       --test lz4_tcp --test lz4_pub_sub
 Miri target for unsafe internals:
 
 ```sh
-cargo +nightly miri test -p yring
+cargo +nightly miri test -p yring --features async
+```
+
+Roughly two minutes for the 30 tests. Miri can also interpret for a
+foreign target, which is how to reproduce a CI failure from a
+different host:
+
+```sh
+cargo +nightly miri test -p yring --features async \
+  --target x86_64-unknown-linux-gnu
 ```
 
 Loom checks:
@@ -73,11 +82,44 @@ ARM64, macOS Intel, macOS ARM64, Windows, and MSRV 1.93 on Linux.
 Feature jobs cover CURVE and LZ4 on Linux, macOS Intel, macOS ARM64,
 and Windows. macOS test jobs run serially with `--test-threads=1`.
 
+## Continuous Integration
+
+`.github/workflows/ci.yml` gates every PR. Beyond fmt/clippy/tests it
+runs, on Linux only:
+
+| job | what |
+|-----|------|
+| `interop` | pyzmq NULL/STREAM + PLAIN + CURVE |
+| `loom` | `yring` loom suite under `--cfg loom`, release |
+| `miri` | `cargo miri test -p yring --features async`, nightly |
+| `fuzz-smoke` | parsers at 1M iters, socket actions at 200 |
+
+`.github/workflows/extended.yml` runs nightly at 03:00 UTC and on
+`workflow_dispatch` (with `soak_duration_secs` / `fuzz_scale` inputs):
+the fuzz targets at 100M / 2000 iters, the soak suite in five groups,
+the `--ignored` stress tests, libzmq draft interop (`ws://`,
+RADIO/DISH, and draft socket types), and Miri under `-Zmiri-many-seeds`.
+
+The interop tests skip when their peer is missing so local runs stay
+green without pyzmq or the libzmq helper binaries. CI sets
+`OMQ_INTEROP_REQUIRED=1`, which turns a missing peer into a failure so
+the job cannot pass without testing anything.
+
+The libzmq draft interop job builds libzmq from source with
+`ENABLE_DRAFTS=ON` (distro packages omit it, and without drafts libzmq
+has no `ws://` transport or draft socket API) and caches the install.
+
 ## Fuzz Tests
 
 The hand-rolled fuzz suites are off by default. Enable with the `fuzz`
 feature. Set `OMQ_FUZZ_ITERS=<n>` and `OMQ_FUZZ_SEED=<u64>` for long or
 reproducible runs.
+
+`OMQ_FUZZ_ITERS` counts a different unit per target, so one value
+cannot serve both. A `fuzz_parsers` iteration is a buffer parse
+(default 10M, ~7s per 1M); a `fuzz_socket_actions` iteration drives a
+live socket (default 200, ~90ms each). Setting it globally silently
+turns the socket suite into an hours-long run.
 
 ```sh
 cargo test -p omq-tokio --features fuzz

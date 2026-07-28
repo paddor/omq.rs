@@ -192,12 +192,20 @@ name = "omq_inproc_subside"
 path = "tests/inproc_subside.rs"
 
 [[test]]
+name = "omq_interop_libzmq_draft"
+path = "tests/interop_libzmq_draft.rs"
+
+[[test]]
 name = "omq_interop_libzmq_ws"
 path = "tests/interop_libzmq_ws.rs"
 
 [[test]]
 name = "omq_interop_pyzmq_curve"
 path = "tests/interop_pyzmq_curve.rs"
+
+[[test]]
+name = "omq_interop_pyzmq_null"
+path = "tests/interop_pyzmq_null.rs"
 
 [[test]]
 name = "omq_interop_pyzmq_plain"

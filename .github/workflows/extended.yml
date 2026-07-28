@@ -1,0 +1,187 @@
+name: extended
+
+# Long-running or expensive suites that would dominate PR CI. `ci.yml`
+# carries the short versions (fuzz smoke, pyzmq interop, loom, miri).
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      soak_duration_secs:
+        description: seconds per soak test
+        default: "180"
+      fuzz_scale:
+        description: multiplier on each fuzz target's iteration count
+        default: "1"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: extended
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.test }})
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # OMQ_FUZZ_ITERS means something different per target: a parser
+        # iteration is a buffer parse, a socket-action iteration drives
+        # a live socket (~90ms). One number cannot serve both.
+        include:
+          - test: omq_fuzz_parsers
+            iters: 100000000
+          - test: omq_fuzz_socket_actions
+            iters: 2000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (fuzz) # --nocapture surfaces OMQ_FUZZ_SEED
+        run: |
+          OMQ_FUZZ_ITERS=$(( ${{ matrix.iters }} * ${{ inputs.fuzz_scale || 1 }} ))
+          export OMQ_FUZZ_ITERS
+          echo "OMQ_FUZZ_ITERS=$OMQ_FUZZ_ITERS"
+          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release \
+            --test ${{ matrix.test }} -- --nocapture
+
+  soak:
+    name: soak (${{ matrix.group }})
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: churn
+            tests: omq_soak_peer_churn omq_soak_pub_sub_churn omq_soak_pub_sub_churn_tcp omq_soak_pub_sub_realworld_churn_tcp omq_soak_router_dealer_churn omq_soak_xpub_xsub_churn
+          - group: reconnect
+            tests: omq_soak_reconnect_all_types omq_soak_reconnect_storm omq_soak_hwm_reconnect omq_soak_mechanism_reconnect
+          - group: mechanism
+            tests: omq_soak_plain omq_soak_curve
+          - group: transport
+            tests: omq_soak_ws omq_soak_compression_lz4 omq_soak_pub_sub_lz4_dict omq_soak_large_throughput
+          - group: runtime
+            tests: omq_soak_cancel_safety omq_soak_inproc_cross_thread omq_soak_multi_socket
+    env:
+      SOAK_FEATURES: soak plain curve lz4 ws
+      OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '180' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build soak tests
+        run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --no-run
+      - name: run soak group
+        run: |
+          for t in ${{ matrix.tests }}; do
+            echo "::group::$t"
+            cargo test -p omq-tokio --features "$SOAK_FEATURES" --release \
+              --test "$t" -- --nocapture
+            echo "::endgroup::"
+          done
+
+  stress:
+    name: stress
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: connect-before-bind # serial: rounds race each other otherwise
+        run: cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored --test-threads=1
+      - name: push/pull
+        run: cargo test -p omq-tokio --test omq_push_pull -- --ignored
+      - name: transmit slot
+        run: cargo test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
+
+  ubuntu-arm:
+    name: cargo test (ubuntu-24.04-arm)
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+
+  interop-libzmq-draft:
+    name: interop (libzmq draft)
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LIBZMQ_REF: v4.3.5
+      LIBZMQ_PREFIX: /home/runner/.local/libzmq
+      OMQ_INTEROP_REQUIRED: "1" # missing helper fails instead of skipping
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cache libzmq
+        id: libzmq
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LIBZMQ_PREFIX }}
+          key: libzmq-${{ env.LIBZMQ_REF }}-drafts-${{ runner.os }}
+      # Distro libzmq ships without ENABLE_DRAFTS, so it has no ws://.
+      - name: build libzmq with drafts
+        if: steps.libzmq.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$LIBZMQ_REF" https://github.com/zeromq/libzmq /tmp/libzmq-src
+          cmake -S /tmp/libzmq-src -B /tmp/libzmq-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$LIBZMQ_PREFIX" \
+            -DENABLE_DRAFTS=ON -DENABLE_WS=ON \
+            -DBUILD_TESTS=OFF -DWITH_DOC=OFF
+          cmake --build /tmp/libzmq-build -j"$(nproc)"
+          cmake --install /tmp/libzmq-build
+      - name: build zmq_ws_peer helper
+        run: |
+          cc -O2 -o omq-tokio/tests/helpers/zmq_ws_peer \
+            omq-tokio/tests/helpers/zmq_ws_peer.c \
+            -I"$LIBZMQ_PREFIX/include" -L"$LIBZMQ_PREFIX/lib" -lzmq
+      - name: build zmq_draft_peer helper
+        run: |
+          cc -O2 -o omq-tokio/tests/helpers/zmq_draft_peer \
+            omq-tokio/tests/helpers/zmq_draft_peer.c \
+            -I"$LIBZMQ_PREFIX/include" -L"$LIBZMQ_PREFIX/lib" -lzmq
+      - name: interop (ws)
+        env:
+          LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
+        run: cargo test -p omq-tokio --features ws --test omq_interop_libzmq_ws
+      - name: interop (draft sockets)
+        env:
+          LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
+        run: cargo test -p omq-tokio --test omq_interop_libzmq_draft
+
+  miri-seeds:
+    name: miri (yring, many seeds)
+    if: github.repository == 'paddor/omq.rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # No -D warnings: nightly adds lints on its own schedule.
+    env:
+      RUSTFLAGS: ""
+      MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..16
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly # falls back if nightly lacks miri
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri setup
+      - name: miri test
+        run: cargo miri test -p yring --features async

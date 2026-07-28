@@ -602,7 +602,10 @@ mod tests {
 
         fn noop(_: *const ()) {}
 
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, drop_waker);
+        // `wake` consumes the waker, so it must drop the Arc; only
+        // `wake_by_ref` is a no-op. Using noop for both leaks the Arc,
+        // which Miri's leak checker reports.
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, drop_waker, noop, drop_waker);
 
         let (mut p, c) = async_spsc::<u32>(1);
         p.push(1).unwrap();

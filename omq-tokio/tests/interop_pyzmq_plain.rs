@@ -25,8 +25,15 @@ fn pyzmq_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// The pyzmq peer is optional locally and mandatory in CI. With
+/// `OMQ_INTEROP_REQUIRED=1` a missing peer fails the test instead of
+/// letting the suite pass without exercising any interop.
 fn skip_if_no_pyzmq() -> bool {
     if !pyzmq_available() {
+        assert!(
+            std::env::var_os("OMQ_INTEROP_REQUIRED").is_none(),
+            "OMQ_INTEROP_REQUIRED=1 but python3 + pyzmq is not available",
+        );
         eprintln!("skip: python3 + pyzmq not available");
         return true;
     }

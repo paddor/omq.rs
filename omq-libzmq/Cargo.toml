@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 omq-tokio = { path = "../omq-tokio", version = "0.20.1", features = ["plain", "curve", "lz4"] }
-yring = { path = "../yring", version = "0.3.11" }
+yring = { path = "../yring", version = "0.3.10" }
 tokio = { version = "1.52", features = ["rt", "sync", "time"] }
 bytes = "1.12.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }

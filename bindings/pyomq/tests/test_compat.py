@@ -1,6 +1,7 @@
 """pyzmq-compatible API surface tests."""
 
 import pyomq as zmq
+import pyomq.asyncio as zmq_async
 
 
 # ── Serialization methods ────────────────────────────────────────────
@@ -295,19 +296,58 @@ def test_bind_to_random_port_returns_different_ports():
 # ── Context.instance() ──────────────────────────────────────────────
 
 
+def _reset_context_instances():
+    for cls in (zmq.Context, zmq_async.Context):
+        inst = cls._instance
+        if inst is not None and not inst.closed:
+            inst.term()
+        cls._instance = None
+
+
 def test_context_instance_singleton():
-    # Reset singleton state for isolation
-    zmq.Context._instance = None
+    _reset_context_instances()
     try:
         a = zmq.Context.instance()
         b = zmq.Context.instance()
+        c = zmq_async.Context.instance()
         assert a is b
+        assert type(a) is zmq.Context
+        assert type(c) is zmq_async.Context
+        assert a is not c
     finally:
-        zmq.Context._instance = None
+        _reset_context_instances()
+
+
+def test_context_instance_singleton_async_first():
+    _reset_context_instances()
+    try:
+        a = zmq_async.Context.instance()
+        b = zmq.Context.instance()
+        assert type(a) is zmq_async.Context
+        assert type(b) is zmq.Context
+        assert a is not b
+    finally:
+        _reset_context_instances()
+
+
+def test_context_instance_available_on_context_objects():
+    _reset_context_instances()
+    sync_ctx = zmq.Context()
+    async_ctx = zmq_async.Context()
+    try:
+        a = sync_ctx.instance()
+        b = async_ctx.instance()
+        assert type(a) is zmq.Context
+        assert type(b) is zmq_async.Context
+        assert a is not b
+    finally:
+        sync_ctx.term()
+        async_ctx.term()
+        _reset_context_instances()
 
 
 def test_context_instance_survives_close():
-    zmq.Context._instance = None
+    _reset_context_instances()
     try:
         inst = zmq.Context.instance()
         inst.term()
@@ -315,7 +355,7 @@ def test_context_instance_survives_close():
         assert fresh is not inst
         assert fresh._closed is False
     finally:
-        zmq.Context._instance = None
+        _reset_context_instances()
 
 
 # ── send_serialized / recv_serialized ───────────────────────────────

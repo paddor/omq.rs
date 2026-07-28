@@ -6,6 +6,52 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [omq-proto 0.24.1] - 2026-07-28
+
+### Added
+
+- `FrameBuffer::pop_front_entry()` for oldest-entry eviction in framed
+  outbound queues.
+
+### Changed
+
+- `OnMute::DropOldest` docs now state fan-out support for `PUB`, `XPUB`,
+  and `RADIO`.
+
+## [omq-tokio 0.20.1] - 2026-07-28
+
+### Added
+
+- `OnMute::DropOldest` support for `PUB`, `XPUB`, and `RADIO` fan-out
+  queues, including lane workers and fallback peers.
+
+### Changed
+
+- Bind dispatch now returns transport-resolved endpoints directly for TCP,
+  IPC, WS, and WSS transports.
+- PR CI now runs full-platform fmt/clippy before a Linux workspace test gate,
+  with heavier Linux-only interop, fuzz, Loom, and Miri jobs behind it.
+- Nightly extended CI now covers longer fuzz runs, soak groups, stress tests,
+  libzmq draft interop, Ubuntu ARM, and multi-seed Miri.
+
+### Fixed
+
+- Named TCP connect preflight still fails at `connect()` time while later
+  reconnect attempts silently retry name resolution.
+- LZ4 fan-out auto-training tests now avoid the slow late-subscriber path
+  that could hang on Ubuntu ARM CI.
+
+## [omq-libzmq 0.5.8] - 2026-07-28
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.20.1 and `omq-proto` to 0.24.1.
+
+### Fixed
+
+- libzmq compatibility tests now use OS-assigned TCP ports instead of fixed
+  ports, removing bind collisions in parallel CI.
+
 ### Added
 
 - **Windows support for pyomq**

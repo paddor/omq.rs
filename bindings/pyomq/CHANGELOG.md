@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-28
+
+### Changed
+
+- Security option setters now delegate to `omq-tokio` builders, keeping
+  pyomq aligned with the backend CURVE/PLAIN option API.
+- *(deps)* Bump `omq-tokio` to 0.20.1 and `omq-proto` to 0.24.1.
+
 ## [0.18.0] - 2026-07-27
 
 ### Added

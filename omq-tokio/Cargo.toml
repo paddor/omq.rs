@@ -32,7 +32,7 @@ soak = []
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.24.1", default-features = false }
-yring = { path = "../yring", version = "0.3.10" }
+yring = { path = "../yring", version = "0.3.11" }
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"

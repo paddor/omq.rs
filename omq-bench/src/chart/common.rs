@@ -126,6 +126,32 @@ pub(crate) fn nice_axis(max_val: f64, target_lines: usize) -> (f64, usize) {
     (step * ticks as f64, ticks)
 }
 
+#[derive(Clone, Copy)]
+enum MsgAxisMode {
+    Auto,
+    Fixed2M,
+}
+
+impl MsgAxisMode {
+    fn bounds(self, max_val: f64, target_lines: usize) -> (f64, usize) {
+        match self {
+            MsgAxisMode::Auto => nice_axis(max_val, target_lines),
+            MsgAxisMode::Fixed2M => msg_axis_2m(max_val),
+        }
+    }
+}
+
+const MSG_AXIS_STEP: f64 = 2_000_000.0;
+
+pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
+    let ticks = if max_val <= 0.0 {
+        1
+    } else {
+        (max_val / MSG_AXIS_STEP).ceil().max(1.0) as usize
+    };
+    (MSG_AXIS_STEP * ticks as f64, ticks)
+}
+
 // ── hardware detection ─────────────────────────────────────────
 
 pub(crate) fn detect_hardware() -> Option<String> {
@@ -614,6 +640,59 @@ pub(crate) fn draw_throughput_dual_panel(
     snd_label: &str,
     rcv_label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    draw_throughput_dual_panel_with_msg_axis(
+        out_path,
+        title,
+        sizes,
+        impls,
+        tput,
+        msgs,
+        cpu,
+        snd_label,
+        rcv_label,
+        MsgAxisMode::Auto,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    tput: &ValMap,
+    msgs: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    rcv_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    draw_throughput_dual_panel_with_msg_axis(
+        out_path,
+        title,
+        sizes,
+        impls,
+        tput,
+        msgs,
+        cpu,
+        snd_label,
+        rcv_label,
+        MsgAxisMode::Fixed2M,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_throughput_dual_panel_with_msg_axis(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    tput: &ValMap,
+    msgs: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    rcv_label: &str,
+    msg_axis: MsgAxisMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
         .iter()
         .filter(|imp| {
@@ -661,7 +740,7 @@ pub(crate) fn draw_throughput_dual_panel(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, n_ticks);
+    let (msgs_max, msgs_ticks) = msg_axis.bounds(msgs_raw, n_ticks);
 
     if !small.is_empty() {
         draw_msgs_panel(

@@ -272,6 +272,40 @@ def test_radio_dish_udp_with_groups():
     ctx.term()
 
 
+def test_radio_dish_helpers_accept_str_groups():
+    s = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    ep = f"udp://127.0.0.1:{port}"
+
+    ctx = pyomq.Context()
+    dish = ctx.socket(pyomq.DISH)
+    radio = ctx.socket(pyomq.RADIO)
+    try:
+        dish.bind(ep)
+        dish.join("weather")
+        radio.connect(ep)
+        time.sleep(0.05)
+
+        radio.send_multipart([b"weather", b"sunny"])
+        dish.setsockopt(pyomq.RCVTIMEO, 500)
+        assert dish.recv_multipart() == [b"weather", b"sunny"]
+
+        dish.leave("weather")
+        radio.send_multipart([b"weather", b"ignored"])
+        try:
+            msg = dish.recv_multipart()
+        except pyomq.Again:
+            pass
+        else:
+            pytest.fail(f"DISH received after leave: {msg!r}")
+    finally:
+        radio.close()
+        dish.close()
+        ctx.term()
+
+
 def test_stream_raw_tcp():
     """STREAM socket accepts raw TCP and echoes data back."""
     ctx = pyomq.Context()

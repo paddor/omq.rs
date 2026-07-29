@@ -227,6 +227,28 @@ async def test_async_unsubscribe_drops_topic(tcp_endpoint):
 
 
 @pytest.mark.asyncio
+async def test_async_subscribe_helpers_accept_str_prefixes(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pub = ctx.socket(pyomq.PUB)
+    sub = ctx.socket(pyomq.SUB)
+    try:
+        ep = pub.bind(tcp_endpoint)
+        sub.connect(ep)
+        sub.subscribe("weather/")
+        await asyncio.sleep(0.2)
+        sub.unsubscribe("weather/")
+        sub.subscribe("sports/")
+        await asyncio.sleep(0.2)
+        pub.send(b"weather/sunny")
+        pub.send(b"sports/score-12")
+        sub.setsockopt(pyomq.RCVTIMEO, 500)
+        assert await sub.recv() == b"sports/score-12"
+    finally:
+        pub.close()
+        sub.close()
+
+
+@pytest.mark.asyncio
 async def test_async_dealer_router_identity(tcp_endpoint):
     ctx = zmq_async.Context()
     router = ctx.socket(pyomq.ROUTER)

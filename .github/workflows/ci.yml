@@ -46,6 +46,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release-pyomq.yml'
       - id: matrix
@@ -63,20 +64,25 @@ jobs:
     needs: [changes, lint]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test --workspace --no-fail-fast
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest
+        run: cargo nextest run --profile ci --workspace
 
   test:
-    name: cargo test (${{ matrix.toolchain }}, ${{ matrix.os }})
+    name: cargo nextest (${{ matrix.toolchain }}, ${{ matrix.os }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
@@ -87,18 +93,22 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target || '' }}
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest
         if: runner.os != 'macOS'
-        run: cargo test --workspace --no-fail-fast
-      - name: cargo test (macOS)
+        run: cargo nextest run --profile ci --workspace
+      - name: cargo nextest (macOS)
         if: runner.os == 'macOS'
-        run: cargo test --workspace --no-fail-fast -- --test-threads=1
+        run: cargo nextest run --profile ci --workspace --test-threads=1
 
   encryption:
     name: encryption (curve, ${{ matrix.os }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
@@ -106,18 +116,22 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (curve)
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest (curve)
         if: runner.os != 'macOS'
-        run: cargo test -p omq-tokio --features curve
-      - name: cargo test (curve, macOS)
+        run: cargo nextest run --profile ci -p omq-tokio --features curve
+      - name: cargo nextest (curve, macOS)
         if: runner.os == 'macOS'
-        run: cargo test -p omq-tokio --features curve -- --test-threads=1
+        run: cargo nextest run --profile ci -p omq-tokio --features curve --test-threads=1
 
   compression:
     name: compression (${{ matrix.os }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.os_matrix) }}
@@ -125,18 +139,22 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (lz4)
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest (lz4)
         if: runner.os != 'macOS'
-        run: cargo test -p omq-tokio --features lz4
-      - name: cargo test (lz4, macOS)
+        run: cargo nextest run --profile ci -p omq-tokio --features lz4
+      - name: cargo nextest (lz4, macOS)
         if: runner.os == 'macOS'
-        run: cargo test -p omq-tokio --features lz4 -- --test-threads=1
+        run: cargo nextest run --profile ci -p omq-tokio --features lz4 --test-threads=1
 
   interop:
     name: interop (pyzmq)
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # pyzmq wheels bundle libzmq + libsodium: the peer is the real
     # reference implementation.
     env:
@@ -145,6 +163,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: actions/setup-python@v6
         id: python
         with: { python-version: "3.14" }
@@ -155,21 +176,22 @@ jobs:
       - name: interop (NULL + STREAM)
         env:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
-        run: cargo test -p omq-tokio --test omq_interop_pyzmq_null
+        run: cargo nextest run --profile ci -p omq-tokio --test omq_interop_pyzmq_null
       - name: interop (PLAIN)
         env:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
-        run: cargo test -p omq-tokio --features plain --test omq_interop_pyzmq_plain
+        run: cargo nextest run --profile ci -p omq-tokio --features plain --test omq_interop_pyzmq_plain
       - name: interop (CURVE)
         env:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
-        run: cargo test -p omq-tokio --features curve --test omq_interop_pyzmq_curve
+        run: cargo nextest run --profile ci -p omq-tokio --features curve --test omq_interop_pyzmq_curve
 
   loom:
     name: loom (yring)
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # omq-tokio's loom_signal test needs no cfg and runs in `test`.
     # RUSTFLAGS replaces the workflow-level value, so repeat -D warnings.
     env:
@@ -178,14 +200,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: loom model check
-        run: cargo test -p yring --features async --test loom --release
+        run: cargo nextest run --profile ci -p yring --features async --test loom --release
 
   miri:
     name: miri (yring)
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # yring holds the only Miri-checkable unsafe: omq-proto is
     # forbid(unsafe_code) and omq-tokio's tests are real socket I/O.
     # No -D warnings: nightly adds lints on its own schedule.
@@ -198,42 +224,52 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - run: cargo miri setup
       - name: miri test
-        run: cargo miri test -p yring --features async
+        run: cargo miri nextest run -p yring --features async
 
   fuzz-smoke:
     name: fuzz smoke
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # OMQ_FUZZ_ITERS means something different per target, so the two
     # get separate budgets: a parser iteration is a buffer parse, a
     # socket-action iteration drives a live socket (~90ms). The
     # `extended` workflow runs both far deeper.
-    # --nocapture surfaces OMQ_FUZZ_SEED for reproduction.
+    # nextest prints captured output on failure, including OMQ_FUZZ_SEED.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: fuzz parsers
         env:
           OMQ_FUZZ_ITERS: "1000000"
         run: >
-          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release
-          --test omq_fuzz_parsers -- --nocapture
+          cargo nextest run --profile ci -p omq-tokio
+          --features "fuzz plain curve lz4 ws" --release
+          --test omq_fuzz_parsers
       - name: fuzz socket actions
         env:
           OMQ_FUZZ_ITERS: "200"
         run: >
-          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release
-          --test omq_fuzz_socket_actions -- --nocapture
+          cargo nextest run --profile ci -p omq-tokio
+          --features "fuzz plain curve lz4 ws" --release
+          --test omq_fuzz_socket_actions
 
   linux-32bit:
     name: 32-bit linux (${{ matrix.target }})
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -252,17 +288,17 @@ jobs:
       - name: compile workspace
         run: cross check --target ${{ matrix.target }} --workspace --all-targets --all-features
       - name: yring tests
-        run: cross test --target ${{ matrix.target }} -p yring --all-features
+        run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p yring --all-features
       - name: tokio tcp smoke tests
-        run: cross test --target ${{ matrix.target }} -p omq-tokio --test omq_tcp_smoke
+        run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-tokio --test omq_tcp_smoke
       - name: proto lz4 tests
-        run: cross test --target ${{ matrix.target }} -p omq-proto --features lz4 --lib
+        run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-proto --features lz4 --lib
       - name: libzmq ABI and inproc tests
         run: |
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_ctx
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_multipart
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_proxy
-          cross test --target ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_draft
+          bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_ctx
+          bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_multipart
+          bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_proxy
+          bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-libzmq --test omq_libzmq_draft
 
   lint:
     name: fmt + clippy (${{ matrix.name }})
@@ -330,6 +366,7 @@ jobs:
     needs: [changes, linux-gate]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_pyomq == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -345,6 +382,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -356,9 +396,9 @@ jobs:
       - name: build pyomq
         working-directory: bindings/pyomq
         run: pip install .
-      - name: cargo test
+      - name: cargo nextest
         working-directory: bindings/pyomq
-        run: cargo test
+        run: cargo nextest run --profile ci --config-file ../../.config/nextest.toml
       - name: pytest
         working-directory: bindings/pyomq
         run: pytest -v -k "not test_perf" -W error

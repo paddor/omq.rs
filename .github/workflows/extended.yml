@@ -44,13 +44,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (fuzz) # --nocapture surfaces OMQ_FUZZ_SEED
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest (fuzz)
         run: |
           OMQ_FUZZ_ITERS=$(( ${{ matrix.iters }} * ${{ inputs.fuzz_scale || 1 }} ))
           export OMQ_FUZZ_ITERS
           echo "OMQ_FUZZ_ITERS=$OMQ_FUZZ_ITERS"
-          cargo test -p omq-tokio --features "fuzz plain curve lz4 ws" --release \
-            --test ${{ matrix.test }} -- --nocapture
+          cargo nextest run --profile extended -p omq-tokio \
+            --features "fuzz plain curve lz4 ws" --release \
+            --test ${{ matrix.test }}
 
   soak:
     name: soak (${{ matrix.group }})
@@ -78,14 +82,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: build soak tests
         run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --no-run
       - name: run soak group
         run: |
           for t in ${{ matrix.tests }}; do
             echo "::group::$t"
-            cargo test -p omq-tokio --features "$SOAK_FEATURES" --release \
-              --test "$t" -- --nocapture
+            cargo nextest run --profile extended -p omq-tokio \
+              --features "$SOAK_FEATURES" --release --test "$t"
             echo "::endgroup::"
           done
 
@@ -98,15 +105,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: connect-before-bind # serial: rounds race each other otherwise
-        run: cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --ignored --test-threads=1
+        run: cargo nextest run --profile extended -p omq-tokio --test omq_stress_connect_before_bind --run-ignored=only --test-threads=1
       - name: push/pull
-        run: cargo test -p omq-tokio --test omq_push_pull -- --ignored
+        run: cargo nextest run --profile extended -p omq-tokio --test omq_push_pull --run-ignored=only
       - name: transmit slot
-        run: cargo test -p omq-tokio --test omq_transmit_slot_stress -- --ignored
+        run: cargo nextest run --profile extended -p omq-tokio --test omq_transmit_slot_stress --run-ignored=only
 
   ubuntu-arm:
-    name: cargo test (ubuntu-24.04-arm)
+    name: cargo nextest (ubuntu-24.04-arm)
     if: github.repository == 'paddor/omq.rs'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
@@ -114,8 +124,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test --workspace --no-fail-fast
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo nextest
+        run: cargo nextest run --profile ci --workspace
 
   interop-libzmq-draft:
     name: interop (libzmq draft)
@@ -130,6 +143,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: cache libzmq
         id: libzmq
         uses: actions/cache@v4
@@ -161,11 +177,11 @@ jobs:
       - name: interop (ws)
         env:
           LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
-        run: cargo test -p omq-tokio --features ws --test omq_interop_libzmq_ws
+        run: cargo nextest run --profile ci -p omq-tokio --features ws --test omq_interop_libzmq_ws
       - name: interop (draft sockets)
         env:
           LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
-        run: cargo test -p omq-tokio --test omq_interop_libzmq_draft
+        run: cargo nextest run --profile ci -p omq-tokio --test omq_interop_libzmq_draft
 
   miri-seeds:
     name: miri (yring, many seeds)
@@ -182,6 +198,9 @@ jobs:
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - run: cargo miri setup
       - name: miri test
-        run: cargo miri test -p yring --features async
+        run: cargo miri nextest run -p yring --features async

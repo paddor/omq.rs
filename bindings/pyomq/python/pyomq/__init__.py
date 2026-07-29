@@ -536,25 +536,29 @@ class _BaseSocket(_SocketOptionsBase):
 
     def subscribe(self, prefix: bytes | str) -> None:
         try:
-            return self._sock.subscribe(prefix)
+            return self._sock.subscribe(
+                prefix.encode() if isinstance(prefix, str) else prefix
+            )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def unsubscribe(self, prefix: bytes | str) -> None:
         try:
-            return self._sock.unsubscribe(prefix)
+            return self._sock.unsubscribe(
+                prefix.encode() if isinstance(prefix, str) else prefix
+            )
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def join(self, group: bytes | str) -> None:
         try:
-            return self._sock.join(group)
+            return self._sock.join(group.encode() if isinstance(group, str) else group)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def leave(self, group: bytes | str) -> None:
         try:
-            return self._sock.leave(group)
+            return self._sock.leave(group.encode() if isinstance(group, str) else group)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 

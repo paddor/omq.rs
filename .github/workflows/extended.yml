@@ -203,4 +203,4 @@ jobs:
           tool: cargo-nextest
       - run: cargo miri setup
       - name: miri test
-        run: cargo miri nextest run -p yring --features async
+        run: cargo miri nextest run --profile extended-miri -p yring --features async

@@ -60,17 +60,64 @@ async fn push_bind(endpoint: Endpoint, payload: String, auth: &str) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+async fn rep_bind(endpoint: Endpoint, expected: String, reply: String, auth: &str) {
+    let rep = Socket::new(SocketType::Rep, options(auth));
+    let bound = rep.bind(endpoint).await.expect("rep bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), rep.recv())
+        .await
+        .expect("rep recv timed out")
+        .expect("rep recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), expected.as_bytes());
+    rep.send(Message::from(Bytes::from(reply)))
+        .await
+        .expect("rep send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn pub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str) {
+    let pub_ = Socket::new(SocketType::Pub, options(auth));
+    let bound = pub_.bind(endpoint).await.expect("pub bind");
+    print_endpoint(&bound);
+
+    wait_handshake(&pub_).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    pub_.send(Message::multipart([topic, payload]))
+        .await
+        .expect("pub send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().expect("mode");
     let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
-    let payload = args.next().expect("payload");
-    let auth = args.next().unwrap_or_else(|| "null".to_string());
 
     match mode.as_str() {
-        "pull-bind" => pull_bind(endpoint, payload, &auth).await,
-        "push-bind" => push_bind(endpoint, payload, &auth).await,
+        "pull-bind" => {
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            pull_bind(endpoint, payload, &auth).await;
+        }
+        "push-bind" => {
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            push_bind(endpoint, payload, &auth).await;
+        }
+        "rep-bind" => {
+            let payload = args.next().expect("payload");
+            let reply = args.next().expect("reply");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            rep_bind(endpoint, payload, reply, &auth).await;
+        }
+        "pub-bind" => {
+            let topic = args.next().expect("topic");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            pub_bind(endpoint, topic, payload, &auth).await;
+        }
         other => panic!("unknown mode: {other}"),
     }
 }

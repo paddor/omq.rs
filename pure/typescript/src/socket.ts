@@ -1,4 +1,5 @@
 import { Connection, type ConnectionOptions } from "./connection.ts";
+import type { PlainAuthOptions } from "./auth.ts";
 import type { SocketTypeName } from "./command.ts";
 import type { Message } from "./message.ts";
 
@@ -41,6 +42,8 @@ export interface SocketOptions {
   identity?: string;
   /** Pre-shared LZ4 dictionary for `lz4+wss://` connections. */
   lz4Dict?: Uint8Array;
+  /** ZMTP PLAIN username/password credentials. */
+  plain?: PlainAuthOptions;
   /** Maximum decompressed message size in bytes. Exceeding this closes the connection. */
   maxMessageSize?: number;
   /** Reconnect after peer-side close or WebSocket error. Defaults to true. */
@@ -139,6 +142,7 @@ export abstract class Socket {
       identity: this.identity,
       lz4Dict: this.opts.lz4Dict,
       maxMessageSize: this.opts.maxMessageSize,
+      plain: this.opts.plain,
       onReady: (conn) => this.onConnectionReady(conn),
       onMessage: (conn, msg) => this.onConnectionMessage(conn, msg),
       onCommand: (conn, name, body) => this.onCommand(conn, name, body),

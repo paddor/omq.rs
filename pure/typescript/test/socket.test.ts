@@ -1732,6 +1732,19 @@ describe("Socket connection management", () => {
     expect(push.readyCount).toBe(2);
   });
 
+  it("uses PLAIN subprotocol from socket options", () => {
+    const push = new Push({
+      plain: { username: "alice", password: "secret" },
+    });
+    push.connect("ws://localhost:8083");
+    const ws = createdSockets[0]!;
+    ws.simulateOpen();
+
+    expect(ws.protocols).toEqual(["ZWS2.0/PLAIN"]);
+    const cmd = decodeCommand(ws.sentFrames[0]!.subarray(1));
+    expect(cmd.name).toBe("HELLO");
+  });
+
   it("readyCount decreases on disconnect", () => {
     const push = new Push();
     push.connect("ws://localhost:8083");

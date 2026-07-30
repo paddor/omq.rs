@@ -68,6 +68,18 @@ sub.connect("lz4+wss://broker.example.com/sub");
 TypeScript senders reject individual LZ4 parts at the 1 GiB multi-block
 boundary. Split huge payloads at the application layer.
 
+### PLAIN Authentication
+
+Use PLAIN when the WebSocket server requires username/password auth. Prefer
+`wss://` because PLAIN itself does not encrypt credentials.
+
+```ts
+const push = new Push({
+  plain: { username: "alice", password: "secret" },
+});
+push.connect("wss://broker.example.com/push");
+```
+
 ### Robustness Options
 
 Sockets reconnect by default after peer-side close or WebSocket error. Current

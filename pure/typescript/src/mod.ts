@@ -2,7 +2,7 @@
  * @module
  *
  * ZMQ client library for browsers over WebSocket. Implements ZMTP 3.x NULL
- * security over the ZWS 2.0 framing protocol, with optional LZ4 dictionary
+ * and PLAIN security over the ZWS 2.0 framing protocol, with optional LZ4 dictionary
  * compression via {@link https://jsr.io/@paddor/lz4rip | @paddor/lz4rip}.
  *
  * ```ts
@@ -47,5 +47,6 @@ export { Peer } from "./peer.ts";
 export { Channel } from "./channel.ts";
 
 export type { SocketOptions } from "./socket.ts";
+export type { PlainAuthOptions } from "./auth.ts";
 export type { PeerProperties } from "./command.ts";
 export type { SocketTypeName } from "./command.ts";

@@ -439,6 +439,44 @@ async fn recv_before_deadline(sock: &Socket, deadline: Instant) -> bool {
     )
 }
 
+fn recv_timer_check_interval(size: usize) -> usize {
+    if size <= 1024 { 4096 } else { 256 }
+}
+
+async fn recv_loop(sock: &Socket, duration: Duration, size: usize) -> (u64, f64) {
+    let t0 = Instant::now();
+    let deadline = t0 + duration;
+    let timer_check_interval = recv_timer_check_interval(size);
+    let mut until_timer_check = timer_check_interval;
+    let mut count: u64 = 0;
+
+    loop {
+        if !recv_before_deadline(sock, deadline).await {
+            break;
+        }
+        count += 1;
+        until_timer_check -= 1;
+        if until_timer_check == 0 {
+            if Instant::now() >= deadline {
+                break;
+            }
+            until_timer_check = timer_check_interval;
+        }
+        while sock.try_recv().is_ok() {
+            count += 1;
+            until_timer_check -= 1;
+            if until_timer_check == 0 {
+                if Instant::now() >= deadline {
+                    return (count, t0.elapsed().as_secs_f64());
+                }
+                until_timer_check = timer_check_interval;
+            }
+        }
+    }
+
+    (count, t0.elapsed().as_secs_f64())
+}
+
 async fn run_sub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Duration) {
     let sub = ctx.socket(SocketType::Sub, bench_options_client(size));
     sub.connect(ep.clone()).await.expect("sub connect");
@@ -631,19 +669,7 @@ async fn run_pull_bind(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, dura
     drain_pending(&pull);
 
     let cpu_before = cpu_time_secs();
-    let t0 = Instant::now();
-    let deadline = t0 + duration;
-    let mut count: u64 = 0;
-    loop {
-        if !recv_before_deadline(&pull, deadline).await {
-            break;
-        }
-        count += 1;
-        while Instant::now() < deadline && pull.try_recv().is_ok() {
-            count += 1;
-        }
-    }
-    let elapsed = t0.elapsed().as_secs_f64();
+    let (count, elapsed) = recv_loop(&pull, duration, size).await;
     let cpu = cpu_time_secs() - cpu_before;
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);
@@ -667,19 +693,7 @@ async fn run_inproc(name: String, size: usize, duration: Duration) {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let t0 = Instant::now();
-    let deadline = t0 + duration;
-    let mut count: u64 = 0;
-    loop {
-        if !recv_before_deadline(&pull, deadline).await {
-            break;
-        }
-        count += 1;
-        while Instant::now() < deadline && pull.try_recv().is_ok() {
-            count += 1;
-        }
-    }
-    let elapsed = t0.elapsed().as_secs_f64();
+    let (count, elapsed) = recv_loop(&pull, duration, size).await;
     println!("{count} {elapsed:.6} {size}");
 }
 
@@ -692,22 +706,7 @@ async fn run_pull(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration:
     drain_pending(&pull);
 
     let cpu_before = cpu_time_secs();
-    let t0 = Instant::now();
-    let deadline = t0 + duration;
-    let mut count: u64 = 0;
-    loop {
-        if !recv_before_deadline(&pull, deadline).await {
-            break;
-        }
-        count += 1;
-        while pull.try_recv().is_ok() {
-            count += 1;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-    }
-    let elapsed = t0.elapsed().as_secs_f64();
+    let (count, elapsed) = recv_loop(&pull, duration, size).await;
     let cpu = cpu_time_secs() - cpu_before;
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
     eprint_pull_summary(&ep, count, elapsed, size);

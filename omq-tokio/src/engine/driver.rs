@@ -236,6 +236,50 @@ impl YringSink {
         self.producer.flush();
         (self.signal)();
     }
+
+    #[inline]
+    fn flush_pending(&mut self, pending: &mut bool) {
+        if *pending {
+            self.flush_and_signal();
+            *pending = false;
+        }
+    }
+
+    async fn send_deferred(&mut self, m: Message, pending: &mut bool) -> bool {
+        let mut item = RecvItem::new(m);
+        loop {
+            match self.producer.push(item) {
+                Ok(()) => {
+                    *pending = true;
+                    return true;
+                }
+                Err(returned) => {
+                    item = returned;
+                    self.flush_pending(pending);
+                }
+            }
+            if self.producer.is_consumer_dropped() {
+                return false;
+            }
+            let seen = self.space.generation();
+            let changed = self.space.changed_after(seen);
+            tokio::pin!(changed);
+            match self.producer.push(item) {
+                Ok(()) => {
+                    *pending = true;
+                    return true;
+                }
+                Err(returned) => {
+                    item = returned;
+                    tokio::select! {
+                        biased;
+                        () = changed => {}
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl RecvSink {
@@ -320,6 +364,24 @@ impl RecvSink {
             return rep.sink.send_plain(body).await;
         }
         self.send_plain(m).await
+    }
+
+    async fn send_with_flush_mode(
+        &mut self,
+        m: Message,
+        defer_yring_flush: bool,
+        pending_yring_flush: &mut bool,
+    ) -> bool {
+        if defer_yring_flush && let Self::Yring(sink) = self {
+            return sink.send_deferred(m, pending_yring_flush).await;
+        }
+        self.send(m).await
+    }
+
+    fn flush_deferred(&mut self, pending_yring_flush: &mut bool) {
+        if let Self::Yring(sink) = self {
+            sink.flush_pending(pending_yring_flush);
+        }
     }
 }
 
@@ -1114,6 +1176,10 @@ async fn drain_decoded_messages(
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
     let mut recv_batch_time = None;
+    let defer_yring_flush = decoder.is_none()
+        && matches!(receive_profile, ReceiveProfile::Throughput)
+        && matches!(recv_direct, Some(RecvSink::Yring(_)));
+    let mut pending_yring_flush = false;
     while let Some(m) = connection.poll_message() {
         let m = match decoder.as_mut() {
             Some(dec) => match dec.decode(m)? {
@@ -1127,7 +1193,17 @@ async fn drain_decoded_messages(
             recv_batch_time = receive_profile.time(msg_bytes);
             receive_profile.budget(msg_bytes)
         });
-        if !route_message(m, recv_direct, peer_out, peer_id).await {
+        if !route_message(
+            m,
+            recv_direct,
+            peer_out,
+            peer_id,
+            defer_yring_flush,
+            &mut pending_yring_flush,
+        )
+        .await
+        {
+            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
             return Ok(DriverStep::Close);
         }
         let budget_remains = budget.account(msg_bytes);
@@ -1136,10 +1212,18 @@ async fn drain_decoded_messages(
             || (time_check
                 && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
         {
+            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
             return Ok(DriverStep::Yield);
         }
     }
+    flush_deferred_recv(recv_direct, &mut pending_yring_flush);
     Ok(DriverStep::Continue)
+}
+
+fn flush_deferred_recv(recv_direct: &mut Option<RecvSink>, pending_yring_flush: &mut bool) {
+    if let Some(sink) = recv_direct {
+        sink.flush_deferred(pending_yring_flush);
+    }
 }
 
 fn enable_transmit_slot_after_handshake(slot: Option<&PeerTransmitSlot>, connection: &Connection) {
@@ -1638,9 +1722,14 @@ async fn route_message(
     recv_direct: &mut Option<RecvSink>,
     peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
+    defer_yring_flush: bool,
+    pending_yring_flush: &mut bool,
 ) -> bool {
     match recv_direct {
-        Some(sink) => sink.send(m).await,
+        Some(sink) => {
+            sink.send_with_flush_mode(m, defer_yring_flush, pending_yring_flush)
+                .await
+        }
         None => peer_out
             .send((peer_id, PeerEvent::Event(Event::Message(m))))
             .await
@@ -1822,6 +1911,30 @@ mod tests {
         sink.flush_and_signal();
 
         assert_eq!(signals.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn yring_sink_deferred_send_signals_once_per_flush() {
+        let (producer, mut consumer) = yring::spsc(4);
+        let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let signals_for_sink = signals.clone();
+        let mut sink = YringSink {
+            producer,
+            signal: Box::new(move || {
+                signals_for_sink.fetch_add(1, Ordering::Relaxed);
+            }),
+            space: Arc::new(StateSignal::new()),
+        };
+        let mut pending = false;
+
+        assert!(sink.send_deferred(Message::single("a"), &mut pending).await);
+        assert!(sink.send_deferred(Message::single("b"), &mut pending).await);
+        assert_eq!(signals.load(Ordering::Relaxed), 0);
+        assert_eq!(consumer.prefetch(), 0);
+
+        sink.flush_pending(&mut pending);
+        assert_eq!(signals.load(Ordering::Relaxed), 1);
+        assert_eq!(consumer.prefetch(), 2);
     }
 
     /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out

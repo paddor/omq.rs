@@ -1,6 +1,7 @@
 use super::common::{
     self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_RZMQ, C_RZMQ_IOURING, C_ZMQRS,
-    Impl, draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
+    Impl, draw_latency_single_panel, draw_throughput_dual_panel,
+    draw_throughput_dual_panel_fixed_2m_msgs, load_latency, load_tput, out_dir,
 };
 
 const TPUT_SIZES: &[u64] = &[
@@ -139,7 +140,7 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput("throughput", "tcp", None, PUSHPULL_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pushpull_tcp.svg");
-        draw_throughput_dual_panel(
+        draw_throughput_dual_panel_fixed_2m_msgs(
             &out,
             "PUSH/PULL throughput, TCP loopback, 2-process",
             TPUT_SIZES,

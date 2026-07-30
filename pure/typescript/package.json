@@ -1,9 +1,15 @@
 {
+  "scripts": {
+    "check": "deno check src/mod.ts",
+    "lint": "deno lint",
+    "test": "vitest run",
+    "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
+  },
   "dependencies": {
-    "@paddor/lz4rip": "npm:@jsr/paddor__lz4rip@^0.2.0"
+    "@paddor/lz4rip": "npm:@jsr/paddor__lz4rip@^0.2.7"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
-    "vitest": "^4.1.9"
+    "@types/node": "^26.1.2",
+    "vitest": "^4.1.10"
   }
 }

@@ -1,14 +1,14 @@
-import type { SocketTypeName } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import type { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import type { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
 function prefixMatches(data: Uint8Array, prefix: Uint8Array): boolean {
-  if (data.byteLength < prefix.byteLength) return false
+  if (data.byteLength < prefix.byteLength) return false;
   for (let i = 0; i < prefix.byteLength; i++) {
-    if (data[i] !== prefix[i]) return false
+    if (data[i] !== prefix[i]) return false;
   }
-  return true
+  return true;
 }
 
 /**
@@ -18,24 +18,26 @@ function prefixMatches(data: Uint8Array, prefix: Uint8Array): boolean {
  */
 export class Pub extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "PUB"
+  protected readonly socketType: SocketTypeName = "PUB";
   /** @ignore */
-  protected peerSubscriptions: Map<Connection, Uint8Array[]> = new Map()
+  protected peerSubscriptions: Map<Connection, Uint8Array[]> = new Map();
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /** Send a message to all peers whose subscriptions match the first frame. */
-  async send(msg: Message): Promise<void> {
-    const topic = msg.parts[0] || new Uint8Array(0)
-    for (const conn of this.readyConnections) {
-      const subs = this.peerSubscriptions.get(conn)
-      if (subs && subs.some((prefix) => prefixMatches(topic, prefix))) {
-        conn.send(msg)
+  send(msg: Message): Promise<void> {
+    return this.runSynchronously(() => {
+      const topic = msg.parts[0] || new Uint8Array(0);
+      for (const conn of this.readyConnections) {
+        const subs = this.peerSubscriptions.get(conn);
+        if (subs && subs.some((prefix) => prefixMatches(topic, prefix))) {
+          conn.send(msg);
+        }
       }
-    }
+    });
   }
 
   /** @ignore */
@@ -45,30 +47,30 @@ export class Pub extends Socket {
     body: Uint8Array,
   ): void {
     if (name === "SUBSCRIBE") {
-      let subs = this.peerSubscriptions.get(conn)
+      let subs = this.peerSubscriptions.get(conn);
       if (!subs) {
-        subs = []
-        this.peerSubscriptions.set(conn, subs)
+        subs = [];
+        this.peerSubscriptions.set(conn, subs);
       }
-      subs.push(body.slice())
+      subs.push(body.slice());
     } else if (name === "CANCEL") {
-      const subs = this.peerSubscriptions.get(conn)
+      const subs = this.peerSubscriptions.get(conn);
       if (subs) {
         const idx = subs.findIndex(
           (s) =>
             s.byteLength === body.byteLength &&
             prefixMatches(s, body) &&
             prefixMatches(body, s),
-        )
-        if (idx >= 0) subs.splice(idx, 1)
+        );
+        if (idx >= 0) subs.splice(idx, 1);
       }
     }
   }
 
   /** @ignore */
   protected override onConnectionClosed(conn: Connection): void {
-    this.peerSubscriptions.delete(conn)
-    super.onConnectionClosed(conn)
+    this.peerSubscriptions.delete(conn);
+    super.onConnectionClosed(conn);
   }
 
   /** @ignore */

@@ -1,10 +1,10 @@
-import type { SocketTypeName } from "./command.ts"
-import { encodeJoin, encodeLeave } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import type { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import { encodeJoin, encodeLeave } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import type { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
-const encoder = new TextEncoder()
+const encoder = new TextEncoder();
 
 /**
  * DISH socket (draft). Group-based subscribe. Joins groups and receives
@@ -13,50 +13,50 @@ const encoder = new TextEncoder()
  */
 export class Dish extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "DISH"
-  private groups: Set<string> = new Set()
+  protected readonly socketType: SocketTypeName = "DISH";
+  private groups: Set<string> = new Set();
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /** Join a group. Messages with this group will be received. */
   join(group: string): void {
-    if (this.groups.has(group)) return
-    this.groups.add(group)
-    const cmd = encodeJoin(encoder.encode(group))
+    if (this.groups.has(group)) return;
+    this.groups.add(group);
+    const cmd = encodeJoin(encoder.encode(group));
     for (const conn of this.readyConnections) {
-      conn.sendCommand(cmd)
+      conn.sendCommand(cmd);
     }
   }
 
   /** Leave a previously joined group. */
   leave(group: string): void {
-    if (!this.groups.delete(group)) return
-    const cmd = encodeLeave(encoder.encode(group))
+    if (!this.groups.delete(group)) return;
+    const cmd = encodeLeave(encoder.encode(group));
     for (const conn of this.readyConnections) {
-      conn.sendCommand(cmd)
+      conn.sendCommand(cmd);
     }
   }
 
   /** Wait for the next message. */
-  async recv(): Promise<Message> {
-    return this.dequeueMessage()
+  recv(): Promise<Message> {
+    return this.dequeueMessage();
   }
 
   /** Async iterator that yields messages until all connections close. */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Message> {
-    while (this.connections.size > 0) {
-      yield await this.recv()
+    while (this.hasOpenEndpoints()) {
+      yield await this.recv();
     }
   }
 
   /** @ignore */
   protected override onConnectionReady(conn: Connection): void {
-    super.onConnectionReady(conn)
+    super.onConnectionReady(conn);
     for (const group of this.groups) {
-      conn.sendCommand(encodeJoin(encoder.encode(group)))
+      conn.sendCommand(encodeJoin(encoder.encode(group)));
     }
   }
 
@@ -65,6 +65,7 @@ export class Dish extends Socket {
     _conn: Connection,
     msg: Message,
   ): void {
-    this.enqueueMessage(msg)
+    if (msg.parts.length !== 2) return;
+    this.enqueueMessage(msg);
   }
 }

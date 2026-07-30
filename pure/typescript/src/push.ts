@@ -1,7 +1,7 @@
-import type { SocketTypeName } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import type { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import type { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
 /**
  * PUSH socket. Sends messages in a round-robin fashion across connected
@@ -9,24 +9,27 @@ import { Socket, type SocketOptions } from "./socket.ts"
  */
 export class Push extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "PUSH"
+  protected readonly socketType: SocketTypeName = "PUSH";
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /** Send a message. Waits for at least one ready connection if none exist yet. */
   async send(msg: Message): Promise<void> {
-    let conn = this.pickRoundRobin()
+    let conn = this.pickRoundRobin();
     if (!conn) {
-      conn = await this.waitForReady()
+      conn = await this.waitForReady();
     }
-    conn.send(msg)
+    await this.sendOnConnection(conn, msg);
   }
 
   /** @ignore */
-  protected override onConnectionMessage(_conn: Connection, _msg: Message): void {
+  protected override onConnectionMessage(
+    _conn: Connection,
+    _msg: Message,
+  ): void {
     // PUSH never receives
   }
 }

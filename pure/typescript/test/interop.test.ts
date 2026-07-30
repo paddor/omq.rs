@@ -5,7 +5,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initSyncFromBytes } from "@paddor/lz4rip";
-import { Message, Pull, Push } from "../src/mod.ts";
+import { Message, Pull, Push, Req, Sub } from "../src/mod.ts";
 
 interface Peer {
   child: ChildProcessWithoutNullStreams;
@@ -189,6 +189,84 @@ async function rustPushToTsPull(
   }
 }
 
+async function tsReqToRustRep(
+  endpoint: string,
+  request: string,
+  reply: string,
+  auth: "null" | "plain" = "null",
+): Promise<void> {
+  const peer = await startPeer(["rep-bind", endpoint, request, reply, auth]);
+  const errors: Error[] = [];
+  const req = new Req(
+    auth === "plain"
+      ? {
+        plain: { username: "alice", password: "secret" },
+        reconnect: false,
+        onError: (error) => errors.push(error),
+      }
+      : { reconnect: false, onError: (error) => errors.push(error) },
+  );
+  try {
+    req.connect(peer.endpoint);
+    const msg = await withTimeout(
+      req.send(Message.from(request)),
+      5_000,
+      () =>
+        `TS REQ timed out ready=${req.readyCount} conn=${req.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(reply);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust REP did not exit after TS REQ\n${peer.stderr()}`,
+    );
+  } finally {
+    req.close();
+  }
+}
+
+async function rustPubToTsSub(
+  endpoint: string,
+  topic: string,
+  payload: string,
+  auth: "null" | "plain" = "null",
+): Promise<void> {
+  const peer = await startPeer(["pub-bind", endpoint, topic, payload, auth]);
+  const errors: Error[] = [];
+  const sub = new Sub(
+    auth === "plain"
+      ? {
+        plain: { username: "alice", password: "secret" },
+        reconnect: false,
+        onError: (error) => errors.push(error),
+      }
+      : { reconnect: false, onError: (error) => errors.push(error) },
+  );
+  try {
+    sub.subscribe("news.");
+    sub.connect(peer.endpoint);
+    const msg = await withTimeout(
+      sub.recv(),
+      5_000,
+      () =>
+        `TS SUB recv timed out ready=${sub.readyCount} conn=${sub.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(topic);
+    expect(msg.string(1)).toBe(payload);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust PUB did not exit after TS SUB recv\n${peer.stderr()}`,
+    );
+  } finally {
+    sub.close();
+  }
+}
+
 describeInterop("omq.rs WebSocket interop", () => {
   it("sends from TypeScript PUSH to Rust PULL over ws", async () => {
     await tsPushToRustPull("ws://127.0.0.1:0/", "ts-to-rust");
@@ -202,11 +280,40 @@ describeInterop("omq.rs WebSocket interop", () => {
     await tsPushToRustPull("lz4+ws://127.0.0.1:0/", "ts-lz4-to-rust");
   }, 120_000);
 
+  it("receives from Rust PUSH on TypeScript PULL over lz4+ws", async () => {
+    await rustPushToTsPull("lz4+ws://127.0.0.1:0/", "rust-lz4-to-ts");
+  }, 120_000);
+
   it("sends from TypeScript PUSH to Rust PULL over PLAIN ws", async () => {
     await tsPushToRustPull("ws://127.0.0.1:0/", "ts-plain-to-rust", "plain");
   }, 120_000);
 
   it("receives from Rust PUSH on TypeScript PULL over PLAIN ws", async () => {
     await rustPushToTsPull("ws://127.0.0.1:0/", "rust-plain-to-ts", "plain");
+  }, 120_000);
+
+  it("round-trips TypeScript REQ to Rust REP over ws", async () => {
+    await tsReqToRustRep("ws://127.0.0.1:0/", "question", "answer");
+  }, 120_000);
+
+  it("round-trips TypeScript REQ to Rust REP over PLAIN ws", async () => {
+    await tsReqToRustRep(
+      "ws://127.0.0.1:0/",
+      "plain-question",
+      "plain-answer",
+      "plain",
+    );
+  }, 120_000);
+
+  it("receives Rust PUB on TypeScript SUB over ws", async () => {
+    await rustPubToTsSub("ws://127.0.0.1:0/", "news.world", "headline");
+  }, 120_000);
+
+  it("receives Rust PUB on TypeScript SUB over lz4+ws", async () => {
+    await rustPubToTsSub(
+      "lz4+ws://127.0.0.1:0/",
+      "news.lz4",
+      "compressed-headline",
+    );
   }, 120_000);
 });

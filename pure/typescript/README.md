@@ -94,3 +94,9 @@ const sub = new Sub({
   onError: (error) => console.error(error),
 });
 ```
+
+### Live Interop Tests
+
+Run `npm run test:interop` from this repo when the sibling `../omq.rs` checkout
+is present. It starts real `omq-tokio` WebSocket peers and verifies NULL, PLAIN,
+and `lz4+ws://` traffic.

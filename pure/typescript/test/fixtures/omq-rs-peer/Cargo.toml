@@ -1,0 +1,10 @@
+[package]
+name = "omq-ts-interop-peer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bytes = "1.12.0"
+omq-tokio = { path = "../../../../omq.rs/omq-tokio", features = ["lz4", "plain", "ws"] }
+tokio = { version = "1.52.0", features = ["macros", "rt", "time"] }

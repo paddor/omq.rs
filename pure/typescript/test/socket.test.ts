@@ -44,7 +44,7 @@ class MockWebSocket {
   static CLOSED = 3;
 
   binaryType = "blob";
-  protocol = "ZWS2.0/NULL";
+  protocol = "ZWS2.0";
   readyState = MockWebSocket.CONNECTING;
   sentFrames: Uint8Array[] = [];
 
@@ -1732,7 +1732,7 @@ describe("Socket connection management", () => {
     expect(push.readyCount).toBe(2);
   });
 
-  it("uses PLAIN subprotocol from socket options", () => {
+  it("uses valid ZWS subprotocol with PLAIN socket options", () => {
     const push = new Push({
       plain: { username: "alice", password: "secret" },
     });
@@ -1740,7 +1740,7 @@ describe("Socket connection management", () => {
     const ws = createdSockets[0]!;
     ws.simulateOpen();
 
-    expect(ws.protocols).toEqual(["ZWS2.0/PLAIN"]);
+    expect(ws.protocols).toEqual(["ZWS2.0"]);
     const cmd = decodeCommand(ws.sentFrames[0]!.subarray(1));
     expect(cmd.name).toBe("HELLO");
   });

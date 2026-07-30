@@ -21,6 +21,10 @@ fn options(auth: &str) -> Options {
     }
 }
 
+fn options_with_identity(auth: &str, identity: impl Into<Bytes>) -> Options {
+    options(auth).identity(identity)
+}
+
 async fn wait_handshake(sock: &Socket) {
     let mut monitor = sock.monitor();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -602,6 +606,20 @@ async fn pull_restart_bind(endpoint: Endpoint, before: String, after: String, au
     assert_eq!(msg.part_bytes(0).unwrap(), after.as_bytes());
 }
 
+async fn pull_delayed_bind(endpoint: Endpoint, expected: String, delay_ms: u64, auth: &str) {
+    print_endpoint(&endpoint);
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+    let pull = Socket::new(SocketType::Pull, options(auth));
+    pull.bind(endpoint).await.expect("delayed pull bind");
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), pull.recv())
+        .await
+        .expect("delayed pull recv timed out")
+        .expect("delayed pull recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), expected.as_bytes());
+}
+
 async fn push_bind(endpoint: Endpoint, payload: String, auth: &str) {
     let push = Socket::new(SocketType::Push, options(auth));
     let bound = push.bind(endpoint).await.expect("push bind");
@@ -745,6 +763,127 @@ async fn channel_bind(endpoint: Endpoint, expected: String, reply: String, auth:
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+async fn router_bind(
+    endpoint: Endpoint,
+    identity: String,
+    request_a: String,
+    request_b: String,
+    reply_a: String,
+    reply_b: String,
+    auth: &str,
+) {
+    let router = Socket::new(SocketType::Router, options(auth));
+    let bound = router.bind(endpoint).await.expect("router bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), router.recv())
+        .await
+        .expect("router recv timed out")
+        .expect("router recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), identity.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), request_a.as_bytes());
+    assert_eq!(msg.part_bytes(2).unwrap(), request_b.as_bytes());
+
+    router
+        .send(Message::multipart([
+            Bytes::from(identity),
+            Bytes::from(reply_a),
+            Bytes::from(reply_b),
+        ]))
+        .await
+        .expect("router send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn dealer_bind(
+    endpoint: Endpoint,
+    identity: String,
+    request_a: String,
+    request_b: String,
+    reply_a: String,
+    reply_b: String,
+    auth: &str,
+) {
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        options_with_identity(auth, Bytes::from(identity)),
+    );
+    let bound = dealer.bind(endpoint).await.expect("dealer bind");
+    print_endpoint(&bound);
+
+    wait_handshake(&dealer).await;
+    dealer
+        .send(Message::multipart([request_a, request_b]))
+        .await
+        .expect("dealer send");
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), dealer.recv())
+        .await
+        .expect("dealer recv timed out")
+        .expect("dealer recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), reply_a.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), reply_b.as_bytes());
+}
+
+async fn pair_bind(
+    endpoint: Endpoint,
+    request_a: String,
+    request_b: String,
+    reply_a: String,
+    reply_b: String,
+    auth: &str,
+) {
+    let pair = Socket::new(SocketType::Pair, options(auth));
+    let bound = pair.bind(endpoint).await.expect("pair bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), pair.recv())
+        .await
+        .expect("pair recv timed out")
+        .expect("pair recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), request_a.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), request_b.as_bytes());
+
+    pair.send(Message::multipart([reply_a, reply_b]))
+        .await
+        .expect("pair send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn xpub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str) {
+    let xpub = Socket::new(SocketType::XPub, options(auth));
+    let bound = xpub.bind(endpoint).await.expect("xpub bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), xpub.recv())
+        .await
+        .expect("xpub recv timed out")
+        .expect("xpub recv");
+    let sub = msg.part_bytes(0).unwrap();
+    assert_eq!(sub.first(), Some(&1));
+    assert_eq!(&sub[1..], topic.as_bytes());
+
+    for _ in 0..10 {
+        xpub.send(Message::single(payload.clone()))
+            .await
+            .expect("xpub send");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn xsub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str) {
+    let xsub = Socket::new(SocketType::XSub, options(auth));
+    xsub.subscribe("news.").await.expect("xsub subscribe");
+    let bound = xsub.bind(endpoint).await.expect("xsub bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), xsub.recv())
+        .await
+        .expect("xsub recv timed out")
+        .expect("xsub recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), payload.as_bytes());
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -778,6 +917,17 @@ async fn main() {
             let after = args.next().expect("after");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             pull_restart_bind(endpoint, before, after, &auth).await;
+        }
+        "pull-delayed-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let payload = args.next().expect("payload");
+            let delay_ms = args
+                .next()
+                .unwrap_or_else(|| "750".to_string())
+                .parse()
+                .expect("delay ms");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            pull_delayed_bind(endpoint, payload, delay_ms, &auth).await;
         }
         "rep-bind" => {
             let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
@@ -839,6 +989,55 @@ async fn main() {
             let reply = args.next().expect("reply");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             channel_bind(endpoint, payload, reply, &auth).await;
+        }
+        "router-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let identity = args.next().expect("identity");
+            let request_a = args.next().expect("request a");
+            let request_b = args.next().expect("request b");
+            let reply_a = args.next().expect("reply a");
+            let reply_b = args.next().expect("reply b");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            router_bind(
+                endpoint, identity, request_a, request_b, reply_a, reply_b, &auth,
+            )
+            .await;
+        }
+        "dealer-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let identity = args.next().expect("identity");
+            let request_a = args.next().expect("request a");
+            let request_b = args.next().expect("request b");
+            let reply_a = args.next().expect("reply a");
+            let reply_b = args.next().expect("reply b");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            dealer_bind(
+                endpoint, identity, request_a, request_b, reply_a, reply_b, &auth,
+            )
+            .await;
+        }
+        "pair-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let request_a = args.next().expect("request a");
+            let request_b = args.next().expect("request b");
+            let reply_a = args.next().expect("reply a");
+            let reply_b = args.next().expect("reply b");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            pair_bind(endpoint, request_a, request_b, reply_a, reply_b, &auth).await;
+        }
+        "xpub-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let topic = args.next().expect("topic");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            xpub_bind(endpoint, topic, payload, &auth).await;
+        }
+        "xsub-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let topic = args.next().expect("topic");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            xsub_bind(endpoint, topic, payload, &auth).await;
         }
         other => panic!("unknown mode: {other}"),
     }

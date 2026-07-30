@@ -1,7 +1,7 @@
-import type { SocketTypeName } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
 /**
  * REP (reply) socket. Receives a request and sends exactly one reply
@@ -9,17 +9,20 @@ import { Socket, type SocketOptions } from "./socket.ts"
  */
 export class Rep extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "REP"
-  private pendingRequests: Array<{ conn: Connection; msg: Message }> = []
+  protected readonly socketType: SocketTypeName = "REP";
+  private pendingRequests: Array<{ conn: Connection; msg: Message }> = [];
   private requestWaiters: Array<
-    (entry: { conn: Connection; msg: Message }) => void
-  > = []
-  private routingEnvelope: Uint8Array[] | null = null
-  private replyConnection: Connection | null = null
+    {
+      resolve: (entry: { conn: Connection; msg: Message }) => void;
+      reject: (error: Error) => void;
+    }
+  > = [];
+  private routingEnvelope: Uint8Array[] | null = null;
+  private replyConnection: Connection | null = null;
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /**
@@ -29,28 +32,28 @@ export class Rep extends Socket {
    */
   async recv(): Promise<Message> {
     if (this.routingEnvelope) {
-      throw new Error("REP socket must send a reply before receiving again")
+      throw new Error("REP socket must send a reply before receiving again");
     }
 
-    let entry: { conn: Connection; msg: Message }
-    const queued = this.pendingRequests.shift()
+    let entry: { conn: Connection; msg: Message };
+    const queued = this.pendingRequests.shift();
     if (queued) {
-      entry = queued
+      entry = queued;
     } else {
-      entry = await new Promise((resolve) =>
-        this.requestWaiters.push(resolve)
-      )
+      entry = await new Promise((resolve, reject) =>
+        this.requestWaiters.push({ resolve, reject })
+      );
     }
 
-    this.replyConnection = entry.conn
+    this.replyConnection = entry.conn;
 
-    const delimIdx = entry.msg.parts.findIndex((p) => p.byteLength === 0)
+    const delimIdx = entry.msg.parts.findIndex((p) => p.byteLength === 0);
     if (delimIdx >= 0) {
-      this.routingEnvelope = entry.msg.parts.slice(0, delimIdx + 1)
-      return Message.fromParts(entry.msg.parts.slice(delimIdx + 1))
+      this.routingEnvelope = entry.msg.parts.slice(0, delimIdx + 1);
+      return Message.fromParts(entry.msg.parts.slice(delimIdx + 1));
     }
-    this.routingEnvelope = [new Uint8Array(0)]
-    return entry.msg
+    this.routingEnvelope = [new Uint8Array(0)];
+    return entry.msg;
   }
 
   /**
@@ -58,34 +61,57 @@ export class Rep extends Socket {
    * envelope is prepended automatically. Throws if no request has been
    * received yet.
    */
-  async send(msg: Message): Promise<void> {
+  send(msg: Message): Promise<void> {
     if (!this.routingEnvelope || !this.replyConnection) {
-      throw new Error("REP socket must receive a request before sending")
+      return Promise.reject(
+        new Error("REP socket must receive a request before sending"),
+      );
     }
     const withEnvelope = Message.fromParts([
       ...this.routingEnvelope,
       ...msg.parts,
-    ])
-    this.replyConnection.send(withEnvelope)
-    this.routingEnvelope = null
-    this.replyConnection = null
+    ]);
+    const conn = this.replyConnection;
+    return this.runSynchronously(() => {
+      conn.send(withEnvelope);
+      this.routingEnvelope = null;
+      this.replyConnection = null;
+    });
   }
 
   /** Async iterator that yields requests until all connections close. */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Message> {
-    while (this.connections.size > 0) {
-      yield await this.recv()
+    while (this.hasOpenEndpoints()) {
+      yield await this.recv();
     }
   }
 
   /** @ignore */
   protected override onConnectionMessage(conn: Connection, msg: Message): void {
-    const entry = { conn, msg }
-    const waiter = this.requestWaiters.shift()
+    const entry = { conn, msg };
+    const waiter = this.requestWaiters.shift();
     if (waiter) {
-      waiter(entry)
+      waiter.resolve(entry);
     } else {
-      this.pendingRequests.push(entry)
+      this.pendingRequests.push(entry);
     }
+  }
+
+  /** @ignore */
+  protected override onConnectionClosed(conn: Connection): void {
+    if (this.replyConnection === conn) {
+      this.routingEnvelope = null;
+      this.replyConnection = null;
+    }
+    super.onConnectionClosed(conn);
+  }
+
+  /** @ignore */
+  protected override onSocketClosed(error: Error): void {
+    const waiters = this.requestWaiters;
+    this.requestWaiters = [];
+    for (const waiter of waiters) waiter.reject(error);
+    this.routingEnvelope = null;
+    this.replyConnection = null;
   }
 }

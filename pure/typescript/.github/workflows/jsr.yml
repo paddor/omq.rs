@@ -16,5 +16,8 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm install
-      - run: npx vitest run
+      - run: npm run check
+      - run: npm run lint
+      - run: npm test
+      - run: deno publish --dry-run
       - run: deno publish

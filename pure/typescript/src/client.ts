@@ -1,6 +1,8 @@
-import type { SocketTypeName } from "./command.ts"
-import { Dealer } from "./dealer.ts"
-import type { SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import { Dealer } from "./dealer.ts";
+import type { Message } from "./message.ts";
+import type { SocketOptions } from "./socket.ts";
 
 /**
  * CLIENT socket (draft). Asynchronous request-reply without state
@@ -9,10 +11,26 @@ import type { SocketOptions } from "./socket.ts"
  */
 export class Client extends Dealer {
   /** @ignore */
-  protected override readonly socketType: SocketTypeName = "CLIENT"
+  protected override readonly socketType: SocketTypeName = "CLIENT";
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
+  }
+
+  /** Send a single-frame request. */
+  override send(msg: Message): Promise<void> {
+    if (msg.parts.length !== 1) {
+      return Promise.reject(
+        new Error("CLIENT socket requires single-part messages"),
+      );
+    }
+    return super.send(msg);
+  }
+
+  /** @ignore */
+  protected override onConnectionMessage(conn: Connection, msg: Message): void {
+    if (msg.parts.length !== 1) return;
+    super.onConnectionMessage(conn, msg);
   }
 }

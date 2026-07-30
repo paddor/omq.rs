@@ -1,7 +1,7 @@
-import type { SocketTypeName } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import type { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import type { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
 /**
  * PAIR socket. Exclusive one-to-one bidirectional communication.
@@ -9,39 +9,39 @@ import { Socket, type SocketOptions } from "./socket.ts"
  */
 export class Pair extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "PAIR"
+  protected readonly socketType: SocketTypeName = "PAIR";
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /** @ignore */
   override connect(url: string): void {
-    if (this.connections.size > 0) {
-      throw new Error("PAIR socket allows only one connection")
+    if (this.endpointCount > 0) {
+      throw new Error("PAIR socket allows only one connection");
     }
-    super.connect(url)
+    super.connect(url);
   }
 
   /** Send a message to the connected peer. */
   async send(msg: Message): Promise<void> {
-    let conn = this.readyConnections[0]
+    let conn = this.readyConnections[0];
     if (!conn) {
-      conn = await this.waitForReady()
+      conn = await this.waitForReady();
     }
-    conn.send(msg)
+    await this.sendOnConnection(conn, msg);
   }
 
   /** Wait for the next message. Resolves immediately if one is queued. */
-  async recv(): Promise<Message> {
-    return this.dequeueMessage()
+  recv(): Promise<Message> {
+    return this.dequeueMessage();
   }
 
   /** Async iterator that yields messages until the connection closes. */
   async *[Symbol.asyncIterator](): AsyncIterableIterator<Message> {
-    while (this.connections.size > 0) {
-      yield await this.recv()
+    while (this.hasOpenEndpoints()) {
+      yield await this.recv();
     }
   }
 
@@ -50,6 +50,6 @@ export class Pair extends Socket {
     _conn: Connection,
     msg: Message,
   ): void {
-    this.enqueueMessage(msg)
+    this.enqueueMessage(msg);
   }
 }

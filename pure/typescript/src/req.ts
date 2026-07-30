@@ -1,7 +1,7 @@
-import type { SocketTypeName } from "./command.ts"
-import type { Connection } from "./connection.ts"
-import { Message } from "./message.ts"
-import { Socket, type SocketOptions } from "./socket.ts"
+import type { SocketTypeName } from "./command.ts";
+import type { Connection } from "./connection.ts";
+import { Message } from "./message.ts";
+import { Socket, type SocketOptions } from "./socket.ts";
 
 /**
  * REQ (request) socket. Sends a message and awaits exactly one reply
@@ -9,14 +9,16 @@ import { Socket, type SocketOptions } from "./socket.ts"
  */
 export class Req extends Socket {
   /** @ignore */
-  protected readonly socketType: SocketTypeName = "REQ"
-  private pendingReply: ((msg: Message) => void) | null = null
-  private replyConnection: Connection | null = null
-  private rrIndex = 0
+  protected readonly socketType: SocketTypeName = "REQ";
+  private pendingReply: {
+    resolve: (msg: Message) => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  private replyConnection: Connection | null = null;
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
-    super(opts)
+    super(opts);
   }
 
   /**
@@ -25,38 +27,72 @@ export class Req extends Socket {
    */
   async send(msg: Message): Promise<Message> {
     if (this.pendingReply) {
-      throw new Error("REQ socket must receive a reply before sending again")
+      throw new Error("REQ socket must receive a reply before sending again");
     }
 
-    let conn = this.pickRoundRobin()
+    let conn = this.pickRoundRobin();
     if (!conn) {
-      conn = await this.waitForReady()
+      conn = await this.waitForReady();
     }
 
     const withDelimiter = new Message(
       new Uint8Array(0),
       ...msg.parts,
-    )
+    );
 
-    conn.send(withDelimiter)
-    this.replyConnection = conn
+    this.replyConnection = conn;
 
-    return new Promise((resolve) => {
-      this.pendingReply = resolve
-    })
+    let rejectReply: (error: Error) => void = () => {};
+    const reply = new Promise<Message>((resolve, reject) => {
+      this.pendingReply = { resolve, reject };
+      rejectReply = reject;
+    });
+
+    try {
+      conn.send(withDelimiter);
+    } catch (error) {
+      this.pendingReply = null;
+      this.replyConnection = null;
+      rejectReply(error instanceof Error ? error : new Error(String(error)));
+    }
+
+    return reply;
   }
 
   /** @ignore */
-  protected override onConnectionMessage(_conn: Connection, msg: Message): void {
-    if (!this.pendingReply) return
+  protected override onConnectionMessage(
+    _conn: Connection,
+    msg: Message,
+  ): void {
+    if (!this.pendingReply) return;
 
     // Strip empty delimiter
     if (msg.parts.length > 0 && msg.parts[0]!.byteLength === 0) {
-      const reply = Message.fromParts(msg.parts.slice(1))
-      const resolve = this.pendingReply
-      this.pendingReply = null
-      this.replyConnection = null
-      resolve(reply)
+      const reply = Message.fromParts(msg.parts.slice(1));
+      const pending = this.pendingReply;
+      this.pendingReply = null;
+      this.replyConnection = null;
+      pending.resolve(reply);
     }
+  }
+
+  /** @ignore */
+  protected override onConnectionClosed(conn: Connection): void {
+    if (this.replyConnection === conn && this.pendingReply) {
+      const pending = this.pendingReply;
+      this.pendingReply = null;
+      this.replyConnection = null;
+      pending.reject(new Error("Connection closed before REQ reply"));
+    }
+    super.onConnectionClosed(conn);
+  }
+
+  /** @ignore */
+  protected override onSocketClosed(error: Error): void {
+    if (!this.pendingReply) return;
+    const pending = this.pendingReply;
+    this.pendingReply = null;
+    this.replyConnection = null;
+    pending.reject(error);
   }
 }

@@ -81,8 +81,7 @@ export class Connection {
       this.lz4Encoder = new Lz4Encoder(opts.lz4Dict);
     }
 
-    const subprotocol = opts.plain ? "ZWS2.0/PLAIN" : "ZWS2.0/NULL";
-    const ws = new WebSocket(wsUrl, [subprotocol]);
+    const ws = new WebSocket(wsUrl, ["ZWS2.0"]);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => this.onOpen();
     ws.onmessage = (ev) => this.onWsMessage(ev);

@@ -36,7 +36,7 @@ class MockWebSocket {
   static CLOSED = 3;
 
   binaryType = "blob";
-  protocol = "ZWS2.0/NULL";
+  protocol = "ZWS2.0";
   readyState = MockWebSocket.CONNECTING;
   sentFrames: Uint8Array[] = [];
 
@@ -108,14 +108,14 @@ function commandFrame(name: string, body = new Uint8Array(0)): Uint8Array {
 }
 
 describe("Connection", () => {
-  it("opens WebSocket with ZWS2.0/NULL subprotocol", () => {
+  it("opens WebSocket with ZWS2.0 subprotocol", () => {
     new Connection("ws://localhost:8081", {
       socketType: "SUB",
       identity: new Uint8Array(0),
     });
     expect(lastCreatedWs).not.toBeNull();
     expect(lastCreatedWs!.url).toBe("ws://localhost:8081");
-    expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0/NULL"]);
+    expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0"]);
   });
 
   it("sets binaryType to arraybuffer", () => {
@@ -126,14 +126,14 @@ describe("Connection", () => {
     expect(lastCreatedWs!.binaryType).toBe("arraybuffer");
   });
 
-  it("opens WebSocket with ZWS2.0/PLAIN subprotocol when configured", () => {
+  it("opens WebSocket with ZWS2.0 subprotocol when PLAIN is configured", () => {
     new Connection("ws://localhost:8081", {
       socketType: "PUSH",
       identity: new Uint8Array(0),
       plain: { username: "alice", password: "secret" },
     });
 
-    expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0/PLAIN"]);
+    expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0"]);
   });
 
   it("strips lz4+ prefix from URL", () => {

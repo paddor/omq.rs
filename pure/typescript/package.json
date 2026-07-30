@@ -3,6 +3,7 @@
     "check": "deno check src/mod.ts",
     "lint": "deno lint",
     "test": "vitest run",
+    "test:interop": "OMQ_TS_INTEROP=1 vitest run test/interop.test.ts --test-timeout 120000",
     "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
   },
   "dependencies": {

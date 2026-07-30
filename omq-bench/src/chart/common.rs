@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::process::Command;
+use std::sync::OnceLock;
 
 use plotters::prelude::*;
 
@@ -40,6 +42,12 @@ pub(crate) struct FairnessEntry {
 }
 
 pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
+
+#[derive(Clone, Copy)]
+enum LegendVersionMode {
+    Hide,
+    ShowOtherImpls,
+}
 
 // ── colors ─────────────────────────────────────────────────────
 
@@ -259,6 +267,90 @@ pub(crate) fn postprocess_svg(
 
 // ── legend table ───────────────────────────────────────────────
 
+static IMPL_VERSIONS: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
+
+fn impl_versions() -> &'static BTreeMap<&'static str, String> {
+    IMPL_VERSIONS.get_or_init(|| {
+        let mut versions = BTreeMap::new();
+        if let Some(version) = libzmq_version() {
+            versions.insert("libzmq", version);
+        }
+        if let Some(version) = cargo_lock_version("scripts/zmqrs_bench_peer/Cargo.lock", "zeromq") {
+            versions.insert("zmq.rs", version);
+        }
+        if let Some(version) = cargo_lock_version("scripts/rzmq_bench_peer/Cargo.lock", "rzmq") {
+            versions.insert("rzmq", version);
+        }
+        versions
+    })
+}
+
+fn libzmq_version() -> Option<String> {
+    let output = Command::new("pkg-config")
+        .args(["--modversion", "libzmq"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!version.is_empty()).then_some(version)
+}
+
+fn cargo_lock_version(rel_lock_path: &str, package: &str) -> Option<String> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    let content = std::fs::read_to_string(repo.join(rel_lock_path)).ok()?;
+
+    let mut name_matches = false;
+    let mut version = None;
+    for line in content.lines().map(str::trim) {
+        if line == "[[package]]" {
+            if name_matches {
+                return version;
+            }
+            name_matches = false;
+            version = None;
+            continue;
+        }
+        if let Some(name) = quoted_toml_value(line, "name") {
+            name_matches = name == package;
+        } else if let Some(v) = quoted_toml_value(line, "version") {
+            version = Some(v.to_string());
+        }
+    }
+
+    name_matches.then_some(version).flatten()
+}
+
+fn quoted_toml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let value = line.strip_prefix(key)?.strip_prefix(" = \"")?;
+    let end = value.find('"')?;
+    Some(&value[..end])
+}
+
+fn other_impl_version(key: &str) -> Option<&'static str> {
+    let version_key = if key.starts_with("libzmq") {
+        "libzmq"
+    } else if key == "zmq.rs" {
+        "zmq.rs"
+    } else if matches!(key, "rzmq" | "rzmq-iouring") {
+        "rzmq"
+    } else {
+        return None;
+    };
+    impl_versions().get(version_key).map(String::as_str)
+}
+
+fn legend_label(imp: &Impl, version_mode: LegendVersionMode) -> String {
+    match version_mode {
+        LegendVersionMode::Hide => imp.label.to_string(),
+        LegendVersionMode::ShowOtherImpls => other_impl_version(imp.key).map_or_else(
+            || imp.label.to_string(),
+            |version| format!("{} v{version}", imp.label),
+        ),
+    }
+}
+
 pub(crate) fn draw_legend_table(
     table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
     impls: &[&Impl],
@@ -266,15 +358,33 @@ pub(crate) fn draw_legend_table(
     snd_label: &str,
     rcv_label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    draw_legend_table_with_versions(
+        table_area,
+        impls,
+        cpu,
+        snd_label,
+        rcv_label,
+        LegendVersionMode::Hide,
+    )
+}
+
+fn draw_legend_table_with_versions(
+    table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    impls: &[&Impl],
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    rcv_label: &str,
+    version_mode: LegendVersionMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
     let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
     let style_dim = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
 
     let col_swatch = 78;
     let col_name = col_swatch + 20;
-    let col_threads = 230;
-    let col_snd = 340;
-    let col_rcv = 430;
+    let col_threads = 250;
+    let col_snd = 360;
+    let col_rcv = 450;
     let row_h = 16i32;
 
     table_area.draw_text("threads", &style_hdr, (col_threads, 4))?;
@@ -295,7 +405,8 @@ pub(crate) fn draw_legend_table(
             vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
             imp.color.stroke_width(2),
         ))?;
-        table_area.draw_text(imp.label, &style_val, (col_name, y))?;
+        let label = legend_label(imp, version_mode);
+        table_area.draw_text(&label, &style_val, (col_name, y))?;
 
         let threads = if imp.threads.is_empty() {
             format!("{cores} MT")
@@ -651,11 +762,39 @@ pub(crate) fn draw_throughput_dual_panel(
         snd_label,
         rcv_label,
         MsgAxisMode::Auto,
+        LegendVersionMode::Hide,
     )
 }
 
 #[expect(clippy::too_many_arguments)]
-pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs(
+pub(crate) fn draw_throughput_dual_panel_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    tput: &ValMap,
+    msgs: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    rcv_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    draw_throughput_dual_panel_with_msg_axis(
+        out_path,
+        title,
+        sizes,
+        impls,
+        tput,
+        msgs,
+        cpu,
+        snd_label,
+        rcv_label,
+        MsgAxisMode::Auto,
+        LegendVersionMode::ShowOtherImpls,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
     out_path: &Path,
     title: &str,
     sizes: &[u64],
@@ -677,6 +816,7 @@ pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs(
         snd_label,
         rcv_label,
         MsgAxisMode::Fixed2M,
+        LegendVersionMode::ShowOtherImpls,
     )
 }
 
@@ -692,6 +832,7 @@ fn draw_throughput_dual_panel_with_msg_axis(
     snd_label: &str,
     rcv_label: &str,
     msg_axis: MsgAxisMode,
+    version_mode: LegendVersionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
         .iter()
@@ -759,7 +900,14 @@ fn draw_throughput_dual_panel_with_msg_axis(
         )?;
     }
 
-    draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
+    draw_legend_table_with_versions(
+        &table_area,
+        &present,
+        cpu,
+        snd_label,
+        rcv_label,
+        version_mode,
+    )?;
     root.present()?;
     drop(root);
 
@@ -908,6 +1056,50 @@ pub(crate) fn draw_latency_single_panel(
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    draw_latency_single_panel_with_version_mode(
+        out_path,
+        title,
+        sizes,
+        impls,
+        lat,
+        cpu,
+        lat_range,
+        LegendVersionMode::Hide,
+    )
+}
+
+pub(crate) fn draw_latency_single_panel_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    lat: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    lat_range: (f64, f64),
+) -> Result<(), Box<dyn std::error::Error>> {
+    draw_latency_single_panel_with_version_mode(
+        out_path,
+        title,
+        sizes,
+        impls,
+        lat,
+        cpu,
+        lat_range,
+        LegendVersionMode::ShowOtherImpls,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_latency_single_panel_with_version_mode(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    lat: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    lat_range: (f64, f64),
+    version_mode: LegendVersionMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
         .iter()
         .filter(|imp| {
@@ -973,7 +1165,14 @@ pub(crate) fn draw_latency_single_panel(
         )?;
     }
 
-    draw_legend_table(&table_area, &present, cpu, "req CPU%", "rep CPU%")?;
+    draw_legend_table_with_versions(
+        &table_area,
+        &present,
+        cpu,
+        "req CPU%",
+        "rep CPU%",
+        version_mode,
+    )?;
     root.present()?;
     drop(root);
 

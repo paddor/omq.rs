@@ -1,7 +1,7 @@
 # @zeromq/omq
 
-ZMQ client library for browsers over WebSocket. Implements ZMTP 3.x NULL
-security over the ZWS 2.0 framing protocol, with optional LZ4 dictionary
+ZMQ client library for browsers over WebSocket. Implements ZMTP 3.x NULL and
+PLAIN security over the ZWS 2.0 framing protocol, with optional LZ4 dictionary
 compression.
 
 Supports connect-side WebSocket sockets for REQ/REP, PUB/SUB, XPUB/XSUB,
@@ -79,6 +79,21 @@ const push = new Push({
 });
 push.connect("wss://broker.example.com/push");
 ```
+
+### TLS and Client Authentication
+
+Use `wss://` for transport privacy. Browser JavaScript cannot choose or provide
+a client certificate/key for `WebSocket`; mTLS has to be handled by the browser
+profile, operating system, or a TLS-terminating proxy. It is not a portable
+application-level auth mechanism for this library.
+
+For browser clients, prefer `wss://` plus PLAIN with a scoped token or JWT as
+the password when the server needs to authenticate the application peer.
+
+CURVE is not implemented in `omq.ts` for now. Over `wss://`, it would mostly
+duplicate TLS encryption and add a larger ZMTP crypto handshake surface. CURVE
+over `ws://` could make sense later for ZMQ-style key identity without TLS
+client-certificate deployment, but it is intentionally out of scope today.
 
 ### Robustness Options
 

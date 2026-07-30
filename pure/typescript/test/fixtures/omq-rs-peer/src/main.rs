@@ -48,6 +48,38 @@ async fn pull_bind(endpoint: Endpoint, expected: String, auth: &str) {
     assert_eq!(msg.part_bytes(0).unwrap(), expected.as_bytes());
 }
 
+async fn pull_restart_bind(endpoint: Endpoint, before: String, after: String, auth: &str) {
+    let pull1 = Socket::new(SocketType::Pull, options(auth));
+    let bound = pull1.bind(endpoint).await.expect("pull1 bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), pull1.recv())
+        .await
+        .expect("pull1 recv timed out")
+        .expect("pull1 recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), before.as_bytes());
+
+    pull1.close().await.expect("pull1 close");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let pull2 = Socket::new(SocketType::Pull, options(auth));
+    let mut bound_again = false;
+    for _ in 0..40 {
+        if pull2.bind(bound.clone()).await.is_ok() {
+            bound_again = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(bound_again, "pull2 failed to bind after pull1 closed");
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), pull2.recv())
+        .await
+        .expect("pull2 recv timed out")
+        .expect("pull2 recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), after.as_bytes());
+}
+
 async fn push_bind(endpoint: Endpoint, payload: String, auth: &str) {
     let push = Socket::new(SocketType::Push, options(auth));
     let bound = push.bind(endpoint).await.expect("push bind");
@@ -105,6 +137,12 @@ async fn main() {
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             push_bind(endpoint, payload, &auth).await;
+        }
+        "pull-restart-bind" => {
+            let before = args.next().expect("before");
+            let after = args.next().expect("after");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            pull_restart_bind(endpoint, before, after, &auth).await;
         }
         "rep-bind" => {
             let payload = args.next().expect("payload");

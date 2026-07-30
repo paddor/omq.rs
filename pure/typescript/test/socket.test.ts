@@ -1811,6 +1811,29 @@ describe("Socket connection management", () => {
     }
   });
 
+  it("rejects sends beyond sendHighWaterMark while waiting for ready", async () => {
+    const push = new Push({ sendHighWaterMark: 1 });
+    push.connect("ws://localhost:8083");
+    const ws = createdSockets[0]!;
+
+    const first = push.send(Message.from("first"));
+    await expect(push.send(Message.from("second"))).rejects.toThrow(
+      "Send high water mark",
+    );
+
+    makeReady(ws, "PULL");
+    await first;
+    const messages = dataFramesAfterReady(ws);
+    expect(messages.length).toBe(1);
+    expect(new TextDecoder().decode(messages[0]![0])).toBe("first");
+  });
+
+  it("validates sendHighWaterMark", () => {
+    expect(() => new Push({ sendHighWaterMark: -1 })).toThrow(
+      "sendHighWaterMark",
+    );
+  });
+
   it("rejects receive waiters on close", async () => {
     const pull = new Pull();
     pull.connect("ws://localhost:8084");

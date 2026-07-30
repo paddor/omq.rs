@@ -54,6 +54,8 @@ export interface SocketOptions {
   reconnectMaxDelayMs?: number;
   /** Maximum queued inbound messages. New inbound messages drop when full. */
   receiveHighWaterMark?: number;
+  /** Maximum sends waiting for a ready connection. New sends reject when full. */
+  sendHighWaterMark?: number;
   /** Called when a connection or protocol error occurs. */
   onError?: (error: Error) => void;
 }
@@ -94,6 +96,12 @@ export abstract class Socket {
       validateNonNegativeInteger(
         "receiveHighWaterMark",
         opts.receiveHighWaterMark,
+      );
+    }
+    if (opts.sendHighWaterMark !== undefined) {
+      validateNonNegativeInteger(
+        "sendHighWaterMark",
+        opts.sendHighWaterMark,
       );
     }
     if (opts.reconnectInitialDelayMs !== undefined) {
@@ -316,6 +324,12 @@ export abstract class Socket {
     if (this.closed) return Promise.reject(new Error("Socket closed"));
     if (this.endpoints.size === 0) {
       return Promise.reject(new Error("Socket has no connections"));
+    }
+    if (
+      this.opts.sendHighWaterMark !== undefined &&
+      this.readyWaiters.length >= this.opts.sendHighWaterMark
+    ) {
+      return Promise.reject(new Error("Send high water mark reached"));
     }
     return new Promise((resolve, reject) => {
       this.readyWaiters.push({ resolve, reject });

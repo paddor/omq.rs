@@ -57,6 +57,14 @@ fn print_endpoint(endpoint: &Endpoint) {
 
 type BrowserState = Arc<Mutex<HashMap<String, String>>>;
 
+struct BrowserDelayedBind {
+    endpoint: Endpoint,
+    options: Options,
+    delay_ms: u64,
+}
+
+type BrowserDelayedBinds = Arc<Mutex<HashMap<String, BrowserDelayedBind>>>;
+
 fn record_browser(state: &BrowserState, key: &str, value: impl Into<String>) {
     state
         .lock()
@@ -130,7 +138,7 @@ fn part_string(msg: &Message, idx: usize) -> String {
     String::from_utf8_lossy(&msg.part_bytes(idx).unwrap_or_default()).into_owned()
 }
 
-async fn browser_control_rep(rep: Socket, state: BrowserState) {
+async fn browser_control_rep(rep: Socket, state: BrowserState, delayed_binds: BrowserDelayedBinds) {
     loop {
         let msg = rep.recv().await.expect("browser control recv");
         let cmd = part_string(&msg, 0);
@@ -141,6 +149,23 @@ async fn browser_control_rep(rep: Socket, state: BrowserState) {
             "ok".to_string()
         } else if let Some(key) = cmd.strip_prefix("get:") {
             read_browser(&state, key)
+        } else if let Some(key) = cmd.strip_prefix("bind-delayed:") {
+            let delayed = delayed_binds
+                .lock()
+                .expect("browser delayed binds mutex poisoned")
+                .remove(key);
+            if let Some(delayed) = delayed {
+                tokio::spawn(browser_pull_delayed_bind(
+                    delayed.endpoint,
+                    key.to_string(),
+                    delayed.options,
+                    delayed.delay_ms,
+                    state.clone(),
+                ));
+                "ok".to_string()
+            } else {
+                format!("missing:{key}")
+            }
         } else {
             format!("unknown:{cmd}")
         };
@@ -217,9 +242,9 @@ async fn browser_sub_record(sub: Socket, name: &'static str, state: BrowserState
     }
 }
 
-async fn browser_bind_retry(endpoint: &Endpoint, label: &str) -> Socket {
-    let pull = Socket::new(SocketType::Pull, Options::default());
+async fn browser_bind_retry(endpoint: &Endpoint, options: Options, label: &str) -> Socket {
     for _ in 0..80 {
+        let pull = Socket::new(SocketType::Pull, options.clone());
         if pull.bind(endpoint.clone()).await.is_ok() {
             return pull;
         }
@@ -228,7 +253,12 @@ async fn browser_bind_retry(endpoint: &Endpoint, label: &str) -> Socket {
     panic!("{label} bind timed out");
 }
 
-async fn browser_pull_restart_loop(endpoint: Endpoint, mut pull: Socket, state: BrowserState) {
+async fn browser_pull_restart_loop(
+    endpoint: Endpoint,
+    mut pull: Socket,
+    options: Options,
+    state: BrowserState,
+) {
     loop {
         let msg = pull.recv().await.expect("browser restart first recv");
         record_browser(&state, "restart_first", part_string(&msg, 0));
@@ -236,13 +266,28 @@ async fn browser_pull_restart_loop(endpoint: Endpoint, mut pull: Socket, state: 
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let pull2 = browser_bind_retry(&endpoint, "browser restart second").await;
+        let pull2 = browser_bind_retry(&endpoint, options.clone(), "browser restart second").await;
         let msg = pull2.recv().await.expect("browser restart second recv");
         record_browser(&state, "restart_second", part_string(&msg, 0));
         pull2.close().await.expect("browser restart second close");
 
         tokio::time::sleep(Duration::from_millis(300)).await;
-        pull = browser_bind_retry(&endpoint, "browser restart first").await;
+        pull = browser_bind_retry(&endpoint, options.clone(), "browser restart first").await;
+    }
+}
+
+async fn browser_pull_delayed_bind(
+    endpoint: Endpoint,
+    name: String,
+    options: Options,
+    delay_ms: u64,
+    state: BrowserState,
+) {
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    let pull = bind_socket(SocketType::Pull, endpoint, options).await;
+    loop {
+        let msg = pull.recv().await.expect("browser delayed pull recv");
+        record_browser(&state, &name, part_string(&msg, 0));
     }
 }
 
@@ -254,6 +299,7 @@ async fn bind_socket(socket_type: SocketType, endpoint: Endpoint, options: Optio
 
 async fn browser_bind(base: u16, host: String) {
     let state: BrowserState = Arc::new(Mutex::new(HashMap::new()));
+    let delayed_binds: BrowserDelayedBinds = Arc::new(Mutex::new(HashMap::new()));
     let plain = Options::default().plain_server(accept_alice);
     let (cert_pem, key_pem) = self_signed_tls();
 
@@ -359,8 +405,58 @@ async fn browser_bind(base: u16, host: String) {
     )
     .await;
     let lz4_wss_push_monitor = lz4_wss_push.monitor();
+    let restart_lz4_wss_endpoint = browser_lz4_wss(&host, base, 17);
+    let restart_lz4_wss_pull = bind_socket(
+        SocketType::Pull,
+        restart_lz4_wss_endpoint.clone(),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let delayed_ws_endpoint = browser_ws(&host, base, 18);
+    let delayed_lz4_ws_endpoint = browser_lz4_ws(&host, base, 19);
+    let delayed_wss_endpoint = browser_wss(&host, base, 20);
+    let delayed_lz4_wss_endpoint = browser_lz4_wss(&host, base, 21);
 
-    tokio::spawn(browser_control_rep(control, state.clone()));
+    for (name, endpoint, options) in [
+        (
+            "connect_before_bind_ws",
+            delayed_ws_endpoint,
+            Options::default(),
+        ),
+        (
+            "connect_before_bind_lz4_ws",
+            delayed_lz4_ws_endpoint,
+            Options::default(),
+        ),
+        (
+            "connect_before_bind_wss",
+            delayed_wss_endpoint,
+            wss_options(&cert_pem, &key_pem),
+        ),
+        (
+            "connect_before_bind_lz4_wss",
+            delayed_lz4_wss_endpoint,
+            wss_options(&cert_pem, &key_pem),
+        ),
+    ] {
+        delayed_binds
+            .lock()
+            .expect("browser delayed binds mutex poisoned")
+            .insert(
+                name.to_string(),
+                BrowserDelayedBind {
+                    endpoint,
+                    options,
+                    delay_ms: 750,
+                },
+            );
+    }
+
+    tokio::spawn(browser_control_rep(
+        control,
+        state.clone(),
+        delayed_binds.clone(),
+    ));
     tokio::spawn(browser_rep_echo(rep_ws, "rep_ws", state.clone()));
     tokio::spawn(browser_pull_record(pull_ws, "pull_ws", state.clone()));
     tokio::spawn(browser_push_on_handshake(
@@ -395,6 +491,7 @@ async fn browser_bind(base: u16, host: String) {
     tokio::spawn(browser_pull_restart_loop(
         restart_endpoint,
         restart_pull,
+        Options::default(),
         state.clone(),
     ));
     tokio::spawn(browser_rep_echo(wss_rep, "wss_rep", state.clone()));
@@ -421,9 +518,14 @@ async fn browser_bind(base: u16, host: String) {
         lz4_wss_push_monitor,
         "lz4_wss_push",
         "push-lz4-wss-from-rust",
-        state,
+        state.clone(),
     ));
-
+    tokio::spawn(browser_pull_restart_loop(
+        restart_lz4_wss_endpoint,
+        restart_lz4_wss_pull,
+        wss_options(&cert_pem, &key_pem),
+        state.clone(),
+    ));
     println!("BROWSER_READY");
     println!("control ws://{host}:{base}/");
     for (name, offset, scheme, note) in [
@@ -443,6 +545,11 @@ async fn browser_bind(base: u16, host: String) {
         ("wss_pull_plain", 14, "wss", " PLAIN"),
         ("lz4_wss_pull", 15, "lz4+wss", ""),
         ("lz4_wss_push", 16, "lz4+wss", ""),
+        ("restart_lz4_wss_pull", 17, "lz4+wss", ""),
+        ("connect_before_bind_ws", 18, "ws", ""),
+        ("connect_before_bind_lz4_ws", 19, "lz4+ws", ""),
+        ("connect_before_bind_wss", 20, "wss", ""),
+        ("connect_before_bind_lz4_wss", 21, "lz4+wss", ""),
     ] {
         println!("{name} {scheme}://{host}:{}/{}", base + offset, note);
     }

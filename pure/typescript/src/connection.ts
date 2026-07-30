@@ -128,13 +128,11 @@ export class Connection {
 
   close(): void {
     this.pendingParts = [];
-    if (this.ws) {
-      this.state = "closed";
-      this.ws.close();
-      this.ws = null;
-    } else {
-      this.state = "closed";
-    }
+    const ws = this.ws;
+    this.state = "closed";
+    this.ws = null;
+    if (ws) ws.close();
+    this.onWsClose();
   }
 
   private onOpen(): void {

@@ -116,6 +116,22 @@ function withTimeout<T>(
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  describeFailure: () => string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await delay(25);
+  }
+  throw new Error(describeFailure());
+}
+
 async function tsPushToRustPull(
   endpoint: string,
   payload: string,
@@ -267,6 +283,67 @@ async function rustPubToTsSub(
   }
 }
 
+async function tsPushReconnectsToRustPullRestart(
+  endpoint: string,
+  auth: "null" | "plain" = "null",
+): Promise<void> {
+  const peer = await startPeer([
+    "pull-restart-bind",
+    endpoint,
+    "before",
+    "after",
+    auth,
+  ]);
+  const errors: Error[] = [];
+  const push = new Push(
+    auth === "plain"
+      ? {
+        plain: { username: "alice", password: "secret" },
+        reconnectInitialDelayMs: 50,
+        reconnectMaxDelayMs: 50,
+        onError: (error) => errors.push(error),
+      }
+      : {
+        reconnectInitialDelayMs: 50,
+        reconnectMaxDelayMs: 50,
+        onError: (error) => errors.push(error),
+      },
+  );
+  try {
+    push.connect(peer.endpoint);
+    await withTimeout(
+      push.send(Message.from("before")),
+      5_000,
+      () =>
+        `initial TS PUSH send timed out ready=${push.readyCount} conn=${push.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await waitUntil(
+      () => push.readyCount === 0,
+      () =>
+        `TS PUSH did not observe Rust restart ready=${push.readyCount} conn=${push.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await withTimeout(
+      push.send(Message.from("after")),
+      10_000,
+      () =>
+        `post-restart TS PUSH send timed out ready=${push.readyCount} conn=${push.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust restart PULL did not exit\n${peer.stderr()}`,
+    );
+  } finally {
+    push.close();
+  }
+}
+
 describeInterop("omq.rs WebSocket interop", () => {
   it("sends from TypeScript PUSH to Rust PULL over ws", async () => {
     await tsPushToRustPull("ws://127.0.0.1:0/", "ts-to-rust");
@@ -316,4 +393,16 @@ describeInterop("omq.rs WebSocket interop", () => {
       "compressed-headline",
     );
   }, 120_000);
+
+  it("reconnects TypeScript PUSH after Rust PULL restart over ws", async () => {
+    await tsPushReconnectsToRustPullRestart("ws://127.0.0.1:0/");
+  }, 120_000);
+
+  it(
+    "reconnects TypeScript PUSH after Rust PULL restart over lz4+ws",
+    async () => {
+      await tsPushReconnectsToRustPullRestart("lz4+ws://127.0.0.1:0/");
+    },
+    120_000,
+  );
 });

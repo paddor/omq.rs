@@ -30,3 +30,9 @@ certificate; the Playwright test first verifies that normal TLS validation
 rejects it, then lets Firefox accept that local test certificate.
 
 Playwright writes `test-results/` and `playwright-report/`; both are ignored.
+
+## CI
+
+GitHub Actions runs `npm run ci` on every push and pull request. The interop job
+also clones `paddor/omq.rs` as the sibling `../omq.rs`, installs Firefox, and
+runs `npm run test:interop` plus `npm run test:browser`.

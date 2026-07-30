@@ -1,8 +1,13 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_tokio::{Endpoint, MechanismPeerInfo, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::options::WssTls;
+use omq_tokio::{
+    Endpoint, MechanismPeerInfo, Message, MonitorEvent, MonitorStream, Options, Socket, SocketType,
+};
 
 fn accept_alice(peer: &MechanismPeerInfo) -> bool {
     peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("secret")
@@ -31,9 +36,419 @@ async fn wait_handshake(sock: &Socket) {
     .expect("handshake timed out");
 }
 
+async fn wait_join(mut monitor: MonitorStream) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match monitor.recv().await {
+                Ok(MonitorEvent::JoinReceived { .. }) => return,
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before JOIN: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("JOIN timed out");
+}
+
 fn print_endpoint(endpoint: &Endpoint) {
     println!("ENDPOINT {endpoint}");
     io::stdout().flush().unwrap();
+}
+
+type BrowserState = Arc<Mutex<HashMap<String, String>>>;
+
+fn record_browser(state: &BrowserState, key: &str, value: impl Into<String>) {
+    state
+        .lock()
+        .expect("browser state mutex poisoned")
+        .insert(key.to_string(), value.into());
+}
+
+fn read_browser(state: &BrowserState, key: &str) -> String {
+    state
+        .lock()
+        .expect("browser state mutex poisoned")
+        .get(key)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn clear_browser(state: &BrowserState) {
+    state.lock().expect("browser state mutex poisoned").clear();
+}
+
+fn browser_ws(host: &str, base: u16, offset: u16) -> Endpoint {
+    format!("ws://{host}:{}/", base + offset).parse().unwrap()
+}
+
+fn browser_lz4_ws(host: &str, base: u16, offset: u16) -> Endpoint {
+    format!("lz4+ws://{host}:{}/", base + offset)
+        .parse()
+        .unwrap()
+}
+
+fn browser_wss(host: &str, base: u16, offset: u16) -> Endpoint {
+    format!("wss://{host}:{}/", base + offset).parse().unwrap()
+}
+
+fn browser_lz4_wss(host: &str, base: u16, offset: u16) -> Endpoint {
+    format!("lz4+wss://{host}:{}/", base + offset)
+        .parse()
+        .unwrap()
+}
+
+fn self_signed_tls() -> (Vec<u8>, Vec<u8>) {
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let cert_pem = certified.cert.pem().into_bytes();
+    let key_pem = certified.signing_key.serialize_pem().into_bytes();
+    (cert_pem, key_pem)
+}
+
+fn wss_options(cert_pem: &[u8], key_pem: &[u8]) -> Options {
+    Options {
+        wss_tls: WssTls {
+            server_cert_pem: Some(cert_pem.to_vec()),
+            server_key_pem: Some(key_pem.to_vec()),
+            accept_invalid_certs: false,
+        },
+        ..Options::default()
+    }
+}
+
+fn plain_wss_options(cert_pem: &[u8], key_pem: &[u8]) -> Options {
+    Options {
+        wss_tls: WssTls {
+            server_cert_pem: Some(cert_pem.to_vec()),
+            server_key_pem: Some(key_pem.to_vec()),
+            accept_invalid_certs: false,
+        },
+        ..Options::default().plain_server(accept_alice)
+    }
+}
+
+fn part_string(msg: &Message, idx: usize) -> String {
+    String::from_utf8_lossy(&msg.part_bytes(idx).unwrap_or_default()).into_owned()
+}
+
+async fn browser_control_rep(rep: Socket, state: BrowserState) {
+    loop {
+        let msg = rep.recv().await.expect("browser control recv");
+        let cmd = part_string(&msg, 0);
+        let reply = if cmd == "ping" {
+            "pong".to_string()
+        } else if cmd == "clear" {
+            clear_browser(&state);
+            "ok".to_string()
+        } else if let Some(key) = cmd.strip_prefix("get:") {
+            read_browser(&state, key)
+        } else {
+            format!("unknown:{cmd}")
+        };
+        rep.send(Message::single(reply))
+            .await
+            .expect("browser control send");
+    }
+}
+
+async fn browser_rep_echo(rep: Socket, name: &'static str, state: BrowserState) {
+    loop {
+        let msg = rep.recv().await.expect("browser rep recv");
+        let req = part_string(&msg, 0);
+        record_browser(&state, name, &req);
+        rep.send(Message::single(format!("reply:{req}")))
+            .await
+            .expect("browser rep send");
+    }
+}
+
+async fn browser_pull_record(pull: Socket, name: &'static str, state: BrowserState) {
+    loop {
+        let msg = pull.recv().await.expect("browser pull recv");
+        record_browser(&state, name, part_string(&msg, 0));
+    }
+}
+
+async fn browser_push_on_handshake(
+    push: Socket,
+    mut monitor: MonitorStream,
+    name: &'static str,
+    payload: &'static str,
+    state: BrowserState,
+) {
+    loop {
+        match monitor.recv().await {
+            Ok(MonitorEvent::HandshakeSucceeded { .. }) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                push.send(Message::single(payload))
+                    .await
+                    .expect("browser push send");
+                record_browser(&state, name, payload);
+            }
+            Ok(_) => {}
+            Err(e) => panic!("browser push monitor closed: {e:?}"),
+        }
+    }
+}
+
+async fn browser_pub_repeat(
+    pub_: Socket,
+    name: &'static str,
+    topic: &'static str,
+    payload: &'static str,
+    state: BrowserState,
+) {
+    loop {
+        pub_.send(Message::multipart([topic, payload]))
+            .await
+            .expect("browser pub send");
+        record_browser(&state, name, format!("{topic}|{payload}"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn browser_sub_record(sub: Socket, name: &'static str, state: BrowserState) {
+    loop {
+        let msg = sub.recv().await.expect("browser sub recv");
+        record_browser(
+            &state,
+            name,
+            format!("{}|{}", part_string(&msg, 0), part_string(&msg, 1)),
+        );
+    }
+}
+
+async fn browser_bind_retry(endpoint: &Endpoint, label: &str) -> Socket {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    for _ in 0..80 {
+        if pull.bind(endpoint.clone()).await.is_ok() {
+            return pull;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{label} bind timed out");
+}
+
+async fn browser_pull_restart_loop(endpoint: Endpoint, mut pull: Socket, state: BrowserState) {
+    loop {
+        let msg = pull.recv().await.expect("browser restart first recv");
+        record_browser(&state, "restart_first", part_string(&msg, 0));
+        pull.close().await.expect("browser restart first close");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let pull2 = browser_bind_retry(&endpoint, "browser restart second").await;
+        let msg = pull2.recv().await.expect("browser restart second recv");
+        record_browser(&state, "restart_second", part_string(&msg, 0));
+        pull2.close().await.expect("browser restart second close");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        pull = browser_bind_retry(&endpoint, "browser restart first").await;
+    }
+}
+
+async fn bind_socket(socket_type: SocketType, endpoint: Endpoint, options: Options) -> Socket {
+    let socket = Socket::new(socket_type, options);
+    socket.bind(endpoint).await.expect("browser bind");
+    socket
+}
+
+async fn browser_bind(base: u16, host: String) {
+    let state: BrowserState = Arc::new(Mutex::new(HashMap::new()));
+    let plain = Options::default().plain_server(accept_alice);
+    let (cert_pem, key_pem) = self_signed_tls();
+
+    let control = bind_socket(
+        SocketType::Rep,
+        browser_ws(&host, base, 0),
+        Options::default(),
+    )
+    .await;
+    let rep_ws = bind_socket(
+        SocketType::Rep,
+        browser_ws(&host, base, 1),
+        Options::default(),
+    )
+    .await;
+    let pull_ws = bind_socket(
+        SocketType::Pull,
+        browser_ws(&host, base, 2),
+        Options::default(),
+    )
+    .await;
+    let push_ws = bind_socket(
+        SocketType::Push,
+        browser_ws(&host, base, 3),
+        Options::default(),
+    )
+    .await;
+    let push_ws_monitor = push_ws.monitor();
+
+    let sub_ws = Socket::new(SocketType::Sub, Options::default());
+    sub_ws
+        .subscribe("news.")
+        .await
+        .expect("browser sub subscribe");
+    sub_ws
+        .bind(browser_ws(&host, base, 4))
+        .await
+        .expect("browser sub bind");
+
+    let pub_ws = bind_socket(
+        SocketType::Pub,
+        browser_ws(&host, base, 5),
+        Options::default(),
+    )
+    .await;
+    let pull_plain = bind_socket(SocketType::Pull, browser_ws(&host, base, 6), plain.clone()).await;
+    let pull_plain_reject = bind_socket(SocketType::Pull, browser_ws(&host, base, 7), plain).await;
+    let pull_lz4 = bind_socket(
+        SocketType::Pull,
+        browser_lz4_ws(&host, base, 8),
+        Options::default(),
+    )
+    .await;
+    let push_lz4 = bind_socket(
+        SocketType::Push,
+        browser_lz4_ws(&host, base, 9),
+        Options::default(),
+    )
+    .await;
+    let push_lz4_monitor = push_lz4.monitor();
+    let restart_endpoint = browser_ws(&host, base, 10);
+    let restart_pull = bind_socket(
+        SocketType::Pull,
+        restart_endpoint.clone(),
+        Options::default(),
+    )
+    .await;
+    let wss_rep = bind_socket(
+        SocketType::Rep,
+        browser_wss(&host, base, 11),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let wss_pull = bind_socket(
+        SocketType::Pull,
+        browser_wss(&host, base, 12),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let wss_push = bind_socket(
+        SocketType::Push,
+        browser_wss(&host, base, 13),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let wss_push_monitor = wss_push.monitor();
+    let wss_pull_plain = bind_socket(
+        SocketType::Pull,
+        browser_wss(&host, base, 14),
+        plain_wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let lz4_wss_pull = bind_socket(
+        SocketType::Pull,
+        browser_lz4_wss(&host, base, 15),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let lz4_wss_push = bind_socket(
+        SocketType::Push,
+        browser_lz4_wss(&host, base, 16),
+        wss_options(&cert_pem, &key_pem),
+    )
+    .await;
+    let lz4_wss_push_monitor = lz4_wss_push.monitor();
+
+    tokio::spawn(browser_control_rep(control, state.clone()));
+    tokio::spawn(browser_rep_echo(rep_ws, "rep_ws", state.clone()));
+    tokio::spawn(browser_pull_record(pull_ws, "pull_ws", state.clone()));
+    tokio::spawn(browser_push_on_handshake(
+        push_ws,
+        push_ws_monitor,
+        "push_ws",
+        "push-ws-from-rust",
+        state.clone(),
+    ));
+    tokio::spawn(browser_sub_record(sub_ws, "sub_ws", state.clone()));
+    tokio::spawn(browser_pub_repeat(
+        pub_ws,
+        "pub_ws",
+        "news.rust",
+        "pub-ws-from-rust",
+        state.clone(),
+    ));
+    tokio::spawn(browser_pull_record(pull_plain, "pull_plain", state.clone()));
+    tokio::spawn(browser_pull_record(
+        pull_plain_reject,
+        "pull_plain_reject",
+        state.clone(),
+    ));
+    tokio::spawn(browser_pull_record(pull_lz4, "pull_lz4", state.clone()));
+    tokio::spawn(browser_push_on_handshake(
+        push_lz4,
+        push_lz4_monitor,
+        "push_lz4",
+        "push-lz4-from-rust",
+        state.clone(),
+    ));
+    tokio::spawn(browser_pull_restart_loop(
+        restart_endpoint,
+        restart_pull,
+        state.clone(),
+    ));
+    tokio::spawn(browser_rep_echo(wss_rep, "wss_rep", state.clone()));
+    tokio::spawn(browser_pull_record(wss_pull, "wss_pull", state.clone()));
+    tokio::spawn(browser_push_on_handshake(
+        wss_push,
+        wss_push_monitor,
+        "wss_push",
+        "push-wss-from-rust",
+        state.clone(),
+    ));
+    tokio::spawn(browser_pull_record(
+        wss_pull_plain,
+        "wss_pull_plain",
+        state.clone(),
+    ));
+    tokio::spawn(browser_pull_record(
+        lz4_wss_pull,
+        "lz4_wss_pull",
+        state.clone(),
+    ));
+    tokio::spawn(browser_push_on_handshake(
+        lz4_wss_push,
+        lz4_wss_push_monitor,
+        "lz4_wss_push",
+        "push-lz4-wss-from-rust",
+        state,
+    ));
+
+    println!("BROWSER_READY");
+    println!("control ws://{host}:{base}/");
+    for (name, offset, scheme, note) in [
+        ("rep_ws", 1, "ws", ""),
+        ("pull_ws", 2, "ws", ""),
+        ("push_ws", 3, "ws", ""),
+        ("sub_ws", 4, "ws", ""),
+        ("pub_ws", 5, "ws", ""),
+        ("pull_plain", 6, "ws", " PLAIN"),
+        ("pull_plain_reject", 7, "ws", " PLAIN"),
+        ("pull_lz4", 8, "lz4+ws", ""),
+        ("push_lz4", 9, "lz4+ws", ""),
+        ("restart_pull", 10, "ws", ""),
+        ("wss_rep", 11, "wss", ""),
+        ("wss_pull", 12, "wss", ""),
+        ("wss_push", 13, "wss", ""),
+        ("wss_pull_plain", 14, "wss", " PLAIN"),
+        ("lz4_wss_pull", 15, "lz4+wss", ""),
+        ("lz4_wss_push", 16, "lz4+wss", ""),
+    ] {
+        println!("{name} {scheme}://{host}:{}/{}", base + offset, note);
+    }
+    io::stdout().flush().unwrap();
+
+    std::future::pending::<()>().await;
 }
 
 async fn pull_bind(endpoint: Endpoint, expected: String, auth: &str) {
@@ -135,46 +550,188 @@ async fn sub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str
     assert_eq!(msg.part_bytes(1).unwrap(), payload.as_bytes());
 }
 
+async fn gather_bind(endpoint: Endpoint, expected: String, auth: &str) {
+    let gather = Socket::new(SocketType::Gather, options(auth));
+    let bound = gather.bind(endpoint).await.expect("gather bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), gather.recv())
+        .await
+        .expect("gather recv timed out")
+        .expect("gather recv");
+    assert_eq!(msg, Message::single(expected));
+}
+
+async fn scatter_bind(endpoint: Endpoint, payload: String, auth: &str) {
+    let scatter = Socket::new(SocketType::Scatter, options(auth));
+    let bound = scatter.bind(endpoint).await.expect("scatter bind");
+    print_endpoint(&bound);
+
+    wait_handshake(&scatter).await;
+    scatter
+        .send(Message::single(payload))
+        .await
+        .expect("scatter send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn server_bind(endpoint: Endpoint, expected: String, reply: String, auth: &str) {
+    let server = Socket::new(SocketType::Server, options(auth));
+    let bound = server.bind(endpoint).await.expect("server bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), server.recv())
+        .await
+        .expect("server recv timed out")
+        .expect("server recv");
+    assert_eq!(msg.part_bytes(1).unwrap(), expected.as_bytes());
+    let routing_id = msg.part_bytes(0).unwrap();
+    server
+        .send(Message::multipart([routing_id, Bytes::from(reply)]))
+        .await
+        .expect("server send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn radio_bind(endpoint: Endpoint, group: String, payload: String, auth: &str) {
+    let radio = Socket::new(SocketType::Radio, options(auth));
+    let monitor = radio.monitor();
+    let bound = radio.bind(endpoint).await.expect("radio bind");
+    print_endpoint(&bound);
+
+    wait_join(monitor).await;
+    radio
+        .send(Message::multipart([group, payload]))
+        .await
+        .expect("radio send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+async fn dish_bind(endpoint: Endpoint, group: String, payload: String, auth: &str) {
+    let dish = Socket::new(SocketType::Dish, options(auth));
+    dish.join(group.clone()).await.expect("dish join");
+    let bound = dish.bind(endpoint).await.expect("dish bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), dish.recv())
+        .await
+        .expect("dish recv timed out")
+        .expect("dish recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), group.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), payload.as_bytes());
+}
+
+async fn channel_bind(endpoint: Endpoint, expected: String, reply: String, auth: &str) {
+    let channel = Socket::new(SocketType::Channel, options(auth));
+    let bound = channel.bind(endpoint).await.expect("channel bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), channel.recv())
+        .await
+        .expect("channel recv timed out")
+        .expect("channel recv");
+    assert_eq!(msg, Message::single(expected));
+    channel
+        .send(Message::single(reply))
+        .await
+        .expect("channel send");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().expect("mode");
-    let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
 
     match mode.as_str() {
+        "browser-bind" => {
+            let base = args
+                .next()
+                .unwrap_or_else(|| "9105".to_string())
+                .parse()
+                .expect("base port");
+            let host = args.next().unwrap_or_else(|| "127.0.0.1".to_string());
+            browser_bind(base, host).await;
+        }
         "pull-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             pull_bind(endpoint, payload, &auth).await;
         }
         "push-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             push_bind(endpoint, payload, &auth).await;
         }
         "pull-restart-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let before = args.next().expect("before");
             let after = args.next().expect("after");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             pull_restart_bind(endpoint, before, after, &auth).await;
         }
         "rep-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let payload = args.next().expect("payload");
             let reply = args.next().expect("reply");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             rep_bind(endpoint, payload, reply, &auth).await;
         }
         "pub-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let topic = args.next().expect("topic");
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             pub_bind(endpoint, topic, payload, &auth).await;
         }
         "sub-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
             let topic = args.next().expect("topic");
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             sub_bind(endpoint, topic, payload, &auth).await;
+        }
+        "gather-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            gather_bind(endpoint, payload, &auth).await;
+        }
+        "scatter-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            scatter_bind(endpoint, payload, &auth).await;
+        }
+        "server-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let payload = args.next().expect("payload");
+            let reply = args.next().expect("reply");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            server_bind(endpoint, payload, reply, &auth).await;
+        }
+        "radio-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let group = args.next().expect("group");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            radio_bind(endpoint, group, payload, &auth).await;
+        }
+        "dish-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let group = args.next().expect("group");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            dish_bind(endpoint, group, payload, &auth).await;
+        }
+        "channel-bind" => {
+            let endpoint: Endpoint = args.next().expect("endpoint").parse().unwrap();
+            let payload = args.next().expect("payload");
+            let reply = args.next().expect("reply");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            channel_bind(endpoint, payload, reply, &auth).await;
         }
         other => panic!("unknown mode: {other}"),
     }

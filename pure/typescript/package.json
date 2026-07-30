@@ -4,12 +4,14 @@
     "lint": "deno lint",
     "test": "vitest run",
     "test:interop": "OMQ_TS_INTEROP=1 vitest run test/interop.test.ts --test-timeout 120000",
+    "test:browser": "playwright test --config=playwright.config.mjs",
     "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
   },
   "dependencies": {
     "@paddor/lz4rip": "npm:@jsr/paddor__lz4rip@^0.2.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@types/node": "^26.1.2",
     "vitest": "^4.1.10"
   }

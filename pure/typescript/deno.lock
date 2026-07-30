@@ -480,6 +480,7 @@
     "packageJson": {
       "dependencies": [
         "npm:@jsr/paddor__lz4rip@~0.2.7",
+        "npm:@playwright/test@^1.62.0",
         "npm:@types/node@^26.1.2",
         "npm:vitest@^4.1.10"
       ]

@@ -24,6 +24,9 @@ npm run test:browser
 
 The browser suite starts a Rust WebSocket peer, serves a temporary browser
 bundle, and checks native browser `WebSocket` plus WASM LZ4 paths. It covers
-`ws://`, `wss://`, `lz4+ws://`, `lz4+wss://`, PLAIN auth, and reconnect.
+`ws://`, `wss://`, `lz4+ws://`, `lz4+wss://`, PLAIN auth, reconnect, and
+connect-before-bind retries. The WSS fixture uses a generated self-signed
+certificate; the Playwright test first verifies that normal TLS validation
+rejects it, then lets Firefox accept that local test certificate.
 
 Playwright writes `test-results/` and `playwright-report/`; both are ignored.

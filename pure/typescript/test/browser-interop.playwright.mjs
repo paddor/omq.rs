@@ -2,10 +2,12 @@ import { expect, test } from "@playwright/test";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { connect as tlsConnect } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -130,6 +132,58 @@ async function findFreePortRange(count) {
   throw new Error("could not find free browser interop port range");
 }
 
+async function tlsProbe(host, port, rejectUnauthorized) {
+  return await new Promise((resolveProbe, rejectProbe) => {
+    const options = {
+      host,
+      port,
+      rejectUnauthorized,
+    };
+    if (isIP(host) === 0) options.servername = host;
+    const socket = tlsConnect(options);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      rejectProbe(new Error(`TLS probe timed out for ${host}:${port}`));
+    }, 5_000);
+
+    socket.once("secureConnect", () => {
+      clearTimeout(timer);
+      const cert = socket.getPeerCertificate(true);
+      socket.end();
+      resolveProbe({ cert });
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolveProbe({ error });
+    });
+  });
+}
+
+async function verifySelfSignedWssCertificate(host, port) {
+  const rejected = await tlsProbe(host, port, true);
+  expect(rejected.error).toBeDefined();
+  expect(`${rejected.error.code ?? ""} ${rejected.error.message}`).toMatch(
+    /SELF_SIGNED|self-signed/i,
+  );
+
+  const accepted = await tlsProbe(host, port, false);
+  if (accepted.error) throw accepted.error;
+  const cert = accepted.cert;
+  expect(cert.raw?.byteLength ?? 0).toBeGreaterThan(0);
+  expect(cert.fingerprint256).toMatch(/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+  expect(cert.issuerCertificate?.fingerprint256 ?? cert.fingerprint256).toBe(
+    cert.fingerprint256,
+  );
+
+  return [
+    `fingerprint256=${cert.fingerprint256}`,
+    `subject=${JSON.stringify(cert.subject)}`,
+    `issuer=${JSON.stringify(cert.issuer)}`,
+    `subjectaltname=${cert.subjectaltname ?? ""}`,
+  ].join("\n");
+}
+
 function startBrowserPeer(basePort) {
   const child = spawn("cargo", [
     "run",
@@ -221,8 +275,16 @@ test("Firefox browser interop with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    const basePort = await findFreePortRange(17);
+    const basePort = await findFreePortRange(22);
     peer = await startBrowserPeer(basePort);
+    const certSummary = await verifySelfSignedWssCertificate(
+      "127.0.0.1",
+      basePort + 11,
+    );
+    await testInfo.attach("wss-self-signed-certificate", {
+      body: certSummary,
+      contentType: "text/plain",
+    });
 
     await page.goto(staticServer.url, { waitUntil: "domcontentloaded" });
     await page.fill("#host", "127.0.0.1");

@@ -129,6 +129,15 @@ async function waitControl(key, expected, ms = 5000) {
   throw new Error(`${key} expected "${expected}", got "${last}"`);
 }
 
+async function waitUntil(predicate, ms, detail) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await delay(50);
+  }
+  throw new Error(detail);
+}
+
 async function waitReady(sock, label, ms = 5000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -192,6 +201,88 @@ function makeLz4mWire(text, blockSize) {
   return wire;
 }
 
+async function pushConnectBeforeBind(
+  key,
+  offset,
+  payload,
+  lz4 = false,
+  secure = false,
+) {
+  if (lz4) await ensureLz4();
+  const armed = await control(`bind-delayed:${key}`);
+  if (armed !== "ok") throw new Error(`delayed bind failed: ${armed}`);
+
+  const errors = [];
+  const push = socket(
+    new Push({
+      reconnectInitialDelayMs: 50,
+      reconnectMaxDelayMs: 50,
+      onError: (error) => errors.push(error),
+    }),
+  );
+
+  try {
+    push.connect(endpoint(offset, lz4, secure));
+    const pendingSend = push.send(new Message(payload));
+    await waitUntil(
+      () => errors.length > 0,
+      3000,
+      "no pre-bind WebSocket failure observed",
+    );
+    await withTimeout(
+      pendingSend,
+      10000,
+      errors.map((e) => e.message).join("; ") || "pre-bind send timeout",
+    );
+    await waitControl(key, payload, 10000);
+    return endpoint(offset, lz4, secure);
+  } finally {
+    push.close();
+  }
+}
+
+async function pushThroughRestart(
+  offset,
+  before,
+  after,
+  lz4 = false,
+  secure = false,
+) {
+  if (lz4) await ensureLz4();
+  const errors = [];
+  const push = socket(
+    new Push({
+      reconnectInitialDelayMs: 50,
+      reconnectMaxDelayMs: 50,
+      onError: (error) => errors.push(error),
+    }),
+  );
+
+  try {
+    push.connect(endpoint(offset, lz4, secure));
+    await withTimeout(
+      push.send(new Message(before)),
+      5000,
+      errors.map((e) => e.message).join("; ") || "first send timeout",
+    );
+    await waitControl("restart_first", before);
+    await waitUntil(
+      () => push.readyCount === 0,
+      5000,
+      "restart close not observed",
+    );
+    await withTimeout(
+      push.send(new Message(after)),
+      10000,
+      errors.map((e) => e.message).join("; ") || "second send timeout",
+    );
+    await waitControl("restart_second", after, 10000);
+    return endpoint(offset, lz4, secure);
+  } finally {
+    push.close();
+  }
+}
+
 const cases = [
   ["control REQ/REP", async () => {
     const reply = await control("ping");
@@ -199,6 +290,39 @@ const cases = [
     const cleared = await control("clear");
     if (cleared !== "ok") throw new Error(`clear failed: ${cleared}`);
     return endpoint(0);
+  }],
+  ["Connect before Rust PULL bind over ws", async () => {
+    return await pushConnectBeforeBind(
+      "connect_before_bind_ws",
+      18,
+      "prebind-ws-from-firefox",
+    );
+  }],
+  ["Connect before Rust PULL bind over lz4+ws", async () => {
+    return await pushConnectBeforeBind(
+      "connect_before_bind_lz4_ws",
+      19,
+      "prebind-lz4-ws-from-firefox-" + "x".repeat(2048),
+      true,
+    );
+  }],
+  ["Connect before Rust PULL bind over wss", async () => {
+    return await pushConnectBeforeBind(
+      "connect_before_bind_wss",
+      20,
+      "prebind-wss-from-firefox",
+      false,
+      true,
+    );
+  }],
+  ["Connect before Rust PULL bind over lz4+wss", async () => {
+    return await pushConnectBeforeBind(
+      "connect_before_bind_lz4_wss",
+      21,
+      "prebind-lz4-wss-from-firefox-" + "x".repeat(2048),
+      true,
+      true,
+    );
   }],
   ["REQ -> Rust REP over ws", async () => {
     const { req, errors } = makeReq(1);
@@ -311,28 +435,16 @@ const cases = [
     return endpoint(9, true);
   }],
   ["Reconnect after Rust PULL restart", async () => {
-    const push = socket(
-      new Push({
-        reconnectInitialDelayMs: 50,
-        reconnectMaxDelayMs: 50,
-      }),
+    return await pushThroughRestart(10, "before", "after");
+  }],
+  ["Reconnect after Rust PULL restart over lz4+wss", async () => {
+    return await pushThroughRestart(
+      17,
+      "before-lz4-wss",
+      "after-lz4-wss",
+      true,
+      true,
     );
-    push.connect(endpoint(10));
-    await withTimeout(
-      push.send(new Message("before")),
-      5000,
-      "first send timeout",
-    );
-    await waitControl("restart_first", "before");
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && push.readyCount !== 0) await delay(25);
-    await withTimeout(
-      push.send(new Message("after")),
-      10000,
-      "second send timeout",
-    );
-    await waitControl("restart_second", "after", 10000);
-    return endpoint(10);
   }],
   ["Synthetic LZ4M decode branch", async () => {
     await ensureLz4();

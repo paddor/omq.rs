@@ -1,7 +1,8 @@
 use super::common::{
     self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_RZMQ, C_RZMQ_IOURING, C_ZMQRS,
-    Impl, draw_latency_single_panel, draw_throughput_dual_panel,
-    draw_throughput_dual_panel_fixed_2m_msgs, load_latency, load_tput, out_dir,
+    Impl, draw_latency_single_panel_with_versions,
+    draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
+    draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
 
 const TPUT_SIZES: &[u64] = &[
@@ -140,7 +141,7 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput("throughput", "tcp", None, PUSHPULL_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pushpull_tcp.svg");
-        draw_throughput_dual_panel_fixed_2m_msgs(
+        draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
             &out,
             "PUSH/PULL throughput, TCP loopback, 2-process",
             TPUT_SIZES,
@@ -159,7 +160,7 @@ pub(crate) fn generate() {
     let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(32), PUBSUB_IMPLS);
     if !tput.is_empty() {
         let out = dir.join("main_pubsub_tcp.svg");
-        draw_throughput_dual_panel(
+        draw_throughput_dual_panel_with_versions(
             &out,
             "PUB/SUB throughput (32 peers), TCP loopback, 2-process",
             PUBSUB_SIZES,
@@ -179,7 +180,7 @@ pub(crate) fn generate() {
     if !lat.is_empty() {
         let out = dir.join("main_reqrep_tcp.svg");
         let range = common::auto_lat_range(&lat);
-        draw_latency_single_panel(
+        draw_latency_single_panel_with_versions(
             &out,
             "REQ/REP latency, TCP loopback, 2-process",
             LAT_SIZES,

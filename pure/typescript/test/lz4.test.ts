@@ -127,6 +127,15 @@ describe("LZ4 transport transform", () => {
     );
   });
 
+  it("rejects TypeScript sends at the 1 GiB LZ4M boundary", () => {
+    const encoder = new Lz4Encoder() as unknown as {
+      encodePart(plaintext: Uint8Array): Uint8Array;
+    };
+    const hugePart = { byteLength: 0x40000000 } as Uint8Array;
+
+    expect(() => encoder.encodePart(hugePart)).toThrow("TypeScript limit");
+  });
+
   it("decodes LZ4M multi-block envelope parts with a test block size", () => {
     const payload = enc.encode("lz4m payload ".repeat(60));
     const decoded = new Lz4Decoder(undefined, 256).decodeMessage([

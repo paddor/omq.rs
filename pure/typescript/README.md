@@ -65,6 +65,9 @@ sub.subscribe("");
 sub.connect("lz4+wss://broker.example.com/sub");
 ```
 
+TypeScript senders reject individual LZ4 parts at the 1 GiB multi-block
+boundary. Split huge payloads at the application layer.
+
 ### Robustness Options
 
 Sockets reconnect by default after peer-side close or WebSocket error. Current

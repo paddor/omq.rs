@@ -8,6 +8,7 @@ const SENTINEL_LZ4D = 0x4c5a3444; // "LZ4D"
 const MAX_DICT_BYTES = 8192;
 const LZ4M_BLOCK_SIZE = 0x40000000;
 const LZ4_MAX_EXPANSION = 255;
+const MAX_TS_SEND_PART_SIZE = LZ4M_BLOCK_SIZE - 1;
 const MIN_COMPRESS_NO_DICT = 512;
 const MIN_COMPRESS_WITH_DICT = 128;
 
@@ -244,6 +245,12 @@ export class Lz4Encoder {
 
     if (plaintext.byteLength < threshold) {
       return wrapPlain(plaintext);
+    }
+
+    if (plaintext.byteLength > MAX_TS_SEND_PART_SIZE) {
+      throw new Error(
+        `LZ4 send part ${plaintext.byteLength} exceeds TypeScript limit ${MAX_TS_SEND_PART_SIZE}`,
+      );
     }
 
     if (plaintext.byteLength > this.blockSize) {

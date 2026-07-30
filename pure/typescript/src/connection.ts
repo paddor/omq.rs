@@ -1,6 +1,9 @@
 import {
   decodeCommand,
+  decodeErrorReason,
   decodeReadyProperties,
+  encodePlainHello,
+  encodePlainInitiate,
   encodePong,
   encodeReady,
   isCompatibleSocketType,
@@ -8,6 +11,7 @@ import {
   type PeerProperties,
   type SocketTypeName,
 } from "./command.ts";
+import type { PlainAuthOptions } from "./auth.ts";
 import { isLz4DictionaryShipment, Lz4Decoder, Lz4Encoder } from "./lz4.ts";
 import { Message } from "./message.ts";
 import {
@@ -20,12 +24,14 @@ import {
 } from "./zws.ts";
 
 export type ConnectionState = "connecting" | "handshaking" | "ready" | "closed";
+type PlainHandshakeState = "awaiting-welcome" | "awaiting-ready";
 
 export interface ConnectionOptions {
   socketType: SocketTypeName;
   identity: Uint8Array;
   lz4Dict?: Uint8Array;
   maxMessageSize?: number;
+  plain?: PlainAuthOptions;
   onReady?: (conn: Connection) => void;
   onMessage?: (conn: Connection, msg: Message) => void;
   onCommand?: (conn: Connection, name: string, body: Uint8Array) => void;
@@ -58,6 +64,7 @@ export class Connection {
   private lz4Encoder: Lz4Encoder | null = null;
   private useLz4: boolean;
   private closeEmitted = false;
+  private plainState: PlainHandshakeState | null = null;
   peerProperties: PeerProperties | null = null;
 
   constructor(url: string, opts: ConnectionOptions) {
@@ -74,7 +81,8 @@ export class Connection {
       this.lz4Encoder = new Lz4Encoder(opts.lz4Dict);
     }
 
-    const ws = new WebSocket(wsUrl, ["ZWS2.0/NULL"]);
+    const subprotocol = opts.plain ? "ZWS2.0/PLAIN" : "ZWS2.0/NULL";
+    const ws = new WebSocket(wsUrl, [subprotocol]);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => this.onOpen();
     ws.onmessage = (ev) => this.onWsMessage(ev);
@@ -132,8 +140,14 @@ export class Connection {
 
   private onOpen(): void {
     this.state = "handshaking";
-    const ready = encodeReady(this.opts.socketType, this.opts.identity);
-    this.sendCommand(ready);
+    if (this.opts.plain) {
+      this.plainState = "awaiting-welcome";
+      this.sendCommand(
+        encodePlainHello(this.opts.plain.username, this.opts.plain.password),
+      );
+    } else {
+      this.sendCommand(encodeReady(this.opts.socketType, this.opts.identity));
+    }
   }
 
   private onWsMessage(ev: MessageEvent): void {
@@ -151,32 +165,11 @@ export class Connection {
 
     if (this.state === "handshaking") {
       if (frame.flag !== FLAG_COMMAND) {
-        this.closeWithError("Expected READY command during handshake");
+        this.closeWithError("Expected command during handshake");
         return;
       }
       const cmd = decodeCommand(frame.payload);
-      if (cmd.name !== "READY") {
-        this.closeWithError(`Expected READY, got ${cmd.name}`);
-        return;
-      }
-      this.peerProperties = decodeReadyProperties(cmd.body);
-      const peerType = this.peerProperties.socketType;
-      if (!peerType) {
-        this.closeWithError("READY missing Socket-Type");
-        return;
-      }
-      if (!isSocketTypeName(peerType)) {
-        this.closeWithError(`Unknown peer socket type: ${peerType}`);
-        return;
-      }
-      if (!isCompatibleSocketType(this.opts.socketType, peerType)) {
-        this.closeWithError(
-          `Incompatible socket types: ours=${this.opts.socketType} peer=${peerType}`,
-        );
-        return;
-      }
-      this.state = "ready";
-      this.opts.onReady?.(this);
+      this.handleHandshakeCommand(cmd);
       return;
     }
 
@@ -258,6 +251,81 @@ export class Connection {
       return;
     }
     this.opts.onCommand?.(this, cmd.name, cmd.body);
+  }
+
+  private handleHandshakeCommand(cmd: {
+    name: string;
+    body: Uint8Array;
+  }): void {
+    if (cmd.name === "ERROR") {
+      this.closeWithError(`Peer sent ERROR: ${decodeErrorReason(cmd.body)}`);
+      return;
+    }
+
+    if (this.opts.plain) {
+      this.handlePlainHandshakeCommand(cmd);
+      return;
+    }
+
+    if (cmd.name !== "READY") {
+      this.closeWithError(`Expected READY, got ${cmd.name}`);
+      return;
+    }
+    this.completeHandshake(cmd.body);
+  }
+
+  private handlePlainHandshakeCommand(cmd: {
+    name: string;
+    body: Uint8Array;
+  }): void {
+    if (this.plainState === "awaiting-welcome") {
+      if (cmd.name !== "WELCOME") {
+        this.closeWithError(`Expected WELCOME, got ${cmd.name}`);
+        return;
+      }
+      if (cmd.body.byteLength !== 0) {
+        this.closeWithError("WELCOME body must be empty");
+        return;
+      }
+      this.plainState = "awaiting-ready";
+      this.sendCommand(
+        encodePlainInitiate(this.opts.socketType, this.opts.identity),
+      );
+      return;
+    }
+
+    if (this.plainState === "awaiting-ready") {
+      if (cmd.name !== "READY") {
+        this.closeWithError(`Expected READY, got ${cmd.name}`);
+        return;
+      }
+      this.completeHandshake(cmd.body);
+      return;
+    }
+
+    this.closeWithError("PLAIN handshake not started");
+  }
+
+  private completeHandshake(body: Uint8Array): void {
+    this.peerProperties = decodeReadyProperties(body);
+    const peerType = this.peerProperties.socketType;
+    if (!peerType) {
+      this.closeWithError("READY missing Socket-Type");
+      return;
+    }
+    if (!isSocketTypeName(peerType)) {
+      this.closeWithError(`Unknown peer socket type: ${peerType}`);
+      return;
+    }
+    if (!isCompatibleSocketType(this.opts.socketType, peerType)) {
+      this.closeWithError(
+        `Incompatible socket types: ours=${this.opts.socketType} peer=${peerType}`,
+      );
+      return;
+    }
+    this.plainState = null;
+    this.state = "ready";
+    this.opts.onReady?.(this);
   }
 
   private handlePing(body: Uint8Array): void {

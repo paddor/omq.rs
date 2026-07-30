@@ -94,19 +94,32 @@ export function isCompatibleSocketType(
   }
 }
 
-export function encodeReady(
+function encodeCommand(
+  name: string,
+  body: Uint8Array<ArrayBufferLike> = new Uint8Array(0),
+): Uint8Array {
+  const nameBytes = encoder.encode(name);
+  if (nameBytes.byteLength > 255) throw new Error("Command name too long");
+
+  const buf = new Uint8Array(1 + nameBytes.byteLength + body.byteLength);
+  buf[0] = nameBytes.byteLength;
+  buf.set(nameBytes, 1);
+  buf.set(body, 1 + nameBytes.byteLength);
+  return buf;
+}
+
+export function encodeReadyProperties(
   socketType: SocketTypeName,
   identity: Uint8Array,
 ): Uint8Array {
-  const props: [string, Uint8Array][] = [
+  const props: [string, Uint8Array<ArrayBufferLike>][] = [
     ["Socket-Type", encoder.encode(socketType)],
   ];
   if (identity.byteLength > 0) {
     props.push(["Identity", identity]);
   }
 
-  const name = encoder.encode("READY");
-  let size = 1 + name.byteLength;
+  let size = 0;
   for (const [key, value] of props) {
     size += 1 + encoder.encode(key).byteLength + 4 + value.byteLength;
   }
@@ -114,10 +127,6 @@ export function encodeReady(
   const buf = new Uint8Array(size);
   const view = new DataView(buf.buffer);
   let offset = 0;
-
-  buf[offset++] = name.byteLength;
-  buf.set(name, offset);
-  offset += name.byteLength;
 
   for (const [key, value] of props) {
     const keyBytes = encoder.encode(key);
@@ -131,6 +140,48 @@ export function encodeReady(
   }
 
   return buf;
+}
+
+export function encodeReady(
+  socketType: SocketTypeName,
+  identity: Uint8Array,
+): Uint8Array {
+  return encodeCommand("READY", encodeReadyProperties(socketType, identity));
+}
+
+export function encodePlainHello(
+  username: string,
+  password: string,
+): Uint8Array {
+  const usernameBytes = encoder.encode(username);
+  const passwordBytes = encoder.encode(password);
+  if (usernameBytes.byteLength > 255) {
+    throw new Error("PLAIN username exceeds 255 bytes");
+  }
+  if (passwordBytes.byteLength > 255) {
+    throw new Error("PLAIN password exceeds 255 bytes");
+  }
+
+  const body = new Uint8Array(
+    2 + usernameBytes.byteLength + passwordBytes.byteLength,
+  );
+  let offset = 0;
+  body[offset++] = usernameBytes.byteLength;
+  body.set(usernameBytes, offset);
+  offset += usernameBytes.byteLength;
+  body[offset++] = passwordBytes.byteLength;
+  body.set(passwordBytes, offset);
+  return encodeCommand("HELLO", body);
+}
+
+export function encodePlainInitiate(
+  socketType: SocketTypeName,
+  identity: Uint8Array,
+): Uint8Array {
+  return encodeCommand(
+    "INITIATE",
+    encodeReadyProperties(socketType, identity),
+  );
 }
 
 export function decodeCommand(
@@ -192,48 +243,32 @@ export function decodeReadyProperties(body: Uint8Array): PeerProperties {
   return props;
 }
 
+export function decodeErrorReason(body: Uint8Array): string {
+  if (body.byteLength < 1) throw new Error("ERROR body missing reason length");
+  const reasonLen = body[0]!;
+  if (body.byteLength < 1 + reasonLen) {
+    throw new Error("ERROR reason truncated");
+  }
+  return decoder.decode(body.subarray(1, 1 + reasonLen));
+}
+
 export function encodeSubscribe(prefix: Uint8Array): Uint8Array {
-  const name = encoder.encode("SUBSCRIBE");
-  const buf = new Uint8Array(1 + name.byteLength + prefix.byteLength);
-  buf[0] = name.byteLength;
-  buf.set(name, 1);
-  buf.set(prefix, 1 + name.byteLength);
-  return buf;
+  return encodeCommand("SUBSCRIBE", prefix);
 }
 
 export function encodeCancel(prefix: Uint8Array): Uint8Array {
-  const name = encoder.encode("CANCEL");
-  const buf = new Uint8Array(1 + name.byteLength + prefix.byteLength);
-  buf[0] = name.byteLength;
-  buf.set(name, 1);
-  buf.set(prefix, 1 + name.byteLength);
-  return buf;
+  return encodeCommand("CANCEL", prefix);
 }
 
 export function encodeJoin(group: Uint8Array): Uint8Array {
-  const name = encoder.encode("JOIN");
-  const buf = new Uint8Array(1 + name.byteLength + group.byteLength);
-  buf[0] = name.byteLength;
-  buf.set(name, 1);
-  buf.set(group, 1 + name.byteLength);
-  return buf;
+  return encodeCommand("JOIN", group);
 }
 
 export function encodeLeave(group: Uint8Array): Uint8Array {
-  const name = encoder.encode("LEAVE");
-  const buf = new Uint8Array(1 + name.byteLength + group.byteLength);
-  buf[0] = name.byteLength;
-  buf.set(name, 1);
-  buf.set(group, 1 + name.byteLength);
-  return buf;
+  return encodeCommand("LEAVE", group);
 }
 
 export function encodePong(context: Uint8Array): Uint8Array {
   if (context.byteLength > 16) throw new Error("PONG context too long");
-  const name = encoder.encode("PONG");
-  const buf = new Uint8Array(1 + name.byteLength + context.byteLength);
-  buf[0] = name.byteLength;
-  buf.set(name, 1);
-  buf.set(context, 1 + name.byteLength);
-  return buf;
+  return encodeCommand("PONG", context);
 }

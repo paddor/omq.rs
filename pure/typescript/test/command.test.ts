@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeCommand,
+  decodeErrorReason,
   decodeReadyProperties,
   encodeCancel,
   encodeJoin,
   encodeLeave,
+  encodePlainHello,
+  encodePlainInitiate,
   encodeReady,
   encodeSubscribe,
   isCompatibleSocketType,
@@ -44,6 +47,51 @@ describe("encodeReady / decodeCommand / decodeReadyProperties round-trip", () =>
     const props = decodeReadyProperties(cmd.body);
     expect(props.socketType).toBe("PUSH");
     expect(new TextDecoder().decode(props.identity)).toBe("cli:test");
+  });
+});
+
+describe("PLAIN command helpers", () => {
+  it("encodes HELLO credentials", () => {
+    const cmd = decodeCommand(encodePlainHello("alice", "secret"));
+
+    expect(cmd.name).toBe("HELLO");
+    expect(cmd.body).toEqual(
+      new Uint8Array([
+        5,
+        ...new TextEncoder().encode("alice"),
+        6,
+        ...new TextEncoder().encode("secret"),
+      ]),
+    );
+  });
+
+  it("rejects overlong HELLO username and password", () => {
+    expect(() => encodePlainHello("x".repeat(256), "secret")).toThrow(
+      "username",
+    );
+    expect(() => encodePlainHello("alice", "x".repeat(256))).toThrow(
+      "password",
+    );
+  });
+
+  it("encodes INITIATE with READY properties", () => {
+    const cmd = decodeCommand(
+      encodePlainInitiate("PUSH", new TextEncoder().encode("client-1")),
+    );
+
+    expect(cmd.name).toBe("INITIATE");
+    const props = decodeReadyProperties(cmd.body);
+    expect(props.socketType).toBe("PUSH");
+    expect(new TextDecoder().decode(props.identity)).toBe("client-1");
+  });
+
+  it("decodes ERROR reason bodies", () => {
+    expect(decodeErrorReason(new Uint8Array([4, 0x64, 0x65, 0x6e, 0x79])))
+      .toBe("deny");
+    expect(() => decodeErrorReason(new Uint8Array(0))).toThrow("missing");
+    expect(() => decodeErrorReason(new Uint8Array([4, 0x64]))).toThrow(
+      "truncated",
+    );
   });
 });
 

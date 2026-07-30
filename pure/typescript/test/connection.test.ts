@@ -98,6 +98,15 @@ function serverReady(serverType: SocketTypeName = "PUB"): Uint8Array {
   return encodeCommandFrame(readyPayload);
 }
 
+function commandFrame(name: string, body = new Uint8Array(0)): Uint8Array {
+  const nameBytes = new TextEncoder().encode(name);
+  const payload = new Uint8Array(1 + nameBytes.byteLength + body.byteLength);
+  payload[0] = nameBytes.byteLength;
+  payload.set(nameBytes, 1);
+  payload.set(body, 1 + nameBytes.byteLength);
+  return encodeCommandFrame(payload);
+}
+
 describe("Connection", () => {
   it("opens WebSocket with ZWS2.0/NULL subprotocol", () => {
     new Connection("ws://localhost:8081", {
@@ -115,6 +124,16 @@ describe("Connection", () => {
       identity: new Uint8Array(0),
     });
     expect(lastCreatedWs!.binaryType).toBe("arraybuffer");
+  });
+
+  it("opens WebSocket with ZWS2.0/PLAIN subprotocol when configured", () => {
+    new Connection("ws://localhost:8081", {
+      socketType: "PUSH",
+      identity: new Uint8Array(0),
+      plain: { username: "alice", password: "secret" },
+    });
+
+    expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0/PLAIN"]);
   });
 
   it("strips lz4+ prefix from URL", () => {
@@ -150,6 +169,66 @@ describe("Connection", () => {
     const props = decodeReadyProperties(cmd.body);
     expect(props.socketType).toBe("SUB");
     expect(new TextDecoder().decode(props.identity)).toBe("web:paddor");
+  });
+
+  it("completes a PLAIN client handshake", () => {
+    const onReady = vi.fn();
+    new Connection("ws://localhost:8081", {
+      socketType: "PUSH",
+      identity: new TextEncoder().encode("client-1"),
+      plain: { username: "alice", password: "secret" },
+      onReady,
+    });
+    lastCreatedWs!.simulateOpen();
+
+    expect(lastCreatedWs!.sentFrames.length).toBe(1);
+    let cmd = decodeCommand(lastCreatedWs!.sentFrames[0]!.subarray(1));
+    expect(cmd.name).toBe("HELLO");
+    expect(cmd.body).toEqual(
+      new Uint8Array([
+        5,
+        ...new TextEncoder().encode("alice"),
+        6,
+        ...new TextEncoder().encode("secret"),
+      ]),
+    );
+
+    lastCreatedWs!.simulateMessage(commandFrame("WELCOME"));
+    expect(lastCreatedWs!.sentFrames.length).toBe(2);
+    cmd = decodeCommand(lastCreatedWs!.sentFrames[1]!.subarray(1));
+    expect(cmd.name).toBe("INITIATE");
+    const initiateProps = decodeReadyProperties(cmd.body);
+    expect(initiateProps.socketType).toBe("PUSH");
+    expect(new TextDecoder().decode(initiateProps.identity)).toBe("client-1");
+
+    lastCreatedWs!.simulateMessage(serverReady("PULL"));
+    expect(onReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects PLAIN ERROR commands during handshake", () => {
+    const onError = vi.fn();
+    new Connection("ws://localhost:8081", {
+      socketType: "PUSH",
+      identity: new Uint8Array(0),
+      plain: { username: "alice", password: "wrong" },
+      onError,
+    });
+    lastCreatedWs!.simulateOpen();
+
+    lastCreatedWs!.simulateMessage(
+      commandFrame(
+        "ERROR",
+        new Uint8Array([
+          21,
+          ...new TextEncoder().encode("Authentication failed"),
+        ]),
+      ),
+    );
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]![1].message).toContain(
+      "Authentication failed",
+    );
   });
 
   it("transitions to ready state after receiving server READY", () => {
@@ -212,7 +291,7 @@ describe("Connection", () => {
     );
     expect(onError).toHaveBeenCalled();
     expect(onError.mock.calls[0]![1].message).toContain(
-      "Expected READY command",
+      "Expected command",
     );
   });
 

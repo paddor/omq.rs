@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>omq.ts browser interop</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: Canvas;
+        color: CanvasText;
+      }
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin: 0 0 16px;
+        font-size: 22px;
+      }
+      .bar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      input {
+        width: 90px;
+        padding: 8px;
+        font: inherit;
+      }
+      #host {
+        width: 180px;
+      }
+      button {
+        padding: 8px 14px;
+        font: inherit;
+        cursor: pointer;
+      }
+      #tests {
+        display: grid;
+        gap: 8px;
+      }
+      .test {
+        display: grid;
+        grid-template-columns: 64px minmax(220px, 1fr) minmax(180px, 1fr);
+        gap: 10px;
+        align-items: center;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 6px;
+        padding: 10px;
+      }
+      .status {
+        font-weight: 700;
+        font-size: 12px;
+      }
+      .pass .status {
+        color: #138a3d;
+      }
+      .fail .status {
+        color: #ba1a1a;
+      }
+      .pending .status {
+        color: #7a5c00;
+      }
+      code {
+        overflow-wrap: anywhere;
+        font-size: 12px;
+      }
+      pre {
+        min-height: 160px;
+        max-height: 320px;
+        overflow: auto;
+        padding: 12px;
+        border-radius: 6px;
+        background: color-mix(in srgb, CanvasText 8%, Canvas);
+      }
+    </style>
+  </head>
+  <body data-status="idle">
+    <main>
+      <h1>omq.ts browser interop</h1>
+      <div class="bar">
+        <label>host <input id="host" value="127.0.0.1"></label>
+        <label>base port <input
+            id="base-port"
+            value="9105"
+            inputmode="numeric"
+          ></label>
+        <button id="run" type="button">Run Tests</button>
+      </div>
+      <div id="tests"></div>
+      <pre id="log"></pre>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

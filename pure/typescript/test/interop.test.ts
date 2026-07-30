@@ -5,7 +5,20 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initSyncFromBytes } from "@paddor/lz4rip";
-import { Message, Pub, Pull, Push, Req, Sub } from "../src/mod.ts";
+import {
+  Channel,
+  Client,
+  Dish,
+  Gather,
+  Message,
+  Pub,
+  Pull,
+  Push,
+  Radio,
+  Req,
+  Scatter,
+  Sub,
+} from "../src/mod.ts";
 
 interface Peer {
   child: ChildProcessWithoutNullStreams;
@@ -382,6 +395,214 @@ async function tsPushReconnectsToRustPullRestart(
   }
 }
 
+async function tsScatterToRustGather(
+  endpoint: string,
+  payload: string,
+): Promise<void> {
+  const peer = await startPeer(["gather-bind", endpoint, payload]);
+  const errors: Error[] = [];
+  const scatter = new Scatter({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    scatter.connect(peer.endpoint);
+    await withTimeout(
+      scatter.send(Message.from(payload)),
+      5_000,
+      () =>
+        `TS SCATTER send timed out ready=${scatter.readyCount} conn=${scatter.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust GATHER did not exit after TS send\n${peer.stderr()}`,
+    );
+  } finally {
+    scatter.close();
+  }
+}
+
+async function rustScatterToTsGather(
+  endpoint: string,
+  payload: string,
+): Promise<void> {
+  const peer = await startPeer(["scatter-bind", endpoint, payload]);
+  const errors: Error[] = [];
+  const gather = new Gather({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    gather.connect(peer.endpoint);
+    const msg = await withTimeout(
+      gather.recv(),
+      5_000,
+      () =>
+        `TS GATHER recv timed out ready=${gather.readyCount} conn=${gather.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(payload);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust SCATTER did not exit after TS recv\n${peer.stderr()}`,
+    );
+  } finally {
+    gather.close();
+  }
+}
+
+async function tsClientToRustServer(
+  endpoint: string,
+  request: string,
+  reply: string,
+): Promise<void> {
+  const peer = await startPeer(["server-bind", endpoint, request, reply]);
+  const errors: Error[] = [];
+  const client = new Client({
+    identity: "ts-client",
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    client.connect(peer.endpoint);
+    await withTimeout(
+      client.send(Message.from(request)),
+      5_000,
+      () =>
+        `TS CLIENT send timed out ready=${client.readyCount} conn=${client.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    const msg = await withTimeout(
+      client.recv(),
+      5_000,
+      () =>
+        `TS CLIENT recv timed out ready=${client.readyCount} conn=${client.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(reply);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust SERVER did not exit after TS CLIENT\n${peer.stderr()}`,
+    );
+  } finally {
+    client.close();
+  }
+}
+
+async function rustRadioToTsDish(
+  endpoint: string,
+  group: string,
+  payload: string,
+): Promise<void> {
+  const peer = await startPeer(["radio-bind", endpoint, group, payload]);
+  const errors: Error[] = [];
+  const dish = new Dish({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    dish.join(group);
+    dish.connect(peer.endpoint);
+    const msg = await withTimeout(
+      dish.recv(),
+      5_000,
+      () =>
+        `TS DISH recv timed out ready=${dish.readyCount} conn=${dish.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(group);
+    expect(msg.string(1)).toBe(payload);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust RADIO did not exit after TS DISH\n${peer.stderr()}`,
+    );
+  } finally {
+    dish.close();
+  }
+}
+
+async function tsRadioToRustDish(
+  endpoint: string,
+  group: string,
+  payload: string,
+): Promise<void> {
+  const peer = await startPeer(["dish-bind", endpoint, group, payload]);
+  const errors: Error[] = [];
+  const radio = new Radio({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    radio.connect(peer.endpoint);
+    await waitUntil(
+      () => radio.readyCount > 0,
+      () =>
+        `TS RADIO never became ready conn=${radio.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await delay(300);
+    await radio.send(new Message(group, payload));
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust DISH did not exit after TS RADIO\n${peer.stderr()}`,
+    );
+  } finally {
+    radio.close();
+  }
+}
+
+async function tsChannelToRustChannel(
+  endpoint: string,
+  request: string,
+  reply: string,
+): Promise<void> {
+  const peer = await startPeer(["channel-bind", endpoint, request, reply]);
+  const errors: Error[] = [];
+  const channel = new Channel({
+    reconnect: false,
+    onError: (error) => errors.push(error),
+  });
+  try {
+    channel.connect(peer.endpoint);
+    await withTimeout(
+      channel.send(Message.from(request)),
+      5_000,
+      () =>
+        `TS CHANNEL send timed out ready=${channel.readyCount} conn=${channel.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    const msg = await withTimeout(
+      channel.recv(),
+      5_000,
+      () =>
+        `TS CHANNEL recv timed out ready=${channel.readyCount} conn=${channel.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    expect(msg.string(0)).toBe(reply);
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust CHANNEL did not exit after TS CHANNEL\n${peer.stderr()}`,
+    );
+  } finally {
+    channel.close();
+  }
+}
+
 describeInterop("omq.rs WebSocket interop", () => {
   it("sends from TypeScript PUSH to Rust PULL over ws", async () => {
     await tsPushToRustPull("ws://127.0.0.1:0/", "ts-to-rust");
@@ -455,4 +676,36 @@ describeInterop("omq.rs WebSocket interop", () => {
     },
     120_000,
   );
+
+  it("sends TypeScript SCATTER to Rust GATHER over ws", async () => {
+    await tsScatterToRustGather("ws://127.0.0.1:0/", "scatter-to-gather");
+  }, 120_000);
+
+  it("receives Rust SCATTER on TypeScript GATHER over ws", async () => {
+    await rustScatterToTsGather("ws://127.0.0.1:0/", "gather-from-scatter");
+  }, 120_000);
+
+  it("round-trips TypeScript CLIENT to Rust SERVER over ws", async () => {
+    await tsClientToRustServer(
+      "ws://127.0.0.1:0/",
+      "client-request",
+      "server-reply",
+    );
+  }, 120_000);
+
+  it("receives Rust RADIO on TypeScript DISH over ws", async () => {
+    await rustRadioToTsDish("ws://127.0.0.1:0/", "weather", "sunny");
+  }, 120_000);
+
+  it("sends TypeScript RADIO to Rust DISH over ws", async () => {
+    await tsRadioToRustDish("ws://127.0.0.1:0/", "weather", "rain");
+  }, 120_000);
+
+  it("round-trips TypeScript CHANNEL to Rust CHANNEL over ws", async () => {
+    await tsChannelToRustChannel(
+      "ws://127.0.0.1:0/",
+      "channel-request",
+      "channel-reply",
+    );
+  }, 120_000);
 });

@@ -6,7 +6,7 @@ compression.
 
 Supports connect-side WebSocket sockets for REQ/REP, PUB/SUB, XPUB/XSUB,
 PUSH/PULL, DEALER/ROUTER, PAIR, CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, PEER,
-and CHANNEL. Security is currently NULL only.
+and CHANNEL. Security mechanisms are NULL and PLAIN.
 
 ## Usage
 
@@ -100,3 +100,8 @@ const sub = new Sub({
 Run `npm run test:interop` from this repo when the sibling `../omq.rs` checkout
 is present. It starts real `omq-tokio` WebSocket peers and verifies NULL, PLAIN,
 and `lz4+ws://` traffic.
+
+Run `npm run test:browser` for the headless Firefox browser interop test. It
+starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
+the same paths through native browser `WebSocket` and WASM LZ4, including
+`wss://` and `lz4+wss://`.

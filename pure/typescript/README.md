@@ -90,6 +90,7 @@ const sub = new Sub({
   reconnectInitialDelayMs: 100,
   reconnectMaxDelayMs: 5000,
   receiveHighWaterMark: 1000,
+  sendHighWaterMark: 1000,
   onError: (error) => console.error(error),
 });
 ```

@@ -121,6 +121,20 @@ async fn pub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+async fn sub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str) {
+    let sub = Socket::new(SocketType::Sub, options(auth));
+    sub.subscribe("news.").await.expect("sub subscribe");
+    let bound = sub.bind(endpoint).await.expect("sub bind");
+    print_endpoint(&bound);
+
+    let msg = tokio::time::timeout(Duration::from_secs(10), sub.recv())
+        .await
+        .expect("sub recv timed out")
+        .expect("sub recv");
+    assert_eq!(msg.part_bytes(0).unwrap(), topic.as_bytes());
+    assert_eq!(msg.part_bytes(1).unwrap(), payload.as_bytes());
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -155,6 +169,12 @@ async fn main() {
             let payload = args.next().expect("payload");
             let auth = args.next().unwrap_or_else(|| "null".to_string());
             pub_bind(endpoint, topic, payload, &auth).await;
+        }
+        "sub-bind" => {
+            let topic = args.next().expect("topic");
+            let payload = args.next().expect("payload");
+            let auth = args.next().unwrap_or_else(|| "null".to_string());
+            sub_bind(endpoint, topic, payload, &auth).await;
         }
         other => panic!("unknown mode: {other}"),
     }

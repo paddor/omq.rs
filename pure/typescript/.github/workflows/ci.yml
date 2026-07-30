@@ -67,8 +67,23 @@ jobs:
           rustup default stable
           cargo --version
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            test/fixtures/omq-rs-peer/target
+          key: ${{ runner.os }}-cargo-interop-${{ hashFiles('test/fixtures/omq-rs-peer/Cargo.lock') }}
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
       - name: Install Firefox for Playwright
         run: npx playwright install --with-deps firefox

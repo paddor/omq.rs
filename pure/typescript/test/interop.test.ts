@@ -5,7 +5,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initSyncFromBytes } from "@paddor/lz4rip";
-import { Message, Pull, Push, Req, Sub } from "../src/mod.ts";
+import { Message, Pub, Pull, Push, Req, Sub } from "../src/mod.ts";
 
 interface Peer {
   child: ChildProcessWithoutNullStreams;
@@ -283,6 +283,44 @@ async function rustPubToTsSub(
   }
 }
 
+async function tsPubToRustSub(
+  endpoint: string,
+  topic: string,
+  payload: string,
+  auth: "null" | "plain" = "null",
+): Promise<void> {
+  const peer = await startPeer(["sub-bind", endpoint, topic, payload, auth]);
+  const errors: Error[] = [];
+  const pub = new Pub(
+    auth === "plain"
+      ? {
+        plain: { username: "alice", password: "secret" },
+        reconnect: false,
+        onError: (error) => errors.push(error),
+      }
+      : { reconnect: false, onError: (error) => errors.push(error) },
+  );
+  try {
+    pub.connect(peer.endpoint);
+    await waitUntil(
+      () => pub.readyCount > 0,
+      () =>
+        `TS PUB never became ready conn=${pub.connectionCount} errors=${
+          errors.map((e) => e.message).join("; ")
+        } rust=${peer.stderr()}`,
+    );
+    await delay(300);
+    await pub.send(new Message(topic, payload));
+    await withTimeout(
+      waitForExit(peer),
+      5_000,
+      () => `Rust SUB did not exit after TS PUB send\n${peer.stderr()}`,
+    );
+  } finally {
+    pub.close();
+  }
+}
+
 async function tsPushReconnectsToRustPullRestart(
   endpoint: string,
   auth: "null" | "plain" = "null",
@@ -391,6 +429,18 @@ describeInterop("omq.rs WebSocket interop", () => {
       "lz4+ws://127.0.0.1:0/",
       "news.lz4",
       "compressed-headline",
+    );
+  }, 120_000);
+
+  it("sends TypeScript PUB to Rust SUB over ws", async () => {
+    await tsPubToRustSub("ws://127.0.0.1:0/", "news.ts", "published");
+  }, 120_000);
+
+  it("sends TypeScript PUB to Rust SUB over lz4+ws", async () => {
+    await tsPubToRustSub(
+      "lz4+ws://127.0.0.1:0/",
+      "news.ts.lz4",
+      "published-lz4",
     );
   }, 120_000);
 

@@ -42,12 +42,12 @@ export class XPub extends Pub {
       const frame = new Uint8Array(1 + body.byteLength);
       frame[0] = 0x01;
       frame.set(body, 1);
-      this.enqueueMessage(Message.fromParts([frame]));
+      this.enqueueMessage(conn, Message.fromParts([frame]));
     } else if (name === "CANCEL") {
       const frame = new Uint8Array(1 + body.byteLength);
       frame[0] = 0x00;
       frame.set(body, 1);
-      this.enqueueMessage(Message.fromParts([frame]));
+      this.enqueueMessage(conn, Message.fromParts([frame]));
     }
   }
 }

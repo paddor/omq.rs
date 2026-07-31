@@ -83,6 +83,6 @@ export class Server extends Socket {
   ): void {
     const idFrame = this.routingIds.get(conn);
     if (!idFrame) return;
-    this.enqueueMessage(Message.fromParts([idFrame, ...msg.parts]));
+    this.enqueueMessage(conn, Message.fromParts([idFrame, ...msg.parts]));
   }
 }

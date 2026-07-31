@@ -82,7 +82,7 @@ export class Router extends Socket {
     const identity = this.peerIdentities.get(conn);
     if (!identity) return;
     const withIdentity = Message.fromParts([identity, ...msg.parts]);
-    this.enqueueMessage(withIdentity);
+    this.enqueueMessage(conn, withIdentity);
   }
 
   private generateIdentity(): Uint8Array {

@@ -702,22 +702,45 @@ describe("Rep", () => {
     await rep.send(Message.from("rep2"));
   });
 
-  it("honors receiveHighWaterMark for queued requests", async () => {
-    const rep = new Rep({ receiveHighWaterMark: 1 });
-    rep.connect("ws://localhost:8082");
-    const ws = createdSockets[0]!;
-    makeReady(ws, "REQ");
+  it("reconnects after queued requests hit receiveHighWaterMark", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const rep = new Rep({
+      receiveHighWaterMark: 1,
+      reconnectInitialDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      onError,
+    });
+    try {
+      rep.connect("ws://localhost:8082");
+      const ws1 = createdSockets[0]!;
+      makeReady(ws1, "REQ");
 
-    sendDataFrame(ws, new Uint8Array(0), "req1");
-    sendDataFrame(ws, new Uint8Array(0), "req2");
+      sendDataFrame(ws1, new Uint8Array(0), "req1");
+      sendDataFrame(ws1, new Uint8Array(0), "req2");
 
-    const msg1 = await rep.recv();
-    expect(msg1.string(0)).toBe("req1");
-    await rep.send(Message.from("rep1"));
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]![0].message).toBe(
+        "Receive high water mark reached",
+      );
+      expect(rep.connectionCount).toBe(0);
+      expect(rep.endpointCount).toBe(1);
 
-    const pending = rep.recv();
-    rep.close();
-    await expect(pending).rejects.toThrow("Socket closed");
+      const pending = rep.recv();
+
+      await vi.advanceTimersByTimeAsync(5);
+      const ws2 = createdSockets[1]!;
+      makeReady(ws2, "REQ");
+      sendDataFrame(ws2, new Uint8Array(0), "req3");
+
+      const msg = await pending;
+      expect(msg.string(0)).toBe("req3");
+      await rep.send(Message.from("rep3"));
+      expect(dataFramesAfterReady(ws2).length).toBe(1);
+    } finally {
+      rep.close();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1953,21 +1976,45 @@ describe("Socket connection management", () => {
     );
   });
 
-  it("drops new inbound messages beyond receiveHighWaterMark", async () => {
-    const pull = new Pull({ receiveHighWaterMark: 1 });
-    pull.connect("ws://localhost:8084");
-    const ws = createdSockets[0]!;
-    makeReady(ws, "PUSH");
+  it("reconnects after inbound queue hits receiveHighWaterMark", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const pull = new Pull({
+      receiveHighWaterMark: 1,
+      reconnectInitialDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      onError,
+    });
+    try {
+      pull.connect("ws://localhost:8084");
+      const ws1 = createdSockets[0]!;
+      makeReady(ws1, "PUSH");
 
-    sendDataFrame(ws, "first");
-    sendDataFrame(ws, "second");
+      sendDataFrame(ws1, "first");
+      sendDataFrame(ws1, "second");
 
-    const msg = await pull.recv();
-    expect(msg.string(0)).toBe("first");
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]![0].message).toBe(
+        "Receive high water mark reached",
+      );
+      expect(pull.connectionCount).toBe(0);
+      expect(pull.endpointCount).toBe(1);
 
-    const pending = pull.recv();
-    pull.close();
-    await expect(pending).rejects.toThrow("Socket closed");
+      const msg = await pull.recv();
+      expect(msg.string(0)).toBe("first");
+
+      const pending = pull.recv();
+      await vi.advanceTimersByTimeAsync(5);
+      const ws2 = createdSockets[1]!;
+      makeReady(ws2, "PUSH");
+      sendDataFrame(ws2, "after reconnect");
+
+      const next = await pending;
+      expect(next.string(0)).toBe("after reconnect");
+    } finally {
+      pull.close();
+      vi.useRealTimers();
+    }
   });
 });
 

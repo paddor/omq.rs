@@ -18,6 +18,7 @@ import {
   FLAG_MORE,
 } from "../src/zws.ts";
 import { Connection } from "../src/connection.ts";
+import { Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
 import { Message } from "../src/message.ts";
 
 beforeAll(() => {
@@ -150,6 +151,27 @@ describe("Connection", () => {
       identity: new Uint8Array(0),
     });
     expect(lastCreatedWs!.url).toBe("wss://localhost:8087");
+  });
+
+  it("frees LZ4 contexts on close", () => {
+    const decoderFree = vi.spyOn(Lz4Decoder.prototype, "free");
+    const encoderFree = vi.spyOn(Lz4Encoder.prototype, "free");
+    try {
+      const conn = new Connection("lz4+ws://localhost:8087", {
+        socketType: "PUSH",
+        identity: new Uint8Array(0),
+      });
+      lastCreatedWs!.simulateOpen();
+      lastCreatedWs!.simulateMessage(serverReady("PULL"));
+
+      conn.close();
+
+      expect(decoderFree).toHaveBeenCalledTimes(1);
+      expect(encoderFree).toHaveBeenCalledTimes(1);
+    } finally {
+      decoderFree.mockRestore();
+      encoderFree.mockRestore();
+    }
   });
 
   it("sends READY command on open", () => {

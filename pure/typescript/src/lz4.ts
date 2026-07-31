@@ -63,6 +63,7 @@ export class Lz4Decoder {
   private dictReceived = false;
   private maxMessageSize: number | undefined;
   private readonly blockSize: number;
+  private freed = false;
 
   constructor(maxMessageSize?: number, blockSize = LZ4M_BLOCK_SIZE) {
     validateBlockSize(blockSize);
@@ -75,6 +76,7 @@ export class Lz4Decoder {
     data: Uint8Array,
     budgetRemaining: number,
   ): { result: Uint8Array; consumed: number } | null {
+    this.assertOpen();
     const sentinel = readSentinel(data);
 
     if (sentinel === SENTINEL_LZ4D) {
@@ -136,6 +138,7 @@ export class Lz4Decoder {
   }
 
   decodeMessage(parts: Uint8Array[]): Uint8Array[] | null {
+    this.assertOpen();
     const budget = this.maxMessageSize ?? Infinity;
     let budgetRemaining = budget;
     const decoded: Uint8Array[] = [];
@@ -155,6 +158,16 @@ export class Lz4Decoder {
     }
 
     return decoded;
+  }
+
+  free(): void {
+    if (this.freed) return;
+    this.decompressor.free();
+    this.freed = true;
+  }
+
+  private assertOpen(): void {
+    if (this.freed) throw new Error("LZ4 decoder closed");
   }
 
   private decodeMultiBlock(
@@ -223,6 +236,7 @@ export class Lz4Encoder {
   private sendDict: Uint8Array | null;
   private dictShipped = false;
   private readonly blockSize: number;
+  private freed = false;
 
   constructor(sendDict?: Uint8Array, blockSize = LZ4M_BLOCK_SIZE) {
     validateBlockSize(blockSize);
@@ -270,6 +284,7 @@ export class Lz4Encoder {
   }
 
   encodeMessage(parts: Uint8Array[]): Uint8Array[][] {
+    this.assertOpen();
     const encoded = parts.map((p) => this.encodePart(p));
     if (!this.dictShipped && this.sendDict) {
       this.dictShipped = true;
@@ -277,6 +292,16 @@ export class Lz4Encoder {
       return [[dictMsg], encoded];
     }
     return [encoded];
+  }
+
+  free(): void {
+    if (this.freed) return;
+    this.compressor.free();
+    this.freed = true;
+  }
+
+  private assertOpen(): void {
+    if (this.freed) throw new Error("LZ4 encoder closed");
   }
 
   private encodeMultiBlock(plaintext: Uint8Array): Uint8Array {

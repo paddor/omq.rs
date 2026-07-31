@@ -51,7 +51,7 @@ impl Trainer {
                 omq_proto::proto::transform::lz4::DictTrainer::new(capacity),
             )),
             #[cfg(feature = "zstd")]
-            CompressionKind::Zstd => Some(Self::Zstd(ZstdTraining::new())),
+            CompressionKind::Zstd => Some(Self::Zstd(ZstdTraining::new(capacity))),
             _ => None,
         }
     }
@@ -83,9 +83,7 @@ impl Trainer {
         }
     }
 
-    fn train(self, capacity: usize) -> Option<Bytes> {
-        #[cfg(not(feature = "zstd"))]
-        let _ = capacity;
+    fn train(self) -> Option<Bytes> {
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(trainer) => {
@@ -93,7 +91,7 @@ impl Trainer {
                 (!dict.is_empty()).then(|| Bytes::from(dict))
             }
             #[cfg(feature = "zstd")]
-            Self::Zstd(training) => training.train(capacity),
+            Self::Zstd(training) => training.train(),
         }
     }
 }
@@ -102,6 +100,7 @@ impl Trainer {
 struct ZstdTraining {
     samples: Vec<Vec<u8>>,
     total_bytes: usize,
+    capacity: usize,
 }
 
 #[cfg(feature = "zstd")]
@@ -109,10 +108,11 @@ impl ZstdTraining {
     const MAX_BYTES: usize = 100 * 1024;
     const MAX_SAMPLE_LEN: usize = 2048;
 
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             samples: Vec::with_capacity(64),
             total_bytes: 0,
+            capacity,
         }
     }
 
@@ -128,9 +128,9 @@ impl ZstdTraining {
         self.total_bytes >= Self::MAX_BYTES
     }
 
-    fn train(self, capacity: usize) -> Option<Bytes> {
+    fn train(self) -> Option<Bytes> {
         let samples: Vec<&[u8]> = self.samples.iter().map(Vec::as_slice).collect();
-        omq_proto::proto::transform::train_zdict(&samples, capacity)
+        omq_proto::proto::transform::train_zdict(&samples, self.capacity)
     }
 }
 
@@ -183,7 +183,7 @@ pub(super) fn feed_dict_training(
         return;
     }
     let training = guard.take().unwrap();
-    let Some(dict) = training.trainer.and_then(|t| t.train(training.capacity)) else {
+    let Some(dict) = training.trainer.and_then(Trainer::train) else {
         return;
     };
     let (kind, options) = {

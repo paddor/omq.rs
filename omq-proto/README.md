@@ -18,8 +18,8 @@ payloads are below 4 GiB.
 | `Message` | Zero-copy multi-frame messages, inline up to 55 B |
 | Greeting / handshake | ZMTP 3.0/3.1 negotiation and mechanism dispatch |
 | Mechanisms | NULL, PLAIN, CURVE |
-| Transforms | LZ4 frame-level compression |
-| `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `udp://`, `lz4+tcp://`, `ws://`, `wss://` |
+| Transforms | LZ4 and zstd frame-level compression |
+| `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `udp://`, `lz4+tcp://`, `zstd+tcp://`, `ws://`, `wss://` |
 | `SocketType` | 20 types (11 stable, 8 draft, plus STREAM) with compatibility matrix |
 | `SubscriptionSet` | Prefix-trie for PUB/SUB topic filtering |
 | Monitor types | `MonitorEvent`, `DisconnectReason`, `PeerInfo` |
@@ -33,6 +33,7 @@ All opt-in. Default build needs no C compiler and no crypto deps.
 | `plain` | PLAIN mechanism | none |
 | `curve` | CURVE mechanism (RFC 26) | `crypto_box`, `crypto_secretbox` |
 | `lz4` | LZ4 compression | `lz4rip` |
+| `zstd` | zstd compression | `zrip` |
 | `ws` | WebSocket transport | - (backends add `rustls`) |
 
 ## License

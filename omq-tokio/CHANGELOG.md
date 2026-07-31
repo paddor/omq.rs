@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-07-31
+
+### Added
+
+- `zstd+tcp://` transport support behind the `zstd` feature, including
+  zstd dictionary training for fan-out paths.
+
+### Fixed
+
+- Preserve trained dictionary ordering before compressed fan-out payloads.
+- Close peer teardown without racing pending outbound driver state.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.25.0 and `yring` to 0.3.11.
+
 ### Security
 
 - Remove `lz4+wss://`; compressed secure WebSocket is intentionally

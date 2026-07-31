@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-31
+
+### Added
+
+- `zstd+tcp://` endpoint parsing and zstd frame transforms behind the
+  `zstd` feature.
+- `Options::compression_level()` for zstd transport compression levels.
+
 ### Security
 
 - Remove `lz4+wss://`; compressed secure WebSocket is intentionally

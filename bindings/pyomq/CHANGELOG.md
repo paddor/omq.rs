@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-31
+
 ### Added
 
 - `zstd+tcp://` support in the published wheel feature set.
 - `OMQ_COMPRESSION_LEVEL` / `Socket.compression_level` for zstd levels.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.20.3 and `omq-proto` to 0.25.0.
 
 ## [0.18.3] - 2026-07-31
 

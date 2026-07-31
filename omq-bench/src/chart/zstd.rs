@@ -9,26 +9,26 @@ const SERIES: &[Series] = &[
         color: RGBColor(250, 204, 21),
     },
     Series {
-        key: "lz4+tcp",
-        label: "lz4+tcp",
+        key: "zstd+tcp",
+        label: "zstd+tcp",
         color: RGBColor(96, 165, 250),
     },
     Series {
-        key: "lz4+tcp+dict",
-        label: "lz4+tcp + dict",
+        key: "zstd+tcp+dict",
+        label: "zstd+tcp + dict",
         color: RGBColor(167, 139, 250),
     },
 ];
 
 const CHART: CompressionChart = CompressionChart {
-    cache_file: "results_pushpull_lz4.jsonl",
-    pattern_prefix: "pushpull_lz4",
-    dict_pattern: "pushpull_lz4_dict",
-    dict_series_key: "lz4+tcp+dict",
-    output_file: "lz4_tcp.svg",
-    title: "PUSH/PULL LZ4 compression, structural JSON payload, 2 KiB dict, TCP loopback, 2-process",
+    cache_file: "results_pushpull_zstd.jsonl",
+    pattern_prefix: "pushpull_zstd",
+    dict_pattern: "pushpull_zstd_dict",
+    dict_series_key: "zstd+tcp+dict",
+    output_file: "zstd_tcp.svg",
+    title: "PUSH/PULL Zstd L1 compression, structural JSON payload, 2 KiB dict, TCP loopback, 2-process",
     series: SERIES,
-    compression_level: None,
+    compression_level: Some(1),
 };
 
 pub(crate) fn generate() {

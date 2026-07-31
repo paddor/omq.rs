@@ -49,7 +49,6 @@ features = ["std"]
 optional = true
 
 [dependencies.zrip]
-path = "../../../zrip"
 version = "0.8.4"
 default-features = false
 features = ["std", "frame", "dict_builder"]

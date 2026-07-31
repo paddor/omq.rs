@@ -230,6 +230,7 @@ pub(crate) fn run(args: PushpullLz4Args) {
                     msgs_s: Some(msgs_s),
                     mbps: Some(mbps),
                     dict_size: None,
+                    compression_level: None,
                 };
                 jsonl::append_jsonl(&jsonl_path, &row);
                 eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s");
@@ -281,6 +282,7 @@ pub(crate) fn run(args: PushpullLz4Args) {
                         msgs_s: Some(msgs_s),
                         mbps: Some(mbps),
                         dict_size: Some(dict_cap),
+                        compression_level: None,
                     };
                     jsonl::append_jsonl(&jsonl_path, &row);
                     eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s  wire {wire_bytes}");

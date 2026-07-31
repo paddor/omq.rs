@@ -26,12 +26,14 @@ fn main() {
             Some(ChartSub::Pubsub) => chart::pubsub::generate(),
             Some(ChartSub::Fanio) => chart::fanio::generate(),
             Some(ChartSub::Lz4) => chart::lz4::generate(),
+            Some(ChartSub::Zstd) => chart::zstd::generate(),
             None => {
                 chart::main_tcp::generate();
                 chart::comparison::generate();
                 chart::pubsub::generate();
                 chart::fanio::generate();
                 chart::lz4::generate();
+                chart::zstd::generate();
             }
         },
     });

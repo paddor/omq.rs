@@ -84,6 +84,21 @@ async fn large_compressible_roundtrip() {
 }
 
 #[tokio::test]
+async fn custom_level_roundtrip() {
+    let (pull, ep) = pull_on_loopback().await;
+    let push = Socket::new(SocketType::Push, Options::default().compression_level(1));
+    push.connect(ep).await.unwrap();
+
+    let plain = vec![b'L'; 16 * 1024];
+    push.send(Message::single(plain.clone())).await.unwrap();
+    let m = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.part_bytes(0).unwrap().to_vec(), plain);
+}
+
+#[tokio::test]
 async fn multipart_roundtrip() {
     let (pull, ep) = pull_on_loopback().await;
     let push = Socket::new(SocketType::Push, Options::default());

@@ -34,6 +34,8 @@ pub(crate) enum ChartSub {
     Fanio,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
+    /// PUSH/PULL Zstd compression chart.
+    Zstd,
 }
 
 #[derive(Subcommand)]
@@ -221,6 +223,10 @@ pub(crate) struct PushpullZstdArgs {
     /// Dict sizes to train (comma-separated).
     #[arg(long, value_delimiter = ',', default_values_t = [2048])]
     pub dict_sizes: Vec<u64>,
+
+    /// Zstd compression level (-8..=4). Omitted uses transport default.
+    #[arg(long)]
+    pub level: Option<i32>,
 }
 
 #[derive(Parser)]

@@ -29,7 +29,7 @@ const USER_DICT_ID_MIN: u32 = 32_768;
 const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
 pub const MAX_DICT_BYTES: usize = 8 * 1024;
-pub const DEFAULT_LEVEL: i32 = -3;
+pub const DEFAULT_LEVEL: i32 = 1;
 pub const DEFAULT_DICT_CAPACITY: usize = 2048;
 
 pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
@@ -452,6 +452,36 @@ mod tests {
         let bytes = wire[0].part_bytes(0).unwrap();
         let header = zrip::frame::header::parse_frame_header(&bytes).unwrap();
         assert_eq!(header.frame_content_size, Some(plain.len() as u64));
+    }
+
+    #[test]
+    fn options_custom_level_reaches_encoder() {
+        use crate::options::Options;
+        use crate::proto::transform::{CompressionKind, MessageEncoder};
+
+        let options = Options::new().compression_level(1);
+        let (enc, _) = MessageEncoder::for_compression_kind(CompressionKind::Zstd, &options)
+            .unwrap()
+            .unwrap();
+        match enc {
+            MessageEncoder::Zstd(enc) => assert_eq!(enc.level, 1),
+            #[cfg(feature = "lz4")]
+            MessageEncoder::Lz4(_) => panic!("expected zstd encoder"),
+        }
+    }
+
+    #[test]
+    fn custom_level_roundtrip() {
+        let plain = vec![b'A'; 4096];
+        let mut enc = ZstdEncoder::new().with_level(1);
+        let mut dec = ZstdDecoder::new();
+        let wire = enc.encode(&Message::single(plain.clone())).unwrap();
+        assert_eq!(enc.level, 1);
+        let out = dec
+            .decode(wire.into_iter().next().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.part_bytes(0).unwrap().to_vec(), plain);
     }
 
     #[test]

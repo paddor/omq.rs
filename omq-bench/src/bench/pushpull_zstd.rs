@@ -74,13 +74,23 @@ fn build_peers() -> Peers {
     }
 }
 
-fn get_wire_size(binary: &str, transport: &str, size: u64, dict_file: Option<&str>) -> u64 {
+fn get_wire_size(
+    binary: &str,
+    transport: &str,
+    size: u64,
+    dict_file: Option<&str>,
+    level: Option<i32>,
+) -> u64 {
     let port = next_port();
     let ep = format!("{transport}://127.0.0.1:{port}");
     let size_str = size.to_string();
     let mut env = vec![("OMQ_BENCH_PAYLOAD", "json")];
     if let Some(df) = dict_file {
         env.push(("OMQ_BENCH_DICT_FILE", df));
+    }
+    let level_val = level.map(|l| l.to_string());
+    if let Some(level) = &level_val {
+        env.push(("OMQ_BENCH_ZSTD_LEVEL", level.as_str()));
     }
     let output = process::capture(
         &[binary, "wire-size", &ep, &size_str],
@@ -108,6 +118,7 @@ fn run_cell(
     size: u64,
     duration: f64,
     dict_file: Option<&str>,
+    level: Option<i32>,
 ) -> Option<(f64, f64, f64)> {
     let size_str = size.to_string();
     let dur_str = format!("{duration:.1}");
@@ -117,6 +128,10 @@ fn run_cell(
     let mut push_env: Vec<(&str, &str)> = vec![("OMQ_BENCH_PAYLOAD", "json")];
     if let Some(df) = dict_file {
         push_env.push(("OMQ_BENCH_DICT_FILE", df));
+    }
+    let level_val = level.map(|l| l.to_string());
+    if let Some(level) = &level_val {
+        push_env.push(("OMQ_BENCH_ZSTD_LEVEL", level.as_str()));
     }
 
     let mut push_proc = process::spawn(
@@ -137,6 +152,9 @@ fn run_cell(
     let mut pull_env: Vec<(&str, &str)> = vec![("OMQ_BENCH_PAYLOAD", "json")];
     if let Some(df) = dict_file {
         pull_env.push(("OMQ_BENCH_DICT_FILE", df));
+    }
+    if let Some(level) = &level_val {
+        pull_env.push(("OMQ_BENCH_ZSTD_LEVEL", level.as_str()));
     }
 
     let output = process::capture(
@@ -195,8 +213,9 @@ pub(crate) fn run(args: PushpullZstdArgs) {
 
     eprintln!("PUSH/PULL Zstd benchmark");
     eprintln!(
-        "Transports: {transports:?}, sizes: {}, rounds: {rounds}",
-        sizes.len()
+        "Transports: {transports:?}, sizes: {}, rounds: {rounds}, level: {}",
+        sizes.len(),
+        args.level.map_or("default".to_string(), |l| l.to_string()),
     );
 
     for transport in &transports {
@@ -205,11 +224,12 @@ pub(crate) fn run(args: PushpullZstdArgs) {
         for &size in &sizes {
             eprint!("{:>8}", size_label(size));
 
-            let wire_bytes = get_wire_size(util_bin, transport, size, None);
+            let wire_bytes = get_wire_size(util_bin, transport, size, None, args.level);
 
             let mut best: Option<(f64, f64, f64)> = None;
             for _ in 0..rounds {
-                if let Some(result) = run_cell(bench_bin, transport, size, duration, None)
+                if let Some(result) =
+                    run_cell(bench_bin, transport, size, duration, None, args.level)
                     && best.as_ref().is_none_or(|b| result.0 > b.0)
                 {
                     best = Some(result);
@@ -230,6 +250,7 @@ pub(crate) fn run(args: PushpullZstdArgs) {
                     msgs_s: Some(msgs_s),
                     mbps: Some(mbps),
                     dict_size: None,
+                    compression_level: args.level,
                 };
                 jsonl::append_jsonl(&jsonl_path, &row);
                 eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s");
@@ -255,13 +276,19 @@ pub(crate) fn run(args: PushpullZstdArgs) {
             for &size in &sizes {
                 eprint!("{:>8}", size_label(size));
 
-                let wire_bytes = get_wire_size(util_bin, transport, size, Some(&dict_path));
+                let wire_bytes =
+                    get_wire_size(util_bin, transport, size, Some(&dict_path), args.level);
 
                 let mut best: Option<(f64, f64, f64)> = None;
                 for _ in 0..rounds {
-                    if let Some(result) =
-                        run_cell(bench_bin, transport, size, duration, Some(&dict_path))
-                        && best.as_ref().is_none_or(|b| result.0 > b.0)
+                    if let Some(result) = run_cell(
+                        bench_bin,
+                        transport,
+                        size,
+                        duration,
+                        Some(&dict_path),
+                        args.level,
+                    ) && best.as_ref().is_none_or(|b| result.0 > b.0)
                     {
                         best = Some(result);
                     }
@@ -281,6 +308,7 @@ pub(crate) fn run(args: PushpullZstdArgs) {
                         msgs_s: Some(msgs_s),
                         mbps: Some(mbps),
                         dict_size: Some(dict_cap),
+                        compression_level: args.level,
                     };
                     jsonl::append_jsonl(&jsonl_path, &row);
                     eprint!("  {msgs_s:>10.0} msg/s  {mbps:>8.1} MB/s  wire {wire_bytes}");

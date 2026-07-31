@@ -201,6 +201,9 @@ impl MessageEncoder {
         if let Some(t) = options.compression_threshold {
             enc = enc.with_threshold(t);
         }
+        if let Some(level) = options.compression_level {
+            enc = enc.with_level(level);
+        }
         let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);

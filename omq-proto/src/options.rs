@@ -42,6 +42,9 @@ pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 /// - The same socket types with a `connect()` endpoint allocate a pre-ready
 ///   pipe at `connect()` time. Sends may queue there before the peer reaches
 ///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
+const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MAX: i32 = 4;
+
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
 // every backend file that accesses them.
@@ -182,6 +185,11 @@ pub struct Options {
     /// where compressing tiny messages wastes CPU.
     pub compression_threshold: Option<usize>,
 
+    /// Compression level for `zstd+tcp://`. `None` uses the transport
+    /// default. Supported zrip levels are -8..=4; level 0 maps to zrip's
+    /// library default (currently level 1). Ignored by `lz4+tcp://`.
+    pub compression_level: Option<i32>,
+
     /// Auto-train dict capacity in bytes. Controls the maximum size of
     /// the dictionary produced by auto-training. Default: 2048.
     /// Ignored when `compression_dict` is set.
@@ -237,7 +245,9 @@ pub struct Options {
     pub wss_tls: WssTls,
 }
 
-/// TLS configuration for WSS endpoints.
+/// TLS configuration for WSS endpoints. This covers server certificates
+/// and client-side server certificate validation only. Mutual TLS/client
+/// certificate authentication is not implemented.
 #[cfg(feature = "ws")]
 #[derive(Clone, Debug, Default)]
 pub struct WssTls {
@@ -277,6 +287,7 @@ impl Default for Options {
             compression_dict: None,
             compression_auto_train: false,
             compression_threshold: None,
+            compression_level: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
             compression_offload_threshold: Some(8192),
@@ -339,6 +350,13 @@ impl Options {
             return Err(crate::error::Error::Config(format!(
                 "compression dict must be 1..={COMPRESSION_DICT_MAX} bytes, got {}",
                 dict.len()
+            )));
+        }
+        if let Some(level) = self.compression_level
+            && !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&level)
+        {
+            return Err(crate::error::Error::Config(format!(
+                "zstd compression level must be {ZSTD_LEVEL_MIN}..={ZSTD_LEVEL_MAX}, got {level}",
             )));
         }
         #[cfg(feature = "plain")]
@@ -645,6 +663,16 @@ impl Options {
         self
     }
 
+    /// Set the `zstd+tcp://` compression level.
+    ///
+    /// Supported zrip levels are -8..=4. Level 0 maps to zrip's library
+    /// default, currently level 1. Ignored by LZ4 compression.
+    #[must_use]
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression_level = Some(level);
+        self
+    }
+
     /// Set the auto-train dictionary capacity in bytes
     /// (default 2048). Ignored when `compression_dict` is set.
     #[must_use]
@@ -806,6 +834,7 @@ mod tests {
         assert_eq!(o.tcp_keepalive, KeepAlive::Default);
         assert!(!o.conflate);
         assert!(!o.router_mandatory);
+        assert_eq!(o.compression_level, None);
         assert_eq!(o.on_mute, OnMute::Block);
         assert_eq!(o.large_message_threshold, Some(128 * 1024));
     }
@@ -824,6 +853,15 @@ mod tests {
             ..Options::default()
         };
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn validates_zstd_compression_level() {
+        assert!(Options::new().compression_level(1).validate().is_ok());
+        assert!(Options::new().compression_level(-8).validate().is_ok());
+        assert!(Options::new().compression_level(4).validate().is_ok());
+        assert!(Options::new().compression_level(5).validate().is_err());
+        assert!(Options::new().compression_level(-9).validate().is_err());
     }
 
     #[cfg(feature = "curve")]
@@ -899,6 +937,7 @@ mod tests {
             .heartbeat_interval(Duration::from_secs(1))
             .max_message_size(1024)
             .conflate(true)
+            .compression_level(1)
             .router_mandatory(true)
             .on_mute(OnMute::DropNewest);
         assert_eq!(o.send_hwm, 42);
@@ -909,6 +948,7 @@ mod tests {
         assert_eq!(o.heartbeat_interval, Some(Duration::from_secs(1)));
         assert_eq!(o.max_message_size, Some(1024));
         assert!(o.conflate);
+        assert_eq!(o.compression_level, Some(1));
         assert!(o.router_mandatory);
         assert_eq!(o.on_mute, OnMute::DropNewest);
     }

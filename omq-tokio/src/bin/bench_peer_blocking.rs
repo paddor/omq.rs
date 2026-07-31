@@ -208,6 +208,9 @@ fn bench_options(msg_size: usize) -> Options {
         let dict = Bytes::from(std::fs::read(&path).expect("read dict file"));
         o = o.compression_dict(dict);
     }
+    if let Ok(val) = std::env::var("OMQ_BENCH_ZSTD_LEVEL") {
+        o = o.compression_level(val.parse().expect("OMQ_BENCH_ZSTD_LEVEL"));
+    }
     o
 }
 

@@ -6,6 +6,6 @@ publish = false
 
 [dependencies]
 bytes = "1.12.0"
-omq-tokio = { path = "../../../../omq.rs/omq-tokio", features = ["lz4", "plain", "ws"] }
+omq-tokio = { version = "0.20.3", features = ["lz4", "plain", "ws"] }
 rcgen = "0.14"
 tokio = { version = "1.52.0", features = ["macros", "rt", "time"] }

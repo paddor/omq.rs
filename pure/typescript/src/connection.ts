@@ -70,7 +70,7 @@ export class Connection {
   constructor(url: string, opts: ConnectionOptions) {
     this.url = url;
     this.opts = opts;
-    this.useLz4 = url.startsWith("lz4+");
+    this.useLz4 = url.startsWith("lz4+ws://");
     const wsUrl = this.useLz4 ? url.replace(/^lz4\+/, "") : url;
     if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) {
       throw new Error(`Unsupported WebSocket URL: ${url}`);

@@ -40,7 +40,7 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
 export interface SocketOptions {
   /** ZMQ identity string. Sent to the peer during handshake. */
   identity?: string;
-  /** Pre-shared LZ4 dictionary for `lz4+wss://` connections. */
+  /** Pre-shared LZ4 dictionary for `lz4+ws://` connections. */
   lz4Dict?: Uint8Array;
   /** ZMTP PLAIN username/password credentials. */
   plain?: PlainAuthOptions;
@@ -122,7 +122,7 @@ export abstract class Socket {
       : new Uint8Array(0);
   }
 
-  /** Connect to a ZMQ endpoint. Use `lz4+wss://` for LZ4-compressed connections. */
+  /** Connect to a ZMQ endpoint. Use `lz4+ws://` for LZ4-compressed connections. */
   connect(url: string): void {
     if (this.closed) throw new Error("Socket closed");
     if (this.endpoints.has(url)) return;

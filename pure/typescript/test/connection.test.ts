@@ -145,8 +145,19 @@ describe("Connection", () => {
     expect(lastCreatedWs!.url).toBe("ws://localhost:8087");
   });
 
-  it("strips lz4+ prefix from wss URL", () => {
-    new Connection("lz4+wss://localhost:8087", {
+  it("rejects unsupported prefixed secure URLs", () => {
+    const prefix = "lz4+";
+    const secureUrl = "wss://localhost:8087";
+    expect(() =>
+      new Connection(prefix + secureUrl, {
+        socketType: "SUB",
+        identity: new Uint8Array(0),
+      })
+    ).toThrow("Unsupported WebSocket URL");
+  });
+
+  it("opens plain wss URLs", () => {
+    new Connection("wss://localhost:8087", {
       socketType: "SUB",
       identity: new Uint8Array(0),
     });

@@ -24,9 +24,10 @@ let lz4Ready = false;
 function endpoint(offset, lz4 = false, secure = false) {
   const base = Number(baseInput.value || "9105");
   const host = hostInput.value.trim() || "127.0.0.1";
-  const scheme = lz4
-    ? (secure ? "lz4+wss" : "lz4+ws")
-    : (secure ? "wss" : "ws");
+  if (lz4 && secure) throw new Error("Unsupported endpoint scheme");
+  let scheme = "ws";
+  if (secure) scheme = "wss";
+  if (lz4) scheme = "lz4+ws";
   return `${scheme}://${host}:${base + offset}/`;
 }
 
@@ -315,15 +316,6 @@ const cases = [
       true,
     );
   }],
-  ["Connect before Rust PULL bind over lz4+wss", async () => {
-    return await pushConnectBeforeBind(
-      "connect_before_bind_lz4_wss",
-      21,
-      "prebind-lz4-wss-from-firefox-" + "x".repeat(2048),
-      true,
-      true,
-    );
-  }],
   ["REQ -> Rust REP over ws", async () => {
     const { req, errors } = makeReq(1);
     try {
@@ -437,15 +429,6 @@ const cases = [
   ["Reconnect after Rust PULL restart", async () => {
     return await pushThroughRestart(10, "before", "after");
   }],
-  ["Reconnect after Rust PULL restart over lz4+wss", async () => {
-    return await pushThroughRestart(
-      17,
-      "before-lz4-wss",
-      "after-lz4-wss",
-      true,
-      true,
-    );
-  }],
   ["Synthetic LZ4M decode branch", async () => {
     await ensureLz4();
     const text = "small synthetic LZ4M payload";
@@ -514,29 +497,6 @@ const cases = [
     );
     await waitControl("wss_pull_plain", "plain-wss-from-firefox");
     return endpoint(14, false, true);
-  }],
-  ["PUSH -> Rust PULL over lz4+wss", async () => {
-    await ensureLz4();
-    const push = socket(new Push({ reconnect: false }));
-    push.connect(endpoint(15, true, true));
-    const payload = "lz4-wss-from-firefox-" + "x".repeat(4096);
-    await withTimeout(
-      push.send(new Message(payload)),
-      5000,
-      "lz4 wss send timeout",
-    );
-    await waitControl("lz4_wss_pull", payload);
-    return endpoint(15, true, true);
-  }],
-  ["PULL <- Rust PUSH over lz4+wss", async () => {
-    await ensureLz4();
-    const pull = socket(new Pull({ reconnect: false }));
-    pull.connect(endpoint(16, true, true));
-    const msg = await withTimeout(pull.recv(), 8000, "lz4 wss recv timeout");
-    if (msg.string(0) !== "push-lz4-wss-from-rust") {
-      throw new Error(`bad payload: ${msg.string(0)}`);
-    }
-    return endpoint(16, true, true);
   }],
 ];
 

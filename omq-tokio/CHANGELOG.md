@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `zstd+tcp://` transport support behind the `zstd` feature, including
-  zstd dictionary training for fan-out paths.
+  zstd dictionary training for outgoing messages.
 
 ### Fixed
 

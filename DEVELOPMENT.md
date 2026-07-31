@@ -132,7 +132,7 @@ OMQ_FUZZ_ITERS=500000000 cargo test -p omq-tokio --features fuzz --release -- --
 Soak tests cover peer churn, reconnect storms, reconnect all types,
 PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, WebSocket
 throughput, WebSocket reconnect, large-message throughput, compression
-with lz4, PLAIN, CURVE, multi-socket, inproc cross-thread,
+with lz4/zstd, PLAIN, CURVE, multi-socket, inproc cross-thread,
 and cancel safety.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s). `Context::new()`
@@ -141,7 +141,7 @@ dedicated IO threads; `Context::current()` is the explicit current-thread
 Tokio integration mode.
 
 ```sh
-FEATURES="soak lz4 plain curve ws"
+FEATURES="soak lz4 zstd plain curve ws"
 cargo test -p omq-tokio --features "$FEATURES" --release --no-run
 OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   --features "$FEATURES" --release --test omq_soak_peer_churn -- --nocapture

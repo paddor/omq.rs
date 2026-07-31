@@ -72,11 +72,11 @@ jobs:
           - group: mechanism
             tests: omq_soak_plain omq_soak_curve
           - group: transport
-            tests: omq_soak_ws omq_soak_compression_lz4 omq_soak_pub_sub_lz4_dict omq_soak_large_throughput
+            tests: omq_soak_ws omq_soak_compression_lz4 omq_soak_pub_sub_lz4_dict omq_soak_compression_zstd omq_soak_pub_sub_zstd_dict omq_soak_large_throughput
           - group: runtime
             tests: omq_soak_cancel_safety omq_soak_inproc_cross_thread omq_soak_multi_socket
     env:
-      SOAK_FEATURES: soak plain curve lz4 ws
+      SOAK_FEATURES: soak plain curve lz4 zstd ws
       OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '180' }}
     steps:
       - uses: actions/checkout@v7

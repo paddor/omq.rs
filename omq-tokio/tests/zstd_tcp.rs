@@ -7,13 +7,28 @@ use std::time::Duration;
 use bytes::Bytes;
 use omq_proto::proto::transform::train_zdict;
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::{
+    Context, ContextConfig, Endpoint, Message, MonitorEvent, Options, Socket, SocketType,
+};
 use rand::Rng;
+
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+const ZDICT_MAGIC: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
 
 fn zstd_loopback(port: u16) -> Endpoint {
     Endpoint::ZstdTcp {
         host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
         port,
+    }
+}
+
+fn tcp_from_zstd(ep: &Endpoint) -> Endpoint {
+    match ep {
+        Endpoint::ZstdTcp { host, port } => Endpoint::Tcp {
+            host: host.clone(),
+            port: *port,
+        },
+        other => panic!("expected zstd+tcp endpoint, got {other:?}"),
     }
 }
 
@@ -257,4 +272,90 @@ async fn auto_train_survives_reconnect() {
         }
     }
     assert_eq!(got, FIRST + SECOND);
+}
+
+#[test]
+fn pub_sub_zstd_io_lane_auto_trains_dict_for_late_subscriber() {
+    let ctx = Context::with_config(ContextConfig { io_threads: 4 });
+    let opts = Options::default()
+        .compression_auto_train(true)
+        .send_hwm(2048)
+        .recv_hwm(2048);
+    let publisher = ctx.socket(SocketType::Pub, opts.clone());
+    let mut mon = publisher.monitor();
+    let decoded_subs: Vec<_> = (0..4)
+        .map(|_| ctx.socket(SocketType::Sub, opts.clone()))
+        .collect();
+    let raw = ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
+
+    ctx.block_on(async move {
+        publisher.bind(zstd_loopback(0)).await.unwrap();
+        let ep = loop {
+            if let MonitorEvent::Listening {
+                endpoint: Endpoint::ZstdTcp { port, .. },
+            } = tokio::time::timeout(Duration::from_secs(5), mon.recv())
+                .await
+                .expect("publisher did not listen")
+                .unwrap()
+            {
+                break zstd_loopback(port);
+            }
+        };
+
+        for sub in &decoded_subs {
+            sub.connect(ep.clone()).await.unwrap();
+            sub.subscribe(Bytes::new()).await.unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut count = 0;
+            while count < decoded_subs.len() {
+                match mon.recv().await {
+                    Ok(MonitorEvent::SubscribeReceived { .. }) => count += 1,
+                    Ok(_) => {}
+                    Err(e) => panic!("monitor closed after {count} subscribes: {e:?}"),
+                }
+            }
+        })
+        .await
+        .expect("subscriptions did not arrive");
+
+        let payload = |seq: u64| {
+            Bytes::from(format!(
+                "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{seq},\"pad\":\"{}\"}}",
+                "A".repeat(256)
+            ))
+        };
+        for seq in 0..128 {
+            publisher.send(Message::single(payload(seq))).await.unwrap();
+        }
+
+        raw.connect(tcp_from_zstd(&ep)).await.unwrap();
+        raw.subscribe(Bytes::new()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        for seq in 128..132 {
+            publisher.send(Message::single(payload(seq))).await.unwrap();
+        }
+
+        let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+            .await
+            .expect("raw subscriber did not receive dictionary")
+            .unwrap();
+        let dict_part = dict.part_bytes(0).unwrap();
+        assert_eq!(&dict_part[..4], &ZDICT_MAGIC);
+
+        let compressed = tokio::time::timeout(Duration::from_secs(5), raw.recv())
+            .await
+            .expect("raw subscriber did not receive compressed payload")
+            .unwrap();
+        let compressed_part = compressed.part_bytes(0).unwrap();
+        assert_eq!(&compressed_part[..4], &ZSTD_MAGIC);
+
+        let decoded = tokio::time::timeout(Duration::from_secs(5), decoded_subs[0].recv())
+            .await
+            .expect("decoded subscriber did not receive payload")
+            .unwrap();
+        assert!(decoded.part_bytes(0).unwrap().starts_with(b"{\"kind\":\"quote\""));
+    });
 }

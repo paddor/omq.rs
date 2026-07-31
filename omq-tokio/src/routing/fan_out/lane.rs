@@ -392,7 +392,7 @@ impl FanOutLanes {
         );
     }
 
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     pub(super) fn set_compression_all(
         &self,
         kind: CompressionKind,

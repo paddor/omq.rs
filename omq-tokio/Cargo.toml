@@ -273,6 +273,10 @@ name = "omq_soak_compression_lz4"
 path = "tests/omq_soak_compression_lz4.rs"
 
 [[test]]
+name = "omq_soak_compression_zstd"
+path = "tests/omq_soak_compression_zstd.rs"
+
+[[test]]
 name = "omq_soak_curve"
 path = "tests/omq_soak_curve.rs"
 
@@ -315,6 +319,10 @@ path = "tests/omq_soak_pub_sub_churn_tcp.rs"
 [[test]]
 name = "omq_soak_pub_sub_lz4_dict"
 path = "tests/omq_soak_pub_sub_lz4_dict.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_zstd_dict"
+path = "tests/omq_soak_pub_sub_zstd_dict.rs"
 
 [[test]]
 name = "omq_soak_pub_sub_realworld_churn_tcp"

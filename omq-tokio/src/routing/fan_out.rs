@@ -28,7 +28,7 @@ use omq_proto::proto::transform::CompressionKind;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 use compression::DictTraining;
 pub(crate) use filter::FanOutMode;
 use lane::{FanOutLanes, LaneDispatch, LanePeerAdd};
@@ -76,7 +76,7 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
@@ -92,7 +92,7 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: self.dict_training.clone(),
         }
     }
@@ -305,7 +305,7 @@ impl Submitter {
         let (forwarded, group) = filter::prepare(self.mode, msg)?;
         let msg_bytes = forwarded.byte_len();
 
-        #[cfg(feature = "lz4")]
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
         compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
 
         self.dispatch_raw(&self.lanes, &forwarded, group).await?;
@@ -327,7 +327,7 @@ pub(crate) struct FanOutSend {
     mode: FanOutMode,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
@@ -409,7 +409,7 @@ impl FanOutSend {
             mode,
             xpub_nodrop: options.xpub_nodrop,
             mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: Arc::new(Mutex::new(compression::new_dict_training(options))),
         }
     }
@@ -429,7 +429,7 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: self.dict_training.clone(),
         }
     }

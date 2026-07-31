@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.18.2"
+version = "0.18.3"
 dependencies = [
  "bytes",
  "flume",

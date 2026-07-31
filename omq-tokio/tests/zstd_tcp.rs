@@ -72,6 +72,27 @@ async fn expect_subscribed(sock: &Socket, min_subscriptions: u64, label: &str) {
     .unwrap_or_else(|e| panic!("{label} subscription did not arrive: {e:?}"));
 }
 
+async fn expect_payload(sock: &Socket, expected: &Bytes, label: &str) {
+    let got = tokio::time::timeout(Duration::from_secs(5), sock.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{label} missed payload"))
+        .unwrap();
+    assert_eq!(got.part_bytes(0).unwrap(), &expected[..]);
+}
+
+#[derive(Clone, Copy)]
+enum FanoutSendMode {
+    Send,
+    TrySend,
+}
+
+async fn send_fanout(publisher: &Socket, msg: Message, mode: FanoutSendMode) {
+    match mode {
+        FanoutSendMode::Send => publisher.send(msg).await.unwrap(),
+        FanoutSendMode::TrySend => publisher.try_send(msg).unwrap(),
+    }
+}
+
 async fn pull_on_loopback() -> (Socket, Endpoint) {
     let pull = Socket::new(SocketType::Pull, Options::default());
     let mut mon = pull.monitor();
@@ -295,108 +316,12 @@ async fn auto_train_survives_reconnect() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pub_sub_zstd_io_lane_auto_trains_dict_for_late_subscriber() {
-    let ctx = Context::with_config(ContextConfig { io_threads: 4 });
-    let mut opts = Options::default()
-        .compression_auto_train(true)
-        .send_hwm(2048)
-        .recv_hwm(2048);
-    opts.xpub_nodrop = true;
-    let publisher = ctx.socket(SocketType::Pub, opts.clone());
-    let mut mon = publisher.monitor();
-    let decoded_subs: Vec<_> = (0..4)
-        .map(|_| ctx.socket(SocketType::Sub, opts.clone()))
-        .collect();
-    let raw = ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
-
-    publisher.bind(zstd_loopback(0)).await.unwrap();
-    let ep = loop {
-        if let MonitorEvent::Listening {
-            endpoint: Endpoint::ZstdTcp { port, .. },
-        } = tokio::time::timeout(Duration::from_secs(5), mon.recv())
-            .await
-            .expect("publisher did not listen")
-            .unwrap()
-        {
-            break zstd_loopback(port);
-        }
-    };
-
-    for sub in &decoded_subs {
-        sub.connect(ep.clone()).await.unwrap();
-        sub.subscribe(Bytes::new()).await.unwrap();
-    }
-
-    expect_subscribed(&publisher, decoded_subs.len() as u64, "decoded subscribers").await;
-
-    let payload = |seq: u64| {
-        Bytes::from(format!(
-            "{{\"kind\":\"quote\",\"venue\":\"XNAS\",\"symbol\":\"OMQ\",\"seq\":{seq},\"pad\":\"{}\"}}",
-            "A".repeat(256)
-        ))
-    };
-    for seq in 0..128 {
-        let expected = payload(seq);
-        publisher
-            .send(Message::single(expected.clone()))
-            .await
-            .unwrap();
-        for (idx, sub) in decoded_subs.iter().enumerate() {
-            let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())
-                .await
-                .unwrap_or_else(|_| panic!("decoded sub {idx} missed training payload {seq}"))
-                .unwrap();
-            assert_eq!(got.part_bytes(0).unwrap(), &expected[..]);
-        }
-    }
-
-    raw.connect(tcp_from_zstd(&ep)).await.unwrap();
-    expect_connected(&raw, 1, "raw subscriber").await;
-    expect_connected(&publisher, decoded_subs.len() + 1, "publisher").await;
-    raw.subscribe(Bytes::new()).await.unwrap();
-    expect_subscribed(&publisher, decoded_subs.len() as u64 + 1, "raw subscriber").await;
-
-    for seq in 128..132 {
-        publisher.send(Message::single(payload(seq))).await.unwrap();
-    }
-
-    let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
-        .await
-        .expect("raw subscriber did not receive dictionary")
-        .unwrap();
-    let dict_part = dict.part_bytes(0).unwrap();
-    assert_eq!(&dict_part[..4], &ZDICT_MAGIC);
-
-    let compressed = tokio::time::timeout(Duration::from_secs(5), raw.recv())
-        .await
-        .expect("raw subscriber did not receive compressed payload")
-        .unwrap();
-    let compressed_part = compressed.part_bytes(0).unwrap();
-    assert_eq!(&compressed_part[..4], &ZSTD_MAGIC);
-
-    let decoded = tokio::time::timeout(Duration::from_secs(5), decoded_subs[0].recv())
-        .await
-        .expect("decoded subscriber did not receive payload")
-        .unwrap();
-    assert!(
-        decoded
-            .part_bytes(0)
-            .unwrap()
-            .starts_with(b"{\"kind\":\"quote\"")
-    );
-
-    raw.close_with_linger(Some(Duration::ZERO)).await.unwrap();
-    for sub in decoded_subs {
-        sub.close_with_linger(Some(Duration::ZERO)).await.unwrap();
-    }
-    publisher
-        .close_with_linger(Some(Duration::ZERO))
-        .await
-        .unwrap();
+async fn pub_sub_zstd_io_lane_send_and_try_send_auto_train_dict_for_late_subscriber() {
+    run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(FanoutSendMode::Send).await;
+    run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(FanoutSendMode::TrySend).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pub_sub_zstd_io_lane_try_send_auto_trains_dict_for_late_subscriber() {
+async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: FanoutSendMode) {
     let ctx = Context::with_config(ContextConfig { io_threads: 4 });
     let mut opts = Options::default()
         .compression_auto_train(true)
@@ -438,15 +363,14 @@ async fn pub_sub_zstd_io_lane_try_send_auto_trains_dict_for_late_subscriber() {
     };
     for seq in 0..128 {
         let expected = payload(seq);
-        publisher
-            .try_send(Message::single(expected.clone()))
-            .unwrap();
+        send_fanout(&publisher, Message::single(expected.clone()), mode).await;
         for (idx, sub) in decoded_subs.iter().enumerate() {
-            let got = tokio::time::timeout(Duration::from_secs(5), sub.recv())
-                .await
-                .unwrap_or_else(|_| panic!("decoded sub {idx} missed training payload {seq}"))
-                .unwrap();
-            assert_eq!(got.part_bytes(0).unwrap(), &expected[..]);
+            expect_payload(
+                sub,
+                &expected,
+                &format!("decoded sub {idx} training seq {seq}"),
+            )
+            .await;
         }
     }
 
@@ -457,7 +381,7 @@ async fn pub_sub_zstd_io_lane_try_send_auto_trains_dict_for_late_subscriber() {
     expect_subscribed(&publisher, decoded_subs.len() as u64 + 1, "raw subscriber").await;
 
     for seq in 128..132 {
-        publisher.try_send(Message::single(payload(seq))).unwrap();
+        send_fanout(&publisher, Message::single(payload(seq)), mode).await;
     }
 
     let dict = tokio::time::timeout(Duration::from_secs(5), raw.recv())
@@ -473,6 +397,13 @@ async fn pub_sub_zstd_io_lane_try_send_auto_trains_dict_for_late_subscriber() {
         .unwrap();
     let compressed_part = compressed.part_bytes(0).unwrap();
     assert_eq!(&compressed_part[..4], &ZSTD_MAGIC);
+
+    for seq in 128..132 {
+        let expected = payload(seq);
+        for (idx, sub) in decoded_subs.iter().enumerate() {
+            expect_payload(sub, &expected, &format!("decoded sub {idx} late seq {seq}")).await;
+        }
+    }
 
     raw.close_with_linger(Some(Duration::ZERO)).await.unwrap();
     for sub in decoded_subs {

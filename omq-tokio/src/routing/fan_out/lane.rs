@@ -1397,6 +1397,67 @@ mod tests {
         data_rx.release();
     }
 
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    #[test]
+    fn pending_compression_update_survives_full_try_dispatch_ring() {
+        let (data_tx, mut data_rx) = yring::spsc::<LaneData>(4);
+        let lanes = FanOutLanes {
+            state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
+            active_flags: Arc::new(vec![AtomicBool::new(false)]),
+            distributor: Mutex::new(LaneDistributor {
+                tx: data_tx,
+                signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                space: Arc::new(crate::engine::signal::StateSignal::new()),
+                pending_compression: None,
+            }),
+            mute_policy: FanOutMutePolicy::Block,
+        };
+        #[cfg(feature = "lz4")]
+        let kind = CompressionKind::Lz4;
+        #[cfg(all(not(feature = "lz4"), feature = "zstd"))]
+        let kind = CompressionKind::Zstd;
+
+        let mut fill_count = 0;
+        loop {
+            let dispatch = test_dispatch("pre");
+            if lanes.try_dispatch(dispatch).is_err() {
+                break;
+            }
+            fill_count += 1;
+            assert!(fill_count < 32, "test ring did not fill");
+        }
+        assert!(fill_count > 0);
+
+        lanes.set_compression_all_ordered(kind, &Options::default(), None);
+        let Err(returned) = lanes.try_dispatch(test_dispatch("blocked")) else {
+            panic!("full ring accepted dispatch before compression update fit");
+        };
+        assert_eq!(returned.msg.part_bytes(0).unwrap().as_ref(), b"blocked");
+
+        data_rx.prefetch();
+        for _ in 0..fill_count {
+            let Some(LaneData::Dispatch(dispatch)) = data_rx.pop() else {
+                panic!("expected only pre-compression dispatches");
+            };
+            assert_eq!(dispatch.msg.part_bytes(0).unwrap().as_ref(), b"pre");
+        }
+        assert!(data_rx.pop().is_none());
+        data_rx.release();
+
+        lanes.try_dispatch(test_dispatch("after")).unwrap();
+        data_rx.prefetch();
+        assert!(matches!(
+            data_rx.pop().expect("compression update present"),
+            LaneData::SetCompression(_)
+        ));
+        let Some(LaneData::Dispatch(dispatch)) = data_rx.pop() else {
+            panic!("expected dispatch after compression update");
+        };
+        assert_eq!(dispatch.msg.part_bytes(0).unwrap().as_ref(), b"after");
+        assert!(data_rx.pop().is_none());
+        data_rx.release();
+    }
+
     #[test]
     fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);

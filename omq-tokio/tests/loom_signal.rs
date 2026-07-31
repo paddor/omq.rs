@@ -105,6 +105,68 @@ enum ModelFanoutEntry {
     Compressed(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLaneEntry {
+    CompressionUpdate,
+    Dispatch(u8),
+}
+
+#[derive(Debug)]
+struct ModelLaneDistributorState {
+    entries: Vec<ModelLaneEntry>,
+    pending_compression: bool,
+}
+
+#[derive(Debug)]
+struct ModelLaneDistributor {
+    state: Mutex<ModelLaneDistributorState>,
+    cap: usize,
+}
+
+impl ModelLaneDistributor {
+    fn new(cap: usize) -> Self {
+        Self {
+            state: Mutex::new(ModelLaneDistributorState {
+                entries: Vec::new(),
+                pending_compression: false,
+            }),
+            cap,
+        }
+    }
+
+    fn set_compression(&self) {
+        self.state.lock().unwrap().pending_compression = true;
+    }
+
+    fn try_dispatch(&self, id: u8) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if !self.try_push_pending_compression(&mut state) {
+            return false;
+        }
+        if state.entries.len() >= self.cap {
+            return false;
+        }
+        state.entries.push(ModelLaneEntry::Dispatch(id));
+        true
+    }
+
+    fn drain(&self) -> Vec<ModelLaneEntry> {
+        std::mem::take(&mut self.state.lock().unwrap().entries)
+    }
+
+    fn try_push_pending_compression(&self, state: &mut ModelLaneDistributorState) -> bool {
+        if !state.pending_compression {
+            return true;
+        }
+        if state.entries.len() >= self.cap {
+            return false;
+        }
+        state.entries.push(ModelLaneEntry::CompressionUpdate);
+        state.pending_compression = false;
+        true
+    }
+}
+
 #[derive(Debug)]
 struct ModelFanoutSlot {
     entries: Mutex<Vec<ModelFanoutEntry>>,
@@ -426,6 +488,57 @@ fn fanout_dict_entry_stays_before_compressed_payloads_under_hwm() {
         let mut observed = wire.lock().unwrap().clone();
         observed.extend(slot.snapshot());
         assert_compressed_payloads_follow_dict(&observed);
+    });
+}
+
+#[test]
+fn fanout_pending_compression_update_precedes_accepted_try_send_dispatches() {
+    loom::model(|| {
+        let distributor = Arc::new(ModelLaneDistributor::new(1));
+
+        distributor.set_compression();
+
+        let sender_dist = distributor.clone();
+        let sender = thread::spawn(move || {
+            let mut accepted = Vec::new();
+            if sender_dist.try_dispatch(1) {
+                accepted.push(1);
+            }
+            thread::yield_now();
+            if sender_dist.try_dispatch(2) {
+                accepted.push(2);
+            }
+            accepted
+        });
+
+        let drain_dist = distributor.clone();
+        let drainer = thread::spawn(move || {
+            let mut observed = Vec::new();
+            thread::yield_now();
+            observed.extend(drain_dist.drain());
+            thread::yield_now();
+            observed.extend(drain_dist.drain());
+            observed
+        });
+
+        let accepted = sender.join().unwrap();
+        let mut observed = drainer.join().unwrap();
+
+        observed.extend(distributor.drain());
+        let update_pos = observed
+            .iter()
+            .position(|entry| *entry == ModelLaneEntry::CompressionUpdate);
+
+        for id in accepted {
+            let dispatch_pos = observed
+                .iter()
+                .position(|entry| *entry == ModelLaneEntry::Dispatch(id))
+                .unwrap_or_else(|| panic!("accepted dispatch {id} missing from {observed:?}"));
+            assert!(
+                update_pos.is_some_and(|pos| pos < dispatch_pos),
+                "accepted dispatch {id} must follow compression update: {observed:?}"
+            );
+        }
     });
 }
 

@@ -97,6 +97,7 @@ export class Rep extends Socket {
         this.opts.receiveHighWaterMark !== undefined &&
         this.pendingRequests.length >= this.opts.receiveHighWaterMark
       ) {
+        this.closeForReceiveHighWaterMark(conn);
         return;
       }
       this.pendingRequests.push(entry);
@@ -105,6 +106,9 @@ export class Rep extends Socket {
 
   /** @ignore */
   protected override onConnectionClosed(conn: Connection): void {
+    this.pendingRequests = this.pendingRequests.filter((entry) =>
+      entry.conn !== conn
+    );
     if (this.replyConnection === conn) {
       this.routingEnvelope = null;
       this.replyConnection = null;

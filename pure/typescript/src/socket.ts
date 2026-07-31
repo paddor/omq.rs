@@ -288,7 +288,7 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected enqueueMessage(msg: Message): void {
+  protected enqueueMessage(conn: Connection, msg: Message): void {
     const waiter = this.messageWaiters.shift();
     if (waiter) {
       waiter.resolve(msg);
@@ -297,6 +297,7 @@ export abstract class Socket {
         this.opts.receiveHighWaterMark !== undefined &&
         this.messageQueue.length >= this.opts.receiveHighWaterMark
       ) {
+        this.closeForReceiveHighWaterMark(conn);
         return;
       }
       this.messageQueue.push(msg);
@@ -367,6 +368,13 @@ export abstract class Socket {
   /** @ignore */
   protected onSocketClosed(_error: Error): void {
     // Subclasses can override
+  }
+
+  /** @ignore */
+  protected closeForReceiveHighWaterMark(conn: Connection): void {
+    const error = new Error("Receive high water mark reached");
+    this.onConnectionError(conn, error);
+    conn.close();
   }
 
   private get reconnectInitialDelayMs(): number {

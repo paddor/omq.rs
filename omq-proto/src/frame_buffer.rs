@@ -15,9 +15,13 @@ enum Entry {
     /// Contiguous range in the arena. Resolved to `Bytes::slice()` at
     /// drain time, sharing one backing allocation across all headers
     /// and small messages.
-    Arena { offset: u32, len: u32 },
+    Arena {
+        offset: u32,
+        len: u32,
+        protected: bool,
+    },
     /// External payload bytes (large message body, pre-encoded data).
-    External(Bytes),
+    External { bytes: Bytes, protected: bool },
 }
 
 pub struct FrameBuffer {
@@ -163,6 +167,7 @@ impl FrameBuffer {
             self.entries.push_back(Entry::Arena {
                 offset: self.arena_mark,
                 len: end - self.arena_mark,
+                protected: false,
             });
             self.arena_mark = end;
         }
@@ -188,7 +193,10 @@ impl FrameBuffer {
             let b = part.as_bytes();
             if !b.is_empty() {
                 self.total_bytes += b.len();
-                self.entries.push_back(Entry::External(b));
+                self.entries.push_back(Entry::External {
+                    bytes: b,
+                    protected: false,
+                });
             }
         }
     }
@@ -245,7 +253,10 @@ impl FrameBuffer {
             let bytes = part.as_bytes();
             if !bytes.is_empty() {
                 self.total_bytes += bytes.len();
-                self.entries.push_back(Entry::External(bytes));
+                self.entries.push_back(Entry::External {
+                    bytes,
+                    protected: false,
+                });
             }
         }
     }
@@ -269,20 +280,37 @@ impl FrameBuffer {
             self.total_bytes += self.arena.len() - before;
             self.commit_arena_range();
             self.total_bytes += prefix.len();
-            self.entries.push_back(Entry::External(prefix.clone()));
+            self.entries.push_back(Entry::External {
+                bytes: prefix.clone(),
+                protected: false,
+            });
             let b = part.as_bytes();
             if !b.is_empty() {
                 self.total_bytes += b.len();
-                self.entries.push_back(Entry::External(b));
+                self.entries.push_back(Entry::External {
+                    bytes: b,
+                    protected: false,
+                });
             }
         }
     }
 
     pub fn push_raw(&mut self, chunks: Vec<Bytes>) {
+        self.push_raw_with_protection(chunks, false);
+    }
+
+    pub fn push_raw_protected(&mut self, chunks: Vec<Bytes>) {
+        self.push_raw_with_protection(chunks, true);
+    }
+
+    fn push_raw_with_protection(&mut self, chunks: Vec<Bytes>, protected: bool) {
         self.commit_arena_range();
         for chunk in chunks {
             self.total_bytes += chunk.len();
-            self.entries.push_back(Entry::External(chunk));
+            self.entries.push_back(Entry::External {
+                bytes: chunk,
+                protected,
+            });
         }
     }
 
@@ -291,30 +319,49 @@ impl FrameBuffer {
         let Some(entry) = self.entries.pop_front() else {
             return false;
         };
-        let len = match entry {
-            Entry::Arena { len, .. } => len as usize,
-            Entry::External(bytes) => bytes.len(),
-        };
+        let len = entry.len();
         self.total_bytes = self.total_bytes.saturating_sub(len);
+        self.clear_empty_arena();
+        true
+    }
+
+    pub fn pop_oldest_unprotected_entry(&mut self) -> bool {
+        self.commit_arena_range();
+        let Some(pos) = self.entries.iter().position(|entry| !entry.is_protected()) else {
+            return false;
+        };
+        let entry = self
+            .entries
+            .remove(pos)
+            .expect("position came from entries");
+        let len = entry.len();
+        self.total_bytes = self.total_bytes.saturating_sub(len);
+        self.clear_empty_arena();
+        true
+    }
+
+    fn clear_empty_arena(&mut self) {
         if self.entries.is_empty() && self.arena.len() == self.arena_mark as usize {
             self.arena.clear();
             self.arena_mark = 0;
         }
-        true
     }
 
     pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
         self.commit_arena_range();
         for chunk in chunks {
             self.total_bytes += chunk.len();
-            self.entries.push_back(Entry::External(chunk.clone()));
+            self.entries.push_back(Entry::External {
+                bytes: chunk.clone(),
+                protected: false,
+            });
         }
     }
 
-    pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) {
+    pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> usize {
         self.commit_arena_range();
         if self.entries.is_empty() {
-            return;
+            return 0;
         }
 
         let frozen = if self.arena.is_empty() {
@@ -335,13 +382,17 @@ impl FrameBuffer {
         };
 
         let take = max_chunks.min(self.entries.len());
+        let mut protected_drained = 0;
         for entry in self.entries.drain(..take) {
+            if entry.is_protected() {
+                protected_drained += 1;
+            }
             let b = match entry {
-                Entry::Arena { offset, len } => frozen
+                Entry::Arena { offset, len, .. } => frozen
                     .as_ref()
                     .expect("arena entry without arena data")
                     .slice(offset as usize..(offset + len) as usize),
-                Entry::External(b) => b,
+                Entry::External { bytes, .. } => bytes,
             };
             self.total_bytes = self.total_bytes.saturating_sub(b.len());
             buf.push(b);
@@ -352,14 +403,22 @@ impl FrameBuffer {
         // exceeds the entry count, so this loop is nearly always empty.
         if let Some(ref frozen) = frozen {
             for entry in &mut self.entries {
-                if let Entry::Arena { offset, len } = *entry {
-                    *entry =
-                        Entry::External(frozen.slice(offset as usize..(offset + len) as usize));
+                if let Entry::Arena {
+                    offset,
+                    len,
+                    protected,
+                } = *entry
+                {
+                    *entry = Entry::External {
+                        bytes: frozen.slice(offset as usize..(offset + len) as usize),
+                        protected,
+                    };
                 }
             }
         }
 
         self.arena_mark = 0;
+        protected_drained
     }
 
     pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
@@ -380,7 +439,25 @@ impl FrameBuffer {
             }
         }
         for chunk in to_restore.into_iter().rev() {
-            self.entries.push_front(Entry::External(chunk));
+            self.entries.push_front(Entry::External {
+                bytes: chunk,
+                protected: false,
+            });
+        }
+    }
+}
+
+impl Entry {
+    fn len(&self) -> usize {
+        match self {
+            Self::Arena { len, .. } => *len as usize,
+            Self::External { bytes, .. } => bytes.len(),
+        }
+    }
+
+    fn is_protected(&self) -> bool {
+        match self {
+            Self::Arena { protected, .. } | Self::External { protected, .. } => *protected,
         }
     }
 }

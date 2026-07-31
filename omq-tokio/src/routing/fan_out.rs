@@ -298,6 +298,8 @@ impl Submitter {
             filter::prepare(self.mode, msg).map_err(omq_proto::error::TrySendError::Error)?;
 
         self.try_dispatch_raw(&self.lanes, &forwarded, group)?;
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
+        compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
         Ok(())
     }
 
@@ -305,10 +307,9 @@ impl Submitter {
         let (forwarded, group) = filter::prepare(self.mode, msg)?;
         let msg_bytes = forwarded.byte_len();
 
+        self.dispatch_raw(&self.lanes, &forwarded, group).await?;
         #[cfg(any(feature = "lz4", feature = "zstd"))]
         compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
-
-        self.dispatch_raw(&self.lanes, &forwarded, group).await?;
         let target_count = self.lane_peer_count.load(Ordering::Relaxed)
             + self.fallback_peer_count.load(Ordering::Relaxed);
         self.maybe_yield(target_count, msg_bytes).await;

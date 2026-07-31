@@ -14,6 +14,10 @@ pub(crate) fn bind_random_lz4_tcp(sock: *mut c_void) -> CString {
     bind_random(sock, "lz4+tcp://127.0.0.1:0")
 }
 
+pub(crate) fn bind_random_zstd_tcp(sock: *mut c_void) -> CString {
+    bind_random(sock, "zstd+tcp://127.0.0.1:0")
+}
+
 fn bind_random(sock: *mut c_void, endpoint: &str) -> CString {
     let bind_addr = CString::new(endpoint).unwrap();
     assert_eq!(

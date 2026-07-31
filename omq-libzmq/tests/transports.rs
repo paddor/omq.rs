@@ -1,4 +1,4 @@
-//! Transport tests: IPC, IPC abstract namespace, lz4+tcp.
+//! Transport tests: IPC, IPC abstract namespace, lz4+tcp, zstd+tcp.
 #![allow(clippy::borrow_as_ptr, clippy::ref_as_ptr)]
 
 mod helpers;
@@ -287,6 +287,34 @@ fn lz4_tcp_multiple_messages() {
         assert_eq!(rc, 256, "lz4 recv {i}");
         assert!(buf[..256].iter().all(|&b| b == i), "lz4 content {i}");
     }
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+// --- zstd+tcp compression ---
+
+#[test]
+fn zstd_tcp_push_pull() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let addr = helpers::bind_random_zstd_tcp(pull);
+    zmq_connect(push, addr.as_ptr());
+    std::thread::sleep(Duration::from_millis(100));
+    set_timeo(push, 2000);
+    set_timeo(pull, 2000);
+
+    let payload = vec![0x37u8; 4096];
+    let rc = zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
+    assert_eq!(rc, 4096);
+
+    let mut buf = vec![0u8; 8192];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(rc, 4096);
+    assert!(buf[..4096].iter().all(|&b| b == 0x37));
 
     zmq_close(push);
     zmq_close(pull);

@@ -84,6 +84,8 @@ impl Trainer {
     }
 
     fn train(self, capacity: usize) -> Option<Bytes> {
+        #[cfg(not(feature = "zstd"))]
+        let _ = capacity;
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(trainer) => {
@@ -173,7 +175,7 @@ pub(super) fn feed_dict_training(
     }
     let mut idx = 0;
     while let Some(part) = msg.part_bytes(idx) {
-        trainer.add_sample(&part);
+        trainer.add_sample(part.as_ref());
         idx += 1;
     }
     training.msgs_left = training.msgs_left.saturating_sub(1);

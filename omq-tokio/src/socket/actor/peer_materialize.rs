@@ -425,7 +425,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
     ArenaConfig { threshold, cap }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn build_transmit_slot(
     socket: &SocketDriver,
     peer_id: u64,

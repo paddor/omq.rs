@@ -6,6 +6,20 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [omq-tokio 0.20.2] - 2026-07-31
+
+### Fixed
+
+- Large byte-stream `PUB` fan-out messages now wake transmit drivers when the
+  encoded frame exceeds the transmit slot byte cap. This fixes large
+  `PUB`/`SUB` delivery over IPC and TCP.
+
+## [omq-libzmq 0.5.9] - 2026-07-31
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.20.2.
+
 ## [omq-proto 0.24.1] - 2026-07-28
 
 ### Added

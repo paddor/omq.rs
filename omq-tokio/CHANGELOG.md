@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-07-31
+
+### Fixed
+
+- Large byte-stream `PUB` fan-out messages now wake transmit drivers when the
+  encoded frame exceeds the transmit slot byte cap. This fixes large
+  `PUB`/`SUB` delivery over IPC and TCP.
+
 ## [0.20.0] - 2026-07-27
 
 ### Security

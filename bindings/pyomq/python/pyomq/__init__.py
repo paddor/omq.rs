@@ -103,6 +103,7 @@ from ._native import (  # type: ignore[attr-defined]  # ty:ignore[unresolved-imp
     CURVE_SERVERKEY,
     # omq-specific options
     OMQ_ON_MUTE,
+    OMQ_COMPRESSION_LEVEL,
     OMQ_COMPRESSION_DICT,
     OMQ_COMPRESSION_AUTO_TRAIN,
     OMQ_ON_MUTE_BLOCK,
@@ -386,6 +387,7 @@ class _SocketOptionsBase:
     curve_secretkey = _SocketOptionDescriptor(CURVE_SECRETKEY)
     curve_serverkey = _SocketOptionDescriptor(CURVE_SERVERKEY)
     on_mute = _SocketOptionDescriptor(OMQ_ON_MUTE)
+    compression_level = _SocketOptionDescriptor(OMQ_COMPRESSION_LEVEL)
     compression_dict = _SocketOptionDescriptor(OMQ_COMPRESSION_DICT)
     compression_auto_train = _SocketOptionDescriptor(OMQ_COMPRESSION_AUTO_TRAIN)
     sndbuf = _SocketOptionDescriptor(SNDBUF)
@@ -1339,6 +1341,7 @@ __all__ = [
     "CURVE_SECRETKEY",
     "CURVE_SERVERKEY",
     "OMQ_ON_MUTE",
+    "OMQ_COMPRESSION_LEVEL",
     "OMQ_COMPRESSION_DICT",
     "OMQ_COMPRESSION_AUTO_TRAIN",
     "OMQ_ON_MUTE_BLOCK",

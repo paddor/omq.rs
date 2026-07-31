@@ -64,6 +64,7 @@ pub const CURVE_SERVERKEY: i32 = 50;
 
 // omq-specific options (no libzmq equivalent):
 pub const OMQ_ON_MUTE: i32 = 1004;
+pub const OMQ_COMPRESSION_LEVEL: i32 = 1005;
 pub const OMQ_COMPRESSION_DICT: i32 = 1006;
 pub const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
 
@@ -161,6 +162,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         CURVE_SECRETKEY,
         CURVE_SERVERKEY,
         OMQ_ON_MUTE,
+        OMQ_COMPRESSION_LEVEL,
         OMQ_COMPRESSION_DICT,
         OMQ_COMPRESSION_AUTO_TRAIN,
         OMQ_ON_MUTE_BLOCK,

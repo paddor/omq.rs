@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `zstd+tcp://` support in the published wheel feature set.
+- `OMQ_COMPRESSION_LEVEL` / `Socket.compression_level` for zstd levels.
+
 ## [0.18.3] - 2026-07-31
 
 ### Changed

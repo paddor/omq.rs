@@ -18,6 +18,7 @@ default = []
 plain = ["omq-tokio/plain"]
 curve = ["omq-tokio/curve"]
 lz4 = ["omq-tokio/lz4"]
+zstd = ["omq-tokio/zstd"]
 
 [dependencies]
 omq-proto = { path = "../../omq-proto", default-features = false }

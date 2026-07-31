@@ -162,6 +162,8 @@ fn has_feature(name: &str) -> bool {
         "plain" => true,
         #[cfg(feature = "lz4")]
         "lz4" => true,
+        #[cfg(feature = "zstd")]
+        "zstd" => true,
         _ => false,
     }
 }

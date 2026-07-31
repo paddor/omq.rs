@@ -283,7 +283,7 @@ def test_has_feature():
     assert zmq.has("pgm") is False
     assert isinstance(zmq.has("curve"), bool)
     assert isinstance(zmq.has("lz4"), bool)
-    assert zmq.has("zstd") is False
+    assert zmq.has("zstd") is True
     assert isinstance(zmq.has("plain"), bool)
     assert zmq.has("gssapi") is False
     assert zmq.has("INPROC") is True
@@ -333,10 +333,34 @@ def test_compression_dict_round_trip():
         ctx.term()
 
 
+def test_compression_level_round_trip():
+    ctx, s = _push()
+    try:
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == 0
+        s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, 1)
+        assert s.getsockopt(zmq.OMQ_COMPRESSION_LEVEL) == 1
+        s.compression_level = 3
+        assert s.compression_level == 3
+    finally:
+        s.close()
+        ctx.term()
+
+
+def test_compression_level_rejects_invalid():
+    ctx, s = _push()
+    try:
+        for level in (-9, 5):
+            with pytest.raises((zmq.ZMQError, ValueError)):
+                s.setsockopt(zmq.OMQ_COMPRESSION_LEVEL, level)
+    finally:
+        s.close()
+        ctx.term()
+
+
 def test_compression_dict_rejects_oversize():
     ctx, s = _push()
     try:
-        oversize = b"\x00" * (64 * 1024)
+        oversize = b"\x00" * (8 * 1024 + 1)
         with pytest.raises((zmq.ZMQError, ValueError)):
             s.setsockopt(zmq.OMQ_COMPRESSION_DICT, oversize)
     finally:

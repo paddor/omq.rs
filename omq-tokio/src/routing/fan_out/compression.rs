@@ -194,5 +194,5 @@ pub(super) fn feed_dict_training(
         };
         (kind, g.options.clone())
     };
-    lanes.set_compression_all(kind, &options, Some(&dict));
+    lanes.set_compression_all_ordered(kind, &options, Some(&dict));
 }

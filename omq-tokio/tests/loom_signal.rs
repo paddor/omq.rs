@@ -98,6 +98,174 @@ impl ModelDataSignal {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFanoutEntry {
+    Plain,
+    Dict,
+    Compressed(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLaneEntry {
+    CompressionUpdate,
+    Dispatch(u8),
+}
+
+#[derive(Debug)]
+struct ModelLaneDistributorState {
+    entries: Vec<ModelLaneEntry>,
+    pending_compression: bool,
+}
+
+#[derive(Debug)]
+struct ModelLaneDistributor {
+    state: Mutex<ModelLaneDistributorState>,
+    cap: usize,
+}
+
+impl ModelLaneDistributor {
+    fn new(cap: usize) -> Self {
+        Self {
+            state: Mutex::new(ModelLaneDistributorState {
+                entries: Vec::new(),
+                pending_compression: false,
+            }),
+            cap,
+        }
+    }
+
+    fn set_compression(&self) {
+        self.state.lock().unwrap().pending_compression = true;
+    }
+
+    fn try_dispatch(&self, id: u8) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if !self.try_push_pending_compression(&mut state) {
+            return false;
+        }
+        if state.entries.len() >= self.cap {
+            return false;
+        }
+        state.entries.push(ModelLaneEntry::Dispatch(id));
+        true
+    }
+
+    fn drain(&self) -> Vec<ModelLaneEntry> {
+        std::mem::take(&mut self.state.lock().unwrap().entries)
+    }
+
+    fn try_push_pending_compression(&self, state: &mut ModelLaneDistributorState) -> bool {
+        if !state.pending_compression {
+            return true;
+        }
+        if state.entries.len() >= self.cap {
+            return false;
+        }
+        state.entries.push(ModelLaneEntry::CompressionUpdate);
+        state.pending_compression = false;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct ModelFanoutSlot {
+    entries: Mutex<Vec<ModelFanoutEntry>>,
+    msg_cap: usize,
+    dict_queued: AtomicBool,
+    dict_shipped: AtomicBool,
+}
+
+impl ModelFanoutSlot {
+    fn new(msg_cap: usize) -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            msg_cap,
+            dict_queued: AtomicBool::new(false),
+            dict_shipped: AtomicBool::new(false),
+        }
+    }
+
+    fn push_plain(&self) {
+        self.push_unprotected(ModelFanoutEntry::Plain);
+    }
+
+    fn push_dict(&self) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        if !Self::make_room(&mut entries, self.msg_cap) {
+            return false;
+        }
+        entries.push(ModelFanoutEntry::Dict);
+        self.dict_queued.store(true, Ordering::Release);
+        true
+    }
+
+    fn push_compressed(&self, id: u8) -> bool {
+        if !self.dict_ready() {
+            return false;
+        }
+        self.push_unprotected(ModelFanoutEntry::Compressed(id))
+    }
+
+    fn drain(&self) -> Vec<ModelFanoutEntry> {
+        let mut entries = self.entries.lock().unwrap();
+        let drained = std::mem::take(&mut *entries);
+        if drained
+            .iter()
+            .any(|entry| matches!(entry, ModelFanoutEntry::Dict))
+        {
+            self.dict_queued.store(false, Ordering::Release);
+            self.dict_shipped.store(true, Ordering::Release);
+        }
+        drained
+    }
+
+    fn snapshot(&self) -> Vec<ModelFanoutEntry> {
+        self.entries.lock().unwrap().clone()
+    }
+
+    fn dict_ready(&self) -> bool {
+        self.dict_queued.load(Ordering::Acquire) || self.dict_shipped.load(Ordering::Acquire)
+    }
+
+    fn push_unprotected(&self, entry: ModelFanoutEntry) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        if !Self::make_room(&mut entries, self.msg_cap) {
+            return false;
+        }
+        entries.push(entry);
+        true
+    }
+
+    fn make_room(entries: &mut Vec<ModelFanoutEntry>, msg_cap: usize) -> bool {
+        while entries.len() >= msg_cap {
+            let Some(pos) = entries
+                .iter()
+                .position(|entry| !matches!(entry, ModelFanoutEntry::Dict))
+            else {
+                return false;
+            };
+            entries.remove(pos);
+        }
+        true
+    }
+}
+
+fn assert_compressed_payloads_follow_dict(entries: &[ModelFanoutEntry]) {
+    let mut saw_dict = false;
+    for entry in entries {
+        match entry {
+            ModelFanoutEntry::Dict => saw_dict = true,
+            ModelFanoutEntry::Compressed(_) => {
+                assert!(
+                    saw_dict,
+                    "compressed fan-out payload must not overtake or orphan dict: {entries:?}"
+                );
+            }
+            ModelFanoutEntry::Plain => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ModelBlockingRecvWaker {
     registered: AtomicBool,
@@ -283,6 +451,94 @@ fn data_signal_rearm_catches_push_between_clear_and_next_wait() {
             signal.ready(),
             "data signal must stay ready when producer races with drain clear"
         );
+    });
+}
+
+#[test]
+fn fanout_dict_entry_stays_before_compressed_payloads_under_hwm() {
+    loom::model(|| {
+        let slot = Arc::new(ModelFanoutSlot::new(2));
+        let wire = Arc::new(Mutex::new(Vec::new()));
+
+        slot.push_plain();
+
+        let sender_slot = slot.clone();
+        let sender = thread::spawn(move || {
+            assert!(sender_slot.push_dict(), "dict must fit by evicting plain");
+            thread::yield_now();
+            let _ = sender_slot.push_compressed(1);
+            thread::yield_now();
+            let _ = sender_slot.push_compressed(2);
+        });
+
+        let drain_slot = slot.clone();
+        let drain_wire = wire.clone();
+        let drainer = thread::spawn(move || {
+            for _ in 0..3 {
+                thread::yield_now();
+                let drained = drain_slot.drain();
+                thread::yield_now();
+                drain_wire.lock().unwrap().extend(drained);
+            }
+        });
+
+        sender.join().unwrap();
+        drainer.join().unwrap();
+
+        let mut observed = wire.lock().unwrap().clone();
+        observed.extend(slot.snapshot());
+        assert_compressed_payloads_follow_dict(&observed);
+    });
+}
+
+#[test]
+fn fanout_pending_compression_update_precedes_accepted_try_send_dispatches() {
+    loom::model(|| {
+        let distributor = Arc::new(ModelLaneDistributor::new(1));
+
+        distributor.set_compression();
+
+        let sender_dist = distributor.clone();
+        let sender = thread::spawn(move || {
+            let mut accepted = Vec::new();
+            if sender_dist.try_dispatch(1) {
+                accepted.push(1);
+            }
+            thread::yield_now();
+            if sender_dist.try_dispatch(2) {
+                accepted.push(2);
+            }
+            accepted
+        });
+
+        let drain_dist = distributor.clone();
+        let drainer = thread::spawn(move || {
+            let mut observed = Vec::new();
+            thread::yield_now();
+            observed.extend(drain_dist.drain());
+            thread::yield_now();
+            observed.extend(drain_dist.drain());
+            observed
+        });
+
+        let accepted = sender.join().unwrap();
+        let mut observed = drainer.join().unwrap();
+
+        observed.extend(distributor.drain());
+        let update_pos = observed
+            .iter()
+            .position(|entry| *entry == ModelLaneEntry::CompressionUpdate);
+
+        for id in accepted {
+            let dispatch_pos = observed
+                .iter()
+                .position(|entry| *entry == ModelLaneEntry::Dispatch(id))
+                .unwrap_or_else(|| panic!("accepted dispatch {id} missing from {observed:?}"));
+            assert!(
+                update_pos.is_some_and(|pos| pos < dispatch_pos),
+                "accepted dispatch {id} must follow compression update: {observed:?}"
+            );
+        }
     });
 }
 

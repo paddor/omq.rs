@@ -292,6 +292,9 @@ for feature in plain curve; do
     par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$feature" --test "omq_$feature"
 done
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features lz4 --test omq_lz4_tcp --test omq_lz4_pub_sub
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features zstd --test omq_zstd_tcp
+par run omq_cargo_with_rust_tools test -p omq-proto  --features "lz4 ws" --test omq_proto_endpoint
+par run omq_cargo_with_rust_tools test -p omq-tokio  --features "lz4 ws" --test omq_lz4_ws
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features plain --test omq_interop_pyzmq_plain
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features curve --test omq_interop_pyzmq_curve
 par_wait
@@ -301,7 +304,7 @@ par_wait
 #    cross-feature interactions and internal #[cfg(feature)] items
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
-all_features='plain curve lz4'
+all_features='plain curve lz4 zstd ws'
 par run omq_cargo_with_rust_tools test -p omq-proto  --features "$all_features"
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$all_features"
 par_wait
@@ -311,7 +314,7 @@ par_wait
 #    `OMQ_FUZZ=1`.
 # ---------------------------------------------------------------- #
 if [[ "${OMQ_FUZZ:-}" == "1" ]]; then
-    par run omq_cargo_with_rust_tools test -p omq-tokio  --features fuzz --release
+    par run omq_cargo_with_rust_tools test -p omq-tokio  --features "fuzz plain curve lz4 zstd ws" --release
     par_wait
 fi
 

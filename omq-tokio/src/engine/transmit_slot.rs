@@ -52,6 +52,7 @@ pub(crate) struct PeerTransmitSlot {
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
     queued_msgs: AtomicUsize,
+    fanout_dict_queued: AtomicBool,
     fanout_dict_shipped: AtomicBool,
     fanout_active: AtomicBool,
     above_lwm: AtomicBool,
@@ -107,6 +108,7 @@ impl PeerTransmitSlot {
             dead: AtomicBool::new(false),
             peer_id,
             queued_msgs: AtomicUsize::new(0),
+            fanout_dict_queued: AtomicBool::new(false),
             fanout_dict_shipped: AtomicBool::new(false),
             fanout_active: AtomicBool::new(true),
             above_lwm: AtomicBool::new(false),
@@ -207,6 +209,21 @@ impl PeerTransmitSlot {
     }
 
     pub(crate) fn try_push_fanout_drop_oldest(&self, frame: &FanOutFrame<'_>) -> TryFrameResult {
+        self.try_push_fanout_drop_oldest_with_protection(frame, false)
+    }
+
+    pub(crate) fn try_push_protected_fanout_drop_oldest(
+        &self,
+        frame: &FanOutFrame<'_>,
+    ) -> TryFrameResult {
+        self.try_push_fanout_drop_oldest_with_protection(frame, true)
+    }
+
+    fn try_push_fanout_drop_oldest_with_protection(
+        &self,
+        frame: &FanOutFrame<'_>,
+        protected: bool,
+    ) -> TryFrameResult {
         if self.dead.load(Ordering::Acquire) {
             return TryFrameResult::Dead;
         }
@@ -219,13 +236,18 @@ impl PeerTransmitSlot {
             && (eq.total_bytes().saturating_add(chunk.len()) >= self.cap
                 || queued_msgs >= self.msg_cap)
         {
-            if !eq.pop_front_entry() {
+            if !eq.pop_oldest_unprotected_entry() {
                 self.above_lwm.store(true, Ordering::Relaxed);
                 return TryFrameResult::Full;
             }
             queued_msgs = queued_msgs.saturating_sub(1);
         }
-        eq.push_raw(vec![chunk]);
+        if protected {
+            eq.push_raw_protected(vec![chunk]);
+            self.fanout_dict_queued.store(true, Ordering::Release);
+        } else {
+            eq.push_raw(vec![chunk]);
+        }
         queued_msgs += 1;
         self.queued_msgs.store(queued_msgs, Ordering::Relaxed);
         self.mark_above_lwm_if_needed(eq.total_bytes(), queued_msgs);
@@ -249,7 +271,13 @@ impl PeerTransmitSlot {
     }
 
     #[inline]
+    pub(crate) fn fanout_dict_queued_or_shipped(&self) -> bool {
+        self.fanout_dict_queued.load(Ordering::Acquire) || self.fanout_dict_shipped()
+    }
+
+    #[inline]
     pub(crate) fn mark_fanout_dict_shipped(&self) {
+        self.fanout_dict_queued.store(false, Ordering::Release);
         self.fanout_dict_shipped.store(true, Ordering::Release);
     }
 
@@ -357,12 +385,16 @@ impl PeerTransmitSlot {
     pub(crate) fn drain(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let before_chunks = buf.len();
-        eq.drain(buf, max_chunks);
+        let protected_drained = eq.drain(buf, max_chunks);
         let eq_drained_chunks = buf.len() - before_chunks;
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
         drop(eq);
+
+        if protected_drained > 0 {
+            self.mark_fanout_dict_shipped();
+        }
 
         if eq_drained_chunks > 0 {
             self.queued_msgs
@@ -411,6 +443,8 @@ impl PeerTransmitSlot {
             *eq = FrameBuffer::one_shot();
         }
         self.queued_msgs.store(0, Ordering::Relaxed);
+        self.fanout_dict_queued.store(false, Ordering::Relaxed);
+        self.fanout_dict_shipped.store(false, Ordering::Relaxed);
         self.fanout_active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
         self.data_signal.wake_all();
@@ -530,6 +564,48 @@ mod tests {
         let mut actual = Vec::new();
         slot.drain(&mut actual, 1024);
         assert_eq!(actual, vec![fanout_bytes(&second), fanout_bytes(&third)]);
+    }
+
+    #[test]
+    fn fanout_drop_oldest_slot_keeps_protected_entry() {
+        let slot = PeerTransmitSlot::new(
+            1,
+            false,
+            None,
+            None,
+            omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            TRANSMIT_SLOT_CAP_DEFAULT,
+            1,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+
+        let dict = Message::single("dict");
+        let payload = Message::single("payload");
+        let mut eq = FrameBuffer::one_shot();
+        let mut chunks = Vec::new();
+        let dict_frame = build_fan_out_frame(&mut eq, &dict, &mut chunks, 1, 8 * 1024);
+        assert_eq!(
+            slot.try_push_protected_fanout_drop_oldest(&dict_frame),
+            TryFrameResult::Ok
+        );
+        clear_fan_out_frame(&mut eq, &mut chunks);
+
+        let payload_frame = build_fan_out_frame(&mut eq, &payload, &mut chunks, 1, 8 * 1024);
+        assert_eq!(
+            slot.try_push_fanout_drop_oldest(&payload_frame),
+            TryFrameResult::Full
+        );
+        clear_fan_out_frame(&mut eq, &mut chunks);
+
+        let mut actual = Vec::new();
+        slot.drain(&mut actual, 1024);
+        assert_eq!(actual, vec![fanout_bytes(&dict)]);
+        assert!(slot.fanout_dict_shipped());
     }
 
     #[tokio::test]

@@ -53,7 +53,7 @@ jobs:
           export OMQ_FUZZ_ITERS
           echo "OMQ_FUZZ_ITERS=$OMQ_FUZZ_ITERS"
           cargo nextest run --profile extended -p omq-tokio \
-            --features "fuzz plain curve lz4 ws" --release \
+            --features "fuzz plain curve lz4 zstd ws" --release \
             --test ${{ matrix.test }}
 
   soak:

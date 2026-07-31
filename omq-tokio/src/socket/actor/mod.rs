@@ -511,9 +511,14 @@ impl SocketDriver {
         for peer_id in disconnected {
             if let Some(mut peer) = lifecycle::PeerLifecycle::new(self)
                 .remove_peer(peer_id, DisconnectReason::PeerClosed)
-                && let Some(task) = peer.task.take()
             {
-                let _ = task.await;
+                peer.handle.cancel.cancel();
+                if let Some(task) = peer.task.take() {
+                    if !task.is_finished() {
+                        task.abort();
+                    }
+                    let _ = task.await;
+                }
             }
         }
 

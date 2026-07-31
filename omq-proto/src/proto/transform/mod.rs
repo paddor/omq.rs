@@ -55,7 +55,7 @@ impl CompressionKind {
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => Some(Self::Lz4),
             #[cfg(all(feature = "lz4", feature = "ws"))]
-            Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => Some(Self::Lz4),
+            Endpoint::Lz4Ws { .. } => Some(Self::Lz4),
             #[cfg(feature = "zstd")]
             Endpoint::ZstdTcp { .. } => Some(Self::Zstd),
             _ => None,

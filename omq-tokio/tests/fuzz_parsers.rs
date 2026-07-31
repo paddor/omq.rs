@@ -396,7 +396,7 @@ fn fuzz_endpoint_parse() {
     use std::str::FromStr;
     let mut rng = rng();
     let schemes = [
-        "tcp", "ipc", "inproc", "udp", "ws", "wss", "lz4+tcp", "lz4+ws", "lz4+wss", "bogus", "",
+        "tcp", "ipc", "inproc", "udp", "ws", "wss", "lz4+tcp", "lz4+ws", "bogus", "",
     ];
     for i in 0..iters() / 2 {
         let input = if rng.random_range(0..4) == 0 {
@@ -476,12 +476,6 @@ fn fuzz_endpoint_roundtrip() {
                 port,
                 path: path.clone(),
             },
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            6 => Endpoint::Lz4Wss {
-                host: host.clone(),
-                port,
-                path: path.clone(),
-            },
             _ => Endpoint::Tcp {
                 host: host.clone(),
                 port,
@@ -508,18 +502,11 @@ fn fuzz_compress_ws_roundtrip() {
     use omq_tokio::proto::transform::MessageEncoder;
     let mut rng = rng();
     let localhost = Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    let endpoints: Vec<Endpoint> = vec![
-        Endpoint::Lz4Ws {
-            host: localhost.clone(),
-            port: 1,
-            path: "/".into(),
-        },
-        Endpoint::Lz4Wss {
-            host: localhost.clone(),
-            port: 1,
-            path: "/".into(),
-        },
-    ];
+    let endpoints: Vec<Endpoint> = vec![Endpoint::Lz4Ws {
+        host: localhost.clone(),
+        port: 1,
+        path: "/".into(),
+    }];
     let opts = Options::default();
     for i in 0..iters() / 4 {
         let ep = &endpoints[rng.random_range(0..endpoints.len())];

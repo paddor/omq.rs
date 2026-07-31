@@ -20,7 +20,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 workspace = true
 
 [dependencies]
-omq-tokio = { path = "../omq-tokio", version = "0.20.2", features = ["plain", "curve", "lz4"] }
+omq-tokio = { path = "../omq-tokio", version = "0.20.2", features = ["plain", "curve", "lz4", "zstd"] }
 yring = { path = "../yring", version = "0.3.10" }
 tokio = { version = "1.52", features = ["rt", "sync", "time"] }
 bytes = "1.12.0"

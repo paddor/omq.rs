@@ -557,6 +557,30 @@ describe("Req", () => {
     const reply = await promise;
     expect(reply.string(0)).toBe("real reply");
   });
+
+  it("ignores replies from non-request connections", async () => {
+    const req = new Req();
+    req.connect("ws://localhost:8082/a");
+    req.connect("ws://localhost:8082/b");
+    const ws1 = createdSockets[0]!;
+    const ws2 = createdSockets[1]!;
+    makeReady(ws1, "ROUTER");
+    makeReady(ws2, "ROUTER");
+
+    let settled = false;
+    const promise = req.send(Message.from("CANVAS")).then((reply) => {
+      settled = true;
+      return reply;
+    });
+
+    sendDataFrame(ws2, new Uint8Array(0), "wrong reply");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false);
+
+    sendDataFrame(ws1, new Uint8Array(0), "real reply");
+    const reply = await promise;
+    expect(reply.string(0)).toBe("real reply");
+  });
 });
 
 // ─── Rep ────────────────────────────────────────────────────────────
@@ -676,6 +700,47 @@ describe("Rep", () => {
     const msg2 = await rep.recv();
     expect(msg2.string(0)).toBe("req2");
     await rep.send(Message.from("rep2"));
+  });
+
+  it("reconnects after queued requests hit receiveHighWaterMark", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const rep = new Rep({
+      receiveHighWaterMark: 1,
+      reconnectInitialDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      onError,
+    });
+    try {
+      rep.connect("ws://localhost:8082");
+      const ws1 = createdSockets[0]!;
+      makeReady(ws1, "REQ");
+
+      sendDataFrame(ws1, new Uint8Array(0), "req1");
+      sendDataFrame(ws1, new Uint8Array(0), "req2");
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]![0].message).toBe(
+        "Receive high water mark reached",
+      );
+      expect(rep.connectionCount).toBe(0);
+      expect(rep.endpointCount).toBe(1);
+
+      const pending = rep.recv();
+
+      await vi.advanceTimersByTimeAsync(5);
+      const ws2 = createdSockets[1]!;
+      makeReady(ws2, "REQ");
+      sendDataFrame(ws2, new Uint8Array(0), "req3");
+
+      const msg = await pending;
+      expect(msg.string(0)).toBe("req3");
+      await rep.send(Message.from("rep3"));
+      expect(dataFramesAfterReady(ws2).length).toBe(1);
+    } finally {
+      rep.close();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -954,6 +1019,40 @@ describe("XSub", () => {
 
     await xsub.send(Message.fromParts([frame]));
     expect(ws.sentFrames.length).toBe(countAfterFirst); // no new frame
+  });
+
+  it("keeps binary prefixes distinct and replays exact bytes", async () => {
+    const xsub = new XSub();
+    xsub.connect("ws://localhost:8081");
+    const ws1 = createdSockets[0]!;
+    makeReady(ws1, "PUB");
+
+    await xsub.send(Message.fromParts([new Uint8Array([0x01, 0xff])]));
+    await xsub.send(Message.fromParts([new Uint8Array([0x01, 0xfe])]));
+
+    const firstCommands = ws1.sentFrames.slice(1).map((f) =>
+      decodeCommand(f.subarray(1))
+    );
+    expect(firstCommands.map((c) => c.name)).toEqual([
+      "SUBSCRIBE",
+      "SUBSCRIBE",
+    ]);
+    expect(firstCommands.map((c) => Array.from(c.body))).toEqual([
+      [0xff],
+      [0xfe],
+    ]);
+
+    xsub.connect("ws://localhost:9081");
+    const ws2 = createdSockets[1]!;
+    makeReady(ws2, "PUB");
+
+    const replayed = ws2.sentFrames.slice(1).map((f) =>
+      decodeCommand(f.subarray(1))
+    );
+    expect(replayed.map((c) => Array.from(c.body))).toEqual([
+      [0xff],
+      [0xfe],
+    ]);
   });
 });
 
@@ -1432,6 +1531,31 @@ describe("Radio", () => {
     await radio.send(new Message("stocks", "data"));
     // Should not throw
   });
+
+  it("keeps binary group keys distinct", async () => {
+    const radio = new Radio();
+    radio.connect("ws://localhost:8081");
+    const ws = createdSockets[0]!;
+    makeReady(ws, "DISH");
+
+    sendCommand(ws, encodeJoin(new Uint8Array([0xff])));
+
+    await radio.send(
+      Message.fromParts([
+        new Uint8Array([0xfe]),
+        new TextEncoder().encode("wrong"),
+      ]),
+    );
+    expect(dataFramesAfterReady(ws).length).toBe(0);
+
+    await radio.send(
+      Message.fromParts([
+        new Uint8Array([0xff]),
+        new TextEncoder().encode("right"),
+      ]),
+    );
+    expect(dataFramesAfterReady(ws).length).toBe(1);
+  });
 });
 
 // ─── Dish (draft) ───────────────────────────────────────────────────
@@ -1852,21 +1976,45 @@ describe("Socket connection management", () => {
     );
   });
 
-  it("drops new inbound messages beyond receiveHighWaterMark", async () => {
-    const pull = new Pull({ receiveHighWaterMark: 1 });
-    pull.connect("ws://localhost:8084");
-    const ws = createdSockets[0]!;
-    makeReady(ws, "PUSH");
+  it("reconnects after inbound queue hits receiveHighWaterMark", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const pull = new Pull({
+      receiveHighWaterMark: 1,
+      reconnectInitialDelayMs: 5,
+      reconnectMaxDelayMs: 5,
+      onError,
+    });
+    try {
+      pull.connect("ws://localhost:8084");
+      const ws1 = createdSockets[0]!;
+      makeReady(ws1, "PUSH");
 
-    sendDataFrame(ws, "first");
-    sendDataFrame(ws, "second");
+      sendDataFrame(ws1, "first");
+      sendDataFrame(ws1, "second");
 
-    const msg = await pull.recv();
-    expect(msg.string(0)).toBe("first");
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]![0].message).toBe(
+        "Receive high water mark reached",
+      );
+      expect(pull.connectionCount).toBe(0);
+      expect(pull.endpointCount).toBe(1);
 
-    const pending = pull.recv();
-    pull.close();
-    await expect(pending).rejects.toThrow("Socket closed");
+      const msg = await pull.recv();
+      expect(msg.string(0)).toBe("first");
+
+      const pending = pull.recv();
+      await vi.advanceTimersByTimeAsync(5);
+      const ws2 = createdSockets[1]!;
+      makeReady(ws2, "PUSH");
+      sendDataFrame(ws2, "after reconnect");
+
+      const next = await pending;
+      expect(next.string(0)).toBe("after reconnect");
+    } finally {
+      pull.close();
+      vi.useRealTimers();
+    }
   });
 });
 

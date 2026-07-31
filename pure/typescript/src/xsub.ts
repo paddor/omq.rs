@@ -1,3 +1,4 @@
+import { bytesKey } from "./bytes.ts";
 import type { SocketTypeName } from "./command.ts";
 import { encodeCancel, encodeSubscribe } from "./command.ts";
 import type { Connection } from "./connection.ts";
@@ -12,7 +13,7 @@ import { Socket, type SocketOptions } from "./socket.ts";
 export class XSub extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "XSUB";
-  private subscriptions: Set<string> = new Set();
+  private subscriptions: Map<string, Uint8Array> = new Map();
 
   /** @ignore */
   constructor(opts?: SocketOptions) {
@@ -32,17 +33,16 @@ export class XSub extends Socket {
 
       const type = frame[0];
       const prefix = frame.subarray(1);
+      const key = bytesKey(prefix);
 
       if (type === 0x01) {
-        const key = new TextDecoder().decode(prefix);
         if (this.subscriptions.has(key)) return;
-        this.subscriptions.add(key);
+        this.subscriptions.set(key, prefix.slice());
         const cmd = encodeSubscribe(prefix);
         for (const conn of this.readyConnections) {
           conn.sendCommand(cmd);
         }
       } else if (type === 0x00) {
-        const key = new TextDecoder().decode(prefix);
         if (!this.subscriptions.delete(key)) return;
         const cmd = encodeCancel(prefix);
         for (const conn of this.readyConnections) {
@@ -67,16 +67,16 @@ export class XSub extends Socket {
   /** @ignore */
   protected override onConnectionReady(conn: Connection): void {
     super.onConnectionReady(conn);
-    for (const key of this.subscriptions) {
-      conn.sendCommand(encodeSubscribe(new TextEncoder().encode(key)));
+    for (const prefix of this.subscriptions.values()) {
+      conn.sendCommand(encodeSubscribe(prefix));
     }
   }
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    conn: Connection,
     msg: Message,
   ): void {
-    this.enqueueMessage(msg);
+    this.enqueueMessage(conn, msg);
   }
 }

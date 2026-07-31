@@ -58,6 +58,21 @@ describe("LZ4 transport transform", () => {
     expect(new TextDecoder().decode(decoded![0])).toBe("short");
   });
 
+  it("rejects use after explicit free", () => {
+    const encoder = new Lz4Encoder();
+    encoder.free();
+    encoder.free();
+    expect(() => encoder.encodeMessage([enc.encode("payload")])).toThrow(
+      "encoder closed",
+    );
+
+    const decoder = new Lz4Decoder();
+    decoder.free();
+    decoder.free();
+    expect(() => decoder.decodeMessage([new Uint8Array([0, 0, 0, 0])]))
+      .toThrow("decoder closed");
+  });
+
   it("rejects compressed-transport parts shorter than the sentinel", () => {
     const decoder = new Lz4Decoder();
     expect(() => decoder.decodeMessage([new Uint8Array([1, 2, 3])])).toThrow(

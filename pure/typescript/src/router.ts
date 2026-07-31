@@ -1,13 +1,8 @@
 import type { SocketTypeName } from "./command.ts";
 import type { Connection } from "./connection.ts";
+import { bytesKey } from "./bytes.ts";
 import { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
-
-function identityKey(id: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < id.byteLength; i++) s += String.fromCharCode(id[i]!);
-  return s;
-}
 
 /**
  * ROUTER socket. Received messages are prepended with the peer's
@@ -41,7 +36,7 @@ export class Router extends Socket {
   send(msg: Message): Promise<void> {
     if (msg.parts.length < 2) return Promise.resolve();
     const id = msg.parts[0]!;
-    const conn = this.connectionsByIdentity.get(identityKey(id));
+    const conn = this.connectionsByIdentity.get(bytesKey(id));
     if (!conn) return Promise.resolve();
     return this.sendOnConnection(conn, Message.fromParts(msg.parts.slice(1)));
   }
@@ -63,14 +58,14 @@ export class Router extends Socket {
       : this.generateIdentity();
 
     this.peerIdentities.set(conn, identity);
-    this.connectionsByIdentity.set(identityKey(identity), conn);
+    this.connectionsByIdentity.set(bytesKey(identity), conn);
   }
 
   /** @ignore */
   protected override onConnectionClosed(conn: Connection): void {
     const identity = this.peerIdentities.get(conn);
     if (identity) {
-      const key = identityKey(identity);
+      const key = bytesKey(identity);
       if (this.connectionsByIdentity.get(key) === conn) {
         this.connectionsByIdentity.delete(key);
       }
@@ -87,7 +82,7 @@ export class Router extends Socket {
     const identity = this.peerIdentities.get(conn);
     if (!identity) return;
     const withIdentity = Message.fromParts([identity, ...msg.parts]);
-    this.enqueueMessage(withIdentity);
+    this.enqueueMessage(conn, withIdentity);
   }
 
   private generateIdentity(): Uint8Array {

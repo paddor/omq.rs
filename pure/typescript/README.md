@@ -110,6 +110,12 @@ const sub = new Sub({
 });
 ```
 
+Browser `WebSocket` does not expose inbound TCP backpressure. If
+`receiveHighWaterMark` is set and the receive queue is full, omq.ts calls
+`onError`, closes the affected connection, and reconnects unless reconnects are
+disabled. The overflow is reported as connection failure instead of a silent
+queue drop.
+
 ### Live Interop Tests
 
 Run `npm run test:interop` from this repo when the sibling `../omq.rs` checkout

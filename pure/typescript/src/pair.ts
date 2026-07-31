@@ -47,9 +47,9 @@ export class Pair extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    conn: Connection,
     msg: Message,
   ): void {
-    this.enqueueMessage(msg);
+    this.enqueueMessage(conn, msg);
   }
 }

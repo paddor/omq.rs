@@ -93,12 +93,22 @@ export class Rep extends Socket {
     if (waiter) {
       waiter.resolve(entry);
     } else {
+      if (
+        this.opts.receiveHighWaterMark !== undefined &&
+        this.pendingRequests.length >= this.opts.receiveHighWaterMark
+      ) {
+        this.closeForReceiveHighWaterMark(conn);
+        return;
+      }
       this.pendingRequests.push(entry);
     }
   }
 
   /** @ignore */
   protected override onConnectionClosed(conn: Connection): void {
+    this.pendingRequests = this.pendingRequests.filter((entry) =>
+      entry.conn !== conn
+    );
     if (this.replyConnection === conn) {
       this.routingEnvelope = null;
       this.replyConnection = null;

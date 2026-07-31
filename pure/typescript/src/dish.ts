@@ -62,10 +62,10 @@ export class Dish extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    conn: Connection,
     msg: Message,
   ): void {
     if (msg.parts.length !== 2) return;
-    this.enqueueMessage(msg);
+    this.enqueueMessage(conn, msg);
   }
 }

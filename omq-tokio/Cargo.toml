@@ -23,6 +23,7 @@ default = []
 curve = ["omq-proto/curve"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
+zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
@@ -176,6 +177,10 @@ name = "omq_heartbeat"
 path = "tests/heartbeat.rs"
 
 [[test]]
+name = "omq_zstd_tcp"
+path = "tests/zstd_tcp.rs"
+
+[[test]]
 name = "omq_inproc_rebind"
 path = "tests/inproc_rebind.rs"
 
@@ -268,6 +273,10 @@ name = "omq_soak_compression_lz4"
 path = "tests/omq_soak_compression_lz4.rs"
 
 [[test]]
+name = "omq_soak_compression_zstd"
+path = "tests/omq_soak_compression_zstd.rs"
+
+[[test]]
 name = "omq_soak_curve"
 path = "tests/omq_soak_curve.rs"
 
@@ -310,6 +319,10 @@ path = "tests/omq_soak_pub_sub_churn_tcp.rs"
 [[test]]
 name = "omq_soak_pub_sub_lz4_dict"
 path = "tests/omq_soak_pub_sub_lz4_dict.rs"
+
+[[test]]
+name = "omq_soak_pub_sub_zstd_dict"
+path = "tests/omq_soak_pub_sub_zstd_dict.rs"
 
 [[test]]
 name = "omq_soak_pub_sub_realworld_churn_tcp"

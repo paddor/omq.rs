@@ -17,6 +17,7 @@ fn main() {
         Command::Run { sub } => match sub {
             RunSub::Comparisons(args) => bench::comparisons::run(args),
             RunSub::PushpullLz4(args) => bench::pushpull_lz4::run(args),
+            RunSub::PushpullZstd(args) => bench::pushpull_zstd::run(args),
             RunSub::Compression(args) => bench::compression::run(args),
         },
         Command::Chart { sub } => match sub {
@@ -25,12 +26,14 @@ fn main() {
             Some(ChartSub::Pubsub) => chart::pubsub::generate(),
             Some(ChartSub::Fanio) => chart::fanio::generate(),
             Some(ChartSub::Lz4) => chart::lz4::generate(),
+            Some(ChartSub::Zstd) => chart::zstd::generate(),
             None => {
                 chart::main_tcp::generate();
                 chart::comparison::generate();
                 chart::pubsub::generate();
                 chart::fanio::generate();
                 chart::lz4::generate();
+                chart::zstd::generate();
             }
         },
     });

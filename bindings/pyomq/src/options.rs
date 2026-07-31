@@ -24,6 +24,9 @@ use crate::constants;
 use crate::error::{map_err, not_implemented};
 use omq_tokio as backend;
 
+const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MAX: i32 = 4;
+
 #[cfg(feature = "curve")]
 fn bad_key(name: &str) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(format!("invalid {name}"))
@@ -68,6 +71,7 @@ pub struct Overlay {
     #[cfg(feature = "curve")]
     pub curve_authenticator: Option<crate::auth::CurveAuthenticator>,
     pub on_mute: OnMute,
+    pub compression_level: Option<i32>,
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
     pub reconnect_stop: i32,
@@ -107,6 +111,7 @@ impl Default for Overlay {
             #[cfg(feature = "curve")]
             curve_authenticator: None,
             on_mute: OnMute::Block,
+            compression_level: None,
             compression_dict: None,
             compression_auto_train: false,
             reconnect_stop: 0,
@@ -140,6 +145,7 @@ impl Overlay {
                 (Some(min), Some(max)) => ReconnectPolicy::Exponential { min, max },
             },
             on_mute: self.on_mute,
+            compression_level: self.compression_level,
             compression_dict: self.compression_dict.clone(),
             compression_auto_train: self.compression_auto_train,
             arena_threshold: Some(64 * 1024),
@@ -231,6 +237,7 @@ impl Overlay {
             #[cfg(feature = "curve")]
             curve_authenticator: None,
             on_mute: o.on_mute,
+            compression_level: o.compression_level,
             compression_dict: o.compression_dict.clone(),
             compression_auto_train: o.compression_auto_train,
             reconnect_stop: i32::from(o.reconnect_stop_conn_refused),
@@ -441,12 +448,21 @@ pub fn setsockopt(
                 }
             };
         }
+        constants::OMQ_COMPRESSION_LEVEL => {
+            let level = value.extract::<i32>()?;
+            if !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&level) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "zstd compression level must be {ZSTD_LEVEL_MIN}..={ZSTD_LEVEL_MAX}, got {level}"
+                )));
+            }
+            ov.compression_level = Some(level);
+        }
         constants::OMQ_COMPRESSION_DICT => {
             let v: &[u8] = value.extract()?;
             if v.is_empty() {
                 ov.compression_dict = None;
             } else {
-                const DICT_MAX: usize = 64 * 1024 - 4;
+                const DICT_MAX: usize = 8 * 1024;
                 if v.len() > DICT_MAX {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "compression dict must be at most {DICT_MAX} bytes, got {}",
@@ -708,6 +724,10 @@ pub fn getsockopt<'py>(
                 OnMute::DropOldest => 2,
                 _ => unreachable!(),
             };
+            Ok(int_to_bound(py, v))
+        }
+        constants::OMQ_COMPRESSION_LEVEL => {
+            let v = sock.overlay.lock().unwrap().compression_level.unwrap_or(0) as i64;
             Ok(int_to_bound(py, v))
         }
         constants::OMQ_COMPRESSION_DICT => {

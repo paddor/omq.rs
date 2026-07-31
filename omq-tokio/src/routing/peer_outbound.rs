@@ -52,6 +52,10 @@ impl PeerOutbound {
         }
     }
 
+    pub(crate) fn requires_per_peer_encoding(&self) -> bool {
+        matches!(self, Self::Wire { slot, .. } if slot.has_transform)
+    }
+
     #[cfg(feature = "ws")]
     pub(crate) fn is_ws(&self) -> bool {
         match self {

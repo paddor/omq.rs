@@ -380,6 +380,54 @@ async fn pub_sub_prefix_filter() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_sub_mixed_tcp_then_lz4_fallback_delivers_to_all() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let tcp_port = test_support::bind_loopback(&publisher).await;
+    let tcp_ep = test_support::tcp_loopback(tcp_port);
+
+    let tcp_sub = Socket::new(SocketType::Sub, Options::default());
+    tcp_sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    tcp_sub.connect(tcp_ep).await.unwrap();
+    publisher
+        .wait_subscribed(1, FAN_OUT_READY_TIMEOUT)
+        .await
+        .expect("tcp subscription did not arrive");
+
+    let lz4_ep = bind_lz4_loopback(&publisher).await;
+    let mut lz4_subs = Vec::new();
+    for _ in 0..2 {
+        let sub = Socket::new(SocketType::Sub, Options::default());
+        sub.subscribe(bytes::Bytes::new()).await.unwrap();
+        sub.connect(lz4_ep.clone()).await.unwrap();
+        lz4_subs.push(sub);
+    }
+    publisher
+        .wait_subscribed(3, FAN_OUT_READY_TIMEOUT)
+        .await
+        .expect("lz4 subscriptions did not arrive");
+
+    let payload = bytes::Bytes::from("quote.".repeat(2048));
+    publisher
+        .send(Message::single(payload.clone()))
+        .await
+        .unwrap();
+
+    let got = tokio::time::timeout(Duration::from_secs(2), tcp_sub.recv())
+        .await
+        .expect("tcp subscriber did not receive message")
+        .unwrap();
+    assert_eq!(got.part_bytes(0).unwrap(), payload);
+
+    for (idx, sub) in lz4_subs.iter().enumerate() {
+        let got = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+            .await
+            .unwrap_or_else(|_| panic!("lz4 subscriber {idx} did not receive message"))
+            .unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), payload);
+    }
+}
+
 /// Fan-out to multiple subscribers: exercises the multi-target
 /// `dispatch_to_targets` path that encodes once and pushes
 /// pre-encoded compressed bytes to all peers.

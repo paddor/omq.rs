@@ -24,10 +24,11 @@ use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::{OnMute, Options};
 use omq_proto::proto::SocketType;
+use omq_proto::proto::transform::CompressionKind;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 use compression::DictTraining;
 pub(crate) use filter::FanOutMode;
 use lane::{FanOutLanes, LaneDispatch, LanePeerAdd};
@@ -75,7 +76,7 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
@@ -91,7 +92,7 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: self.dict_training.clone(),
         }
     }
@@ -304,7 +305,7 @@ impl Submitter {
         let (forwarded, group) = filter::prepare(self.mode, msg)?;
         let msg_bytes = forwarded.byte_len();
 
-        #[cfg(feature = "lz4")]
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
         compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
 
         self.dispatch_raw(&self.lanes, &forwarded, group).await?;
@@ -326,14 +327,14 @@ pub(crate) struct FanOutSend {
     mode: FanOutMode,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     subscribe_all_count: usize,
-    has_compression: bool,
+    compression_kind: Option<CompressionKind>,
     compression_dict: Option<Bytes>,
     options: Options,
 }
@@ -392,7 +393,7 @@ impl FanOutSend {
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
             subscribe_all_count: 0,
-            has_compression: false,
+            compression_kind: None,
             compression_dict: options.compression_dict.clone(),
             options: options.clone(),
         }));
@@ -408,7 +409,7 @@ impl FanOutSend {
             mode,
             xpub_nodrop: options.xpub_nodrop,
             mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: Arc::new(Mutex::new(compression::new_dict_training(options))),
         }
     }
@@ -428,7 +429,7 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(feature = "lz4")]
+            #[cfg(any(feature = "lz4", feature = "zstd"))]
             dict_training: self.dict_training.clone(),
         }
     }
@@ -459,10 +460,10 @@ impl FanOutSend {
         any_groups: bool,
         io_thread: usize,
     ) {
-        let has_transform = handle
+        let compression_kind = handle
             .transmit_slot
             .as_ref()
-            .is_some_and(|s| s.has_transform);
+            .and_then(|s| s.compression_kind());
         let target = PeerOutbound::from_handle(&handle);
 
         #[cfg(feature = "ws")]
@@ -470,9 +471,20 @@ impl FanOutSend {
         #[cfg(not(feature = "ws"))]
         let target_is_ws = false;
 
-        let lane_eligible = !target_is_ws
+        let lane_base_eligible = !target_is_ws
             && matches!(target, PeerOutbound::Wire { .. })
             && handle.transmit_slot.is_some();
+
+        let lane_eligible = lane_base_eligible && {
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
+            if has_lane_peers {
+                g.compression_kind == compression_kind
+            } else {
+                g.compression_kind = compression_kind;
+                true
+            }
+        };
 
         let lane = if !lane_eligible {
             None
@@ -485,15 +497,12 @@ impl FanOutSend {
                     any_groups,
                 },
             );
-            let mut g = self.inner.lock().expect("fanout inner poisoned");
-            if has_transform {
-                g.has_compression = true;
-            }
-            if g.has_compression {
+            let g = self.inner.lock().expect("fanout inner poisoned");
+            if let Some(kind) = g.compression_kind {
                 let options = g.options.clone();
                 let dict = g.compression_dict.clone();
                 drop(g);
-                self.lanes.set_compression(lane, options, dict);
+                self.lanes.set_compression(lane, kind, options, dict);
             } else {
                 drop(g);
             }

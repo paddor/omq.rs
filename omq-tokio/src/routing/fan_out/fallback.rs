@@ -32,6 +32,17 @@ pub(super) fn dispatch_to_targets(
             _ => Ok(()),
         },
         _ => {
+            if targets.iter().any(PeerOutbound::requires_per_peer_encoding) {
+                for t in targets {
+                    if t.try_encode(msg) == TryFrameResult::Full
+                        && mute_policy == FanOutMutePolicy::DropNewest
+                    {
+                        deactivate(t);
+                    }
+                }
+                return Ok(());
+            }
+
             #[cfg(feature = "ws")]
             if targets.iter().any(PeerOutbound::is_ws) {
                 for t in targets {
@@ -221,6 +232,34 @@ mod tests {
         assert_eq!(deactivated, vec![1, 1]);
     }
 
+    #[test]
+    fn transformed_multi_target_fallback_uses_per_peer_encoding() {
+        let slot1 = test_transformed_slot(11);
+        let slot2 = test_transformed_slot(12);
+        let (inbox1, mut rx1) = tokio::sync::mpsc::channel(1);
+        let (inbox2, mut rx2) = tokio::sync::mpsc::channel(1);
+        let msg = Message::single("payload");
+        let targets = [
+            PeerOutbound::Wire {
+                slot: slot1.clone(),
+                inbox: inbox1,
+                direct: None,
+            },
+            PeerOutbound::Wire {
+                slot: slot2.clone(),
+                inbox: inbox2,
+                direct: None,
+            },
+        ];
+
+        dispatch_to_targets(&targets, &msg, FanOutMutePolicy::DropNewest, &mut |_| {}).unwrap();
+
+        assert!(slot1.is_empty());
+        assert!(slot2.is_empty());
+        assert_eq!(recv_inbox_message(&mut rx1), msg);
+        assert_eq!(recv_inbox_message(&mut rx2), msg);
+    }
+
     fn test_wire_target(
         slot: &Arc<crate::engine::transmit_slot::PeerTransmitSlot>,
     ) -> PeerOutbound {
@@ -239,6 +278,7 @@ mod tests {
             1,
             false,
             None,
+            None,
             omq_proto::frame_buffer::ARENA_THRESHOLD,
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
@@ -250,6 +290,32 @@ mod tests {
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot
+    }
+
+    fn test_transformed_slot(peer_id: u64) -> Arc<crate::engine::transmit_slot::PeerTransmitSlot> {
+        let slot = crate::engine::transmit_slot::PeerTransmitSlot::new(
+            peer_id,
+            true,
+            None,
+            None,
+            omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
+            8,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+        slot
+    }
+
+    fn recv_inbox_message(rx: &mut tokio::sync::mpsc::Receiver<PeerDriverCommand>) -> Message {
+        match rx.try_recv().expect("inbox message") {
+            PeerDriverCommand::SendMessage(msg) => msg,
+            other => panic!("unexpected command {other:?}"),
+        }
     }
 
     fn encoded_message(body: &str) -> Bytes {

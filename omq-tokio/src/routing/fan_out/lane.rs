@@ -17,8 +17,7 @@ use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-#[cfg(feature = "lz4")]
-use omq_proto::proto::transform::MessageEncoder;
+use omq_proto::proto::transform::{CompressionKind, MessageEncoder};
 
 use super::filter::{self, FanOutMode};
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
@@ -49,6 +48,7 @@ enum LaneControl {
         group: Bytes,
     },
     SetCompression {
+        kind: CompressionKind,
         options: Box<Options>,
         dict: Option<Bytes>,
     },
@@ -158,7 +158,6 @@ struct LaneWorker {
     subscribe_all_count: usize,
     eq: FrameBuffer,
     chunks: Vec<Bytes>,
-    #[cfg(feature = "lz4")]
     encoder: Option<MessageEncoder>,
     distribution_targets: Vec<LaneDistributionTarget>,
     active_flags: Option<Arc<Vec<AtomicBool>>>,
@@ -268,7 +267,6 @@ impl FanOutLanes {
                     subscribe_all_count: 0,
                     eq: FrameBuffer::one_shot(),
                     chunks: Vec::new(),
-                    #[cfg(feature = "lz4")]
                     encoder: None,
                     distribution_targets: dist_targets,
                     active_flags: flags,
@@ -377,23 +375,36 @@ impl FanOutLanes {
         self.send_to_lane(lane, LaneControl::Leave { peer_id, group });
     }
 
-    pub(super) fn set_compression(&self, lane: usize, options: Options, dict: Option<Bytes>) {
+    pub(super) fn set_compression(
+        &self,
+        lane: usize,
+        kind: CompressionKind,
+        options: Options,
+        dict: Option<Bytes>,
+    ) {
         self.send_to_lane(
             lane,
             LaneControl::SetCompression {
+                kind,
                 options: Box::new(options),
                 dict,
             },
         );
     }
 
-    #[cfg(feature = "lz4")]
-    pub(super) fn set_compression_all(&self, options: &Options, dict: Option<&Bytes>) {
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(super) fn set_compression_all(
+        &self,
+        kind: CompressionKind,
+        options: &Options,
+        dict: Option<&Bytes>,
+    ) {
         let mut state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &mut state.endpoints {
             Self::push_control(
                 endpoint,
                 LaneControl::SetCompression {
+                    kind,
                     options: Box::new(options.clone()),
                     dict: dict.cloned(),
                 },
@@ -750,8 +761,12 @@ impl LaneWorker {
                     peer.groups.remove(s);
                 }
             }
-            LaneControl::SetCompression { options, dict } => {
-                self.init_encoder(&options, dict.as_ref());
+            LaneControl::SetCompression {
+                kind,
+                options,
+                dict,
+            } => {
+                self.init_encoder(kind, &options, dict.as_ref());
             }
             LaneControl::Shutdown => return true,
         }
@@ -761,21 +776,17 @@ impl LaneWorker {
     #[allow(clippy::unused_self)]
     fn init_encoder(
         &mut self,
+        #[allow(unused)] kind: CompressionKind,
         #[allow(unused)] options: &Options,
         #[allow(unused)] dict: Option<&Bytes>,
     ) {
-        #[cfg(feature = "lz4")]
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
         if self.encoder.is_none() || dict.is_some() {
-            use omq_proto::endpoint::{Endpoint, Host};
             let mut opts = options.clone().compression_auto_train(false);
             if let Some(d) = dict {
                 opts = opts.compression_dict(d.clone());
             }
-            let dummy = Endpoint::Lz4Tcp {
-                host: Host::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
-                port: 0,
-            };
-            if let Some((enc, _dec)) = MessageEncoder::for_endpoint(&dummy, &opts) {
+            if let Ok(Some((enc, _dec))) = MessageEncoder::for_compression_kind(kind, &opts) {
                 self.encoder = Some(enc);
             }
         }
@@ -813,9 +824,8 @@ impl LaneWorker {
             return false;
         }
 
-        // Compress if an encoder is active (lz4+tcp:// peers present).
-        #[cfg(feature = "lz4")]
-        let wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
+        // Compress if an encoder is active.
+        let mut wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
             match enc.encode(&dispatch.msg) {
                 Ok(transformed) => transformed,
                 Err(_) => return false,
@@ -823,23 +833,9 @@ impl LaneWorker {
         } else {
             smallvec::smallvec![dispatch.msg.clone()]
         };
-        #[cfg(not(feature = "lz4"))]
-        let wire_messages: SmallVec<[Message; 2]> = smallvec::smallvec![dispatch.msg.clone()];
 
         // Handle dict shipment: the first transformed message may be a dict.
-        #[cfg(feature = "lz4")]
-        let (dict_msg, payload_start) = {
-            if wire_messages
-                .first()
-                .is_some_and(omq_proto::proto::transform::lz4::is_dict_shipment)
-            {
-                (Some(&wire_messages[0]), 1)
-            } else {
-                (None, 0)
-            }
-        };
-        #[cfg(not(feature = "lz4"))]
-        let (dict_msg, payload_start): (Option<&Message>, usize) = (None, 0);
+        let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut wire_messages);
 
         let target_count = peer_ids.len();
         let mut eq = std::mem::replace(&mut self.eq, FrameBuffer::one_shot());
@@ -849,7 +845,7 @@ impl LaneWorker {
         // Encode dict and payload into per-peer slots. Both go through
         // push_frame_to_peer (direct FrameBuffer push) to preserve ordering.
         let has_dict = dict_msg.is_some();
-        if let Some(dict) = dict_msg {
+        if let Some(dict) = dict_msg.as_ref() {
             {
                 let frame = build_fan_out_frame(
                     &mut eq,
@@ -885,7 +881,7 @@ impl LaneWorker {
 
         if !shutdown {
             // Encode the payload messages into the FrameBuffer.
-            for wire_msg in &wire_messages[payload_start..] {
+            for wire_msg in &wire_messages {
                 encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
             }
 
@@ -946,8 +942,7 @@ impl LaneWorker {
             return;
         }
 
-        #[cfg(feature = "lz4")]
-        let wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
+        let mut wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
             match enc.encode(&dispatch.msg) {
                 Ok(transformed) => transformed,
                 Err(_) => return,
@@ -955,26 +950,12 @@ impl LaneWorker {
         } else {
             smallvec::smallvec![dispatch.msg.clone()]
         };
-        #[cfg(not(feature = "lz4"))]
-        let wire_messages: SmallVec<[Message; 2]> = smallvec::smallvec![dispatch.msg.clone()];
 
-        #[cfg(feature = "lz4")]
-        let (dict_msg, payload_start) = {
-            if wire_messages
-                .first()
-                .is_some_and(omq_proto::proto::transform::lz4::is_dict_shipment)
-            {
-                (Some(&wire_messages[0]), 1)
-            } else {
-                (None, 0)
-            }
-        };
-        #[cfg(not(feature = "lz4"))]
-        let (dict_msg, payload_start): (Option<&Message>, usize) = (None, 0);
+        let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut wire_messages);
 
         let target_count = peer_ids.len();
         let has_dict = dict_msg.is_some();
-        if let Some(dict) = dict_msg {
+        if let Some(dict) = dict_msg.as_ref() {
             let frame = build_fan_out_frame(
                 &mut self.eq,
                 dict,
@@ -1000,7 +981,7 @@ impl LaneWorker {
             clear_fan_out_frame(&mut self.eq, &mut self.chunks);
         }
 
-        for wire_msg in &wire_messages[payload_start..] {
+        for wire_msg in &wire_messages {
             encode_fan_out_message(
                 &mut self.eq,
                 wire_msg,
@@ -1267,7 +1248,6 @@ mod tests {
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            #[cfg(feature = "lz4")]
             encoder: None,
             distribution_targets: Vec::new(),
             active_flags: None,
@@ -1316,7 +1296,6 @@ mod tests {
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            #[cfg(feature = "lz4")]
             encoder: None,
             distribution_targets: Vec::new(),
             active_flags: None,
@@ -1372,6 +1351,7 @@ mod tests {
         crate::engine::transmit_slot::PeerTransmitSlot::new(
             peer_id,
             false,
+            None,
             None,
             4096,
             16 * 1024,

@@ -20,10 +20,12 @@ workspace = true
 # No C compiler required, no crypto deps. Opt in to features:
 #   curve     CURVE encrypted-handshake (RFC 26)
 #   lz4       lz4+tcp:// transport (pure Rust; lz4rip)
+#   zstd      zstd+tcp:// transport (pure Rust; zrip)
 default = []
 curve = ["dep:crypto_box", "dep:crypto_secretbox", "dep:subtle", "dep:x25519-dalek", "dep:zeroize"]
 plain = []
 lz4 = ["dep:lz4rip"]
+zstd = ["dep:zrip"]
 ws = []
 soak = []
 
@@ -44,6 +46,12 @@ zeroize = { version = "1.8.0", features = ["zeroize_derive"], optional = true }
 version = "0.11.2"
 default-features = false
 features = ["std"]
+optional = true
+
+[dependencies.zrip]
+version = "0.8.4"
+default-features = false
+features = ["std", "frame", "dict_builder"]
 optional = true
 
 [[bench]]

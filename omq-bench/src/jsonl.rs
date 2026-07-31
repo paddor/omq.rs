@@ -134,6 +134,8 @@ pub(crate) struct PushpullLz4Row {
     pub mbps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dict_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression_level: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

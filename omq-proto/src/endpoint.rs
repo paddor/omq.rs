@@ -48,6 +48,9 @@ pub enum Endpoint {
     /// `lz4+tcp://host:port` LZ4-compressed TCP. Requires the `lz4` feature.
     #[cfg(feature = "lz4")]
     Lz4Tcp { host: Host, port: u16 },
+    /// `zstd+tcp://host:port` Zstd-compressed TCP. Requires the `zstd` feature.
+    #[cfg(feature = "zstd")]
+    ZstdTcp { host: Host, port: u16 },
     /// `ws://host:port/path` ZeroMQ over WebSocket (RFC 45). Requires the
     /// `ws` feature.
     #[cfg(feature = "ws")]
@@ -140,6 +143,10 @@ impl FromStr for Endpoint {
             "udp" => parse_udp(rest),
             #[cfg(feature = "lz4")]
             "lz4+tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Lz4Tcp { host, port }),
+            #[cfg(feature = "zstd")]
+            "zstd+tcp" => {
+                parse_host_port(rest).map(|(host, port)| Endpoint::ZstdTcp { host, port })
+            }
             #[cfg(feature = "ws")]
             "ws" => parse_ws(rest, false),
             #[cfg(feature = "ws")]
@@ -173,6 +180,8 @@ impl fmt::Display for Endpoint {
             },
             #[cfg(feature = "lz4")]
             Self::Lz4Tcp { host, port } => write!(f, "lz4+tcp://{host}:{port}"),
+            #[cfg(feature = "zstd")]
+            Self::ZstdTcp { host, port } => write!(f, "zstd+tcp://{host}:{port}"),
             #[cfg(feature = "ws")]
             Self::Ws { host, port, path } => write!(f, "ws://{host}:{port}{path}"),
             #[cfg(feature = "ws")]
@@ -198,6 +207,11 @@ impl Endpoint {
                 host: host.clone(),
                 port: *port,
             },
+            #[cfg(feature = "zstd")]
+            Endpoint::ZstdTcp { host, port } => Endpoint::Tcp {
+                host: host.clone(),
+                port: *port,
+            },
             _ => self.clone(),
         }
     }
@@ -212,6 +226,10 @@ impl Endpoint {
             (Endpoint::Lz4Tcp { .. }, Endpoint::Tcp { host, port }) => {
                 Endpoint::Lz4Tcp { host, port }
             }
+            #[cfg(feature = "zstd")]
+            (Endpoint::ZstdTcp { .. }, Endpoint::Tcp { host, port }) => {
+                Endpoint::ZstdTcp { host, port }
+            }
             (_, resolved) => resolved,
         }
     }
@@ -224,6 +242,8 @@ impl Endpoint {
             Endpoint::Tcp { .. } => true,
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => true,
+            #[cfg(feature = "zstd")]
+            Endpoint::ZstdTcp { .. } => true,
             _ => false,
         }
     }
@@ -291,6 +311,8 @@ impl Endpoint {
             Endpoint::Udp { .. } => "udp",
             #[cfg(feature = "lz4")]
             Endpoint::Lz4Tcp { .. } => "lz4+tcp",
+            #[cfg(feature = "zstd")]
+            Endpoint::ZstdTcp { .. } => "zstd+tcp",
             #[cfg(feature = "ws")]
             Endpoint::Ws { .. } => "ws",
             #[cfg(feature = "ws")]

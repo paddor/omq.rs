@@ -18,6 +18,7 @@ use omq_proto::handle_frame::{
     HandleFrameCaps, HandleFrameDecision, HandleFrameState, decide_handle_frame,
 };
 use omq_proto::message::Message;
+use omq_proto::proto::transform::CompressionKind;
 
 pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
@@ -42,6 +43,7 @@ pub(crate) struct PeerTransmitSlot {
     pub(crate) space_available: Arc<StateSignal>,
     pub(crate) handshake_done: AtomicBool,
     pub(crate) has_transform: bool,
+    pub(crate) compression_kind: Option<CompressionKind>,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
     #[cfg(feature = "ws")]
     is_ws: bool,
@@ -79,6 +81,7 @@ impl PeerTransmitSlot {
     pub(crate) fn new(
         peer_id: u64,
         has_transform: bool,
+        compression_kind: Option<CompressionKind>,
         transform_passthrough: Option<(Bytes, usize)>,
         arena_threshold: usize,
         arena_cap: usize,
@@ -95,6 +98,7 @@ impl PeerTransmitSlot {
             space_available: Arc::new(StateSignal::new()),
             handshake_done: AtomicBool::new(false),
             has_transform,
+            compression_kind,
             transform_passthrough,
             #[cfg(feature = "ws")]
             is_ws,
@@ -232,6 +236,11 @@ impl PeerTransmitSlot {
 
     pub(crate) fn signal_encoded(&self) {
         self.data_signal.mark();
+    }
+
+    #[inline]
+    pub(crate) fn compression_kind(&self) -> Option<CompressionKind> {
+        self.compression_kind
     }
 
     #[inline]
@@ -450,6 +459,7 @@ mod tests {
             1,
             false,
             None,
+            None,
             omq_proto::frame_buffer::ARENA_THRESHOLD,
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             TRANSMIT_SLOT_CAP_DEFAULT,
@@ -492,6 +502,7 @@ mod tests {
         let slot = PeerTransmitSlot::new(
             1,
             false,
+            None,
             None,
             omq_proto::frame_buffer::ARENA_THRESHOLD,
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,

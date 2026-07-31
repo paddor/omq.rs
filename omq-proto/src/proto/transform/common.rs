@@ -10,6 +10,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
+#[cfg(feature = "lz4")]
 use crate::message::Message;
 use crate::message::Payload;
 
@@ -72,6 +73,7 @@ pub(super) fn validate_dict(dict: &Bytes, label: &str, max_bytes: usize) -> Resu
 
 /// Build a single-part ZMTP message carrying a dict shipment:
 /// `sentinel | dict_bytes`.
+#[cfg(feature = "lz4")]
 pub(super) fn build_dict_shipment(sentinel: [u8; 4], dict: &Bytes) -> Message {
     let mut frame = BytesMut::with_capacity(4 + dict.len());
     frame.extend_from_slice(&sentinel);

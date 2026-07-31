@@ -4,7 +4,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 - Tokio backend for Linux, macOS, and Windows
 - 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
-- 9 transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`, `lz4+ws://`, and `lz4+wss://`
+- 9 stable transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`,
+  `lz4+ws://`, and `lz4+wss://`; experimental `zstd+tcp://` compression
+  transport behind the `zstd` feature
 - 3 security mechanisms: NULL, PLAIN, CURVE
 - No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
@@ -103,6 +105,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
 | `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
+| `zstd`            | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 
 ## Design highlights
@@ -181,10 +184,11 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 
 ## Platform and requirements
 
-**Linux is the primary development and benchmarking platform.** CI
-required checks cover Linux x86_64, Linux ARM64, macOS Intel, macOS
-ARM64, and Windows. macOS jobs run the Rust tests serially because
-socket/timer timing is more sensitive on hosted runners.
+**Linux is the primary development and benchmarking platform.** PR CI
+required checks cover Linux x86_64, macOS ARM64, and Windows Rust tests,
+plus 32-bit Linux cross-checks. Fmt and clippy also run on macOS Intel.
+Extended CI covers Ubuntu ARM64. macOS jobs run the Rust tests serially
+because socket/timer timing is more sensitive on hosted runners.
 
 **macOS** is covered in CI for both Intel and ARM64 runners.
 `omq-tokio` uses mio / kqueue. `omq-libzmq` uses a pipe-backed

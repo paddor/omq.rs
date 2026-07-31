@@ -34,6 +34,8 @@ pub(crate) enum ChartSub {
     Fanio,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
+    /// PUSH/PULL Zstd compression chart.
+    Zstd,
 }
 
 #[derive(Subcommand)]
@@ -42,6 +44,8 @@ pub(crate) enum RunSub {
     Comparisons(ComparisonsArgs),
     /// PUSH/PULL with LZ4 compression.
     PushpullLz4(PushpullLz4Args),
+    /// PUSH/PULL with experimental Zstd compression.
+    PushpullZstd(PushpullZstdArgs),
     /// Push/pull compression benchmarks.
     Compression(CompressionArgs),
 }
@@ -192,6 +196,37 @@ pub(crate) struct PushpullLz4Args {
     /// Dict sizes to train (comma-separated).
     #[arg(long, value_delimiter = ',', default_values_t = [2048])]
     pub dict_sizes: Vec<u64>,
+}
+
+#[derive(Parser)]
+pub(crate) struct PushpullZstdArgs {
+    /// Transports (comma-separated).
+    #[arg(long, default_value = "tcp,zstd+tcp")]
+    pub transports: String,
+
+    /// Message sizes (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub sizes: Option<Vec<u64>>,
+
+    /// Duration per measurement in seconds.
+    #[arg(long, default_value_t = 2.0)]
+    pub duration: f64,
+
+    /// Best-of-N rounds.
+    #[arg(long, default_value_t = 3)]
+    pub rounds: u32,
+
+    /// Quick mode: 3 sizes, 1 round, 1.5s.
+    #[arg(long)]
+    pub quick: bool,
+
+    /// Dict sizes to train (comma-separated).
+    #[arg(long, value_delimiter = ',', default_values_t = [2048])]
+    pub dict_sizes: Vec<u64>,
+
+    /// Zstd compression level (-8..=4). Omitted uses transport default.
+    #[arg(long)]
+    pub level: Option<i32>,
 }
 
 #[derive(Parser)]

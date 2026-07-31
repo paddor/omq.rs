@@ -16,8 +16,8 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveServerOptions};
 use crate::socket_ref::SocketRef;
-/// Upper bound for `Options::compression_dict`. Both transports
-/// cap at 8 KiB. Inlined as a const so the `compression_dict`
+/// Upper bound for `Options::compression_dict`. Compression transports cap
+/// dictionaries at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
@@ -42,6 +42,9 @@ pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 /// - The same socket types with a `connect()` endpoint allocate a pre-ready
 ///   pipe at `connect()` time. Sends may queue there before the peer reaches
 ///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
+const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MAX: i32 = 4;
+
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
 // every backend file that accesses them.
@@ -155,17 +158,16 @@ pub struct Options {
     /// Active security mechanism. Defaults to `Null` (no encryption).
     pub mechanism: MechanismSetup,
 
-    /// Outbound compression dictionary. Used by `lz4+tcp://`; ignored
-    /// on plain transports. The dict is shipped to the peer once per
+    /// Outbound compression dictionary. Used by compression transports;
+    /// ignored on plain transports. The dict is shipped to the peer once per
     /// connection; subsequent parts are compressed against it.
     /// Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
     /// Auto-trained dictionaries. Defaults to off.
-    /// When no `compression_dict` is configured on an `lz4+tcp://`
+    /// When no `compression_dict` is configured on a compression
     /// connection, the encoder feeds outbound message parts to a
-    /// `DictTrainer` until it saturates (bloom-filter diversity
-    /// plateaus), then trains a dict (capacity controlled by
+    /// dict trainer until it saturates, then trains a dict (capacity controlled by
     /// `compression_dict_capacity`, default 2 KiB) and ships it.
     /// After that the per-part compression threshold drops from
     /// 512 B to 64 B and small messages ride the dict.
@@ -183,14 +185,18 @@ pub struct Options {
     /// where compressing tiny messages wastes CPU.
     pub compression_threshold: Option<usize>,
 
+    /// Compression level for `zstd+tcp://`. `None` uses the transport
+    /// default. Supported zrip levels are -8..=4; level 0 maps to zrip's
+    /// library default (currently level 1). Ignored by `lz4+tcp://`.
+    pub compression_level: Option<i32>,
+
     /// Auto-train dict capacity in bytes. Controls the maximum size of
     /// the dictionary produced by auto-training. Default: 2048.
     /// Ignored when `compression_dict` is set.
     pub compression_dict_capacity: Option<usize>,
 
     /// Maximum dictionary size (bytes) accepted from a peer. Dicts
-    /// larger than this are rejected. Default: 8192 for both
-    /// transports.
+    /// larger than this are rejected. Default: 8192 for compression transports.
     pub max_recv_dict_size: Option<usize>,
 
     /// Minimum message size (bytes) before compression is offloaded to
@@ -239,7 +245,9 @@ pub struct Options {
     pub wss_tls: WssTls,
 }
 
-/// TLS configuration for WSS endpoints.
+/// TLS configuration for WSS endpoints. This covers server certificates
+/// and client-side server certificate validation only. Mutual TLS/client
+/// certificate authentication is not implemented.
 #[cfg(feature = "ws")]
 #[derive(Clone, Debug, Default)]
 pub struct WssTls {
@@ -279,6 +287,7 @@ impl Default for Options {
             compression_dict: None,
             compression_auto_train: false,
             compression_threshold: None,
+            compression_level: None,
             compression_dict_capacity: None,
             max_recv_dict_size: None,
             compression_offload_threshold: Some(8192),
@@ -341,6 +350,13 @@ impl Options {
             return Err(crate::error::Error::Config(format!(
                 "compression dict must be 1..={COMPRESSION_DICT_MAX} bytes, got {}",
                 dict.len()
+            )));
+        }
+        if let Some(level) = self.compression_level
+            && !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&level)
+        {
+            return Err(crate::error::Error::Config(format!(
+                "zstd compression level must be {ZSTD_LEVEL_MIN}..={ZSTD_LEVEL_MAX}, got {level}",
             )));
         }
         #[cfg(feature = "plain")]
@@ -619,8 +635,8 @@ impl Options {
         self
     }
 
-    /// Set the outbound compression dictionary. Used by `lz4+tcp://`.
-    /// Validated by [`Options::validate`]: must be 1..=8192 bytes (RFC §6.2).
+    /// Set the outbound compression dictionary. Used by compression transports.
+    /// Validated by [`Options::validate`]: must be 1..=8192 bytes.
     /// Disables auto-training when set.
     #[must_use]
     pub fn compression_dict(mut self, dict: impl Into<Bytes>) -> Self {
@@ -628,7 +644,7 @@ impl Options {
         self
     }
 
-    /// Enable auto-trained dictionaries (`lz4+tcp://`).
+    /// Enable auto-trained dictionaries for compression transports.
     /// Off by default. See [`Options::compression_auto_train`] for
     /// semantics.
     #[must_use]
@@ -647,6 +663,16 @@ impl Options {
         self
     }
 
+    /// Set the `zstd+tcp://` compression level.
+    ///
+    /// Supported zrip levels are -8..=4. Level 0 maps to zrip's library
+    /// default, currently level 1. Ignored by LZ4 compression.
+    #[must_use]
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression_level = Some(level);
+        self
+    }
+
     /// Set the auto-train dictionary capacity in bytes
     /// (default 2048). Ignored when `compression_dict` is set.
     #[must_use]
@@ -656,7 +682,8 @@ impl Options {
     }
 
     /// Set the maximum dictionary size accepted from a peer.
-    /// Dicts larger than this are rejected at decode time.
+    /// Dicts larger than this are rejected at decode time. Transport hard caps
+    /// still apply.
     #[must_use]
     pub fn max_recv_dict_size(mut self, max: usize) -> Self {
         self.max_recv_dict_size = Some(max);
@@ -807,6 +834,7 @@ mod tests {
         assert_eq!(o.tcp_keepalive, KeepAlive::Default);
         assert!(!o.conflate);
         assert!(!o.router_mandatory);
+        assert_eq!(o.compression_level, None);
         assert_eq!(o.on_mute, OnMute::Block);
         assert_eq!(o.large_message_threshold, Some(128 * 1024));
     }
@@ -825,6 +853,15 @@ mod tests {
             ..Options::default()
         };
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn validates_zstd_compression_level() {
+        assert!(Options::new().compression_level(1).validate().is_ok());
+        assert!(Options::new().compression_level(-8).validate().is_ok());
+        assert!(Options::new().compression_level(4).validate().is_ok());
+        assert!(Options::new().compression_level(5).validate().is_err());
+        assert!(Options::new().compression_level(-9).validate().is_err());
     }
 
     #[cfg(feature = "curve")]
@@ -900,6 +937,7 @@ mod tests {
             .heartbeat_interval(Duration::from_secs(1))
             .max_message_size(1024)
             .conflate(true)
+            .compression_level(1)
             .router_mandatory(true)
             .on_mute(OnMute::DropNewest);
         assert_eq!(o.send_hwm, 42);
@@ -910,6 +948,7 @@ mod tests {
         assert_eq!(o.heartbeat_interval, Some(Duration::from_secs(1)));
         assert_eq!(o.max_message_size, Some(1024));
         assert!(o.conflate);
+        assert_eq!(o.compression_level, Some(1));
         assert!(o.router_mandatory);
         assert_eq!(o.on_mute, OnMute::DropNewest);
     }

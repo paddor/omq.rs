@@ -10,7 +10,7 @@ uv pip install pyomq
 uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 ```
 
-The published wheel includes optional features: plain, curve, lz4.
+The published wheel includes optional features: plain, curve, lz4, zstd.
 Use `pyomq.has("curve")` at runtime to check availability.
 
 Published wheels currently target Linux. Other platforms can build from
@@ -51,7 +51,7 @@ Sync and `asyncio` APIs both ship in this release. All 20 ZMTP socket types are 
 - **Draft**: SERVER, CLIENT (RFC 41), RADIO, DISH (RFC 48), GATHER, SCATTER (RFC 49), PEER, CHANNEL (RFC 51).
 
 Transports: `tcp://`, `ipc://`, `inproc://`, and `udp://` (RADIO/DISH only).
-Optional features built into the wheel: `plain`, `curve`, `lz4`.
+Optional features built into the wheel: `plain`, `curve`, `lz4`, `zstd`.
 
 DISH groups: use `socket.join(b"group")` / `socket.leave(b"group")` to manage
 subscriptions; messages are sent as multipart `[group, body]`.
@@ -92,7 +92,8 @@ Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure, 
 
 ## Compression transports
 
-OMQ.rs adds a transparent LZ4 compression transport on top of TCP: `lz4+tcp://`.
+OMQ.rs adds transparent compression transports on top of TCP:
+`lz4+tcp://` and experimental `zstd+tcp://`.
 Swap the scheme in your endpoint string and everything else stays the same:
 
 ```python
@@ -103,24 +104,26 @@ pull = ctx.socket(zmq.PULL)
 pull.connect("lz4+tcp://127.0.0.1:5555")
 ```
 
-Both peers must use a matching compression endpoint. Payloads below ~512 B are
-sent as-is (the codec detects that compression would expand them).
+Both peers must use a matching compression endpoint. Payloads below the
+transport threshold are sent as-is when compression would not help.
 
-`lz4+tcp://` supports dictionary auto-training (off by default). When enabled,
-it samples the first 100 outbound messages, builds a 2 KiB dict, and ships it
-to the peer once. After that the compression threshold drops from 512 B to
-128 B, so small structured messages start compressing too. Pure Rust (lz4rip),
-no C compiler required.
+Compression transports support static dictionaries and dictionary
+auto-training (off by default). Auto-training samples outbound messages,
+builds a 2 KiB dict, and ships it once per connection. Static dicts are set
+with `compression_dict`. `zstd+tcp://` also accepts `compression_level`.
+Pure Rust (`lz4rip` / `zrip`), no C compiler required.
 
 Enable it on sockets that send compressible traffic before `bind()`/`connect()`:
 
 ```python
 push.compression_auto_train = 1
 # or: push.setsockopt(zmq.OMQ_COMPRESSION_AUTO_TRAIN, 1)
+push.compression_level = 1  # zstd+tcp only
 ```
 
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for throughput charts and benchmark details.
-Wire format: [LZ4 transport RFC](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md).
+Wire formats: [LZ4](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md),
+[Zstd](https://github.com/paddor/omq.rs/blob/main/doc/zstd-rfc.md).
 
 ## CURVE authentication
 

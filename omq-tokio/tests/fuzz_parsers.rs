@@ -523,8 +523,9 @@ fn fuzz_compress_ws_roundtrip() {
     let opts = Options::default();
     for i in 0..iters() / 4 {
         let ep = &endpoints[rng.random_range(0..endpoints.len())];
-        let (mut enc, mut dec) =
-            MessageEncoder::for_endpoint(ep, &opts).expect("transform for compressed-ws");
+        let (mut enc, mut dec) = MessageEncoder::for_endpoint(ep, &opts)
+            .expect("transform constructor")
+            .expect("transform for compressed-ws");
         let n_parts = rng.random_range(1..=4);
         let mut parts: Vec<Bytes> = Vec::new();
         for _ in 0..n_parts {

@@ -780,13 +780,13 @@ impl LaneWorker {
         #[allow(unused)] options: &Options,
         #[allow(unused)] dict: Option<&Bytes>,
     ) {
-        #[cfg(feature = "lz4")]
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
         if self.encoder.is_none() || dict.is_some() {
             let mut opts = options.clone().compression_auto_train(false);
             if let Some(d) = dict {
                 opts = opts.compression_dict(d.clone());
             }
-            if let Some((enc, _dec)) = MessageEncoder::for_compression_kind(kind, &opts) {
+            if let Ok(Some((enc, _dec))) = MessageEncoder::for_compression_kind(kind, &opts) {
                 self.encoder = Some(enc);
             }
         }
@@ -824,7 +824,7 @@ impl LaneWorker {
             return false;
         }
 
-        // Compress if an encoder is active (lz4+tcp:// peers present).
+        // Compress if an encoder is active.
         let mut wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
             match enc.encode(&dispatch.msg) {
                 Ok(transformed) => transformed,

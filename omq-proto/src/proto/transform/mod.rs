@@ -2,7 +2,7 @@
 //! boundary and the ZMTP codec.
 //!
 //! Transforms wrap each [`crate::message::Message`] going out and coming in.
-//! Compression transports (`lz4+tcp://`) live here: they
+//! Compression transports (`lz4+tcp://`, `zstd+tcp://`) live here: they
 //! prepend a 4-byte sentinel to each message part and optionally compress
 //! the body. Distinct from the per-frame `CurveTransform` inside
 //! [`crate::proto::Connection`], which encrypts at the ZMTP frame layer
@@ -17,18 +17,22 @@
 //! This split lets runtime code hold encoder and decoder state
 //! independently so dict-compressed sends do not contend with reads.
 
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 mod common;
 #[cfg(feature = "lz4")]
 pub mod lz4;
+#[cfg(feature = "zstd")]
+pub mod zstd;
 
 #[cfg(feature = "lz4")]
 pub use lz4::{Lz4Decoder, Lz4Encoder};
+#[cfg(feature = "zstd")]
+pub use zstd::{ZstdDecoder, ZstdEncoder, train_zdict};
 
 use smallvec::SmallVec;
 
 use crate::endpoint::Endpoint;
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 use crate::endpoint::Host;
 use crate::error::Result;
 use crate::message::Message;
@@ -40,6 +44,8 @@ use crate::options::Options;
 pub enum CompressionKind {
     #[cfg(feature = "lz4")]
     Lz4,
+    #[cfg(feature = "zstd")]
+    Zstd,
 }
 
 impl CompressionKind {
@@ -50,17 +56,22 @@ impl CompressionKind {
             Endpoint::Lz4Tcp { .. } => Some(Self::Lz4),
             #[cfg(all(feature = "lz4", feature = "ws"))]
             Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => Some(Self::Lz4),
+            #[cfg(feature = "zstd")]
+            Endpoint::ZstdTcp { .. } => Some(Self::Zstd),
             _ => None,
         }
     }
 
     /// TCP endpoint for this compression kind. Used where a backend lane
     /// needs an encoder without owning a real peer endpoint.
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     #[must_use]
     pub fn tcp_endpoint(self, host: Host, port: u16) -> Endpoint {
         match self {
+            #[cfg(feature = "lz4")]
             Self::Lz4 => Endpoint::Lz4Tcp { host, port },
+            #[cfg(feature = "zstd")]
+            Self::Zstd => Endpoint::ZstdTcp { host, port },
         }
     }
 }
@@ -76,6 +87,8 @@ pub type TransformedOut = SmallVec<[Message; 2]>;
 pub enum MessageEncoder {
     #[cfg(feature = "lz4")]
     Lz4(Box<Lz4Encoder>),
+    #[cfg(feature = "zstd")]
+    Zstd(Box<ZstdEncoder>),
 }
 
 /// Receive-side message transform. Symmetric to [`MessageEncoder`].
@@ -83,6 +96,8 @@ pub enum MessageEncoder {
 pub enum MessageDecoder {
     #[cfg(feature = "lz4")]
     Lz4(Lz4Decoder),
+    #[cfg(feature = "zstd")]
+    Zstd(ZstdDecoder),
 }
 
 impl MessageEncoder {
@@ -101,39 +116,51 @@ impl MessageEncoder {
                 bytes::Bytes::from_static(SENTINEL),
                 t.passthrough_threshold()?,
             )),
-            #[cfg(not(feature = "lz4"))]
-            _ => unreachable!("MessageEncoder is uninhabited without lz4 feature"),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => Some((
+                bytes::Bytes::from_static(SENTINEL),
+                t.passthrough_threshold()?,
+            )),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!("MessageEncoder is uninhabited without compression features"),
         }
     }
 
     /// Build the per-connection encoder+decoder pair implied by an endpoint
-    /// scheme. Returns `None` for plain `tcp://` / `ipc://` / `inproc://` /
-    /// `udp://`. Picks up `Options::compression_dict`,
+    /// scheme. Returns `Ok(None)` for plain `tcp://` / `ipc://` /
+    /// `inproc://` / `udp://`. Picks up `Options::compression_dict`,
     /// `Options::compression_auto_train`, and `Options::max_message_size`.
     #[allow(unused_variables)]
-    pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<(Self, MessageDecoder)> {
-        let kind = CompressionKind::for_endpoint(endpoint)?;
+    pub fn for_endpoint(
+        endpoint: &Endpoint,
+        options: &Options,
+    ) -> Result<Option<(Self, MessageDecoder)>> {
+        let Some(kind) = CompressionKind::for_endpoint(endpoint) else {
+            return Ok(None);
+        };
         Self::for_compression_kind(kind, options)
     }
 
     /// Build the per-connection encoder+decoder pair for a compression kind.
+    /// Returns `Err` when a configured static dict is invalid.
     #[allow(unused_variables)]
     pub fn for_compression_kind(
         kind: CompressionKind,
         options: &Options,
-    ) -> Option<(Self, MessageDecoder)> {
+    ) -> Result<Option<(Self, MessageDecoder)>> {
         match kind {
             #[cfg(feature = "lz4")]
-            CompressionKind::Lz4 => Some(Self::build_lz4(options)),
+            CompressionKind::Lz4 => Ok(Some(Self::build_lz4(options)?)),
+            #[cfg(feature = "zstd")]
+            CompressionKind::Zstd => Ok(Some(Self::build_zstd(options)?)),
         }
     }
 
     #[cfg(feature = "lz4")]
-    fn build_lz4(options: &Options) -> (Self, MessageDecoder) {
+    fn build_lz4(options: &Options) -> Result<(Self, MessageDecoder)> {
         use lz4::{Lz4Decoder, Lz4Encoder};
         let mut enc = if let Some(d) = options.compression_dict.clone() {
-            Lz4Encoder::with_send_dict(d)
-                .expect("compression_dict validated at Options::compression_dict")
+            Lz4Encoder::with_send_dict(d)?
         } else {
             let mut e = Lz4Encoder::new();
             if options.compression_auto_train {
@@ -152,7 +179,36 @@ impl MessageEncoder {
         if let Some(m) = options.max_recv_dict_size {
             dec = dec.with_max_recv_dict_size(m);
         }
-        (MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec))
+        Ok((MessageEncoder::Lz4(Box::new(enc)), MessageDecoder::Lz4(dec)))
+    }
+
+    #[cfg(feature = "zstd")]
+    fn build_zstd(options: &Options) -> Result<(Self, MessageDecoder)> {
+        use zstd::{ZstdDecoder, ZstdEncoder};
+        let mut enc = if let Some(d) = options.compression_dict.clone() {
+            ZstdEncoder::with_send_dict(d)?
+        } else {
+            let mut e = ZstdEncoder::new();
+            if options.compression_auto_train {
+                e = e.with_auto_train();
+            }
+            if let Some(c) = options.compression_dict_capacity {
+                e = e.with_dict_capacity(c);
+            }
+            e
+        }
+        .with_max_message_size(options.max_message_size);
+        if let Some(t) = options.compression_threshold {
+            enc = enc.with_threshold(t);
+        }
+        let mut dec = ZstdDecoder::new().with_max_message_size(options.max_message_size);
+        if let Some(m) = options.max_recv_dict_size {
+            dec = dec.with_max_recv_dict_size(m);
+        }
+        Ok((
+            MessageEncoder::Zstd(Box::new(enc)),
+            MessageDecoder::Zstd(dec),
+        ))
     }
 
     /// Transform an outbound user message into 1+ wire messages.
@@ -160,10 +216,12 @@ impl MessageEncoder {
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => t.encode(msg),
-            #[cfg(not(feature = "lz4"))]
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.encode(msg),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => {
                 let _ = msg;
-                unreachable!("MessageEncoder is uninhabited without lz4 feature")
+                unreachable!("MessageEncoder is uninhabited without compression features")
             }
         }
     }
@@ -175,7 +233,11 @@ impl MessageEncoder {
         if out.first().is_some_and(lz4::is_dict_shipment) {
             return Some(out.remove(0));
         }
-        #[cfg(not(feature = "lz4"))]
+        #[cfg(feature = "zstd")]
+        if out.first().is_some_and(zstd::is_dict_shipment) {
+            return Some(out.remove(0));
+        }
+        #[cfg(not(any(feature = "lz4", feature = "zstd")))]
         let _ = out;
         None
     }
@@ -185,7 +247,9 @@ impl MessageEncoder {
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => t.can_offload(),
-            #[cfg(not(feature = "lz4"))]
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.can_offload(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => unreachable!(),
         }
     }
@@ -196,7 +260,9 @@ impl MessageEncoder {
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => Self::Lz4(Box::new(t.new_offload())),
-            #[cfg(not(feature = "lz4"))]
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => Self::Zstd(Box::new(t.new_offload())),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => unreachable!(),
         }
     }
@@ -207,6 +273,8 @@ impl MessageEncoder {
         match (self, primary) {
             #[cfg(feature = "lz4")]
             (Self::Lz4(me), Self::Lz4(p)) => me.sync_dict(p),
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(me), Self::Zstd(p)) => me.sync_dict(p),
             _ => {}
         }
     }
@@ -217,6 +285,8 @@ impl MessageEncoder {
         match (self, other) {
             #[cfg(feature = "lz4")]
             (Self::Lz4(_), Self::Lz4(_)) => true,
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(_), Self::Zstd(_)) => true,
             _ => false,
         }
     }
@@ -225,15 +295,20 @@ impl MessageEncoder {
 impl MessageDecoder {
     /// Transform an inbound wire message. `None` means the message was
     /// consumed by the transport (dict shipment) and must not surface.
-    #[cfg_attr(not(feature = "lz4"), allow(clippy::needless_pass_by_value))]
+    #[cfg_attr(
+        not(any(feature = "lz4", feature = "zstd")),
+        allow(clippy::needless_pass_by_value)
+    )]
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         match self {
             #[cfg(feature = "lz4")]
             Self::Lz4(t) => t.decode(msg),
-            #[cfg(not(feature = "lz4"))]
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.decode(msg),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => {
                 let _ = msg;
-                unreachable!("MessageDecoder is uninhabited without lz4 feature")
+                unreachable!("MessageDecoder is uninhabited without compression features")
             }
         }
     }

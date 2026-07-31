@@ -55,7 +55,11 @@ pub(super) fn spawn_byte_stream_connection(
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
-    let transforms = MessageEncoder::for_endpoint(&endpoint, &socket.options);
+    let Ok(transforms) =
+        build_message_transforms(socket, &endpoint, &peer_ident, is_server, route_id)
+    else {
+        return;
+    };
     let compression_kind = omq_proto::proto::transform::CompressionKind::for_endpoint(&endpoint);
     let has_transforms = transforms.is_some();
     let latency_profile = workload_profile == WorkloadProfile::Latency
@@ -231,6 +235,33 @@ pub(super) fn spawn_inproc_peer(
     );
     if let Some(peer) = socket.peers.get_mut(&peer_id) {
         peer.task = Some(task);
+    }
+}
+
+fn build_message_transforms(
+    socket: &mut SocketDriver,
+    endpoint: &Endpoint,
+    peer_ident: &PeerIdent,
+    is_server: bool,
+    route_id: u64,
+) -> core::result::Result<Option<(MessageEncoder, omq_proto::proto::transform::MessageDecoder)>, ()>
+{
+    match MessageEncoder::for_endpoint(endpoint, &socket.options) {
+        Ok(transforms) => Ok(transforms),
+        Err(e) => {
+            socket
+                .monitor
+                .publish(omq_proto::MonitorEvent::HandshakeFailed {
+                    endpoint: endpoint.clone(),
+                    peer_ident: peer_ident.clone(),
+                    reason: e.to_string(),
+                });
+            if !is_server {
+                socket.dialers.retain(|d| d.route_id != route_id);
+                socket.send_strategy.connect_pipe_removed(route_id);
+            }
+            Err(())
+        }
     }
 }
 

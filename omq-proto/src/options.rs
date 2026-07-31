@@ -16,8 +16,8 @@ use crate::proto::mechanism::{Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
 use crate::proto::mechanism::{CurveKeypair, CurvePublicKey, CurveServerOptions};
 use crate::socket_ref::SocketRef;
-/// Upper bound for `Options::compression_dict`. Both transports
-/// cap at 8 KiB. Inlined as a const so the `compression_dict`
+/// Upper bound for `Options::compression_dict`. Compression transports cap
+/// dictionaries at 8 KiB. Inlined as a const so the `compression_dict`
 /// setter works regardless of which compression features are enabled.
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
@@ -155,17 +155,16 @@ pub struct Options {
     /// Active security mechanism. Defaults to `Null` (no encryption).
     pub mechanism: MechanismSetup,
 
-    /// Outbound compression dictionary. Used by `lz4+tcp://`; ignored
-    /// on plain transports. The dict is shipped to the peer once per
+    /// Outbound compression dictionary. Used by compression transports;
+    /// ignored on plain transports. The dict is shipped to the peer once per
     /// connection; subsequent parts are compressed against it.
     /// Must be 1..=8192 bytes.
     pub compression_dict: Option<Bytes>,
 
     /// Auto-trained dictionaries. Defaults to off.
-    /// When no `compression_dict` is configured on an `lz4+tcp://`
+    /// When no `compression_dict` is configured on a compression
     /// connection, the encoder feeds outbound message parts to a
-    /// `DictTrainer` until it saturates (bloom-filter diversity
-    /// plateaus), then trains a dict (capacity controlled by
+    /// dict trainer until it saturates, then trains a dict (capacity controlled by
     /// `compression_dict_capacity`, default 2 KiB) and ships it.
     /// After that the per-part compression threshold drops from
     /// 512 B to 64 B and small messages ride the dict.
@@ -189,8 +188,7 @@ pub struct Options {
     pub compression_dict_capacity: Option<usize>,
 
     /// Maximum dictionary size (bytes) accepted from a peer. Dicts
-    /// larger than this are rejected. Default: 8192 for both
-    /// transports.
+    /// larger than this are rejected. Default: 8192 for compression transports.
     pub max_recv_dict_size: Option<usize>,
 
     /// Minimum message size (bytes) before compression is offloaded to
@@ -619,8 +617,8 @@ impl Options {
         self
     }
 
-    /// Set the outbound compression dictionary. Used by `lz4+tcp://`.
-    /// Validated by [`Options::validate`]: must be 1..=8192 bytes (RFC §6.2).
+    /// Set the outbound compression dictionary. Used by compression transports.
+    /// Validated by [`Options::validate`]: must be 1..=8192 bytes.
     /// Disables auto-training when set.
     #[must_use]
     pub fn compression_dict(mut self, dict: impl Into<Bytes>) -> Self {
@@ -628,7 +626,7 @@ impl Options {
         self
     }
 
-    /// Enable auto-trained dictionaries (`lz4+tcp://`).
+    /// Enable auto-trained dictionaries for compression transports.
     /// Off by default. See [`Options::compression_auto_train`] for
     /// semantics.
     #[must_use]
@@ -656,7 +654,8 @@ impl Options {
     }
 
     /// Set the maximum dictionary size accepted from a peer.
-    /// Dicts larger than this are rejected at decode time.
+    /// Dicts larger than this are rejected at decode time. Transport hard caps
+    /// still apply.
     #[must_use]
     pub fn max_recv_dict_size(mut self, max: usize) -> Self {
         self.max_recv_dict_size = Some(max);

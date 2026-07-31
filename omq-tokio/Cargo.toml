@@ -23,6 +23,7 @@ default = []
 curve = ["omq-proto/curve"]
 plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
+zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
@@ -174,6 +175,10 @@ path = "tests/handshake_timeout.rs"
 [[test]]
 name = "omq_heartbeat"
 path = "tests/heartbeat.rs"
+
+[[test]]
+name = "omq_zstd_tcp"
+path = "tests/zstd_tcp.rs"
 
 [[test]]
 name = "omq_inproc_rebind"

@@ -207,9 +207,17 @@ async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
         Some("train-dict") => {
             let path = &args[2];
             let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
-            let dict = train_json_dict(capacity);
+            let dict = train_lz4_json_dict(capacity);
             std::fs::write(path, &dict).expect("write dict file");
             eprintln!("Trained {} byte dict -> {path}", dict.len());
+        }
+        #[cfg(feature = "zstd")]
+        Some("train-zstd-dict") => {
+            let path = &args[2];
+            let capacity: usize = args.get(3).map_or(2048, |s| s.parse().expect("capacity"));
+            let dict = train_zstd_json_dict(capacity);
+            std::fs::write(path, &dict).expect("write dict file");
+            eprintln!("Trained {} byte zstd dict -> {path}", dict.len());
         }
         Some("inproc-latency") => {
             let name = args[2].clone();
@@ -1119,7 +1127,7 @@ fn bench_payload(size: usize) -> Bytes {
     }
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 fn json_payload_seeded(target_bytes: usize, seed: u32) -> Bytes {
     let mut out = String::with_capacity(target_bytes + 512);
     let mut state: u32 = seed;
@@ -1250,11 +1258,8 @@ fn json_record(out: &mut String, state: &mut u32) {
     );
 }
 
-#[cfg(feature = "lz4")]
-fn train_json_dict(capacity: usize) -> Vec<u8> {
-    use omq_proto::proto::transform::lz4::DictTrainer;
-
-    let mut trainer = DictTrainer::new(capacity);
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+fn json_dict_samples() -> Vec<Bytes> {
     // Bias toward common message sizes (512B, 1 KiB) with a few at other sizes.
     let sample_sizes: &[(usize, usize)] = &[
         (64, 2),
@@ -1265,19 +1270,39 @@ fn train_json_dict(capacity: usize) -> Vec<u8> {
         (2048, 4),
         (4096, 4),
     ];
+    let mut samples = Vec::new();
     for &(size, count) in sample_sizes {
         for i in 1..=count {
-            let payload = json_payload_seeded(size, i as u32);
-            trainer.add_sample(&payload);
+            samples.push(json_payload_seeded(size, i as u32));
         }
     }
+    samples
+}
+
+#[cfg(feature = "lz4")]
+fn train_lz4_json_dict(capacity: usize) -> Vec<u8> {
+    use omq_proto::proto::transform::lz4::DictTrainer;
+
+    let mut trainer = DictTrainer::new(capacity);
+    for payload in json_dict_samples() {
+        trainer.add_sample(&payload);
+    }
     trainer.train()
+}
+
+#[cfg(feature = "zstd")]
+fn train_zstd_json_dict(capacity: usize) -> Vec<u8> {
+    let samples = json_dict_samples();
+    let refs: Vec<&[u8]> = samples.iter().map(Bytes::as_ref).collect();
+    omq_proto::proto::transform::train_zdict(&refs, capacity)
+        .expect("zstd dictionary training must produce a dict")
+        .to_vec()
 }
 
 fn wire_size(ep: &Endpoint, size: usize) -> usize {
     use omq_proto::proto::transform::MessageEncoder;
     let options = bench_options(size);
-    let Some((mut enc, _dec)) = MessageEncoder::for_endpoint(ep, &options) else {
+    let Ok(Some((mut enc, _dec))) = MessageEncoder::for_endpoint(ep, &options) else {
         return size;
     };
     let payload = json_payload_random(size);

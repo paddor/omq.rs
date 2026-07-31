@@ -1591,7 +1591,7 @@ fn submit_to_pipeline(
     threshold: usize,
     pipeline: &mut OffloadPipeline,
 ) {
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     if msg.byte_len() >= threshold
         && let Some(mut pool_enc) = pool.try_take(encoder)
     {
@@ -1637,7 +1637,7 @@ fn drain_offload_result(
     connection: &Connection,
     eq: &mut FrameBuffer,
 ) -> Result<()> {
-    #[cfg(feature = "lz4")]
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
     if let (Some(enc), Some(pool)) = (pool_enc, pool) {
         pool.put(enc);
     }

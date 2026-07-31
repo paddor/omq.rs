@@ -117,6 +117,18 @@ fn lz4_tcp() {
     );
 }
 
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_tcp() {
+    assert_eq!(
+        parse("zstd+tcp://host:9"),
+        Endpoint::ZstdTcp {
+            host: Host::Name("host".into()),
+            port: 9
+        }
+    );
+}
+
 #[test]
 fn unsupported_scheme() {
     assert!(matches!(
@@ -183,6 +195,12 @@ fn display_roundtrip() {
     #[cfg(feature = "lz4")]
     {
         let c = "lz4+tcp://host:9";
+        let parsed: Endpoint = c.parse().unwrap();
+        assert_eq!(parsed.to_string(), c);
+    }
+    #[cfg(feature = "zstd")]
+    {
+        let c = "zstd+tcp://host:9";
         let parsed: Endpoint = c.parse().unwrap();
         assert_eq!(parsed.to_string(), c);
     }

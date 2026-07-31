@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-07-31
+
+### Fixed
+
+- Test-only async waker now drops consumed raw wakers, avoiding Miri leak
+  reports.
+
 ## [0.3.10] - 2026-07-23
 
 ### Added

@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-07-31
+
 ### Added
 
 - Enable `zstd+tcp://` transport through the C API.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.20.3 and `yring` to 0.3.11.
 
 ## [0.5.9] - 2026-07-31
 

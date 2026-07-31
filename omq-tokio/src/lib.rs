@@ -2,7 +2,7 @@
 //!
 //! Wire-compatible with libzmq. Supports 20 socket types, TCP / IPC /
 //! inproc / UDP transports, NULL / PLAIN / CURVE mechanisms, and the
-//! lz4+tcp compression transport.
+//! lz4+tcp / zstd+tcp compression transports.
 //!
 //! The codec, message types, mechanism handshakes, and routing
 //! algorithms live in the runtime-agnostic `omq-proto` crate.

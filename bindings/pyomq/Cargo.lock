@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.20.2"
+version = "0.20.3"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.18.3"
+version = "0.19.0"
 dependencies = [
  "bytes",
  "flume",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "atomic-waker",
  "futures-core",

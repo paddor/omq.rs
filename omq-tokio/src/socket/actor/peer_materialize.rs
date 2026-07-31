@@ -56,6 +56,7 @@ pub(super) fn spawn_byte_stream_connection(
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
     let transforms = MessageEncoder::for_endpoint(&endpoint, &socket.options);
+    let compression_kind = omq_proto::proto::transform::CompressionKind::for_endpoint(&endpoint);
     let has_transforms = transforms.is_some();
     let latency_profile = workload_profile == WorkloadProfile::Latency
         && !socket.options.mechanism.has_frame_transform();
@@ -91,6 +92,7 @@ pub(super) fn spawn_byte_stream_connection(
         socket,
         peer_id,
         has_transforms,
+        compression_kind,
         passthrough_info,
         arena,
         #[cfg(feature = "ws")]
@@ -396,6 +398,7 @@ fn build_transmit_slot(
     socket: &SocketDriver,
     peer_id: u64,
     has_transforms: bool,
+    compression_kind: Option<omq_proto::proto::transform::CompressionKind>,
     passthrough_info: Option<(bytes::Bytes, usize)>,
     arena: ArenaConfig,
     #[cfg(feature = "ws")] is_ws: bool,
@@ -413,6 +416,7 @@ fn build_transmit_slot(
     Some(crate::engine::transmit_slot::PeerTransmitSlot::new(
         peer_id,
         has_transforms,
+        compression_kind,
         passthrough_info,
         arena.threshold,
         arena.cap,

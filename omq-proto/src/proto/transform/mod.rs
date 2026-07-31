@@ -28,9 +28,42 @@ pub use lz4::{Lz4Decoder, Lz4Encoder};
 use smallvec::SmallVec;
 
 use crate::endpoint::Endpoint;
+#[cfg(feature = "lz4")]
+use crate::endpoint::Host;
 use crate::error::Result;
 use crate::message::Message;
 use crate::options::Options;
+
+/// Compression transform selected by an endpoint scheme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CompressionKind {
+    #[cfg(feature = "lz4")]
+    Lz4,
+}
+
+impl CompressionKind {
+    /// Compression implied by an endpoint scheme.
+    pub fn for_endpoint(endpoint: &Endpoint) -> Option<Self> {
+        match endpoint {
+            #[cfg(feature = "lz4")]
+            Endpoint::Lz4Tcp { .. } => Some(Self::Lz4),
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => Some(Self::Lz4),
+            _ => None,
+        }
+    }
+
+    /// TCP endpoint for this compression kind. Used where a backend lane
+    /// needs an encoder without owning a real peer endpoint.
+    #[cfg(feature = "lz4")]
+    #[must_use]
+    pub fn tcp_endpoint(self, host: Host, port: u16) -> Endpoint {
+        match self {
+            Self::Lz4 => Endpoint::Lz4Tcp { host, port },
+        }
+    }
+}
 
 /// A transform that may produce up to a small number of wire messages from
 /// one user message (e.g. a dict shipment ahead of the first compressed
@@ -79,12 +112,19 @@ impl MessageEncoder {
     /// `Options::compression_auto_train`, and `Options::max_message_size`.
     #[allow(unused_variables)]
     pub fn for_endpoint(endpoint: &Endpoint, options: &Options) -> Option<(Self, MessageDecoder)> {
-        match endpoint {
+        let kind = CompressionKind::for_endpoint(endpoint)?;
+        Self::for_compression_kind(kind, options)
+    }
+
+    /// Build the per-connection encoder+decoder pair for a compression kind.
+    #[allow(unused_variables)]
+    pub fn for_compression_kind(
+        kind: CompressionKind,
+        options: &Options,
+    ) -> Option<(Self, MessageDecoder)> {
+        match kind {
             #[cfg(feature = "lz4")]
-            Endpoint::Lz4Tcp { .. } => Some(Self::build_lz4(options)),
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => Some(Self::build_lz4(options)),
-            _ => None,
+            CompressionKind::Lz4 => Some(Self::build_lz4(options)),
         }
     }
 

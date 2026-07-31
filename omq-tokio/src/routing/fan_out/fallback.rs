@@ -239,6 +239,7 @@ mod tests {
             1,
             false,
             None,
+            None,
             omq_proto::frame_buffer::ARENA_THRESHOLD,
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,

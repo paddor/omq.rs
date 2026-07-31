@@ -24,6 +24,7 @@ use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::{OnMute, Options};
 use omq_proto::proto::SocketType;
+use omq_proto::proto::transform::CompressionKind;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
@@ -333,7 +334,7 @@ pub(crate) struct FanOutSend {
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     subscribe_all_count: usize,
-    has_compression: bool,
+    compression_kind: Option<CompressionKind>,
     compression_dict: Option<Bytes>,
     options: Options,
 }
@@ -392,7 +393,7 @@ impl FanOutSend {
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
             subscribe_all_count: 0,
-            has_compression: false,
+            compression_kind: None,
             compression_dict: options.compression_dict.clone(),
             options: options.clone(),
         }));
@@ -459,10 +460,10 @@ impl FanOutSend {
         any_groups: bool,
         io_thread: usize,
     ) {
-        let has_transform = handle
+        let compression_kind = handle
             .transmit_slot
             .as_ref()
-            .is_some_and(|s| s.has_transform);
+            .and_then(|s| s.compression_kind());
         let target = PeerOutbound::from_handle(&handle);
 
         #[cfg(feature = "ws")]
@@ -486,14 +487,16 @@ impl FanOutSend {
                 },
             );
             let mut g = self.inner.lock().expect("fanout inner poisoned");
-            if has_transform {
-                g.has_compression = true;
+            if let Some(kind) = compression_kind
+                && g.compression_kind.is_none()
+            {
+                g.compression_kind = Some(kind);
             }
-            if g.has_compression {
+            if let Some(kind) = g.compression_kind {
                 let options = g.options.clone();
                 let dict = g.compression_dict.clone();
                 drop(g);
-                self.lanes.set_compression(lane, options, dict);
+                self.lanes.set_compression(lane, kind, options, dict);
             } else {
                 drop(g);
             }

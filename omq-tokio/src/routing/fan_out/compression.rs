@@ -67,10 +67,13 @@ pub(super) fn feed_dict_training(
         return;
     }
     let dict = Bytes::from(dict_bytes);
-    let options = {
+    let (kind, options) = {
         let mut g = inner.lock().expect("fanout inner poisoned");
         g.compression_dict = Some(dict.clone());
-        g.options.clone()
+        let Some(kind) = g.compression_kind else {
+            return;
+        };
+        (kind, g.options.clone())
     };
-    lanes.set_compression_all(&options, Some(&dict));
+    lanes.set_compression_all(kind, &options, Some(&dict));
 }

@@ -8,6 +8,14 @@ Supports connect-side WebSocket sockets for REQ/REP, PUB/SUB, XPUB/XSUB,
 PUSH/PULL, DEALER/ROUTER, PAIR, CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, PEER,
 and CHANNEL. Security mechanisms are NULL and PLAIN.
 
+## Install
+
+Published on JSR as [`@zeromq/omq`](https://jsr.io/@zeromq/omq).
+
+```sh
+deno add jsr:@zeromq/omq
+```
+
 ## Usage
 
 ### Subscribe

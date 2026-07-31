@@ -521,6 +521,29 @@ async fn pub_io_lane_fanout_subscription_filter() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub_sub_ipc_large_message_exceeds_transmit_slot_cap() {
+    let ep = test_support::ipc_endpoint("pub-sub-large-message");
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    pub_.bind(ep.clone()).await.unwrap();
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    sub.connect(ep).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+
+    let body = vec![0x55; 1024 * 1024];
+    pub_.send(Message::single(body.clone())).await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+        .await
+        .expect("subscriber timed out")
+        .unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap(), body.as_slice());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;

@@ -172,7 +172,10 @@ impl PeerTransmitSlot {
         }
         let bytes = chunks.iter().map(Bytes::len).sum();
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if self.is_full(&eq) || eq.total_bytes().saturating_add(bytes) >= self.cap {
+        let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
+        if queued_msgs >= self.msg_cap
+            || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
+        {
             self.above_lwm.store(true, Ordering::Relaxed);
             return TryFrameResult::Full;
         }
@@ -208,8 +211,9 @@ impl PeerTransmitSlot {
         let chunk = fanout_frame_chunk(frame);
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
-        while eq.total_bytes().saturating_add(chunk.len()) >= self.cap
-            || queued_msgs >= self.msg_cap
+        while queued_msgs > 0
+            && (eq.total_bytes().saturating_add(chunk.len()) >= self.cap
+                || queued_msgs >= self.msg_cap)
         {
             if !eq.pop_front_entry() {
                 self.above_lwm.store(true, Ordering::Relaxed);

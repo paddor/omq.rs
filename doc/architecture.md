@@ -187,8 +187,19 @@ entries still use `Bytes` and vectored writes.
 CURVE keeps per-connection nonce state, so encrypted traffic uses
 per-connection ordered transforms. CURVE encrypts and decrypts in place
 (`SalsaBox::encrypt_in_place_detached` / `decrypt_in_place_detached`) with one
-allocation per message. LZ4 fan-out may encode once at socket level when wire
-bytes are identical for all matched subscribers.
+allocation per message.
+
+Compression transports (`lz4+tcp://`, `zstd+tcp://`) transform whole messages
+before ZMTP framing.
+
+- Peer-routed sends (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `PAIR`, `ROUTER`,
+  `REP`, `SERVER`, `PEER`, `STREAM`) compress in the selected peer driver.
+  Large messages (>= `Options::compression_offload_threshold`, default 8 KiB)
+  borrow a warm encoder from the socket's `CompressionPool`, run compression
+  on Tokio's blocking pool, and drain results in send order.
+- Lane-routed broadcast sends (`PUB`, `XPUB`, `RADIO`) use lane-local
+  encoders. Each lane compresses once for its matched peers, with ordered dict
+  updates, and does not use the offload pool.
 
 ## Routing
 

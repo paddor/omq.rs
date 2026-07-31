@@ -8,6 +8,8 @@ use bytes::Bytes;
 use omq_proto::message::Message;
 #[cfg(feature = "lz4")]
 use omq_proto::options::Options;
+#[cfg(feature = "lz4")]
+use omq_proto::proto::transform::CompressionKind;
 
 #[cfg(feature = "lz4")]
 use super::{FanOutInner, lane::FanOutLanes};
@@ -48,6 +50,14 @@ pub(super) fn feed_dict_training(
     lanes: &FanOutLanes,
     msg: &Message,
 ) {
+    if inner
+        .lock()
+        .expect("fanout inner poisoned")
+        .compression_kind
+        != Some(CompressionKind::Lz4)
+    {
+        return;
+    }
     let mut guard = dict_training.lock().expect("dict_training poisoned");
     let Some(training) = guard.as_mut() else {
         return;

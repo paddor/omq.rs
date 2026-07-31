@@ -471,9 +471,20 @@ impl FanOutSend {
         #[cfg(not(feature = "ws"))]
         let target_is_ws = false;
 
-        let lane_eligible = !target_is_ws
+        let lane_base_eligible = !target_is_ws
             && matches!(target, PeerOutbound::Wire { .. })
             && handle.transmit_slot.is_some();
+
+        let lane_eligible = lane_base_eligible && {
+            let mut g = self.inner.lock().expect("fanout inner poisoned");
+            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
+            if has_lane_peers {
+                g.compression_kind == compression_kind
+            } else {
+                g.compression_kind = compression_kind;
+                true
+            }
+        };
 
         let lane = if !lane_eligible {
             None
@@ -486,12 +497,7 @@ impl FanOutSend {
                     any_groups,
                 },
             );
-            let mut g = self.inner.lock().expect("fanout inner poisoned");
-            if let Some(kind) = compression_kind
-                && g.compression_kind.is_none()
-            {
-                g.compression_kind = Some(kind);
-            }
+            let g = self.inner.lock().expect("fanout inner poisoned");
             if let Some(kind) = g.compression_kind {
                 let options = g.options.clone();
                 let dict = g.compression_dict.clone();

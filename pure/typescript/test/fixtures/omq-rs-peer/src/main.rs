@@ -103,12 +103,6 @@ fn browser_wss(host: &str, base: u16, offset: u16) -> Endpoint {
     format!("wss://{host}:{}/", base + offset).parse().unwrap()
 }
 
-fn browser_lz4_wss(host: &str, base: u16, offset: u16) -> Endpoint {
-    format!("lz4+wss://{host}:{}/", base + offset)
-        .parse()
-        .unwrap()
-}
-
 fn self_signed_tls() -> (Vec<u8>, Vec<u8>) {
     let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     let cert_pem = certified.cert.pem().into_bytes();
@@ -396,30 +390,9 @@ async fn browser_bind(base: u16, host: String) {
         plain_wss_options(&cert_pem, &key_pem),
     )
     .await;
-    let lz4_wss_pull = bind_socket(
-        SocketType::Pull,
-        browser_lz4_wss(&host, base, 15),
-        wss_options(&cert_pem, &key_pem),
-    )
-    .await;
-    let lz4_wss_push = bind_socket(
-        SocketType::Push,
-        browser_lz4_wss(&host, base, 16),
-        wss_options(&cert_pem, &key_pem),
-    )
-    .await;
-    let lz4_wss_push_monitor = lz4_wss_push.monitor();
-    let restart_lz4_wss_endpoint = browser_lz4_wss(&host, base, 17);
-    let restart_lz4_wss_pull = bind_socket(
-        SocketType::Pull,
-        restart_lz4_wss_endpoint.clone(),
-        wss_options(&cert_pem, &key_pem),
-    )
-    .await;
     let delayed_ws_endpoint = browser_ws(&host, base, 18);
     let delayed_lz4_ws_endpoint = browser_lz4_ws(&host, base, 19);
     let delayed_wss_endpoint = browser_wss(&host, base, 20);
-    let delayed_lz4_wss_endpoint = browser_lz4_wss(&host, base, 21);
 
     for (name, endpoint, options) in [
         (
@@ -435,11 +408,6 @@ async fn browser_bind(base: u16, host: String) {
         (
             "connect_before_bind_wss",
             delayed_wss_endpoint,
-            wss_options(&cert_pem, &key_pem),
-        ),
-        (
-            "connect_before_bind_lz4_wss",
-            delayed_lz4_wss_endpoint,
             wss_options(&cert_pem, &key_pem),
         ),
     ] {
@@ -512,24 +480,6 @@ async fn browser_bind(base: u16, host: String) {
         "wss_pull_plain",
         state.clone(),
     ));
-    tokio::spawn(browser_pull_record(
-        lz4_wss_pull,
-        "lz4_wss_pull",
-        state.clone(),
-    ));
-    tokio::spawn(browser_push_on_handshake(
-        lz4_wss_push,
-        lz4_wss_push_monitor,
-        "lz4_wss_push",
-        "push-lz4-wss-from-rust",
-        state.clone(),
-    ));
-    tokio::spawn(browser_pull_restart_loop(
-        restart_lz4_wss_endpoint,
-        restart_lz4_wss_pull,
-        wss_options(&cert_pem, &key_pem),
-        state.clone(),
-    ));
     println!("BROWSER_READY");
     println!("control ws://{host}:{base}/");
     for (name, offset, scheme, note) in [
@@ -547,13 +497,9 @@ async fn browser_bind(base: u16, host: String) {
         ("wss_pull", 12, "wss", ""),
         ("wss_push", 13, "wss", ""),
         ("wss_pull_plain", 14, "wss", " PLAIN"),
-        ("lz4_wss_pull", 15, "lz4+wss", ""),
-        ("lz4_wss_push", 16, "lz4+wss", ""),
-        ("restart_lz4_wss_pull", 17, "lz4+wss", ""),
         ("connect_before_bind_ws", 18, "ws", ""),
         ("connect_before_bind_lz4_ws", 19, "lz4+ws", ""),
         ("connect_before_bind_wss", 20, "wss", ""),
-        ("connect_before_bind_lz4_wss", 21, "lz4+wss", ""),
     ] {
         println!("{name} {scheme}://{host}:{}/{}", base + offset, note);
     }
@@ -871,7 +817,7 @@ async fn xpub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &st
     }
 }
 
-async fn xsub_bind(endpoint: Endpoint, topic: String, payload: String, auth: &str) {
+async fn xsub_bind(endpoint: Endpoint, _topic: String, payload: String, auth: &str) {
     let xsub = Socket::new(SocketType::XSub, options(auth));
     xsub.subscribe("news.").await.expect("xsub subscribe");
     let bound = xsub.bind(endpoint).await.expect("xsub bind");

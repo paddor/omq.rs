@@ -12,7 +12,7 @@
  *
  * const sub = new Sub();
  * sub.subscribe("market.");
- * sub.connect("lz4+wss://broker.example.com/sub");
+ * sub.connect("lz4+ws://broker.example.com/sub");
  *
  * for await (const msg of sub) {
  *   console.log(msg.string(0), msg.string(1));

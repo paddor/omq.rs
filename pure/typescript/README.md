@@ -19,7 +19,7 @@ await initLz4();
 
 const sub = new Sub();
 sub.subscribe("market.");
-sub.connect("lz4+wss://broker.example.com/sub");
+sub.connect("lz4+ws://broker.example.com/sub");
 
 for await (const msg of sub) {
   console.log(msg.string(0), msg.string(1));
@@ -51,7 +51,7 @@ await push.send(new Message("event", JSON.stringify({ ts: Date.now() })));
 
 ### LZ4 Dictionary Compression
 
-For `lz4+wss://` URLs, call `initLz4()` once before connecting. An optional
+For `lz4+ws://` URLs, call `initLz4()` once before connecting. An optional
 pre-shared dictionary improves compression ratio on small messages:
 
 ```ts
@@ -62,7 +62,7 @@ await initLz4();
 const dict = new Uint8Array([...]); // pre-shared dictionary
 const sub = new Sub({ lz4Dict: dict });
 sub.subscribe("");
-sub.connect("lz4+wss://broker.example.com/sub");
+sub.connect("lz4+ws://broker.example.com/sub");
 ```
 
 TypeScript senders reject individual LZ4 parts at the 1 GiB multi-block
@@ -118,11 +118,11 @@ queue drop.
 
 ### Live Interop Tests
 
-Run `npm run test:interop` from this repo when the sibling `../omq.rs` checkout
-is present. It starts real `omq-tokio` WebSocket peers and verifies NULL, PLAIN,
-and `lz4+ws://` traffic.
+Run `npm run test:interop` from this repo to start real `omq-tokio` WebSocket
+peers from the crates.io test fixture and verify NULL, PLAIN, and `lz4+ws://`
+traffic.
 
 Run `npm run test:browser` for the headless Firefox browser interop test. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
-`wss://` and `lz4+wss://`.
+`wss://`.

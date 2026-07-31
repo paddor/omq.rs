@@ -275,7 +275,7 @@ test("Firefox browser interop with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    const basePort = await findFreePortRange(22);
+    const basePort = await findFreePortRange(21);
     peer = await startBrowserPeer(basePort);
     const certSummary = await verifySelfSignedWssCertificate(
       "127.0.0.1",

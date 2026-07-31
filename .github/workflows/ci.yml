@@ -148,6 +148,20 @@ jobs:
       - name: cargo nextest (lz4, macOS)
         if: runner.os == 'macOS'
         run: cargo nextest run --profile ci -p omq-tokio --features lz4 --test-threads=1
+      - name: cargo nextest (zstd)
+        if: runner.os != 'macOS'
+        run: cargo nextest run --profile ci -p omq-tokio --features zstd
+      - name: cargo nextest (zstd, macOS)
+        if: runner.os == 'macOS'
+        run: cargo nextest run --profile ci -p omq-tokio --features zstd --test-threads=1
+      - name: cargo nextest (lz4+ws endpoint)
+        run: cargo nextest run --profile ci -p omq-proto --features "lz4 ws" --test omq_proto_endpoint
+      - name: cargo nextest (lz4+ws)
+        if: runner.os != 'macOS'
+        run: cargo nextest run --profile ci -p omq-tokio --features "lz4 ws" --test omq_lz4_ws
+      - name: cargo nextest (lz4+ws, macOS)
+        if: runner.os == 'macOS'
+        run: cargo nextest run --profile ci -p omq-tokio --features "lz4 ws" --test omq_lz4_ws --test-threads=1
 
   interop:
     name: interop (pyzmq)
@@ -254,14 +268,14 @@ jobs:
           OMQ_FUZZ_ITERS: "1000000"
         run: >
           cargo nextest run --profile ci -p omq-tokio
-          --features "fuzz plain curve lz4 ws" --release
+          --features "fuzz plain curve lz4 zstd ws" --release
           --test omq_fuzz_parsers
       - name: fuzz socket actions
         env:
           OMQ_FUZZ_ITERS: "200"
         run: >
           cargo nextest run --profile ci -p omq-tokio
-          --features "fuzz plain curve lz4 ws" --release
+          --features "fuzz plain curve lz4 zstd ws" --release
           --test omq_fuzz_socket_actions
 
   linux-32bit:

@@ -1,3 +1,4 @@
+import { bytesKey } from "./bytes.ts";
 import type { SocketTypeName } from "./command.ts";
 import type { Connection } from "./connection.ts";
 import type { Message } from "./message.ts";
@@ -28,7 +29,7 @@ export class Radio extends Socket {
       if (msg.parts.length !== 2) {
         throw new Error("RADIO socket requires [group, body]");
       }
-      const group = new TextDecoder().decode(msg.parts[0]);
+      const group = bytesKey(msg.parts[0]!);
       for (const conn of this.readyConnections) {
         const groups = this.peerGroups.get(conn);
         if (groups && groups.has(group)) {
@@ -44,7 +45,7 @@ export class Radio extends Socket {
     name: string,
     body: Uint8Array,
   ): void {
-    const group = new TextDecoder().decode(body);
+    const group = bytesKey(body);
     if (name === "JOIN") {
       let groups = this.peerGroups.get(conn);
       if (!groups) {

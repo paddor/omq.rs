@@ -61,10 +61,11 @@ export class Req extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    conn: Connection,
     msg: Message,
   ): void {
     if (!this.pendingReply) return;
+    if (conn !== this.replyConnection) return;
 
     // Strip empty delimiter
     if (msg.parts.length > 0 && msg.parts[0]!.byteLength === 0) {

@@ -93,6 +93,12 @@ export class Rep extends Socket {
     if (waiter) {
       waiter.resolve(entry);
     } else {
+      if (
+        this.opts.receiveHighWaterMark !== undefined &&
+        this.pendingRequests.length >= this.opts.receiveHighWaterMark
+      ) {
+        return;
+      }
       this.pendingRequests.push(entry);
     }
   }

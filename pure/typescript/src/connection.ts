@@ -128,6 +128,10 @@ export class Connection {
 
   close(): void {
     this.pendingParts = [];
+    this.lz4Decoder?.free();
+    this.lz4Decoder = null;
+    this.lz4Encoder?.free();
+    this.lz4Encoder = null;
     const ws = this.ws;
     this.state = "closed";
     this.ws = null;

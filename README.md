@@ -4,9 +4,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 
 - Tokio backend for Linux, macOS, and Windows
 - 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
-- 9 stable transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`,
-  `lz4+ws://`, and `lz4+wss://`; experimental `zstd+tcp://` compression
-  transport behind the `zstd` feature
+- 8 stable transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`,
+  and `lz4+ws://`; experimental `zstd+tcp://` compression transport behind
+  the `zstd` feature
 - 3 security mechanisms: NULL, PLAIN, CURVE
 - No C compiler, no libzmq, no libsodium
 - Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))

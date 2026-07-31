@@ -63,10 +63,6 @@ pub enum Endpoint {
     /// `lz4` and `ws` features.
     #[cfg(all(feature = "lz4", feature = "ws"))]
     Lz4Ws { host: Host, port: u16, path: String },
-    /// `lz4+wss://host:port/path` LZ4-compressed WebSocket with TLS.
-    /// Requires the `lz4` and `ws` features.
-    #[cfg(all(feature = "lz4", feature = "ws"))]
-    Lz4Wss { host: Host, port: u16, path: String },
 }
 
 /// TCP / UDP host specification: either an IP address or a DNS name.
@@ -152,13 +148,7 @@ impl FromStr for Endpoint {
             #[cfg(feature = "ws")]
             "wss" => parse_ws(rest, true),
             #[cfg(all(feature = "lz4", feature = "ws"))]
-            "lz4+ws" => parse_compressed_ws(rest, false, |h, p, pa| Endpoint::Lz4Ws {
-                host: h,
-                port: p,
-                path: pa,
-            }),
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            "lz4+wss" => parse_compressed_ws(rest, true, |h, p, pa| Endpoint::Lz4Wss {
+            "lz4+ws" => parse_compressed_ws(rest, |h, p, pa| Endpoint::Lz4Ws {
                 host: h,
                 port: p,
                 path: pa,
@@ -188,8 +178,6 @@ impl fmt::Display for Endpoint {
             Self::Wss { host, port, path } => write!(f, "wss://{host}:{port}{path}"),
             #[cfg(all(feature = "lz4", feature = "ws"))]
             Self::Lz4Ws { host, port, path } => write!(f, "lz4+ws://{host}:{port}{path}"),
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            Self::Lz4Wss { host, port, path } => write!(f, "lz4+wss://{host}:{port}{path}"),
         }
     }
 }
@@ -248,9 +236,9 @@ impl Endpoint {
         }
     }
 
-    /// Strip the compression scheme prefix so the underlying WS
-    /// transport sees a plain `ws://` or `wss://` endpoint. Identity
-    /// for plain `ws://` / `wss://` and all non-WS endpoints.
+    /// Strip the compression scheme prefix so the underlying WS transport
+    /// sees a plain `ws://` endpoint. Identity for plain `ws://` / `wss://`
+    /// and all non-WS endpoints.
     #[cfg(feature = "ws")]
     #[must_use]
     pub fn underlying_ws(&self) -> Endpoint {
@@ -261,19 +249,13 @@ impl Endpoint {
                 port: *port,
                 path: path.clone(),
             },
-            #[cfg(feature = "lz4")]
-            Endpoint::Lz4Wss { host, port, path } => Endpoint::Wss {
-                host: host.clone(),
-                port: *port,
-                path: path.clone(),
-            },
             other => other.clone(),
         }
     }
 
     /// Re-attach the original endpoint's compression scheme to a
     /// resolved WS address. Used after binding so the bound endpoint
-    /// surfaced to the user still says `lz4+ws://…` etc.
+    /// surfaced to the user still says `lz4+ws://...`.
     #[cfg(feature = "ws")]
     #[must_use]
     pub fn rewrap_ws(&self, resolved: Endpoint) -> Endpoint {
@@ -281,10 +263,6 @@ impl Endpoint {
             #[cfg(feature = "lz4")]
             (Endpoint::Lz4Ws { .. }, Endpoint::Ws { host, port, path }) => {
                 Endpoint::Lz4Ws { host, port, path }
-            }
-            #[cfg(feature = "lz4")]
-            (Endpoint::Lz4Wss { .. }, Endpoint::Wss { host, port, path }) => {
-                Endpoint::Lz4Wss { host, port, path }
             }
             (_, resolved) => resolved,
         }
@@ -297,7 +275,7 @@ impl Endpoint {
         match self {
             Endpoint::Ws { .. } | Endpoint::Wss { .. } => true,
             #[cfg(feature = "lz4")]
-            Endpoint::Lz4Ws { .. } | Endpoint::Lz4Wss { .. } => true,
+            Endpoint::Lz4Ws { .. } => true,
             _ => false,
         }
     }
@@ -319,8 +297,6 @@ impl Endpoint {
             Endpoint::Wss { .. } => "wss",
             #[cfg(all(feature = "lz4", feature = "ws"))]
             Endpoint::Lz4Ws { .. } => "lz4+ws",
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            Endpoint::Lz4Wss { .. } => "lz4+wss",
         }
     }
 }
@@ -540,13 +516,10 @@ fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
 #[cfg(all(feature = "lz4", feature = "ws"))]
 fn parse_compressed_ws(
     rest: &str,
-    tls: bool,
     wrap: impl FnOnce(Host, u16, String) -> Endpoint,
 ) -> Result<Endpoint> {
-    match parse_ws(rest, tls)? {
-        Endpoint::Ws { host, port, path } | Endpoint::Wss { host, port, path } => {
-            Ok(wrap(host, port, path))
-        }
+    match parse_ws(rest, false)? {
+        Endpoint::Ws { host, port, path } => Ok(wrap(host, port, path)),
         _ => unreachable!(),
     }
 }

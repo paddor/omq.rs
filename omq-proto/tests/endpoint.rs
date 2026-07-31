@@ -137,6 +137,15 @@ fn unsupported_scheme() {
     ));
 }
 
+#[cfg(all(feature = "lz4", feature = "ws"))]
+#[test]
+fn lz4_wss_is_unsupported() {
+    assert!(matches!(
+        "lz4+wss://host:443/".parse::<Endpoint>().unwrap_err(),
+        Error::UnsupportedScheme(s) if s == "lz4+wss"
+    ));
+}
+
 #[test]
 fn reject_no_scheme() {
     assert!(matches!(

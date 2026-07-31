@@ -24,15 +24,15 @@ Lints: `missing_debug_implementations` = **deny**,
 cargo test -p omq-tokio
 cargo test -p omq-proto
 cargo test -p yring
-cargo test -p omq-tokio --test req_rep -- some_test_name
+cargo test -p omq-tokio --test omq_req_rep -- some_test_name
 ```
 
 Feature-gated tests:
 
 ```sh
-cargo test -p omq-tokio --features plain     --test plain
-cargo test -p omq-tokio --features curve     --test curve
-cargo test -p omq-tokio --features lz4       --test lz4_tcp --test lz4_pub_sub
+cargo test -p omq-tokio --features plain     --test omq_plain
+cargo test -p omq-tokio --features curve     --test omq_curve
+cargo test -p omq-tokio --features lz4       --test omq_lz4_tcp --test omq_lz4_pub_sub
 ```
 
 Miri target for unsafe internals:
@@ -77,10 +77,11 @@ runs a smaller smoke gate for obvious TCP/inproc regressions. The perf
 gate skips when `CI` or `GITHUB_ACTIONS` is set.
 
 GitHub CI runs `cargo fmt` and clippy on Linux, macOS Intel, macOS
-ARM64, and Windows. It runs workspace tests on Linux x86_64, Linux
-ARM64, macOS Intel, macOS ARM64, Windows, and MSRV 1.93 on Linux.
-Feature jobs cover CURVE and LZ4 on Linux, macOS Intel, macOS ARM64,
-and Windows. macOS test jobs run serially with `--test-threads=1`.
+ARM64, and Windows. It runs workspace tests on Linux x86_64 with MSRV
+1.93, macOS ARM64, and Windows. Feature jobs cover CURVE and LZ4 on
+Linux, macOS ARM64, and Windows. macOS test jobs run serially with
+`--test-threads=1`. PR CI also runs 32-bit Linux cross-checks.
+Extended CI adds Ubuntu ARM64.
 
 ## Continuous Integration
 
@@ -157,7 +158,7 @@ OMQ_SOAK_DURATION_SECS=120 python3 -m pytest tests/soak/ -v --tb=short
 ## Stress Tests
 
 ```sh
-cargo test -p omq-tokio --test stress_connect_before_bind -- --test-threads=1
+cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --test-threads=1
 ```
 
 ## Benchmarks

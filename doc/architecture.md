@@ -315,7 +315,7 @@ round-robin sends with no ready pipe mute.
 ## Mechanisms And Monitoring
 
 Mechanisms live under `omq-proto/src/proto/mechanism/`: NULL is always on;
-PLAIN, CURVE, LZ4, and WS are feature-gated.
+PLAIN and CURVE are feature-gated. LZ4 and WS are transport features.
 
 `Socket::monitor()` returns a `Stream<Item = MonitorEvent>`. Events carry owned
 `PeerInfo` snapshots for listening, accept/connect, delayed connect,

@@ -184,10 +184,11 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 
 ## Platform and requirements
 
-**Linux is the primary development and benchmarking platform.** CI
-required checks cover Linux x86_64, Linux ARM64, macOS Intel, macOS
-ARM64, and Windows. macOS jobs run the Rust tests serially because
-socket/timer timing is more sensitive on hosted runners.
+**Linux is the primary development and benchmarking platform.** PR CI
+required checks cover Linux x86_64, macOS ARM64, and Windows Rust tests,
+plus 32-bit Linux cross-checks. Fmt and clippy also run on macOS Intel.
+Extended CI covers Ubuntu ARM64. macOS jobs run the Rust tests serially
+because socket/timer timing is more sensitive on hosted runners.
 
 **macOS** is covered in CI for both Intel and ARM64 runners.
 `omq-tokio` uses mio / kqueue. `omq-libzmq` uses a pipe-backed

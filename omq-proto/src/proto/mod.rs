@@ -34,7 +34,7 @@ pub use connection::{Connection, ConnectionConfig, Event, Role};
 pub use frame::{MAX_FRAME_HEADER_LEN, MAX_SHORT_FRAME_SIZE};
 pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_MINOR};
 
-/// All 19 ZMTP socket types.
+/// All 20 ZMTP socket types.
 ///
 /// The value carries the wire-level ASCII name returned by [`Self::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

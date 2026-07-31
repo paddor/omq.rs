@@ -1,7 +1,7 @@
 //! omq-tokio - tokio-runtime backend for omq.
 //!
-//! Wire-compatible with libzmq. All 11 standard socket types plus 7
-//! draft types, TCP / IPC / inproc / UDP transports, NULL / CURVE /
+//! Wire-compatible with libzmq. Supports 20 socket types, TCP / IPC /
+//! inproc / UDP transports, NULL / PLAIN / CURVE mechanisms, and the
 //! lz4+tcp compression transport.
 //!
 //! The codec, message types, mechanism handshakes, and routing

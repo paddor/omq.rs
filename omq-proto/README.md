@@ -20,7 +20,7 @@ payloads are below 4 GiB.
 | Mechanisms | NULL, PLAIN, CURVE |
 | Transforms | LZ4 frame-level compression |
 | `Endpoint` | Parser for `tcp://`, `ipc://` (Unix sockets / Windows named pipes), `inproc://`, `udp://`, `lz4+tcp://`, `ws://`, `wss://` |
-| `SocketType` | 19 types (11 stable + 8 draft) with compatibility matrix |
+| `SocketType` | 20 types (11 stable, 8 draft, plus STREAM) with compatibility matrix |
 | `SubscriptionSet` | Prefix-trie for PUB/SUB topic filtering |
 | Monitor types | `MonitorEvent`, `DisconnectReason`, `PeerInfo` |
 

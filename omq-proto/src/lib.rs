@@ -1,7 +1,7 @@
 //! Sans-I/O core for omq.
 //!
 //! ZMTP codec, message + payload types, frame parsing, mechanism
-//! handshakes (NULL / CURVE), compression transforms
+//! handshakes (NULL / PLAIN / CURVE), compression transforms
 //! (lz4), endpoint parsing, options, and the prefix-
 //! subscription matcher. None of this depends on a runtime.
 #![forbid(unsafe_code)]

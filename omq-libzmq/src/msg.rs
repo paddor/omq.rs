@@ -14,6 +14,7 @@ const KIND_EMPTY: u8 = 0;
 const KIND_HEAP: u8 = 1;
 const KIND_EXTERNAL: u8 = 2;
 const KIND_BYTES: u8 = 3;
+const KIND_HEAP_SHARED: u8 = 4;
 
 /// `zmq_msg_t` compatible repr: 64 bytes, C layout.
 ///
@@ -53,6 +54,7 @@ const OFF_HINT: usize = OFF_FREE_FN + PTR_SIZE;
 const OFF_BOXED: usize = OFF_HINT + PTR_SIZE;
 const OFF_RESERVED: usize = OFF_BOXED + PTR_SIZE;
 const RESERVED_LEN: usize = 16;
+const LARGE_MSG_SHARED_THRESHOLD: usize = 64;
 
 type FreeFn = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void);
 
@@ -342,7 +344,7 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
     // SAFETY: msg is non-null (checked above).
     let r = unsafe { repr(msg) };
     match r.kind() {
-        KIND_HEAP => {
+        KIND_HEAP | KIND_HEAP_SHARED => {
             let ptr = r.ptr();
             if !ptr.is_null() {
                 // SAFETY: ptr was allocated by libc::malloc in zmq_msg_init_size.
@@ -423,7 +425,7 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
                 s.reserved_array(),
             );
         }
-        KIND_HEAP | KIND_EXTERNAL => {
+        KIND_HEAP | KIND_EXTERNAL | KIND_HEAP_SHARED => {
             // Deep copy into a new heap allocation.
             let size = s.size();
             let src_ptr = s.ptr();
@@ -444,8 +446,13 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
             };
             // SAFETY: dst was closed above and is ready for reinitialization.
             let d = unsafe { repr(dst) };
+            let kind = if s.kind() == KIND_EXTERNAL || size >= LARGE_MSG_SHARED_THRESHOLD {
+                KIND_HEAP_SHARED
+            } else {
+                KIND_HEAP
+            };
             d.init_fields(
-                KIND_HEAP,
+                kind,
                 s.more(),
                 size,
                 new_ptr,
@@ -471,7 +478,14 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
     }
     match property {
         1 => zmq_msg_more(msg),
-        3 => 0, // ZMQ_SHARED
+        3 => {
+            // SAFETY: msg is non-null (checked above).
+            let r = unsafe { repr_ref(msg) };
+            i32::from(matches!(
+                r.kind(),
+                KIND_EXTERNAL | KIND_BYTES | KIND_HEAP_SHARED
+            ))
+        }
         5 => zmq_msg_routing_id(msg).cast_signed(),
         _ => {
             crate::error::set_errno(libc::EINVAL);

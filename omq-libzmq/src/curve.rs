@@ -60,11 +60,13 @@ pub extern "C" fn zmq_z85_encode(
     size: usize,
 ) -> *mut libc::c_char {
     if dest.is_null() || data.is_null() || !size.is_multiple_of(4) {
+        crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     }
     // SAFETY: data is non-null (checked above) with size readable bytes.
     let slice = unsafe { std::slice::from_raw_parts(data, size) };
     let Ok(encoded) = z85::encode(slice) else {
+        crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     };
     // SAFETY: dest is non-null (checked above); caller must provide a buffer of
@@ -79,14 +81,17 @@ pub extern "C" fn zmq_z85_encode(
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_z85_decode(dest: *mut u8, string: *const libc::c_char) -> *mut u8 {
     if dest.is_null() || string.is_null() {
+        crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     }
     // SAFETY: string is non-null (checked above); caller guarantees valid C string.
     let s = unsafe { std::ffi::CStr::from_ptr(string).to_str().unwrap_or("") };
     if s.len() % 5 != 0 {
+        crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     }
     let Ok(decoded) = z85::decode(s) else {
+        crate::error::set_errno(libc::EINVAL);
         return std::ptr::null_mut();
     };
     // SAFETY: dest is non-null (checked above); caller provides a buffer of

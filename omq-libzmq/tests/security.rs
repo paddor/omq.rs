@@ -45,6 +45,7 @@ fn z85_encode_decode_roundtrip() {
     let mut encoded = [0u8; 11]; // 8 bytes -> 10 Z85 chars + null
     let ret = zmq_z85_encode(encoded.as_mut_ptr().cast(), data.as_ptr(), data.len());
     assert!(!ret.is_null());
+    assert_eq!(&encoded[..10], b"HelloWorld");
     let z85_str = std::str::from_utf8(&encoded[..10]).unwrap();
     assert_eq!(z85_str.len(), 10);
 
@@ -60,6 +61,33 @@ fn z85_invalid_size_returns_null() {
     let mut encoded = [0u8; 10];
     let ret = zmq_z85_encode(encoded.as_mut_ptr().cast(), data.as_ptr(), data.len());
     assert!(ret.is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+}
+
+#[test]
+fn z85_invalid_inputs_set_einval() {
+    let data = [0u8; 4];
+    let mut encoded = [0u8; 6];
+    assert!(zmq_z85_encode(std::ptr::null_mut(), data.as_ptr(), data.len()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert!(zmq_z85_encode(encoded.as_mut_ptr().cast(), std::ptr::null(), data.len()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let mut decoded = [0u8; 8];
+    for invalid in [
+        c"0".as_ptr(),
+        c"01234567".as_ptr(),
+        c"#####".as_ptr(),
+        c"%nSc1".as_ptr(),
+    ] {
+        assert!(zmq_z85_decode(decoded.as_mut_ptr(), invalid).is_null());
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    }
+
+    assert!(zmq_z85_decode(std::ptr::null_mut(), c"HelloWorld".as_ptr()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert!(zmq_z85_decode(decoded.as_mut_ptr(), std::ptr::null()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
 }
 
 #[test]

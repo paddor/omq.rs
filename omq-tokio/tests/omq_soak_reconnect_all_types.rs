@@ -19,7 +19,6 @@ use bytes::Bytes;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Message, Options, Socket, SocketType};
 use rand::RngExt;
-use rand::rngs::StdRng;
 
 fn fast_reconnect() -> Options {
     Options {

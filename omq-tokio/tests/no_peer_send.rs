@@ -1,6 +1,8 @@
 use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
+mod test_support;
+
 use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType, TrySendError};
 
@@ -148,7 +150,13 @@ async fn bound_push_mutes_after_last_peer_disconnects() {
         .unwrap()
         .unwrap();
     pull.close().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_support::wait_for_connection_count(
+        &push,
+        0,
+        Duration::from_secs(1),
+        "PUSH last peer disconnect",
+    )
+    .await;
 
     let err = push.try_send(Message::single("after")).unwrap_err();
     assert!(matches!(err, TrySendError::Full(_)));

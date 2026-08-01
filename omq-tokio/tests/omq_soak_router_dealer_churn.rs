@@ -54,16 +54,17 @@ async fn churn_dealers(
         *next_id += 1;
         let d = Socket::new(SocketType::Dealer, dealer_opts(id.as_bytes()));
         d.connect(ep.clone()).await.unwrap();
+        d.wait_connected(1, Duration::from_secs(1))
+            .await
+            .expect("DEALER did not connect during churn");
         dealers.push(Dealer {
             identity: Bytes::from(id),
             socket: d,
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
     } else if action < 5 && dealers.len() > 1 {
         let idx = rng.random_range(0..dealers.len());
         let removed = dealers.swap_remove(idx);
         removed.socket.close().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

@@ -53,9 +53,6 @@ async fn pub_conflate_keeps_only_latest_per_subscriber() {
             .await
             .unwrap();
     }
-    // Give the pump a moment to settle.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), sub.recv()).await {
         let body = msg.part_bytes(0).unwrap();
@@ -140,8 +137,6 @@ async fn pull_conflate_keeps_only_latest() {
             .await
             .unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
     let received = tokio::time::timeout(Duration::from_secs(1), pull.recv())
         .await
         .expect("PULL did not receive")
@@ -179,8 +174,6 @@ async fn radio_conflate_keeps_only_latest_per_group() {
             .await
             .unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let mut received = Vec::new();
     while let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(50), dish.recv()).await {
         let body = msg.part_bytes(1).unwrap();

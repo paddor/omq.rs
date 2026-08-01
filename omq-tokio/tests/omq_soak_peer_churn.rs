@@ -22,7 +22,9 @@ fn soak_peer_churn() {
 
         let initial_pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(64));
         initial_pull.connect(ep.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        push.wait_connected(1, Duration::from_secs(1))
+            .await
+            .expect("initial PULL did not connect");
 
         let mut rng = soak_common::seeded_rng("peer_churn");
         let mut peers: Vec<Socket> = vec![initial_pull];

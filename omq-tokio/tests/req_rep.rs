@@ -10,6 +10,7 @@
 
 mod test_support;
 
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -176,6 +177,51 @@ async fn req_round_robins_across_connected_reps() {
     }
 
     assert_eq!(counts, [ROUNDS; REPS]);
+}
+
+#[tokio::test]
+async fn dealer_round_robins_requests_across_reps() {
+    const REPS: usize = 5;
+
+    let ep = inproc_ep("rr-dealer-round-robin");
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.bind(ep.clone()).await.unwrap();
+
+    let mut reps = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.connect(ep.clone()).await.unwrap();
+        reps.push(rep);
+    }
+    dealer
+        .wait_connected(REPS, Duration::from_secs(1))
+        .await
+        .expect("DEALER did not see all REPs");
+
+    for i in 0..REPS {
+        dealer
+            .send(Message::multipart([
+                bytes::Bytes::new(),
+                bytes::Bytes::from(format!("q-{i}")),
+            ]))
+            .await
+            .unwrap();
+    }
+
+    let mut counts = [0usize; REPS];
+    let mut bodies = HashSet::new();
+    for _ in 0..REPS {
+        let (idx, request) = recv_from_any_rep(&reps).await;
+        counts[idx] += 1;
+        assert!(
+            bodies.insert(String::from_utf8(request.part_bytes(0).unwrap().to_vec()).unwrap()),
+            "duplicate REP request body"
+        );
+    }
+
+    assert_eq!(counts, [1; REPS]);
+    let expected = (0..REPS).map(|i| format!("q-{i}")).collect();
+    assert_eq!(bodies, expected);
 }
 
 #[tokio::test]

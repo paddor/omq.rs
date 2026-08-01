@@ -50,6 +50,15 @@ fn drain_dealer_round_robin_msgs(router: &Socket, seen: &mut HashSet<u32>) -> us
     }
 }
 
+async fn recv_dealer_body_string(dealer: &Socket) -> String {
+    let msg = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .expect("DEALER did not receive")
+        .unwrap();
+    assert_eq!(msg.len(), 1);
+    String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap()
+}
+
 #[tokio::test]
 async fn dealer_duplicate_tcp_connect_is_ignored() {
     let router = Socket::new(SocketType::Router, Options::default());
@@ -316,6 +325,60 @@ async fn dealer_round_robin_preserves_multipart_messages() {
     assert_eq!(seen.len(), MSGS as usize);
     assert!(count_a > 0, "router a received no messages");
     assert!(count_b > 0, "router b received no messages");
+}
+
+#[tokio::test]
+async fn dealer_fair_queues_first_batch_before_second_batch() {
+    const PEERS: usize = 5;
+
+    let ep = inproc_ep("rd-dealer-fair-queue");
+    let receiver = Socket::new(SocketType::Dealer, Options::default());
+    receiver.bind(ep.clone()).await.unwrap();
+
+    let mut senders = Vec::with_capacity(PEERS);
+    for _ in 0..PEERS {
+        let sender = Socket::new(SocketType::Dealer, Options::default());
+        sender.connect(ep.clone()).await.unwrap();
+        senders.push(sender);
+    }
+    receiver
+        .wait_connected(PEERS, Duration::from_secs(1))
+        .await
+        .expect("receiver did not see all DEALER peers");
+
+    senders[0].send(Message::single("warm-a")).await.unwrap();
+    assert_eq!(recv_dealer_body_string(&receiver).await, "warm-a");
+    senders[0].send(Message::single("warm-b")).await.unwrap();
+    assert_eq!(recv_dealer_body_string(&receiver).await, "warm-b");
+
+    for (idx, sender) in senders.iter().enumerate() {
+        sender
+            .send(Message::single(format!("first-{idx}")))
+            .await
+            .unwrap();
+    }
+    for (idx, sender) in senders.iter().enumerate() {
+        sender
+            .send(Message::single(format!("second-{idx}")))
+            .await
+            .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut first_batch = HashSet::new();
+    for _ in 0..PEERS {
+        first_batch.insert(recv_dealer_body_string(&receiver).await);
+    }
+    let expected_first = (0..PEERS).map(|idx| format!("first-{idx}")).collect();
+    assert_eq!(first_batch, expected_first);
+
+    let mut second_batch = HashSet::new();
+    for _ in 0..PEERS {
+        second_batch.insert(recv_dealer_body_string(&receiver).await);
+    }
+    let expected_second = (0..PEERS).map(|idx| format!("second-{idx}")).collect();
+    assert_eq!(second_batch, expected_second);
 }
 
 #[tokio::test]

@@ -7,14 +7,47 @@
 
 mod test_support;
 
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use omq_tokio::{
-    DisconnectReason, Endpoint, Message, MonitorEvent, Options, ReconnectPolicy, Socket, SocketType,
+    DisconnectReason, Endpoint, Error, Message, MonitorEvent, Options, ReconnectPolicy, Socket,
+    SocketType,
 };
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+fn record_dealer_round_robin_msg(msg: Message, seen: &mut HashSet<u32>) {
+    assert_eq!(msg.len(), 3);
+    assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"dealer-id");
+
+    let header = msg.part_bytes(1).unwrap();
+    let header = std::str::from_utf8(&header).unwrap();
+    let seq = header
+        .strip_prefix("head-")
+        .expect("header prefix")
+        .parse::<u32>()
+        .expect("header sequence");
+
+    let body = msg.part_bytes(2).unwrap();
+    assert_eq!(body.as_ref(), format!("body-{seq}").as_bytes());
+    assert!(seen.insert(seq), "duplicate dealer message {seq}");
+}
+
+fn drain_dealer_round_robin_msgs(router: &Socket, seen: &mut HashSet<u32>) -> usize {
+    let mut count = 0;
+    loop {
+        match router.try_recv() {
+            Ok(msg) => {
+                record_dealer_round_robin_msg(msg, seen);
+                count += 1;
+            }
+            Err(Error::WouldBlock) => return count,
+            Err(e) => panic!("router recv failed: {e:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -164,6 +197,125 @@ async fn tcp_router_routes_two_initial_dealer_identities() {
         .unwrap();
     assert_eq!(reply_a, Message::single("reply-a"));
     assert_eq!(reply_b, Message::single("reply-b"));
+}
+
+#[tokio::test]
+async fn tcp_req_to_router_uses_empty_delimiter_and_ignores_bad_reply() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let port = test_support::bind_loopback(&router).await;
+    let ep = test_support::tcp_loopback(port);
+
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.connect(ep).await.unwrap();
+
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see req");
+    req.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("req did not connect");
+
+    req.send(Message::multipart(["A", "B"])).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), router.recv())
+        .await
+        .expect("router did not receive req")
+        .unwrap();
+    assert_eq!(request.len(), 4);
+    let identity = request.part_bytes(0).unwrap();
+    assert!(!identity.is_empty());
+    assert!(request.part_bytes(1).unwrap().is_empty());
+    assert_eq!(request.part_bytes(2).unwrap().as_ref(), b"A");
+    assert_eq!(request.part_bytes(3).unwrap().as_ref(), b"B");
+
+    router
+        .send(Message::multipart([
+            identity.clone(),
+            bytes::Bytes::from_static(b"bad"),
+        ]))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(req.try_recv(), Err(Error::WouldBlock)));
+
+    router
+        .send(Message::multipart([
+            identity,
+            bytes::Bytes::new(),
+            bytes::Bytes::from_static(b"good"),
+        ]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), req.recv())
+        .await
+        .expect("req did not receive good reply")
+        .unwrap();
+    assert_eq!(reply, Message::single("good"));
+}
+
+#[tokio::test]
+async fn dealer_round_robin_preserves_multipart_messages() {
+    const MSGS: u32 = 12;
+
+    let router_a = Socket::new(SocketType::Router, Options::default());
+    let port_a = test_support::bind_loopback(&router_a).await;
+
+    let router_b = Socket::new(SocketType::Router, Options::default());
+    let port_b = test_support::bind_loopback(&router_b).await;
+
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(bytes::Bytes::from_static(b"dealer-id")),
+    );
+    dealer
+        .connect(test_support::tcp_loopback(port_a))
+        .await
+        .unwrap();
+    dealer
+        .connect(test_support::tcp_loopback(port_b))
+        .await
+        .unwrap();
+
+    router_a
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router a did not see dealer");
+    router_b
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router b did not see dealer");
+    dealer
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect both routers");
+
+    for i in 0..MSGS {
+        dealer
+            .send(Message::multipart([
+                format!("head-{i}"),
+                format!("body-{i}"),
+            ]))
+            .await
+            .unwrap();
+    }
+
+    let mut seen = HashSet::new();
+    let mut count_a = 0;
+    let mut count_b = 0;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while seen.len() < MSGS as usize {
+        count_a += drain_dealer_round_robin_msgs(&router_a, &mut seen);
+        count_b += drain_dealer_round_robin_msgs(&router_b, &mut seen);
+        assert!(
+            Instant::now() < deadline,
+            "timed out draining dealer messages: a={count_a}, b={count_b}, seen={seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(seen.len(), MSGS as usize);
+    assert!(count_a > 0, "router a received no messages");
+    assert!(count_b > 0, "router b received no messages");
 }
 
 #[tokio::test]

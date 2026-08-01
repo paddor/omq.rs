@@ -39,6 +39,28 @@ async fn bound_push_without_peer_mutes() {
 }
 
 #[tokio::test]
+async fn bound_dealer_without_peer_mutes() {
+    let dealer = Socket::new(SocketType::Dealer, Options::default().send_hwm(1));
+    dealer.bind(tcp_ep(0)).await.unwrap();
+
+    let err = dealer.try_send(Message::single("x")).unwrap_err();
+    assert!(matches!(err, TrySendError::Full(_)));
+
+    let mut send = tokio::spawn({
+        let dealer = dealer.clone();
+        async move { dealer.send(Message::single("wait")).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut send)
+            .await
+            .is_err(),
+        "bound no-peer DEALER send must wait for a pipe"
+    );
+    dealer.close().await.unwrap();
+    assert!(matches!(send.await.unwrap(), Err(omq_tokio::Error::Closed)));
+}
+
+#[tokio::test]
 async fn connect_side_push_queues_in_pre_ready_pipe() {
     let ep = free_tcp_ep();
     let push = Socket::new(SocketType::Push, Options::default().send_hwm(2));

@@ -24,13 +24,22 @@ const ZMQ_XSUB: i32 = 10;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_RCVMORE: i32 = 13;
+const ZMQ_LINGER: i32 = 17;
 const ZMQ_SNDHWM: i32 = 23;
 const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 
+fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
+    zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>());
+}
+
 fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
-    zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
+    set_i32(sock, opt, ms);
+}
+
+fn set_linger(sock: *mut c_void, ms: i32) {
+    set_i32(sock, ZMQ_LINGER, ms);
 }
 
 fn rcvmore(sock: *mut c_void) -> bool {
@@ -228,6 +237,8 @@ fn proxy_retries_pending_after_bypass_backpressure() {
 
 #[test]
 fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
+    const HOT_MESSAGES: u32 = 128;
+
     let ctx = zmq_ctx_new();
     let fe = zmq_socket(ctx, ZMQ_PAIR);
     let be = zmq_socket(ctx, ZMQ_PAIR);
@@ -235,6 +246,12 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
     let right = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_a = zmq_socket(ctx, ZMQ_PAIR);
     let ctrl_b = zmq_socket(ctx, ZMQ_PAIR);
+
+    // This test builds frontend-to-backend backlog before asserting reverse
+    // progress. Keep teardown independent of any late queued sends.
+    for sock in [fe, be, left, right, ctrl_a, ctrl_b] {
+        set_linger(sock, 0);
+    }
 
     let hwm = 16i32;
     zmq_setsockopt(
@@ -276,13 +293,22 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
         zmq_proxy_steerable(a.fe, a.be, a.cap, a.ctrl)
     });
 
-    for i in 0..512u32 {
+    let mut hot_sent = 0usize;
+    for i in 0..HOT_MESSAGES {
         let data = i.to_le_bytes();
-        let _ = zmq_send(left, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+        let rc = zmq_send(left, data.as_ptr().cast(), data.len(), ZMQ_DONTWAIT);
+        if rc == i32::try_from(data.len()).expect("test payload len fits i32") {
+            hot_sent += 1;
+        }
     }
+    assert!(
+        hot_sent > hwm as usize,
+        "hot path did not build backlog (sent {hot_sent})"
+    );
 
     let payload = b"right-to-left";
-    zmq_send(right, payload.as_ptr().cast(), payload.len(), 0);
+    let rc = zmq_send(right, payload.as_ptr().cast(), payload.len(), 0);
+    assert_eq!(rc as usize, payload.len());
 
     let mut buf = [0u8; 64];
     let rc = zmq_recv(left, buf.as_mut_ptr().cast(), buf.len(), 0);
@@ -293,6 +319,18 @@ fn proxy_does_not_starve_reverse_direction_when_frontend_is_hot() {
         omq_zmq::zmq_errno()
     );
     assert_eq!(&buf[..payload.len()], payload);
+
+    set_timeo(right, ZMQ_RCVTIMEO, 5000);
+    let mut hot_buf = [0u8; 4];
+    for n in 0..hot_sent {
+        let rc = zmq_recv(right, hot_buf.as_mut_ptr().cast(), hot_buf.len(), 0);
+        assert_eq!(
+            rc,
+            4,
+            "right hot recv {n}/{hot_sent} failed (errno={})",
+            omq_zmq::zmq_errno()
+        );
+    }
 
     zmq_send(ctrl_b, b"TERMINATE".as_ptr().cast(), 9, 0);
     assert_eq!(proxy.join().unwrap(), 0);

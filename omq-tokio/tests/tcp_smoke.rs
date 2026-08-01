@@ -49,3 +49,28 @@ async fn req_rep_tcp_smoke() {
         .unwrap();
     assert_eq!(reply, Message::single("tcp-reply"));
 }
+
+#[tokio::test]
+async fn pair_tcp_connect_by_localhost_name() {
+    let server = Socket::new(SocketType::Pair, Options::default());
+    let port = test_support::bind_loopback(&server).await;
+    let ep = format!("tcp://localhost:{port}").parse().unwrap();
+
+    let client = Socket::new(SocketType::Pair, Options::default());
+    client.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&client).await;
+
+    client.send(Message::single("HELLO")).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), server.recv())
+        .await
+        .expect("server did not receive PAIR message")
+        .unwrap();
+    assert_eq!(got, Message::single("HELLO"));
+
+    server.send(Message::single("WORLD")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("client did not receive PAIR reply")
+        .unwrap();
+    assert_eq!(reply, Message::single("WORLD"));
+}

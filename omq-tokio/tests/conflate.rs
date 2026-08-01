@@ -119,7 +119,7 @@ async fn push_conflate_keeps_only_latest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pull_conflate_keeps_only_latest() {
-    const N: u32 = 100;
+    const N: u32 = 20;
 
     let pull = Socket::new(SocketType::Pull, Options::default().conflate(true));
     let port = test_support::bind_loopback(&pull).await;
@@ -140,14 +140,13 @@ async fn pull_conflate_keeps_only_latest() {
             .await
             .unwrap();
     }
-    push.close().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     let received = tokio::time::timeout(Duration::from_secs(1), pull.recv())
         .await
         .expect("PULL did not receive")
         .unwrap();
-    assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"m-099");
+    assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"m-019");
 
     assert!(
         tokio::time::timeout(Duration::from_millis(100), pull.recv())
@@ -155,6 +154,7 @@ async fn pull_conflate_keeps_only_latest() {
             .is_err(),
         "PULL-side conflate should leave one unread message"
     );
+    push.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

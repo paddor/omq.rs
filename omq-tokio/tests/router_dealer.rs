@@ -19,7 +19,7 @@ fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
 
-fn record_dealer_round_robin_msg(msg: Message, seen: &mut HashSet<u32>) {
+fn record_dealer_round_robin_msg(msg: &Message, seen: &mut HashSet<u32>) {
     assert_eq!(msg.len(), 3);
     assert_eq!(msg.part_bytes(0).unwrap().as_ref(), b"dealer-id");
 
@@ -41,7 +41,7 @@ fn drain_dealer_round_robin_msgs(router: &Socket, seen: &mut HashSet<u32>) -> us
     loop {
         match router.try_recv() {
             Ok(msg) => {
-                record_dealer_round_robin_msg(msg, seen);
+                record_dealer_round_robin_msg(&msg, seen);
                 count += 1;
             }
             Err(Error::WouldBlock) => return count,

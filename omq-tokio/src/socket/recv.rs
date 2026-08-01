@@ -170,6 +170,62 @@ impl std::fmt::Debug for TcpYringConsumer {
 
 pub(crate) type TcpConsumers = Arc<RwLock<Vec<Arc<TcpYringConsumer>>>>;
 
+/// Receive-side conflate storage. Producers overwrite the single slot;
+/// the socket recv path observes only the latest unread message.
+pub(crate) struct ConflateRecvSlot {
+    slot: Mutex<Option<RecvItem>>,
+    notify: Arc<DataSignal>,
+    closed: AtomicBool,
+    blocking_waker: Arc<BlockingRecvWaker>,
+}
+
+impl std::fmt::Debug for ConflateRecvSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConflateRecvSlot")
+            .field("closed", &self.closed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConflateRecvSlot {
+    pub(crate) fn new(
+        notify: Arc<DataSignal>,
+        blocking_waker: Arc<BlockingRecvWaker>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            slot: Mutex::new(None),
+            notify,
+            closed: AtomicBool::new(false),
+            blocking_waker,
+        })
+    }
+
+    pub(crate) fn send_latest(&self, msg: Message) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        *self.slot.lock().unwrap() = Some(RecvItem::new(msg));
+        self.notify.mark();
+        self.blocking_waker.wake();
+        true
+    }
+
+    fn take(&self) -> Option<Message> {
+        self.slot.lock().unwrap().take().map(RecvItem::into_message)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.slot.lock().unwrap().is_none()
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.slot.lock().unwrap().take();
+        self.notify.wake_all();
+        self.blocking_waker.wake();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SharedRecvPipe: MPSC yring-based recv channel
 // ---------------------------------------------------------------------------
@@ -295,19 +351,24 @@ pub(crate) struct SpscHandles {
     pub activated: SpscActivated,
     pub tcp_consumers: TcpConsumers,
     pub blocking_recv_waker: Arc<BlockingRecvWaker>,
+    pub conflate_slot: Option<Arc<ConflateRecvSlot>>,
 }
 
 impl SpscHandles {
-    pub(crate) fn new(blocking_recv_waker: Arc<BlockingRecvWaker>) -> Self {
+    pub(crate) fn new(blocking_recv_waker: Arc<BlockingRecvWaker>, conflate_recv: bool) -> Self {
+        let recv_signal = Arc::new(DataSignal::new());
+        let conflate_slot = conflate_recv
+            .then(|| ConflateRecvSlot::new(recv_signal.clone(), blocking_recv_waker.clone()));
         Self {
             consumers: Arc::new(RwLock::new(Vec::new())),
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
             send_ring_available: Arc::new(AtomicBool::new(false)),
-            recv_signal: Arc::new(DataSignal::new()),
+            recv_signal,
             activated: Arc::new(StateSignal::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
             blocking_recv_waker,
+            conflate_slot,
         }
     }
 }
@@ -337,6 +398,8 @@ pub(crate) struct SpscAwareRecv {
     recv_pipe_notify: Arc<DataSignal>,
     /// Space-available signal for the shared recv pipe.
     recv_pipe_space: Arc<StateSignal>,
+    /// Optional receive-side conflate slot.
+    conflate_slot: Option<Arc<ConflateRecvSlot>>,
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
     drain_state: Mutex<DrainState>,
@@ -545,6 +608,7 @@ impl SpscAwareRecv {
             activated: handles.activated,
             send_ring: handles.send_ring,
             send_ring_available: handles.send_ring_available,
+            conflate_slot: handles.conflate_slot,
             recv_pipe_notify,
             recv_pipe_space,
             blocking_recv_waker: handles.blocking_recv_waker,
@@ -592,10 +656,14 @@ impl SpscAwareRecv {
 
     fn buffered_sources_empty(&self) -> bool {
         let guard = self.drain_state.lock().unwrap();
-        Self::state_is_empty(&guard)
+        Self::state_is_empty(&guard) && self.conflate_slot_empty()
     }
 
     fn try_drain(&self) -> DrainResult {
+        if let Some(msg) = self.take_conflate_message() {
+            return DrainResult::Message(msg);
+        }
+
         let mut guard = self.drain_state.lock().unwrap();
 
         if let Some(msg) = guard.batch.pop_front() {
@@ -606,6 +674,11 @@ impl SpscAwareRecv {
         self.recv_pipe_notify.begin_drain();
         self.refresh_snapshot(&mut guard);
 
+        if let Some(msg) = self.take_conflate_message() {
+            drop(guard);
+            return DrainResult::Message(msg);
+        }
+
         let state = &mut *guard;
         if let Some(msg) = Self::try_latency_fast_path(state) {
             drop(guard);
@@ -615,9 +688,10 @@ impl SpscAwareRecv {
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
         if result.is_none()
-            && Self::state_is_empty(state)
-            && (self.recv_signal.clear_after(Self::state_is_empty(state))
+            && all_empty
+            && (self.recv_signal.clear_after(all_empty)
                 || self
                     .recv_pipe_notify
                     .clear_after(state.recv_consumer.is_empty()))
@@ -645,6 +719,16 @@ impl SpscAwareRecv {
         state.inproc.clone_from(&self.consumers.read().unwrap());
         state.tcp.clone_from(&self.tcp_consumers.read().unwrap());
         state.generation = current_gen;
+    }
+
+    fn take_conflate_message(&self) -> Option<Message> {
+        self.conflate_slot.as_ref().and_then(|slot| slot.take())
+    }
+
+    fn conflate_slot_empty(&self) -> bool {
+        self.conflate_slot
+            .as_ref()
+            .is_none_or(|slot| slot.is_empty())
     }
 
     fn try_latency_fast_path(state: &mut DrainState) -> Option<Message> {
@@ -801,7 +885,8 @@ impl SpscAwareRecv {
             tokio::pin!(pipe_ready);
             tokio::pin!(activated);
 
-            if self.consumer_generation.load(Ordering::Acquire) > 0 {
+            if self.consumer_generation.load(Ordering::Acquire) > 0 || self.conflate_slot.is_some()
+            {
                 match self.try_drain() {
                     DrainResult::Message(msg) => return Ok(msg),
                     DrainResult::Closed => return Err(Error::Closed),
@@ -852,6 +937,9 @@ impl SpscAwareRecv {
         }
         self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
+        if let Some(slot) = &self.conflate_slot {
+            slot.close();
+        }
         if let Some(pair) = self.send_ring.load_full() {
             pair.space_notify.notify_changed();
             pair.blocking_space.notify();

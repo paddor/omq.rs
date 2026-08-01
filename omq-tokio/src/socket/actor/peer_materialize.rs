@@ -173,7 +173,13 @@ pub(super) fn spawn_inproc_peer(
         tx,
         rx,
     } = conn;
-    let recv_sink = take_inproc_recv_sink(socket);
+    let recv_sink = take_inproc_recv_sink(socket).or_else(|| {
+        socket
+            .spsc
+            .conflate_slot
+            .as_ref()
+            .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
+    });
     let io_thread = socket.io_pool.assign_thread();
 
     socket.peers.insert(
@@ -200,14 +206,13 @@ pub(super) fn spawn_inproc_peer(
         },
     );
 
-    let recv_direct = if can_bypass_actor_recv(socket.socket_type) {
+    let direct_recv_enabled = can_bypass_actor_recv(socket.socket_type) && recv_sink.is_none();
+    let recv_direct = if direct_recv_enabled {
         Some(socket.recv_tx.clone())
     } else {
         None
     };
-    let recv_spsc = rx
-        .clone()
-        .filter(|_| can_bypass_actor_recv(socket.socket_type));
+    let recv_spsc = rx.clone().filter(|_| direct_recv_enabled);
     if let Some(ref s) = recv_spsc {
         PeerLifecycle::new(socket).register_inproc_consumer(s, true);
     }
@@ -528,6 +533,10 @@ fn attach_yring_recv_bypass(
     peer_id: u64,
     rep_latency: bool,
 ) -> ConnectionDriver<AnyStream> {
+    if let Some(slot) = socket.spsc.conflate_slot.as_ref() {
+        return peer_driver.with_recv_sink(crate::engine::RecvSink::Conflate(slot.clone()));
+    }
+
     let sink = socket
         .recv_sink_config
         .as_ref()

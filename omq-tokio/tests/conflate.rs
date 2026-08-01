@@ -2,6 +2,8 @@
 //! the latest message. Verifies the silent-bug fix - the option was
 //! settable but had no effect prior to this change.
 //!
+mod test_support;
+
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -112,6 +114,46 @@ async fn push_conflate_keeps_only_latest() {
     assert!(
         received.iter().any(|s| s == "m-099"),
         "latest message must be visible; got {received:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_conflate_keeps_only_latest() {
+    const N: u32 = 100;
+
+    let pull = Socket::new(SocketType::Pull, Options::default().conflate(true));
+    let port = test_support::bind_loopback(&pull).await;
+
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+    pull.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("PULL did not see PUSH");
+    push.wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("PUSH did not connect");
+
+    for i in 0..N {
+        push.send(Message::single(format!("m-{i:03}")))
+            .await
+            .unwrap();
+    }
+    push.close().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let received = tokio::time::timeout(Duration::from_secs(1), pull.recv())
+        .await
+        .expect("PULL did not receive")
+        .unwrap();
+    assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"m-099");
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), pull.recv())
+            .await
+            .is_err(),
+        "PULL-side conflate should leave one unread message"
     );
 }
 

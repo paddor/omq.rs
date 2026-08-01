@@ -259,11 +259,15 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     };
     let id = next_socket_id();
 
-    let mut overlay = SocketOverlay::default();
-    overlay.ipv6 = ctx.ipv6.load(Ordering::Acquire);
-    if !ctx.blocky.load(Ordering::Acquire) {
-        overlay.linger = LingerSetting::Finite(std::time::Duration::ZERO);
-    }
+    let overlay = SocketOverlay {
+        ipv6: ctx.ipv6.load(Ordering::Acquire),
+        linger: if ctx.blocky.load(Ordering::Acquire) {
+            LingerSetting::Unset
+        } else {
+            LingerSetting::Finite(std::time::Duration::ZERO)
+        },
+        ..SocketOverlay::default()
+    };
 
     let sock = Arc::new(OmqSocket {
         id,

@@ -32,23 +32,13 @@ fn null_socket_ops_return_enotsock() {
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);
 
     assert_eq!(
-        zmq_setsockopt(
-            sock,
-            ZMQ_SNDHWM,
-            (&hwm as *const i32).cast(),
-            size_of::<i32>(),
-        ),
+        zmq_setsockopt(sock, ZMQ_SNDHWM, (&raw const hwm).cast(), size_of::<i32>(),),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);
 
     assert_eq!(
-        zmq_getsockopt(
-            sock,
-            ZMQ_SNDHWM,
-            (&mut out as *mut i32).cast(),
-            &mut out_size,
-        ),
+        zmq_getsockopt(sock, ZMQ_SNDHWM, (&raw mut out).cast(), &raw mut out_size,),
         -1
     );
     assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSOCK);

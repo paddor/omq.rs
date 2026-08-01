@@ -192,7 +192,7 @@ fn ctx_ipv6_option_applies_to_new_sockets() {
     let mut v = 0i32;
     let mut sz = size_of::<i32>();
     assert_eq!(
-        zmq_getsockopt(socket, ZMQ_IPV6, (&mut v as *mut i32).cast(), &mut sz),
+        zmq_getsockopt(socket, ZMQ_IPV6, (&raw mut v).cast(), &raw mut sz),
         0
     );
     assert_eq!(sz, size_of::<i32>());
@@ -215,7 +215,7 @@ fn ctx_blocky_zero_sets_linger_zero_on_new_sockets() {
     let mut v = -1i32;
     let mut sz = size_of::<i32>();
     assert_eq!(
-        zmq_getsockopt(socket, ZMQ_LINGER, (&mut v as *mut i32).cast(), &mut sz),
+        zmq_getsockopt(socket, ZMQ_LINGER, (&raw mut v).cast(), &raw mut sz),
         0
     );
     assert_eq!(v, 0);
@@ -236,7 +236,7 @@ fn explicit_linger_overrides_ctx_blocky_default() {
         zmq_setsockopt(
             socket,
             ZMQ_LINGER,
-            (&linger as *const i32).cast(),
+            (&raw const linger).cast(),
             size_of::<i32>(),
         ),
         0
@@ -245,7 +245,7 @@ fn explicit_linger_overrides_ctx_blocky_default() {
     let mut v = 0i32;
     let mut sz = size_of::<i32>();
     assert_eq!(
-        zmq_getsockopt(socket, ZMQ_LINGER, (&mut v as *mut i32).cast(), &mut sz),
+        zmq_getsockopt(socket, ZMQ_LINGER, (&raw mut v).cast(), &raw mut sz),
         0
     );
     assert_eq!(v, linger);

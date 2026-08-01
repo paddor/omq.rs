@@ -316,8 +316,12 @@ async fn auto_train_survives_reconnect() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pub_sub_zstd_io_lane_send_and_try_send_auto_train_dict_for_late_subscriber() {
+async fn pub_sub_zstd_io_lane_send_auto_train_dict_for_late_subscriber() {
     run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(FanoutSendMode::Send).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pub_sub_zstd_io_lane_try_send_auto_train_dict_for_late_subscriber() {
     run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(FanoutSendMode::TrySend).await;
 }
 

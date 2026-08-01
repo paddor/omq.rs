@@ -119,6 +119,7 @@ impl ReceiveProfile {
 pub enum RecvSink {
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
+    Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     Rep(RepRecvSink),
 }
 
@@ -217,6 +218,7 @@ impl std::fmt::Debug for RecvSink {
                 .debug_struct("Yring")
                 .field("producer", &y.producer)
                 .finish_non_exhaustive(),
+            Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
             Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
         }
     }
@@ -310,6 +312,10 @@ impl RecvSink {
                 }
                 Err(returned) => Some(returned.message),
             },
+            Self::Conflate(slot) => {
+                let _ = slot.send_latest(m);
+                None
+            }
             Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
         }
     }
@@ -348,6 +354,7 @@ impl RecvSink {
                     return true;
                 }
             }
+            Self::Conflate(slot) => slot.send_latest(m),
             Self::Rep(_) => unreachable!("plain send on REP sink"),
         }
     }

@@ -2,6 +2,7 @@
 
 mod test_support;
 
+use std::collections::HashSet;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,6 +34,14 @@ fn encode_stress_message(id: u32, payload: &[u8]) -> Message {
 fn decode_stress_message(msg: &Message) -> u32 {
     let bytes = msg.part_bytes(0).expect("frame");
     u32::from_be_bytes(bytes[0..4].try_into().unwrap())
+}
+
+async fn recv_body_string(sock: &Socket) -> String {
+    let msg = tokio::time::timeout(Duration::from_secs(1), sock.recv())
+        .await
+        .expect("recv timed out")
+        .unwrap();
+    String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap()
 }
 
 #[tokio::test]
@@ -150,6 +159,87 @@ async fn push_pull_single_peer() {
     assert_eq!(m1, Message::single("a"));
     assert_eq!(m2, Message::single("b"));
     assert_eq!(m3, Message::single("c"));
+}
+
+#[tokio::test]
+async fn push_round_robin_delivers_two_rounds_to_each_pull() {
+    const PULLS: usize = 5;
+
+    let ep = inproc_ep("pp-spec-round-robin");
+    let push = Socket::new(SocketType::Push, Options::default());
+    push.bind(ep.clone()).await.unwrap();
+
+    let mut pulls = Vec::with_capacity(PULLS);
+    for _ in 0..PULLS {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        pull.connect(ep.clone()).await.unwrap();
+        pulls.push(pull);
+    }
+    push.wait_connected(PULLS, Duration::from_secs(1))
+        .await
+        .expect("PUSH did not see all PULLs");
+
+    for _ in 0..PULLS {
+        push.send(Message::single("ABC")).await.unwrap();
+    }
+    for _ in 0..PULLS {
+        push.send(Message::single("DEF")).await.unwrap();
+    }
+
+    for pull in &pulls {
+        assert_eq!(recv_body_string(pull).await, "ABC");
+        assert_eq!(recv_body_string(pull).await, "DEF");
+    }
+}
+
+#[tokio::test]
+async fn pull_fair_queues_first_batch_before_second_batch() {
+    const PUSHES: usize = 5;
+
+    let ep = inproc_ep("pp-spec-fair-queue");
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    pull.bind(ep.clone()).await.unwrap();
+
+    let mut pushes = Vec::with_capacity(PUSHES);
+    for _ in 0..PUSHES {
+        let push = Socket::new(SocketType::Push, Options::default());
+        push.connect(ep.clone()).await.unwrap();
+        pushes.push(push);
+    }
+    pull.wait_connected(PUSHES, Duration::from_secs(1))
+        .await
+        .expect("PULL did not see all PUSHes");
+
+    for (peer, push) in pushes.iter().enumerate() {
+        push.send(Message::single(format!("first-{peer}")))
+            .await
+            .unwrap();
+        push.send(Message::single(format!("second-{peer}")))
+            .await
+            .unwrap();
+    }
+
+    let mut first_batch = HashSet::new();
+    for _ in 0..PUSHES {
+        first_batch.insert(recv_body_string(&pull).await);
+    }
+    assert_eq!(
+        first_batch,
+        (0..PUSHES)
+            .map(|peer| format!("first-{peer}"))
+            .collect::<HashSet<_>>()
+    );
+
+    let mut second_batch = HashSet::new();
+    for _ in 0..PUSHES {
+        second_batch.insert(recv_body_string(&pull).await);
+    }
+    assert_eq!(
+        second_batch,
+        (0..PUSHES)
+            .map(|peer| format!("second-{peer}"))
+            .collect::<HashSet<_>>()
+    );
 }
 
 #[tokio::test]

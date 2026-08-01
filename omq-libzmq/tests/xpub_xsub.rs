@@ -106,12 +106,13 @@ fn xpub_receives_sub_notifications() {
     set_linger_zero(xpub);
     set_linger_zero(sub);
 
-    let addr = helpers::bind_random_tcp(xpub);
+    let addr = CString::new("inproc://test-xpub-sub-notifications").unwrap();
+    zmq_bind(xpub, addr.as_ptr());
     set_timeo(xpub, 2000);
 
     zmq_setsockopt(sub, ZMQ_SUBSCRIBE, b"news".as_ptr().cast(), 4);
     zmq_connect(sub, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(50));
     set_timeo(sub, 2000);
 
     // XPUB should receive a subscription notification: 0x01 + "news".

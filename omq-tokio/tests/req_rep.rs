@@ -10,6 +10,7 @@
 
 mod test_support;
 
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -25,6 +26,24 @@ fn tcp_ep(port: u16) -> Endpoint {
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+async fn recv_from_any_rep(reps: &[Socket]) -> (usize, Message) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        for (idx, rep) in reps.iter().enumerate() {
+            match rep.try_recv() {
+                Ok(msg) => return (idx, msg),
+                Err(Error::WouldBlock) => {}
+                Err(e) => panic!("rep {idx} recv failed: {e:?}"),
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no REP received request"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test]
@@ -118,6 +137,94 @@ async fn req_rep_multiple_rounds() {
 }
 
 #[tokio::test]
+async fn req_round_robins_across_connected_reps() {
+    const REPS: usize = 5;
+    const ROUNDS: usize = 2;
+
+    let ep = inproc_ep("rr-req-round-robin");
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.bind(ep.clone()).await.unwrap();
+
+    let mut reps = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.connect(ep.clone()).await.unwrap();
+        reps.push(rep);
+    }
+    req.wait_connected(REPS, Duration::from_secs(1))
+        .await
+        .expect("REQ did not see all REPs");
+
+    let mut counts = [0usize; REPS];
+    for i in 0..(REPS * ROUNDS) {
+        let question = format!("q-{i}");
+        req.send(Message::single(question.clone())).await.unwrap();
+
+        let (idx, request) = recv_from_any_rep(&reps).await;
+        assert_eq!(request.part_bytes(0).unwrap(), question.as_bytes());
+        counts[idx] += 1;
+
+        let answer = format!("a-{idx}-{i}");
+        reps[idx]
+            .send(Message::single(answer.clone()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), req.recv())
+            .await
+            .expect("REQ did not receive reply")
+            .unwrap();
+        assert_eq!(reply.part_bytes(0).unwrap(), answer.as_bytes());
+    }
+
+    assert_eq!(counts, [ROUNDS; REPS]);
+}
+
+#[tokio::test]
+async fn dealer_round_robins_requests_across_reps() {
+    const REPS: usize = 5;
+
+    let ep = inproc_ep("rr-dealer-round-robin");
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.bind(ep.clone()).await.unwrap();
+
+    let mut reps = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let rep = Socket::new(SocketType::Rep, Options::default());
+        rep.connect(ep.clone()).await.unwrap();
+        reps.push(rep);
+    }
+    dealer
+        .wait_connected(REPS, Duration::from_secs(1))
+        .await
+        .expect("DEALER did not see all REPs");
+
+    for i in 0..REPS {
+        dealer
+            .send(Message::multipart([
+                bytes::Bytes::new(),
+                bytes::Bytes::from(format!("q-{i}")),
+            ]))
+            .await
+            .unwrap();
+    }
+
+    let mut counts = [0usize; REPS];
+    let mut bodies = HashSet::new();
+    for _ in 0..REPS {
+        let (idx, request) = recv_from_any_rep(&reps).await;
+        counts[idx] += 1;
+        assert!(
+            bodies.insert(String::from_utf8(request.part_bytes(0).unwrap().to_vec()).unwrap()),
+            "duplicate REP request body"
+        );
+    }
+
+    assert_eq!(counts, [1; REPS]);
+    let expected = (0..REPS).map(|i| format!("q-{i}")).collect();
+    assert_eq!(bodies, expected);
+}
+
+#[tokio::test]
 async fn dealer_to_rep_envelope() {
     // DEALER sends [empty, body]; REP saves envelope + empty delim and
     // returns just the body to the user. Reply goes back through the
@@ -151,6 +258,37 @@ async fn dealer_to_rep_envelope() {
     assert_eq!(reply.len(), 2);
     assert!(reply.part_bytes(0).unwrap().is_empty());
     assert_eq!(reply.part_bytes(1).unwrap(), &b"world"[..]);
+}
+
+#[tokio::test]
+async fn dealer_to_rep_preserves_large_envelope_on_reply() {
+    let ep = inproc_ep("rr-dealer-rep-big-envelope");
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.bind(ep.clone()).await.unwrap();
+
+    let dealer = Socket::new(SocketType::Dealer, Options::default());
+    dealer.connect(ep).await.unwrap();
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
+
+    dealer
+        .send(Message::multipart(["X", "Y", "", "request"]))
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), rep.recv())
+        .await
+        .expect("REP did not receive dealer request")
+        .unwrap();
+    assert_eq!(got, Message::single("request"));
+
+    rep.send(Message::single("reply")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .expect("DEALER did not receive REP reply")
+        .unwrap();
+    assert_eq!(reply, Message::multipart(["X", "Y", "", "reply"]));
 }
 
 #[tokio::test]

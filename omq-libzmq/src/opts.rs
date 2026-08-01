@@ -354,7 +354,7 @@ pub extern "C" fn zmq_setsockopt(
     optvallen: usize,
 ) -> c_int {
     if sock.is_null() {
-        return crate::error::fail(libc::EFAULT);
+        return crate::error::fail(crate::error::ENOTSOCK);
     }
     // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
@@ -837,7 +837,7 @@ pub extern "C" fn zmq_getsockopt(
     optvallen: *mut usize,
 ) -> c_int {
     if sock.is_null() {
-        return crate::error::fail(libc::EFAULT);
+        return crate::error::fail(crate::error::ENOTSOCK);
     }
     // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
@@ -1258,6 +1258,7 @@ fn write_i32(optval: *mut libc::c_void, optvallen: *mut usize, val: i32) -> c_in
     }
     // SAFETY: optval is non-null with at least 4 bytes available (checked above).
     unsafe {
+        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
         std::ptr::write_unaligned(optval.cast::<i32>(), val);
         *optvallen = 4;
     }
@@ -1275,6 +1276,7 @@ fn write_i64(optval: *mut libc::c_void, optvallen: *mut usize, val: i64) -> c_in
     }
     // SAFETY: optval is non-null with at least 8 bytes available (checked above).
     unsafe {
+        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
         std::ptr::write_unaligned(optval.cast::<i64>(), val);
         *optvallen = 8;
     }

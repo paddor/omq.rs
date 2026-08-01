@@ -80,6 +80,59 @@ async fn stream_basic_roundtrip() {
 }
 
 #[tokio::test]
+async fn stream_large_raw_payload_roundtrip() {
+    let stream = Socket::new(SocketType::Stream, Options::default());
+    let ep = stream.bind(tcp_ep(0)).await.unwrap();
+    let addr = resolved_addr(&ep);
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+
+    let connect_msg = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .expect("timed out waiting for connect notification")
+        .unwrap();
+    let identity = connect_msg.part_bytes(0).unwrap();
+    assert!(!identity.is_empty(), "identity should be non-empty");
+    assert!(connect_msg.part_bytes(1).unwrap().is_empty());
+
+    let payload: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+    client.write_all(&payload).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut received = Vec::with_capacity(payload.len());
+        while received.len() < payload.len() {
+            let msg = stream.recv().await.unwrap();
+            assert_eq!(msg.len(), 2);
+            assert_eq!(msg.part_bytes(0).unwrap(), identity);
+
+            let chunk = msg.part_bytes(1).unwrap();
+            assert!(!chunk.is_empty(), "unexpected empty STREAM notification");
+            received.extend_from_slice(&chunk);
+        }
+        received
+    })
+    .await
+    .expect("timed out receiving large raw payload");
+    assert_eq!(received, payload);
+
+    let reply: Vec<u8> = payload.iter().map(|b| b ^ 0xA5).collect();
+    stream
+        .send(Message::multipart([
+            identity,
+            Bytes::copy_from_slice(&reply),
+        ]))
+        .await
+        .unwrap();
+
+    let mut got_reply = vec![0u8; reply.len()];
+    tokio::time::timeout(Duration::from_secs(3), client.read_exact(&mut got_reply))
+        .await
+        .expect("timed out waiting for large STREAM reply")
+        .unwrap();
+    assert_eq!(got_reply, reply);
+}
+
+#[tokio::test]
 async fn stream_peer_disconnect() {
     let stream = Socket::new(SocketType::Stream, Options::default());
     let ep = stream.bind(tcp_ep(0)).await.unwrap();

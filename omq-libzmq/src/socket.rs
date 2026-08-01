@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
 use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
-use crate::opts::SocketOverlay;
+use crate::opts::{LingerSetting, SocketOverlay};
 
 /// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
 fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
@@ -259,11 +259,21 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     };
     let id = next_socket_id();
 
+    let overlay = SocketOverlay {
+        ipv6: ctx.ipv6.load(Ordering::Acquire),
+        linger: if ctx.blocky.load(Ordering::Acquire) {
+            LingerSetting::Unset
+        } else {
+            LingerSetting::Finite(std::time::Duration::ZERO)
+        },
+        ..SocketOverlay::default()
+    };
+
     let sock = Arc::new(OmqSocket {
         id,
         ctx: ctx.clone(),
         socket_type,
-        overlay: Mutex::new(SocketOverlay::default()),
+        overlay: Mutex::new(overlay),
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: crate::local_cell::LocalCell::new(Vec::new()),
@@ -383,7 +393,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
-        return fail(libc::EFAULT);
+        return fail(crate::error::ENOTSOCK);
     }
     // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
@@ -441,7 +451,10 @@ unsafe fn parse_endpoint_args<'a>(
     sock_ptr: *mut c_void,
     addr: *const c_char,
 ) -> Result<(&'a Arc<OmqSocket>, String, Endpoint), c_int> {
-    if sock_ptr.is_null() || addr.is_null() {
+    if sock_ptr.is_null() {
+        return Err(crate::error::ENOTSOCK);
+    }
+    if addr.is_null() {
         return Err(libc::EFAULT);
     }
     // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
@@ -473,7 +486,10 @@ unsafe fn parse_group_args<'a>(
     sock_ptr: *mut c_void,
     cstr: *const c_char,
 ) -> Result<(&'a Arc<OmqSocket>, Bytes), c_int> {
-    if sock_ptr.is_null() || cstr.is_null() {
+    if sock_ptr.is_null() {
+        return Err(crate::error::ENOTSOCK);
+    }
+    if cstr.is_null() {
         return Err(libc::EFAULT);
     }
     // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
@@ -690,7 +706,7 @@ pub extern "C" fn zmq_socket_monitor(
     events: c_int,
 ) -> c_int {
     if sock_ptr.is_null() {
-        return fail(libc::EFAULT);
+        return fail(crate::error::ENOTSOCK);
     }
     // addr == NULL means stop monitoring.
     if addr.is_null() {

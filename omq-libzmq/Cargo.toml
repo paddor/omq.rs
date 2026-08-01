@@ -115,6 +115,10 @@ name = "omq_libzmq_security"
 path = "tests/security.rs"
 
 [[test]]
+name = "omq_libzmq_socket_null"
+path = "tests/socket_null.rs"
+
+[[test]]
 name = "omq_libzmq_transports"
 path = "tests/transports.rs"
 

@@ -159,7 +159,17 @@ impl Socket {
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool);
         let send_submitter = send_strategy.submitter();
-        let spsc = SpscHandles::new(blocking_recv_waker);
+        let conflate_recv = options.conflate
+            && matches!(
+                socket_type,
+                SocketType::Pull
+                    | SocketType::Sub
+                    | SocketType::XSub
+                    | SocketType::Dish
+                    | SocketType::Dealer
+                    | SocketType::Gather
+            );
+        let spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let rep_pending = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let rep_current = Arc::new(Mutex::new(None));

@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_msg_close,
-    zmq_msg_copy, zmq_msg_data, zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data,
-    zmq_msg_init_size, zmq_msg_more, zmq_msg_move, zmq_msg_recv, zmq_msg_send, zmq_msg_set,
-    zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group, zmq_msg_init,
+    zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more, zmq_msg_move,
+    zmq_msg_recv, zmq_msg_send, zmq_msg_set, zmq_msg_set_group, zmq_msg_size, zmq_recv, zmq_send,
+    zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -21,6 +22,7 @@ const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_MORE: i32 = 1;
+const ZMQ_SHARED: i32 = 3;
 const ZMQ_ROUTING_ID: i32 = 5;
 
 const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
@@ -74,6 +76,22 @@ fn msg_init_size() {
     unsafe { std::ptr::write_bytes(data.cast::<u8>(), 0xAB, 16) };
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
+}
+
+#[test]
+fn msg_init_size_zero_and_init_buffer_null_zero() {
+    let mut sized = ZmqMsg::zeroed();
+    assert_eq!(zmq_msg_init_size(sized.0.as_mut_ptr().cast(), 0), 0);
+    assert_eq!(zmq_msg_size(sized.0.as_ptr().cast()), 0);
+    assert_eq!(zmq_msg_close(sized.0.as_mut_ptr().cast()), 0);
+
+    let mut copied = ZmqMsg::zeroed();
+    assert_eq!(
+        zmq_msg_init_buffer(copied.0.as_mut_ptr().cast(), std::ptr::null(), 0),
+        0
+    );
+    assert_eq!(zmq_msg_size(copied.0.as_ptr().cast()), 0);
+    assert_eq!(zmq_msg_close(copied.0.as_mut_ptr().cast()), 0);
 }
 
 #[test]
@@ -175,6 +193,114 @@ fn msg_init_buffer() {
     zmq_msg_close(m.0.as_mut_ptr().cast());
 }
 
+#[test]
+fn msg_get_reports_shared_for_external_data_and_large_copy() {
+    let mut external = ZmqMsg::zeroed();
+    let mut payload = [0x42u8; 5];
+    assert_eq!(
+        zmq_msg_init_data(
+            external.0.as_mut_ptr().cast(),
+            payload.as_mut_ptr().cast(),
+            payload.len(),
+            None,
+            std::ptr::null_mut(),
+        ),
+        0
+    );
+    assert_eq!(zmq_msg_get(external.0.as_ptr().cast(), ZMQ_SHARED), 1);
+
+    let mut large = ZmqMsg::zeroed();
+    assert_eq!(zmq_msg_init_size(large.0.as_mut_ptr().cast(), 1024), 0);
+    assert_eq!(zmq_msg_get(large.0.as_ptr().cast(), ZMQ_SHARED), 0);
+
+    let mut copied = ZmqMsg::new();
+    assert_eq!(
+        zmq_msg_copy(copied.0.as_mut_ptr().cast(), large.0.as_ptr().cast()),
+        0
+    );
+    assert_eq!(zmq_msg_get(copied.0.as_ptr().cast(), ZMQ_SHARED), 1);
+
+    assert_eq!(zmq_msg_close(copied.0.as_mut_ptr().cast()), 0);
+    assert_eq!(zmq_msg_close(large.0.as_mut_ptr().cast()), 0);
+    assert_eq!(zmq_msg_close(external.0.as_mut_ptr().cast()), 0);
+}
+
+#[test]
+fn msg_get_and_gets_validate_properties() {
+    let mut m = ZmqMsg::new();
+    assert_eq!(zmq_msg_get(m.0.as_ptr().cast(), ZMQ_MORE), 0);
+    assert_eq!(zmq_msg_get(m.0.as_ptr().cast(), ZMQ_SHARED), 0);
+    assert_eq!(zmq_msg_get(m.0.as_ptr().cast(), ZMQ_ROUTING_ID), 0);
+
+    assert_eq!(zmq_msg_get(m.0.as_ptr().cast(), 9999), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(zmq_msg_get(std::ptr::null(), ZMQ_MORE), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    for property in [
+        c"Socket-Type".as_ptr(),
+        c"Identity".as_ptr(),
+        c"Routing-Id".as_ptr(),
+        c"Peer-Address".as_ptr(),
+    ] {
+        let value = zmq_msg_gets(m.0.as_ptr().cast(), property);
+        assert!(!value.is_null());
+        assert_eq!(unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes(), b"");
+    }
+
+    assert!(zmq_msg_gets(m.0.as_ptr().cast(), c"Unknown".as_ptr()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert!(zmq_msg_gets(std::ptr::null(), c"Socket-Type".as_ptr()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert!(zmq_msg_gets(m.0.as_ptr().cast(), std::ptr::null()).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    assert_eq!(zmq_msg_close(m.0.as_mut_ptr().cast()), 0);
+}
+
+#[test]
+fn msg_routing_id_and_group_roundtrip() {
+    let mut m = ZmqMsg::new();
+    assert_eq!(omq_zmq::zmq_msg_routing_id(m.0.as_ptr().cast()), 0);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(m.0.as_ptr().cast())) }.to_bytes(),
+        b""
+    );
+
+    assert_eq!(
+        omq_zmq::zmq_msg_set_routing_id(m.0.as_mut_ptr().cast(), 42),
+        0
+    );
+    assert_eq!(omq_zmq::zmq_msg_routing_id(m.0.as_ptr().cast()), 42);
+
+    assert_eq!(
+        zmq_msg_set_group(m.0.as_mut_ptr().cast(), c"group-a".as_ptr()),
+        0
+    );
+    let group = unsafe { std::ffi::CStr::from_ptr(zmq_msg_group(m.0.as_ptr().cast())) };
+    assert_eq!(group.to_bytes(), b"group-a");
+
+    assert_eq!(
+        zmq_msg_set_group(m.0.as_mut_ptr().cast(), c"too-long-group".as_ptr()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(omq_zmq::zmq_msg_set_routing_id(std::ptr::null_mut(), 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(
+        zmq_msg_set_group(std::ptr::null_mut(), c"group".as_ptr()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(
+        zmq_msg_set_group(m.0.as_mut_ptr().cast(), std::ptr::null()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    assert_eq!(zmq_msg_close(m.0.as_mut_ptr().cast()), 0);
+}
+
 /// `zmq_msg_init_data` with `free_fn`
 #[test]
 fn msg_init_data_with_free_fn() {
@@ -205,6 +331,56 @@ fn msg_init_data_with_free_fn() {
 
     zmq_msg_close(m.0.as_mut_ptr().cast());
     assert!(FREED.load(Ordering::SeqCst), "free_fn was not called");
+}
+
+#[test]
+fn msg_init_data_free_fn_runs_after_successful_send() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    unsafe extern "C" fn count_free(_data: *mut c_void, hint: *mut c_void) {
+        let counter = unsafe { &*hint.cast::<AtomicUsize>() };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let addr = CString::new("inproc://test-msg-free-on-send").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    std::thread::sleep(Duration::from_millis(20));
+    set_timeo(pull, ZMQ_RCVTIMEO, 1000);
+
+    let freed = AtomicUsize::new(0);
+    let mut payload = *b"external-data";
+    let mut m = ZmqMsg::zeroed();
+    assert_eq!(
+        zmq_msg_init_data(
+            m.0.as_mut_ptr().cast(),
+            payload.as_mut_ptr().cast(),
+            payload.len(),
+            Some(count_free),
+            (&freed as *const AtomicUsize).cast_mut().cast(),
+        ),
+        0
+    );
+
+    assert_eq!(
+        zmq_msg_send(m.0.as_mut_ptr().cast(), push, 0),
+        i32::try_from(payload.len()).unwrap()
+    );
+    assert_eq!(freed.load(Ordering::SeqCst), 1);
+
+    let mut buf = [0u8; 32];
+    assert_eq!(
+        zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0),
+        i32::try_from(payload.len()).unwrap()
+    );
+    assert_eq!(&buf[..payload.len()], &payload);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
 }
 
 /// `zmq_msg_move` transfers ownership; src becomes empty

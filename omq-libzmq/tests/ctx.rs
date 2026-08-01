@@ -2,17 +2,23 @@
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown,
-    zmq_ctx_term, zmq_init, zmq_recv, zmq_send, zmq_socket,
+    zmq_ctx_term, zmq_getsockopt, zmq_init, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_term,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
+use std::mem::size_of;
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_IO_THREADS: i32 = 1;
 const ZMQ_MAX_SOCKETS: i32 = 2;
+const ZMQ_SOCKET_LIMIT: i32 = 3;
 const ZMQ_MAX_MSGSZ: i32 = 5;
 const ZMQ_MSG_T_SIZE: i32 = 6;
+const ZMQ_IPV6: i32 = 42;
+const ZMQ_BLOCKY: i32 = 70;
+const ZMQ_LINGER: i32 = 17;
 
 #[test]
 fn ctx_new_term() {
@@ -39,7 +45,15 @@ fn ctx_shutdown_then_term() {
 fn ctx_null_term_returns_error() {
     let rc = zmq_ctx_term(std::ptr::null_mut::<c_void>());
     assert_eq!(rc, -1);
-    assert_ne!(omq_zmq::zmq_errno(), 0);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+}
+
+#[test]
+fn ctx_null_aliases_return_efault() {
+    assert_eq!(zmq_term(std::ptr::null_mut::<c_void>()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+    assert_eq!(zmq_ctx_shutdown(std::ptr::null_mut::<c_void>()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
 }
 
 #[test]
@@ -134,6 +148,13 @@ fn ctx_get_max_sockets_default() {
 }
 
 #[test]
+fn ctx_get_socket_limit_alias() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_SOCKET_LIMIT), 1023);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn ctx_set_max_sockets() {
     let ctx = zmq_ctx_new();
     assert_eq!(zmq_ctx_set(ctx, ZMQ_MAX_SOCKETS, 512), 0);
@@ -155,6 +176,105 @@ fn ctx_set_max_msgsz() {
     let ctx = zmq_ctx_new();
     assert_eq!(zmq_ctx_set(ctx, ZMQ_MAX_MSGSZ, 65536), 0);
     assert_eq!(zmq_ctx_get(ctx, ZMQ_MAX_MSGSZ), 65536);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_ipv6_option_applies_to_new_sockets() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IPV6), 0);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IPV6, 1), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IPV6), 1);
+
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!socket.is_null());
+
+    let mut v = 0i32;
+    let mut sz = size_of::<i32>();
+    assert_eq!(
+        zmq_getsockopt(socket, ZMQ_IPV6, (&raw mut v).cast(), &raw mut sz),
+        0
+    );
+    assert_eq!(sz, size_of::<i32>());
+    assert_eq!(v, 1);
+
+    zmq_close(socket);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_blocky_zero_sets_linger_zero_on_new_sockets() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_BLOCKY), 1);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_BLOCKY, 0), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_BLOCKY), 0);
+
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!socket.is_null());
+
+    let mut v = -1i32;
+    let mut sz = size_of::<i32>();
+    assert_eq!(
+        zmq_getsockopt(socket, ZMQ_LINGER, (&raw mut v).cast(), &raw mut sz),
+        0
+    );
+    assert_eq!(v, 0);
+
+    zmq_close(socket);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn explicit_linger_overrides_ctx_blocky_default() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_BLOCKY, 0), 0);
+
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!socket.is_null());
+    let linger = 25i32;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_LINGER,
+            (&raw const linger).cast(),
+            size_of::<i32>(),
+        ),
+        0
+    );
+
+    let mut v = 0i32;
+    let mut sz = size_of::<i32>();
+    assert_eq!(
+        zmq_getsockopt(socket, ZMQ_LINGER, (&raw mut v).cast(), &raw mut sz),
+        0
+    );
+    assert_eq!(v, linger);
+
+    zmq_close(socket);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_shutdown_rejects_later_socket_creation() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!socket.is_null());
+    assert_eq!(zmq_close(socket), 0);
+
+    assert_eq!(zmq_ctx_shutdown(ctx), 0);
+    assert!(zmq_socket(ctx, ZMQ_PUSH).is_null());
+    assert_eq!(omq_zmq::zmq_errno(), 156_384_765);
+
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn ctx_invalid_options_return_einval() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, -1, 0), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(zmq_ctx_get(ctx, -1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     zmq_ctx_term(ctx);
 }
 

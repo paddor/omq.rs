@@ -6,7 +6,11 @@ use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
+use omq_tokio::{
+    Endpoint, Message, MonitorEvent, MonitorStream, OnMute, Options, Socket, SocketType,
+};
+
+static PUB_IO_LANE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -17,6 +21,23 @@ fn free_tcp_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+async fn wait_for_unsubscribe(mon: &mut MonitorStream, prefix: &[u8]) {
+    let fut = async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::UnsubscribeReceived { prefix: got }) if got.as_ref() == prefix => {
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before unsubscribe: {e:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), fut)
+        .await
+        .expect("unsubscribe did not arrive");
 }
 
 #[tokio::test]
@@ -304,6 +325,57 @@ async fn pub_sub_unsubscribe() {
 }
 
 #[tokio::test]
+async fn pub_sub_overlapping_unsubscribe_keeps_narrower_prefix() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut publisher_mon = publisher.monitor();
+    let port = test_support::bind_loopback(&publisher).await;
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.subscribe("a").await.unwrap();
+    subscriber.subscribe("ab").await.unwrap();
+    subscriber
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+
+    publisher
+        .wait_subscribed(2, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
+
+    publisher.send(Message::single("ab-first")).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("subscriber did not receive first match")
+        .unwrap();
+    assert_eq!(first, Message::single("ab-first"));
+
+    subscriber.unsubscribe("a").await.unwrap();
+    wait_for_unsubscribe(&mut publisher_mon, b"a").await;
+
+    publisher.send(Message::single("a-filtered")).await.unwrap();
+    publisher.send(Message::single("ab-second")).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("subscriber did not receive narrower-prefix match")
+        .unwrap();
+    assert_eq!(second, Message::single("ab-second"));
+
+    let extra = tokio::time::timeout(Duration::from_millis(150), subscriber.recv()).await;
+    assert!(extra.is_err(), "broader unsubscribed prefix still matched");
+
+    subscriber.unsubscribe("ab").await.unwrap();
+    wait_for_unsubscribe(&mut publisher_mon, b"ab").await;
+
+    publisher.send(Message::single("ab-third")).await.unwrap();
+    let gone = tokio::time::timeout(Duration::from_millis(150), subscriber.recv()).await;
+    assert!(
+        gone.is_err(),
+        "narrower prefix still matched after unsubscribe"
+    );
+}
+
+#[tokio::test]
 async fn sub_replays_subscriptions_on_new_peer() {
     // Subscribe BEFORE connecting to any PUB. Then connect. SUBSCRIBE must
     // be replayed to the new peer as part of its HandshakeSucceeded hook.
@@ -444,6 +516,7 @@ async fn xpub_nodrop_delivers_all_under_backpressure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_all_receive() {
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -482,6 +555,7 @@ async fn pub_io_lane_fanout_all_receive() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_subscription_filter() {
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -549,6 +623,7 @@ async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;
     const MSGS: u32 = 256;
 
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(
         SocketType::Pub,
         Options::default().send_hwm(1).on_mute(OnMute::Block),
@@ -583,6 +658,7 @@ async fn pub_io_lane_fanout_two_worker_runtime_all_receive() {
     const SUBS: usize = 8;
     const MSGS: u32 = 32;
 
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 

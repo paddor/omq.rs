@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use omq_tokio::Endpoint;
 use omq_tokio::endpoint::Host;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 // ---------------------------------------------------------------------------
 // Tracking allocator
@@ -67,6 +69,19 @@ pub fn soak_duration() -> Duration {
 
 pub fn build_context() -> omq_tokio::Context {
     omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env())
+}
+
+pub fn seeded_rng(label: &str) -> StdRng {
+    let seed: u64 = std::env::var("OMQ_SOAK_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            let mut s = [0u8; 8];
+            rand::rng().fill_bytes(&mut s);
+            u64::from_le_bytes(s)
+        });
+    eprintln!("[{label}] OMQ_SOAK_SEED={seed}");
+    StdRng::seed_from_u64(seed)
 }
 
 // ---------------------------------------------------------------------------

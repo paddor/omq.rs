@@ -43,7 +43,7 @@ fn soak_xpub_xsub_churn() {
         let xpub = Socket::new(SocketType::XPub, xpub_options());
         let ep = xpub.bind(soak_common::tcp_ep(0)).await.unwrap();
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("xpub_xsub_churn");
         let mut subs: Vec<Socket> = Vec::new();
         let mut pub_count: u64 = 0;
         let mut sub_notifications: u64 = 0;

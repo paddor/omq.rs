@@ -10,7 +10,10 @@ on:
     inputs:
       soak_duration_secs:
         description: seconds per soak test
-        default: "180"
+        default: "7200"
+      soak_seed:
+        description: optional OMQ_SOAK_SEED for replay
+        default: ""
       fuzz_scale:
         description: multiplier on each fuzz target's iteration count
         default: "1"
@@ -57,27 +60,40 @@ jobs:
             --test ${{ matrix.test }}
 
   soak:
-    name: soak (${{ matrix.group }})
+    name: soak (${{ matrix.test }})
     if: github.repository == 'paddor/omq.rs'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix:
         include:
-          - group: churn
-            tests: omq_soak_peer_churn omq_soak_pub_sub_churn omq_soak_pub_sub_churn_tcp omq_soak_pub_sub_realworld_churn_tcp omq_soak_router_dealer_churn omq_soak_xpub_xsub_churn
-          - group: reconnect
-            tests: omq_soak_reconnect_all_types omq_soak_reconnect_storm omq_soak_hwm_reconnect omq_soak_mechanism_reconnect
-          - group: mechanism
-            tests: omq_soak_plain omq_soak_curve
-          - group: transport
-            tests: omq_soak_ws omq_soak_compression_lz4 omq_soak_pub_sub_lz4_dict omq_soak_compression_zstd omq_soak_pub_sub_zstd_dict omq_soak_large_throughput
-          - group: runtime
-            tests: omq_soak_cancel_safety omq_soak_inproc_cross_thread omq_soak_multi_socket
+          - test: omq_soak_peer_churn
+          - test: omq_soak_pub_sub_churn
+          - test: omq_soak_pub_sub_churn_tcp
+          - test: omq_soak_pub_sub_realworld_churn_tcp
+          - test: omq_soak_router_dealer_churn
+          - test: omq_soak_xpub_xsub_churn
+          - test: omq_soak_reconnect_all_types
+          - test: omq_soak_reconnect_storm
+          - test: omq_soak_hwm_reconnect
+          - test: omq_soak_mechanism_reconnect
+          - test: omq_soak_plain
+          - test: omq_soak_curve
+          - test: omq_soak_ws
+          - test: omq_soak_compression_lz4
+          - test: omq_soak_pub_sub_lz4_dict
+          - test: omq_soak_compression_zstd
+          - test: omq_soak_pub_sub_zstd_dict
+          - test: omq_soak_large_throughput
+          - test: omq_soak_cancel_safety
+          - test: omq_soak_inproc_cross_thread
+          - test: omq_soak_multi_socket
     env:
       SOAK_FEATURES: soak plain curve lz4 zstd ws
-      OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '180' }}
+      OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '7200' }}
+      OMQ_SOAK_SEED: ${{ inputs.soak_seed || '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -86,15 +102,9 @@ jobs:
         with:
           tool: cargo-nextest
       - name: build soak tests
-        run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --no-run
-      - name: run soak group
-        run: |
-          for t in ${{ matrix.tests }}; do
-            echo "::group::$t"
-            cargo nextest run --profile extended -p omq-tokio \
-              --features "$SOAK_FEATURES" --release --test "$t"
-            echo "::endgroup::"
-          done
+        run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --test ${{ matrix.test }} --no-run
+      - name: run soak test
+        run: cargo nextest run --profile extended -p omq-tokio --features "$SOAK_FEATURES" --release --test ${{ matrix.test }}
 
   stress:
     name: stress

@@ -136,7 +136,7 @@ fn soak_router_dealer_churn() {
         );
         let ep = router.bind(soak_common::tcp_ep(0)).await.unwrap();
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("router_dealer_churn");
         let mut dealers: Vec<Dealer> = Vec::new();
         let mut next_id: u64 = 0;
         let mut stats = Stats {

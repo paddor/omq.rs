@@ -151,7 +151,7 @@ fn soak_reconnect_all_types() {
     ctx.block_on(async move {
         let mut pairs = create_all_pairs().await;
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("reconnect_all_types");
         let start = Instant::now();
         let mut last_log = start;
 

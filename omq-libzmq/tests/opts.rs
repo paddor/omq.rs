@@ -91,6 +91,29 @@ fn get_bytes(sock: *mut c_void, opt: i32, buf: &mut [u8]) -> usize {
 }
 
 #[test]
+fn getsockopt_i32_clears_larger_output_buffer() {
+    let ctx = zmq_ctx_new();
+    let sub = zmq_socket(ctx, ZMQ_SUB);
+
+    let mut more: i64 = -1;
+    let mut more_size = size_of::<i64>();
+    assert_eq!(
+        zmq_getsockopt(
+            sub,
+            ZMQ_RCVMORE,
+            (&mut more as *mut i64).cast(),
+            &mut more_size,
+        ),
+        0
+    );
+    assert_eq!(more_size, size_of::<i32>());
+    assert_eq!(more, 0);
+
+    zmq_close(sub);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn hwm_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);

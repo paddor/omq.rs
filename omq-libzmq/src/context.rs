@@ -21,6 +21,9 @@ pub(crate) struct OmqContext {
     sockets: Mutex<Vec<Weak<crate::socket::OmqSocket>>>,
     pub max_sockets: AtomicI32,
     pub max_msg_size: AtomicI64,
+    pub ipv6: AtomicBool,
+    pub blocky: AtomicBool,
+    pub zero_copy_recv: AtomicBool,
     /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
     pub(crate) inproc_binds: Mutex<FxHashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
     /// Pending inproc connect requests waiting for a bind.
@@ -47,6 +50,9 @@ impl OmqContext {
             sockets: Mutex::new(Vec::new()),
             max_sockets: AtomicI32::new(1023),
             max_msg_size: AtomicI64::new(-1),
+            ipv6: AtomicBool::new(false),
+            blocky: AtomicBool::new(true),
+            zero_copy_recv: AtomicBool::new(true),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
         })
@@ -134,6 +140,8 @@ impl std::fmt::Debug for OmqContext {
             .field("linger_count", &self.linger_count.load(Ordering::Relaxed))
             .field("max_sockets", &self.max_sockets.load(Ordering::Relaxed))
             .field("max_msg_size", &self.max_msg_size.load(Ordering::Relaxed))
+            .field("ipv6", &self.ipv6.load(Ordering::Relaxed))
+            .field("blocky", &self.blocky.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -214,7 +222,9 @@ const ZMQ_MAX_SOCKETS: c_int = 2;
 const ZMQ_SOCKET_LIMIT: c_int = 3;
 const ZMQ_MAX_MSGSZ: c_int = 5;
 const ZMQ_MSG_T_SIZE: c_int = 6;
+const ZMQ_ZERO_COPY_RECV: c_int = 10;
 const ZMQ_IPV6_CTX: c_int = 42;
+const ZMQ_BLOCKY: c_int = 70;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: c_int) -> c_int {
@@ -240,7 +250,16 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_MAX_MSGSZ => {
             ctx.max_msg_size.store(i64::from(value), Ordering::Relaxed);
         }
-        ZMQ_SOCKET_LIMIT | ZMQ_IPV6_CTX => {}
+        ZMQ_IPV6_CTX => {
+            ctx.ipv6.store(value != 0, Ordering::Release);
+        }
+        ZMQ_BLOCKY => {
+            ctx.blocky.store(value != 0, Ordering::Release);
+        }
+        ZMQ_ZERO_COPY_RECV => {
+            ctx.zero_copy_recv.store(value != 0, Ordering::Release);
+        }
+        ZMQ_SOCKET_LIMIT => {}
         _ => return crate::error::fail(libc::EINVAL),
     }
     0
@@ -258,7 +277,9 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
         ZMQ_MAX_SOCKETS | ZMQ_SOCKET_LIMIT => ctx.max_sockets.load(Ordering::Relaxed),
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
         ZMQ_MSG_T_SIZE => c_int::try_from(crate::msg::ZMQ_MSG_T_SIZE).unwrap_or(c_int::MAX),
-        ZMQ_IPV6_CTX => 0,
+        ZMQ_ZERO_COPY_RECV => c_int::from(ctx.zero_copy_recv.load(Ordering::Acquire)),
+        ZMQ_IPV6_CTX => c_int::from(ctx.ipv6.load(Ordering::Acquire)),
+        ZMQ_BLOCKY => c_int::from(ctx.blocky.load(Ordering::Acquire)),
         _ => crate::error::fail(libc::EINVAL),
     }
 }

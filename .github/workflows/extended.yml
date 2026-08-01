@@ -55,9 +55,17 @@ jobs:
           OMQ_FUZZ_ITERS=$(( ${{ matrix.iters }} * ${{ inputs.fuzz_scale || 1 }} ))
           export OMQ_FUZZ_ITERS
           echo "OMQ_FUZZ_ITERS=$OMQ_FUZZ_ITERS"
-          cargo nextest run --profile extended -p omq-tokio \
+          bash scripts/ci-run-with-forensics.sh "fuzz ${{ matrix.test }}" 10200 -- \
+            cargo nextest run --profile extended -p omq-tokio \
             --features "fuzz plain curve lz4 zstd ws" --release \
             --test ${{ matrix.test }}
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-fuzz-${{ matrix.test }}
+          path: target/hang-forensics
+          if-no-files-found: ignore
 
   soak:
     name: soak (${{ matrix.test }})
@@ -104,7 +112,17 @@ jobs:
       - name: build soak tests
         run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --test ${{ matrix.test }} --no-run
       - name: run soak test
-        run: cargo nextest run --profile extended -p omq-tokio --features "$SOAK_FEATURES" --release --test ${{ matrix.test }}
+        run: |
+          bash scripts/ci-run-with-forensics.sh "soak ${{ matrix.test }}" 10200 -- \
+            cargo nextest run --profile extended -p omq-tokio \
+            --features "$SOAK_FEATURES" --release --test ${{ matrix.test }}
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-soak-${{ matrix.test }}
+          path: target/hang-forensics
+          if-no-files-found: ignore
 
   stress:
     name: stress
@@ -119,11 +137,28 @@ jobs:
         with:
           tool: cargo-nextest
       - name: connect-before-bind # serial: rounds race each other otherwise
-        run: cargo nextest run --profile extended -p omq-tokio --test omq_stress_connect_before_bind --run-ignored=only --test-threads=1
+        run: |
+          bash scripts/ci-run-with-forensics.sh "stress connect-before-bind" 5100 -- \
+            cargo nextest run --profile extended -p omq-tokio \
+            --test omq_stress_connect_before_bind --run-ignored=only \
+            --test-threads=1
       - name: push/pull
-        run: cargo nextest run --profile extended -p omq-tokio --test omq_push_pull --run-ignored=only
+        run: |
+          bash scripts/ci-run-with-forensics.sh "stress push-pull" 5100 -- \
+            cargo nextest run --profile extended -p omq-tokio \
+            --test omq_push_pull --run-ignored=only
       - name: transmit slot
-        run: cargo nextest run --profile extended -p omq-tokio --test omq_transmit_slot_stress --run-ignored=only
+        run: |
+          bash scripts/ci-run-with-forensics.sh "stress transmit-slot" 5100 -- \
+            cargo nextest run --profile extended -p omq-tokio \
+            --test omq_transmit_slot_stress --run-ignored=only
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-stress
+          path: target/hang-forensics
+          if-no-files-found: ignore
 
   ubuntu-arm:
     name: cargo nextest (ubuntu-24.04-arm)
@@ -138,7 +173,16 @@ jobs:
         with:
           tool: cargo-nextest
       - name: cargo nextest
-        run: cargo nextest run --profile ci --workspace
+        run: |
+          bash scripts/ci-run-with-forensics.sh "ubuntu-arm nextest" 5100 -- \
+            cargo nextest run --profile ci --workspace
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-ubuntu-arm
+          path: target/hang-forensics
+          if-no-files-found: ignore
 
   interop-libzmq-draft:
     name: interop (libzmq draft)
@@ -187,11 +231,24 @@ jobs:
       - name: interop (ws)
         env:
           LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
-        run: cargo nextest run --profile ci -p omq-tokio --features ws --test omq_interop_libzmq_ws
+        run: |
+          bash scripts/ci-run-with-forensics.sh "interop libzmq ws" 2400 -- \
+            cargo nextest run --profile ci -p omq-tokio --features ws \
+            --test omq_interop_libzmq_ws
       - name: interop (draft sockets)
         env:
           LD_LIBRARY_PATH: ${{ env.LIBZMQ_PREFIX }}/lib
-        run: cargo nextest run --profile ci -p omq-tokio --test omq_interop_libzmq_draft
+        run: |
+          bash scripts/ci-run-with-forensics.sh "interop libzmq draft" 2400 -- \
+            cargo nextest run --profile ci -p omq-tokio \
+            --test omq_interop_libzmq_draft
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-interop-libzmq-draft
+          path: target/hang-forensics
+          if-no-files-found: ignore
 
   miri-seeds:
     name: miri (yring, many seeds)
@@ -213,4 +270,14 @@ jobs:
           tool: cargo-nextest
       - run: cargo miri setup
       - name: miri test
-        run: cargo miri nextest run --profile extended-miri -p yring --features async
+        run: |
+          bash scripts/ci-run-with-forensics.sh "miri yring many seeds" 6900 -- \
+            cargo miri nextest run --profile extended-miri -p yring \
+            --features async
+      - name: upload hang forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-forensics-miri-seeds
+          path: target/hang-forensics
+          if-no-files-found: ignore

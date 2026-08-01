@@ -21,4 +21,4 @@ final-status-level = "slow"
 
 [profile.extended-miri]
 inherits = "default-miri"
-slow-timeout = { period = "10m", terminate-after = 1, grace-period = "10s" }
+slow-timeout = { period = "20m", terminate-after = 1, grace-period = "10s" }

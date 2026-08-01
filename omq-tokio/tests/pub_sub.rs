@@ -10,6 +10,8 @@ use omq_tokio::{
     Endpoint, Message, MonitorEvent, MonitorStream, OnMute, Options, Socket, SocketType,
 };
 
+static PUB_IO_LANE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
 }
@@ -514,6 +516,7 @@ async fn xpub_nodrop_delivers_all_under_backpressure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_all_receive() {
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -552,6 +555,7 @@ async fn pub_io_lane_fanout_all_receive() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pub_io_lane_fanout_subscription_filter() {
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 
@@ -619,6 +623,7 @@ async fn pub_io_lane_fanout_block_on_mute_does_not_block_slow_sub() {
     const SUBS: usize = 6;
     const MSGS: u32 = 256;
 
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(
         SocketType::Pub,
         Options::default().send_hwm(1).on_mute(OnMute::Block),
@@ -653,6 +658,7 @@ async fn pub_io_lane_fanout_two_worker_runtime_all_receive() {
     const SUBS: usize = 8;
     const MSGS: u32 = 32;
 
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;
 

@@ -99,6 +99,31 @@ async fn xpub_surfaces_subscribe_messages() {
 }
 
 #[tokio::test]
+async fn xpub_surfaces_sub_unsubscribe_messages() {
+    let xpub = Socket::new(SocketType::XPub, Options::default());
+    let endpoint: Endpoint = "inproc://xpub-sub-unsubscribe".parse().unwrap();
+    xpub.bind(endpoint.clone()).await.unwrap();
+
+    let sub = Socket::new(SocketType::Sub, Options::default());
+    sub.connect(endpoint).await.unwrap();
+    sub.subscribe("news").await.unwrap();
+
+    let subscribe = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+        .await
+        .expect("XPUB subscribe notification timed out")
+        .unwrap();
+    assert_eq!(subscribe.part_bytes(0).unwrap().as_ref(), b"\x01news");
+
+    sub.unsubscribe("news").await.unwrap();
+
+    let unsubscribe = tokio::time::timeout(Duration::from_secs(2), xpub.recv())
+        .await
+        .expect("XPUB unsubscribe notification timed out")
+        .unwrap();
+    assert_eq!(unsubscribe.part_bytes(0).unwrap().as_ref(), b"\x00news");
+}
+
+#[tokio::test]
 async fn xsub_subscribe_filters_messages_from_xpub() {
     // XSUB.subscribe() sends a ZMTP SUBSCRIBE command to connected XPUB.
     // XPUB should then only forward matching messages to the XSUB.

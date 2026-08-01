@@ -6,7 +6,9 @@ use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
 use omq_tokio::options::ReconnectPolicy;
-use omq_tokio::{Endpoint, Message, OnMute, Options, Socket, SocketType};
+use omq_tokio::{
+    Endpoint, Message, MonitorEvent, MonitorStream, OnMute, Options, Socket, SocketType,
+};
 
 fn inproc_ep(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
@@ -17,6 +19,23 @@ fn free_tcp_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+async fn wait_for_unsubscribe(mon: &mut MonitorStream, prefix: &[u8]) {
+    let fut = async {
+        loop {
+            match mon.recv().await {
+                Ok(MonitorEvent::UnsubscribeReceived { prefix: got }) if got.as_ref() == prefix => {
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("monitor closed before unsubscribe: {e:?}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), fut)
+        .await
+        .expect("unsubscribe did not arrive");
 }
 
 #[tokio::test]
@@ -301,6 +320,57 @@ async fn pub_sub_unsubscribe() {
     // blueberry filtered out.
     let other = tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await;
     assert!(other.is_err());
+}
+
+#[tokio::test]
+async fn pub_sub_overlapping_unsubscribe_keeps_narrower_prefix() {
+    let publisher = Socket::new(SocketType::Pub, Options::default());
+    let mut publisher_mon = publisher.monitor();
+    let port = test_support::bind_loopback(&publisher).await;
+
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.subscribe("a").await.unwrap();
+    subscriber.subscribe("ab").await.unwrap();
+    subscriber
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+
+    publisher
+        .wait_subscribed(2, Duration::from_secs(1))
+        .await
+        .expect("subscriptions did not arrive");
+
+    publisher.send(Message::single("ab-first")).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("subscriber did not receive first match")
+        .unwrap();
+    assert_eq!(first, Message::single("ab-first"));
+
+    subscriber.unsubscribe("a").await.unwrap();
+    wait_for_unsubscribe(&mut publisher_mon, b"a").await;
+
+    publisher.send(Message::single("a-filtered")).await.unwrap();
+    publisher.send(Message::single("ab-second")).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("subscriber did not receive narrower-prefix match")
+        .unwrap();
+    assert_eq!(second, Message::single("ab-second"));
+
+    let extra = tokio::time::timeout(Duration::from_millis(150), subscriber.recv()).await;
+    assert!(extra.is_err(), "broader unsubscribed prefix still matched");
+
+    subscriber.unsubscribe("ab").await.unwrap();
+    wait_for_unsubscribe(&mut publisher_mon, b"ab").await;
+
+    publisher.send(Message::single("ab-third")).await.unwrap();
+    let gone = tokio::time::timeout(Duration::from_millis(150), subscriber.recv()).await;
+    assert!(
+        gone.is_err(),
+        "narrower prefix still matched after unsubscribe"
+    );
 }
 
 #[tokio::test]

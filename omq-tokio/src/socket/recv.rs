@@ -375,6 +375,12 @@ enum RecvSource {
     Shared,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainLimit {
+    One,
+    Budget,
+}
+
 #[derive(Clone, Copy)]
 enum PeerSource<'a> {
     Inproc(&'a InprocRx),
@@ -396,6 +402,7 @@ fn drain_peer_source(
     latency: bool,
     batch: &mut VecDeque<Message>,
     budget: &mut DrainBudget,
+    limit: DrainLimit,
 ) -> SourceDrain {
     match source {
         PeerSource::Inproc(peer) => drain_peer_consumer(
@@ -404,6 +411,7 @@ fn drain_peer_source(
             latency,
             batch,
             budget,
+            limit,
             || {
                 peer.space_notify.notify_changed();
                 peer.blocking_space.notify();
@@ -415,6 +423,7 @@ fn drain_peer_source(
             latency,
             batch,
             budget,
+            limit,
             || peer.space.notify_changed(),
         ),
     }
@@ -426,6 +435,7 @@ fn drain_peer_consumer<F: FnMut()>(
     latency: bool,
     batch: &mut VecDeque<Message>,
     budget: &mut DrainBudget,
+    limit: DrainLimit,
     mut on_release: F,
 ) -> SourceDrain {
     let Ok(mut consumer) = consumer.try_lock() else {
@@ -436,8 +446,15 @@ fn drain_peer_consumer<F: FnMut()>(
         let (item, released) = drain_yring_one(&mut consumer, &mut remaining);
         (item.map(RecvItem::into_message), released)
     } else {
-        let drained = drain_yring(&mut consumer, batch, &mut remaining, budget);
-        (None, drained > 0)
+        let released = match limit {
+            DrainLimit::One => {
+                let (_, released) =
+                    drain_yring_one_into_batch(&mut consumer, batch, &mut remaining, budget);
+                released
+            }
+            DrainLimit::Budget => drain_yring(&mut consumer, batch, &mut remaining, budget) > 0,
+        };
+        (None, released)
     };
     if released {
         on_release();
@@ -447,6 +464,24 @@ fn drain_peer_consumer<F: FnMut()>(
         message,
         disconnected: consumer.is_disconnected(),
     }
+}
+
+fn drain_yring_one_into_batch(
+    consumer: &mut yring::Consumer<RecvItem>,
+    batch: &mut VecDeque<Message>,
+    batch_remaining: &mut usize,
+    budget: &mut DrainBudget,
+) -> (usize, bool) {
+    if budget.exhausted() {
+        return (0, false);
+    }
+    let (item, released) = drain_yring_one(consumer, batch_remaining);
+    let Some(item) = item else {
+        return (0, released);
+    };
+    let _ = budget.account(item.size_class.budget_bytes());
+    batch.push_back(item.message);
+    (1, released)
 }
 
 fn drain_yring(
@@ -626,6 +661,7 @@ impl SpscAwareRecv {
             true,
             &mut state.batch,
             &mut budget,
+            DrainLimit::One,
         )
         .message
     }
@@ -637,6 +673,12 @@ impl SpscAwareRecv {
         let inproc_len = state.inproc.len();
         let tcp_len = state.tcp.len();
         let source_count = inproc_len + tcp_len + 1;
+        let peer_source_count = inproc_len + tcp_len;
+        let limit = if !state.latency && peer_source_count > 1 {
+            DrainLimit::One
+        } else {
+            DrainLimit::Budget
+        };
         let start = state.recv_cursor % source_count;
 
         // One logical round-robin space covers all sources. This prevents a
@@ -653,14 +695,16 @@ impl SpscAwareRecv {
                     state.latency,
                     &mut state.batch,
                     &mut budget,
+                    limit,
                 ),
                 RecvSource::Stream(index) => drain_peer_source(
                     PeerSource::Stream(&state.tcp[index]),
                     state.latency,
                     &mut state.batch,
                     &mut budget,
+                    limit,
                 ),
-                RecvSource::Shared => self.drain_shared_source(state, &mut budget),
+                RecvSource::Shared => self.drain_shared_source(state, &mut budget, limit),
             };
             result = outcome.message;
             has_disconnected |= outcome.disconnected;
@@ -668,7 +712,12 @@ impl SpscAwareRecv {
         (result, has_disconnected)
     }
 
-    fn drain_shared_source(&self, state: &mut DrainState, budget: &mut DrainBudget) -> SourceDrain {
+    fn drain_shared_source(
+        &self,
+        state: &mut DrainState,
+        budget: &mut DrainBudget,
+        limit: DrainLimit,
+    ) -> SourceDrain {
         if state.latency {
             let (item, released) =
                 drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch_remaining);
@@ -680,13 +729,26 @@ impl SpscAwareRecv {
                 disconnected: false,
             }
         } else {
-            let drained = drain_yring(
-                &mut state.recv_consumer,
-                &mut state.batch,
-                &mut state.recv_batch_remaining,
-                budget,
-            );
-            if drained > 0 {
+            let released = match limit {
+                DrainLimit::One => {
+                    let (_, released) = drain_yring_one_into_batch(
+                        &mut state.recv_consumer,
+                        &mut state.batch,
+                        &mut state.recv_batch_remaining,
+                        budget,
+                    );
+                    released
+                }
+                DrainLimit::Budget => {
+                    drain_yring(
+                        &mut state.recv_consumer,
+                        &mut state.batch,
+                        &mut state.recv_batch_remaining,
+                        budget,
+                    ) > 0
+                }
+            };
+            if released {
                 self.recv_pipe_space.notify_changed();
             }
             SourceDrain::default()
@@ -892,7 +954,7 @@ impl SpscAwareRecv {
 mod tests {
     use super::{
         RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, RecvItem, RecvSource, drain_yring, drain_yring_one,
-        recv_source_at,
+        drain_yring_one_into_batch, recv_source_at,
     };
     use omq_proto::Message;
     use omq_proto::flow::DrainBudget;
@@ -1004,6 +1066,32 @@ mod tests {
 
         let next = consumer.prefetch_and_pop().unwrap();
         assert_eq!(next.message.part_bytes(0).unwrap(), &b"next"[..]);
+    }
+
+    #[test]
+    fn one_item_drain_keeps_remainder_for_next_fair_round() {
+        let (mut producer, mut consumer) = yring::spsc(8);
+        producer
+            .push(RecvItem::new(Message::from_slice(b"first")))
+            .unwrap();
+        producer
+            .push(RecvItem::new(Message::from_slice(b"second")))
+            .unwrap();
+        producer.flush();
+
+        let mut batch = std::collections::VecDeque::new();
+        let mut budget = DrainBudget::new(256, usize::MAX);
+        let mut remaining = 0;
+        assert_eq!(
+            drain_yring_one_into_batch(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            (1, false)
+        );
+        assert_eq!(
+            batch.pop_front().unwrap().part_bytes(0).unwrap().as_ref(),
+            b"first"
+        );
+        assert_eq!(remaining, 1);
+        assert!(!consumer.is_empty());
     }
 
     #[test]

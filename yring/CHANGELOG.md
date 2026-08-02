@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-08-02
+
+### Changed
+
+- Miri many-seed stress checks now cap cross-thread test sizes and use the
+  extended timeout profile in CI.
+
 ## [0.3.11] - 2026-07-31
 
 ### Fixed

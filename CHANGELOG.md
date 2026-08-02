@@ -6,6 +6,52 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [pyomq 0.19.1] - 2026-08-02
+
+### Fixed
+
+- `CONFLATE` now keeps only the latest inbound message on receive-side
+  sockets through `omq-tokio` 0.21.0.
+- Pyomq CI uses its own nextest `ci` profile so root workspace overrides for
+  `omq-tokio` binaries do not break test runs.
+
+### Changed
+
+- *(deps)* Bump bundled `omq-tokio` to 0.21.0 and `yring` to 0.3.12.
+
+## [omq-tokio 0.21.0] - 2026-08-02
+
+### Added
+
+- Receive-side `Options::conflate(true)` now keeps only the latest inbound
+  message for conflate-capable sockets.
+
+### Fixed
+
+- Fair-queue receive order is preserved when multiple inbound peer rings are
+  ready at once.
+- Fan-out lane workers clear stale data readiness after empty drains, avoiding
+  owned-runtime shutdown spins after zstd auto-training tests.
+- zstd fan-out auto-training tests drain subscribers through the training tail
+  before attaching late raw subscribers.
+
+### Changed
+
+- *(deps)* Bump `yring` to 0.3.12.
+
+## [omq-libzmq 0.5.11] - 2026-08-02
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.21.0 and `yring` to 0.3.12.
+
+## [yring 0.3.12] - 2026-08-02
+
+### Changed
+
+- Miri many-seed stress checks now cap cross-thread test sizes and use the
+  extended timeout profile in CI.
+
 ## [omq-tokio 0.20.2] - 2026-07-31
 
 ### Fixed

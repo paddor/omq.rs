@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-02
+
+### Added
+
+- Receive-side `Options::conflate(true)` now keeps only the latest inbound
+  message for conflate-capable sockets.
+
+### Fixed
+
+- Fair-queue receive order is preserved when multiple inbound peer rings are
+  ready at once.
+- Fan-out lane workers clear stale data readiness after empty drains, avoiding
+  owned-runtime shutdown spins after zstd auto-training tests.
+- zstd fan-out auto-training tests drain subscribers through the training tail
+  before attaching late raw subscribers.
+
+### Changed
+
+- *(deps)* Bump `yring` to 0.3.12.
+
 ## [0.20.3] - 2026-07-31
 
 ### Added

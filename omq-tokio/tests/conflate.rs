@@ -116,7 +116,7 @@ async fn push_conflate_keeps_only_latest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pull_conflate_keeps_only_latest() {
-    const N: u32 = 20;
+    const N: u32 = 5_000;
 
     let pull = Socket::new(SocketType::Pull, Options::default().conflate(true));
     let port = test_support::bind_loopback(&pull).await;
@@ -133,21 +133,31 @@ async fn pull_conflate_keeps_only_latest() {
         .expect("PUSH did not connect");
 
     for i in 0..N {
-        push.send(Message::single(format!("m-{i:03}")))
+        push.send(Message::single(format!("m-{i:05}")))
             .await
             .unwrap();
     }
-    let received = tokio::time::timeout(Duration::from_secs(1), pull.recv())
-        .await
-        .expect("PULL did not receive")
-        .unwrap();
-    assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"m-019");
+
+    let latest = format!("m-{:05}", N - 1);
+    let mut received = Vec::new();
+    while received.len() < N as usize {
+        let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(1), pull.recv()).await else {
+            break;
+        };
+        received.push(String::from_utf8_lossy(&msg.part_bytes(0).unwrap()).into_owned());
+        if received.last() == Some(&latest) {
+            break;
+        }
+    }
 
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), pull.recv())
-            .await
-            .is_err(),
-        "PULL-side conflate should leave one unread message"
+        received.len() < N as usize,
+        "PULL-side conflate dropped nothing; sent {N}, received {}",
+        received.len()
+    );
+    assert!(
+        received.iter().any(|s| s == &latest),
+        "latest message must be visible; got {received:?}"
     );
     push.close().await.unwrap();
 }

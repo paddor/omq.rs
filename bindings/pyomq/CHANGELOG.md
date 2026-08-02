@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-08-02
+
+### Fixed
+
+- `CONFLATE` now keeps only the latest inbound message on receive-side
+  sockets through `omq-tokio` 0.21.0.
+- Pyomq CI uses its own nextest `ci` profile so root workspace overrides for
+  `omq-tokio` binaries do not break test runs.
+
+### Changed
+
+- *(deps)* Bump bundled `omq-tokio` to 0.21.0 and `yring` to 0.3.12.
+
 ## [0.19.0] - 2026-07-31
 
 ### Added

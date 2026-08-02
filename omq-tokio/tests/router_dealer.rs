@@ -244,8 +244,12 @@ async fn tcp_req_to_router_uses_empty_delimiter_and_ignores_bad_reply() {
         ]))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(matches!(req.try_recv(), Err(Error::WouldBlock)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), req.recv())
+            .await
+            .is_err(),
+        "REQ should ignore malformed ROUTER reply"
+    );
 
     router
         .send(Message::multipart([
@@ -319,7 +323,7 @@ async fn dealer_round_robin_preserves_multipart_messages() {
             Instant::now() < deadline,
             "timed out draining dealer messages: a={count_a}, b={count_b}, seen={seen:?}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
 
     assert_eq!(seen.len(), MSGS as usize);
@@ -364,8 +368,6 @@ async fn dealer_fair_queues_first_batch_before_second_batch() {
             .unwrap();
     }
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let mut first_batch = HashSet::new();
     for _ in 0..PEERS {
         first_batch.insert(recv_dealer_body_string(&receiver).await);
@@ -393,8 +395,14 @@ async fn router_prefixes_identity_on_recv() {
         Options::default().identity(bytes::Bytes::from_static(b"alice")),
     );
     dealer.connect(ep).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see dealer");
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
 
     dealer.send(Message::single("hello")).await.unwrap();
 
@@ -416,8 +424,14 @@ async fn router_routes_back_by_identity() {
         Options::default().identity(bytes::Bytes::from_static(b"bob")),
     );
     dealer.connect(ep).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see dealer");
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
 
     dealer.send(Message::single("ping")).await.unwrap();
 
@@ -446,9 +460,6 @@ async fn router_mandatory_errors_on_unknown_identity() {
     );
     router.bind(ep.clone()).await.unwrap();
 
-    // No dealers connected.
-    tokio::time::sleep(Duration::from_millis(30)).await;
-
     let r = router.send(Message::multipart(["ghost", "hello"])).await;
     assert!(matches!(r, Err(omq_tokio::Error::Unroutable)), "got {r:?}");
 }
@@ -458,8 +469,6 @@ async fn router_silently_drops_unknown_identity_by_default() {
     let ep = inproc_ep("rd-silent");
     let router = Socket::new(SocketType::Router, Options::default());
     router.bind(ep.clone()).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Default router_mandatory = false: send to ghost succeeds but routes
     // nowhere.
@@ -483,12 +492,21 @@ async fn router_handles_identity_churn_without_growth() {
             Options::default().identity(bytes::Bytes::from_static(b"worker-1")),
         );
         dealer.connect(ep.clone()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        dealer
+            .wait_connected(1, Duration::from_secs(1))
+            .await
+            .expect("dealer did not connect");
         dealer.send(Message::single("ping")).await.unwrap();
         let m = router.recv().await.unwrap();
         assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
         dealer.close().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        test_support::wait_for_connection_count(
+            &router,
+            0,
+            Duration::from_secs(1),
+            "router identity churn disconnect",
+        )
+        .await;
     }
 
     // Final dealer connects and exchanges one message; routing still works.
@@ -497,7 +515,10 @@ async fn router_handles_identity_churn_without_growth() {
         Options::default().identity(bytes::Bytes::from_static(b"worker-1")),
     );
     dealer.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
     dealer.send(Message::single("final")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), router.recv())
         .await
@@ -516,8 +537,14 @@ async fn router_assigns_identity_for_peers_without_one() {
 
     let dealer = Socket::new(SocketType::Dealer, Options::default());
     dealer.connect(ep).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("router did not see dealer");
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer did not connect");
 
     dealer.send(Message::single("anon")).await.unwrap();
 
@@ -557,7 +584,10 @@ async fn router_handover_evicts_old_peer() {
 
     let dealer_a = Socket::new(SocketType::Dealer, no_reconnect.clone());
     dealer_a.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    dealer_a
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer a did not connect");
 
     dealer_a.send(Message::single("hello")).await.unwrap();
     let got = router.recv().await.unwrap();
@@ -575,7 +605,10 @@ async fn router_handover_evicts_old_peer() {
 
     let dealer_b = Socket::new(SocketType::Dealer, no_reconnect);
     dealer_b.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    dealer_b
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("dealer b did not connect");
 
     dealer_b.send(Message::single("world")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), router.recv())
@@ -652,8 +685,10 @@ async fn router_handover_auto_identity_no_collision() {
 
     let d2 = Socket::new(SocketType::Dealer, Options::default());
     d2.connect(ep).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    router
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .expect("router did not see both dealers");
 
     d1.send(Message::single("a")).await.unwrap();
     d2.send(Message::single("b")).await.unwrap();
@@ -697,7 +732,10 @@ async fn server_handover_evicts_old_peer() {
 
     let client_a = Socket::new(SocketType::Client, no_reconnect.clone());
     client_a.connect(ep.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    client_a
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("client a did not connect");
 
     client_a.send(Message::single("ping")).await.unwrap();
     let got = tokio::time::timeout(Duration::from_millis(500), server.recv())
@@ -708,7 +746,10 @@ async fn server_handover_evicts_old_peer() {
 
     let client_b = Socket::new(SocketType::Client, no_reconnect);
     client_b.connect(ep).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    client_b
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("client b did not connect");
 
     // Verify handover monitor event.
     let mut found = false;

@@ -683,8 +683,7 @@ impl LaneWorker {
             }
 
             self.flush_touched(&mut touched);
-            if drained {
-                self.data_signal.clear_after(self.data_rx.is_empty());
+            if self.finish_data_drain(drained) {
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -693,6 +692,11 @@ impl LaneWorker {
                 () = self.data_signal.ready() => {}
             }
         }
+    }
+
+    fn finish_data_drain(&self, drained: bool) -> bool {
+        let rearmed = self.data_signal.clear_after(self.data_rx.is_empty());
+        drained || rearmed
     }
 
     fn notify_data_space(&self) {
@@ -1360,6 +1364,43 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
             .await
             .expect("dispatch did not wake after space signal");
+    }
+
+    #[tokio::test]
+    async fn empty_data_drain_clears_stale_signal() {
+        let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
+        let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
+        let data_signal = Arc::new(crate::engine::signal::DataSignal::new());
+        let worker = LaneWorker {
+            data_rx,
+            ctrl_rx,
+            data_signal: data_signal.clone(),
+            data_space: Arc::new(crate::engine::signal::StateSignal::new()),
+            ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+            mode: FanOutMode::SubscriptionPrefix,
+            mute_policy: FanOutMutePolicy::DropNewest,
+            peers: FxHashMap::default(),
+            subscribe_all_count: 0,
+            eq: FrameBuffer::one_shot(),
+            chunks: Vec::new(),
+            encoder: None,
+            distribution_targets: Vec::new(),
+            active_flags: None,
+        };
+
+        data_signal.mark();
+        data_signal.begin_drain();
+
+        assert!(!worker.finish_data_drain(false));
+        tokio::time::timeout(std::time::Duration::from_secs(1), data_signal.ready())
+            .await
+            .expect("stale notify permit should be consumable once");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), data_signal.ready())
+                .await
+                .is_err(),
+            "empty drain must clear stale readiness"
+        );
     }
 
     #[cfg(any(feature = "lz4", feature = "zstd"))]

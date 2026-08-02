@@ -19,7 +19,6 @@ use bytes::Bytes;
 use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Message, Options, Socket, SocketType};
 use rand::RngExt;
-use rand::rngs::StdRng;
 
 fn fast_reconnect() -> Options {
     Options {
@@ -151,7 +150,7 @@ fn soak_reconnect_all_types() {
     ctx.block_on(async move {
         let mut pairs = create_all_pairs().await;
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("reconnect_all_types");
         let start = Instant::now();
         let mut last_log = start;
 

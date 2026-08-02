@@ -412,7 +412,7 @@ jobs:
         run: pip install .
       - name: cargo nextest
         working-directory: bindings/pyomq
-        run: cargo nextest run --profile ci --config-file ../../.config/nextest.toml
+        run: cargo nextest run --profile ci --config-file .config/nextest.toml
       - name: pytest
         working-directory: bindings/pyomq
         run: pytest -v -k "not test_perf" -W error

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rand::RngExt;
-use rand::rngs::StdRng;
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
@@ -26,7 +25,7 @@ fn soak_pub_sub_churn() {
         let publisher = Socket::new(SocketType::Pub, Options::default());
         publisher.bind(ep.clone()).await.unwrap();
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("pub_sub_churn");
         let mut subs: Vec<Socket> = Vec::new();
         let mut pub_count: u64 = 0;
         let start = Instant::now();

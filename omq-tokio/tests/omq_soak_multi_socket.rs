@@ -18,19 +18,19 @@ struct SocketPair {
 async fn create_pairs() -> Vec<SocketPair> {
     let mut pairs = Vec::new();
 
-    for i in 0..20 {
+    for _ in 0..20 {
         let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(16));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
         let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(16));
         push.connect(ep).await.unwrap();
+        push.wait_connected(1, Duration::from_secs(1))
+            .await
+            .expect("PUSH/PULL pair did not connect");
         pairs.push(SocketPair {
             sender: push,
             receiver: pull,
             kind: "push/pull-tcp",
         });
-        if i == 0 {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
     }
 
     for i in 0..20 {
@@ -40,6 +40,9 @@ async fn create_pairs() -> Vec<SocketPair> {
         let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(16));
         sub.connect(ep).await.unwrap();
         sub.subscribe("").await.unwrap();
+        pub_.wait_subscribed(1, Duration::from_secs(1))
+            .await
+            .expect("PUB/SUB pair did not subscribe");
         pairs.push(SocketPair {
             sender: pub_,
             receiver: sub,
@@ -52,6 +55,9 @@ async fn create_pairs() -> Vec<SocketPair> {
         let ep = rep.bind(soak_common::tcp_ep(0)).await.unwrap();
         let req = Socket::new(SocketType::Req, soak_common::soak_options());
         req.connect(ep).await.unwrap();
+        req.wait_connected(1, Duration::from_secs(1))
+            .await
+            .expect("REQ/REP pair did not connect");
         pairs.push(SocketPair {
             sender: req,
             receiver: rep,
@@ -72,7 +78,6 @@ fn soak_multi_socket() {
     let tracker = ctx.block_on(async move {
         let pairs = create_pairs().await;
         eprintln!("[multi_socket] created {} socket pairs", pairs.len());
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let start = Instant::now();
         let mut total_exchanged: u64 = 0;

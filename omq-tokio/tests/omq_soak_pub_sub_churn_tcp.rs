@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rand::RngExt;
-use rand::rngs::StdRng;
 
 use omq_tokio::{Message, MonitorEvent, OnMute, Options, ReconnectPolicy, Socket, SocketType};
 
@@ -64,7 +63,7 @@ fn soak_pub_sub_churn_tcp() {
         slow_sub.subscribe(Bytes::new()).await.unwrap();
         wait_for_subscribes(&mut mon, 1).await;
 
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("pub_sub_churn_tcp");
         let mut subs: Vec<Socket> = Vec::new();
         let mut pub_count: u64 = 0;
         let start = Instant::now();

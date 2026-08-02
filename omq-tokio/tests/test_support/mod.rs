@@ -105,6 +105,30 @@ pub async fn assert_no_second_connection(sock: &Socket, context: &str) {
     assert!(second.is_err(), "{context}: duplicate connection appeared");
 }
 
+pub async fn wait_for_connection_count(
+    sock: &Socket,
+    expected: usize,
+    timeout: Duration,
+    context: &str,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let actual = sock
+            .connections()
+            .await
+            .unwrap_or_else(|e| panic!("{context}: failed to read connections: {e:?}"))
+            .len();
+        if actual == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{context}: expected {expected} connections, got {actual}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn open_fd_count() -> Option<usize> {
     Some(std::fs::read_dir("/proc/self/fd").ok()?.count())

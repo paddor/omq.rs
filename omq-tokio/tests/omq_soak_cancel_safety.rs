@@ -47,7 +47,7 @@ fn soak_cancel_safety() {
 
     let ctx = soak_common::build_context();
     ctx.block_on(async move {
-        let mut rng = rand::make_rng::<StdRng>();
+        let mut rng = soak_common::seeded_rng("cancel_safety");
         let start = Instant::now();
         let mut iterations: u64 = 0;
         let mut last_log = start;

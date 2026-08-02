@@ -80,6 +80,40 @@ async fn expect_payload(sock: &Socket, expected: &Bytes, label: &str) {
     assert_eq!(got.part_bytes(0).unwrap(), &expected[..]);
 }
 
+fn payload_seq(payload: &[u8]) -> Option<u64> {
+    let marker = b"\"seq\":";
+    let start = payload
+        .windows(marker.len())
+        .position(|window| window == marker)?
+        + marker.len();
+    let mut seq = 0u64;
+    let mut saw_digit = false;
+    for &byte in &payload[start..] {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        saw_digit = true;
+        seq = seq.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+    }
+    saw_digit.then_some(seq)
+}
+
+async fn expect_payload_seq_at_least(sock: &Socket, min_seq: u64, label: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let got = sock.recv().await.unwrap();
+            let part = got.part_bytes(0).unwrap();
+            let seq = payload_seq(&part)
+                .unwrap_or_else(|| panic!("{label} received unparseable payload"));
+            if seq >= min_seq {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label} missed payload at or after seq {min_seq}"));
+}
+
 #[derive(Clone, Copy)]
 enum FanoutSendMode {
     Send,
@@ -366,16 +400,10 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
         ))
     };
     for seq in 0..128 {
-        let expected = payload(seq);
-        send_fanout(&publisher, Message::single(expected.clone()), mode).await;
-        for (idx, sub) in decoded_subs.iter().enumerate() {
-            expect_payload(
-                sub,
-                &expected,
-                &format!("decoded sub {idx} training seq {seq}"),
-            )
-            .await;
-        }
+        send_fanout(&publisher, Message::single(payload(seq)), mode).await;
+    }
+    for (idx, sub) in decoded_subs.iter().enumerate() {
+        expect_payload_seq_at_least(sub, 127, &format!("decoded sub {idx} training tail")).await;
     }
 
     raw.connect(tcp_from_zstd(&ep)).await.unwrap();

@@ -42,7 +42,7 @@ async fn recv_from_any_rep(reps: &[Socket]) -> (usize, Message) {
             tokio::time::Instant::now() < deadline,
             "no REP received request"
         );
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -315,7 +315,13 @@ async fn rep_survives_client_disconnect_mid_cycle() {
         req1.close().await.unwrap();
     }
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    test_support::wait_for_connection_count(
+        &rep,
+        0,
+        Duration::from_secs(1),
+        "REP first client disconnect",
+    )
+    .await;
 
     // Second client: full roundtrip must succeed.
     let req2 = Socket::new(SocketType::Req, Options::default());
@@ -354,13 +360,8 @@ async fn rep_reply_to_disconnected_client_is_accepted() {
     assert_eq!(got, Message::single("drop-me"));
 
     req.close_with_linger(Some(Duration::ZERO)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !rep.connections().await.unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("REP still had live peer");
+    test_support::wait_for_connection_count(&rep, 0, Duration::from_secs(1), "REP disconnect")
+        .await;
 
     rep.send(Message::single("dropped-reply"))
         .await
@@ -519,7 +520,13 @@ async fn rep_tcp_serves_sequential_clients() {
             .unwrap();
         assert_eq!(reply.part_bytes(0).unwrap(), answer.as_bytes());
 
-        drop(req);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        req.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+        test_support::wait_for_connection_count(
+            &rep,
+            0,
+            Duration::from_secs(1),
+            "REP sequential client disconnect",
+        )
+        .await;
     }
 }

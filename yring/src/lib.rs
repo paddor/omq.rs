@@ -578,6 +578,12 @@ impl<T> std::fmt::Debug for Consumer<T> {
 mod tests {
     use super::*;
 
+    // CI runs Miri with many seeds. Keep cross-thread coverage without turning
+    // per-seed validation into a throughput test.
+    fn miri_sized(n: u64) -> u64 {
+        if cfg!(miri) { 2_048 } else { n }
+    }
+
     #[test]
     fn push_pop_basic() {
         let (mut p, mut c) = spsc::<u32>(4);
@@ -916,7 +922,7 @@ mod tests {
     #[test]
     fn cross_thread() {
         let (mut p, mut c) = spsc::<u64>(1024);
-        let n = 100_000u64;
+        let n = miri_sized(100_000);
         let sender = std::thread::spawn(move || {
             for i in 0..n {
                 while p.push(i).is_err() {

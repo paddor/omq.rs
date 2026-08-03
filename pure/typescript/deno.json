@@ -5,7 +5,7 @@
   "description": "ZMQ client library for browsers over WebSocket with LZ4 dictionary compression.",
   "exports": "./src/mod.ts",
   "imports": {
-    "@paddor/lz4rip": "jsr:@paddor/lz4rip@^0.2.7"
+    "@paddor/lz4rip": "jsr:@paddor/lz4rip@^0.2.8"
   },
   "compilerOptions": {
     "strict": true,

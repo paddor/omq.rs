@@ -1,14 +1,14 @@
 {
   "version": "5",
   "specifiers": {
-    "jsr:@paddor/lz4rip@~0.2.7": "0.2.7",
-    "npm:@jsr/paddor__lz4rip@~0.2.7": "0.2.7",
+    "jsr:@paddor/lz4rip@~0.2.8": "0.2.8",
+    "npm:@jsr/paddor__lz4rip@~0.2.8": "0.2.8",
     "npm:@types/node@^26.1.2": "26.1.2",
     "npm:vitest@^4.1.10": "4.1.10_@types+node@26.1.2_vite@8.1.5__@types+node@26.1.2"
   },
   "jsr": {
-    "@paddor/lz4rip@0.2.7": {
-      "integrity": "e6d3adc168d9e9e4480dc4ebdb69b64142b11e30c0df09902b0d1ba4b4a4ea04"
+    "@paddor/lz4rip@0.2.8": {
+      "integrity": "22d959e407a663f0d66c093b1d7aaf26c48ba446aef6a79006e6e0242aad018e"
     }
   },
   "npm": {
@@ -34,9 +34,9 @@
     "@jridgewell/sourcemap-codec@1.5.5": {
       "integrity": "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="
     },
-    "@jsr/paddor__lz4rip@0.2.7": {
-      "integrity": "sha512-nlTMBHIZoCfXBbdBqO24flu4gouCqo3FDMtskwnp9fPe7JtwQOsrTewZXJnVtqleVpYvRFkp0VMQQ1NtczdMmA==",
-      "tarball": "https://npm.jsr.io/~/11/@jsr/paddor__lz4rip/0.2.7.tgz"
+    "@jsr/paddor__lz4rip@0.2.8": {
+      "integrity": "sha512-SZ9yLGh3h7d+ne/ryqAjtKdRgGDQtWkA2VkzF/jM2fpGXdbOR0DrAE1yQTfsi5iaKBfZEIuHumURnHw05KAiig==",
+      "tarball": "https://npm.jsr.io/~/11/@jsr/paddor__lz4rip/0.2.8.tgz"
     },
     "@napi-rs/wasm-runtime@1.2.1_@emnapi+core@1.11.1_@emnapi+runtime@1.11.1": {
       "integrity": "sha512-KjZdi8Q1wh89gsVmghvbrMgWl6ZWmRmHV6wjB7/g4Zf0dyO+hH3neZUtuDNPO00qq5YE5RITVWvrIZKRaAmzGQ==",
@@ -475,11 +475,11 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@paddor/lz4rip@~0.2.7"
+      "jsr:@paddor/lz4rip@~0.2.8"
     ],
     "packageJson": {
       "dependencies": [
-        "npm:@jsr/paddor__lz4rip@~0.2.7",
+        "npm:@jsr/paddor__lz4rip@~0.2.8",
         "npm:@playwright/test@^1.62.0",
         "npm:@types/node@^26.1.2",
         "npm:vitest@^4.1.10"

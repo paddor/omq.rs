@@ -10,7 +10,9 @@ final-status-level = "slow"
 
 [profile.extended]
 inherits = "ci"
-slow-timeout = { period = "10m", terminate-after = 3, grace-period = "10s" }
+# Extended CI wraps test runs with scripts/ci-run-with-forensics.sh at 10200s.
+# Keep nextest above that so the wrapper owns real hang diagnostics.
+slow-timeout = { period = "30m", terminate-after = 6, grace-period = "10s" }
 
 [profile.default-miri]
 slow-timeout = { period = "120s", terminate-after = 3, grace-period = "10s" }

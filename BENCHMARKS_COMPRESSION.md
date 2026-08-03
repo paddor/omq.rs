@@ -8,15 +8,24 @@ Virtual throughput = msg/s x uncompressed size (effective app data rate
 on a constrained link). Charts show projected throughput at 1 Gbps,
 100 Mbps, and 10 Mbps.
 
-- `lz4+tcp://`: low CPU cost, high message rate, modest wire savings.
-- `zstd+tcp://`: higher CPU cost, better wire ratio. Useful when the
-  link is the bottleneck.
+- `lz4+tcp://`: low CPU cost, high message rate. With the 2 KiB
+  dict, charted JSON payloads at 1 KiB and larger average ~3.3x wire
+  reduction.
+- `zstd+tcp://`: higher CPU cost, ~4.0x average wire reduction over the
+  same points.
 - Auto-dict: trains once, ships once per direction per connection, then
   lowers the small-message compression threshold.
+
+### LZ4
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="PUSH/PULL lz4+tcp: projected throughput at link speed" width="850">
 </p>
+
+### Zstd
+
+Zstd's extra compression ratio is visible, but so is the CPU cost: on
+fast links it loses to LZ4 despite similar wire savings.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/zstd_tcp.svg" alt="PUSH/PULL zstd+tcp: projected throughput at link speed" width="850">

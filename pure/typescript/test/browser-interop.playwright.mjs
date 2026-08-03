@@ -18,7 +18,7 @@ const browserDir = join(testDir, "browser");
 const fixtureManifest = join(testDir, "fixtures/omq-rs-peer/Cargo.toml");
 const wasmPath = join(
   repoRoot,
-  "node_modules/@paddor/lz4rip/src/pkg/lz4rip.wasm",
+  "node_modules/@paddor/lz4rip/src/pkg/lz4rip_wasm_bg.wasm",
 );
 
 function delay(ms) {
@@ -30,7 +30,7 @@ async function prepareStaticSite() {
   await copyFile(join(browserDir, "index.html"), join(dir, "index.html"));
   await copyFile(join(browserDir, "app.js"), join(dir, "app.js"));
   await mkdir(join(dir, "pkg"), { recursive: true });
-  await copyFile(wasmPath, join(dir, "pkg/lz4rip.wasm"));
+  await copyFile(wasmPath, join(dir, "pkg/lz4rip_wasm_bg.wasm"));
   await execFileAsync("deno", [
     "bundle",
     "--platform",

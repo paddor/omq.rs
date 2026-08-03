@@ -10,7 +10,7 @@ const enc = new TextEncoder();
 beforeAll(() => {
   const wasmPath = resolve(
     dirname(fileURLToPath(import.meta.url)),
-    "../node_modules/@paddor/lz4rip/src/pkg/lz4rip.wasm",
+    "../node_modules/@paddor/lz4rip/src/pkg/lz4rip_wasm_bg.wasm",
   );
   initSyncFromBytes(readFileSync(wasmPath));
 });

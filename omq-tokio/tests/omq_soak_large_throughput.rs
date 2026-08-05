@@ -59,13 +59,16 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
     for delta in -SHIFT_SCAN..=SHIFT_SCAN {
         let mut matches = 0usize;
         for (pos, &byte) in data.iter().enumerate().take(end).skip(start) {
-            let Some(source) = (pos as isize).checked_add(delta) else {
+            let Ok(pos) = isize::try_from(pos) else {
                 continue;
             };
-            if source >= 16
-                && (source as usize) < data.len()
-                && byte == (pattern[source as usize] ^ mask)
-            {
+            let Some(source) = pos.checked_add(delta) else {
+                continue;
+            };
+            let Ok(source) = usize::try_from(source) else {
+                continue;
+            };
+            if source >= 16 && source < data.len() && byte == (pattern[source] ^ mask) {
                 matches += 1;
             }
         }

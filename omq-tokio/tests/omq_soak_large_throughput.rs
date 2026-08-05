@@ -5,23 +5,92 @@ static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::Track
 
 mod soak_common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use omq_tokio::{Message, Socket, SocketType};
+use omq_tokio::{Message, Options, Socket, SocketType};
 
 const MSG_SIZE: usize = 1024 * 1024;
 const CANARY_MAGIC: u64 = 0xDEAD_BEEF_CAFE_F00D;
+const SHIFT_SCAN: isize = 32;
+const SHIFT_WINDOW: usize = 128;
+
+fn payload_pattern() -> &'static [u8] {
+    static PATTERN: OnceLock<Vec<u8>> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        let mut pattern = vec![0u8; MSG_SIZE];
+        for (i, slot) in pattern.iter_mut().enumerate().skip(16) {
+            *slot = offset_payload_byte(i);
+        }
+        pattern
+    })
+}
+
+fn offset_payload_byte(offset: usize) -> u8 {
+    let mut byte = (offset as u8).wrapping_mul(31);
+    byte ^= ((offset >> 8) as u8).wrapping_mul(17);
+    byte ^= ((offset >> 16) as u8).wrapping_mul(13);
+    byte
+}
+
+fn seq_mask(seq: u64) -> u8 {
+    (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3)
+}
 
 fn build_payload(seq: u64) -> Vec<u8> {
-    let mut buf = vec![0u8; MSG_SIZE];
+    let mask = seq_mask(seq);
+    let mut buf = payload_pattern().to_vec();
     buf[..8].copy_from_slice(&CANARY_MAGIC.to_le_bytes());
     buf[8..16].copy_from_slice(&seq.to_le_bytes());
-    for (i, slot) in buf.iter_mut().enumerate().skip(16) {
-        *slot = (i & 0xFF) as u8;
+    for slot in &mut buf[16..] {
+        *slot ^= mask;
     }
     buf
+}
+
+fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usize) {
+    let pattern = payload_pattern();
+    let mask = seq_mask(seq);
+    let start = offset.saturating_sub(SHIFT_WINDOW / 2).max(16);
+    let end = offset.saturating_add(SHIFT_WINDOW / 2).min(data.len());
+    let len = end - start;
+    let mut best = (0, 0, len);
+    for delta in -SHIFT_SCAN..=SHIFT_SCAN {
+        let mut matches = 0usize;
+        for (pos, &byte) in data.iter().enumerate().take(end).skip(start) {
+            let Some(source) = (pos as isize).checked_add(delta) else {
+                continue;
+            };
+            if source >= 16
+                && (source as usize) < data.len()
+                && byte == (pattern[source as usize] ^ mask)
+            {
+                matches += 1;
+            }
+        }
+        if matches > best.1 {
+            best = (delta, matches, len);
+        }
+    }
+    best
+}
+
+fn corruption_context(data: &[u8], seq: u64, offset: usize) -> String {
+    let pattern = payload_pattern();
+    let mask = seq_mask(seq);
+    let start = offset.saturating_sub(16).max(16);
+    let end = offset.saturating_add(16).min(data.len());
+    let expected: Vec<u8> = (start..end).map(|pos| pattern[pos] ^ mask).collect();
+    let (delta, matches, window_len) = best_source_shift(data, seq, offset);
+    format!(
+        "best_source_delta={delta}, shift_window_matches={matches}/{window_len}, \
+         got_window[{}..{}]={:02x?}, expected_window={:02x?}",
+        start,
+        end,
+        &data[start..end],
+        expected
+    )
 }
 
 struct PayloadStats {
@@ -57,12 +126,17 @@ impl PayloadStats {
             &data[..32]
         );
 
+        let pattern = payload_pattern();
+        let mask = seq_mask(seq);
         for (i, &byte) in data.iter().enumerate().skip(16) {
-            assert_eq!(
-                byte,
-                (i & 0xFF) as u8,
-                "payload byte corruption at offset {i}: seq={seq}",
-            );
+            let expected = pattern[i] ^ mask;
+            if byte != expected {
+                let context = corruption_context(data, seq, i);
+                panic!(
+                    "payload byte corruption at offset {i}: seq={seq}, \
+                     got={byte}, expected={expected}, {context}"
+                );
+            }
         }
 
         // Small reordering is expected during connection churn: the
@@ -83,6 +157,24 @@ impl PayloadStats {
     }
 }
 
+fn large_throughput_options() -> Options {
+    let mut options = soak_common::soak_options();
+    if std::env::var_os("OMQ_SOAK_DISABLE_LARGE_PATH").is_some() {
+        options = options.disable_large_message_path();
+    }
+    if let Ok(bytes) = std::env::var("OMQ_SOAK_TCP_BUF_BYTES")
+        && let Ok(bytes) = bytes.parse()
+    {
+        options = options.recv_buffer_size(bytes).send_buffer_size(bytes);
+    }
+    if let Ok(bytes) = std::env::var("OMQ_SOAK_ARENA_THRESHOLD")
+        && let Ok(bytes) = bytes.parse()
+    {
+        options = options.arena_threshold(bytes);
+    }
+    options
+}
+
 #[test]
 #[expect(clippy::too_many_lines)]
 fn soak_large_message_throughput() {
@@ -99,17 +191,17 @@ fn soak_large_message_throughput() {
     let ctx = soak_common::build_context();
 
     ctx.block_on(async move {
-        let pull = Socket::new(SocketType::Pull, soak_common::soak_options().recv_hwm(4));
+        let pull = Socket::new(SocketType::Pull, large_throughput_options().recv_hwm(4));
         let ep = pull.bind(soak_common::tcp_ep(0)).await.unwrap();
 
-        let push = Socket::new(SocketType::Push, soak_common::soak_options().send_hwm(4));
+        let push = Socket::new(SocketType::Push, large_throughput_options().send_hwm(4));
         push.connect(ep).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let send_sent = sent.clone();
         let send_stop = stop.clone();
         let push_clone = push.clone();
-        let send_task = tokio::spawn(async move {
+        let mut send_task = tokio::spawn(async move {
             let mut seq = 0u64;
             while !send_stop.load(Ordering::Relaxed) {
                 let payload = build_payload(seq);
@@ -129,7 +221,7 @@ fn soak_large_message_throughput() {
         let recv_stop = stop.clone();
         let pull_clone = pull.clone();
         let recv_stats = stats.clone();
-        let recv_task = tokio::spawn(async move {
+        let mut recv_task = tokio::spawn(async move {
             while !recv_stop.load(Ordering::Relaxed) {
                 if let Ok(Ok(m)) =
                     tokio::time::timeout(Duration::from_secs(2), pull_clone.recv()).await
@@ -146,7 +238,19 @@ fn soak_large_message_throughput() {
         let mut tracker = soak_common::ThroughputTracker::new(Duration::from_secs(10));
 
         while start.elapsed() < duration {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::select! {
+                res = &mut send_task => {
+                    stop.store(true, Ordering::Relaxed);
+                    res.expect("large throughput send task panicked");
+                    panic!("large throughput send task exited before stop");
+                }
+                res = &mut recv_task => {
+                    stop.store(true, Ordering::Relaxed);
+                    res.expect("large throughput recv task panicked");
+                    panic!("large throughput recv task exited before stop");
+                }
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
             let s = sent.load(Ordering::Relaxed);
             let r = recvd.load(Ordering::Relaxed);
             tracker.record(r);
@@ -162,8 +266,12 @@ fn soak_large_message_throughput() {
         stop.store(true, Ordering::Relaxed);
         tracker.assert_stable("large_throughput");
 
-        let _ = send_task.await;
-        let _ = recv_task.await;
+        send_task
+            .await
+            .expect("large throughput send task panicked");
+        recv_task
+            .await
+            .expect("large throughput recv task panicked");
 
         let s = sent.load(Ordering::Relaxed);
         let r = recvd.load(Ordering::Relaxed);

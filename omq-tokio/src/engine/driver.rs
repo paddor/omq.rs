@@ -1866,7 +1866,10 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use tokio::io::DuplexStream;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{DuplexStream, ReadBuf};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -1918,6 +1921,174 @@ mod tests {
         sink.flush_and_signal();
 
         assert_eq!(signals.load(Ordering::Relaxed), 2);
+    }
+
+    #[derive(Debug)]
+    struct PartialVectoredWriter {
+        out: Vec<u8>,
+        first_cap: usize,
+        next_cap: usize,
+        writes: usize,
+    }
+
+    impl PartialVectoredWriter {
+        fn new(first_cap: usize, next_cap: usize) -> Self {
+            Self {
+                out: Vec::new(),
+                first_cap,
+                next_cap,
+                writes: 0,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for PartialVectoredWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let cap = if self.writes == 0 {
+                self.first_cap
+            } else {
+                self.next_cap
+            };
+            let n = cap.min(buf.len());
+            if n > 0 {
+                self.out.extend_from_slice(&buf[..n]);
+            }
+            self.writes += 1;
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let total = bufs.iter().map(|buf| buf.len()).sum::<usize>();
+            let cap = if self.writes == 0 {
+                self.first_cap
+            } else {
+                self.next_cap
+            };
+            let mut remaining = cap.min(total);
+            for buf in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(buf.len());
+                self.out.extend_from_slice(&buf[..n]);
+                remaining -= n;
+            }
+            self.writes += 1;
+            Poll::Ready(Ok(cap.min(total)))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedReader {
+        data: Bytes,
+        pos: usize,
+        chunks: VecDeque<usize>,
+    }
+
+    impl ScriptedReader {
+        fn new(data: Bytes, chunks: impl IntoIterator<Item = usize>) -> Self {
+            Self {
+                data,
+                pos: 0,
+                chunks: chunks.into_iter().collect(),
+            }
+        }
+    }
+
+    impl tokio::io::AsyncRead for ScriptedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.pos >= self.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            let chunk_cap = self.chunks.pop_front().unwrap_or(usize::MAX);
+            let n = chunk_cap
+                .min(buf.remaining())
+                .min(self.data.len() - self.pos);
+            let end = self.pos + n;
+            buf.put_slice(&self.data[self.pos..end]);
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_frame_buffer_preserves_large_payload_after_partial_write() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let payload = (0..MSG_SIZE).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        let mut eq = FrameBuffer::one_shot();
+        eq.frame(&Message::single(Bytes::from(payload.clone())));
+
+        let mut drain_buf = Vec::new();
+        let mut writer = PartialVectoredWriter::new(9 + 632_554, 65_537);
+        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
+            .await
+            .unwrap();
+
+        assert!(eq.is_empty());
+        assert_eq!(writer.out.len(), 9 + MSG_SIZE);
+        assert_eq!(writer.out[0], 0x02);
+        assert_eq!(
+            u64::from_be_bytes(writer.out[1..9].try_into().unwrap()),
+            MSG_SIZE as u64
+        );
+        assert_eq!(&writer.out[9..], &payload);
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_preserves_buffered_prefix() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 632_558;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = (0..MSG_SIZE).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+        pull.handle_input(wire.slice(..prefix_wire_bytes)).unwrap();
+        let mut reader = ScriptedReader::new(
+            wire.slice(prefix_wire_bytes..),
+            [3, 1, 65_537, 8_191, 262_147],
+        );
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let pool = RecvBufPool::new();
+        let mut last_input = Instant::now();
+
+        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input, &pool)
+            .await
+            .unwrap();
+
+        let msg = pull.poll_message().expect("large message decoded");
+        assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+        assert_eq!(reader.pos, reader.data.len());
     }
 
     #[tokio::test]
@@ -2245,5 +2416,29 @@ mod tests {
             connection.advance_transmit(out.len() - len_before);
         }
         out
+    }
+
+    fn ready_push_pull_connections() -> (Connection, Connection) {
+        let mut push = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"c")),
+        );
+        let mut pull = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        for _ in 0..10 {
+            let push_out = drain_transmit(&mut push);
+            let pull_out = drain_transmit(&mut pull);
+            if push_out.is_empty() && pull_out.is_empty() {
+                break;
+            }
+            if !push_out.is_empty() {
+                pull.handle_input(Bytes::from(push_out)).unwrap();
+            }
+            if !pull_out.is_empty() {
+                push.handle_input(Bytes::from(pull_out)).unwrap();
+            }
+        }
+        assert!(push.is_ready());
+        assert!(pull.is_ready());
+        (push, pull)
     }
 }

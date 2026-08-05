@@ -185,6 +185,7 @@ when a measured cell looks bad, don't hand-wave it as noise.
 | `omq_bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio-ct |
 | `omq_bench_peer_blocking` | `omq-tokio/src/bin/bench_peer_blocking.rs` | omq-tokio-1t, omq-tokio-2t |
 | `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
+| `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 
@@ -213,9 +214,10 @@ postfix=performance governor, turbo off
 
 ### Main TCP Charts
 
-Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput)
-and `doc/charts/main_reqrep_tcp.svg` (REQ/REP latency), TCP only.
-Rebench omq impls only, then regenerate:
+Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
+`doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
+`doc/charts/main_reqrep_tcp.svg` (REQ/REP latency), TCP only.
+Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:
 
 ```sh
 cargo run --release -p omq-bench -- run comparisons \
@@ -223,10 +225,10 @@ cargo run --release -p omq-bench -- run comparisons \
 cargo run --release -p omq-bench -- chart main
 ```
 
-Rebench all impls (when external baselines are stale):
+Rebench all impls for all three main TCP charts:
 
 ```sh
-cargo run --release -p omq-bench -- run comparisons --transport tcp --no-pubsub
+cargo run --release -p omq-bench -- run comparisons --transport tcp
 cargo run --release -p omq-bench -- chart main
 ```
 
@@ -234,7 +236,8 @@ cargo run --release -p omq-bench -- chart main
 
 Produces `doc/charts/{pushpull,pubsub,reqrep}/*.svg`,
 `doc/charts/pushpull/fan{out,in}/tcp.svg`,
-`doc/charts/main_pushpull_tcp.svg`, `doc/charts/main_reqrep_tcp.svg`:
+`doc/charts/main_pushpull_tcp.svg`, `doc/charts/main_pubsub_tcp.svg`,
+`doc/charts/main_reqrep_tcp.svg`:
 
 ```sh
 cargo run --release -p omq-bench -- run comparisons --omq

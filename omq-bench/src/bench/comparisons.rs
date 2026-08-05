@@ -162,6 +162,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[("ZMQ_IO_THREADS", "2")],
     },
     ImplDef {
+        name: "tmq",
+        binary_from: None,
+        prefix: "m",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "push",
+        fanio_needs_peer_count: false,
+        supports_pubsub: true,
+        env: &[],
+    },
+    ImplDef {
         name: "zmq.rs",
         binary_from: None,
         prefix: "q",
@@ -450,6 +466,17 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                     PathBuf::from("scripts/zmqrs_bench_peer/target/release/zmqrs_bench_peer"),
                 );
             }
+            "tmq" => {
+                run_build_in_dir_with_env(
+                    &["cargo", "build", "--release", "-q"],
+                    "scripts/tmq_bench_peer",
+                    &[("CXXFLAGS", "-std=gnu++11")],
+                );
+                binaries.insert(
+                    source.to_string(),
+                    PathBuf::from("scripts/tmq_bench_peer/target/release/tmq_bench_peer"),
+                );
+            }
             "rzmq" => {
                 run_build_in_dir(
                     &["cargo", "build", "--release", "-q"],
@@ -491,6 +518,17 @@ fn run_build_in_dir(cmd: &[&str], dir: &str) {
     let status = std::process::Command::new(cmd[0])
         .args(&cmd[1..])
         .current_dir(dir)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run {cmd:?} in {dir}: {e}"));
+    assert!(status.success(), "build failed: {cmd:?} in {dir}");
+}
+
+fn run_build_in_dir_with_env(cmd: &[&str], dir: &str, env: &[(&str, &str)]) {
+    eprintln!("  building: {} (in {dir})", cmd.join(" "));
+    let status = std::process::Command::new(cmd[0])
+        .args(&cmd[1..])
+        .current_dir(dir)
+        .envs(env.iter().copied())
         .status()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?} in {dir}: {e}"));
     assert!(status.success(), "build failed: {cmd:?} in {dir}");

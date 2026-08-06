@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const COMPARISON_CHART_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
-const MAIN_EXTRA_CHART_SIZES: &[u64] = &[32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304];
+const MAIN_EXTRA_CHART_SIZES: &[u64] = &[
+    32, 128, 512, 2048, 8192, 32768, 262_144, 4_194_304, 8_388_608,
+];
 const QUICK_SIZES: &[u64] = &[64, 1024, 4096];
 
 const LATENCY_MAX_SIZE: u64 = 4096;

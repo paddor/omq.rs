@@ -1203,4 +1203,96 @@ mod tests {
         );
         assert_eq!(batch.len(), 1);
     }
+
+    #[test]
+    fn large_message_batch_survives_ring_slot_reuse() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let (mut producer, mut consumer) = yring::spsc(1);
+        let first = (0..MSG_SIZE).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        let second = (0..MSG_SIZE)
+            .map(|i| 255u8.wrapping_sub((i & 0xFF) as u8))
+            .collect::<Vec<_>>();
+
+        producer
+            .push(RecvItem::new(Message::single(first.clone())))
+            .unwrap();
+        producer.flush();
+
+        let mut batch = std::collections::VecDeque::new();
+        let mut budget = DrainBudget::new(256, RECV_BATCH_BYTES);
+        let mut remaining = 0;
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            1
+        );
+        assert_eq!(remaining, 0);
+
+        producer
+            .push(RecvItem::new(Message::single(second.clone())))
+            .unwrap();
+        producer.flush();
+
+        assert_eq!(
+            batch.front().unwrap().part_bytes(0).unwrap().as_ref(),
+            first.as_slice()
+        );
+
+        let mut next_budget = DrainBudget::new(256, RECV_BATCH_BYTES);
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut next_budget),
+            1
+        );
+        assert_eq!(
+            batch.pop_front().unwrap().part_bytes(0).unwrap().as_ref(),
+            first.as_slice()
+        );
+        assert_eq!(
+            batch.pop_front().unwrap().part_bytes(0).unwrap().as_ref(),
+            second.as_slice()
+        );
+    }
+
+    #[test]
+    fn held_large_message_survives_many_ring_wraps() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let (mut producer, mut consumer) = yring::spsc(1);
+        let first = (0..MSG_SIZE)
+            .map(|i| ((i as u8).wrapping_mul(31)) ^ ((i >> 8) as u8))
+            .collect::<Vec<_>>();
+
+        producer
+            .push(RecvItem::new(Message::single(first.clone())))
+            .unwrap();
+        producer.flush();
+
+        let mut batch = std::collections::VecDeque::new();
+        let mut budget = DrainBudget::new(256, RECV_BATCH_BYTES);
+        let mut remaining = 0;
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            1
+        );
+        let held = batch.pop_front().unwrap();
+
+        for seq in 0..16u8 {
+            let next = (0..MSG_SIZE)
+                .map(|i| seq ^ (i as u8).wrapping_mul(17))
+                .collect::<Vec<_>>();
+            producer
+                .push(RecvItem::new(Message::single(next.clone())))
+                .unwrap();
+            producer.flush();
+
+            let mut next_budget = DrainBudget::new(256, RECV_BATCH_BYTES);
+            assert_eq!(
+                drain_yring(&mut consumer, &mut batch, &mut remaining, &mut next_budget),
+                1
+            );
+            assert_eq!(
+                batch.pop_front().unwrap().part_bytes(0).unwrap().as_ref(),
+                next.as_slice()
+            );
+            assert_eq!(held.part_bytes(0).unwrap().as_ref(), first.as_slice());
+        }
+    }
 }

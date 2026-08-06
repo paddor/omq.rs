@@ -48,6 +48,39 @@ async fn push_pull_large(size_bytes: usize) {
     );
 }
 
+fn patterned_payload(len: usize, seq: u64) -> Vec<u8> {
+    let mut payload = vec![0u8; len];
+    payload[..8].copy_from_slice(&0xDEAD_BEEF_CAFE_F00Du64.to_le_bytes());
+    payload[8..16].copy_from_slice(&seq.to_le_bytes());
+    let mask = (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3);
+    for (i, byte) in payload.iter_mut().enumerate().skip(16) {
+        let mut expected = (i as u8).wrapping_mul(31);
+        expected ^= ((i >> 8) as u8).wrapping_mul(17);
+        expected ^= ((i >> 16) as u8).wrapping_mul(13);
+        *byte = expected ^ mask;
+    }
+    payload
+}
+
+fn assert_patterned_payload(got: &[u8], seq: u64) {
+    let magic = u64::from_le_bytes(got[..8].try_into().unwrap());
+    let got_seq = u64::from_le_bytes(got[8..16].try_into().unwrap());
+    assert_eq!(magic, 0xDEAD_BEEF_CAFE_F00D, "canary corrupt");
+    assert_eq!(got_seq, seq, "payload sequence mismatch");
+
+    let mask = (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3);
+    for (i, &byte) in got.iter().enumerate().skip(16) {
+        let mut expected = (i as u8).wrapping_mul(31);
+        expected ^= ((i >> 8) as u8).wrapping_mul(17);
+        expected ^= ((i >> 16) as u8).wrapping_mul(13);
+        expected ^= mask;
+        assert_eq!(
+            byte, expected,
+            "payload byte corruption at offset {i}: seq={seq}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn large_message_64kib() {
     push_pull_large(64 * 1024).await;
@@ -156,4 +189,137 @@ async fn large_message_back_to_back() {
         .unwrap();
     assert_eq!(&*m1.part_bytes(0).unwrap(), &p1[..]);
     assert_eq!(&*m2.part_bytes(0).unwrap(), &p2[..]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_large_messages_preserve_pattern_under_hwm_backpressure() {
+    const COUNT: u64 = 32;
+    const SIZE: usize = 1024 * 1024;
+
+    let opts = Options::default()
+        .send_hwm(4)
+        .recv_hwm(4)
+        .send_buffer_size(64 * 1024)
+        .recv_buffer_size(64 * 1024);
+    let pull = Socket::new(SocketType::Pull, opts.clone());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, opts);
+    push.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
+
+    let sender = tokio::spawn(async move {
+        for seq in 0..COUNT {
+            push.send(Message::single(patterned_payload(SIZE, seq)))
+                .await
+                .unwrap();
+        }
+        push
+    });
+
+    for seq in 0..COUNT {
+        let m = tokio::time::timeout(Duration::from_secs(10), pull.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out receiving seq {seq}"))
+            .unwrap();
+        let got = m.part_bytes(0).unwrap();
+        assert_eq!(got.len(), SIZE, "payload length mismatch for seq {seq}");
+        assert_patterned_payload(&got, seq);
+    }
+
+    let push = sender.await.unwrap();
+    push.close().await.unwrap();
+    pull.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_large_messages_survive_recv_bypass_ring_pressure() {
+    const COUNT: u64 = 48;
+    const HOLD_COUNT: u64 = 8;
+    const SIZE: usize = 1024 * 1024;
+
+    let opts = Options::default()
+        .send_hwm(4)
+        .recv_hwm(4)
+        .send_buffer_size(64 * 1024)
+        .recv_buffer_size(64 * 1024);
+    let pull = Socket::new(SocketType::Pull, opts.clone());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, opts);
+    push.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
+
+    let sender = tokio::spawn(async move {
+        for seq in 0..COUNT {
+            push.send(Message::single(patterned_payload(SIZE, seq)))
+                .await
+                .unwrap();
+        }
+        push
+    });
+
+    let mut held = Vec::new();
+    for seq in 0..COUNT {
+        let m = tokio::time::timeout(Duration::from_secs(10), pull.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out receiving seq {seq}"))
+            .unwrap();
+        let got = m.part_bytes(0).unwrap();
+        assert_eq!(got.len(), SIZE, "payload length mismatch for seq {seq}");
+        assert_patterned_payload(&got, seq);
+
+        if seq < HOLD_COUNT {
+            held.push((seq, m));
+        }
+        for (held_seq, held_msg) in &held {
+            let held_payload = held_msg.part_bytes(0).unwrap();
+            assert_patterned_payload(&held_payload, *held_seq);
+        }
+    }
+
+    let push = sender.await.unwrap();
+    push.close().await.unwrap();
+    pull.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_message_preserves_pattern_with_tiny_tcp_buffers() {
+    const COUNT: u64 = 1;
+    const SIZE: usize = 1024 * 1024;
+
+    let opts = Options::default()
+        .send_hwm(4)
+        .recv_hwm(4)
+        .send_buffer_size(16 * 1024)
+        .recv_buffer_size(16 * 1024);
+    let pull = Socket::new(SocketType::Pull, opts.clone());
+    let ep = pull.bind(tcp_ep(0)).await.unwrap();
+    let push = Socket::new(SocketType::Push, opts);
+    push.connect(ep).await.unwrap();
+    test_support::wait_for_handshake(&push).await;
+    test_support::wait_for_handshake(&pull).await;
+
+    let sender = tokio::spawn(async move {
+        for seq in 0..COUNT {
+            push.send(Message::single(patterned_payload(SIZE, seq)))
+                .await
+                .unwrap();
+        }
+        push
+    });
+
+    for seq in 0..COUNT {
+        let m = tokio::time::timeout(Duration::from_secs(15), pull.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out receiving seq {seq}"))
+            .unwrap();
+        let got = m.part_bytes(0).unwrap();
+        assert_eq!(got.len(), SIZE, "payload length mismatch for seq {seq}");
+        assert_patterned_payload(&got, seq);
+    }
+
+    let push = sender.await.unwrap();
+    push.close().await.unwrap();
+    pull.close().await.unwrap();
 }

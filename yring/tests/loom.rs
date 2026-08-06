@@ -170,6 +170,43 @@ fn wraparound_correctness() {
 }
 
 #[test]
+fn popped_value_survives_slot_reuse() {
+    use loom::sync::Arc;
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<Arc<usize>>(1);
+
+        p.push(Arc::new(10)).unwrap();
+        p.flush();
+
+        let first = loop {
+            if c.prefetch() > 0 {
+                let value = c.pop().unwrap();
+                c.release();
+                break value;
+            }
+            thread::yield_now();
+        };
+
+        let h = thread::spawn(move || {
+            while p.push(Arc::new(20)).is_err() {
+                thread::yield_now();
+            }
+            p.flush();
+        });
+
+        h.join().unwrap();
+        assert_eq!(*first, 10);
+
+        assert_eq!(c.prefetch(), 1);
+        let second = c.pop().unwrap();
+        c.release();
+        assert_eq!(*first, 10);
+        assert_eq!(*second, 20);
+    });
+}
+
+#[test]
 fn pointer_width_cursor_wrap_boundary() {
     loom::model(|| {
         let base = usize::MAX - 1;

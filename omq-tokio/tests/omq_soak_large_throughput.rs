@@ -8,6 +8,7 @@ mod soak_common;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use std::{fs, io::Write};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
@@ -82,18 +83,64 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
 fn corruption_context(data: &[u8], seq: u64, offset: usize) -> String {
     let pattern = payload_pattern();
     let mask = seq_mask(seq);
+    let got = data[offset];
+    let expected_byte = pattern[offset] ^ mask;
+    let xor = got ^ expected_byte;
     let start = offset.saturating_sub(16).max(16);
     let end = offset.saturating_add(16).min(data.len());
     let expected: Vec<u8> = (start..end).map(|pos| pattern[pos] ^ mask).collect();
     let (delta, matches, window_len) = best_source_shift(data, seq, offset);
     format!(
-        "best_source_delta={delta}, shift_window_matches={matches}/{window_len}, \
+        "xor=0x{xor:02x}, single_bit={}, best_source_delta={delta}, \
+         shift_window_matches={matches}/{window_len}, \
          got_window[{}..{}]={:02x?}, expected_window={:02x?}",
+        xor.is_power_of_two(),
         start,
         end,
         &data[start..end],
         expected
     )
+}
+
+fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<String> {
+    let dir = std::path::Path::new("tmp/soak-large-corruption");
+    fs::create_dir_all(dir).ok()?;
+    let stamp = format!("seq-{seq}-offset-{offset}-pid-{}", std::process::id());
+    let got_path = dir.join(format!("{stamp}.got.bin"));
+    let expected_path = dir.join(format!("{stamp}.expected.bin"));
+    let meta_path = dir.join(format!("{stamp}.meta.txt"));
+
+    let pattern = payload_pattern();
+    let mask = seq_mask(seq);
+    let expected = pattern
+        .iter()
+        .enumerate()
+        .map(|(i, &byte)| {
+            if i < 8 {
+                CANARY_MAGIC.to_le_bytes()[i]
+            } else if i < 16 {
+                seq.to_le_bytes()[i - 8]
+            } else {
+                byte ^ mask
+            }
+        })
+        .collect::<Vec<_>>();
+
+    fs::write(&got_path, data).ok()?;
+    fs::write(&expected_path, expected).ok()?;
+    let mut meta = fs::File::create(&meta_path).ok()?;
+    let got = data[offset];
+    let expected_byte = payload_pattern()[offset] ^ seq_mask(seq);
+    let xor = got ^ expected_byte;
+    writeln!(meta, "seq={seq}").ok()?;
+    writeln!(meta, "offset={offset}").ok()?;
+    writeln!(meta, "got={got}").ok()?;
+    writeln!(meta, "expected={expected_byte}").ok()?;
+    writeln!(meta, "xor=0x{xor:02x}").ok()?;
+    writeln!(meta, "single_bit={}", xor.is_power_of_two()).ok()?;
+    writeln!(meta, "got_path={}", got_path.display()).ok()?;
+    writeln!(meta, "expected_path={}", expected_path.display()).ok()?;
+    Some(meta_path.display().to_string())
 }
 
 struct PayloadStats {
@@ -135,9 +182,11 @@ impl PayloadStats {
             let expected = pattern[i] ^ mask;
             if byte != expected {
                 let context = corruption_context(data, seq, i);
+                let artifact = dump_corruption_artifact(data, seq, i)
+                    .unwrap_or_else(|| "artifact dump failed".to_string());
                 panic!(
                     "payload byte corruption at offset {i}: seq={seq}, \
-                     got={byte}, expected={expected}, {context}"
+                     got={byte}, expected={expected}, artifact={artifact}, {context}"
                 );
             }
         }

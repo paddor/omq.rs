@@ -397,6 +397,7 @@ impl PeerTransmitSlot {
         }
 
         if eq_drained_chunks > 0 {
+            #[allow(deprecated)]
             self.queued_msgs
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                     Some(n.saturating_sub(eq_drained_chunks))

@@ -403,6 +403,51 @@ mod tests {
     }
 
     #[test]
+    fn randomized_split_read_and_advance_match_contiguous_reference() {
+        let cases = if cfg!(miri) { 2 } else { 64 };
+        let steps = if cfg!(miri) { 64 } else { 512 };
+        for case in 0..cases {
+            let mut seed = 0xC0DE_FEED_BADC_0FFE ^ case;
+            let mut buf = ChunkedInputBuf::new();
+            let mut expected = Vec::new();
+            let mut next_byte = case as u8;
+
+            for _ in 0..steps {
+                if expected.len() < 128 || next_random(&mut seed).is_multiple_of(3) {
+                    let len = random_len(&mut seed);
+                    let chunk = (0..len)
+                        .map(|_| {
+                            let byte = next_byte;
+                            next_byte = next_byte.wrapping_add(31);
+                            byte
+                        })
+                        .collect::<Vec<_>>();
+                    expected.extend_from_slice(&chunk);
+                    buf.push(Bytes::from(chunk));
+                } else {
+                    let n = 1 + (next_random(&mut seed) % expected.len());
+                    match next_random(&mut seed) % 3 {
+                        0 => {
+                            buf.advance(n);
+                        }
+                        1 => {
+                            let mut got = vec![0u8; n];
+                            buf.read_into(n, &mut got);
+                            assert_eq!(got, expected[..n], "case={case}, n={n}");
+                        }
+                        _ => {
+                            let got = buf.split_to(n);
+                            assert_eq!(got.as_slice(), &expected[..n], "case={case}, n={n}");
+                        }
+                    }
+                    expected.drain(..n);
+                }
+                assert_chunked_matches_prefix(&buf, &expected, case);
+            }
+        }
+    }
+
+    #[test]
     fn read_into_zero_on_empty() {
         let mut buf = ChunkedInputBuf::new();
         let mut dest = [0u8; 4];
@@ -419,5 +464,52 @@ mod tests {
         let mut dest = [0u8; 4];
         buf.read_into(0, &mut dest);
         assert!(buf.is_empty());
+    }
+
+    fn assert_chunked_matches_prefix(buf: &ChunkedInputBuf, expected: &[u8], case: u64) {
+        assert_eq!(buf.len(), expected.len(), "case={case}");
+        if expected.is_empty() {
+            assert!(buf.is_empty(), "case={case}");
+            assert!(buf.peek_array::<1>().is_none(), "case={case}");
+        } else {
+            assert_eq!(buf.peek_array::<1>(), Some([expected[0]]), "case={case}");
+            if expected.len() >= 8 {
+                let mut prefix = [0u8; 8];
+                prefix.copy_from_slice(&expected[..8]);
+                assert_eq!(buf.peek_array::<8>(), Some(prefix), "case={case}");
+            }
+        }
+    }
+
+    fn random_len(seed: &mut u64) -> usize {
+        if cfg!(miri) {
+            return match next_random(seed) % 6 {
+                0 => 1,
+                1 => 2,
+                2 => 3,
+                3 => 62,
+                4 => 63,
+                _ => (next_random(seed) % 128) + 1,
+            };
+        }
+        match next_random(seed) % 10 {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => 62,
+            4 => 63,
+            5 => 255,
+            6 => 256,
+            7 => 4095,
+            8 => 4096,
+            _ => (next_random(seed) % 1024) + 1,
+        }
+    }
+
+    fn next_random(seed: &mut u64) -> usize {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed as usize
     }
 }

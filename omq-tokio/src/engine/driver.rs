@@ -868,7 +868,6 @@ where
         };
         let mut read_buf_full_reads = 0usize;
         let mut read_buf = BytesMut::with_capacity(read_buf_target);
-        let recv_pool = RecvBufPool::new();
         let mut eq = FrameBuffer::with_config_lazy(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::new();
         let mut arena_buf: Vec<u8> = Vec::new();
@@ -930,7 +929,6 @@ where
                         &mut read_buf_full_reads,
                         &config,
                         &mut last_input,
-                        &recv_pool,
                         &peer_out,
                         peer_id,
                     ).await?;
@@ -1040,7 +1038,6 @@ where
                         &mut read_buf_full_reads,
                         &config,
                         &mut last_input,
-                        &recv_pool,
                         &peer_out,
                         peer_id,
                     ).await?;
@@ -1259,7 +1256,6 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     read_buf_full_reads: &mut usize,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
-    recv_pool: &Arc<RecvBufPool>,
     peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
 ) -> Result<()> {
@@ -1280,7 +1276,7 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
         emit_connection_events_best_effort(connection, peer_out, peer_id).await;
         return Err(e);
     }
-    handle_large_messages(connection, reader, config, last_input, recv_pool).await
+    handle_large_messages(connection, reader, config, last_input).await
 }
 
 fn handle_pre_activation_inbox_command(
@@ -1488,65 +1484,13 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-// -- Recv buffer pool --------------------------------------------------------
-//
-// Large messages (above the arena threshold) need their own allocation.
-// Without pooling, each message triggers mmap + page faults for fresh
-// zeroed pages. The pool recycles buffers: pages stay warm, no syscall
-// per message after warmup.
-
-#[derive(Debug)]
-struct RecvBufPool(std::sync::Mutex<Vec<Vec<u8>>>);
-
-impl RecvBufPool {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(std::sync::Mutex::new(Vec::new())))
-    }
-
-    fn take(&self, capacity: usize) -> Vec<u8> {
-        let mut pool = self.0.lock().expect("recv buf pool");
-        if let Some(mut buf) = pool.pop() {
-            if buf.capacity() < capacity {
-                buf.reserve(capacity - buf.capacity());
-            }
-            buf
-        } else {
-            Vec::with_capacity(capacity)
-        }
-    }
-
-    fn give(&self, buf: Vec<u8>) {
-        self.0.lock().expect("recv buf pool").push(buf);
-    }
-}
-
-struct PooledRecvBuf {
-    buf: Vec<u8>,
-    pool: Arc<RecvBufPool>,
-}
-
-impl AsRef<[u8]> for PooledRecvBuf {
-    fn as_ref(&self) -> &[u8] {
-        &self.buf
-    }
-}
-
-impl Drop for PooledRecvBuf {
-    fn drop(&mut self) {
-        let buf = std::mem::take(&mut self.buf);
-        self.pool.give(buf);
-    }
-}
-
-/// Read large frames directly into pooled buffers (bypasses the fixed
-/// `read_buf` -> `Connection` buffering path). The pool recycles allocations
-/// so pages stay warm across messages.
+/// Read large frames directly into owned buffers (bypasses the fixed
+/// `read_buf` -> `Connection` buffering path).
 async fn handle_large_messages<R: AsyncRead + Unpin>(
     connection: &mut Connection,
     reader: &mut R,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
-    recv_pool: &Arc<RecvBufPool>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
     let skip_large = connection.is_ws();
@@ -1562,18 +1506,13 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
         let Some((plen, prefix)) = connection.begin_supplied_payload_with_prefix() else {
             break;
         };
-        let mut buf = recv_pool.take(plen);
-        buf.resize(plen, 0);
+        let mut buf = BytesMut::zeroed(plen);
         buf[..prefix.len()].copy_from_slice(prefix.as_slice());
         if prefix.len() < plen {
             reader.read_exact(&mut buf[prefix.len()..plen]).await?;
         }
         *last_input = Instant::now();
-        let payload = Bytes::from_owner(PooledRecvBuf {
-            buf,
-            pool: Arc::clone(recv_pool),
-        });
-        connection.supply_payload(payload)?;
+        connection.supply_payload(buf.freeze())?;
     }
     Ok(())
 }
@@ -1885,6 +1824,118 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ChoppyDuplex {
+        inner: DuplexStream,
+        read_cap: usize,
+        write_cap: usize,
+    }
+
+    impl ChoppyDuplex {
+        fn new(inner: DuplexStream, read_cap: usize, write_cap: usize) -> Self {
+            Self {
+                inner,
+                read_cap: read_cap.max(1),
+                write_cap: write_cap.max(1),
+            }
+        }
+    }
+
+    impl DriverStream for ChoppyDuplex {
+        type Reader = ChoppyReader<tokio::io::ReadHalf<DuplexStream>>;
+        type Writer = ChoppyWriter<tokio::io::WriteHalf<DuplexStream>>;
+
+        fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+            let (reader, writer) = tokio::io::split(self.inner);
+            (
+                ChoppyReader {
+                    inner: reader,
+                    cap: self.read_cap,
+                },
+                ChoppyWriter {
+                    inner: writer,
+                    cap: self.write_cap,
+                },
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChoppyReader<R> {
+        inner: R,
+        cap: usize,
+    }
+
+    impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ChoppyReader<R> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let mut scratch = vec![0u8; self.cap.min(buf.remaining())];
+            let mut limited = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut limited) {
+                Poll::Ready(Ok(())) => {
+                    buf.put_slice(limited.filled());
+                    Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChoppyWriter<W> {
+        inner: W,
+        cap: usize,
+    }
+
+    impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ChoppyWriter<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let n = self.cap.min(buf.len());
+            Pin::new(&mut self.inner).poll_write(cx, &buf[..n])
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let mut remaining = self.cap;
+            let mut limited: SmallVec<[io::IoSlice<'_>; 64]> = SmallVec::new();
+            for buf in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(buf.len());
+                if n > 0 {
+                    limited.push(io::IoSlice::new(&buf[..n]));
+                    remaining -= n;
+                }
+            }
+            Pin::new(&mut self.inner).poll_write_vectored(cx, &limited)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.inner.is_write_vectored()
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
     #[test]
     fn latency_receive_profile_drains_one_message_without_timer() {
         for profile in [ReceiveProfile::Latency, ReceiveProfile::LatencyReq] {
@@ -1999,6 +2050,67 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct ScriptedVectoredWriter {
+        out: Vec<u8>,
+        caps: VecDeque<usize>,
+        fallback_cap: usize,
+    }
+
+    impl ScriptedVectoredWriter {
+        fn new(caps: impl IntoIterator<Item = usize>, fallback_cap: usize) -> Self {
+            Self {
+                out: Vec::new(),
+                caps: caps.into_iter().collect(),
+                fallback_cap,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ScriptedVectoredWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let cap = self.caps.pop_front().unwrap_or(self.fallback_cap).max(1);
+            let n = cap.min(buf.len());
+            self.out.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let total = bufs.iter().map(|buf| buf.len()).sum::<usize>();
+            let cap = self.caps.pop_front().unwrap_or(self.fallback_cap).max(1);
+            let mut remaining = cap.min(total);
+            for buf in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(buf.len());
+                self.out.extend_from_slice(&buf[..n]);
+                remaining -= n;
+            }
+            Poll::Ready(Ok(cap.min(total)))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
     struct ScriptedReader {
         data: Bytes,
         pos: usize,
@@ -2059,6 +2171,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_frame_buffer_preserves_large_payloads_after_partial_write_matrix() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const CAPS: &[(usize, usize)] = &[
+            (1, 16_384),
+            (8, 16_384),
+            (9, 16_384),
+            (9 + 632_554, 65_537),
+            (9 + 632_558, 65_537),
+            (9 + 632_562, 65_537),
+            (9 + MSG_SIZE - 4, 4_097),
+            (9 + MSG_SIZE, 4_097),
+        ];
+
+        let payloads = (0..3)
+            .map(|seq| patterned_payload(MSG_SIZE, seq))
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for payload in &payloads {
+            expected.push(0x02);
+            expected.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
+            expected.extend_from_slice(payload);
+        }
+
+        for &(first_cap, next_cap) in CAPS {
+            let mut eq = FrameBuffer::one_shot();
+            for payload in &payloads {
+                eq.frame(&Message::single(Bytes::copy_from_slice(payload)));
+            }
+
+            let mut drain_buf = Vec::new();
+            let mut writer = PartialVectoredWriter::new(first_cap, next_cap);
+            flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
+                .await
+                .unwrap();
+
+            assert!(eq.is_empty());
+            assert_eq!(
+                writer.out, expected,
+                "first_cap={first_cap}, next_cap={next_cap}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_frame_buffer_preserves_large_payloads_after_scripted_partial_writes() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let payloads = (0..4)
+            .map(|seq| patterned_payload(MSG_SIZE, seq))
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for payload in &payloads {
+            expected.push(0x02);
+            expected.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
+            expected.extend_from_slice(payload);
+        }
+
+        let mut eq = FrameBuffer::one_shot();
+        for payload in &payloads {
+            eq.frame(&Message::single(Bytes::copy_from_slice(payload)));
+        }
+
+        let caps = [
+            1,
+            8,
+            9,
+            31,
+            4_095,
+            4_097,
+            65_535,
+            65_537,
+            9 + 632_554,
+            9 + 632_558,
+            9 + 632_562,
+            131_071,
+            262_147,
+        ];
+        let mut drain_buf = Vec::new();
+        let mut writer = ScriptedVectoredWriter::new(caps, 17_003);
+        flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
+            .await
+            .unwrap();
+
+        assert!(eq.is_empty());
+        assert_eq!(writer.out, expected);
+    }
+
+    #[tokio::test]
+    async fn flush_frame_buffer_matches_reference_under_random_partial_writes() {
+        const LENGTHS: &[usize] = &[
+            16,
+            62,
+            63,
+            254,
+            255,
+            256,
+            4095,
+            4096,
+            8191,
+            65_535,
+            65_536,
+            131_073,
+            632_558,
+            1024 * 1024,
+        ];
+
+        for case in 0..48u64 {
+            let mut seed = 0xA5A5_5A5A_D3C1_BEEF ^ case;
+            let mut eq = FrameBuffer::one_shot();
+            let mut expected = Vec::new();
+            for seq in 0..12u64 {
+                let len = LENGTHS[next_random(&mut seed) % LENGTHS.len()];
+                let payload = patterned_payload(len, (case << 8) | seq);
+                push_expected_single_frame(&mut expected, &payload);
+                eq.frame(&Message::single(Bytes::from(payload)));
+            }
+
+            let caps = (0..192)
+                .map(|_| match next_random(&mut seed) % 12 {
+                    0 => 1,
+                    1 => 2,
+                    2 => 8,
+                    3 => 9,
+                    4 => 17,
+                    5 => 4_095,
+                    6 => 4_097,
+                    7 => 65_535,
+                    8 => 65_537,
+                    9 => 9 + 632_558,
+                    10 => 9 + 1024 * 1024 - 4,
+                    _ => (next_random(&mut seed) % 262_147) + 1,
+                })
+                .collect::<Vec<_>>();
+
+            let mut drain_buf = Vec::new();
+            let mut writer = ScriptedVectoredWriter::new(caps, 37_111);
+            flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
+                .await
+                .unwrap();
+
+            assert!(eq.is_empty(), "case={case}");
+            assert_eq!(writer.out, expected, "case={case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_lazy_frame_buffer_matches_reference_under_partial_writes() {
+        const LENGTHS: &[usize] = &[4_095, 4_096, 65_537, 632_558, 1024 * 1024];
+        let caps = [1, 8, 9, 4_097, 65_537, 9 + 632_554, 9 + 632_558, 262_147];
+        let mut eq = FrameBuffer::with_config_lazy(
+            omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+        );
+        let mut drain_buf = Vec::new();
+        let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
+        let mut expected = Vec::new();
+
+        for seq in 0..64u64 {
+            let len = LENGTHS[seq as usize % LENGTHS.len()];
+            let payload = patterned_payload(len, seq);
+            push_expected_single_frame(&mut expected, &payload);
+            eq.frame(&Message::single(Bytes::from(payload)));
+            flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf)
+                .await
+                .unwrap();
+            assert!(eq.is_empty(), "seq={seq}");
+        }
+
+        assert_eq!(writer.out, expected);
+    }
+
+    #[tokio::test]
+    async fn write_chunks_preserves_large_payloads_after_scripted_partial_writes() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let payloads = (0..3)
+            .map(|seq| patterned_payload(MSG_SIZE, seq))
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        let mut chunks = Vec::new();
+        for payload in &payloads {
+            let mut header = Vec::with_capacity(9);
+            header.push(0x02);
+            header.extend_from_slice(&(MSG_SIZE as u64).to_be_bytes());
+            expected.extend_from_slice(&header);
+            expected.extend_from_slice(payload);
+            chunks.push(Bytes::from(header));
+            chunks.push(Bytes::copy_from_slice(payload));
+        }
+
+        let caps = [
+            1,
+            8,
+            9,
+            17,
+            4_097,
+            9 + 632_558,
+            65_537,
+            262_147,
+            9 + MSG_SIZE - 4,
+        ];
+        let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
+        write_chunks(&mut writer, &mut chunks).await.unwrap();
+
+        assert!(chunks.is_empty());
+        assert_eq!(writer.out, expected);
+    }
+
+    #[tokio::test]
     async fn large_message_direct_read_preserves_buffered_prefix() {
         const MSG_SIZE: usize = 1024 * 1024;
         const PREFIX_PAYLOAD_BYTES: usize = 632_558;
@@ -2079,16 +2398,287 @@ mod tests {
             large_message_threshold: 128 * 1024,
             ..PeerDriverConfig::default()
         };
-        let pool = RecvBufPool::new();
         let mut last_input = Instant::now();
 
-        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input, &pool)
+        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
             .await
             .unwrap();
 
         let msg = pull.poll_message().expect("large message decoded");
         assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
         assert_eq!(reader.pos, reader.data.len());
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_preserves_fragmented_buffered_prefix() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 632_558;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = patterned_payload(MSG_SIZE, 42);
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+        pull.handle_input(wire.slice(..5)).unwrap();
+        pull.handle_input(wire.slice(5..17)).unwrap();
+        pull.handle_input(wire.slice(17..prefix_wire_bytes))
+            .unwrap();
+
+        let mut reader = ScriptedReader::new(
+            wire.slice(prefix_wire_bytes..),
+            [4, 3, 1, 65_537, 8_191, 262_147],
+        );
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+            .await
+            .unwrap();
+
+        let msg = pull.poll_message().expect("large message decoded");
+        assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+        assert_eq!(reader.pos, reader.data.len());
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_preserves_many_chunk_buffered_prefix() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 632_558;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = patterned_payload(MSG_SIZE, 43);
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+        feed_input_in_chunks(
+            &mut pull,
+            &wire,
+            prefix_wire_bytes,
+            [4096, 8192, 16_384, 32_768, 65_536, 131_072],
+        );
+
+        let mut reader = ScriptedReader::new(
+            wire.slice(prefix_wire_bytes..),
+            [4, 3, 1, 65_537, 8_191, 262_147],
+        );
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+            .await
+            .unwrap();
+
+        let msg = pull.poll_message().expect("large message decoded");
+        assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+        assert_eq!(reader.pos, reader.data.len());
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_preserves_repeated_payloads() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 632_558;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        for seq in 0..2 {
+            let payload = patterned_payload(MSG_SIZE, seq);
+            push.send_message(&Message::single(Bytes::from(payload.clone())))
+                .unwrap();
+            let wire = Bytes::from(drain_transmit(&mut push));
+            let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+            pull.handle_input(wire.slice(..prefix_wire_bytes)).unwrap();
+            let mut reader = ScriptedReader::new(
+                wire.slice(prefix_wire_bytes..),
+                [3, 1, 65_537, 8_191, 262_147],
+            );
+            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+                .await
+                .unwrap();
+
+            let msg = pull.poll_message().expect("large message decoded");
+            assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+        }
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_small_payload_smoke() {
+        const MSG_SIZE: usize = 8 * 1024;
+        const PREFIX_CASES: &[usize] = &[0, 4, 4097, MSG_SIZE];
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let config = PeerDriverConfig {
+            large_message_threshold: 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        for (seq, &prefix_payload_bytes) in PREFIX_CASES.iter().enumerate() {
+            let payload = patterned_payload(MSG_SIZE, seq as u64);
+            push.send_message(&Message::single(Bytes::from(payload.clone())))
+                .unwrap();
+            let wire = Bytes::from(drain_transmit(&mut push));
+            let prefix_wire_bytes = 9 + prefix_payload_bytes;
+
+            feed_fragmented_input(&mut pull, &wire, prefix_wire_bytes);
+            let mut reader = ScriptedReader::new(wire.slice(prefix_wire_bytes..), [1, 7, 31, 257]);
+            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+                .await
+                .unwrap();
+
+            let msg = pull.poll_message().expect("large message decoded");
+            assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+            assert_eq!(reader.pos, reader.data.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_survives_prefix_boundary_matrix() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_CASES: &[usize] = &[
+            0,
+            1,
+            4,
+            8,
+            9,
+            17,
+            255,
+            256,
+            4095,
+            4096,
+            65_535,
+            65_536,
+            128 * 1024 - 4,
+            128 * 1024,
+            128 * 1024 + 4,
+            632_554,
+            632_558,
+            632_562,
+            MSG_SIZE - 1,
+            MSG_SIZE,
+        ];
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        for (seq, &prefix_payload_bytes) in PREFIX_CASES.iter().enumerate() {
+            let payload = patterned_payload(MSG_SIZE, seq as u64);
+            push.send_message(&Message::single(Bytes::from(payload.clone())))
+                .unwrap();
+            let wire = Bytes::from(drain_transmit(&mut push));
+            let prefix_wire_bytes = 9 + prefix_payload_bytes;
+
+            feed_fragmented_input(&mut pull, &wire, prefix_wire_bytes);
+            let mut reader = ScriptedReader::new(
+                wire.slice(prefix_wire_bytes..),
+                [1 + (seq % 7), 3, 31, 4093, 65_537, 131_071, 262_147],
+            );
+
+            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+                .await
+                .unwrap();
+
+            let msg = pull.poll_message().expect("large message decoded");
+            assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+            assert_eq!(reader.pos, reader.data.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_matches_mixed_chunked_wire_reference() {
+        const LENGTHS: &[usize] = &[
+            16,
+            255,
+            256,
+            4095,
+            4096,
+            65_536,
+            128 * 1024 + 1,
+            632_558,
+            1024 * 1024,
+        ];
+        const CASES: u64 = 24;
+
+        for case in 0..CASES {
+            let mut seed = 0x5151_F00D_ABCD_1234 ^ case;
+            let (mut push, mut pull) = ready_push_pull_connections();
+            let mut expected = Vec::new();
+            for seq in 0..18u64 {
+                let len = LENGTHS[next_random(&mut seed) % LENGTHS.len()];
+                let payload = patterned_payload(len, (case << 8) | seq);
+                push.send_message(&Message::single(Bytes::from(payload.clone())))
+                    .unwrap();
+                expected.push(payload);
+            }
+            let wire = Bytes::from(drain_transmit(&mut push));
+            let config = PeerDriverConfig {
+                large_message_threshold: 128 * 1024,
+                ..PeerDriverConfig::default()
+            };
+            let mut last_input = Instant::now();
+            let mut cursor = 0usize;
+            let mut got = Vec::new();
+
+            while cursor < wire.len() {
+                let chunk_len = match next_random(&mut seed) % 10 {
+                    0 => 1,
+                    1 => 2,
+                    2 => 9,
+                    3 => 17,
+                    4 => 4096,
+                    5 => 65_536,
+                    6 => 128 * 1024,
+                    7 => 128 * 1024 + 4,
+                    8 => 9 + 632_558,
+                    _ => (next_random(&mut seed) % (128 * 1024)) + 1,
+                };
+                let end = cursor.saturating_add(chunk_len).min(wire.len());
+                pull.handle_input(wire.slice(cursor..end)).unwrap();
+                cursor = end;
+
+                let read_caps = [
+                    1 + (next_random(&mut seed) % 7),
+                    31,
+                    4093,
+                    65_537,
+                    131_071,
+                    262_147,
+                ];
+                let mut reader = ScriptedReader::new(wire.slice(cursor..), read_caps);
+                handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+                    .await
+                    .unwrap();
+                cursor += reader.pos;
+
+                while let Some(msg) = pull.poll_message() {
+                    got.push(msg.part_bytes(0).unwrap().to_vec());
+                }
+            }
+
+            while let Some(msg) = pull.poll_message() {
+                got.push(msg.part_bytes(0).unwrap().to_vec());
+            }
+            assert_eq!(got, expected, "case={case}");
+        }
     }
 
     #[tokio::test]
@@ -2243,6 +2833,143 @@ mod tests {
             }
             _ => panic!("unexpected {ev:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn send_pipe_to_yring_preserves_large_payload_under_partial_io() {
+        let (server_stream, client_stream) = tokio::io::duplex(16 * 1024);
+        send_pipe_to_yring_large_payload_harness(server_stream, client_stream, 32).await;
+    }
+
+    #[tokio::test]
+    async fn send_pipe_to_yring_preserves_large_payload_under_choppy_io() {
+        let (server_stream, client_stream) = tokio::io::duplex(16 * 1024);
+        let server_stream = ChoppyDuplex::new(server_stream, 17_003, 7_919);
+        let client_stream = ChoppyDuplex::new(client_stream, 23_011, 65_537);
+        send_pipe_to_yring_large_payload_harness(server_stream, client_stream, 24).await;
+    }
+
+    #[expect(clippy::too_many_lines)]
+    async fn send_pipe_to_yring_large_payload_harness<S, C>(
+        server_stream: S,
+        client_stream: C,
+        msgs: usize,
+    ) where
+        S: DriverStream + Send + 'static,
+        C: DriverStream + Send + 'static,
+    {
+        const MSG_SIZE: usize = 1024 * 1024;
+        let server_connection =
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+        let client_connection = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push)
+                .identity(Bytes::from_static(b"c")),
+        );
+
+        let (mut send_pipe_tx, send_pipe_rx) = crate::engine::send_pipe(4);
+        let (recv_producer, mut recv_consumer) = yring::spsc(4);
+        let recv_signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recv_signals_for_sink = recv_signals.clone();
+        let recv_space = Arc::new(StateSignal::new());
+
+        let (s_inbox_tx, s_inbox_rx) = mpsc::channel(16);
+        let (c_inbox_tx, c_inbox_rx) = mpsc::channel(16);
+        let (s_evt_tx, s_evt_rx) = mpsc::channel(16);
+        let (c_evt_tx, c_evt_rx) = mpsc::channel(16);
+        let mut s_evt_rx = EventAdapter { rx: s_evt_rx };
+        let mut c_evt_rx = EventAdapter { rx: c_evt_rx };
+        let s_cancel = CancellationToken::new();
+        let c_cancel = CancellationToken::new();
+
+        let server = ConnectionDriver::with_config(
+            server_stream,
+            server_connection,
+            s_inbox_rx,
+            s_evt_tx,
+            0,
+            s_cancel.clone(),
+            PeerDriverConfig {
+                large_message_threshold: 128 * 1024,
+                ..PeerDriverConfig::default()
+            },
+        )
+        .with_recv_sink(RecvSink::Yring(YringSink {
+            producer: recv_producer,
+            signal: Box::new(move || {
+                recv_signals_for_sink.fetch_add(1, Ordering::Relaxed);
+            }),
+            space: recv_space.clone(),
+        }));
+        let client = ConnectionDriver::new(
+            client_stream,
+            client_connection,
+            c_inbox_rx,
+            c_evt_tx,
+            0,
+            c_cancel.clone(),
+        )
+        .with_send_pipe(send_pipe_rx);
+
+        let server_task = tokio::spawn(async move { server.run().await });
+        let client_task = tokio::spawn(async move { client.run().await });
+
+        c_evt_rx.recv().await.unwrap();
+        s_evt_rx.recv().await.unwrap();
+        c_inbox_tx
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        s_inbox_tx
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+
+        let mut next_recv = 0usize;
+        for seq in 0..msgs {
+            let payload = patterned_payload(MSG_SIZE, seq as u64);
+            let mut msg = Message::single(payload);
+            loop {
+                match send_pipe_tx.try_send(msg) {
+                    Ok(()) => break,
+                    Err(crate::engine::SendPipeError::Full(returned)) => {
+                        msg = returned;
+                        drain_large_messages_until(
+                            &mut recv_consumer,
+                            &recv_space,
+                            MSG_SIZE,
+                            &mut next_recv,
+                            seq,
+                            false,
+                        )
+                        .await;
+                        tokio::task::yield_now().await;
+                    }
+                    Err(crate::engine::SendPipeError::Closed(_)) => panic!("send pipe closed"),
+                }
+            }
+        }
+
+        drain_large_messages_until(
+            &mut recv_consumer,
+            &recv_space,
+            MSG_SIZE,
+            &mut next_recv,
+            msgs,
+            true,
+        )
+        .await;
+        c_cancel.cancel();
+        s_cancel.cancel();
+        let client_result = tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("client driver did not stop")
+            .expect("client driver task panicked");
+        let server_result = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server driver did not stop")
+            .expect("server driver task panicked");
+        client_result.expect("client driver failed");
+        server_result.expect("server driver failed");
     }
 
     #[tokio::test]
@@ -2440,5 +3167,112 @@ mod tests {
         assert!(push.is_ready());
         assert!(pull.is_ready());
         (push, pull)
+    }
+
+    fn feed_fragmented_input(connection: &mut Connection, wire: &Bytes, end: usize) {
+        let mut start = 0;
+        for boundary in [5, 17, 4093, 65_541, end] {
+            let boundary = boundary.min(end);
+            if boundary > start {
+                connection
+                    .handle_input(wire.slice(start..boundary))
+                    .unwrap();
+                start = boundary;
+            }
+        }
+        if start < end {
+            connection.handle_input(wire.slice(start..end)).unwrap();
+        }
+    }
+
+    fn feed_input_in_chunks(
+        connection: &mut Connection,
+        wire: &Bytes,
+        end: usize,
+        chunks: impl IntoIterator<Item = usize>,
+    ) {
+        let chunks = chunks.into_iter().collect::<Vec<_>>();
+        let mut start = 0;
+        let mut index = 0;
+        while start < end {
+            let size = chunks[index % chunks.len()];
+            index += 1;
+            let next = start.saturating_add(size).min(end);
+            connection.handle_input(wire.slice(start..next)).unwrap();
+            start = next;
+        }
+    }
+
+    fn patterned_payload(len: usize, seq: u64) -> Vec<u8> {
+        let mut payload = vec![0u8; len];
+        payload[..8].copy_from_slice(&0xDEAD_BEEF_CAFE_F00Du64.to_le_bytes());
+        payload[8..16].copy_from_slice(&seq.to_le_bytes());
+        let mask = (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3);
+        for (i, byte) in payload.iter_mut().enumerate().skip(16) {
+            let mut expected = (i as u8).wrapping_mul(31);
+            expected ^= ((i >> 8) as u8).wrapping_mul(17);
+            expected ^= ((i >> 16) as u8).wrapping_mul(13);
+            *byte = expected ^ mask;
+        }
+        payload
+    }
+
+    fn push_expected_single_frame(out: &mut Vec<u8>, payload: &[u8]) {
+        if payload.len() > 255 {
+            out.push(0x02);
+            out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        } else {
+            out.push(0);
+            out.push(payload.len() as u8);
+        }
+        out.extend_from_slice(payload);
+    }
+
+    fn next_random(seed: &mut u64) -> usize {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed as usize
+    }
+
+    async fn drain_large_messages_until(
+        consumer: &mut yring::Consumer<RecvItem>,
+        space: &StateSignal,
+        msg_size: usize,
+        next_recv: &mut usize,
+        target: usize,
+        wait: bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *next_recv < target {
+            if consumer.prefetch() == 0 && consumer.is_empty() {
+                if !wait || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let mut released = false;
+            while let Some(item) = consumer.pop() {
+                released = true;
+                let data = item.message.part_bytes(0).unwrap();
+                assert_eq!(
+                    data.as_ref(),
+                    patterned_payload(msg_size, *next_recv as u64)
+                );
+                *next_recv += 1;
+            }
+            if released {
+                consumer.release();
+                space.notify_changed();
+            }
+        }
+        if wait {
+            assert!(
+                *next_recv >= target,
+                "received {} large messages, expected {target}",
+                *next_recv,
+            );
+        }
     }
 }

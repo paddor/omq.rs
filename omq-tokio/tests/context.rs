@@ -6,7 +6,7 @@ mod test_support;
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
-use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
+use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType, error::Error};
 
 fn tcp_loopback(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -590,6 +590,94 @@ fn blocking_socket_pub_sub() {
     }
     let m = recv_thread.join().unwrap();
     assert_eq!(m, Message::single("msg"));
+}
+
+#[test]
+fn blocking_socket_recv_timeout_empty_returns_timeout() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+
+    let start = std::time::Instant::now();
+    let result = pull.recv_timeout(Duration::from_millis(50));
+
+    assert!(matches!(result, Err(Error::Timeout)));
+    assert!(start.elapsed() >= Duration::from_millis(25));
+}
+
+#[test]
+fn blocking_socket_recv_timeout_zero_receives_queued_message() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+
+    let ep = inproc_ep("blocking-timeout-queued");
+    pull.bind(ep.clone()).unwrap();
+    push.connect(ep).unwrap();
+
+    push.send(Message::single("queued")).unwrap();
+    let m = pull.recv_timeout(Duration::ZERO).unwrap();
+
+    assert_eq!(m, Message::single("queued"));
+}
+
+#[test]
+fn blocking_socket_recv_timeout_wakes_on_late_message() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+
+    let ep = inproc_ep("blocking-timeout-wake");
+    pull.bind(ep.clone()).unwrap();
+    push.connect(ep).unwrap();
+
+    let receiver = pull.clone();
+    let recv_thread =
+        std::thread::spawn(move || receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+    std::thread::sleep(Duration::from_millis(25));
+    push.send(Message::single("late")).unwrap();
+
+    let m = recv_thread.join().unwrap();
+    assert_eq!(m, Message::single("late"));
+}
+
+#[test]
+fn blocking_socket_recv_timeout_wakes_on_close() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+
+    let receiver = pull.clone();
+    let recv_thread = std::thread::spawn(move || receiver.recv_timeout(Duration::from_secs(1)));
+    std::thread::sleep(Duration::from_millis(25));
+    pull.close().unwrap();
+
+    let result = recv_thread.join().unwrap();
+    assert!(matches!(result, Err(Error::Closed)));
+}
+
+#[test]
+fn blocking_socket_req_recv_timeout_does_not_poison_socket() {
+    let ctx = Context::new();
+    let rep = ctx.blocking_socket(SocketType::Rep, Options::default());
+    let req = ctx.blocking_socket(SocketType::Req, Options::default());
+
+    let ep = inproc_ep("blocking-timeout-req");
+    rep.bind(ep.clone()).unwrap();
+    req.connect(ep).unwrap();
+
+    req.send(Message::single("question")).unwrap();
+    let timed_out = req.recv_timeout(Duration::from_millis(20));
+    assert!(matches!(timed_out, Err(Error::Timeout)));
+
+    let q = rep.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(q, Message::single("question"));
+    rep.send(Message::single("answer")).unwrap();
+
+    let a = req.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(a, Message::single("answer"));
+
+    req.send(Message::single("next")).unwrap();
+    let next = rep.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(next, Message::single("next"));
 }
 
 #[test]

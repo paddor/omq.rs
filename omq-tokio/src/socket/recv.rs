@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result};
@@ -649,6 +650,51 @@ impl SpscAwareRecv {
                         continue;
                     }
                     std::thread::park();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn blocking_recv_timeout(&self, timeout: Duration) -> Result<Message> {
+        let now = Instant::now();
+        let Some(deadline) = now.checked_add(timeout) else {
+            return self.blocking_recv();
+        };
+        self.blocking_recv_until(deadline)
+    }
+
+    pub(crate) fn blocking_recv_until(&self, deadline: Instant) -> Result<Message> {
+        self.blocking_recv_waker.register(std::thread::current());
+        loop {
+            match self.try_drain() {
+                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Closed => return Err(Error::Closed),
+                DrainResult::Empty => {}
+            }
+            self.blocking_recv_waker.prepare_sleep();
+            match self.try_drain() {
+                DrainResult::Message(msg) => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Ok(msg);
+                }
+                DrainResult::Closed => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Err(Error::Closed);
+                }
+                DrainResult::Empty => {
+                    if !self.buffered_sources_empty() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        if Instant::now() >= deadline {
+                            return Err(Error::Timeout);
+                        }
+                        continue;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        return Err(Error::Timeout);
+                    }
+                    std::thread::park_timeout(remaining);
                 }
             }
         }

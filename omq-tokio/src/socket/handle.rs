@@ -537,6 +537,57 @@ impl Socket {
         }
     }
 
+    /// Blocking receive with a timeout for sync callers.
+    pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
+        let now = std::time::Instant::now();
+        let Some(deadline) = now.checked_add(timeout) else {
+            return self.blocking_recv();
+        };
+        match self.inner.socket_type {
+            SocketType::Req => loop {
+                let mut msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                return Ok(msg);
+            },
+            SocketType::Rep => loop {
+                let msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(msg);
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(body);
+                }
+            },
+            _ => self.inner.recv_rx.blocking_recv_timeout(timeout),
+        }
+    }
+
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.

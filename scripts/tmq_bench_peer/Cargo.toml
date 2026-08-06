@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "tmq_bench_peer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tmq_bench_peer"
+path = "src/main.rs"
+
+[dependencies]
+futures = "0.3"
+libc = "0.2"
+tmq = "0.5"
+tokio = { version = "1", features = ["full"] }
+zmq = "0.10"

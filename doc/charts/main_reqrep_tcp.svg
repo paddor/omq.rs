@@ -1,7 +1,7 @@
-<svg viewBox="0 0 850 466" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
-<rect x="0" y="0" width="850" height="466" opacity="1" fill="#000000" stroke="none"/>
+<svg viewBox="0 0 850 482" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, sans-serif">
+<rect x="0" y="0" width="850" height="482" opacity="1" fill="#000000" stroke="none"/>
 <text x="425" y="17" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#F9FAFB">REQ/REP latency, TCP loopback, 2-process</text>
-<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Linux VM on a 2018 Mac Mini, Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz, 6 cores, performance governor, turbo off</text>
+<text x="425" y="31" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#9CA3AF">Linux VM on a 2018 Mac Mini, Intel(R) Core(TM) i7-8700B CPU @ 3.20GHz, 6 cores, performance governor, turbo on</text>
 <text x="415" y="41" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#E5E7EB">
 p50 round-trip latency (lower is better)
 </text>
@@ -85,6 +85,12 @@ p50 round-trip latency (lower is better)
 <circle cx="444" cy="228" r="2.5" opacity="1" fill="#60A5FA" stroke="none" stroke-width="1"/>
 <circle cx="631" cy="228" r="2.5" opacity="1" fill="#60A5FA" stroke="none" stroke-width="1"/>
 <circle cx="819" cy="223" r="2.5" opacity="1" fill="#60A5FA" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#A855F7" stroke-width="2" points="70,126 257,133 444,133 631,136 819,116 "/>
+<circle cx="70" cy="126" r="2.5" opacity="1" fill="#A855F7" stroke="none" stroke-width="1"/>
+<circle cx="257" cy="133" r="2.5" opacity="1" fill="#A855F7" stroke="none" stroke-width="1"/>
+<circle cx="444" cy="133" r="2.5" opacity="1" fill="#A855F7" stroke="none" stroke-width="1"/>
+<circle cx="631" cy="136" r="2.5" opacity="1" fill="#A855F7" stroke="none" stroke-width="1"/>
+<circle cx="819" cy="116" r="2.5" opacity="1" fill="#A855F7" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#FB7185" stroke-width="2" points="70,222 257,220 444,217 631,221 819,203 "/>
 <circle cx="70" cy="222" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
 <circle cx="257" cy="220" r="2.5" opacity="1" fill="#FB7185" stroke="none" stroke-width="1"/>
@@ -151,43 +157,56 @@ CT
 <text x="450" y="392" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 59%
 </text>
-<polyline fill="none" opacity="1" stroke="#60A5FA" stroke-width="2" points="78,414 92,414 "/>
+<polyline fill="none" opacity="1" stroke="#A855F7" stroke-width="2" points="78,414 92,414 "/>
 <text x="98" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-zmq.rs v0.6.0
+tmq v0.5.0
 </text>
 <text x="250" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-6 MT
+1 IO
 </text>
 <text x="360" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-55%
+58%
 </text>
 <text x="450" y="408" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-57%
+61%
 </text>
-<polyline fill="none" opacity="1" stroke="#4ADE80" stroke-width="2" points="78,430 92,430 "/>
+<polyline fill="none" opacity="1" stroke="#60A5FA" stroke-width="2" points="78,430 92,430 "/>
 <text x="98" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-rzmq v0.5.24
+zmq.rs v0.6.0
 </text>
 <text x="250" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 6 MT
 </text>
 <text x="360" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-63%
+55%
 </text>
 <text x="450" y="424" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-68%
+57%
 </text>
-<polyline fill="none" opacity="1" stroke="#10B981" stroke-width="2" points="78,446 92,446 "/>
+<polyline fill="none" opacity="1" stroke="#4ADE80" stroke-width="2" points="78,446 92,446 "/>
 <text x="98" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-rzmq-iouring v0.5.24
+rzmq v0.5.24
 </text>
 <text x="250" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 6 MT
 </text>
 <text x="360" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
-95%
+63%
 </text>
 <text x="450" y="440" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+68%
+</text>
+<polyline fill="none" opacity="1" stroke="#10B981" stroke-width="2" points="78,462 92,462 "/>
+<text x="98" y="456" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
+rzmq-iouring v0.5.24
+</text>
+<text x="250" y="456" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+6 MT
+</text>
+<text x="360" y="456" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
+95%
+</text>
+<text x="450" y="456" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 104%
 </text>
 </svg>

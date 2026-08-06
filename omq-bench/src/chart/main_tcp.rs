@@ -1,12 +1,12 @@
 use super::common::{
-    self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_RZMQ, C_RZMQ_IOURING, C_ZMQRS,
-    Impl, draw_latency_single_panel_with_versions,
+    self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_CT, C_RZMQ, C_RZMQ_IOURING, C_TMQ,
+    C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
 
 const TPUT_SIZES: &[u64] = &[
-    16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304,
+    16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
 const PUBSUB_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 const LAT_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
@@ -29,6 +29,12 @@ const PUSHPULL_IMPLS: &[Impl] = &[
         label: "omq",
         threads: "CT",
         color: C_OMQ_CT,
+    },
+    Impl {
+        key: "tmq",
+        label: "tmq",
+        threads: "1 IO",
+        color: C_TMQ,
     },
     Impl {
         key: "zmq.rs",
@@ -68,6 +74,12 @@ const REQREP_IMPLS: &[Impl] = &[
         label: "omq",
         threads: "CT",
         color: C_OMQ_CT,
+    },
+    Impl {
+        key: "tmq",
+        label: "tmq",
+        threads: "1 IO",
+        color: C_TMQ,
     },
     Impl {
         key: "zmq.rs",
@@ -113,6 +125,12 @@ const PUBSUB_IMPLS: &[Impl] = &[
         label: "omq",
         threads: "2 IO",
         color: C_OMQ_2T,
+    },
+    Impl {
+        key: "tmq",
+        label: "tmq",
+        threads: "1 IO",
+        color: C_TMQ,
     },
     Impl {
         key: "zmq.rs",

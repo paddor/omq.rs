@@ -8,6 +8,7 @@ Cargo.lock.bak
 !bindings/pyomq/Cargo.lock
 /bindings/pyomq/dist/*.whl
 !examples/zguide-tokio/Cargo.lock
+!scripts/tmq_bench_peer/Cargo.lock
 uv.lock
 .DS_Store
 /tmp/

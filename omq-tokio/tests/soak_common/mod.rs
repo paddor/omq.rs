@@ -109,6 +109,14 @@ type Samples = (
     Vec<(Instant, usize)>,
 );
 
+const LIVE_GROWTH_WARMUP: Duration = Duration::from_secs(30);
+const LIVE_GROWTH_WINDOW: Duration = Duration::from_secs(120);
+const LIVE_GROWTH_MIN_SAMPLES: usize = 30;
+const LIVE_HEAP_SLOPE_LIMIT_KIB_S: f64 = 512.0;
+const LIVE_HEAP_GROWTH_MIN_BYTES: usize = 64 * 1024 * 1024;
+const LIVE_RSS_SLOPE_LIMIT_KIB_S: f64 = 1024.0;
+const LIVE_RSS_GROWTH_MIN_BYTES: usize = 128 * 1024 * 1024;
+
 pub struct ResourceMonitor {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Samples>>,
@@ -118,9 +126,11 @@ pub struct ResourceMonitor {
 impl ResourceMonitor {
     pub fn start() -> Self {
         let heap_baseline = alloc::LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        let label = std::thread::current().name().unwrap_or("soak").to_owned();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::spawn(move || {
+            let started = Instant::now();
             let mut rss_samples = Vec::new();
             let mut fd_samples = Vec::new();
             let mut heap_samples = Vec::new();
@@ -128,11 +138,27 @@ impl ResourceMonitor {
                 let now = Instant::now();
                 if let Some(rss) = read_rss_bytes() {
                     rss_samples.push((now, rss));
+                    assert_live_growth_stable(
+                        &label,
+                        "RSS",
+                        started,
+                        &rss_samples,
+                        LIVE_RSS_SLOPE_LIMIT_KIB_S,
+                        LIVE_RSS_GROWTH_MIN_BYTES,
+                    );
                 }
                 if let Some(fds) = read_fd_count() {
                     fd_samples.push((now, fds));
                 }
                 heap_samples.push((now, alloc::LIVE_BYTES.load(Ordering::Relaxed)));
+                assert_live_growth_stable(
+                    &label,
+                    "heap",
+                    started,
+                    &heap_samples,
+                    LIVE_HEAP_SLOPE_LIMIT_KIB_S,
+                    LIVE_HEAP_GROWTH_MIN_BYTES,
+                );
                 std::thread::sleep(Duration::from_secs(1));
             }
             (rss_samples, fd_samples, heap_samples)
@@ -173,6 +199,89 @@ fn read_rss_bytes() -> Option<usize> {
 
 fn read_fd_count() -> Option<usize> {
     Some(std::fs::read_dir("/proc/self/fd").ok()?.count())
+}
+
+fn assert_live_growth_stable(
+    label: &str,
+    metric: &str,
+    started: Instant,
+    samples: &[(Instant, usize)],
+    slope_limit_kib_s: f64,
+    min_growth_bytes: usize,
+) {
+    let Some((now, current)) = samples.last().copied() else {
+        return;
+    };
+    if now.duration_since(started) < LIVE_GROWTH_WARMUP + LIVE_GROWTH_WINDOW {
+        return;
+    }
+
+    let window_start = now - LIVE_GROWTH_WINDOW;
+    let first = samples
+        .iter()
+        .position(|(t, _)| *t >= window_start)
+        .unwrap_or(0);
+    let window = &samples[first..];
+    if window.len() < LIVE_GROWTH_MIN_SAMPLES {
+        return;
+    }
+
+    let window_growth = current.saturating_sub(window.first().unwrap().1);
+    if window_growth < min_growth_bytes {
+        return;
+    }
+
+    let Some(slope_bytes_per_sec) = slope_bytes_per_sec(window) else {
+        return;
+    };
+    let slope_kib_s = slope_bytes_per_sec / 1024.0;
+    if slope_kib_s <= slope_limit_kib_s {
+        return;
+    }
+
+    eprintln!(
+        "[{label}] live {metric} growth detected: slope {slope_kib_s:.1} KiB/s over {:.0}s, \
+         growth {:.1} MiB, current {:.1} MiB (limit {slope_limit_kib_s:.1} KiB/s and {:.1} MiB); \
+         failing before OOM",
+        LIVE_GROWTH_WINDOW.as_secs_f64(),
+        window_growth as f64 / 1_048_576.0,
+        current as f64 / 1_048_576.0,
+        min_growth_bytes as f64 / 1_048_576.0,
+    );
+    std::process::exit(101);
+}
+
+fn slope_bytes_per_sec(samples: &[(Instant, usize)]) -> Option<f64> {
+    let first_t = samples.first()?.0;
+    let elapsed_secs = samples.last()?.0.duration_since(first_t).as_secs_f64();
+    if elapsed_secs < 1.0 {
+        return None;
+    }
+
+    let n_f = samples.len() as f64;
+    let sum_x: f64 = samples
+        .iter()
+        .map(|(t, _)| t.duration_since(first_t).as_secs_f64())
+        .sum();
+    let sum_y: f64 = samples.iter().map(|(_, v)| *v as f64).sum();
+    let dot_xy: f64 = samples
+        .iter()
+        .map(|(t, v)| t.duration_since(first_t).as_secs_f64() * *v as f64)
+        .sum();
+    let sum_xx: f64 = samples
+        .iter()
+        .map(|(t, _)| {
+            let x = t.duration_since(first_t).as_secs_f64();
+            x * x
+        })
+        .sum();
+
+    let denom = n_f * sum_xx - sum_x * sum_x;
+    if denom == 0.0 {
+        None
+    } else {
+        Some((n_f * dot_xy - sum_x * sum_y) / denom)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,38 +327,13 @@ impl ResourceReport {
             return;
         }
 
-        let first_t = post_warmup.first().unwrap().0;
-        let elapsed_secs = post_warmup
-            .last()
-            .unwrap()
-            .0
-            .duration_since(first_t)
-            .as_secs_f64();
-        if elapsed_secs < 1.0 {
+        let Some(slope_bytes_per_sec) = slope_bytes_per_sec(post_warmup) else {
             return;
-        }
-
-        let n_f = post_warmup.len() as f64;
-        let sum_x: f64 = post_warmup
-            .iter()
-            .map(|(t, _)| t.duration_since(first_t).as_secs_f64())
-            .sum();
+        };
         let sum_y: f64 = post_warmup.iter().map(|(_, v)| *v as f64).sum();
-        let dot_xy: f64 = post_warmup
-            .iter()
-            .map(|(t, v)| t.duration_since(first_t).as_secs_f64() * *v as f64)
-            .sum();
-        let sum_xx: f64 = post_warmup
-            .iter()
-            .map(|(t, _)| {
-                let x = t.duration_since(first_t).as_secs_f64();
-                x * x
-            })
-            .sum();
 
-        let slope_bytes_per_sec = (n_f * dot_xy - sum_x * sum_y) / (n_f * sum_xx - sum_x * sum_x);
         let slope_kib_s = slope_bytes_per_sec / 1024.0;
-        let avg: f64 = sum_y / n_f;
+        let avg: f64 = sum_y / post_warmup.len() as f64;
 
         eprintln!(
             "[{label}] heap: avg {:.1} MiB, slope {slope_kib_s:.1} KiB/s (informational)",

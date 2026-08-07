@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.21.0"
+version = "0.21.1"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -32,8 +32,8 @@ fuzz = []
 soak = []
 
 [dependencies]
-omq-proto = { path = "../omq-proto", version = "0.25.0", default-features = false }
-yring = { path = "../yring", version = "0.3.12" }
+omq-proto = { path = "../omq-proto", version = "0.25.1", default-features = false }
+yring = { path = "../yring", version = "0.3.13" }
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-08-08
+
+### Added
+
+- `blocking::Socket::recv_timeout()` for sync callers.
+- Regression coverage for large payloads under fragmented reads, partial
+  writes, and SPSC ring slot reuse.
+
+### Fixed
+
+- Large messages delivered through receive rings now keep payload bytes stable
+  after producer slot reuse.
+- Disconnected TCP peers now drop empty receive rings so reconnect-heavy
+  sockets do not retain stale per-peer consumers.
+- Long soak tests now account for allocator cleanup windows when checking live
+  byte growth.
+
+### Changed
+
+- *(deps)* Bump `omq-proto` to 0.25.1 and `yring` to 0.3.13.
+
 ## [0.21.0] - 2026-08-02
 
 ### Added

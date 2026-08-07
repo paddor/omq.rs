@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-08-08
+
+### Added
+
+- Sync sockets now use `omq-tokio` blocking receive timeout support.
+
+### Fixed
+
+- Large messages delivered through `omq-tokio` receive rings now keep payload
+  bytes stable after producer slot reuse.
+- Reconnect-heavy sockets no longer retain stale empty TCP receive rings.
+
+### Changed
+
+- *(deps)* Bump bundled `omq-tokio` to 0.21.1, `omq-proto` to 0.25.1,
+  and `yring` to 0.3.13.
+
 ## [0.19.1] - 2026-08-02
 
 ### Fixed

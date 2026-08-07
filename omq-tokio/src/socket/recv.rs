@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result};
@@ -371,6 +372,26 @@ impl SpscHandles {
             conflate_slot,
         }
     }
+
+    pub(crate) fn remove_empty_tcp_consumer(&self, peer_id: u64) {
+        let mut removed = false;
+        self.tcp_consumers.write().unwrap().retain(|tc| {
+            if tc.peer_id != peer_id {
+                return true;
+            }
+            let keep = tc
+                .consumer
+                .try_lock()
+                .map_or(true, |consumer| !consumer.is_empty());
+            removed |= !keep;
+            keep
+        });
+
+        if removed {
+            self.consumer_generation.fetch_add(1, Ordering::Release);
+            self.activated.notify_changed();
+        }
+    }
 }
 
 /// Recv channel that integrates per-peer SPSC awareness. Fair-queues
@@ -649,6 +670,51 @@ impl SpscAwareRecv {
                         continue;
                     }
                     std::thread::park();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn blocking_recv_timeout(&self, timeout: Duration) -> Result<Message> {
+        let now = Instant::now();
+        let Some(deadline) = now.checked_add(timeout) else {
+            return self.blocking_recv();
+        };
+        self.blocking_recv_until(deadline)
+    }
+
+    pub(crate) fn blocking_recv_until(&self, deadline: Instant) -> Result<Message> {
+        self.blocking_recv_waker.register(std::thread::current());
+        loop {
+            match self.try_drain() {
+                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Closed => return Err(Error::Closed),
+                DrainResult::Empty => {}
+            }
+            self.blocking_recv_waker.prepare_sleep();
+            match self.try_drain() {
+                DrainResult::Message(msg) => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Ok(msg);
+                }
+                DrainResult::Closed => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Err(Error::Closed);
+                }
+                DrainResult::Empty => {
+                    if !self.buffered_sources_empty() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        if Instant::now() >= deadline {
+                            return Err(Error::Timeout);
+                        }
+                        continue;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        return Err(Error::Timeout);
+                    }
+                    std::thread::park_timeout(remaining);
                 }
             }
         }
@@ -1041,11 +1107,55 @@ impl SpscAwareRecv {
 #[cfg(test)]
 mod tests {
     use super::{
-        RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, RecvItem, RecvSource, drain_yring, drain_yring_one,
-        drain_yring_one_into_batch, recv_source_at,
+        BlockingRecvWaker, RECV_BATCH_BYTES, RECV_BATCH_MESSAGES, RecvItem, RecvSource,
+        SpscHandles, TcpYringConsumer, drain_yring, drain_yring_one, drain_yring_one_into_batch,
+        recv_source_at,
     };
     use omq_proto::Message;
     use omq_proto::flow::DrainBudget;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn tcp_consumer(peer_id: u64) -> (yring::Producer<RecvItem>, Arc<TcpYringConsumer>) {
+        let (producer, consumer) = yring::spsc(4);
+        (
+            producer,
+            Arc::new(TcpYringConsumer {
+                consumer: std::sync::Mutex::new(consumer),
+                batch_remaining: AtomicUsize::new(0),
+                space: Arc::new(crate::engine::signal::StateSignal::new()),
+                peer_id,
+            }),
+        )
+    }
+
+    #[test]
+    fn remove_empty_tcp_consumer_drops_empty_peer_ring() {
+        let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+        let (_producer, consumer) = tcp_consumer(7);
+        handles.tcp_consumers.write().unwrap().push(consumer);
+
+        handles.remove_empty_tcp_consumer(7);
+
+        assert!(handles.tcp_consumers.read().unwrap().is_empty());
+        assert_eq!(handles.consumer_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn remove_empty_tcp_consumer_keeps_unread_messages() {
+        let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
+        let (mut producer, consumer) = tcp_consumer(7);
+        producer
+            .push(RecvItem::new(Message::from_slice(b"queued")))
+            .unwrap();
+        producer.flush();
+        handles.tcp_consumers.write().unwrap().push(consumer);
+
+        handles.remove_empty_tcp_consumer(7);
+
+        assert_eq!(handles.tcp_consumers.read().unwrap().len(), 1);
+        assert_eq!(handles.consumer_generation.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn latency_drain_keeps_prefetched_batch_open() {

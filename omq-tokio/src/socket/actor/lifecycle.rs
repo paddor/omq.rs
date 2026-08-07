@@ -32,6 +32,7 @@ impl<'a> PeerLifecycle<'a> {
         }
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
+        self.driver.spsc.remove_empty_tcp_consumer(peer_id);
         self.update_send_ring();
         self.invalidate_transmit_slot(peer.as_ref());
         self.refill_recv_sink();

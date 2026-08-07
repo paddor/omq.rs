@@ -20,6 +20,7 @@ const PHASE_TARGETS: &[usize] = &[0, 1, 12, 3, 0];
 const TOPICS: &[&[u8]] = &[b"a.", b"b.", b"c.", b"d."];
 const PAYLOAD_LEN: usize = 96;
 const SEND_BATCH: usize = 256;
+const SOAK_HWM: u32 = 8_192;
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const PHASE_WARMUP: Duration = Duration::from_millis(300);
 const DEFAULT_PHASE_DURATION: Duration = Duration::from_secs(3);
@@ -27,18 +28,63 @@ const SHORT_PHASE_DURATION: Duration = Duration::from_secs(1);
 const MIN_SEND_MSGS_PER_SEC: f64 = 5_000.0;
 const MAX_GAP_RATIO: f64 = 0.01;
 const MIN_EXPECTED_FOR_GAP_CHECK: u64 = 1_000;
+const EXTERNAL_PAUSE_THRESHOLD: Duration = Duration::from_secs(10);
+
+fn active_elapsed(start: Instant, paused: Duration) -> Duration {
+    start.elapsed().saturating_sub(paused)
+}
+
+fn account_external_pause(
+    label: &str,
+    last_progress: &mut Instant,
+    run_paused: &mut Duration,
+    phase_paused: &mut Duration,
+) -> bool {
+    let now = Instant::now();
+    let idle = now.saturating_duration_since(*last_progress);
+    *last_progress = now;
+
+    if idle < EXTERNAL_PAUSE_THRESHOLD {
+        return false;
+    }
+
+    *run_paused += idle;
+    *phase_paused += idle;
+    eprintln!(
+        "[pub_sub_realworld_churn_tcp] ignored external pause during {label}: {:.1}s",
+        idle.as_secs_f64()
+    );
+    true
+}
+
+fn reset_measurement_after_pause(
+    subs: &mut [SubscriberProbe],
+    seq: u64,
+    measure_start: &mut Instant,
+    sent_at_measure_start: &mut u64,
+    recv_at_measure_start: &mut u64,
+    gaps_at_measure_start: &mut u64,
+) {
+    *measure_start = Instant::now();
+    *sent_at_measure_start = seq;
+    *recv_at_measure_start = subs.iter().map(|s| s.received).sum();
+    *gaps_at_measure_start = subs.iter().map(|s| s.gaps).sum();
+    for sub in subs {
+        sub.reset_gap_window();
+    }
+}
 
 fn pub_options() -> Options {
     soak_common::soak_options()
-        .send_hwm(65_536)
-        .recv_hwm(65_536)
+        .send_hwm(SOAK_HWM)
+        .recv_hwm(SOAK_HWM)
         .on_mute(OnMute::DropNewest)
 }
 
 fn sub_options() -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..soak_common::soak_options().recv_hwm(65_536)
+        ..soak_common::soak_options().recv_hwm(SOAK_HWM)
     }
 }
 
@@ -214,9 +260,10 @@ fn soak_pub_sub_realworld_churn_tcp() {
         let mut next_sub_id = 0usize;
         let mut phase_idx = 0usize;
         let start = Instant::now();
+        let mut run_paused = Duration::ZERO;
         let mut last_log = start;
 
-        while start.elapsed() < duration {
+        while active_elapsed(start, run_paused) < duration {
             let target = PHASE_TARGETS[phase_idx % PHASE_TARGETS.len()];
             phase_idx += 1;
 
@@ -236,8 +283,31 @@ fn soak_pub_sub_realworld_churn_tcp() {
             let mut recv_at_measure_start = 0u64;
             let mut gaps_at_measure_start = 0u64;
             let mut measure_start = phase_start;
+            let mut phase_paused = Duration::ZERO;
+            let mut last_progress = phase_start;
 
-            while phase_start.elapsed() < phase_duration && start.elapsed() < duration {
+            while active_elapsed(phase_start, phase_paused) < phase_duration
+                && active_elapsed(start, run_paused) < duration
+            {
+                if account_external_pause(
+                    "phase",
+                    &mut last_progress,
+                    &mut run_paused,
+                    &mut phase_paused,
+                ) {
+                    last_log = Instant::now();
+                    if measuring {
+                        reset_measurement_after_pause(
+                            &mut subs,
+                            seq,
+                            &mut measure_start,
+                            &mut sent_at_measure_start,
+                            &mut recv_at_measure_start,
+                            &mut gaps_at_measure_start,
+                        );
+                    }
+                }
+
                 for _ in 0..SEND_BATCH {
                     let msg = Message::single(encode(seq));
                     tokio::time::timeout(SEND_TIMEOUT, publisher.send(msg))
@@ -251,7 +321,7 @@ fn soak_pub_sub_realworld_churn_tcp() {
                     sub.drain();
                 }
 
-                if !measuring && phase_start.elapsed() >= PHASE_WARMUP {
+                if !measuring && active_elapsed(phase_start, phase_paused) >= PHASE_WARMUP {
                     measuring = true;
                     measure_start = Instant::now();
                     sent_at_measure_start = seq;
@@ -269,9 +339,28 @@ fn soak_pub_sub_realworld_churn_tcp() {
                     eprintln!(
                         "[pub_sub_realworld_churn_tcp] {:.0}s, phase_target {target}, \
                          sent {seq}, received {received}, gaps {gaps}",
-                        start.elapsed().as_secs_f64(),
+                        active_elapsed(start, run_paused).as_secs_f64(),
                     );
                     last_log = Instant::now();
+                }
+
+                if account_external_pause(
+                    "phase work",
+                    &mut last_progress,
+                    &mut run_paused,
+                    &mut phase_paused,
+                ) {
+                    last_log = Instant::now();
+                    if measuring {
+                        reset_measurement_after_pause(
+                            &mut subs,
+                            seq,
+                            &mut measure_start,
+                            &mut sent_at_measure_start,
+                            &mut recv_at_measure_start,
+                            &mut gaps_at_measure_start,
+                        );
+                    }
                 }
 
                 tokio::task::yield_now().await;

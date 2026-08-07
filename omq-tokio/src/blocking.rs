@@ -103,6 +103,10 @@ impl Socket {
         self.inner.blocking_recv()
     }
 
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Message> {
+        self.inner.blocking_recv_timeout(timeout)
+    }
+
     pub fn try_recv(&self) -> Result<Message> {
         self.inner.try_recv()
     }

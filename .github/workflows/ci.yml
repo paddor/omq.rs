@@ -300,10 +300,32 @@ jobs:
           tool: cross
       - uses: Swatinem/rust-cache@v2
       - name: compile workspace
-        run: cross check --target ${{ matrix.target }} --workspace --all-targets --all-features
+        run: |
+          if [[ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]]; then
+            # `ws` pulls in `ring`, whose debug C build passes an x86-only
+            # frame-pointer flag through this armv7 cross compiler. i686
+            # still covers 32-bit `--all-targets --all-features`.
+            features=(
+              omq-proto/plain
+              omq-proto/curve
+              omq-proto/lz4
+              omq-proto/zstd
+              omq-tokio/plain
+              omq-tokio/curve
+              omq-tokio/lz4
+              omq-tokio/zstd
+            )
+            cross check --target ${{ matrix.target }} \
+              -p yring -p omq-proto -p omq-tokio -p omq-libzmq \
+              --features "${features[*]}" \
+              --lib --bins
+          else
+            cross check --target ${{ matrix.target }} --workspace --all-targets --all-features
+          fi
       - name: yring tests
         run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p yring --all-features
       - name: tokio tcp smoke tests
+        if: matrix.target != 'armv7-unknown-linux-gnueabihf'
         run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-tokio --test omq_tcp_smoke
       - name: proto lz4 tests
         run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-proto --features lz4 --lib

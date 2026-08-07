@@ -110,7 +110,7 @@ type Samples = (
 );
 
 const LIVE_GROWTH_WARMUP: Duration = Duration::from_secs(30);
-const LIVE_GROWTH_WINDOW: Duration = Duration::from_secs(120);
+const LIVE_GROWTH_WINDOW: Duration = Duration::from_mins(2);
 const LIVE_GROWTH_MIN_SAMPLES: usize = 30;
 const LIVE_HEAP_SLOPE_LIMIT_KIB_S: f64 = 512.0;
 const LIVE_HEAP_GROWTH_MIN_BYTES: usize = 64 * 1024 * 1024;
@@ -216,7 +216,9 @@ fn assert_live_growth_stable(
         return;
     }
 
-    let window_start = now - LIVE_GROWTH_WINDOW;
+    let Some(window_start) = now.checked_sub(LIVE_GROWTH_WINDOW) else {
+        return;
+    };
     let first = samples
         .iter()
         .position(|(t, _)| *t >= window_start)

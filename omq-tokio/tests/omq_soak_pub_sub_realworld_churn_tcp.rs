@@ -20,6 +20,7 @@ const PHASE_TARGETS: &[usize] = &[0, 1, 12, 3, 0];
 const TOPICS: &[&[u8]] = &[b"a.", b"b.", b"c.", b"d."];
 const PAYLOAD_LEN: usize = 96;
 const SEND_BATCH: usize = 256;
+const SOAK_HWM: u32 = 8_192;
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const PHASE_WARMUP: Duration = Duration::from_millis(300);
 const DEFAULT_PHASE_DURATION: Duration = Duration::from_secs(3);
@@ -75,15 +76,15 @@ fn reset_measurement_after_pause(
 
 fn pub_options() -> Options {
     soak_common::soak_options()
-        .send_hwm(65_536)
-        .recv_hwm(65_536)
+        .send_hwm(SOAK_HWM)
+        .recv_hwm(SOAK_HWM)
         .on_mute(OnMute::DropNewest)
 }
 
 fn sub_options() -> Options {
     Options {
         reconnect: ReconnectPolicy::Disabled,
-        ..soak_common::soak_options().recv_hwm(65_536)
+        ..soak_common::soak_options().recv_hwm(SOAK_HWM)
     }
 }
 

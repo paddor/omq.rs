@@ -604,11 +604,24 @@ public final class Socket implements AutoCloseable {
         context.remove(state);
     }
 
-    private static long millis(Duration duration) {
+    static long millis(Duration duration) {
         if (duration.isNegative()) {
             throw new IllegalArgumentException("duration must be non-negative");
         }
-        return duration.toMillis();
+        if (duration.isZero()) {
+            return 0;
+        }
+        try {
+            long millis = Math.multiplyExact(duration.getSeconds(), 1_000L);
+            int nanos = duration.getNano();
+            millis = Math.addExact(millis, nanos / 1_000_000L);
+            if (nanos % 1_000_000L != 0) {
+                millis = Math.addExact(millis, 1L);
+            }
+            return millis;
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
+        }
     }
 
     private static void requirePositive(String name, int value) {

@@ -4,6 +4,8 @@ import java.util.Objects;
 
 /** Base unchecked exception for endpoint transport I/O failures. */
 public class TransportException extends OMQException {
+    private static final long serialVersionUID = 1L;
+
     private final String operation;
     private final String endpoint;
     private final String detail;

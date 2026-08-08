@@ -167,6 +167,39 @@ public final class Message {
         return new String(bytes(), charset);
     }
 
+    /** Returns whether this message has the same parts and bytes as another message. */
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof Message message) || partCount() != message.partCount()) {
+            return false;
+        }
+        for (int i = 0; i < partCount(); i++) {
+            if (!Arrays.equals(partView(i), message.partView(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Returns a hash code derived from message parts and bytes. */
+    @Override
+    public int hashCode() {
+        int hash = 1;
+        for (int i = 0; i < partCount(); i++) {
+            hash = 31 * hash + Arrays.hashCode(partView(i));
+        }
+        return hash;
+    }
+
+    /** Returns a compact description without copying or exposing message bytes. */
+    @Override
+    public String toString() {
+        return "Message[parts=" + partCount() + ", bytes=" + totalBytes() + "]";
+    }
+
     private static byte[][] copy(byte[][] input) {
         requireParts(input);
         byte[][] out = new byte[input.length][];
@@ -189,5 +222,23 @@ public final class Message {
         byte[] out = new byte[copy.remaining()];
         copy.get(out);
         return out;
+    }
+
+    private byte[] partView(int index) {
+        if (body != null) {
+            if (index != 0) {
+                throw new ArrayIndexOutOfBoundsException(index);
+            }
+            return body;
+        }
+        return parts[index];
+    }
+
+    private long totalBytes() {
+        long total = 0;
+        for (int i = 0; i < partCount(); i++) {
+            total += partView(i).length;
+        }
+        return total;
     }
 }

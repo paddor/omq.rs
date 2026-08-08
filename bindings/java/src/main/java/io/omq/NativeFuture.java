@@ -46,6 +46,24 @@ final class NativeFuture<T> extends CompletableFuture<T> {
         }
     }
 
+    @Override
+    public void obtrudeValue(T value) {
+        try {
+            super.obtrudeValue(value);
+        } finally {
+            clearNativeTask();
+        }
+    }
+
+    @Override
+    public void obtrudeException(Throwable ex) {
+        try {
+            super.obtrudeException(ex);
+        } finally {
+            clearNativeTask();
+        }
+    }
+
     private void clearNativeTask() {
         long handle = taskHandle.getAndSet(0);
         if (handle != 0) {

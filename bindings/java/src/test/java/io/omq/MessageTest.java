@@ -82,4 +82,19 @@ final class MessageTest {
 
         assertThrows(IllegalStateException.class, message::bytes);
     }
+
+    @Test
+    void messagesHaveValueSemantics() {
+        Message left = Message.multipart(
+                "a".getBytes(StandardCharsets.UTF_8),
+                "bb".getBytes(StandardCharsets.UTF_8));
+        Message right = Message.multipart(
+                "a".getBytes(StandardCharsets.UTF_8),
+                "bb".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(left, right);
+        assertEquals(left.hashCode(), right.hashCode());
+        assertTrue(left.toString().contains("parts=2"));
+        assertTrue(left.toString().contains("bytes=3"));
+    }
 }

@@ -58,24 +58,18 @@ public final class Context implements AutoCloseable {
 
     /** Returns an opaque process-local key for importing this context. */
     public UUID shareKey() {
-        long[] key = Native.contextShareKey(handle());
-        return new UUID(key[0], key[1]);
+        synchronized (state) {
+            long[] key = Native.contextShareKey(state.handle());
+            return new UUID(key[0], key[1]);
+        }
     }
 
     /** Creates a socket owned by this context. */
     public Socket socket(SocketType type) {
         Objects.requireNonNull(type, "type");
-        long contextHandle = handle();
-        Socket socket = new Socket(this, contextHandle, type, sockets);
-        return socket;
-    }
-
-    long handle() {
-        long handle = state.handle.get();
-        if (handle == 0) {
-            throw new ClosedException("context closed");
+        synchronized (state) {
+            return new Socket(this, state.handle(), type, sockets);
         }
-        return handle;
     }
 
     void remove(Socket.State state) {
@@ -85,10 +79,12 @@ public final class Context implements AutoCloseable {
     /** Closes all owned sockets and terminates the native context. */
     @Override
     public void close() {
-        for (Socket.State socket : sockets.toArray(Socket.State[]::new)) {
-            socket.close();
+        synchronized (state) {
+            for (Socket.State socket : sockets.toArray(Socket.State[]::new)) {
+                socket.close();
+            }
+            cleanable.clean();
         }
-        cleanable.clean();
     }
 
     private static final class State implements Runnable {
@@ -105,11 +101,19 @@ public final class Context implements AutoCloseable {
         }
 
         @Override
-        public void run() {
+        public synchronized void run() {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
                 Native.contextClose(handle, owner);
             }
+        }
+
+        synchronized long handle() {
+            long handle = this.handle.get();
+            if (handle == 0) {
+                throw new ClosedException("context closed");
+            }
+            return handle;
         }
     }
 }

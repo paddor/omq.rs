@@ -1,5 +1,6 @@
 package io.omq;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Duration;
@@ -69,5 +70,17 @@ final class OptionsTest {
              Socket pull = context.socket(SocketType.PULL)) {
             assertThrows(IllegalArgumentException.class, () -> pull.compressionThreshold(-1));
         }
+    }
+
+    @Test
+    void positiveSubMillisecondDurationsRoundUp() {
+        assertEquals(0, Socket.millis(Duration.ZERO));
+        assertEquals(1, Socket.millis(Duration.ofNanos(1)));
+        assertEquals(2, Socket.millis(Duration.ofNanos(1_000_001)));
+    }
+
+    @Test
+    void hugeDurationsSaturate() {
+        assertEquals(Long.MAX_VALUE, Socket.millis(Duration.ofSeconds(Long.MAX_VALUE)));
     }
 }

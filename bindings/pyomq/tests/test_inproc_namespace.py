@@ -2,6 +2,7 @@
 
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
+from pyomq.testing import rust_thread_send_via_share_key
 import pytest
 
 
@@ -76,6 +77,23 @@ def test_share_key_context_roundtrip():
         push.close()
         pull.close()
         shared.term()
+        ctx.term()
+
+
+def test_share_key_python_context_rust_thread_inproc():
+    ctx = zmq.Context()
+    try:
+        pull = ctx.socket(zmq.PULL)
+        pull.setsockopt(zmq.RCVTIMEO, 1000)
+        pull.bind("inproc://python-rust-thread")
+        rust_thread_send_via_share_key(
+            ctx.share_key(),
+            "inproc://python-rust-thread",
+            b"rust-thread",
+        )
+        assert pull.recv() == b"rust-thread"
+    finally:
+        pull.close()
         ctx.term()
 
 

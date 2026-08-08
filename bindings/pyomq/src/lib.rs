@@ -17,8 +17,11 @@ mod runtime;
 mod socket;
 mod socket_async;
 
+use std::str::FromStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use omq_proto::endpoint::Endpoint;
 use pyo3::prelude::*;
 
 /// Extractor that accepts either a sync `Socket` or an `AsyncSocket`,
@@ -57,6 +60,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
+    m.add_function(wrap_pyfunction!(rust_thread_send_via_share_key, m)?)?;
     #[cfg(feature = "curve")]
     m.add_class::<peer_info::PeerInfo>()?;
     #[cfg(feature = "curve")]
@@ -65,6 +69,31 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(curve_public, m)?)?;
     }
     Ok(())
+}
+
+#[pyfunction]
+fn rust_thread_send_via_share_key(
+    py: Python<'_>,
+    share_key: u128,
+    endpoint: &str,
+    payload: &[u8],
+) -> PyResult<()> {
+    let endpoint = Endpoint::from_str(endpoint).map_err(error::map_err)?;
+    let payload = Bytes::copy_from_slice(payload);
+    py.detach(move || {
+        std::thread::spawn(move || -> omq_proto::error::Result<()> {
+            let ctx = omq_tokio::Context::from_share_key(share_key)
+                .ok_or(omq_proto::error::Error::Closed)?;
+            let push =
+                ctx.blocking_socket(omq_tokio::SocketType::Push, omq_tokio::Options::default());
+            push.connect(endpoint)?;
+            push.send(omq_tokio::Message::single(payload))
+        })
+        .join()
+        .map_err(|_| omq_proto::error::Error::Protocol("rust helper thread panicked".into()))
+        .and_then(std::convert::identity)
+    })
+    .map_err(error::map_err)
 }
 
 #[pyfunction]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -36,6 +36,8 @@ const RECV_MEDIUM_BYTES: usize = 1024 * 1024;
 const RECV_LARGE_BYTES: usize = 1024 * 1024;
 const RECV_MEDIUM_TIME: Duration = Duration::from_micros(200);
 const RECV_LARGE_TIME: Duration = Duration::from_micros(200);
+const RECV_POOL_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiveProfile {
@@ -479,8 +481,8 @@ pub struct PeerDriverConfig {
     pub heartbeat_timeout: Option<Duration>,
     /// `TTL` field of outgoing PING (peer-hint for when to assume dead).
     pub heartbeat_ttl: Option<Duration>,
-    /// Recv frames whose payload exceeds this threshold via a single
-    /// `read_exact` into a pre-sized buffer, bypassing the fixed
+    /// Recv frames whose payload exceeds this threshold directly into
+    /// a pre-sized owned buffer, bypassing the fixed
     /// `read_buf` -> `Connection` buffering path. `0` disables.
     pub large_message_threshold: usize,
 }
@@ -868,6 +870,7 @@ where
         };
         let mut read_buf_full_reads = 0usize;
         let mut read_buf = BytesMut::with_capacity(read_buf_target);
+        let recv_pool = RecvBufPool::new();
         let mut eq = FrameBuffer::with_config_lazy(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::new();
         let mut arena_buf: Vec<u8> = Vec::new();
@@ -929,6 +932,7 @@ where
                         &mut read_buf_full_reads,
                         &config,
                         &mut last_input,
+                        &recv_pool,
                         &peer_out,
                         peer_id,
                     ).await?;
@@ -1038,6 +1042,7 @@ where
                         &mut read_buf_full_reads,
                         &config,
                         &mut last_input,
+                        &recv_pool,
                         &peer_out,
                         peer_id,
                     ).await?;
@@ -1256,6 +1261,7 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     read_buf_full_reads: &mut usize,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
+    recv_pool: &Arc<RecvBufPool>,
     peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
 ) -> Result<()> {
@@ -1276,7 +1282,7 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
         emit_connection_events_best_effort(connection, peer_out, peer_id).await;
         return Err(e);
     }
-    handle_large_messages(connection, reader, config, last_input).await
+    handle_large_messages(connection, reader, config, last_input, recv_pool).await
 }
 
 fn handle_pre_activation_inbox_command(
@@ -1484,13 +1490,77 @@ async fn drain_send_pipe_batch<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Read large frames directly into owned buffers (bypasses the fixed
+#[derive(Debug)]
+struct RecvBufPool {
+    inner: std::sync::Mutex<RecvBufPoolInner>,
+}
+
+#[derive(Debug, Default)]
+struct RecvBufPoolInner {
+    buffers: Vec<Vec<u8>>,
+    retained_bytes: usize,
+}
+
+impl RecvBufPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(RecvBufPoolInner::default()),
+        })
+    }
+
+    fn take(&self, capacity: usize) -> Vec<u8> {
+        let mut pool = self.inner.lock().expect("recv buf pool");
+        if let Some(mut buf) = pool.buffers.pop() {
+            pool.retained_bytes = pool.retained_bytes.saturating_sub(buf.capacity());
+            if buf.capacity() < capacity {
+                buf.reserve(capacity - buf.capacity());
+            }
+            buf.clear();
+            return buf;
+        }
+        Vec::with_capacity(capacity)
+    }
+
+    fn give(&self, mut buf: Vec<u8>) {
+        let capacity = buf.capacity();
+        if capacity > RECV_POOL_MAX_BUFFER_BYTES {
+            return;
+        }
+        buf.clear();
+        let mut pool = self.inner.lock().expect("recv buf pool");
+        if pool.retained_bytes.saturating_add(capacity) <= RECV_POOL_MAX_RETAINED_BYTES {
+            pool.retained_bytes += capacity;
+            pool.buffers.push(buf);
+        }
+    }
+}
+
+struct PooledRecvBuf {
+    buf: Vec<u8>,
+    pool: Arc<RecvBufPool>,
+}
+
+impl AsRef<[u8]> for PooledRecvBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+impl Drop for PooledRecvBuf {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        self.pool.give(buf);
+    }
+}
+
+/// Read large frames directly into pooled owned buffers (bypasses the fixed
 /// `read_buf` -> `Connection` buffering path).
 async fn handle_large_messages<R: AsyncRead + Unpin>(
     connection: &mut Connection,
     reader: &mut R,
     config: &PeerDriverConfig,
     last_input: &mut Instant,
+    recv_pool: &Arc<RecvBufPool>,
 ) -> Result<()> {
     #[cfg(feature = "ws")]
     let skip_large = connection.is_ws();
@@ -1506,13 +1576,45 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
         let Some((plen, prefix)) = connection.begin_supplied_payload_with_prefix() else {
             break;
         };
-        let mut buf = BytesMut::zeroed(plen);
-        buf[..prefix.len()].copy_from_slice(prefix.as_slice());
-        if prefix.len() < plen {
-            reader.read_exact(&mut buf[prefix.len()..plen]).await?;
-        }
+        let payload = if plen <= RECV_POOL_MAX_BUFFER_BYTES {
+            let mut buf = recv_pool.take(plen);
+            buf.extend_from_slice(prefix.as_slice());
+            if buf.len() < plen {
+                let filled = buf.len();
+                buf.resize(plen, 0);
+                reader.read_exact(&mut buf[filled..plen]).await?;
+            }
+            debug_assert_eq!(buf.len(), plen);
+            Bytes::from_owner(PooledRecvBuf {
+                buf,
+                pool: Arc::clone(recv_pool),
+            })
+        } else {
+            let mut buf = BytesMut::with_capacity(plen);
+            buf.extend_from_slice(prefix.as_slice());
+            if buf.len() < plen {
+                read_exact_buf(reader, &mut buf, plen).await?;
+            }
+            debug_assert_eq!(buf.len(), plen);
+            buf.freeze()
+        };
         *last_input = Instant::now();
-        connection.supply_payload(buf.freeze())?;
+        connection.supply_payload(payload)?;
+    }
+    Ok(())
+}
+
+async fn read_exact_buf<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut BytesMut,
+    target_len: usize,
+) -> io::Result<()> {
+    while buf.len() < target_len {
+        let remaining = target_len - buf.len();
+        let mut limited = (&mut *buf).limit(remaining);
+        if reader.read_buf(&mut limited).await? == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
     }
     Ok(())
 }
@@ -1974,6 +2076,45 @@ mod tests {
         assert_eq!(signals.load(Ordering::Relaxed), 2);
     }
 
+    #[test]
+    fn recv_buf_pool_reuses_bounded_buffers() {
+        let pool = RecvBufPool::new();
+        let mut buf = pool.take(256 * 1024);
+        buf.extend_from_slice(&[7; 1024]);
+        let capacity = buf.capacity();
+        pool.give(buf);
+
+        assert_eq!(pool.inner.lock().unwrap().buffers.len(), 1);
+        let reused = pool.take(128 * 1024);
+        assert_eq!(reused.len(), 0);
+        assert!(reused.capacity() >= capacity);
+        assert_eq!(pool.inner.lock().unwrap().retained_bytes, 0);
+    }
+
+    #[test]
+    fn recv_buf_pool_does_not_retain_huge_buffers() {
+        let pool = RecvBufPool::new();
+        pool.give(Vec::with_capacity(RECV_POOL_MAX_BUFFER_BYTES + 1));
+        let guard = pool.inner.lock().unwrap();
+        assert_eq!(guard.buffers.len(), 0);
+        assert_eq!(guard.retained_bytes, 0);
+    }
+
+    #[test]
+    fn recv_buf_pool_caps_total_retained_bytes() {
+        let pool = RecvBufPool::new();
+        let buffer_count = (RECV_POOL_MAX_RETAINED_BYTES / RECV_POOL_MAX_BUFFER_BYTES) + 2;
+        for _ in 0..buffer_count {
+            pool.give(Vec::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+        }
+        let guard = pool.inner.lock().unwrap();
+        assert!(guard.retained_bytes <= RECV_POOL_MAX_RETAINED_BYTES);
+        assert_eq!(
+            guard.buffers.len(),
+            RECV_POOL_MAX_RETAINED_BYTES / RECV_POOL_MAX_BUFFER_BYTES
+        );
+    }
+
     #[derive(Debug)]
     struct PartialVectoredWriter {
         out: Vec<u8>,
@@ -2144,6 +2285,25 @@ mod tests {
             buf.put_slice(&self.data[self.pos..end]);
             self.pos = end;
             Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UninitProbeReader {
+        inner: ScriptedReader,
+    }
+
+    impl tokio::io::AsyncRead for UninitProbeReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            assert!(
+                buf.initialized().is_empty(),
+                "large recv path must fill uninitialized spare capacity"
+            );
+            Pin::new(&mut self.inner).poll_read(cx, buf)
         }
     }
 
@@ -2400,7 +2560,7 @@ mod tests {
         };
         let mut last_input = Instant::now();
 
-        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+        handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
             .await
             .unwrap();
 
@@ -2436,7 +2596,7 @@ mod tests {
         };
         let mut last_input = Instant::now();
 
-        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+        handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
             .await
             .unwrap();
 
@@ -2474,13 +2634,74 @@ mod tests {
         };
         let mut last_input = Instant::now();
 
-        handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+        handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
             .await
             .unwrap();
 
         let msg = pull.poll_message().expect("large message decoded");
         assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
         assert_eq!(reader.pos, reader.data.len());
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_uses_uninitialized_spare_capacity() {
+        const MSG_SIZE: usize = RECV_POOL_MAX_BUFFER_BYTES + 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 64;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = patterned_payload(MSG_SIZE, 45);
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+        pull.handle_input(wire.slice(..prefix_wire_bytes)).unwrap();
+        let mut reader = UninitProbeReader {
+            inner: ScriptedReader::new(wire.slice(prefix_wire_bytes..), [128, 4093, 65_537]),
+        };
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
+            .await
+            .unwrap();
+
+        let msg = pull.poll_message().expect("large message decoded");
+        assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn large_message_direct_read_returns_unexpected_eof_on_short_payload() {
+        const MSG_SIZE: usize = 1024 * 1024;
+        const PREFIX_PAYLOAD_BYTES: usize = 64;
+
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = patterned_payload(MSG_SIZE, 44);
+        push.send_message(&Message::single(Bytes::from(payload)))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let prefix_wire_bytes = 9 + PREFIX_PAYLOAD_BYTES;
+
+        pull.handle_input(wire.slice(..prefix_wire_bytes)).unwrap();
+        let short_end = prefix_wire_bytes + 1024;
+        let mut reader = ScriptedReader::new(wire.slice(prefix_wire_bytes..short_end), [128]);
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+
+        let err = handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
+            .await
+            .expect_err("short payload must fail");
+
+        assert!(matches!(
+            err,
+            Error::Io(ref e) if e.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[tokio::test]
@@ -2507,7 +2728,7 @@ mod tests {
                 wire.slice(prefix_wire_bytes..),
                 [3, 1, 65_537, 8_191, 262_147],
             );
-            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+            handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
                 .await
                 .unwrap();
 
@@ -2537,7 +2758,7 @@ mod tests {
 
             feed_fragmented_input(&mut pull, &wire, prefix_wire_bytes);
             let mut reader = ScriptedReader::new(wire.slice(prefix_wire_bytes..), [1, 7, 31, 257]);
-            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+            handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
                 .await
                 .unwrap();
 
@@ -2593,7 +2814,7 @@ mod tests {
                 [1 + (seq % 7), 3, 31, 4093, 65_537, 131_071, 262_147],
             );
 
-            handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+            handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
                 .await
                 .unwrap();
 
@@ -2664,7 +2885,7 @@ mod tests {
                     262_147,
                 ];
                 let mut reader = ScriptedReader::new(wire.slice(cursor..), read_caps);
-                handle_large_messages(&mut pull, &mut reader, &config, &mut last_input)
+                handle_large_messages_test(&mut pull, &mut reader, &config, &mut last_input)
                     .await
                     .unwrap();
                 cursor += reader.pos;
@@ -3183,6 +3404,16 @@ mod tests {
         if start < end {
             connection.handle_input(wire.slice(start..end)).unwrap();
         }
+    }
+
+    async fn handle_large_messages_test<R: AsyncRead + Unpin>(
+        connection: &mut Connection,
+        reader: &mut R,
+        config: &PeerDriverConfig,
+        last_input: &mut Instant,
+    ) -> Result<()> {
+        let recv_pool = RecvBufPool::new();
+        handle_large_messages(connection, reader, config, last_input, &recv_pool).await
     }
 
     fn feed_input_in_chunks(

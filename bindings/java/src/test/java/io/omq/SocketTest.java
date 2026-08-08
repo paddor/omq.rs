@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,26 @@ final class SocketTest {
             assertEquals(2, received.partCount());
             assertArrayEquals("route".getBytes(StandardCharsets.UTF_8), received.part(0));
             assertArrayEquals("body".getBytes(StandardCharsets.UTF_8), received.part(1));
+        }
+    }
+
+    @Test
+    void byteBufferSendDoesNotAdvancePosition() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            ByteBuffer buffer = ByteBuffer.wrap("xxpayloadyy".getBytes(StandardCharsets.UTF_8));
+            buffer.position(2);
+            buffer.limit(9);
+            push.send(buffer);
+
+            assertEquals("payload", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            assertEquals(2, buffer.position());
+            assertEquals(9, buffer.limit());
         }
     }
 

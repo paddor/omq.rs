@@ -6,6 +6,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+/** Owns native OMQ I/O threads and creates sockets. */
 public final class Context implements AutoCloseable {
     private static final Cleaner CLEANER = Cleaner.create();
 
@@ -13,10 +14,12 @@ public final class Context implements AutoCloseable {
     private final State state;
     private final Cleaner.Cleanable cleanable;
 
+    /** Creates a context with one native I/O thread. */
     public Context() {
         this(1);
     }
 
+    /** Creates a context with the requested native I/O thread count. */
     public Context(int ioThreads) {
         if (ioThreads <= 0) {
             throw new IllegalArgumentException("ioThreads must be greater than zero");
@@ -25,14 +28,17 @@ public final class Context implements AutoCloseable {
         this.cleanable = CLEANER.register(this, state);
     }
 
+    /** Opens a context with one native I/O thread. */
     public static Context open() {
         return new Context();
     }
 
+    /** Opens a context with the requested native I/O thread count. */
     public static Context open(int ioThreads) {
         return new Context(ioThreads);
     }
 
+    /** Creates a socket owned by this context. */
     public Socket socket(SocketType type) {
         Objects.requireNonNull(type, "type");
         long contextHandle = handle();
@@ -52,6 +58,7 @@ public final class Context implements AutoCloseable {
         sockets.remove(state);
     }
 
+    /** Closes all owned sockets and terminates the native context. */
     @Override
     public void close() {
         for (Socket.State socket : sockets.toArray(Socket.State[]::new)) {

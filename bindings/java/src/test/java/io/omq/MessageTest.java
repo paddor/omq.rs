@@ -3,6 +3,7 @@ package io.omq;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -58,6 +59,15 @@ final class MessageTest {
         assertEquals(2, message.partCount());
         assertArrayEquals("one".getBytes(StandardCharsets.UTF_8), message.part(0));
         assertArrayEquals("two".getBytes(StandardCharsets.UTF_8), message.part(1));
+    }
+
+    @Test
+    void partBufferIsReadOnlyCopy() {
+        Message message = Message.text("copy");
+        ByteBuffer buffer = message.partBuffer(0);
+
+        assertTrue(buffer.isReadOnly());
+        assertEquals("copy", StandardCharsets.UTF_8.decode(buffer).toString());
     }
 
     @Test

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jni::JNIEnv;
-use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue};
 use jni::sys::{jint, jlong, jobjectArray, jstring};
 use omq_tokio::blocking::Socket as BlockingSocket;
 use omq_tokio::{
@@ -98,6 +98,65 @@ fn throw_java(env: &mut JNIEnv<'_>, class: &str, message: impl AsRef<str>) {
     let _ = env.throw_new(class, message.as_ref());
 }
 
+fn throw_transport_java(
+    env: &mut JNIEnv<'_>,
+    class: &str,
+    operation: &str,
+    endpoint: &str,
+    detail: &str,
+) {
+    let result = (|| {
+        let operation = env.new_string(operation)?;
+        let endpoint = env.new_string(endpoint)?;
+        let detail = env.new_string(detail)?;
+        let throwable = env.new_object(
+            class,
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Object(&operation),
+                JValue::Object(&endpoint),
+                JValue::Object(&detail),
+            ],
+        )?;
+        env.throw(JThrowable::from(throwable))
+    })();
+
+    if result.is_err() {
+        let _ = env.throw_new(
+            "io/omq/OMQException",
+            format!("{operation} failed for {endpoint}: {detail}"),
+        );
+    }
+}
+
+fn is_name_resolution_error(error: &std::io::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    matches!(error.kind(), std::io::ErrorKind::NotFound)
+        || text.contains("lookup")
+        || text.contains("no address")
+        || text.contains("no addresses")
+        || text.contains("name or service")
+        || text.contains("nodename")
+        || text.contains("temporary failure in name resolution")
+}
+
+fn throw_omq_for_endpoint(env: &mut JNIEnv<'_>, error: Error, operation: &str, endpoint: &str) {
+    if let Error::Io(io_error) = error {
+        let class = if is_name_resolution_error(&io_error) {
+            "io/omq/NameResolutionException"
+        } else {
+            match operation {
+                "bind" => "io/omq/BindException",
+                "connect" => "io/omq/ConnectException",
+                _ => "io/omq/TransportException",
+            }
+        };
+        throw_transport_java(env, class, operation, endpoint, &io_error.to_string());
+    } else {
+        throw_omq(env, error);
+    }
+}
+
 fn throw_omq(env: &mut JNIEnv<'_>, error: Error) {
     let class = match error {
         Error::Timeout | Error::WouldBlock => "io/omq/TimeoutException",
@@ -167,10 +226,6 @@ fn message_to_java(env: &mut JNIEnv<'_>, message: Message) -> Result<jobjectArra
     }
 
     Ok(parts.into_raw())
-}
-
-fn endpoint_from_java(env: &mut JNIEnv<'_>, endpoint: JString<'_>) -> Result<Endpoint, Error> {
-    Endpoint::from_str(&java_string(env, endpoint)?)
 }
 
 fn duration_from_millis(millis: jlong) -> Result<Duration, Error> {
@@ -393,9 +448,11 @@ pub extern "system" fn Java_io_omq_Native_socketBind(
     endpoint: JString<'_>,
 ) -> jstring {
     guard(&mut env, std::ptr::null_mut(), |env| {
+        let mut endpoint_text = String::new();
         let result = (|| {
             let socket = socket_from_handle(handle)?;
-            let endpoint = endpoint_from_java(env, endpoint)?;
+            endpoint_text = java_string(env, endpoint)?;
+            let endpoint = Endpoint::from_str(&endpoint_text)?;
             let bound = socket.materialize()?.bind(endpoint)?;
             env.new_string(bound.to_string())
                 .map(|s| s.into_raw())
@@ -405,7 +462,7 @@ pub extern "system" fn Java_io_omq_Native_socketBind(
         match result {
             Ok(value) => value,
             Err(error) => {
-                throw_omq(env, error);
+                throw_omq_for_endpoint(env, error, "bind", &endpoint_text);
                 std::ptr::null_mut()
             }
         }
@@ -420,14 +477,16 @@ pub extern "system" fn Java_io_omq_Native_socketConnect(
     endpoint: JString<'_>,
 ) {
     guard(&mut env, (), |env| {
+        let mut endpoint_text = String::new();
         let result = (|| {
             let socket = socket_from_handle(handle)?;
-            let endpoint = endpoint_from_java(env, endpoint)?;
+            endpoint_text = java_string(env, endpoint)?;
+            let endpoint = Endpoint::from_str(&endpoint_text)?;
             socket.materialize()?.connect(endpoint)
         })();
 
         if let Err(error) = result {
-            throw_omq(env, error);
+            throw_omq_for_endpoint(env, error, "connect", &endpoint_text);
         }
     });
 }
@@ -440,14 +499,16 @@ pub extern "system" fn Java_io_omq_Native_socketUnbind(
     endpoint: JString<'_>,
 ) {
     guard(&mut env, (), |env| {
+        let mut endpoint_text = String::new();
         let result = (|| {
             let socket = socket_from_handle(handle)?;
-            let endpoint = endpoint_from_java(env, endpoint)?;
+            endpoint_text = java_string(env, endpoint)?;
+            let endpoint = Endpoint::from_str(&endpoint_text)?;
             socket.materialize()?.unbind(endpoint)
         })();
 
         if let Err(error) = result {
-            throw_omq(env, error);
+            throw_omq_for_endpoint(env, error, "unbind", &endpoint_text);
         }
     });
 }
@@ -460,14 +521,16 @@ pub extern "system" fn Java_io_omq_Native_socketDisconnect(
     endpoint: JString<'_>,
 ) {
     guard(&mut env, (), |env| {
+        let mut endpoint_text = String::new();
         let result = (|| {
             let socket = socket_from_handle(handle)?;
-            let endpoint = endpoint_from_java(env, endpoint)?;
+            endpoint_text = java_string(env, endpoint)?;
+            let endpoint = Endpoint::from_str(&endpoint_text)?;
             socket.materialize()?.disconnect(endpoint)
         })();
 
         if let Err(error) = result {
-            throw_omq(env, error);
+            throw_omq_for_endpoint(env, error, "disconnect", &endpoint_text);
         }
     });
 }

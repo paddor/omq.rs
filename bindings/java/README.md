@@ -6,6 +6,8 @@ This is not a JeroMQ compatibility layer. The Java API owns a native OMQ
 context, and that context owns the background IO thread(s), matching the normal
 libzmq architecture.
 
+Architecture detail: [`doc/architecture.md`](doc/architecture.md).
+
 ## Build, install, test
 
 ```sh

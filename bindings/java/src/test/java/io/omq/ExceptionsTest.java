@@ -1,5 +1,6 @@
 package io.omq;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,7 +13,40 @@ final class ExceptionsTest {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {
             assertThrows(InvalidEndpointException.class, () -> pull.bind("not-an-endpoint"));
-            assertThrows(OMQException.class, () -> pull.bind("tcp://999.999.999.999:0"));
+            NameResolutionException error = assertThrows(
+                    NameResolutionException.class,
+                    () -> pull.bind("tcp://999.999.999.999:0"));
+            assertEquals("bind", error.operation());
+            assertEquals("tcp://999.999.999.999:0", error.endpoint());
+            assertTrue(error.detail().length() > 0);
+        }
+    }
+
+    @Test
+    void bindIoErrorRaisesBindException() {
+        try (Context context = OMQ.context();
+             Socket first = context.socket(SocketType.PULL);
+             Socket second = context.socket(SocketType.PULL)) {
+            String endpoint = first.bind("tcp://127.0.0.1:0");
+
+            BindException error = assertThrows(BindException.class, () -> second.bind(endpoint));
+            assertEquals("bind", error.operation());
+            assertEquals(endpoint, error.endpoint());
+            assertTrue(error.detail().length() > 0);
+            assertTrue(error.getMessage().contains(endpoint));
+        }
+    }
+
+    @Test
+    void connectDnsErrorRaisesNameResolutionException() {
+        try (Context context = OMQ.context();
+             Socket push = context.socket(SocketType.PUSH)) {
+            NameResolutionException error = assertThrows(
+                    NameResolutionException.class,
+                    () -> push.connect("tcp://999.999.999.999:5555"));
+            assertEquals("connect", error.operation());
+            assertEquals("tcp://999.999.999.999:5555", error.endpoint());
+            assertTrue(error.detail().length() > 0);
         }
     }
 

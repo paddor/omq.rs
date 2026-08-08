@@ -58,6 +58,13 @@ use crate::transport::{
     Transport as _, inproc as inproc_transport,
 };
 
+#[cfg(feature = "ws")]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WsConnectOptions<'a> {
+    pub(super) accept_invalid_certs: bool,
+    pub(super) mechanism: &'a omq_proto::MechanismSetup,
+}
+
 /// Re-register a stream with the current thread's I/O reactor. Each
 /// `current_thread` tokio runtime has its own reactor; a stream
 /// accepted on one thread must be migrated before a driver on another
@@ -400,6 +407,7 @@ impl AnyListener {
 /// `lz4+tcp://` reuses the TCP listener; the per-connection
 /// transform is installed by the actor based on the endpoint scheme.
 pub(super) async fn bind_any(
+    inproc_registry: &std::sync::Arc<inproc_transport::InprocRegistry>,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_signal: &std::sync::Arc<DataSignal>,
@@ -439,6 +447,7 @@ pub(super) async fn bind_any(
     match endpoint {
         Endpoint::Inproc { name } => {
             let listener = AnyListener::Inproc(inproc_transport::bind(
+                inproc_registry.clone(),
                 name,
                 snapshot.clone(),
                 recv_signal.clone(),
@@ -512,13 +521,13 @@ async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
 
 /// Connect dispatch (single attempt). Used under `dial_with_backoff`.
 pub(super) async fn connect_any(
+    inproc_registry: &inproc_transport::InprocRegistry,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_signal: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
-    #[cfg(feature = "ws")] accept_invalid_certs: bool,
-    #[cfg(feature = "ws")] mechanism: &omq_proto::MechanismSetup,
+    #[cfg(feature = "ws")] ws_options: WsConnectOptions<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
@@ -546,8 +555,8 @@ pub(super) async fn connect_any(
             port,
             path,
             matches!(plain, Endpoint::Wss { .. }),
-            accept_invalid_certs,
-            mechanism,
+            ws_options.accept_invalid_certs,
+            ws_options.mechanism,
         )
         .await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);
@@ -560,6 +569,7 @@ pub(super) async fn connect_any(
     match endpoint {
         Endpoint::Inproc { name } => {
             let conn = inproc_transport::connect_with_max_message_size(
+                inproc_registry,
                 name,
                 snapshot.clone(),
                 recv_signal.clone(),
@@ -629,7 +639,9 @@ mod tests {
     async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
         #[cfg(feature = "ws")]
         let wss_tls = omq_proto::options::WssTls::default();
+        let inproc_registry = Arc::new(inproc_transport::InprocRegistry::new());
         bind_any(
+            &inproc_registry,
             endpoint,
             &snapshot(),
             &recv_signal(),

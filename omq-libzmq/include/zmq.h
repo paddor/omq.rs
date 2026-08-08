@@ -291,6 +291,10 @@ int   zmq_ctx_destroy (void *context_); /* deprecated */
 void *zmq_init (int io_threads_);       /* deprecated */
 int   zmq_term (void *context_);        /* deprecated */
 
+/*  OMQ extension: share/import one native ContextCore inside this process.  */
+int   omq_ctx_share_key (void *context_, uint64_t *key_hi_, uint64_t *key_lo_);
+void *omq_ctx_from_share_key (uint64_t key_hi_, uint64_t key_lo_);
+
 /*  Socket API --------------------------------------------------------------- */
 void *zmq_socket     (void *context_, int type_);
 int   zmq_close      (void *s_);

@@ -9,8 +9,8 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send,
-    zmq_setsockopt, zmq_socket,
+    omq_ctx_from_share_key, omq_ctx_share_key, zmq_bind, zmq_close, zmq_connect, zmq_ctx_new,
+    zmq_ctx_term, zmq_errno, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -21,6 +21,7 @@ const ZMQ_SUB: i32 = 2;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_SNDMORE: i32 = 2;
+const ZMQ_ETERM: i32 = 156_384_765;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
     zmq_setsockopt(
@@ -58,6 +59,130 @@ fn inproc_push_pull() {
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn inproc_same_name_is_context_local() {
+    let ctx1 = zmq_ctx_new();
+    let ctx2 = zmq_ctx_new();
+    let push1 = zmq_socket(ctx1, ZMQ_PUSH);
+    let pull1 = zmq_socket(ctx1, ZMQ_PULL);
+    let push2 = zmq_socket(ctx2, ZMQ_PUSH);
+    let pull2 = zmq_socket(ctx2, ZMQ_PULL);
+
+    let addr = CString::new("inproc://test-context-local").unwrap();
+    assert_eq!(zmq_bind(pull1, addr.as_ptr()), 0);
+    assert_eq!(zmq_bind(pull2, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push1, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push2, addr.as_ptr()), 0);
+    std::thread::sleep(Duration::from_millis(20));
+    set_timeo(pull1, 1000);
+    set_timeo(pull2, 1000);
+
+    assert_eq!(zmq_send(push1, b"ctx1".as_ptr().cast(), 4, 0), 4);
+    assert_eq!(zmq_send(push2, b"ctx2".as_ptr().cast(), 4, 0), 4);
+
+    let mut buf = [0u8; 32];
+    assert_eq!(zmq_recv(pull1, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"ctx1");
+    assert_eq!(zmq_recv(pull2, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"ctx2");
+
+    zmq_close(push1);
+    zmq_close(pull1);
+    zmq_close(push2);
+    zmq_close(pull2);
+    zmq_ctx_term(ctx1);
+    zmq_ctx_term(ctx2);
+}
+
+#[test]
+fn inproc_shared_context_key_crosses_c_contexts() {
+    let ctx1 = zmq_ctx_new();
+    let mut key_hi = 0_u64;
+    let mut key_lo = 0_u64;
+    assert_eq!(omq_ctx_share_key(ctx1, &mut key_hi, &mut key_lo), 0);
+    let ctx2 = omq_ctx_from_share_key(key_hi, key_lo);
+    assert!(!ctx2.is_null());
+
+    let pull = zmq_socket(ctx1, ZMQ_PULL);
+    let push = zmq_socket(ctx2, ZMQ_PUSH);
+    let addr = CString::new("inproc://test-shared-key").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    std::thread::sleep(Duration::from_millis(20));
+    set_timeo(pull, 1000);
+
+    assert_eq!(zmq_send(push, b"shared".as_ptr().cast(), 6, 0), 6);
+    let mut buf = [0u8; 32];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 6);
+    assert_eq!(&buf[..6], b"shared");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx2);
+
+    let pull = zmq_socket(ctx1, ZMQ_PULL);
+    let push = zmq_socket(ctx1, ZMQ_PUSH);
+    let addr = CString::new("inproc://test-owner-after-import-term").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    set_timeo(pull, 1000);
+    assert_eq!(zmq_send(push, b"owner".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
+    assert_eq!(&buf[..5], b"owner");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx1);
+}
+
+#[test]
+fn imported_context_observes_owner_term() {
+    let ctx1 = zmq_ctx_new();
+    let mut key_hi = 0_u64;
+    let mut key_lo = 0_u64;
+    assert_eq!(omq_ctx_share_key(ctx1, &mut key_hi, &mut key_lo), 0);
+    let ctx2 = omq_ctx_from_share_key(key_hi, key_lo);
+    assert!(!ctx2.is_null());
+
+    assert_eq!(zmq_ctx_term(ctx1), 0);
+    assert!(zmq_socket(ctx2, ZMQ_PUSH).is_null());
+    assert_eq!(zmq_errno(), ZMQ_ETERM);
+    assert_eq!(omq_ctx_share_key(ctx2, &mut key_hi, &mut key_lo), -1);
+    assert_eq!(zmq_errno(), ZMQ_ETERM);
+    assert_eq!(zmq_ctx_term(ctx2), 0);
+}
+
+#[test]
+fn imported_socket_recv_wakes_after_owner_term() {
+    let ctx1 = zmq_ctx_new();
+    let mut key_hi = 0_u64;
+    let mut key_lo = 0_u64;
+    assert_eq!(omq_ctx_share_key(ctx1, &mut key_hi, &mut key_lo), 0);
+    let ctx2 = omq_ctx_from_share_key(key_hi, key_lo);
+    assert!(!ctx2.is_null());
+
+    let pull = zmq_socket(ctx2, ZMQ_PULL);
+    let addr = CString::new("inproc://test-imported-owner-term").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+
+    let pull_addr = pull as usize;
+    let recv_thread = std::thread::spawn(move || {
+        let pull = pull_addr as *mut c_void;
+        let mut buf = [0u8; 32];
+        let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+        (rc, zmq_errno())
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(zmq_ctx_term(ctx1), 0);
+    let (rc, err) = recv_thread.join().expect("recv thread");
+    assert_eq!(rc, -1);
+    assert_eq!(err, ZMQ_ETERM);
+
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx2), 0);
 }
 
 #[test]

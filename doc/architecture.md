@@ -16,11 +16,14 @@ omq-proto core: Connection, frames, mechanisms, messages, options
 
 ## Context and runtime management
 
-`Context` owns one or more independent `current_thread` tokio runtimes,
+`Context` is a cheap handle to a shared `ContextCore`. The core owns
+one or more independent `current_thread` tokio runtimes,
 each on its own OS thread. Each runtime has its own IO reactor (epoll /
 kqueue), timer wheel, and task scheduler. There is no cross-thread work
 stealing and no shared scheduler lock. Connections assigned to one
 thread run with zero contention from connections on other threads.
+`ContextCore` also owns the `inproc://` namespace for sockets created
+through that context.
 
 - `Context::new()`: one IO thread. Default.
 - `Context::with_config(cfg)`: N IO threads. Each IO thread is a
@@ -42,6 +45,14 @@ from their own async runtime while OMQ IO stays on the context's runtime
 threads. `Context::block_on()` is a plain-`fn main()` helper that runs a
 future on the owned runtime and blocks the caller (not available on
 `Context::current()`).
+
+`Context::share_key()` returns a process-local opaque `u128` key.
+`Context::from_share_key()` turns that key back into another handle to
+the same `ContextCore`, if the owner still exists and has not been
+terminated. The registry stores weak references only, so a key cannot
+keep a context alive. C and foreign bindings pass the key as two `u64`
+words; imported binding contexts must not terminate the owner unless
+their API explicitly says they own it.
 
 ## Blocking API (background IO)
 
@@ -270,8 +281,13 @@ nonblocking send and never backpressure data forwarding.
 Inproc bypasses ZMTP framing and kernel I/O. Cross-thread peers use `yring`
 send pipes and deliver `InboundFrame::Message` through `inproc_peer_driver`.
 Same-thread paths use direct `yring::ProducerOwner` access where applicable.
-Public semantics remain the same: HWM backpressure, round-robin fairness,
-and connect-before-bind.
+Names are scoped to the owning `ContextCore`, not the process. Two
+independent contexts can bind the same `inproc://name` without seeing
+each other. Handles imported with `Context::from_share_key()` share the
+same namespace, which lets different language bindings in one process
+communicate over inproc without a process-global registry. Public
+semantics remain the same: HWM backpressure, round-robin fairness, and
+connect-before-bind.
 
 ## Drain Budgets And Signaling
 

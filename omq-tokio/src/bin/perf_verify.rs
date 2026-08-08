@@ -170,8 +170,13 @@ async fn count_messages(sock: omq_tokio::Socket, deadline: Instant) -> u64 {
 
 async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
     tokio::task::spawn_blocking(move || {
+        let is_inproc = matches!(endpoint, Endpoint::Inproc { .. });
         let pull_ctx = Context::with_config(ContextConfig { io_threads });
-        let push_ctx = Context::with_config(ContextConfig { io_threads });
+        let push_ctx = if is_inproc {
+            pull_ctx.clone()
+        } else {
+            Context::with_config(ContextConfig { io_threads })
+        };
         let pull = pull_ctx.blocking_socket(SocketType::Pull, Options::default());
         let push = push_ctx.blocking_socket(SocketType::Push, Options::default());
         let endpoint = pull.bind(endpoint).expect("PULL bind");

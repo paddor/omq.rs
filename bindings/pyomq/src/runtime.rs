@@ -62,6 +62,7 @@ pub(crate) struct ContextInner {
     io_threads: usize,
     state: Mutex<Option<RuntimeState>>,
     terminated: AtomicBool,
+    owns_runtime: bool,
 }
 
 impl ContextInner {
@@ -70,7 +71,31 @@ impl ContextInner {
             io_threads: io_threads.max(1),
             state: Mutex::new(None),
             terminated: AtomicBool::new(false),
+            owns_runtime: true,
         })
+    }
+
+    pub fn from_shared_context(ctx: omq_tokio::Context) -> Arc<Self> {
+        let io_threads = ctx.io_threads().max(1);
+        Arc::new(Self {
+            io_threads,
+            state: Mutex::new(Some(RuntimeState {
+                pid: std::process::id(),
+                ctx,
+            })),
+            terminated: AtomicBool::new(false),
+            owns_runtime: false,
+        })
+    }
+
+    pub fn share_key(&self) -> PyResult<u128> {
+        Ok(self.runtime_context()?.share_key())
+    }
+
+    pub fn from_share_key(share_key: u128) -> PyResult<Arc<Self>> {
+        let ctx = omq_tokio::Context::from_share_key(share_key)
+            .ok_or_else(|| crate::error::map_err(omq_proto::error::Error::Closed))?;
+        Ok(Self::from_shared_context(ctx))
     }
 
     fn ensure_runtime(&self) -> PyResult<Handle> {
@@ -82,7 +107,13 @@ impl ContextInner {
         if let Some(rt) = guard.as_ref()
             && rt.pid == pid
         {
+            if rt.ctx.is_terminated() {
+                return Err(crate::error::map_err(omq_proto::error::Error::Closed));
+            }
             return Ok(rt.ctx.handle().clone());
+        }
+        if !self.owns_runtime {
+            return Err(crate::error::map_err(omq_proto::error::Error::Closed));
         }
         let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig {
             io_threads: self.io_threads,
@@ -105,11 +136,23 @@ impl ContextInner {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|rt| rt.pid == std::process::id())
+            .is_some_and(|rt| rt.pid == std::process::id() && !rt.ctx.is_terminated())
     }
 
     pub fn runtime_handle(&self) -> PyResult<Handle> {
         self.ensure_runtime()
+    }
+
+    pub fn runtime_context(&self) -> PyResult<omq_tokio::Context> {
+        let _ = self.ensure_runtime()?;
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("runtime initialized")
+            .ctx
+            .clone())
     }
 
     /// Build a socket using omq-tokio's native blocking adapter.
@@ -118,15 +161,8 @@ impl ContextInner {
         socket_type: omq_tokio::SocketType,
         options: omq_tokio::Options,
     ) -> PyResult<(u64, omq_tokio::blocking::Socket)> {
-        let handle = self.ensure_runtime()?;
-        let ctx = self
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("runtime initialized")
-            .ctx
-            .clone();
+        let ctx = self.runtime_context()?;
+        let handle = ctx.handle().clone();
         let (otx, orx) = flume::bounded(1);
         handle.spawn(async move {
             let id = next_id();
@@ -165,12 +201,13 @@ impl ContextInner {
         send_ready: Arc<ReadinessSignal>,
         recv_space: Arc<omq_tokio::engine::StateSignal>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
-        let handle = self.ensure_runtime()?;
+        let ctx = self.runtime_context()?;
+        let handle = ctx.handle().clone();
         let (otx, orx) = flume::bounded(1);
         let recv_all_signal = global_recv_signal();
         handle.spawn(async move {
             let id = next_id();
-            let sock = Arc::new(InnerSocket::new(socket_type, options));
+            let sock = Arc::new(ctx.socket(socket_type, options));
 
             const SEND_YIELD_INTERVAL: u32 = 256;
             let send_socket = sock.clone();
@@ -296,10 +333,10 @@ impl ContextInner {
         self.terminated.store(true, Ordering::Release);
         let state = self.state.lock().unwrap().take();
         if let Some(s) = state {
-            if s.pid == std::process::id() {
+            if self.owns_runtime && s.pid == std::process::id() {
                 s.ctx.term();
             } else {
-                std::mem::forget(s);
+                drop_or_forget_foreign(s);
             }
         }
     }
@@ -348,12 +385,20 @@ impl ContextInner {
 impl Drop for ContextInner {
     fn drop(&mut self) {
         if let Some(s) = self.state.get_mut().unwrap().take() {
-            if s.pid == std::process::id() {
+            if self.owns_runtime && s.pid == std::process::id() {
                 s.ctx.term();
             } else {
-                std::mem::forget(s);
+                drop_or_forget_foreign(s);
             }
         }
+    }
+}
+
+fn drop_or_forget_foreign(state: RuntimeState) {
+    if state.pid == std::process::id() {
+        drop(state);
+    } else {
+        std::mem::forget(state);
     }
 }
 

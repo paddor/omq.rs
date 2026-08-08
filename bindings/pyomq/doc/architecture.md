@@ -46,6 +46,20 @@ Python threads ──────────────▶ tokio thread (curre
 `omq_tokio::Socket` is `Send + Sync` and stored as `Arc<Socket>` in
 `SocketInner`. Python wrappers hold an `Arc<SocketInner>`.
 
+Each Python `Context` owns or shadows one native `omq_tokio::Context`,
+which is a handle to a shared `ContextCore`. The core owns the tokio
+runtime and its `inproc://` registry. Normal `pyomq.Context()` owns that
+core and calls native `term()` on close. Shadow contexts and
+`Context.from_share_key()` wrappers only drop their handle; they do not
+terminate the owner.
+
+`Context.share_key()` returns a process-local opaque integer backed by
+the native `u128` `ContextCore` key. `Context.from_share_key(key)` and
+`pyomq.asyncio.Context.from_share_key(key)` import another handle to the
+same core, so sync and asyncio wrappers can share `inproc://` names
+without Python-side endpoint rewriting. The native registry stores weak
+refs, so keys do not keep contexts alive.
+
 ### Why the yring relay is needed
 
 Although `omq_tokio::Socket` can be shared across threads, its
@@ -86,8 +100,8 @@ Materialization:
 
 1. Extract options from the `Overlay` into `omq_tokio::Options`.
 2. Create yring producer/consumer pairs (capacities from SNDHWM/RCVHWM).
-3. Post job to the tokio thread: build the socket, spawn send and recv
-   pump tasks.
+3. Post job to the tokio thread: build the socket from the context's
+   native `ContextCore`, spawn send and recv pump tasks.
 4. Store `Materialized { id, socket, send_prod, recv_cons, recv_ready,
    send_ready, recv_space, send_pump, recv_pump }` in the `SocketInner`.
 

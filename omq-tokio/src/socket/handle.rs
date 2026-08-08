@@ -19,6 +19,7 @@ use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
 use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
+use crate::transport::inproc::InprocRegistry;
 
 pub use omq_proto::error::TrySendError;
 
@@ -100,6 +101,7 @@ impl Socket {
             options,
             None,
             &crate::context::IoPoolHandle::none(),
+            crate::transport::inproc::standalone_registry(),
         )
     }
 
@@ -107,8 +109,9 @@ impl Socket {
         socket_type: SocketType,
         options: Options,
         io_pool: &crate::context::IoPoolHandle,
+        inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
-        Self::new_inner(socket_type, options, None, io_pool)
+        Self::new_inner(socket_type, options, None, io_pool, inproc_registry)
     }
 
     /// Like [`Socket::new`], but installs a `RecvSinkConfig` that the
@@ -124,7 +127,18 @@ impl Socket {
             options,
             Some(config),
             &crate::context::IoPoolHandle::none(),
+            crate::transport::inproc::standalone_registry(),
         )
+    }
+
+    pub(crate) fn new_with_recv_sink_config_and_io_pool(
+        socket_type: SocketType,
+        options: Options,
+        config: Arc<crate::engine::RecvSinkConfig>,
+        io_pool: &crate::context::IoPoolHandle,
+        inproc_registry: Arc<InprocRegistry>,
+    ) -> Self {
+        Self::new_inner(socket_type, options, Some(config), io_pool, inproc_registry)
     }
 
     fn new_inner(
@@ -132,6 +146,7 @@ impl Socket {
         options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         io_pool: &crate::context::IoPoolHandle,
+        inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
         options
             .validate()
@@ -192,6 +207,7 @@ impl Socket {
             subscribe_count.clone(),
             ready_peer_count.clone(),
             io_pool.clone(),
+            inproc_registry,
         );
         let actor_task = spawn_driver(driver, io_pool);
         Self {

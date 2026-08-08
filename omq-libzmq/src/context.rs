@@ -1,6 +1,6 @@
 //! Context: owns a tokio runtime on a background thread.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
@@ -29,6 +29,7 @@ pub(crate) struct OmqContext {
     /// Pending inproc connect requests waiting for a bind.
     pub(crate) inproc_waiting:
         Mutex<FxHashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
+    owns_io_context: bool,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -55,22 +56,63 @@ impl OmqContext {
             zero_copy_recv: AtomicBool::new(true),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
+            owns_io_context: true,
         })
     }
 
+    fn from_io_context(ctx: omq_tokio::Context) -> Arc<Self> {
+        let out = Arc::new(Self {
+            ctx: OnceLock::new(),
+            configured_io_threads: AtomicI32::new(i32::try_from(ctx.io_threads()).unwrap_or(1)),
+            terminated: Arc::new(AtomicBool::new(false)),
+            socket_count: AtomicI32::new(0),
+            linger_count: AtomicI32::new(0),
+            socket_notify: (Mutex::new(()), Condvar::new()),
+            sockets: Mutex::new(Vec::new()),
+            max_sockets: AtomicI32::new(1023),
+            max_msg_size: AtomicI64::new(-1),
+            ipv6: AtomicBool::new(false),
+            blocky: AtomicBool::new(true),
+            zero_copy_recv: AtomicBool::new(true),
+            inproc_binds: Mutex::new(FxHashMap::default()),
+            inproc_waiting: Mutex::new(FxHashMap::default()),
+            owns_io_context: false,
+        });
+        out.ctx
+            .set(ctx)
+            .expect("new imported context should be empty");
+        out
+    }
+
     pub(crate) fn handle(&self) -> Option<&Handle> {
+        if self.is_effectively_terminated() {
+            return None;
+        }
         self.ctx.get().map(omq_tokio::Context::handle)
     }
 
     pub(crate) fn io_context(&self) -> Option<&omq_tokio::Context> {
+        if self.is_effectively_terminated() {
+            return None;
+        }
         let n = self.configured_io_threads.load(Ordering::Acquire);
-        (n > 0).then(|| {
-            self.ctx.get_or_init(|| {
-                omq_tokio::Context::with_config(omq_tokio::ContextConfig {
-                    io_threads: n as usize,
-                })
+        if n <= 0 {
+            return None;
+        }
+        let ctx = self.ctx.get_or_init(|| {
+            omq_tokio::Context::with_config(omq_tokio::ContextConfig {
+                io_threads: n as usize,
             })
-        })
+        });
+        (!ctx.is_terminated()).then_some(ctx)
+    }
+
+    pub(crate) fn is_effectively_terminated(&self) -> bool {
+        self.terminated.load(Ordering::Acquire)
+            || self
+                .ctx
+                .get()
+                .is_some_and(omq_tokio::Context::is_terminated)
     }
 
     pub(crate) fn zero_io_threads(&self) -> bool {
@@ -200,11 +242,49 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
         }
     }
 
-    if let Some(ctx) = arc.ctx.get() {
+    if arc.owns_io_context
+        && let Some(ctx) = arc.ctx.get()
+    {
         ctx.term();
     }
     drop(arc);
     0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_ctx_share_key(
+    ctx_ptr: *mut c_void,
+    key_hi: *mut u64,
+    key_lo: *mut u64,
+) -> c_int {
+    if ctx_ptr.is_null() || key_hi.is_null() || key_lo.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
+    // SAFETY: caller guarantees ctx_ptr is a valid context from this library.
+    let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
+    if ctx.is_effectively_terminated() {
+        return crate::error::fail(crate::error::ETERM);
+    }
+    let Some(io_ctx) = ctx.io_context() else {
+        return crate::error::fail(libc::ENOTSUP);
+    };
+    let key = io_ctx.share_key();
+    // SAFETY: output pointers were checked non-null above.
+    unsafe {
+        *key_hi = (key >> 64) as u64;
+        *key_lo = key as u64;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_ctx_from_share_key(key_hi: u64, key_lo: u64) -> *mut c_void {
+    let key = (u128::from(key_hi) << 64) | u128::from(key_lo);
+    let Some(ctx) = omq_tokio::Context::from_share_key(key) else {
+        let _ = crate::error::fail(libc::EINVAL);
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(OmqContext::from_io_context(ctx))).cast()
 }
 
 #[unsafe(no_mangle)]

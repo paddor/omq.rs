@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "ws")]
+use super::dispatch::WsConnectOptions;
 use super::dispatch::{
     AnyConn, AnyStream, bind_any, connect_any, generated_identity, peer_ident_socket_addr,
     preflight_connect_endpoint_resolution,
@@ -238,6 +240,7 @@ pub(crate) struct SocketDriver {
     subscribe_count: Arc<AtomicU64>,
     ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
+    inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
 }
 
 impl SocketDriver {
@@ -258,6 +261,7 @@ impl SocketDriver {
         subscribe_count: Arc<AtomicU64>,
         ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
         io_pool: crate::context::IoPoolHandle,
+        inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -296,6 +300,7 @@ impl SocketDriver {
             subscribe_count,
             ready_peer_count_shared,
             io_pool,
+            inproc_registry,
         }
     }
 

@@ -8,7 +8,6 @@
 
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::consts;
@@ -147,7 +146,7 @@ impl ProxyCtx {
                 }
             }
 
-            if self.frontend.ctx.terminated.load(Ordering::Acquire) {
+            if self.frontend.ctx.is_effectively_terminated() {
                 return crate::error::fail(crate::error::ETERM);
             }
 
@@ -327,6 +326,9 @@ impl ProxyCtx {
             std::thread::sleep(Duration::from_millis(1));
             return;
         };
+        if target.ctx.is_effectively_terminated() {
+            return;
+        }
         let Some(handle) = target.ctx.handle() else {
             std::thread::sleep(Duration::from_millis(1));
             return;

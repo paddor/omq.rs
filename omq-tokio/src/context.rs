@@ -3,9 +3,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, Weak, mpsc};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
@@ -279,7 +281,7 @@ impl IoPoolHandle {
 /// ```
 #[derive(Clone, Debug)]
 pub struct Context {
-    inner: Arc<ContextInner>,
+    inner: Arc<ContextCore>,
 }
 
 enum RuntimeOwnership {
@@ -287,18 +289,25 @@ enum RuntimeOwnership {
     Borrowed { handle: Handle },
 }
 
-struct ContextInner {
+/// Shared context core.
+///
+/// A `ContextCore` owns the runtime, the per-context `inproc://`
+/// namespace, and the language-neutral share key used by bindings.
+pub struct ContextCore {
     ownership: RuntimeOwnership,
     owner_pid: u32,
     io_threads: usize,
     terminated: AtomicBool,
+    share_key: u128,
+    inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
 }
 
-impl std::fmt::Debug for ContextInner {
+impl std::fmt::Debug for ContextCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContextInner")
+        f.debug_struct("ContextCore")
             .field("io_threads", &self.io_threads)
             .field("owner_pid", &self.owner_pid)
+            .field("share_key", &format_args!("{:032x}", self.share_key))
             .field(
                 "owned",
                 &matches!(self.ownership, RuntimeOwnership::Owned { .. }),
@@ -308,7 +317,47 @@ impl std::fmt::Debug for ContextInner {
     }
 }
 
-impl ContextInner {
+static NEXT_CONTEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static CONTEXT_KEY_PREFIX: LazyLock<u64> = LazyLock::new(|| {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos ^ (u64::from(std::process::id()) << 32)
+});
+static CONTEXT_REGISTRY: LazyLock<Mutex<FxHashMap<u128, Weak<ContextCore>>>> =
+    LazyLock::new(|| Mutex::new(FxHashMap::default()));
+
+fn next_context_key() -> u128 {
+    let low = NEXT_CONTEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    (u128::from(*CONTEXT_KEY_PREFIX) << 64) | u128::from(low)
+}
+
+fn register_context_core(core: &Arc<ContextCore>) {
+    let mut registry = CONTEXT_REGISTRY.lock().expect("context registry poisoned");
+    registry.retain(|_, weak| weak.strong_count() > 0);
+    registry.insert(core.share_key, Arc::downgrade(core));
+}
+
+fn unregister_context_core(share_key: u128) {
+    if let Ok(mut registry) = CONTEXT_REGISTRY.lock() {
+        registry.remove(&share_key);
+    }
+}
+
+impl ContextCore {
+    fn new(ownership: RuntimeOwnership, io_threads: usize) -> Arc<Self> {
+        let core = Arc::new(Self {
+            ownership,
+            owner_pid: std::process::id(),
+            io_threads,
+            terminated: AtomicBool::new(false),
+            share_key: next_context_key(),
+            inproc_registry: Arc::new(crate::transport::inproc::InprocRegistry::new()),
+        });
+        register_context_core(&core);
+        core
+    }
+
     fn is_owner_process(&self) -> bool {
         self.owner_pid == std::process::id()
     }
@@ -327,6 +376,12 @@ impl ContextInner {
             },
             _ => IoPoolHandle::none(),
         }
+    }
+
+    /// Language-neutral opaque key for importing this context in another
+    /// binding loaded into the same native library image.
+    pub fn share_key(&self) -> u128 {
+        self.share_key
     }
 }
 
@@ -351,12 +406,7 @@ impl Context {
         let io_threads = config.io_threads;
         let pool = IoThreadPool::new(io_threads);
         Self {
-            inner: Arc::new(ContextInner {
-                ownership: RuntimeOwnership::Owned { pool },
-                owner_pid: std::process::id(),
-                io_threads,
-                terminated: AtomicBool::new(false),
-            }),
+            inner: ContextCore::new(RuntimeOwnership::Owned { pool }, io_threads),
         }
     }
 
@@ -372,13 +422,46 @@ impl Context {
         let handle =
             Handle::try_current().expect("Context::current() called outside a tokio runtime");
         Self {
-            inner: Arc::new(ContextInner {
-                ownership: RuntimeOwnership::Borrowed { handle },
-                owner_pid: std::process::id(),
-                io_threads: 0,
-                terminated: AtomicBool::new(false),
-            }),
+            inner: ContextCore::new(RuntimeOwnership::Borrowed { handle }, 0),
         }
+    }
+
+    /// Return the opaque `u128` key for this context core.
+    ///
+    /// The key is only meaningful inside the current process and native
+    /// library image. Importing it creates another `Context` handle to the
+    /// same runtime and `inproc://` namespace.
+    pub fn share_key(&self) -> u128 {
+        self.inner.share_key()
+    }
+
+    /// Import a context by a key previously returned by [`share_key`](Self::share_key).
+    pub fn from_share_key(share_key: u128) -> Option<Self> {
+        let core = {
+            let mut registry = CONTEXT_REGISTRY.lock().ok()?;
+            let core = registry.get(&share_key).and_then(Weak::upgrade);
+            if core.is_none() {
+                registry.remove(&share_key);
+            }
+            core?
+        };
+        if !core.is_owner_process() || core.terminated.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(Self { inner: core })
+    }
+
+    #[doc(hidden)]
+    pub fn core(&self) -> Arc<ContextCore> {
+        self.inner.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn from_core(core: Arc<ContextCore>) -> Option<Self> {
+        if !core.is_owner_process() || core.terminated.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(Self { inner: core })
     }
 
     /// Create a blocking socket on this context's runtime.
@@ -414,7 +497,38 @@ impl Context {
         );
         let _guard = self.inner.primary_handle().enter();
         let io_pool = self.inner.io_pool_handle();
-        Socket::new_with_io_pool(socket_type, options, &io_pool)
+        Socket::new_with_io_pool(
+            socket_type,
+            options,
+            &io_pool,
+            self.inner.inproc_registry.clone(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn socket_with_recv_sink_config(
+        &self,
+        socket_type: SocketType,
+        options: Options,
+        config: Arc<crate::engine::RecvSinkConfig>,
+    ) -> Socket {
+        assert!(
+            !self.inner.terminated.load(Ordering::Acquire),
+            "Context::socket_with_recv_sink_config() called on a terminated context"
+        );
+        assert!(
+            self.inner.is_owner_process(),
+            "Context::socket_with_recv_sink_config() called on a context inherited across fork"
+        );
+        let _guard = self.inner.primary_handle().enter();
+        let io_pool = self.inner.io_pool_handle();
+        Socket::new_with_recv_sink_config_and_io_pool(
+            socket_type,
+            options,
+            config,
+            &io_pool,
+            self.inner.inproc_registry.clone(),
+        )
     }
 
     /// Run a future on this context's runtime, blocking the calling
@@ -473,6 +587,11 @@ impl Context {
         self.inner.io_threads
     }
 
+    /// Whether this context core has been terminated.
+    pub fn is_terminated(&self) -> bool {
+        self.inner.terminated.load(Ordering::Acquire)
+    }
+
     /// Shut down this context's runtime. All spawned driver tasks are
     /// aborted and the background threads exit.
     ///
@@ -482,6 +601,7 @@ impl Context {
         if self.inner.terminated.swap(true, Ordering::AcqRel) {
             return;
         }
+        unregister_context_core(self.inner.share_key);
         if !self.inner.is_owner_process() {
             return;
         }
@@ -497,8 +617,9 @@ impl Default for Context {
     }
 }
 
-impl Drop for ContextInner {
+impl Drop for ContextCore {
     fn drop(&mut self) {
+        unregister_context_core(self.share_key);
         if !self.is_owner_process() {
             return;
         }

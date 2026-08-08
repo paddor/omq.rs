@@ -64,6 +64,17 @@ impl Context {
         }
     }
 
+    fn share_key(&self) -> PyResult<u128> {
+        self.ctx.share_key()
+    }
+
+    #[staticmethod]
+    fn from_share_key(share_key: u128) -> PyResult<Self> {
+        Ok(Context {
+            ctx: ContextInner::from_share_key(share_key)?,
+        })
+    }
+
     /// Construct a new socket of the given libzmq type code.
     #[pyo3(signature = (socket_type, /))]
     fn socket(&self, py: Python<'_>, socket_type: i32) -> PyResult<Socket> {
@@ -116,6 +127,17 @@ impl AsyncContext {
         AsyncContext {
             ctx: context.ctx.clone(),
         }
+    }
+
+    fn share_key(&self) -> PyResult<u128> {
+        self.ctx.share_key()
+    }
+
+    #[staticmethod]
+    fn from_share_key(share_key: u128) -> PyResult<Self> {
+        Ok(AsyncContext {
+            ctx: ContextInner::from_share_key(share_key)?,
+        })
     }
 
     #[pyo3(signature = (socket_type, /))]

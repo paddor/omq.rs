@@ -39,8 +39,8 @@ mod socket;
 mod util;
 
 pub use context::{
-    zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown, zmq_ctx_term,
-    zmq_init, zmq_term,
+    omq_ctx_from_share_key, omq_ctx_share_key, zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_new,
+    zmq_ctx_set, zmq_ctx_shutdown, zmq_ctx_term, zmq_init, zmq_term,
 };
 pub use curve::{zmq_curve_keypair, zmq_curve_public, zmq_z85_decode, zmq_z85_encode};
 pub use error::{zmq_errno, zmq_strerror};

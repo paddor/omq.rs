@@ -240,7 +240,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     }
     // SAFETY: caller must pass a valid context pointer from zmq_ctx_new.
     let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
-    if ctx.terminated.load(Ordering::Acquire) {
+    if ctx.is_effectively_terminated() {
         set_errno(ETERM);
         return std::ptr::null_mut();
     }
@@ -363,16 +363,13 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     // Enter the tokio runtime context so that Socket::new (which calls
     // tokio::spawn internally for its driver task) and the recv pump
     // spawn below are scheduled on the context's runtime.
-    let Some(handle) = sock.ctx.handle() else {
+    let Some(ctx) = sock.ctx.io_context().cloned() else {
         return false;
     };
+    let handle = ctx.handle().clone();
     let _guard = handle.enter();
 
-    let inner = Arc::new(omq_tokio::Socket::new_with_recv_sink_config(
-        socket_type,
-        opts,
-        recv_sink_cfg,
-    ));
+    let inner = Arc::new(ctx.socket_with_recv_sink_config(socket_type, opts, recv_sink_cfg));
 
     // Recv pump: relay from async_channel into the pump yring.
     // Handles second+ peers whose drivers push to async_channel.
@@ -459,7 +456,7 @@ unsafe fn parse_endpoint_args<'a>(
     }
     // SAFETY: caller guarantees sock_ptr is a valid socket from zmq_socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock.ctx.terminated.load(Ordering::Acquire) {
+    if sock.ctx.is_effectively_terminated() {
         return Err(ETERM);
     }
     // SAFETY: addr is non-null (checked above); caller guarantees a valid C string.
@@ -726,15 +723,17 @@ pub extern "C" fn zmq_socket_monitor(
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
+    let Some(monitor_ctx) = sock.ctx.io_context().cloned() else {
+        return fail(ETERM);
+    };
 
     let result = with_socket(&sock.ctx, inner, move |s| async move {
         let mut stream = s.monitor();
 
         // Create a PAIR socket for publishing events, bind it to addr.
-        let pair = std::sync::Arc::new(omq_tokio::Socket::new(
-            omq_tokio::SocketType::Pair,
-            omq_tokio::Options::default(),
-        ));
+        let pair = std::sync::Arc::new(
+            monitor_ctx.socket(omq_tokio::SocketType::Pair, omq_tokio::Options::default()),
+        );
         let ep = omq_tokio::Endpoint::from_str(&addr_str)
             .map_err(|e| omq_tokio::error::Error::InvalidEndpoint(e.to_string()))?;
         pair.bind(ep).await?;

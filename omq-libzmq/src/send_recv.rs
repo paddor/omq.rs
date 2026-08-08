@@ -229,11 +229,7 @@ fn block_recv<T>(
     if rcvtimeo > 0 {
         let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
         loop {
-            if sock
-                .ctx
-                .terminated
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -243,11 +239,7 @@ fn block_recv<T>(
             let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
             let recv_notify = sock.notify.recv_notifier();
             let _ = recv_notify.wait_for_readable(ms);
-            if sock
-                .ctx
-                .terminated
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
             if let Some(val) = try_pop() {
@@ -256,20 +248,12 @@ fn block_recv<T>(
         }
     }
     loop {
-        if sock
-            .ctx
-            .terminated
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
         let recv_notify = sock.notify.recv_notifier();
-        let _ = recv_notify.wait_for_readable(-1);
-        if sock
-            .ctx
-            .terminated
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        let _ = recv_notify.wait_for_readable(100);
+        if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
         if let Some(val) = try_pop() {
@@ -286,11 +270,7 @@ fn block_recv_result<T>(
     if rcvtimeo > 0 {
         let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
         loop {
-            if sock
-                .ctx
-                .terminated
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -300,11 +280,7 @@ fn block_recv_result<T>(
             let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
             let recv_notify = sock.notify.recv_notifier();
             let _ = recv_notify.wait_for_readable(ms);
-            if sock
-                .ctx
-                .terminated
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
             if let Some(val) = try_pop()? {
@@ -313,20 +289,12 @@ fn block_recv_result<T>(
         }
     }
     loop {
-        if sock
-            .ctx
-            .terminated
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
         let recv_notify = sock.notify.recv_notifier();
-        let _ = recv_notify.wait_for_readable(-1);
-        if sock
-            .ctx
-            .terminated
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        let _ = recv_notify.wait_for_readable(100);
+        if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }
         if let Some(val) = try_pop()? {
@@ -487,11 +455,7 @@ pub extern "C" fn zmq_send(
     }
     // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock
-        .ctx
-        .terminated
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
     if buf.is_null() && len > 0 {
@@ -530,11 +494,7 @@ pub extern "C" fn zmq_recv(
     }
     // SAFETY: sock_ptr is non-null (checked above); caller guarantees a valid socket.
     let sock = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
-    if sock
-        .ctx
-        .terminated
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if sock.ctx.is_effectively_terminated() {
         return fail(ETERM);
     }
     if buf.is_null() && buf_len > 0 {

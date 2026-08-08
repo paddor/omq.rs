@@ -1,6 +1,6 @@
 //! In-process transport.
 //!
-//! `inproc://name` endpoints are resolved via a process-global
+//! `inproc://name` endpoints are resolved via the owning context's
 //! registry. Unlike TCP/IPC, **inproc skips the ZMTP codec
 //! entirely** - both ends are in the same process, so we exchange
 //! parsed `Message` / `Command` values directly through a pair of
@@ -13,7 +13,8 @@
 //! `Options::send_hwm` at the `SocketDriver` layer where each
 //! channel is wired up.
 
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::{Condvar, Mutex as StdMutex};
 
 use rustc_hash::FxHashMap;
@@ -163,15 +164,41 @@ type InprocAck = (
     Option<Arc<InprocRx>>,
 );
 
-/// Global registry of bound inproc names → request channel.
-static REGISTRY: LazyLock<Mutex<FxHashMap<String, mpsc::Sender<InprocConnectRequest>>>> =
-    LazyLock::new(|| Mutex::new(FxHashMap::default()));
+#[derive(Debug)]
+struct InprocBinding {
+    id: u64,
+    tx: mpsc::Sender<InprocConnectRequest>,
+}
+
+/// Per-context registry of bound inproc names -> request channel.
+#[derive(Debug, Default)]
+pub struct InprocRegistry {
+    next_binding_id: AtomicU64,
+    binds: Mutex<FxHashMap<String, InprocBinding>>,
+}
+
+impl InprocRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn next_binding_id(&self) -> u64 {
+        self.next_binding_id.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+pub(crate) fn standalone_registry() -> Arc<InprocRegistry> {
+    static REGISTRY: std::sync::LazyLock<Arc<InprocRegistry>> =
+        std::sync::LazyLock::new(|| Arc::new(InprocRegistry::new()));
+    REGISTRY.clone()
+}
 
 /// Bind to `name`. The returned `InprocListener` yields one
 /// `InprocConn` per accepted connector. `snapshot` is captured
 /// here so we can hand it back to each connector synchronously
 /// during `accept`.
 pub(crate) fn bind(
+    registry: Arc<InprocRegistry>,
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_signal: Arc<DataSignal>,
@@ -179,18 +206,21 @@ pub(crate) fn bind(
     max_message_size: Option<usize>,
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
+    let binding_id = registry.next_binding_id();
     {
-        let mut reg = REGISTRY.lock().expect("inproc registry poisoned");
+        let mut reg = registry.binds.lock().expect("inproc registry poisoned");
         if let Some(existing) = reg.get(name)
-            && !existing.is_closed()
+            && !existing.tx.is_closed()
         {
             return Err(Error::InvalidEndpoint(format!(
                 "inproc name already bound: {name}"
             )));
         }
-        reg.insert(name.to_string(), tx);
+        reg.insert(name.to_string(), InprocBinding { id: binding_id, tx });
     }
     Ok(InprocListener {
+        registry,
+        binding_id,
         name: name.to_string(),
         endpoint: omq_proto::endpoint::Endpoint::Inproc {
             name: name.to_string(),
@@ -204,6 +234,7 @@ pub(crate) fn bind(
 }
 
 pub(crate) async fn connect_with_max_message_size(
+    registry: &InprocRegistry,
     name: &str,
     snapshot: InprocPeerSnapshot,
     recv_signal: Arc<DataSignal>,
@@ -211,8 +242,8 @@ pub(crate) async fn connect_with_max_message_size(
     max_message_size: Option<usize>,
 ) -> Result<InprocConn> {
     let req_tx = {
-        let reg = REGISTRY.lock().expect("inproc registry poisoned");
-        reg.get(name).cloned()
+        let reg = registry.binds.lock().expect("inproc registry poisoned");
+        reg.get(name).map(|binding| binding.tx.clone())
     }
     .ok_or_else(|| Error::InvalidEndpoint(format!("no inproc binding: {name}")))?;
 
@@ -251,6 +282,8 @@ pub(crate) async fn connect_with_max_message_size(
 /// Bound inproc listener. Releases its registry slot on drop.
 #[derive(Debug)]
 pub struct InprocListener {
+    registry: Arc<InprocRegistry>,
+    binding_id: u64,
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
@@ -350,7 +383,11 @@ impl InprocListener {
 
 impl Drop for InprocListener {
     fn drop(&mut self) {
-        if let Ok(mut reg) = REGISTRY.lock() {
+        if let Ok(mut reg) = self.registry.binds.lock()
+            && reg
+                .get(&self.name)
+                .is_some_and(|binding| binding.id == self.binding_id)
+        {
             reg.remove(&self.name);
         }
     }
@@ -378,6 +415,10 @@ mod tests {
         crate::socket::recv::BlockingRecvWaker::new()
     }
 
+    fn registry() -> Arc<InprocRegistry> {
+        Arc::new(InprocRegistry::new())
+    }
+
     #[test]
     fn blocking_space_rechecks_before_parking() {
         let space = BlockingSpace::new();
@@ -393,11 +434,28 @@ mod tests {
 
     #[tokio::test]
     async fn bind_connect_accept_exchange() {
-        let mut l = bind("test-bca", snap(SocketType::Pull), notify(), waker(), None).unwrap();
+        let registry = registry();
+        let mut l = bind(
+            registry.clone(),
+            "test-bca",
+            snap(SocketType::Pull),
+            notify(),
+            waker(),
+            None,
+        )
+        .unwrap();
         let n = notify();
+        let connector_registry = registry.clone();
         let connector = tokio::spawn(async move {
-            connect_with_max_message_size("test-bca", snap(SocketType::Push), n, waker(), None)
-                .await
+            connect_with_max_message_size(
+                &connector_registry,
+                "test-bca",
+                snap(SocketType::Push),
+                n,
+                waker(),
+                None,
+            )
+            .await
         });
         let server_side = l.accept().await.unwrap();
         let client_side = connector.await.unwrap().unwrap();
@@ -427,9 +485,25 @@ mod tests {
 
     #[tokio::test]
     async fn double_bind_rejected() {
-        let _l = bind("test-dup", snap(SocketType::Pair), notify(), waker(), None).unwrap();
+        let registry = registry();
+        let _l = bind(
+            registry.clone(),
+            "test-dup",
+            snap(SocketType::Pair),
+            notify(),
+            waker(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(
-            bind("test-dup", snap(SocketType::Pair), notify(), waker(), None),
+            bind(
+                registry,
+                "test-dup",
+                snap(SocketType::Pair),
+                notify(),
+                waker(),
+                None
+            ),
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -438,6 +512,7 @@ mod tests {
     async fn connect_without_bind_fails() {
         assert!(matches!(
             connect_with_max_message_size(
+                &registry(),
                 "test-unbound",
                 snap(SocketType::Push),
                 notify(),
@@ -451,9 +526,26 @@ mod tests {
 
     #[tokio::test]
     async fn listener_drop_releases_name() {
+        let registry = registry();
         {
-            let _l = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
+            let _l = bind(
+                registry.clone(),
+                "test-drop",
+                snap(SocketType::Pair),
+                notify(),
+                waker(),
+                None,
+            )
+            .unwrap();
         }
-        let _l2 = bind("test-drop", snap(SocketType::Pair), notify(), waker(), None).unwrap();
+        let _l2 = bind(
+            registry,
+            "test-drop",
+            snap(SocketType::Pair),
+            notify(),
+            waker(),
+            None,
+        )
+        .unwrap();
     }
 }

@@ -52,7 +52,7 @@ pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;
 
-pub use context::{Context, ContextConfig};
+pub use context::{Context, ContextConfig, ContextCore};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,

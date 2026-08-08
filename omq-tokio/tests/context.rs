@@ -201,6 +201,94 @@ fn multiple_contexts() {
 }
 
 #[test]
+fn contexts_have_isolated_inproc_namespaces() {
+    let ctx1 = Context::new();
+    let ctx2 = Context::new();
+    let endpoint = inproc_ep("same-name-isolated");
+
+    let pull1 = ctx1.socket(SocketType::Pull, Options::default());
+    let push1 = ctx1.socket(SocketType::Push, Options::default());
+    let pull2 = ctx2.socket(SocketType::Pull, Options::default());
+    let push2 = ctx2.socket(SocketType::Push, Options::default());
+
+    ctx1.block_on({
+        let endpoint = endpoint.clone();
+        let pull = pull1.clone();
+        let push = push1.clone();
+        async move {
+            pull.bind(endpoint.clone()).await.unwrap();
+            push.connect(endpoint).await.unwrap();
+        }
+    });
+    ctx2.block_on({
+        let endpoint = endpoint.clone();
+        let pull = pull2.clone();
+        let push = push2.clone();
+        async move {
+            pull.bind(endpoint.clone()).await.unwrap();
+            push.connect(endpoint).await.unwrap();
+        }
+    });
+
+    ctx1.block_on(async move {
+        push1.send(Message::single("ctx1")).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), pull1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg, Message::single("ctx1"));
+    });
+    ctx2.block_on(async move {
+        push2.send(Message::single("ctx2")).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), pull2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg, Message::single("ctx2"));
+    });
+}
+
+#[test]
+fn context_from_share_key_shares_inproc_namespace() {
+    let ctx = Context::new();
+    let shared = Context::from_share_key(ctx.share_key()).unwrap();
+
+    let pull = shared.socket(SocketType::Pull, Options::default());
+    let push = ctx.socket(SocketType::Push, Options::default());
+
+    ctx.block_on(async move {
+        let endpoint = inproc_ep("share-key");
+        pull.bind(endpoint.clone()).await.unwrap();
+        push.connect(endpoint).await.unwrap();
+        push.send(Message::single("shared")).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg, Message::single("shared"));
+    });
+}
+
+#[test]
+fn context_share_key_does_not_keep_core_alive() {
+    let key = {
+        let ctx = Context::new();
+        ctx.share_key()
+    };
+    assert!(Context::from_share_key(key).is_none());
+}
+
+#[test]
+fn context_share_key_fails_after_term() {
+    let ctx = Context::new();
+    let key = ctx.share_key();
+    let shared = Context::from_share_key(key).unwrap();
+    ctx.term();
+    assert!(Context::from_share_key(key).is_none());
+    assert!(shared.is_terminated());
+}
+
+#[test]
 fn context_clone_shares_runtime() {
     let ctx = Context::new();
     let ctx2 = ctx.clone();

@@ -238,6 +238,7 @@ pub(crate) struct SocketDriver {
     subscribe_count: Arc<AtomicU64>,
     ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
+    inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
 }
 
 impl SocketDriver {
@@ -258,6 +259,7 @@ impl SocketDriver {
         subscribe_count: Arc<AtomicU64>,
         ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
         io_pool: crate::context::IoPoolHandle,
+        inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
@@ -296,6 +298,7 @@ impl SocketDriver {
             subscribe_count,
             ready_peer_count_shared,
             io_pool,
+            inproc_registry,
         }
     }
 

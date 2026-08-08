@@ -606,6 +606,7 @@ class Context(_SyncContext):
 
     _socket_class: type | None = None
     _ctx: _native.AsyncContext
+    _is_shadow: bool
     _closed: bool
     _sockets: weakref.WeakSet[Socket]
     _ctx_id: int
@@ -652,12 +653,24 @@ class Context(_SyncContext):
         self._sockets.add(s)
         return s
 
+    @classmethod
+    def from_share_key(cls, key: int) -> Context:
+        obj = object.__new__(cls)
+        obj._ctx = _native.AsyncContext.from_share_key(key)
+        obj._is_shadow = True
+        obj._closed = False
+        obj._sockets = weakref.WeakSet()
+        obj._ctx_id = next(_next_ctx_id)
+        return obj
+
     def term(self) -> None:
         self._closed = True
         for s in list(self._sockets):
             if not s.closed:
                 s.close()
         self._sockets.clear()
+        if not self._is_shadow:
+            self._ctx.term()
 
     def destroy(self, linger: int | None = None) -> None:
         for s in list(self._sockets):

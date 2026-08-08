@@ -310,6 +310,7 @@ impl SocketDriver {
         reject_encrypted_inproc(&endpoint, &self.options.mechanism)?;
         let snapshot = self.inproc_snapshot();
         let bound = bind_any(
+            &self.inproc_registry,
             &endpoint,
             &snapshot,
             &self.spsc.recv_signal,
@@ -379,6 +380,7 @@ impl SocketDriver {
         let recv_signal = self.spsc.recv_signal.clone();
         let blocking_recv_waker = self.spsc.blocking_recv_waker.clone();
         let max_message_size = self.options.max_message_size;
+        let inproc_registry = self.inproc_registry.clone();
         #[cfg(feature = "ws")]
         let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
         #[cfg(feature = "ws")]
@@ -388,6 +390,7 @@ impl SocketDriver {
             let result = dial_with_backoff(
                 || {
                     connect_any(
+                        &inproc_registry,
                         &ep_for_dial,
                         &snapshot,
                         &recv_signal,

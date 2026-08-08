@@ -1019,8 +1019,6 @@ class _ShadowSocket(_SocketOptionsBase):
 
 _next_ctx_id: Iterator[int] = itertools.count(1)
 
-_INPROC_PREFIX: Final[str] = "inproc://"
-
 
 class _ContextMeta(type):
     """Context metaclass with per-subclass singleton storage."""
@@ -1064,27 +1062,8 @@ class Context(metaclass=_ContextMeta):
         )
 
     def _namespace_inproc(self, endpoint: str | bytes) -> str | bytes:
-        # libzmq scopes inproc per-context; omq's registry is global. pytest
-        # holds frame references to locals (traceback capture), so __del__
-        # never fires and the old socket's registry entry stays alive. Next
-        # test's new Context tries bind("inproc://test") and gets "already
-        # bound". The entry is cleaned up eventually (Socket.close() ->
-        # SocketCommand::Close -> InprocListener::drop removes it), but not
-        # before the next test's bind(). Prefixing with context ID gives each
-        # Context its own namespace, matching libzmq's per-context scoping.
-        ns_str = f"pyomq-ctx-{self._ctx_id}/"
-        ns_bytes = ns_str.encode()
-        if isinstance(endpoint, bytes):
-            pfx = b"inproc://"
-            if endpoint.startswith(pfx) and not endpoint[len(pfx) :].startswith(
-                ns_bytes
-            ):
-                return pfx + ns_bytes + endpoint[len(pfx) :]
-        elif isinstance(endpoint, str):
-            if endpoint.startswith(_INPROC_PREFIX) and not endpoint[
-                len(_INPROC_PREFIX) :
-            ].startswith(ns_str):
-                return f"inproc://{ns_str}{endpoint[len(_INPROC_PREFIX) :]}"
+        # `inproc://` names are scoped by the native context core. Keep the
+        # user endpoint unchanged so LAST_ENDPOINT and errors match input.
         return endpoint
 
     def __class_getitem__(cls, item: Any) -> type[Context]:
@@ -1118,6 +1097,21 @@ class Context(metaclass=_ContextMeta):
         if isinstance(address, int):
             return cls(_shadow_ctx=cls.instance())
         raise TypeError(f"expected Context or int, got {type(address).__name__}")
+
+    def share_key(self) -> int:
+        """Return the opaque native context-core key for this process."""
+        return int(self._ctx.share_key())
+
+    @classmethod
+    def from_share_key(cls, key: int) -> Self:
+        """Create a Context wrapper for an existing native context core."""
+        obj = object.__new__(cls)
+        obj._ctx = _native.Context.from_share_key(key)
+        obj._is_shadow = True
+        obj._closed = False
+        obj._sockets = weakref.WeakSet()
+        obj._ctx_id = next(_next_ctx_id)
+        return cast(Self, obj)
 
     @classmethod
     def instance(cls, io_threads: int = 1) -> Self:

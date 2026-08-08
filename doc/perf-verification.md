@@ -10,7 +10,9 @@ With `.perf_hw` present, the verifier measures CT REQ/REP latency at
 256B, canonical 1-IO PUSH/PULL at 16B, 1KiB, and 16KiB, and canonical
 1-IO PUB/SUB with four subscribers at 16B and 4KiB. It also checks the
 2-IO variants, a 32-subscriber 2-IO PUB/SUB 256B fan-out gate, and
-16B inproc PUSH/PULL. It uses separate OMQ contexts and loopback TCP.
+16B inproc PUSH/PULL. TCP cases use separate OMQ contexts and loopback
+TCP. The inproc case uses one shared `ContextCore`, matching scoped
+`inproc://` semantics.
 Warmup and measurement windows are bounded.
 
 Thresholds are machine-specific. Create the ignored `.perf_hw` file in the

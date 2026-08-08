@@ -400,6 +400,7 @@ impl AnyListener {
 /// `lz4+tcp://` reuses the TCP listener; the per-connection
 /// transform is installed by the actor based on the endpoint scheme.
 pub(super) async fn bind_any(
+    inproc_registry: &std::sync::Arc<inproc_transport::InprocRegistry>,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_signal: &std::sync::Arc<DataSignal>,
@@ -439,6 +440,7 @@ pub(super) async fn bind_any(
     match endpoint {
         Endpoint::Inproc { name } => {
             let listener = AnyListener::Inproc(inproc_transport::bind(
+                inproc_registry.clone(),
                 name,
                 snapshot.clone(),
                 recv_signal.clone(),
@@ -512,6 +514,7 @@ async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
 
 /// Connect dispatch (single attempt). Used under `dial_with_backoff`.
 pub(super) async fn connect_any(
+    inproc_registry: &inproc_transport::InprocRegistry,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv_signal: &std::sync::Arc<DataSignal>,
@@ -560,6 +563,7 @@ pub(super) async fn connect_any(
     match endpoint {
         Endpoint::Inproc { name } => {
             let conn = inproc_transport::connect_with_max_message_size(
+                inproc_registry,
                 name,
                 snapshot.clone(),
                 recv_signal.clone(),
@@ -629,7 +633,9 @@ mod tests {
     async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
         #[cfg(feature = "ws")]
         let wss_tls = omq_proto::options::WssTls::default();
+        let inproc_registry = Arc::new(inproc_transport::InprocRegistry::new());
         bind_any(
+            &inproc_registry,
             endpoint,
             &snapshot(),
             &recv_signal(),

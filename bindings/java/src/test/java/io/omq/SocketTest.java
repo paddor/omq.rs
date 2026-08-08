@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -63,6 +64,30 @@ final class SocketTest {
             assertEquals("payload", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
             assertEquals(2, buffer.position());
             assertEquals(9, buffer.limit());
+        }
+    }
+
+    @Test
+    void trySendReturnsTrueWhenMessageAccepted() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            assertTrue(push.trySend("try"));
+            assertEquals("try", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
+    void trySendReturnsFalseWhenNoPeerCanAccept() {
+        try (Context context = OMQ.context();
+             Socket push = context.socket(SocketType.PUSH)) {
+            push.bind("tcp://127.0.0.1:0");
+
+            assertFalse(push.trySend("mute"));
         }
     }
 

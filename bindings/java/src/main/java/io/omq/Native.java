@@ -14,6 +14,8 @@ final class Native {
     private Native() {
     }
 
+    static native void asyncTaskCancel(long handle);
+
     static native long contextCreate(int ioThreads);
 
     static native void contextClose(long handle);
@@ -21,6 +23,8 @@ final class Native {
     static native String[] curveKeypair();
 
     static native String curvePublic(String secretKey);
+
+    static native long receiveAnyAsync(Socket[] sockets, long[] handles, Object future);
 
     static native long socketCreate(long contextHandle, int socketType);
 
@@ -38,7 +42,13 @@ final class Native {
 
     static native void socketSendMultipart(long handle, byte[][] parts);
 
+    static native int socketTrySendMultipart(long handle, byte[][] parts);
+
+    static native long socketSendAsync(long handle, byte[][] parts, Object future);
+
     static native byte[][] socketRecv(long handle, long timeoutMillis);
+
+    static native long socketRecvAsync(long handle, long timeoutMillis, Object future);
 
     static native void socketSubscribe(long handle, byte[] prefix);
 

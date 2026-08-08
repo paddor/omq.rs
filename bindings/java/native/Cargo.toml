@@ -26,3 +26,4 @@ bytes = "1.12.0"
 jni = "0.21"
 omq-proto = { path = "../../../omq-proto", default-features = false }
 omq-tokio = { path = "../../../omq-tokio", default-features = false }
+tokio = { version = "1.52.0", features = ["sync", "time"] }

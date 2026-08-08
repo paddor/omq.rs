@@ -66,6 +66,32 @@ position. Java does not encode ZMTP, manage connections, or run transport
 threads. Native OMQ receives complete `Message` values and performs all
 socket semantics in Rust.
 
+`trySend` calls native `try_send` and returns `false` when native routing
+or high-water-mark state cannot accept the message immediately. Other
+errors still raise typed exceptions. `tryReceive` and `tryRecv` return an
+empty `Optional` when no complete message is available.
+
+## Async API
+
+`sendAsync` and `receiveAsync` return Java `CompletableFuture` values but
+do not use Java worker threads. The Java method creates a future, JNI takes
+a global reference to it, clones the native async socket, and spawns a Rust
+future on the OMQ context runtime. JNI returns a native abort token stored
+inside the future; `cancel`, user `complete`, and user `completeExceptionally`
+drop that token and abort the native task. When the Rust future completes,
+the OMQ runtime thread attaches to the JVM as a daemon and calls `complete`
+or `completeExceptionally`.
+
+`receiveAsync(Duration)` wraps native `recv()` in `tokio::time::timeout`
+and completes exceptionally with `TimeoutException` on deadline. `sendAsync`
+completes after OMQ accepts the message into outbound routing buffers, same
+semantic point as synchronous `send`.
+
+`OMQ.receiveAny(Socket...)` requires distinct sockets, races one native
+`recv()` future per socket, and returns a `ReceiveEvent` with the winning
+socket and message. Loser receives are aborted inside Rust before they can
+consume later messages. Canceling the Java future aborts all native receives.
+
 ## Compression
 
 Compression is enabled by endpoint scheme and native Cargo features.

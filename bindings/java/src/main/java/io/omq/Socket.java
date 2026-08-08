@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
@@ -88,6 +89,73 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Attempts to send a single-part binary message without blocking. */
+    public synchronized boolean trySend(byte[] body) {
+        Objects.requireNonNull(body, "body");
+        return trySend(Message.of(body));
+    }
+
+    /** Attempts to send remaining buffer bytes without blocking. */
+    public synchronized boolean trySend(ByteBuffer body) {
+        return trySend(Message.of(body));
+    }
+
+    /** Attempts to send UTF-8 text without blocking. */
+    public synchronized boolean trySend(String text) {
+        return trySend(text, StandardCharsets.UTF_8);
+    }
+
+    /** Attempts to send text encoded with the supplied charset without blocking. */
+    public synchronized boolean trySend(String text, Charset charset) {
+        Objects.requireNonNull(text, "text");
+        Objects.requireNonNull(charset, "charset");
+        return trySend(text.getBytes(charset));
+    }
+
+    /** Attempts to send a message without blocking. */
+    public synchronized boolean trySend(Message message) {
+        Objects.requireNonNull(message, "message");
+        byte[][] parts = message.toNative();
+        return withHandle(handle -> Native.socketTrySendMultipart(handle, parts)) != 0;
+    }
+
+    /** Sends a single-part binary message asynchronously on the native runtime. */
+    public synchronized CompletableFuture<Void> sendAsync(byte[] body) {
+        Objects.requireNonNull(body, "body");
+        return sendAsync(Message.of(body));
+    }
+
+    /** Sends the remaining buffer bytes asynchronously on the native runtime. */
+    public synchronized CompletableFuture<Void> sendAsync(ByteBuffer body) {
+        return sendAsync(Message.of(body));
+    }
+
+    /** Sends UTF-8 text asynchronously on the native runtime. */
+    public synchronized CompletableFuture<Void> sendAsync(String text) {
+        return sendAsync(text, StandardCharsets.UTF_8);
+    }
+
+    /** Sends text asynchronously on the native runtime with the supplied charset. */
+    public synchronized CompletableFuture<Void> sendAsync(String text, Charset charset) {
+        Objects.requireNonNull(text, "text");
+        Objects.requireNonNull(charset, "charset");
+        return sendAsync(text.getBytes(charset));
+    }
+
+    /** Sends a message asynchronously on the native runtime; canceling aborts the native send. */
+    public synchronized CompletableFuture<Void> sendAsync(Message message) {
+        Objects.requireNonNull(message, "message");
+        NativeFuture<Void> future = new NativeFuture<>();
+        byte[][] parts = message.toNative();
+        try {
+            long task = withHandle(handle -> Native.socketSendAsync(handle, parts, future));
+            future.setNativeTask(task);
+        } catch (OMQException error) {
+            future.completeExceptionally(error);
+        }
+        return future;
+    }
+
     /** Receives one message, blocking forever. */
     public synchronized Message receive() {
         return Message.fromNative(withHandle(handle -> Native.socketRecv(handle, FOREVER)));
@@ -112,6 +180,37 @@ public final class Socket implements AutoCloseable {
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
+    }
+
+    /** Receives one message if already available, or returns empty. */
+    public synchronized Optional<Message> tryRecv() {
+        return tryReceive();
+    }
+
+    /** Receives one message asynchronously on the native runtime; canceling aborts the native receive. */
+    public synchronized CompletableFuture<Message> receiveAsync() {
+        NativeFuture<Message> future = new NativeFuture<>();
+        try {
+            long task = withHandle(handle -> Native.socketRecvAsync(handle, FOREVER, future));
+            future.setNativeTask(task);
+        } catch (OMQException error) {
+            future.completeExceptionally(error);
+        }
+        return future;
+    }
+
+    /** Receives one message asynchronously before the timeout; canceling aborts the native receive. */
+    public synchronized CompletableFuture<Message> receiveAsync(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        NativeFuture<Message> future = new NativeFuture<>();
+        long timeoutMillis = millis(timeout);
+        try {
+            long task = withHandle(handle -> Native.socketRecvAsync(handle, timeoutMillis, future));
+            future.setNativeTask(task);
+        } catch (OMQException error) {
+            future.completeExceptionally(error);
+        }
+        return future;
     }
 
     /** Subscribes this socket to a binary prefix. */
@@ -317,6 +416,16 @@ public final class Socket implements AutoCloseable {
         synchronized (state) {
             return action.apply(state.handle());
         }
+    }
+
+    long nativeHandle() {
+        synchronized (state) {
+            return state.handle();
+        }
+    }
+
+    Object nativeMonitor() {
+        return state;
     }
 
     private void withHandleVoid(LongConsumer action) {

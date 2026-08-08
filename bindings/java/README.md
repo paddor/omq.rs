@@ -24,6 +24,9 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `Context` owns native IO threads and creates sockets.
 - `Socket` is `AutoCloseable`; use try-with-resources.
 - `Message` is immutable and supports single-part and multipart payloads.
+- `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
+  native OMQ runtime tasks, not Java worker threads. Cancel the returned
+  future to abort the native task.
 - Sockets are synchronized on the Java side. Treat a socket as a single-thread
   object; create more sockets for more concurrent flows.
 
@@ -38,4 +41,12 @@ try (Context ctx = OMQ.context();
     push.send("hello");
     String body = pull.receive(Duration.ofSeconds(5)).orElseThrow().text();
 }
+```
+
+Async receive from multiple distinct sockets uses a typed helper:
+
+```java
+ReceiveEvent event = OMQ.receiveAny(socketA, socketB).get();
+Socket ready = event.socket();
+Message first = event.message();
 ```

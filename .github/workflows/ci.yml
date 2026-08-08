@@ -23,6 +23,7 @@ jobs:
       os_matrix: ${{ steps.matrix.outputs.os_matrix }}
       lint_matrix: ${{ steps.matrix.outputs.lint_matrix }}
       run_pyomq: ${{ steps.scope.outputs.pyomq }}
+      run_java: ${{ steps.scope.outputs.java }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -49,6 +50,9 @@ jobs:
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release-pyomq.yml'
+            java:
+              - 'bindings/java/**'
+              - '.github/workflows/ci.yml'
       - id: matrix
         run: |
           echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
@@ -439,6 +443,29 @@ jobs:
         working-directory: bindings/pyomq
         run: pytest -v -k "not test_perf" -W error
 
+  java-test:
+    name: java-test
+    needs: [changes]
+    if: needs.changes.outputs.run_java == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/java/native
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: bindings/java/pom.xml
+      - name: junit
+        run: mvn -f bindings/java/pom.xml test
+
   ci-success:
     name: CI success
     needs:
@@ -455,6 +482,7 @@ jobs:
         linux-32bit,
         lint,
         pyomq-test,
+        java-test,
       ]
     runs-on: ubuntu-latest
     if: always()

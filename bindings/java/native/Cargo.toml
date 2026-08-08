@@ -1,0 +1,28 @@
+[package]
+name = "omq-java-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "omq_java"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "omq-java-peer"
+path = "src/bin/peer.rs"
+
+[features]
+default = ["plain", "curve", "lz4", "zstd"]
+plain = ["omq-proto/plain", "omq-tokio/plain"]
+curve = ["omq-proto/curve", "omq-tokio/curve"]
+lz4 = ["omq-proto/lz4", "omq-tokio/lz4"]
+zstd = ["omq-proto/zstd", "omq-tokio/zstd"]
+
+[dependencies]
+bytes = "1.12.0"
+jni = "0.21"
+omq-proto = { path = "../../../omq-proto", default-features = false }
+omq-tokio = { path = "../../../omq-tokio", default-features = false }

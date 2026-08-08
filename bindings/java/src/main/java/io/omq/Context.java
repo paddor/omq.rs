@@ -2,7 +2,9 @@ package io.omq;
 
 import java.lang.ref.Cleaner;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -28,6 +30,11 @@ public final class Context implements AutoCloseable {
         this.cleanable = CLEANER.register(this, state);
     }
 
+    private Context(long handle, boolean owner) {
+        this.state = new State(handle, owner);
+        this.cleanable = CLEANER.register(this, state);
+    }
+
     /** Opens a context with one native I/O thread. */
     public static Context open() {
         return new Context();
@@ -36,6 +43,23 @@ public final class Context implements AutoCloseable {
     /** Opens a context with the requested native I/O thread count. */
     public static Context open(int ioThreads) {
         return new Context(ioThreads);
+    }
+
+    /** Imports a context handle by an opaque process-local share key. */
+    public static Optional<Context> fromShareKey(UUID key) {
+        Objects.requireNonNull(key, "key");
+        long handle = Native.contextFromShareKey(
+                key.getMostSignificantBits(), key.getLeastSignificantBits());
+        if (handle == 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new Context(handle, false));
+    }
+
+    /** Returns an opaque process-local key for importing this context. */
+    public UUID shareKey() {
+        long[] key = Native.contextShareKey(handle());
+        return new UUID(key[0], key[1]);
     }
 
     /** Creates a socket owned by this context. */
@@ -69,16 +93,22 @@ public final class Context implements AutoCloseable {
 
     private static final class State implements Runnable {
         private final AtomicLong handle;
+        private final boolean owner;
 
         private State(long handle) {
+            this(handle, true);
+        }
+
+        private State(long handle, boolean owner) {
             this.handle = new AtomicLong(handle);
+            this.owner = owner;
         }
 
         @Override
         public void run() {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
-                Native.contextClose(handle);
+                Native.contextClose(handle, owner);
             }
         }
     }

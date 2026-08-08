@@ -18,7 +18,11 @@ final class Native {
 
     static native long contextCreate(int ioThreads);
 
-    static native void contextClose(long handle);
+    static native void contextClose(long handle, boolean owner);
+
+    static native long[] contextShareKey(long handle);
+
+    static native long contextFromShareKey(long high, long low);
 
     static native String[] curveKeypair();
 

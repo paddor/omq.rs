@@ -3,7 +3,9 @@ package io.omq;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /** Static entry points for OMQ.java. */
@@ -21,6 +23,11 @@ public final class OMQ {
     /** Opens a context with the requested native I/O thread count. */
     public static Context context(int ioThreads) {
         return Context.open(ioThreads);
+    }
+
+    /** Imports a context handle by an opaque process-local share key. */
+    public static Optional<Context> contextFromShareKey(UUID key) {
+        return Context.fromShareKey(key);
     }
 
     /** Generates a CURVE Z85 public/secret key pair in native OMQ. */

@@ -21,7 +21,7 @@ final class InprocTest {
     }
 
     @Test
-    void inprocWorksAcrossContexts() {
+    void inprocNamesAreContextLocal() {
         String endpoint = TestSupport.inprocEndpoint("isolated");
         try (Context a = OMQ.context();
              Context b = OMQ.context();
@@ -31,7 +31,21 @@ final class InprocTest {
             push.connect(endpoint);
             push.send("hidden");
 
-            assertEquals("hidden", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            assertTrue(pull.receive(Duration.ofMillis(100)).isEmpty());
+        }
+    }
+
+    @Test
+    void inprocWorksAcrossSharedContexts() {
+        try (Context owner = OMQ.context();
+             Context shared = Context.fromShareKey(owner.shareKey()).orElseThrow();
+             Socket pull = owner.socket(SocketType.PULL);
+             Socket push = shared.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind(TestSupport.inprocEndpoint("shared"));
+            push.connect(endpoint);
+            push.send("visible");
+
+            assertEquals("visible", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
         }
     }
 

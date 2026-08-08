@@ -22,6 +22,8 @@ current-platform native library in the jar under `io/omq/native/...`.
 ## Shape
 
 - `Context` owns native IO threads and creates sockets.
+- `Context.shareKey()` / `Context.fromShareKey(...)` explicitly share one
+  native context core and `inproc://` namespace across Java handles.
 - `Socket` is `AutoCloseable`; use try-with-resources.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when

@@ -32,9 +32,12 @@ Java caller thread -> synchronized Socket -> JNI -> omq_tokio::blocking::Socket
 ```
 
 `Context(int ioThreads)` creates a native `omq_tokio::Context` with that
-I/O thread count. Java holds an opaque native handle. Closing the Java
+I/O thread count. Java holds an opaque native handle. Closing an owning Java
 context terminates the native context and closes all Java sockets created
-from it.
+from it. `Context.shareKey()` returns a process-local opaque `UUID` view of
+the native `u128` context key. `Context.fromShareKey(UUID)` imports another
+Java handle to the same native context core; closing the imported handle
+closes its Java sockets but does not terminate the owner.
 
 `Socket` holds an opaque native socket handle. The Rust side stores
 `Options` and lazily creates the actual `omq_tokio::blocking::Socket` on
@@ -85,11 +88,13 @@ array as one single-part message. The Rust side copies each array into owned
 native message storage before `sendManyBytes` returns; Java buffers are never
 retained by native code.
 
-`inproc://` is not special-cased in Java. The Rust context owns the process
-inproc registry and decides whether an endpoint is local, what socket types
-are compatible, and which native queue path is legal. A Java-private inproc
-registry would split address ownership from Rust and would break mixed
-Java/Rust endpoints inside the same process.
+`inproc://` is not special-cased in Java. Each Rust context core owns its
+own inproc registry and decides whether an endpoint is local, what socket
+types are compatible, and which native queue path is legal. Separate Java
+contexts have isolated inproc namespaces. Use `Context.shareKey()` and
+`Context.fromShareKey(UUID)` when two Java handles must share one inproc
+namespace. A Java-private inproc registry would split address ownership from
+Rust and would break mixed Java/Rust endpoints inside the same process.
 
 `trySend` calls native `try_send` and returns `false` when native routing
 or high-water-mark state cannot accept the message immediately. Other

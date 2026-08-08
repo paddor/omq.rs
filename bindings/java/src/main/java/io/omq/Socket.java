@@ -14,6 +14,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
+import java.util.function.Predicate;
 
 /** Synchronous OMQ socket backed by a native omq-tokio socket. */
 public final class Socket implements AutoCloseable {
@@ -550,6 +551,13 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Configures this socket as a PLAIN server with an authenticator before first I/O. */
+    public synchronized Socket plainServer(Predicate<PeerInfo> authenticator) {
+        Objects.requireNonNull(authenticator, "authenticator");
+        withHandleVoid(handle -> Native.socketSetPlainServerCallback(handle, authenticator));
+        return this;
+    }
+
     /** Configures this socket as a PLAIN client before first I/O. */
     public synchronized Socket plainClient(String username, String password) {
         Objects.requireNonNull(username, "username");
@@ -563,6 +571,16 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(keypair, "keypair");
         withHandleVoid(handle -> Native.socketSetCurveServer(
                 handle, keypair.publicKey(), keypair.secretKey()));
+        return this;
+    }
+
+    /** Configures this socket as a CURVE server with an authenticator before first I/O. */
+    public synchronized Socket curveServer(
+            CurveKeypair keypair, Predicate<PeerInfo> authenticator) {
+        Objects.requireNonNull(keypair, "keypair");
+        Objects.requireNonNull(authenticator, "authenticator");
+        withHandleVoid(handle -> Native.socketSetCurveServerCallback(
+                handle, keypair.publicKey(), keypair.secretKey(), authenticator));
         return this;
     }
 

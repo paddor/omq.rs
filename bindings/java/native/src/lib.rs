@@ -15,7 +15,8 @@ use omq_tokio::blocking::Socket as BlockingSocket;
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
     Authenticator, Context, ContextConfig, CurveKeypair, CurvePublicKey, CurveSecretKey,
-    CurveServerOptions, Endpoint, Error, MechanismSetup, Message, Options, SocketType,
+    CurveServerOptions, Endpoint, Error, MechanismPeerInfo, MechanismSetup, Message, Options,
+    SocketType,
 };
 
 struct JavaContext {
@@ -256,6 +257,79 @@ fn runtime_exception_object<'local>(
         "(Ljava/lang/String;)V",
         &[JValue::Object(&message)],
     )
+}
+
+fn mechanism_peer_info_object<'local>(
+    env: &mut JNIEnv<'local>,
+    peer: &MechanismPeerInfo,
+) -> Result<JObject<'local>, Error> {
+    let mechanism = env
+        .new_string(peer.mechanism.as_str()?.to_string())
+        .map_err(jni_error)?;
+    let public_key = if peer.mechanism == omq_proto::proto::MechanismName::CURVE {
+        JObject::from(
+            env.new_string(CurvePublicKey::from_bytes(peer.public_key).to_z85())
+                .map_err(jni_error)?,
+        )
+    } else {
+        JObject::null()
+    };
+    let identity = match &peer.identity {
+        Some(identity) => JObject::from(env.byte_array_from_slice(identity).map_err(jni_error)?),
+        None => JObject::null(),
+    };
+    let username = match &peer.username {
+        Some(username) => JObject::from(env.new_string(username).map_err(jni_error)?),
+        None => JObject::null(),
+    };
+    let password = match &peer.password {
+        Some(password) => JObject::from(env.new_string(password).map_err(jni_error)?),
+        None => JObject::null(),
+    };
+
+    env.new_object(
+        "io/omq/PeerInfo",
+        "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;)V",
+        &[
+            JValue::Object(&mechanism),
+            JValue::Object(&public_key),
+            JValue::Object(&identity),
+            JValue::Object(&username),
+            JValue::Object(&password),
+        ],
+    )
+    .map_err(jni_error)
+}
+
+fn java_authenticator(
+    env: &mut JNIEnv<'_>,
+    authenticator: JObject<'_>,
+) -> Result<Authenticator, Error> {
+    if authenticator.is_null() {
+        return Err(Error::Config("authenticator must not be null".to_string()));
+    }
+    let jvm = env.get_java_vm().map_err(jni_error)?;
+    let authenticator = env.new_global_ref(authenticator).map_err(jni_error)?;
+    Ok(Authenticator::new(move |peer| {
+        let Ok(mut env) = jvm.attach_current_thread_as_daemon() else {
+            return false;
+        };
+        let Ok(info) = mechanism_peer_info_object(&mut env, peer) else {
+            return false;
+        };
+        match env.call_method(
+            &authenticator,
+            "test",
+            "(Ljava/lang/Object;)Z",
+            &[JValue::Object(&info)],
+        ) {
+            Ok(value) => value.z().unwrap_or(false),
+            Err(_) => {
+                let _ = env.exception_clear();
+                false
+            }
+        }
+    }))
 }
 
 fn complete_future_exceptionally(env: &mut JNIEnv<'_>, future: &GlobalRef, error: Error) {
@@ -1657,6 +1731,28 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetPlainServerCallback(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    authenticator: JObject<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let authenticator = java_authenticator(env, authenticator)?;
+            socket.set_option(move |options| {
+                options.mechanism = MechanismSetup::PlainServer { authenticator };
+            })
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketSetPlainClient(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -1699,6 +1795,39 @@ pub extern "system" fn Java_io_omq_Native_socketSetCurveServer(
                 options.mechanism = MechanismSetup::CurveServer {
                     our_keypair: keypair,
                     options: CurveServerOptions::default(),
+                };
+            })
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetCurveServerCallback(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    public_key: JString<'_>,
+    secret_key: JString<'_>,
+    authenticator: JObject<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let keypair = curve_keypair_from_z85(
+                java_string(env, public_key)?,
+                java_string(env, secret_key)?,
+            )?;
+            let authenticator = java_authenticator(env, authenticator)?;
+            socket.set_option(move |options| {
+                let mut curve_options = CurveServerOptions::default();
+                curve_options.authenticator = Some(authenticator);
+                options.mechanism = MechanismSetup::CurveServer {
+                    our_keypair: keypair,
+                    options: curve_options,
                 };
             })
         })();

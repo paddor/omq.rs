@@ -1,11 +1,14 @@
 package io.omq;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 final class CurveTest {
@@ -92,6 +95,35 @@ final class CurveTest {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {
             assertThrows(OMQException.class, () -> pull.curveServer(mismatched));
+        }
+    }
+
+    @Test
+    void curveAuthenticatorReceivesPeerInfo() {
+        CurveKeypair serverKeypair = OMQ.curveKeypair();
+        CurveKeypair clientKeypair = OMQ.curveKeypair();
+        AtomicReference<PeerInfo> seen = new AtomicReference<>();
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).curveServer(serverKeypair, peer -> {
+                 seen.set(peer);
+                 return "CURVE".equals(peer.mechanism().orElse(""))
+                         && clientKeypair.publicKey().equals(peer.publicKey().orElse(""))
+                         && "curve-client".equals(new String(
+                                 peer.identity().orElseThrow(), StandardCharsets.UTF_8));
+             });
+             Socket push = context.socket(SocketType.PUSH)
+                     .identity("curve-client".getBytes(StandardCharsets.UTF_8))
+                     .curveClient(clientKeypair, serverKeypair.publicKey())) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send("allowed");
+
+            assertEquals("allowed", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            assertEquals(clientKeypair.publicKey(), seen.get().publicKey().orElseThrow());
+            assertArrayEquals(
+                    "curve-client".getBytes(StandardCharsets.UTF_8),
+                    seen.get().identity().orElseThrow());
         }
     }
 }

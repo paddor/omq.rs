@@ -3,7 +3,9 @@ package io.omq;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 final class PlainTest {
@@ -64,6 +66,31 @@ final class PlainTest {
             push.send("blocked");
 
             assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
+        }
+    }
+
+    @Test
+    void plainAuthenticatorReceivesPeerInfo() {
+        AtomicReference<PeerInfo> seen = new AtomicReference<>();
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).plainServer(peer -> {
+                 seen.set(peer);
+                 return "PLAIN".equals(peer.mechanism().orElse(""))
+                         && "alice".equals(peer.username().orElse(""))
+                         && "secret".equals(peer.password().orElse(""))
+                         && peer.identity().isEmpty();
+             });
+             Socket push = context.socket(SocketType.PUSH)
+                     .identity("plain-client".getBytes(StandardCharsets.UTF_8))
+                     .plainClient("alice", "secret")) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send("allowed");
+
+            assertEquals("allowed", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            assertEquals("alice", seen.get().username().orElseThrow());
+            assertTrue(seen.get().publicKey().isEmpty());
         }
     }
 }

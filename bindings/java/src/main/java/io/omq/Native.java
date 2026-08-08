@@ -95,9 +95,14 @@ final class Native {
 
     static native void socketSetPlainServer(long handle, String username, String password);
 
+    static native void socketSetPlainServerCallback(long handle, Object authenticator);
+
     static native void socketSetPlainClient(long handle, String username, String password);
 
     static native void socketSetCurveServer(long handle, String publicKey, String secretKey);
+
+    static native void socketSetCurveServerCallback(
+            long handle, String publicKey, String secretKey, Object authenticator);
 
     static native void socketSetCurveClient(
             long handle, String publicKey, String secretKey, String serverPublicKey);

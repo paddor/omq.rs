@@ -69,6 +69,21 @@ socket semantics in Rust.
 Synchronous single-part receives cross JNI as a raw `byte[]`, so the common
 path avoids an extra `byte[][]` allocation. `receiveBytes` returns that fresh
 native-owned array directly. Multipart receives still cross as `byte[][]`.
+Batch receives cross JNI as `Object[]`, where each element uses the same
+single-message representation. The native side blocks only for the first
+message, then drains ready messages with nonblocking recv up to the caller's
+limit. This reduces per-message JNI and Java/native synchronization cost for
+high-throughput consumers.
+
+For the hottest single-part consumers, `receiveManyBytesInto` fills a
+caller-owned `byte[][]` and returns a count. The Java side can reuse that
+outer array. The JNI side reuses one native `Vec<Message>` scratch buffer per
+socket and copies each payload directly into the caller's output slots.
+
+`sendManyBytes` crosses JNI once with a Java `byte[][]` and sends each inner
+array as one single-part message. The Rust side copies each array into owned
+native message storage before `sendManyBytes` returns; Java buffers are never
+retained by native code.
 
 `inproc://` is not special-cased in Java. The Rust context owns the process
 inproc registry and decides whether an endpoint is local, what socket types

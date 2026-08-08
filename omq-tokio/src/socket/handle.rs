@@ -604,6 +604,87 @@ impl Socket {
         }
     }
 
+    pub(crate) fn blocking_recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.blocking_recv_many_into(max, &mut messages)?;
+        Ok(messages)
+    }
+
+    pub(crate) fn blocking_recv_many_into(
+        &self,
+        max: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let start_len = out.len();
+        out.push(self.blocking_recv()?);
+        self.try_recv_many_after_first(max, start_len, out)
+    }
+
+    pub(crate) fn blocking_recv_many_timeout(
+        &self,
+        max: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.blocking_recv_many_timeout_into(max, timeout, &mut messages)?;
+        Ok(messages)
+    }
+
+    pub(crate) fn blocking_recv_many_timeout_into(
+        &self,
+        max: usize,
+        timeout: std::time::Duration,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let start_len = out.len();
+        out.push(self.blocking_recv_timeout(timeout)?);
+        self.try_recv_many_after_first(max, start_len, out)
+    }
+
+    fn try_recv_many_after_first(
+        &self,
+        max: usize,
+        start_len: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        let appended = out.len() - start_len;
+        if appended >= max {
+            return Ok(appended);
+        }
+        if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(appended);
+        }
+        match self.try_recv_many_into(max - appended, out) {
+            Ok(n) => Ok(appended + n),
+            Err(Error::WouldBlock) => Ok(appended),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn try_recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.try_recv_many_into(max, &mut messages)?;
+        Ok(messages)
+    }
+
+    /// Try to receive up to `max` ready messages into `out` without blocking.
+    pub fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            if max == 0 {
+                return Ok(0);
+            }
+            out.push(self.try_recv()?);
+            return Ok(1);
+        }
+        self.inner.recv_rx.try_recv_many_into(max, out)
+    }
+
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.

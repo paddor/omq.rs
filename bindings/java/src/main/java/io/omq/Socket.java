@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -86,6 +88,14 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(message, "message");
         byte[][] parts = message.toNative();
         withHandleVoid(handle -> Native.socketSendMultipart(handle, parts));
+        return this;
+    }
+
+    /** Sends each byte array as one single-part message. */
+    public synchronized Socket sendManyBytes(byte[][] bodies) {
+        Objects.requireNonNull(bodies, "bodies");
+        byte[][] messages = requireBodies(bodies);
+        withHandleVoid(handle -> Native.socketSendMany(handle, messages));
         return this;
     }
 
@@ -209,6 +219,124 @@ public final class Socket implements AutoCloseable {
                     this.<Object>withHandle(handle -> Native.socketRecv(handle, 0))));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
+        }
+    }
+
+    /** Receives up to {@code maxMessages} messages, blocking until the first message. */
+    public synchronized List<Message> receiveMany(int maxMessages) {
+        requirePositive("maxMessages", maxMessages);
+        return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
+                handle, maxMessages, FOREVER)));
+    }
+
+    /** Receives up to {@code maxMessages} single-part bodies, blocking until the first message. */
+    public synchronized List<byte[]> receiveManyBytes(int maxMessages) {
+        requirePositive("maxMessages", maxMessages);
+        return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
+                handle, maxMessages, FOREVER)));
+    }
+
+    /** Receives up to {@code maxMessages} messages before the timeout, or returns an empty list. */
+    public synchronized List<Message> receiveMany(int maxMessages, Duration timeout) {
+        requirePositive("maxMessages", maxMessages);
+        Objects.requireNonNull(timeout, "timeout");
+        long timeoutMillis = millis(timeout);
+        try {
+            return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
+                    handle, maxMessages, timeoutMillis)));
+        } catch (TimeoutException timeoutError) {
+            return List.of();
+        }
+    }
+
+    /** Receives up to {@code maxMessages} single-part bodies before the timeout, or returns an empty list. */
+    public synchronized List<byte[]> receiveManyBytes(int maxMessages, Duration timeout) {
+        requirePositive("maxMessages", maxMessages);
+        Objects.requireNonNull(timeout, "timeout");
+        long timeoutMillis = millis(timeout);
+        try {
+            return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
+                    handle, maxMessages, timeoutMillis)));
+        } catch (TimeoutException timeoutError) {
+            return List.of();
+        }
+    }
+
+    /** Fills {@code output} with single-part bodies, blocking until the first message. */
+    public synchronized int receiveManyBytesInto(byte[][] output) {
+        return receiveManyBytesInto(output, 0, outputLength(output));
+    }
+
+    /** Fills {@code output} with single-part bodies, blocking until the first message. */
+    public synchronized int receiveManyBytesInto(byte[][] output, int offset, int maxMessages) {
+        int max = checkOutputRange(output, offset, maxMessages);
+        if (max == 0) {
+            return 0;
+        }
+        return withHandle(handle -> Native.socketRecvManyBytesInto(
+                handle, output, offset, max, FOREVER));
+    }
+
+    /** Fills {@code output} with single-part bodies before the timeout, or returns zero. */
+    public synchronized int receiveManyBytesInto(byte[][] output, Duration timeout) {
+        return receiveManyBytesInto(output, 0, outputLength(output), timeout);
+    }
+
+    /** Fills {@code output} with single-part bodies before the timeout, or returns zero. */
+    public synchronized int receiveManyBytesInto(
+            byte[][] output, int offset, int maxMessages, Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        int max = checkOutputRange(output, offset, maxMessages);
+        if (max == 0) {
+            return 0;
+        }
+        long timeoutMillis = millis(timeout);
+        try {
+            return withHandle(handle -> Native.socketRecvManyBytesInto(
+                    handle, output, offset, max, timeoutMillis));
+        } catch (TimeoutException timeoutError) {
+            return 0;
+        }
+    }
+
+    /** Receives available messages up to {@code maxMessages} without blocking. */
+    public synchronized List<Message> tryReceiveMany(int maxMessages) {
+        requirePositive("maxMessages", maxMessages);
+        try {
+            return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
+                    handle, maxMessages, 0)));
+        } catch (TimeoutException timeoutError) {
+            return List.of();
+        }
+    }
+
+    /** Receives available single-part bodies up to {@code maxMessages} without blocking. */
+    public synchronized List<byte[]> tryReceiveManyBytes(int maxMessages) {
+        requirePositive("maxMessages", maxMessages);
+        try {
+            return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
+                    handle, maxMessages, 0)));
+        } catch (TimeoutException timeoutError) {
+            return List.of();
+        }
+    }
+
+    /** Fills {@code output} with available single-part bodies without blocking. */
+    public synchronized int tryReceiveManyBytesInto(byte[][] output) {
+        return tryReceiveManyBytesInto(output, 0, outputLength(output));
+    }
+
+    /** Fills {@code output} with available single-part bodies without blocking. */
+    public synchronized int tryReceiveManyBytesInto(byte[][] output, int offset, int maxMessages) {
+        int max = checkOutputRange(output, offset, maxMessages);
+        if (max == 0) {
+            return 0;
+        }
+        try {
+            return withHandle(handle -> Native.socketRecvManyBytesInto(
+                    handle, output, offset, max, 0));
+        } catch (TimeoutException timeoutError) {
+            return 0;
         }
     }
 
@@ -481,6 +609,53 @@ public final class Socket implements AutoCloseable {
             throw new IllegalArgumentException("duration must be non-negative");
         }
         return duration.toMillis();
+    }
+
+    private static void requirePositive(String name, int value) {
+        if (value <= 0) {
+            throw new IllegalArgumentException(name + " must be greater than zero");
+        }
+    }
+
+    private static List<Message> messagesFromNative(Object[] nativeMessages) {
+        ArrayList<Message> out = new ArrayList<>(nativeMessages.length);
+        for (Object nativeMessage : nativeMessages) {
+            out.add(Message.fromNative(nativeMessage));
+        }
+        return out;
+    }
+
+    private static List<byte[]> bytesFromNative(Object[] nativeMessages) {
+        ArrayList<byte[]> out = new ArrayList<>(nativeMessages.length);
+        for (Object nativeMessage : nativeMessages) {
+            out.add(Message.bytesFromNative(nativeMessage));
+        }
+        return out;
+    }
+
+    private static byte[][] requireBodies(byte[][] bodies) {
+        for (int i = 0; i < bodies.length; i++) {
+            Objects.requireNonNull(bodies[i], "body " + i);
+        }
+        return bodies;
+    }
+
+    private static int outputLength(byte[][] output) {
+        return Objects.requireNonNull(output, "output").length;
+    }
+
+    private static int checkOutputRange(byte[][] output, int offset, int maxMessages) {
+        Objects.requireNonNull(output, "output");
+        if (offset < 0) {
+            throw new IndexOutOfBoundsException("offset must be non-negative");
+        }
+        if (maxMessages < 0) {
+            throw new IllegalArgumentException("maxMessages must be non-negative");
+        }
+        if (offset > output.length || maxMessages > output.length - offset) {
+            throw new IndexOutOfBoundsException("output range exceeds array length");
+        }
+        return maxMessages;
     }
 
     static final class State implements Runnable {

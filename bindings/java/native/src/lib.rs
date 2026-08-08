@@ -1,6 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -26,7 +26,9 @@ struct JavaSocket {
     ctx: Context,
     socket_type: SocketType,
     options: Mutex<Options>,
-    socket: Mutex<Option<BlockingSocket>>,
+    socket: OnceLock<BlockingSocket>,
+    materialize_lock: Mutex<()>,
+    recv_scratch: Mutex<Vec<Message>>,
     closed: AtomicBool,
 }
 
@@ -36,11 +38,15 @@ impl JavaSocket {
             return Err(Error::Closed);
         }
 
-        let mut socket = self
-            .socket
+        if let Some(socket) = self.socket.get() {
+            return Ok(socket.clone());
+        }
+
+        let _guard = self
+            .materialize_lock
             .lock()
-            .map_err(|_| Error::Config("socket lock poisoned".to_string()))?;
-        if let Some(socket) = socket.as_ref() {
+            .map_err(|_| Error::Config("materialize lock poisoned".to_string()))?;
+        if let Some(socket) = self.socket.get() {
             return Ok(socket.clone());
         }
 
@@ -52,7 +58,9 @@ impl JavaSocket {
         options.validate()?;
 
         let created = self.ctx.blocking_socket(self.socket_type, options);
-        *socket = Some(created.clone());
+        self.socket
+            .set(created.clone())
+            .map_err(|_| Error::Config("socket materialized concurrently".to_string()))?;
         Ok(created)
     }
 
@@ -64,12 +72,11 @@ impl JavaSocket {
             return Err(Error::Closed);
         }
 
-        if self
-            .socket
+        let _guard = self
+            .materialize_lock
             .lock()
-            .map_err(|_| Error::Config("socket lock poisoned".to_string()))?
-            .is_some()
-        {
+            .map_err(|_| Error::Config("materialize lock poisoned".to_string()))?;
+        if self.socket.get().is_some() {
             return Err(Error::Config(
                 "socket options must be set before bind/connect/send/receive".to_string(),
             ));
@@ -380,9 +387,26 @@ fn bytes_from_parts(env: &mut JNIEnv<'_>, parts: JObjectArray<'_>) -> Result<Vec
     Ok(out)
 }
 
+fn send_bodies(
+    env: &mut JNIEnv<'_>,
+    bodies: &JObjectArray<'_>,
+    socket: &BlockingSocket,
+) -> Result<(), Error> {
+    let len = env.get_array_length(bodies).map_err(jni_error)?;
+    for i in 0..len {
+        let body = env.get_object_array_element(bodies, i).map_err(jni_error)?;
+        if body.is_null() {
+            return Err(Error::Config(format!("message body {i} must not be null")));
+        }
+        let body = JByteArray::from(body);
+        socket.send(Message::single(Bytes::from(byte_array(env, body)?)))?;
+    }
+    Ok(())
+}
+
 fn message_to_java_parts<'local>(
     env: &mut JNIEnv<'local>,
-    message: Message,
+    message: &Message,
 ) -> Result<JObjectArray<'local>, Error> {
     let byte_array_class = env.find_class("[B").map_err(jni_error)?;
     let parts = env
@@ -390,7 +414,7 @@ fn message_to_java_parts<'local>(
         .map_err(jni_error)?;
 
     for i in 0..message.len() {
-        let array = message_part_to_java(env, &message, i)?;
+        let array = message_part_to_java(env, message, i)?;
         env.set_object_array_element(&parts, i as jint, array)
             .map_err(jni_error)?;
     }
@@ -411,8 +435,15 @@ fn message_to_java_object<'local>(
     env: &mut JNIEnv<'local>,
     message: Message,
 ) -> Result<JObject<'local>, Error> {
+    message_to_java_object_ref(env, &message)
+}
+
+fn message_to_java_object_ref<'local>(
+    env: &mut JNIEnv<'local>,
+    message: &Message,
+) -> Result<JObject<'local>, Error> {
     if message.len() == 1 {
-        let part = message_part_to_java(env, &message, 0)?;
+        let part = message_part_to_java(env, message, 0)?;
         let part = JObject::from(part);
         return env
             .call_static_method(
@@ -441,10 +472,87 @@ fn message_to_java_native<'local>(
     env: &mut JNIEnv<'local>,
     message: Message,
 ) -> Result<JObject<'local>, Error> {
+    message_to_java_native_ref(env, &message)
+}
+
+fn message_to_java_native_ref<'local>(
+    env: &mut JNIEnv<'local>,
+    message: &Message,
+) -> Result<JObject<'local>, Error> {
     if message.len() == 1 {
-        return message_part_to_java(env, &message, 0).map(JObject::from);
+        return message_part_to_java(env, message, 0).map(JObject::from);
     }
     message_to_java_parts(env, message).map(JObject::from)
+}
+
+fn messages_to_java_native_array(
+    env: &mut JNIEnv<'_>,
+    messages: &[Message],
+) -> Result<jobjectArray, Error> {
+    let object_class = env.find_class("java/lang/Object").map_err(jni_error)?;
+    let out = env
+        .new_object_array(messages.len() as jint, object_class, JObject::null())
+        .map_err(jni_error)?;
+    for (index, message) in messages.iter().enumerate() {
+        let item = message_to_java_native_ref(env, message)?;
+        env.set_object_array_element(&out, index as jint, item)
+            .map_err(jni_error)?;
+    }
+    Ok(out.into_raw())
+}
+
+fn recv_with_timeout(socket: &BlockingSocket, timeout_millis: jlong) -> Result<Message, Error> {
+    if timeout_millis < 0 {
+        socket.recv()
+    } else if timeout_millis == 0 {
+        socket.try_recv()
+    } else {
+        socket.recv_timeout(Duration::from_millis(timeout_millis as u64))
+    }
+}
+
+fn recv_many_into(
+    socket: &BlockingSocket,
+    max_messages: jint,
+    timeout_millis: jlong,
+    out: &mut Vec<Message>,
+) -> Result<usize, Error> {
+    if max_messages <= 0 {
+        return Err(Error::Config(
+            "maxMessages must be greater than zero".to_string(),
+        ));
+    }
+
+    let max = max_messages as usize;
+    if timeout_millis < 0 {
+        socket.recv_many_into(max, out)
+    } else if timeout_millis == 0 {
+        socket.try_recv_many_into(max, out)
+    } else {
+        socket.recv_many_timeout_into(max, Duration::from_millis(timeout_millis as u64), out)
+    }
+}
+
+fn fill_java_byte_arrays(
+    env: &mut JNIEnv<'_>,
+    out: &JObjectArray<'_>,
+    offset: jint,
+    messages: &[Message],
+) -> Result<(), Error> {
+    for (index, message) in messages.iter().enumerate() {
+        if message.len() != 1 {
+            throw_java(
+                env,
+                "java/lang/IllegalStateException",
+                format!("message has {} parts", message.len()),
+            );
+            return Err(Error::Config("message is multipart".to_string()));
+        }
+        let body = message_part_to_java(env, message, 0)?;
+        env.set_object_array_element(out, offset + index as jint, body)
+            .map_err(jni_error)?;
+    }
+    Ok(())
 }
 
 fn duration_from_millis(millis: jlong) -> Result<Duration, Error> {
@@ -713,7 +821,9 @@ pub extern "system" fn Java_io_omq_Native_socketCreate(
             ctx: ctx.ctx.clone(),
             socket_type,
             options: Mutex::new(Options::default()),
-            socket: Mutex::new(None),
+            socket: OnceLock::new(),
+            materialize_lock: Mutex::new(()),
+            recv_scratch: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
         })) as jlong
     })
@@ -735,10 +845,8 @@ pub extern "system" fn Java_io_omq_Native_socketClose(
             return;
         }
 
-        if let Ok(mut guard) = socket.socket.lock()
-            && let Some(socket) = guard.take()
-        {
-            let _ = socket.close();
+        if let Some(socket) = socket.socket.get() {
+            let _ = socket.clone().close();
         }
     });
 }
@@ -849,7 +957,7 @@ pub extern "system" fn Java_io_omq_Native_socketSend(
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let data = byte_array(env, data)?;
-            socket.materialize()?.send(Message::from_slice(&data))
+            socket.materialize()?.send(Message::single(Bytes::from(data)))
         })();
 
         if let Err(error) = result {
@@ -870,6 +978,25 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipart(
             let socket = socket_from_handle(handle)?;
             let parts = bytes_from_parts(env, parts)?;
             socket.materialize()?.send(Message::multipart(parts))
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSendMany(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    messages: JObjectArray<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?.materialize()?;
+            send_bodies(env, &messages, &socket)
         })();
 
         if let Err(error) = result {
@@ -950,13 +1077,7 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
     guard(&mut env, std::ptr::null_mut(), |env| {
         let result = (|| {
             let socket = socket_from_handle(handle)?.materialize()?;
-            let message = if timeout_millis < 0 {
-                socket.recv()?
-            } else if timeout_millis == 0 {
-                socket.try_recv()?
-            } else {
-                socket.recv_timeout(Duration::from_millis(timeout_millis as u64))?
-            };
+            let message = recv_with_timeout(&socket, timeout_millis)?;
             message_to_java_native(env, message).map(JObject::into_raw)
         })();
 
@@ -965,6 +1086,78 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
             Err(error) => {
                 throw_omq(env, error);
                 std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketRecvMany(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    max_messages: jint,
+    timeout_millis: jlong,
+) -> jobjectArray {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let result = (|| {
+            let java_socket = socket_from_handle(handle)?;
+            let socket = java_socket.materialize()?;
+            let mut scratch = java_socket
+                .recv_scratch
+                .lock()
+                .map_err(|_| Error::Config("recv scratch lock poisoned".to_string()))?;
+            scratch.clear();
+            recv_many_into(&socket, max_messages, timeout_millis, &mut scratch)?;
+            let out = messages_to_java_native_array(env, &scratch);
+            scratch.clear();
+            out
+        })();
+
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                throw_omq(env, error);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketRecvManyBytesInto(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    out: JObjectArray<'_>,
+    offset: jint,
+    max_messages: jint,
+    timeout_millis: jlong,
+) -> jint {
+    guard(&mut env, 0, |env| {
+        let result = (|| {
+            let java_socket = socket_from_handle(handle)?;
+            let socket = java_socket.materialize()?;
+            let mut scratch = java_socket
+                .recv_scratch
+                .lock()
+                .map_err(|_| Error::Config("recv scratch lock poisoned".to_string()))?;
+            scratch.clear();
+            let count = recv_many_into(&socket, max_messages, timeout_millis, &mut scratch)?;
+            let fill_result = fill_java_byte_arrays(env, &out, offset, &scratch);
+            scratch.clear();
+            fill_result?;
+            Ok(count as jint)
+        })();
+
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                if env.exception_check().unwrap_or(false) {
+                    return 0;
+                }
+                throw_omq(env, error);
+                0
             }
         }
     })

@@ -989,6 +989,92 @@ impl SpscAwareRecv {
         }
     }
 
+    pub(crate) fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        let start_len = out.len();
+        if max == 0 {
+            return Ok(0);
+        }
+
+        if let Some(msg) = self.take_conflate_message() {
+            out.push(msg);
+            if out.len() - start_len == max {
+                return Ok(max);
+            }
+        }
+
+        let mut guard = self.drain_state.lock().unwrap();
+        while out.len() - start_len < max {
+            let Some(msg) = guard.batch.pop_front() else {
+                break;
+            };
+            out.push(msg);
+        }
+        if out.len() - start_len == max {
+            return Ok(max);
+        }
+
+        if guard.latency {
+            drop(guard);
+            while out.len() - start_len < max {
+                match self.try_drain() {
+                    DrainResult::Message(msg) => out.push(msg),
+                    DrainResult::Closed if out.len() == start_len => return Err(Error::Closed),
+                    DrainResult::Closed | DrainResult::Empty => break,
+                }
+            }
+            let drained = out.len() - start_len;
+            return if drained == 0 {
+                Err(Error::WouldBlock)
+            } else {
+                Ok(drained)
+            };
+        }
+
+        self.recv_signal.begin_drain();
+        self.recv_pipe_notify.begin_drain();
+        self.refresh_snapshot(&mut guard);
+
+        if let Some(msg) = self.take_conflate_message() {
+            out.push(msg);
+        }
+
+        let state = &mut *guard;
+        let (_latency_result, has_disconnected) = self.drain_sources(state);
+        while out.len() - start_len < max {
+            let Some(msg) = state.batch.pop_front() else {
+                break;
+            };
+            out.push(msg);
+        }
+
+        let pipe_disconnected = state.recv_consumer.is_disconnected();
+        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
+        if out.len() == start_len
+            && all_empty
+            && (self.recv_signal.clear_after(all_empty)
+                || self
+                    .recv_pipe_notify
+                    .clear_after(state.recv_consumer.is_empty()))
+        {
+            self.blocking_recv_waker.wake();
+        }
+        drop(guard);
+
+        if has_disconnected {
+            self.cleanup_disconnected();
+        }
+
+        let drained = out.len() - start_len;
+        if drained != 0 {
+            Ok(drained)
+        } else if pipe_disconnected && !has_peers {
+            Err(Error::Closed)
+        } else {
+            Err(Error::WouldBlock)
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         {
             let mut state = self.drain_state.lock().unwrap();

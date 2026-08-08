@@ -107,8 +107,47 @@ impl Socket {
         self.inner.blocking_recv_timeout(timeout)
     }
 
+    pub fn recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        self.inner.blocking_recv_many(max)
+    }
+
+    /// Receive up to `max` messages, appending them to `out`.
+    ///
+    /// Blocks until the first message arrives, then drains ready messages
+    /// without allocating a batch vector.
+    pub fn recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        self.inner.blocking_recv_many_into(max, out)
+    }
+
+    pub fn recv_many_timeout(&self, max: usize, timeout: Duration) -> Result<Vec<Message>> {
+        self.inner.blocking_recv_many_timeout(max, timeout)
+    }
+
+    /// Receive up to `max` messages before `timeout`, appending them to `out`.
+    ///
+    /// Blocks until the first message arrives or the timeout expires, then
+    /// drains ready messages without allocating a batch vector.
+    pub fn recv_many_timeout_into(
+        &self,
+        max: usize,
+        timeout: Duration,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        self.inner
+            .blocking_recv_many_timeout_into(max, timeout, out)
+    }
+
     pub fn try_recv(&self) -> Result<Message> {
         self.inner.try_recv()
+    }
+
+    pub fn try_recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        self.inner.try_recv_many(max)
+    }
+
+    /// Try to receive up to `max` ready messages into `out` without blocking.
+    pub fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        self.inner.try_recv_many_into(max, out)
     }
 
     pub fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {

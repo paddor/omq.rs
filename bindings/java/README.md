@@ -26,6 +26,11 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
   multipart metadata matters.
+- `sendManyBytes` sends many single-part messages in one JNI call.
+- `receiveMany` and `receiveManyBytes` amortize JNI overhead by waiting for
+  one message and then draining currently available messages up to a limit.
+- `receiveManyBytesInto` fills a caller-owned `byte[][]` to avoid Java
+  collection and native batch-vector allocation on hot receive loops.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.

@@ -619,6 +619,125 @@ fn blocking_socket_push_pull_inproc() {
 }
 
 #[test]
+fn blocking_socket_recv_many_into_appends_to_existing_vec() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+
+    let ep = inproc_ep("blocking-recv-many-into");
+    pull.bind(ep.clone()).unwrap();
+    push.connect(ep).unwrap();
+
+    push.send(Message::single("a")).unwrap();
+    push.send(Message::single("b")).unwrap();
+    push.send(Message::single("c")).unwrap();
+
+    let mut out = Vec::with_capacity(8);
+    out.push(Message::single("seed"));
+    let capacity = out.capacity();
+    let count = pull.recv_many_into(4, &mut out).unwrap();
+
+    assert_eq!(count, 3);
+    assert_eq!(out.capacity(), capacity);
+    assert_eq!(out[0], Message::single("seed"));
+    assert_eq!(out[1], Message::single("a"));
+    assert_eq!(out[2], Message::single("b"));
+    assert_eq!(out[3], Message::single("c"));
+}
+
+#[test]
+fn blocking_socket_recv_many_timeout_into_reuses_vec() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+
+    let ep = inproc_ep("blocking-recv-many-timeout-into");
+    pull.bind(ep.clone()).unwrap();
+    push.connect(ep).unwrap();
+
+    push.send(Message::single("a")).unwrap();
+    push.send(Message::single("b")).unwrap();
+
+    let mut out = Vec::with_capacity(4);
+    let capacity = out.capacity();
+    let count = pull
+        .recv_many_timeout_into(4, Duration::from_secs(1), &mut out)
+        .unwrap();
+
+    assert_eq!(count, 2);
+    assert_eq!(out.capacity(), capacity);
+    assert_eq!(out, vec![Message::single("a"), Message::single("b")]);
+}
+
+#[test]
+fn blocking_socket_try_recv_many_into_empty_returns_would_block() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+
+    pull.bind(inproc_ep("blocking-recv-many-empty")).unwrap();
+
+    let mut out = Vec::with_capacity(4);
+    let capacity = out.capacity();
+    assert!(matches!(
+        pull.try_recv_many_into(4, &mut out),
+        Err(Error::WouldBlock)
+    ));
+    assert!(out.is_empty());
+    assert_eq!(out.capacity(), capacity);
+}
+
+#[test]
+fn blocking_socket_recv_many_into_zero_does_not_block_or_mutate() {
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+
+    let mut out = vec![Message::single("seed")];
+    assert_eq!(pull.recv_many_into(0, &mut out).unwrap(), 0);
+    assert_eq!(pull.try_recv_many_into(0, &mut out).unwrap(), 0);
+    assert_eq!(out, vec![Message::single("seed")]);
+}
+
+#[test]
+fn async_socket_try_recv_many_into_appends_to_existing_vec() {
+    let ctx = Context::new();
+    let pull = ctx.socket(SocketType::Pull, Options::default());
+    let push = ctx.socket(SocketType::Push, Options::default());
+
+    ctx.block_on(async move {
+        let ep = inproc_ep("async-try-recv-many-into");
+        pull.bind(ep.clone()).await.unwrap();
+        push.connect(ep).await.unwrap();
+
+        push.send(Message::single("a")).await.unwrap();
+        push.send(Message::single("b")).await.unwrap();
+        push.send(Message::single("c")).await.unwrap();
+
+        let mut out = Vec::with_capacity(8);
+        out.push(Message::single("seed"));
+        let capacity = out.capacity();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while out.len() < 4 && std::time::Instant::now() < deadline {
+            match pull.try_recv_many_into(4, &mut out) {
+                Ok(_) => {}
+                Err(Error::WouldBlock) => tokio::task::yield_now().await,
+                Err(error) => panic!("try_recv_many_into failed: {error:?}"),
+            }
+        }
+
+        assert_eq!(out.capacity(), capacity);
+        assert_eq!(
+            out,
+            vec![
+                Message::single("seed"),
+                Message::single("a"),
+                Message::single("b"),
+                Message::single("c"),
+            ]
+        );
+    });
+}
+
+#[test]
 fn blocking_socket_push_pull_tcp() {
     let ctx = Context::new();
     let pull = ctx.blocking_socket(SocketType::Pull, Options::default());

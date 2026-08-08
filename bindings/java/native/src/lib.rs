@@ -12,6 +12,7 @@ use jni::sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jstring
 use jni::{JNIEnv, JavaVM};
 use omq_proto::TrySendError;
 use omq_tokio::blocking::Socket as BlockingSocket;
+use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
     Authenticator, Context, ContextConfig, CurveKeypair, CurvePublicKey, CurveSecretKey,
     CurveServerOptions, Endpoint, Error, MechanismSetup, Message, Options, SocketType,
@@ -571,6 +572,16 @@ fn optional_duration_from_millis(millis: jlong) -> Result<Option<Duration>, Erro
         return Ok(None);
     }
     duration_from_millis(millis).map(Some)
+}
+
+fn optional_usize_from_long(name: &str, value: jlong) -> Result<Option<usize>, Error> {
+    if value == -1 {
+        return Ok(None);
+    }
+    if value < 0 {
+        return Err(Error::Config(format!("{name} must be non-negative")));
+    }
+    Ok(Some(value as usize))
 }
 
 fn socket_type_from_code(code: jint) -> Result<SocketType, Error> {
@@ -1721,6 +1732,457 @@ pub extern "system" fn Java_io_omq_Native_socketSetCurveClient(
                     server_public,
                 };
             })
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetWorkloadProfile(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    profile: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let profile = match profile {
+                -1 => None,
+                0 => Some(WorkloadProfile::Throughput),
+                1 => Some(WorkloadProfile::Latency),
+                other => return Err(Error::Config(format!("unknown workload profile {other}"))),
+            };
+            socket.set_option(move |options| options.workload_profile = profile)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetReconnect(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    mode: jint,
+    min_millis: jlong,
+    max_millis: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let reconnect = match mode {
+                0 => ReconnectPolicy::Disabled,
+                1 => ReconnectPolicy::Fixed(duration_from_millis(min_millis)?),
+                2 => {
+                    let min = duration_from_millis(min_millis)?;
+                    let max = duration_from_millis(max_millis)?;
+                    if max < min {
+                        return Err(Error::Config(
+                            "reconnect max must be greater than or equal to min".to_string(),
+                        ));
+                    }
+                    ReconnectPolicy::Exponential { min, max }
+                }
+                other => return Err(Error::Config(format!("unknown reconnect mode {other}"))),
+            };
+            socket.set_option(move |options| options.reconnect = reconnect)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetReconnectStopConnRefused(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    enabled: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            socket.set_option(move |options| options.reconnect_stop_conn_refused = enabled != 0)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetHeartbeatTtl(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    millis: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let ttl = optional_duration_from_millis(millis)?;
+            socket.set_option(move |options| options.heartbeat_ttl = ttl)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetHeartbeatTimeout(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    millis: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let timeout = optional_duration_from_millis(millis)?;
+            socket.set_option(move |options| options.heartbeat_timeout = timeout)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetMaxPendingHandshakes(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    max: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            if max <= 0 {
+                return Err(Error::Config(
+                    "max pending handshakes must be greater than zero".to_string(),
+                ));
+            }
+            let socket = socket_from_handle(handle)?;
+            socket.set_option(move |options| options.max_pending_handshakes = max as usize)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetConflate(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    enabled: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            socket.set_option(move |options| options.conflate = enabled != 0)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetRouterMandatory(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    enabled: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            socket.set_option(move |options| options.router_mandatory = enabled != 0)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetOnMute(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    mode: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let on_mute = match mode {
+                0 => OnMute::Block,
+                1 => OnMute::DropNewest,
+                2 => OnMute::DropOldest,
+                other => return Err(Error::Config(format!("unknown on-mute mode {other}"))),
+            };
+            socket.set_option(move |options| options.on_mute = on_mute)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetTcpKeepalive(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    mode: jint,
+    idle_millis: jlong,
+    interval_millis: jlong,
+    count: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let keepalive = match mode {
+                0 => KeepAlive::Default,
+                1 => KeepAlive::Disabled,
+                2 => {
+                    if count <= 0 {
+                        return Err(Error::Config(
+                            "TCP keepalive count must be greater than zero".to_string(),
+                        ));
+                    }
+                    KeepAlive::Enabled {
+                        idle: duration_from_millis(idle_millis)?,
+                        intvl: duration_from_millis(interval_millis)?,
+                        cnt: count as u32,
+                    }
+                }
+                other => return Err(Error::Config(format!("unknown TCP keepalive mode {other}"))),
+            };
+            socket.set_option(move |options| options.tcp_keepalive = keepalive)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetSendBufferSize(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("send buffer size", bytes)?;
+            socket.set_option(move |options| options.send_buffer_size = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetReceiveBufferSize(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("receive buffer size", bytes)?;
+            socket.set_option(move |options| options.recv_buffer_size = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetCompressionDict(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    dict: JByteArray<'_>,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let dict = byte_array(env, dict)?;
+            let dict = if dict.is_empty() {
+                None
+            } else {
+                Some(Bytes::from(dict))
+            };
+            socket.set_option(move |options| options.compression_dict = dict)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetCompressionDictCapacity(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("compression dictionary capacity", bytes)?;
+            socket.set_option(move |options| options.compression_dict_capacity = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetMaxReceiveDictSize(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("max receive dictionary size", bytes)?;
+            socket.set_option(move |options| options.max_recv_dict_size = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetCompressionOffloadThreshold(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("compression offload threshold", bytes)?;
+            socket.set_option(move |options| options.compression_offload_threshold = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetLargeMessageThreshold(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("large message threshold", bytes)?
+                .filter(|bytes| *bytes != 0);
+            socket.set_option(move |options| options.large_message_threshold = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetArenaThreshold(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("arena threshold", bytes)?;
+            socket.set_option(move |options| options.arena_threshold = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetTransmitSlotCap(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    bytes: jlong,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let bytes = optional_usize_from_long("transmit slot capacity", bytes)?;
+            socket.set_option(move |options| options.transmit_slot_cap = bytes)
+        })();
+
+        if let Err(error) = result {
+            throw_omq(env, error);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSetXpubNoDrop(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    enabled: jint,
+) {
+    guard(&mut env, (), |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            socket.set_option(move |options| options.xpub_nodrop = enabled != 0)
         })();
 
         if let Err(error) = result {

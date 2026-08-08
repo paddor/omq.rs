@@ -102,6 +102,47 @@ final class Native {
     static native void socketSetCurveClient(
             long handle, String publicKey, String secretKey, String serverPublicKey);
 
+    static native void socketSetWorkloadProfile(long handle, int profile);
+
+    static native void socketSetReconnect(long handle, int mode, long minMillis, long maxMillis);
+
+    static native void socketSetReconnectStopConnRefused(long handle, int enabled);
+
+    static native void socketSetHeartbeatTtl(long handle, long millis);
+
+    static native void socketSetHeartbeatTimeout(long handle, long millis);
+
+    static native void socketSetMaxPendingHandshakes(long handle, int max);
+
+    static native void socketSetConflate(long handle, int enabled);
+
+    static native void socketSetRouterMandatory(long handle, int enabled);
+
+    static native void socketSetOnMute(long handle, int mode);
+
+    static native void socketSetTcpKeepalive(
+            long handle, int mode, long idleMillis, long intervalMillis, int count);
+
+    static native void socketSetSendBufferSize(long handle, long bytes);
+
+    static native void socketSetReceiveBufferSize(long handle, long bytes);
+
+    static native void socketSetCompressionDict(long handle, byte[] dict);
+
+    static native void socketSetCompressionDictCapacity(long handle, long bytes);
+
+    static native void socketSetMaxReceiveDictSize(long handle, long bytes);
+
+    static native void socketSetCompressionOffloadThreshold(long handle, long bytes);
+
+    static native void socketSetLargeMessageThreshold(long handle, long bytes);
+
+    static native void socketSetArenaThreshold(long handle, long bytes);
+
+    static native void socketSetTransmitSlotCap(long handle, long bytes);
+
+    static native void socketSetXpubNoDrop(long handle, int enabled);
+
     private static void load() {
         try {
             System.loadLibrary("omq_java");

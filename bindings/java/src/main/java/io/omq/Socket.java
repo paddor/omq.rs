@@ -575,6 +575,255 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Selects native socket-driver scheduling before first I/O. */
+    public synchronized Socket workloadProfile(WorkloadProfile profile) {
+        Objects.requireNonNull(profile, "profile");
+        withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, profile.code()));
+        return this;
+    }
+
+    /** Restores native socket-type default scheduling before first I/O. */
+    public synchronized Socket defaultWorkloadProfile() {
+        withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, -1));
+        return this;
+    }
+
+    /** Disables reconnect attempts before first I/O. */
+    public synchronized Socket reconnectDisabled() {
+        withHandleVoid(handle -> Native.socketSetReconnect(handle, 0, 0, 0));
+        return this;
+    }
+
+    /** Uses a fixed reconnect interval before first I/O. */
+    public synchronized Socket reconnectInterval(Duration interval) {
+        Objects.requireNonNull(interval, "interval");
+        long intervalMillis = millis(interval);
+        withHandleVoid(handle -> Native.socketSetReconnect(handle, 1, intervalMillis, 0));
+        return this;
+    }
+
+    /** Uses exponential reconnect backoff before first I/O. */
+    public synchronized Socket reconnectExponential(Duration min, Duration max) {
+        Objects.requireNonNull(min, "min");
+        Objects.requireNonNull(max, "max");
+        long minMillis = millis(min);
+        long maxMillis = millis(max);
+        if (maxMillis < minMillis) {
+            throw new IllegalArgumentException("max must be greater than or equal to min");
+        }
+        withHandleVoid(handle -> Native.socketSetReconnect(handle, 2, minMillis, maxMillis));
+        return this;
+    }
+
+    /** Stops reconnecting after ECONNREFUSED before first I/O. */
+    public synchronized Socket reconnectStopConnRefused(boolean enabled) {
+        withHandleVoid(handle -> Native.socketSetReconnectStopConnRefused(handle, enabled ? 1 : 0));
+        return this;
+    }
+
+    /** Sets heartbeat TTL advertised to peers before first I/O. */
+    public synchronized Socket heartbeatTtl(Duration ttl) {
+        Objects.requireNonNull(ttl, "ttl");
+        long ttlMillis = millis(ttl);
+        withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, ttlMillis));
+        return this;
+    }
+
+    /** Omits heartbeat TTL before first I/O. */
+    public synchronized Socket noHeartbeatTtl() {
+        withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, NONE));
+        return this;
+    }
+
+    /** Sets receive-idle heartbeat timeout before first I/O. */
+    public synchronized Socket heartbeatTimeout(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long timeoutMillis = millis(timeout);
+        withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, timeoutMillis));
+        return this;
+    }
+
+    /** Restores default heartbeat timeout before first I/O. */
+    public synchronized Socket defaultHeartbeatTimeout() {
+        withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, NONE));
+        return this;
+    }
+
+    /** Sets maximum simultaneous pending handshakes before first I/O. */
+    public synchronized Socket maxPendingHandshakes(int max) {
+        if (max <= 0) {
+            throw new IllegalArgumentException("max must be greater than zero");
+        }
+        withHandleVoid(handle -> Native.socketSetMaxPendingHandshakes(handle, max));
+        return this;
+    }
+
+    /** Enables or disables receive-side conflation before first I/O. */
+    public synchronized Socket conflate(boolean enabled) {
+        withHandleVoid(handle -> Native.socketSetConflate(handle, enabled ? 1 : 0));
+        return this;
+    }
+
+    /** Enables ROUTER mandatory routing errors before first I/O. */
+    public synchronized Socket routerMandatory(boolean enabled) {
+        withHandleVoid(handle -> Native.socketSetRouterMandatory(handle, enabled ? 1 : 0));
+        return this;
+    }
+
+    /** Sets outbound-full behavior before first I/O. */
+    public synchronized Socket onMute(OnMute mode) {
+        Objects.requireNonNull(mode, "mode");
+        withHandleVoid(handle -> Native.socketSetOnMute(handle, mode.code()));
+        return this;
+    }
+
+    /** Leaves TCP keepalive policy at the operating-system default before first I/O. */
+    public synchronized Socket tcpKeepaliveDefault() {
+        withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 0, 0, 0, 0));
+        return this;
+    }
+
+    /** Disables TCP keepalive before first I/O. */
+    public synchronized Socket tcpKeepaliveOff() {
+        withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 1, 0, 0, 0));
+        return this;
+    }
+
+    /** Enables TCP keepalive before first I/O. */
+    public synchronized Socket tcpKeepalive(Duration idle, Duration interval, int count) {
+        Objects.requireNonNull(idle, "idle");
+        Objects.requireNonNull(interval, "interval");
+        if (count <= 0) {
+            throw new IllegalArgumentException("count must be greater than zero");
+        }
+        withHandleVoid(handle -> Native.socketSetTcpKeepalive(
+                handle, 2, millis(idle), millis(interval), count));
+        return this;
+    }
+
+    /** Sets OS send buffer size before first I/O. */
+    public synchronized Socket sendBufferSize(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, bytes));
+        return this;
+    }
+
+    /** Restores OS default send buffer size before first I/O. */
+    public synchronized Socket defaultSendBufferSize() {
+        withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, NONE));
+        return this;
+    }
+
+    /** Sets OS receive buffer size before first I/O. */
+    public synchronized Socket receiveBufferSize(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, bytes));
+        return this;
+    }
+
+    /** Restores OS default receive buffer size before first I/O. */
+    public synchronized Socket defaultReceiveBufferSize() {
+        withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, NONE));
+        return this;
+    }
+
+    /** Sets a compression dictionary before first I/O. */
+    public synchronized Socket compressionDict(byte[] dict) {
+        Objects.requireNonNull(dict, "dict");
+        withHandleVoid(handle -> Native.socketSetCompressionDict(handle, dict));
+        return this;
+    }
+
+    /** Disables the static compression dictionary before first I/O. */
+    public synchronized Socket noCompressionDict() {
+        withHandleVoid(handle -> Native.socketSetCompressionDict(handle, new byte[0]));
+        return this;
+    }
+
+    /** Sets compression auto-trained dictionary capacity before first I/O. */
+    public synchronized Socket compressionDictCapacity(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, bytes));
+        return this;
+    }
+
+    /** Restores default compression auto-trained dictionary capacity before first I/O. */
+    public synchronized Socket defaultCompressionDictCapacity() {
+        withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, NONE));
+        return this;
+    }
+
+    /** Sets maximum accepted peer compression dictionary size before first I/O. */
+    public synchronized Socket maxReceiveDictSize(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, bytes));
+        return this;
+    }
+
+    /** Restores default maximum accepted peer compression dictionary size before first I/O. */
+    public synchronized Socket defaultMaxReceiveDictSize() {
+        withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, NONE));
+        return this;
+    }
+
+    /** Sets minimum size for compression offload before first I/O. */
+    public synchronized Socket compressionOffloadThreshold(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, bytes));
+        return this;
+    }
+
+    /** Disables compression offload before first I/O. */
+    public synchronized Socket noCompressionOffload() {
+        withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, NONE));
+        return this;
+    }
+
+    /** Sets large-message receive threshold before first I/O. */
+    public synchronized Socket largeMessageThreshold(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, bytes));
+        return this;
+    }
+
+    /** Disables the large-message receive fast path before first I/O. */
+    public synchronized Socket disableLargeMessagePath() {
+        withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, NONE));
+        return this;
+    }
+
+    /** Sets encoder arena threshold before first I/O. */
+    public synchronized Socket arenaThreshold(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, bytes));
+        return this;
+    }
+
+    /** Restores default encoder arena threshold before first I/O. */
+    public synchronized Socket defaultArenaThreshold() {
+        withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, NONE));
+        return this;
+    }
+
+    /** Sets per-peer transmit slot capacity before first I/O. */
+    public synchronized Socket transmitSlotCapacity(long bytes) {
+        requireNonNegative("bytes", bytes);
+        withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, bytes));
+        return this;
+    }
+
+    /** Restores default per-peer transmit slot capacity before first I/O. */
+    public synchronized Socket defaultTransmitSlotCapacity() {
+        withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, NONE));
+        return this;
+    }
+
+    /** Enables or disables XPUB no-drop behavior before first I/O. */
+    public synchronized Socket xpubNoDrop(boolean enabled) {
+        withHandleVoid(handle -> Native.socketSetXpubNoDrop(handle, enabled ? 1 : 0));
+        return this;
+    }
+
     private <T> T withHandle(LongFunction<T> action) {
         synchronized (state) {
             return action.apply(state.handle());
@@ -627,6 +876,12 @@ public final class Socket implements AutoCloseable {
     private static void requirePositive(String name, int value) {
         if (value <= 0) {
             throw new IllegalArgumentException(name + " must be greater than zero");
+        }
+    }
+
+    private static void requireNonNegative(String name, long value) {
+        if (value < 0) {
+            throw new IllegalArgumentException(name + " must be non-negative");
         }
     }
 

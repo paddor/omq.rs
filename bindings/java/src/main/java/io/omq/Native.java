@@ -30,6 +30,12 @@ final class Native {
 
     static native long receiveAnyAsync(Socket[] sockets, long[] handles, Object future);
 
+    static native long socketMonitor(long handle);
+
+    static native MonitorEvent monitorRecv(long handle, long timeoutMillis);
+
+    static native void monitorClose(long handle);
+
     static native long socketCreate(long contextHandle, int socketType);
 
     static native void socketClose(long handle);

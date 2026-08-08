@@ -593,6 +593,11 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Opens a diagnostic native monitor for this socket. */
+    public synchronized Monitor monitor() {
+        return new Monitor(withHandle(Native::socketMonitor));
+    }
+
     /** Selects native socket-driver scheduling before first I/O. */
     public synchronized Socket workloadProfile(WorkloadProfile profile) {
         Objects.requireNonNull(profile, "profile");

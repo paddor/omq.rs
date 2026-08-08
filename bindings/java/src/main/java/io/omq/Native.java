@@ -46,7 +46,7 @@ final class Native {
 
     static native long socketSendAsync(long handle, byte[][] parts, Object future);
 
-    static native byte[][] socketRecv(long handle, long timeoutMillis);
+    static native Object socketRecv(long handle, long timeoutMillis);
 
     static native long socketRecvAsync(long handle, long timeoutMillis, Object future);
 

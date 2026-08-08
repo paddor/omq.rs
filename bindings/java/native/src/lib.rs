@@ -8,7 +8,7 @@ use bytes::Bytes;
 use jni::objects::{
     GlobalRef, JByteArray, JClass, JLongArray, JObject, JObjectArray, JString, JThrowable, JValue,
 };
-use jni::sys::{jint, jlong, jobjectArray, jstring};
+use jni::sys::{jint, jlong, jobject, jobjectArray, jstring};
 use jni::{JNIEnv, JavaVM};
 use omq_proto::TrySendError;
 use omq_tokio::blocking::Socket as BlockingSocket;
@@ -390,8 +390,7 @@ fn message_to_java_parts<'local>(
         .map_err(jni_error)?;
 
     for i in 0..message.len() {
-        let part = message.part_bytes(i).unwrap_or_default();
-        let array = env.byte_array_from_slice(&part).map_err(jni_error)?;
+        let array = message_part_to_java(env, &message, i)?;
         env.set_object_array_element(&parts, i as jint, array)
             .map_err(jni_error)?;
     }
@@ -399,10 +398,33 @@ fn message_to_java_parts<'local>(
     Ok(parts)
 }
 
+fn message_part_to_java<'local>(
+    env: &mut JNIEnv<'local>,
+    message: &Message,
+    index: usize,
+) -> Result<JByteArray<'local>, Error> {
+    env.byte_array_from_slice(message.part_slice(index).unwrap_or_default())
+        .map_err(jni_error)
+}
+
 fn message_to_java_object<'local>(
     env: &mut JNIEnv<'local>,
     message: Message,
 ) -> Result<JObject<'local>, Error> {
+    if message.len() == 1 {
+        let part = message_part_to_java(env, &message, 0)?;
+        let part = JObject::from(part);
+        return env
+            .call_static_method(
+                "io/omq/Message",
+                "fromNative",
+                "([B)Lio/omq/Message;",
+                &[JValue::Object(&part)],
+            )
+            .and_then(|value| value.l())
+            .map_err(jni_error);
+    }
+
     let parts = message_to_java_parts(env, message)?;
     let parts = JObject::from(parts);
     env.call_static_method(
@@ -415,8 +437,14 @@ fn message_to_java_object<'local>(
     .map_err(jni_error)
 }
 
-fn message_to_java(env: &mut JNIEnv<'_>, message: Message) -> Result<jobjectArray, Error> {
-    message_to_java_parts(env, message).map(JObjectArray::into_raw)
+fn message_to_java_native<'local>(
+    env: &mut JNIEnv<'local>,
+    message: Message,
+) -> Result<JObject<'local>, Error> {
+    if message.len() == 1 {
+        return message_part_to_java(env, &message, 0).map(JObject::from);
+    }
+    message_to_java_parts(env, message).map(JObject::from)
 }
 
 fn duration_from_millis(millis: jlong) -> Result<Duration, Error> {
@@ -918,7 +946,7 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
     _class: JClass<'_>,
     handle: jlong,
     timeout_millis: jlong,
-) -> jobjectArray {
+) -> jobject {
     guard(&mut env, std::ptr::null_mut(), |env| {
         let result = (|| {
             let socket = socket_from_handle(handle)?.materialize()?;
@@ -929,7 +957,7 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
             } else {
                 socket.recv_timeout(Duration::from_millis(timeout_millis as u64))?
             };
-            message_to_java(env, message)
+            message_to_java_native(env, message).map(JObject::into_raw)
         })();
 
         match result {

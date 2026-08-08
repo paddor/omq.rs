@@ -158,7 +158,14 @@ public final class Socket implements AutoCloseable {
 
     /** Receives one message, blocking forever. */
     public synchronized Message receive() {
-        return Message.fromNative(withHandle(handle -> Native.socketRecv(handle, FOREVER)));
+        return Message.fromNative(
+                this.<Object>withHandle(handle -> Native.socketRecv(handle, FOREVER)));
+    }
+
+    /** Receives one single-part message body, blocking forever. */
+    public synchronized byte[] receiveBytes() {
+        return Message.bytesFromNative(
+                this.<Object>withHandle(handle -> Native.socketRecv(handle, FOREVER)));
     }
 
     /** Receives one message before the timeout, or returns empty. */
@@ -167,7 +174,19 @@ public final class Socket implements AutoCloseable {
         long timeoutMillis = millis(timeout);
         try {
             return Optional.of(Message.fromNative(
-                    withHandle(handle -> Native.socketRecv(handle, timeoutMillis))));
+                    this.<Object>withHandle(handle -> Native.socketRecv(handle, timeoutMillis))));
+        } catch (TimeoutException timeoutError) {
+            return Optional.empty();
+        }
+    }
+
+    /** Receives one single-part message body before the timeout, or returns empty. */
+    public synchronized Optional<byte[]> receiveBytes(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long timeoutMillis = millis(timeout);
+        try {
+            return Optional.of(Message.bytesFromNative(
+                    this.<Object>withHandle(handle -> Native.socketRecv(handle, timeoutMillis))));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -176,7 +195,18 @@ public final class Socket implements AutoCloseable {
     /** Receives one message if already available, or returns empty. */
     public synchronized Optional<Message> tryReceive() {
         try {
-            return Optional.of(Message.fromNative(withHandle(handle -> Native.socketRecv(handle, 0))));
+            return Optional.of(Message.fromNative(
+                    this.<Object>withHandle(handle -> Native.socketRecv(handle, 0))));
+        } catch (TimeoutException timeoutError) {
+            return Optional.empty();
+        }
+    }
+
+    /** Receives one single-part message body if already available, or returns empty. */
+    public synchronized Optional<byte[]> tryReceiveBytes() {
+        try {
+            return Optional.of(Message.bytesFromNative(
+                    this.<Object>withHandle(handle -> Native.socketRecv(handle, 0))));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -185,6 +215,11 @@ public final class Socket implements AutoCloseable {
     /** Receives one message if already available, or returns empty. */
     public synchronized Optional<Message> tryRecv() {
         return tryReceive();
+    }
+
+    /** Receives one single-part message body if already available, or returns empty. */
+    public synchronized Optional<byte[]> tryRecvBytes() {
+        return tryReceiveBytes();
     }
 
     /** Receives one message asynchronously on the native runtime; canceling aborts the native receive. */

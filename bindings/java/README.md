@@ -24,6 +24,8 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `Context` owns native IO threads and creates sockets.
 - `Socket` is `AutoCloseable`; use try-with-resources.
 - `Message` is immutable and supports single-part and multipart payloads.
+- `receiveBytes` is the direct single-part hot path; use `receive` when
+  multipart metadata matters.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.

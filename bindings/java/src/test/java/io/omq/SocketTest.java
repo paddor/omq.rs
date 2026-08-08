@@ -48,6 +48,50 @@ final class SocketTest {
     }
 
     @Test
+    void receiveBytesReturnsSinglePartBody() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            push.send("bytes");
+
+            assertArrayEquals(
+                    "bytes".getBytes(StandardCharsets.UTF_8),
+                    pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow());
+        }
+    }
+
+    @Test
+    void receiveBytesRejectsMultipart() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            push.send(Message.multipart("a".getBytes(), "b".getBytes()));
+
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> pull.receiveBytes(Duration.ofSeconds(5)));
+        }
+    }
+
+    @Test
+    void tryReceiveBytesReturnsEmptyWhenNoMessageAvailable() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL)) {
+            pull.bind("tcp://127.0.0.1:0");
+
+            assertFalse(pull.tryReceiveBytes().isPresent());
+        }
+    }
+
+    @Test
     void byteBufferSendDoesNotAdvancePosition() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);

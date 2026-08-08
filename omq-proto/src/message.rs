@@ -463,6 +463,44 @@ impl Message {
         }
     }
 
+    /// Borrow a single part by index.
+    ///
+    /// This avoids the `Bytes` allocation needed for inline messages in
+    /// [`Message::part_bytes`]. The returned slice is valid while the
+    /// message is borrowed.
+    #[inline]
+    pub fn part_slice(&self, index: usize) -> Option<&[u8]> {
+        match &self.inner {
+            MessageInner::Empty => None,
+            MessageInner::Inline { len, data } => {
+                if len & INLINE_DELIMITED_FLAG != 0 {
+                    match index {
+                        0 => Some(&[]),
+                        1 => Some(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]),
+                        _ => None,
+                    }
+                } else if index == 0 {
+                    Some(&data[..*len as usize])
+                } else {
+                    None
+                }
+            }
+            MessageInner::Single(p) => {
+                if index == 0 {
+                    Some(p.as_slice())
+                } else {
+                    None
+                }
+            }
+            MessageInner::EmptyDelimitedBytes(p) => match index {
+                0 => Some(&[]),
+                1 => Some(p),
+                _ => None,
+            },
+            MessageInner::Multi(v) => v.get(index).map(Payload::as_slice),
+        }
+    }
+
     /// Borrow exactly `N` parts as an array of `Bytes`.
     ///
     /// Returns [`PartCountError`] if the message has a different number of
@@ -1216,6 +1254,59 @@ mod tests {
         assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
         assert_eq!(m.part_bytes(2).unwrap(), &b"c"[..]);
         assert!(m.part_bytes(3).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_empty() {
+        let m = Message::new();
+        assert!(m.part_slice(0).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_inline() {
+        let m = Message::from_inline(b"hello");
+        assert_eq!(m.part_slice(0), Some(b"hello".as_slice()));
+        assert!(m.part_slice(1).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_heap_borrows_payload() {
+        let body = Bytes::copy_from_slice(&[0xAA; MAX_INLINE_MESSAGE + 1]);
+        let body_ptr = body.as_ptr();
+        let m = Message::single(body);
+        let got = m.part_slice(0).unwrap();
+        assert!(std::ptr::addr_eq(got.as_ptr(), body_ptr));
+        assert_eq!(got.len(), MAX_INLINE_MESSAGE + 1);
+        assert!(m.part_slice(1).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_empty_delimiter_inline() {
+        let m = Message::with_prefix(Bytes::new(), Message::from_inline(b"hello"));
+        assert_eq!(m.part_slice(0), Some([].as_slice()));
+        assert_eq!(m.part_slice(1), Some(b"hello".as_slice()));
+        assert!(m.part_slice(2).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_empty_delimiter_heap() {
+        let body = Bytes::copy_from_slice(&[0xBB; MAX_INLINE_MESSAGE + 1]);
+        let body_ptr = body.as_ptr();
+        let m = Message::with_prefix(Bytes::new(), Message::single(body));
+        assert_eq!(m.part_slice(0), Some([].as_slice()));
+        let got = m.part_slice(1).unwrap();
+        assert!(std::ptr::addr_eq(got.as_ptr(), body_ptr));
+        assert_eq!(got.len(), MAX_INLINE_MESSAGE + 1);
+        assert!(m.part_slice(2).is_none());
+    }
+
+    #[test]
+    fn message_part_slice_multipart() {
+        let m = Message::multipart(["a", "bb", "ccc"]);
+        assert_eq!(m.part_slice(0), Some(b"a".as_slice()));
+        assert_eq!(m.part_slice(1), Some(b"bb".as_slice()));
+        assert_eq!(m.part_slice(2), Some(b"ccc".as_slice()));
+        assert!(m.part_slice(3).is_none());
     }
 
     #[test]

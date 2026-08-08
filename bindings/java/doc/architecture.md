@@ -66,6 +66,16 @@ position. Java does not encode ZMTP, manage connections, or run transport
 threads. Native OMQ receives complete `Message` values and performs all
 socket semantics in Rust.
 
+Synchronous single-part receives cross JNI as a raw `byte[]`, so the common
+path avoids an extra `byte[][]` allocation. `receiveBytes` returns that fresh
+native-owned array directly. Multipart receives still cross as `byte[][]`.
+
+`inproc://` is not special-cased in Java. The Rust context owns the process
+inproc registry and decides whether an endpoint is local, what socket types
+are compatible, and which native queue path is legal. A Java-private inproc
+registry would split address ownership from Rust and would break mixed
+Java/Rust endpoints inside the same process.
+
 `trySend` calls native `try_send` and returns `false` when native routing
 or high-water-mark state cannot accept the message immediately. Other
 errors still raise typed exceptions. `tryReceive` and `tryRecv` return an

@@ -1,3 +1,5 @@
+#[cfg(feature = "ws")]
+use super::WsConnectOptions;
 use super::{
     Canceled, ConnectionStatus, DialerEntry, DisconnectReason, Duration, Endpoint, Error,
     InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType,
@@ -397,9 +399,10 @@ impl SocketDriver {
                         &blocking_recv_waker,
                         max_message_size,
                         #[cfg(feature = "ws")]
-                        accept_invalid_certs,
-                        #[cfg(feature = "ws")]
-                        &mechanism,
+                        WsConnectOptions {
+                            accept_invalid_certs,
+                            mechanism: &mechanism,
+                        },
                     )
                 },
                 policy,

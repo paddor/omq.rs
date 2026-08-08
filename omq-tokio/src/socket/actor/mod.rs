@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "ws")]
+use super::dispatch::WsConnectOptions;
 use super::dispatch::{
     AnyConn, AnyStream, bind_any, connect_any, generated_identity, peer_ident_socket_addr,
     preflight_connect_endpoint_resolution,

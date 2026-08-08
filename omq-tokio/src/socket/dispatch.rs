@@ -58,6 +58,13 @@ use crate::transport::{
     Transport as _, inproc as inproc_transport,
 };
 
+#[cfg(feature = "ws")]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WsConnectOptions<'a> {
+    pub(super) accept_invalid_certs: bool,
+    pub(super) mechanism: &'a omq_proto::MechanismSetup,
+}
+
 /// Re-register a stream with the current thread's I/O reactor. Each
 /// `current_thread` tokio runtime has its own reactor; a stream
 /// accepted on one thread must be migrated before a driver on another
@@ -520,8 +527,7 @@ pub(super) async fn connect_any(
     recv_signal: &std::sync::Arc<DataSignal>,
     blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
-    #[cfg(feature = "ws")] accept_invalid_certs: bool,
-    #[cfg(feature = "ws")] mechanism: &omq_proto::MechanismSetup,
+    #[cfg(feature = "ws")] ws_options: WsConnectOptions<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
@@ -549,8 +555,8 @@ pub(super) async fn connect_any(
             port,
             path,
             matches!(plain, Endpoint::Wss { .. }),
-            accept_invalid_certs,
-            mechanism,
+            ws_options.accept_invalid_certs,
+            ws_options.mechanism,
         )
         .await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);

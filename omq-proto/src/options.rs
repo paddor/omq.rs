@@ -208,9 +208,11 @@ pub struct Options {
     /// Switch the recv path to a sized one-shot read for any inbound
     /// frame whose wire payload is at least this many bytes.
     ///
-    /// On `omq-tokio` this threshold triggers a `read_exact` fast
-    /// path that reads large payloads into a single pre-sized buffer
-    /// instead of accumulating fixed-size reads through the codec.
+    /// On `omq-tokio` this threshold triggers a fast path that reads
+    /// large payloads into a single pre-sized buffer instead of
+    /// accumulating fixed-size reads through the codec. Medium-large
+    /// payloads may use bounded pooled buffers; larger payloads use
+    /// one-shot owned buffers.
     pub large_message_threshold: Option<usize>,
 
     /// Payload size at which the encoder switches from contiguous arena

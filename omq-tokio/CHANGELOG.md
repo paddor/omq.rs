@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Large direct receives now reuse bounded pooled buffers for medium-large
+  frames and avoid zero-filling frames above the pool cap.
+
 ## [0.21.1] - 2026-08-08
 
 ### Added

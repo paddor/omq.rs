@@ -189,6 +189,31 @@ final class OptionsTest {
     }
 
     @Test
+    void builderConfiguresCurveAuth() {
+        CurveKeypair serverKeypair = OMQ.curveKeypair();
+        CurveKeypair clientKeypair = OMQ.curveKeypair();
+        SocketOptions serverOptions = SocketOptions.builder()
+                .curveServer(
+                        serverKeypair,
+                        peer -> clientKeypair.publicKey().equals(peer.publicKey().orElse("")))
+                .build();
+        SocketOptions clientOptions = SocketOptions.builder()
+                .curveClient(clientKeypair, serverKeypair.publicKey())
+                .build();
+
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL, serverOptions);
+             Socket push = context.socket(SocketType.PUSH, clientOptions)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send("hello over builder curve");
+
+            assertEquals("hello over builder curve", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
     void builderRejectsInvalidOptionsEarly() {
         assertThrows(IllegalArgumentException.class,
                 () -> SocketOptions.builder().sendHighWaterMark(-1));

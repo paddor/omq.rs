@@ -165,6 +165,7 @@ final class Native {
 
     static native void socketSetXpubNoDrop(long handle, int enabled);
 
+    @SuppressWarnings("restricted")
     private static void load() {
         try {
             System.loadLibrary("omq_java");
@@ -179,6 +180,7 @@ final class Native {
         }
     }
 
+    @SuppressWarnings("restricted")
     private static void loadFromResource() throws IOException {
         String library = System.mapLibraryName("omq_java");
         String resource = "/io/omq/native/" + platform() + "/" + library;

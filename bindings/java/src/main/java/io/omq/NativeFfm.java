@@ -255,6 +255,7 @@ final class NativeFfm {
         };
     }
 
+    @SuppressWarnings("restricted")
     private static MethodHandle downcall(String name, FunctionDescriptor descriptor) {
         MemorySegment symbol = LOOKUP.findOrThrow(name);
         return LINKER.downcallHandle(symbol, descriptor);
@@ -270,6 +271,7 @@ final class NativeFfm {
         }
     }
 
+    @SuppressWarnings("restricted")
     private static String errorMessage(MethodHandle handle, long ringHandle) {
         long address;
         try {

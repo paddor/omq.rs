@@ -443,9 +443,28 @@ jobs:
         working-directory: bindings/pyomq
         run: pytest -v -k "not test_perf" -W error
 
+  java-lint:
+    name: java-lint
+    needs: [changes]
+    if: needs.changes.outputs.run_java == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: bindings/java/pom.xml
+      - name: format, lint, compile, javadoc
+        run: >
+          mvn -f bindings/java/pom.xml -DskipNative=true -DskipTests
+          spotless:check checkstyle:check compile test-compile javadoc:javadoc
+
   java-test:
     name: java-test
-    needs: [changes]
+    needs: [changes, java-lint]
     if: needs.changes.outputs.run_java == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -482,6 +501,7 @@ jobs:
         linux-32bit,
         lint,
         pyomq-test,
+        java-lint,
         java-test,
       ]
     runs-on: ubuntu-latest

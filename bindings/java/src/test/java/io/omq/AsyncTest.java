@@ -220,9 +220,9 @@ final class AsyncTest {
 
     @Test
     void asyncOperationsOnClosedSocketCompleteExceptionally() throws Exception {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Socket push = context.socket(SocketType.PUSH)) {
+        try (Context context = OMQ.context()) {
+            Socket pull = context.socket(SocketType.PULL);
+            Socket push = context.socket(SocketType.PUSH);
             pull.close();
             push.close();
 

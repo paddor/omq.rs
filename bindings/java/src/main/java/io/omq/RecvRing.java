@@ -177,6 +177,7 @@ final class RecvRing implements AutoCloseable {
         return parts;
     }
 
+    @SuppressWarnings("restricted")
     private MemorySegment source(Desc desc) {
         if ((desc.flags() & FLAG_EXTERNAL) != 0) {
             return MemorySegment.ofAddress(desc.payload()).reinterpret(desc.payloadLen());
@@ -206,6 +207,7 @@ final class RecvRing implements AutoCloseable {
         }
     }
 
+    @SuppressWarnings("restricted")
     private void ensure(long socketHandle) {
         if (handle != 0) {
             return;

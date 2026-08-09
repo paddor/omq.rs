@@ -1,6 +1,7 @@
 package io.omq;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,12 +41,12 @@ final class ContextTest {
 
     @Test
     void sharedContextCloseDoesNotTerminateOwner() {
-        try (Context owner = OMQ.context();
-             Context shared = OMQ.contextFromShareKey(owner.shareKey()).orElseThrow()) {
+        try (Context owner = OMQ.context()) {
+            Context shared = OMQ.contextFromShareKey(owner.shareKey()).orElseThrow();
             shared.close();
             assertDoesNotThrow(() -> {
                 try (Socket socket = owner.socket(SocketType.PULL)) {
-                    socket.close();
+                    assertNotNull(socket);
                 }
             });
         }
@@ -72,6 +73,7 @@ final class ContextTest {
                     start.await();
                     for (int attempt = 0; attempt < 100; attempt++) {
                         try (Socket socket = context.socket(SocketType.PULL)) {
+                            assertNotNull(socket);
                             // Close racing context may close this socket first.
                         } catch (ClosedException closed) {
                             return null;

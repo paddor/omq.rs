@@ -73,7 +73,7 @@ final class MessageTest {
     @Test
     void multipartRejectsEmptyMessage() {
         assertThrows(IllegalArgumentException.class,
-                () -> Message.multipart((byte[][]) new byte[0][]));
+                () -> Message.multipart(new byte[0][]));
     }
 
     @Test

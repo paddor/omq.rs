@@ -43,8 +43,8 @@ final class MonitorTest {
     @Test
     void monitorTimeoutAndCloseAreTyped() {
         try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Monitor monitor = pull.monitor()) {
+             Socket pull = context.socket(SocketType.PULL)) {
+            Monitor monitor = pull.monitor();
             assertTrue(monitor.tryReceive().isEmpty());
             assertTrue(monitor.receive(Duration.ofMillis(1)).isEmpty());
             monitor.close();

@@ -127,6 +127,7 @@ final class SendRing implements AutoCloseable {
         throw new ClosedException("native send ring closed");
     }
 
+    @SuppressWarnings("restricted")
     private void ensure(long socketHandle) {
         if (handle != 0) {
             return;

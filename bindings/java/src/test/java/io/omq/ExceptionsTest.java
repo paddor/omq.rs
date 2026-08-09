@@ -62,8 +62,8 @@ final class ExceptionsTest {
 
     @Test
     void closedSocketRaisesTypedException() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
+        try (Context context = OMQ.context()) {
+            Socket pull = context.socket(SocketType.PULL);
             pull.close();
             assertThrows(ClosedException.class, pull::receive);
         }

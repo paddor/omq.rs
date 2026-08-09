@@ -2,14 +2,15 @@
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Socket-level messaging patterns that work the same way in-process, between processes, and over the network.
 
-- Tokio backend for Linux, macOS, and Windows
 - 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
 - 8 stable transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`,
   and `lz4+ws://`; experimental `zstd+tcp://` compression transport behind
   the `zstd` feature
 - 3 security mechanisms: NULL, PLAIN, CURVE
+- OMQ-owned background I/O threads on Linux, macOS, and Windows
 - No C compiler, no libzmq, no libsodium
-- Python binding ([pyomq](bindings/pyomq/)), C API ([omq-libzmq](omq-libzmq/))
+- Bindings: OMQ.rb (Ruby), [pyomq](bindings/pyomq/) (Python),
+  [OMQ.java](bindings/java/) (Java), and C API ([omq-libzmq](omq-libzmq/))
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
@@ -122,7 +123,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Workspace
 
-Five Cargo workspace crates plus the Python binding.
+Five Cargo workspace crates plus language bindings.
 
 | Crate | What it does | Unsafe policy |
 |-------|--------------|---------------|
@@ -132,6 +133,7 @@ Five Cargo workspace crates plus the Python binding.
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
+| [`OMQ.java`](bindings/java/) | Java 25 binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
 
 ## Testing
 

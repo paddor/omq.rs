@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,9 +28,9 @@ final class OMQInteropTest {
             sock.curve_server = True
             sock.curve_publickey = os.environ["SRV_PUB"].encode()
             sock.curve_secretkey = os.environ["SRV_SEC"].encode()
-            sock.bind("tcp://127.0.0.1:*")
-            endpoint = sock.getsockopt(zmq.LAST_ENDPOINT)
-            print(endpoint.decode() if isinstance(endpoint, bytes) else endpoint, flush=True)
+            endpoint = os.environ["ENDPOINT"]
+            sock.bind(endpoint)
+            print(endpoint, flush=True)
             msg = sock.recv()
             print(msg.decode(), flush=True)
             sock.close(0)
@@ -44,8 +46,8 @@ final class OMQInteropTest {
             sock.curve_serverkey = os.environ["SRV_PUB"].encode()
             sock.connect(os.environ["ENDPOINT"])
             sock.send(os.environ["PAYLOAD"].encode())
-            time.sleep(0.1)
-            sock.close(1000)
+            time.sleep(1.0)
+            sock.close(2000)
             ctx.term()
             """;
 
@@ -131,8 +133,10 @@ final class OMQInteropTest {
         assumePyzmqCurve();
         CurveKeypair serverKeypair = OMQ.curveKeypair();
         CurveKeypair clientKeypair = OMQ.curveKeypair();
+        String configuredEndpoint = freeTcpEndpoint();
         Process process = startPython(
                 Map.of(
+                        "ENDPOINT", configuredEndpoint,
                         "SRV_PUB", serverKeypair.publicKey(),
                         "SRV_SEC", serverKeypair.secretKey()),
                 PYZMQ_CURVE_PULL);
@@ -235,6 +239,12 @@ final class OMQInteropTest {
     private static String python() {
         String configured = System.getenv("OMQ_PYTHON3");
         return configured == null || configured.isBlank() ? "python3" : configured;
+    }
+
+    private static String freeTcpEndpoint() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            return "tcp://127.0.0.1:" + socket.getLocalPort();
+        }
     }
 
     private static void assertProcessSuccess(Process process) throws InterruptedException {

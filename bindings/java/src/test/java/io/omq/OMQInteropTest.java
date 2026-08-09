@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -222,6 +223,7 @@ final class OMQInteropTest {
     }
 
     private static void assumePyzmqCurve() throws IOException, InterruptedException {
+        assumeTrue(!isWindows(), "pyzmq CURVE interop is disabled on Windows");
         Process process = startPython(Map.of(), "import sys, zmq; sys.exit(0 if zmq.has('curve') else 1)");
         boolean exited = process.waitFor(10, TimeUnit.SECONDS);
         if (!exited) {
@@ -244,6 +246,10 @@ final class OMQInteropTest {
     private static String python() {
         String configured = System.getenv("OMQ_PYTHON3");
         return configured == null || configured.isBlank() ? "python3" : configured;
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
     }
 
     private static void assertProcessSuccess(Process process) throws InterruptedException {

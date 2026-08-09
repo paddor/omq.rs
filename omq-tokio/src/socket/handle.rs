@@ -1,5 +1,6 @@
 //! Public `Socket` handle.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -437,6 +438,45 @@ impl Socket {
         }
     }
 
+    /// Try to send up to `max` messages from `messages` without blocking.
+    ///
+    /// Successfully submitted messages are removed from the front of
+    /// `messages`. If the socket is full before any message is submitted,
+    /// the first unsent message is returned in [`TrySendError::Full`].
+    pub fn try_send_many(
+        &self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, TrySendError> {
+        match self.inner.socket_type {
+            SocketType::Push | SocketType::Scatter => self
+                .inner
+                .send_submitter
+                .try_send_many(messages, max.min(messages.len())),
+            _ => {
+                let mut sent = 0usize;
+                while sent < max {
+                    let Some(msg) = messages.pop_front() else {
+                        break;
+                    };
+                    match self.try_send(msg) {
+                        Ok(()) => sent += 1,
+                        Err(TrySendError::Full(returned)) => {
+                            messages.push_front(returned);
+                            if sent > 0 {
+                                return Ok(sent);
+                            }
+                            let msg = messages.pop_front().expect("returned message present");
+                            return Err(TrySendError::Full(msg));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(sent)
+            }
+        }
+    }
+
     pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
         self.inner.recv_rx.wait_for_spsc_space(msg)
     }
@@ -602,6 +642,87 @@ impl Socket {
             },
             _ => self.inner.recv_rx.blocking_recv_timeout(timeout),
         }
+    }
+
+    pub(crate) fn blocking_recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.blocking_recv_many_into(max, &mut messages)?;
+        Ok(messages)
+    }
+
+    pub(crate) fn blocking_recv_many_into(
+        &self,
+        max: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let start_len = out.len();
+        out.push(self.blocking_recv()?);
+        self.try_recv_many_after_first(max, start_len, out)
+    }
+
+    pub(crate) fn blocking_recv_many_timeout(
+        &self,
+        max: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.blocking_recv_many_timeout_into(max, timeout, &mut messages)?;
+        Ok(messages)
+    }
+
+    pub(crate) fn blocking_recv_many_timeout_into(
+        &self,
+        max: usize,
+        timeout: std::time::Duration,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let start_len = out.len();
+        out.push(self.blocking_recv_timeout(timeout)?);
+        self.try_recv_many_after_first(max, start_len, out)
+    }
+
+    fn try_recv_many_after_first(
+        &self,
+        max: usize,
+        start_len: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        let appended = out.len() - start_len;
+        if appended >= max {
+            return Ok(appended);
+        }
+        if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(appended);
+        }
+        match self.try_recv_many_into(max - appended, out) {
+            Ok(n) => Ok(appended + n),
+            Err(Error::WouldBlock) => Ok(appended),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn try_recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.try_recv_many_into(max, &mut messages)?;
+        Ok(messages)
+    }
+
+    /// Try to receive up to `max` ready messages into `out` without blocking.
+    pub fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            if max == 0 {
+                return Ok(0);
+            }
+            out.push(self.try_recv()?);
+            return Ok(1);
+        }
+        self.inner.recv_rx.try_recv_many_into(max, out)
     }
 
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is

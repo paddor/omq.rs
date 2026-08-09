@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::collections::VecDeque;
+
 use omq_proto::message::Message;
 
 use super::signal::{DataSignal, StateSignal};
@@ -133,6 +135,63 @@ impl SendPipeProducer {
                 Err(SendPipeError::Full(returned))
             }
         }
+    }
+
+    #[inline]
+    pub(crate) fn try_send_many(
+        &mut self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, SendPipeError> {
+        let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
+            let Some(msg) = messages.pop_front() else {
+                return Ok(0);
+            };
+            return self.try_send_conflate(msg).map(|()| 1);
+        };
+        if producer.is_consumer_dropped() {
+            let Some(msg) = messages.pop_front() else {
+                return Ok(0);
+            };
+            return Err(SendPipeError::Closed(msg));
+        }
+
+        let mut count = 0usize;
+        while count < max {
+            let Some(msg) = messages.pop_front() else {
+                break;
+            };
+            match producer.push(msg) {
+                Ok(()) => count += 1,
+                Err(returned) if producer.is_consumer_dropped() => {
+                    messages.push_front(returned);
+                    if count > 0 {
+                        producer.flush();
+                        self.data_signal.mark();
+                        return Ok(count);
+                    }
+                    let msg = messages.pop_front().expect("returned message present");
+                    return Err(SendPipeError::Closed(msg));
+                }
+                Err(returned) => {
+                    messages.push_front(returned);
+                    self.above_lwm.store(true, Ordering::Release);
+                    if count > 0 {
+                        producer.flush();
+                        self.data_signal.mark();
+                        return Ok(count);
+                    }
+                    let msg = messages.pop_front().expect("returned message present");
+                    return Err(SendPipeError::Full(msg));
+                }
+            }
+        }
+
+        if count > 0 {
+            producer.flush();
+            self.data_signal.mark();
+        }
+        Ok(count)
     }
 
     #[cold]

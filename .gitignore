@@ -5,6 +5,7 @@
 **/*.rs.bk
 Cargo.lock
 Cargo.lock.bak
+!bindings/java/native/Cargo.lock
 !bindings/pyomq/Cargo.lock
 /bindings/pyomq/dist/*.whl
 !examples/zguide-tokio/Cargo.lock

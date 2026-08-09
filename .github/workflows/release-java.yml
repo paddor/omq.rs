@@ -1,0 +1,130 @@
+name: Release OMQ.java
+
+on:
+  push:
+    tags:
+      - 'omq-java-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Maven version to publish, for example 0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  native:
+    name: Native ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            library: libomq_java.so
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            library: libomq_java.dylib
+          - platform: macos-aarch64
+            runner: macos-latest
+            library: libomq_java.dylib
+          - platform: windows-x86_64
+            runner: windows-latest
+            library: omq_java.dll
+    steps:
+      - uses: actions/checkout@v7
+      - name: Disable local CPU rustflags
+        shell: bash
+        run: rm -f .cargo/config.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/java/native
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: bindings/java/pom.xml
+      - name: Build release native
+        working-directory: bindings/java/native
+        run: cargo build --release --features plain,curve,lz4,zstd
+      - name: Compile Java tests
+        run: mvn -B -ntp -f bindings/java/pom.xml -DskipNative=true -DskipTests test-compile
+      - name: Stage release native for tests
+        shell: bash
+        run: |
+          resource_dir="bindings/java/target/classes/io/omq/native/${{ matrix.platform }}"
+          mkdir -p "$resource_dir"
+          cp "bindings/java/native/target/release/${{ matrix.library }}" "$resource_dir/"
+      - name: JUnit with release native
+        run: >
+          mvn -B -ntp -f bindings/java/pom.xml -DskipNative=true
+          -Domq.java.peer.path=${{ github.workspace }}/bindings/java/native/target/release/omq-java-peer
+          surefire:test
+      - name: Stage native artifact
+        shell: bash
+        run: |
+          resource_dir="native-resource/io/omq/native/${{ matrix.platform }}"
+          mkdir -p "$resource_dir"
+          cp "bindings/java/native/target/release/${{ matrix.library }}" "$resource_dir/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: java-native-${{ matrix.platform }}
+          path: native-resource
+
+  publish:
+    name: Upload to Maven Central
+    runs-on: ubuntu-latest
+    needs: [native]
+    timeout-minutes: 30
+    environment:
+      name: maven-central
+      url: https://central.sonatype.com/artifact/io.github.paddor/omq-java
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: java-native-*
+          merge-multiple: true
+          path: bindings/java/target/generated-resources/native
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: bindings/java/pom.xml
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#omq-java-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload for validation
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: >
+          mvn -B -ntp -f bindings/java/pom.xml -Prelease
+          -Drevision=${{ steps.version.outputs.version }}
+          -DskipNative=true -DskipTests
+          -Dcentral.autoPublish=false -Dcentral.waitUntil=validated
+          deploy

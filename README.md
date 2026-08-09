@@ -9,8 +9,9 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - 3 security mechanisms: NULL, PLAIN, CURVE
 - OMQ-owned background I/O threads on Linux, macOS, and Windows
 - No C compiler, no libzmq, no libsodium
-- Bindings: OMQ.rb (Ruby), [pyomq](bindings/pyomq/) (Python),
-  [OMQ.java](bindings/java/) (Java), and C API ([omq-libzmq](omq-libzmq/))
+- Bindings: [OMQ.rb](https://github.com/zeromq/omq.rb) (Ruby),
+  [pyomq](bindings/pyomq/) (Python), [OMQ.java](bindings/java/) (Java),
+  and C API ([omq-libzmq](omq-libzmq/))
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
@@ -37,6 +38,8 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/lz4_tcp.svg" alt="LZ4 PUSH/PULL throughput over TCP" width="950">
 </p>
+
+[Full compression transport benchmarks (LZ4 and Zstd)](BENCHMARKS_COMPRESSION.md)
 </details>
 
 [Full comparison charts](COMPARISONS.md)

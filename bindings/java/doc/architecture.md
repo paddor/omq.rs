@@ -1,181 +1,89 @@
 # OMQ.java Architecture
 
-Maven binding for `omq-tokio`. The public API targets Java 25. Rust owns the
-OMQ context, sockets, protocol state, queues, reconnect logic, auth,
-compression, and background I/O.
+OMQ.java is a Java API over Rust `omq-tokio`.
 
-## Source layout
+- Java owns API shape, lifetime wrappers, argument validation, Java exceptions, and Java 25 FFM views of native rings.
+- Rust owns contexts, sockets, routing, queues, transports, ZMTP, reconnect, auth, compression, peer metadata, and I/O threads.
 
-```
-src/main/java/io/omq/
-  OMQ.java             static entry points and CURVE helpers
-  Context.java         native context handle, socket ownership, cleanup
-  Socket.java          synchronized socket facade and option setters
-  Message.java         immutable single-part and multipart payloads
-  Native.java          JNI declarations and packaged native library loader
-  NativeFfm.java       Java 25 FFM downcalls for fast native data paths
-  RecvRing.java        off-heap receive cache consumed from Java
-  SendRing.java        off-heap single-part send ring produced by Java
-  *Exception.java      unchecked exception hierarchy
+## Runtime
 
-native/src/
-  lib.rs              JNI and C ABI implementation over omq_tokio::blocking
-  bin/peer.rs         OMQ.rs peer used by Java interop tests
+```text
+Java caller thread
+  -> synchronized Socket method
+  -> JNI control path or FFM data path
+  -> omq_tokio::blocking::Socket
+  -> OMQ context runtime thread(s)
+  -> connection tasks and transport I/O
 ```
 
-## Threading model
+- `Context` owns a native `omq_tokio::Context`; the native context owns runtime threads, endpoint state, inproc registry, and sockets.
+- `Socket` owns one native socket handle; Java methods are `synchronized`, but socket semantics live in Rust.
+- Native handles are atomic; close is idempotent. `Cleaner` is only a leak fallback.
+- `Context.shareKey()` exposes a process-local opaque `UUID` for the native `u128` context key.
+- `Context.fromShareKey(UUID)` imports a non-owning Java handle to the same native context core.
+- Rust materializes the real blocking socket lazily on first `bind`, `connect`, `send`, `receive`, async receive, or wait.
+- Socket options are pre-materialization setup; protocol or transport setters fail after materialization.
 
-```
-Java caller thread -> synchronized Socket -> JNI/FFM -> omq_tokio::blocking::Socket
-                                                         |
-                                                         v
-                                      OMQ Context background I/O thread(s)
-                                      connection tasks, queues, ZMTP, auth,
-                                      compression, reconnect, transport I/O
-```
+## Source Map
 
-`Context(int ioThreads)` creates a native `omq_tokio::Context` with that
-I/O thread count. Java holds an opaque native handle. Closing an owning Java
-context terminates the native context and closes all Java sockets created
-from it. `Context.shareKey()` returns a process-local opaque `UUID` view of
-the native `u128` context key. `Context.fromShareKey(UUID)` imports another
-Java handle to the same native context core; closing the imported handle
-closes its Java sockets but does not terminate the owner.
+- `src/main/java/io/omq/Context.java`: context ownership and sharing
+- `src/main/java/io/omq/Socket.java`: public socket API and lifecycle
+- `src/main/java/io/omq/Native.java`: JNI declarations
+- `src/main/java/io/omq/NativeFfm.java`: FFM downcalls
+- `src/main/java/io/omq/RecvRing.java`, `SendRing.java`: Java ring views
+- `native/src/lib.rs`: JNI/FFM bridge to `omq-tokio`
 
-`Socket` holds an opaque native socket handle. The Rust side stores
-`Options` and lazily creates the actual `omq_tokio::blocking::Socket` on
-first `bind`, `connect`, `send`, `receive`, or wait operation. Option
-methods only edit the Rust `Options` value and must run before
-materialization.
+## Native Boundary
 
-Java socket methods are `synchronized`, so one Java wrapper cannot race
-itself. Native state uses an atomic handle for idempotent close and Rust
-mutexes for materialization and option mutation. `Cleaner` is a leak
-fallback, not the normal lifecycle path. Use try-with-resources.
+| Path | Role |
+| --- | --- |
+| JNI | lifecycle, endpoints, options, monitors, auth callbacks, multipart send, timeout send, async setup, error translation |
+| FFM | scalar sync receive batches, small single-part `PUSH`/`SCATTER` sends |
 
-## Data path
+The FFM ABI is Java-specific. It is not `omq-libzmq`. Java never encodes ZMTP or drives transport readiness.
 
-Java does not encode ZMTP, manage connections, or run transport threads.
-Native OMQ receives complete `Message` values and performs all socket
-semantics in Rust.
+## Ring Mechanics
 
-Synchronous receives use a Java 25 FFM fast path. Each Java socket lazily
-creates a native off-heap receive ring on first sync receive. The Rust side
-fills that ring with `recv_many_into()` using one reused `Vec<Message>`.
-Java then drains cached descriptors and payload bytes directly from
-`MemorySegment` views. Public methods stay scalar: `receive`,
-`receiveBytes`, `receiveInto`, `tryReceive`, and duration variants all use
-hidden batches when the ring is empty.
+The FFM rings are `yring`-style SPSC queues in native memory, but not the exact
+libzmq three-shared-pointer layout. Shared state is two padded atomic cursors:
+`head` and `tail`. `closed` is send-only. Each side keeps local cached cursors
+to avoid rereading the opposite atomic on every message.
 
-The receive ring mirrors `yring`/`ypipe_t` shape. Rust owns a private producer
-cursor. Java owns `head`. Rust publishes a batch by release-storing `tail`;
-Java acquires `tail`, reads descriptors with no native call per message, and
-release-stores `head` when a cached batch is drained or before refill.
-Descriptors and payload storage are native memory. Large payloads that do not
-fit the payload ring are held as native external blocks until Java advances
-`head`.
+Descriptors live in a power-of-two ring. Payload bytes live in a separate
+power-of-two arena. The producer writes payload bytes and descriptor, then
+release-stores `tail`. The consumer acquire-loads `tail`, drains descriptors,
+then release-stores `head` when slots are reusable.
 
-Single-part `PUSH` and `SCATTER` sends use a matching FFM send fast path.
-Java copies the user `byte[]` into an off-heap SPSC payload ring, writes one
-descriptor, and release-stores `tail`. A native worker thread drains
-descriptors, builds OMQ `Message` values backed by the off-heap slot, and
-submits them to the same native PUSH/SCATTER path used by JNI sends. The slot
-is released only when Rust drops the message owner. JNI send paths drain any
-queued FFM sends first, preserving call order when applications mix small
-single-part sends with multipart, timeout, async, or large-message sends.
-Large messages that do not fit the send payload ring wait for the ring to
-drain and then use the normal JNI send path. The ring remains usable for
-later small messages.
+Receive direction is Rust producer / Java consumer. Send direction is Java
+producer / Rust consumer. Large payloads that do not fit the arena leave the
+ring path and use native owned storage or JNI fallback.
 
-JNI remains the control plane for context/socket setup, options, auth
-callbacks, monitors, multipart send, non-`PUSH`/`SCATTER` send, timeout send,
-and async completion. The C ABI used by FFM is small and Java-specific; it is
-not `omq-libzmq`.
+## Receive Path
 
-`sendManyBytes` crosses JNI once with a Java `byte[][]` and sends each inner
-array as one single-part message. The Rust side copies each array into owned
-native message storage before `sendManyBytes` returns; Java buffers are never
-retained by native code.
+- Each socket lazily creates a native off-heap receive ring.
+- When Java's cache is empty, Rust fills descriptors and payload storage with `recv_many_into()` and reuses one internal `Vec<Message>`.
+- Java drains cached descriptors through `MemorySegment` views.
+- `receive`, `receiveBytes`, `receiveInto`, timeout variants, and try variants all use this hidden batch path.
 
-`inproc://` is not special-cased in Java. Each Rust context core owns its
-own inproc registry and decides whether an endpoint is local, what socket
-types are compatible, and which native queue path is legal. Separate Java
-contexts have isolated inproc namespaces. Use `Context.shareKey()` and
-`Context.fromShareKey(UUID)` when two Java handles must share one inproc
-namespace. A Java-private inproc registry would split address ownership from
-Rust and would break mixed Java/Rust endpoints inside the same process.
+## Send Path
 
-`trySend` calls native `try_send` and returns `false` when native routing
-or high-water-mark state cannot accept the message immediately. Other
-errors still raise typed exceptions. `tryReceive` and `tryRecv` return an
-empty `Optional` when no complete message is available.
+- Small single-part `PUSH` and `SCATTER` sends copy bytes into an off-heap SPSC send ring.
+- A native worker drains descriptors and submits OMQ messages on the same Rust path as JNI sends.
+- Multipart, large, timeout, async, and non-`PUSH`/`SCATTER` sends use JNI.
+- JNI sends drain queued FFM sends first, so mixed APIs preserve call order.
 
-## Async API
+## Async Path
 
-`sendAsync` and `receiveAsync` return Java `CompletableFuture` values but
-do not use Java worker threads. The Java method creates a future, JNI takes
-a global reference to it, clones the native async socket, and spawns a Rust
-future on the OMQ context runtime. JNI returns a native abort token stored
-inside the future; `cancel`, user `complete`, and user `completeExceptionally`
-drop that token and abort the native task. When the Rust future completes,
-the OMQ runtime thread attaches to the JVM as a daemon and calls `complete`
-or `completeExceptionally`.
+- `sendAsync`, `receiveAsync`, and `OMQ.receiveAny` return `CompletableFuture` without Java worker threads.
+- JNI creates a global ref, clones the native async socket, and spawns a Rust future on the OMQ runtime.
+- Completion attaches the runtime thread to the JVM as a daemon.
+- Canceling or externally completing the Java future drops a native abort token.
+- Async receive first drains any message already cached in the FFM receive ring.
 
-`receiveAsync(Duration)` wraps native `recv()` in `tokio::time::timeout`
-and completes exceptionally with `TimeoutException` on deadline. `sendAsync`
-completes after OMQ accepts the message into outbound routing buffers, same
-semantic point as synchronous `send`.
+## Inproc
 
-`OMQ.receiveAny(Socket...)` requires distinct sockets and runs one native
-task that polls nonblocking receives across them. It returns the first
-`ReceiveEvent` it consumes. It never starts loser `recv()` futures, so
-messages on other sockets remain queued. Canceling the Java future aborts
-the native poll task.
-Before spawning native receives, async receive APIs first drain any message
-already cached in the Java FFM receive ring. This preserves receive ordering
-when sync and async APIs are mixed.
+`inproc://` belongs to the Rust context core. Separate contexts have separate inproc namespaces. Handles imported with `fromShareKey` share the same native context core and therefore the same inproc namespace. Java has no private inproc registry.
 
-## Compression
+## Native Features
 
-Compression is enabled by endpoint scheme and native Cargo features.
-The Maven build enables `lz4` and `zstd`, so Java can use endpoints such
-as `lz4+tcp://127.0.0.1:5555` and `zstd+tcp://127.0.0.1:5555`.
-`compressionAutoTrain`, `compressionThreshold`, and `compressionLevel`
-map to OMQ options before socket materialization.
-
-## Security
-
-PLAIN and CURVE are enabled by the Maven native build. `OMQ.curveKeypair()`
-calls `omq_proto::CurveKeypair::generate()` in Rust and returns Z85 public
-and secret keys. `OMQ.curvePublic(secretKey)` parses a Z85 secret key in
-Rust and derives the matching Z85 public key.
-
-## Exceptions
-
-All OMQ Java exceptions are unchecked.
-
-- `TimeoutException`: timeout or would-block.
-- `ClosedException`: closed context or socket.
-- `InvalidEndpointException`: invalid endpoint or unsupported scheme.
-- `ProtocolException`: ZMTP protocol violation, bad handshake, or
-  unsupported ZMTP version.
-- `TransportException`: base for endpoint transport I/O failures. Carries
-  `operation()`, `endpoint()`, and native `detail()`.
-- `BindException`: native bind I/O failure, for example address in use.
-- `ConnectException`: native connect preflight I/O failure.
-- `NameResolutionException`: host lookup failure during bind, connect,
-  unbind, or disconnect.
-- `OMQException`: invalid configuration, message-too-large, unroutable,
-  JNI/native panic wrapper, and unexpected native errors.
-
-Java argument validation still uses standard `NullPointerException`,
-`IllegalArgumentException`, or `IllegalStateException` where appropriate.
-
-## Tests
-
-Normal CI runs the JUnit suite with the native library built by Maven. The
-soak test is opt-in and skipped unless `OMQ_JAVA_SOAK=1` or
-`-Domq.java.soak=true` is set. `bindings/java/scripts/soak.sh` runs the same
-mixed workload at 5, 10, 30, and 60 minutes by default. It exercises TCP peer
-churn, CURVE-authenticated churn, `lz4+tcp://`, `zstd+tcp://`, and shared
-context `inproc://` traffic while checking heap and RSS growth.
+Compression, PLAIN, and CURVE are native OMQ features exposed through Java options and endpoint schemes. Rust performs negotiation, key generation, authentication, compression, and peer metadata extraction.

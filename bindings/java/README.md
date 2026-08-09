@@ -12,6 +12,28 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 Requires Java 25 or newer.
 
+Maven Central coordinates:
+
+```xml
+<dependency>
+  <groupId>io.github.paddor</groupId>
+  <artifactId>omq-java</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
+
+Synchronous receives use Java 25 FFM and require native access:
+
+```sh
+--enable-native-access=ALL-UNNAMED
+```
+
+If the jar is used on the module path, enable only the automatic module:
+
+```sh
+--enable-native-access=io.omq
+```
+
 ```sh
 mvn package
 mvn install
@@ -20,8 +42,6 @@ mvn test
 
 Maven builds the Rust native library in `native/target/debug` and embeds the
 current-platform native library in the jar under `io/omq/native/...`.
-Synchronous receives use Java 25 FFM and require native access:
-`--enable-native-access=ALL-UNNAMED`.
 
 ## Shape
 

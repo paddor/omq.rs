@@ -463,11 +463,15 @@ jobs:
           spotless:check checkstyle:check compile test-compile javadoc:javadoc
 
   java-test:
-    name: java-test
+    name: java-test (${{ matrix.os }})
     needs: [changes, java-lint]
     if: needs.changes.outputs.run_java == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master

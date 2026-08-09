@@ -4,21 +4,60 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>io.omq</groupId>
+  <groupId>io.github.paddor</groupId>
   <artifactId>omq-java</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>${revision}</version>
   <name>OMQ.java</name>
   <description>Java bindings for OMQ backed by omq-tokio</description>
+  <url>https://github.com/paddor/omq.rs</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/license/mit</url>
+      <distribution>repo</distribution>
+    </license>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>paddor</id>
+      <name>Patrik Wenger</name>
+      <email>paddor@gmail.com</email>
+      <url>https://github.com/paddor</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/paddor/omq.rs.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/paddor/omq.rs.git</developerConnection>
+    <tag>HEAD</tag>
+    <url>https://github.com/paddor/omq.rs</url>
+  </scm>
+
+  <issueManagement>
+    <system>GitHub Issues</system>
+    <url>https://github.com/paddor/omq.rs/issues</url>
+  </issueManagement>
 
   <properties>
+    <revision>0.1.0-SNAPSHOT</revision>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.14.1</junit.version>
     <jeromq.version>0.6.0</jeromq.version>
     <checkstyle.version>3.5.0</checkstyle.version>
     <spotless.version>2.44.0</spotless.version>
+    <central.autoPublish>false</central.autoPublish>
+    <central.waitUntil>validated</central.waitUntil>
     <native.library>libomq_java.so</native.library>
     <native.platform>linux-x86_64</native.platform>
+    <omq.java.peer.path>${project.basedir}/native/target/debug/omq-java-peer</omq.java.peer.path>
     <skipNative>false</skipNative>
   </properties>
 
@@ -38,6 +77,14 @@
   </dependencies>
 
   <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>${project.build.directory}/generated-resources/native</directory>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
@@ -88,6 +135,18 @@
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.5.1</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.omq</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -146,13 +205,103 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.4</version>
         <configuration>
-          <argLine>--enable-native-access=ALL-UNNAMED -Domq.java.peer=${project.basedir}/native/target/debug/omq-java-peer</argLine>
+          <argLine>--enable-native-access=ALL-UNNAMED -Domq.java.peer=${omq.java.peer.path}</argLine>
         </configuration>
       </plugin>
     </plugins>
   </build>
 
   <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.4.0</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.8</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+                <configuration>
+                  <gpgArguments>
+                    <arg>--batch</arg>
+                    <arg>--yes</arg>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                  <passphraseEnvName>MAVEN_GPG_PASSPHRASE</passphraseEnvName>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>${central.autoPublish}</autoPublish>
+              <waitUntil>${central.waitUntil}</waitUntil>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>flatten-maven-plugin</artifactId>
+            <version>1.8.0</version>
+            <configuration>
+              <flattenMode>resolveCiFriendliesOnly</flattenMode>
+            </configuration>
+            <executions>
+              <execution>
+                <id>flatten</id>
+                <phase>process-resources</phase>
+                <goals>
+                  <goal>flatten</goal>
+                </goals>
+              </execution>
+              <execution>
+                <id>flatten-clean</id>
+                <phase>clean</phase>
+                <goals>
+                  <goal>clean</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
     <profile>
       <id>linux-amd64</id>
       <activation>

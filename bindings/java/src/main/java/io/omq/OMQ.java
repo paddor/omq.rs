@@ -1,5 +1,6 @@
 package io.omq;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Objects;
@@ -43,6 +44,39 @@ public final class OMQ {
 
     /** Receives the next message from any distinct supplied socket on the native runtime. */
     public static CompletableFuture<ReceiveEvent> receiveAny(Socket... sockets) {
+        Socket[] copy = checkedSockets(sockets);
+        NativeFuture<ReceiveEvent> future = new NativeFuture<>();
+        try {
+            long task = withReceiveAnySetupLocked(copy, () -> {
+                long[] handles = nativeHandles(copy);
+                return Native.receiveAnyAsync(copy, handles, future);
+            });
+            future.setNativeTask(task);
+        } catch (OMQException error) {
+            future.completeExceptionally(error);
+        }
+        return future;
+    }
+
+    /** Receives from any supplied socket before the timeout, or completes with empty. */
+    public static CompletableFuture<Optional<ReceiveEvent>> receiveAny(Duration timeout, Socket... sockets) {
+        Objects.requireNonNull(timeout, "timeout");
+        Socket[] copy = checkedSockets(sockets);
+        long timeoutMillis = Socket.millis(timeout);
+        NativeFuture<Optional<ReceiveEvent>> future = new NativeFuture<>();
+        try {
+            long task = withReceiveAnySetupLocked(copy, () -> {
+                long[] handles = nativeHandles(copy);
+                return Native.receiveAnyAsyncOptional(copy, handles, timeoutMillis, future);
+            });
+            future.setNativeTask(task);
+        } catch (OMQException error) {
+            future.completeExceptionally(error);
+        }
+        return future;
+    }
+
+    private static Socket[] checkedSockets(Socket[] sockets) {
         Objects.requireNonNull(sockets, "sockets");
         if (sockets.length == 0) {
             throw new IllegalArgumentException("at least one socket is required");
@@ -55,20 +89,15 @@ public final class OMQ {
                 throw new IllegalArgumentException("sockets must be distinct");
             }
         }
-        NativeFuture<ReceiveEvent> future = new NativeFuture<>();
-        try {
-            long task = withReceiveAnySetupLocked(copy, () -> {
-                long[] handles = new long[copy.length];
-                for (int i = 0; i < copy.length; i++) {
-                    handles[i] = copy[i].nativeHandle();
-                }
-                return Native.receiveAnyAsync(copy, handles, future);
-            });
-            future.setNativeTask(task);
-        } catch (OMQException error) {
-            future.completeExceptionally(error);
+        return copy;
+    }
+
+    private static long[] nativeHandles(Socket[] sockets) {
+        long[] handles = new long[sockets.length];
+        for (int i = 0; i < sockets.length; i++) {
+            handles[i] = sockets[i].nativeHandle();
         }
-        return future;
+        return handles;
     }
 
     private static long withReceiveAnySetupLocked(Socket[] sockets, NativeLongSupplier action) {

@@ -761,6 +761,53 @@ fn complete_future_receive_event(
     }
 }
 
+fn optional_receive_event_object<'local>(
+    env: &mut JNIEnv<'local>,
+    event: Option<(GlobalRef, Message)>,
+) -> Result<JObject<'local>, Error> {
+    match event {
+        Some((socket, message)) => {
+            let event = receive_event_object(env, &socket, message)?;
+            env.call_static_method(
+                "java/util/Optional",
+                "of",
+                "(Ljava/lang/Object;)Ljava/util/Optional;",
+                &[JValue::Object(&event)],
+            )
+            .and_then(|value| value.l())
+            .map_err(jni_error)
+        }
+        None => env
+            .call_static_method("java/util/Optional", "empty", "()Ljava/util/Optional;", &[])
+            .and_then(|value| value.l())
+            .map_err(jni_error),
+    }
+}
+
+fn complete_future_optional_receive_event(
+    jvm: JavaVM,
+    future: GlobalRef,
+    result: Result<Option<(GlobalRef, Message)>, Error>,
+) {
+    let Ok(mut env) = jvm.attach_current_thread_as_daemon() else {
+        return;
+    };
+    match result {
+        Ok(event) => match optional_receive_event_object(&mut env, event) {
+            Ok(event) => {
+                let _ = env.call_method(
+                    &future,
+                    "complete",
+                    "(Ljava/lang/Object;)Z",
+                    &[JValue::Object(&event)],
+                );
+            }
+            Err(error) => complete_future_exceptionally(&mut env, &future, error),
+        },
+        Err(error) => complete_future_exceptionally(&mut env, &future, error),
+    }
+}
+
 fn complete_future_void(jvm: JavaVM, future: GlobalRef, result: Result<(), Error>) {
     let Ok(mut env) = jvm.attach_current_thread_as_daemon() else {
         return;
@@ -1418,6 +1465,84 @@ pub extern "system" fn Java_io_omq_Native_receiveAnyAsync(
                 let result = rx.recv().await.unwrap_or(Err(Error::Closed));
                 joins.abort_all();
                 complete_future_receive_event(jvm, future, result);
+            });
+            Ok(async_task_handle(join))
+        })();
+
+        match result {
+            Ok(handle) => handle,
+            Err(error) => {
+                throw_omq(env, error);
+                0
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_receiveAnyAsyncOptional(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    sockets: JObjectArray<'_>,
+    handles: JLongArray<'_>,
+    timeout_millis: jlong,
+    future: JObject<'_>,
+) -> jlong {
+    guard(&mut env, 0, |env| {
+        let result = (|| {
+            let timeout = optional_duration_from_millis(timeout_millis)?;
+            let len = env.get_array_length(&sockets).map_err(jni_error)?;
+            if len <= 0 {
+                return Err(Error::Config("at least one socket is required".to_string()));
+            }
+            if env.get_array_length(&handles).map_err(jni_error)? != len {
+                return Err(Error::Config("socket and handle arrays differ".to_string()));
+            }
+            let mut raw_handles = vec![0; len as usize];
+            env.get_long_array_region(&handles, 0, &mut raw_handles)
+                .map_err(jni_error)?;
+            let jvm = env.get_java_vm().map_err(jni_error)?;
+            let future = env.new_global_ref(&future).map_err(jni_error)?;
+            let mut entries = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                let socket_obj = env
+                    .get_object_array_element(&sockets, i)
+                    .map_err(jni_error)?;
+                if socket_obj.is_null() {
+                    return Err(Error::Config(format!("socket {i} must not be null")));
+                }
+                let handle = raw_handles[i as usize];
+                let socket = socket_from_handle(handle)?;
+                let java_socket = env.new_global_ref(&socket_obj).map_err(jni_error)?;
+                let runtime = socket.ctx.handle().clone();
+                let async_socket = socket.materialize()?.into_async();
+                entries.push((runtime, async_socket, java_socket));
+            }
+
+            let parent_runtime = entries[0].0.clone();
+            let join = parent_runtime.spawn(async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut joins = AbortOnDrop::with_capacity(entries.len());
+                for (runtime, socket, java_socket) in entries {
+                    let tx = tx.clone();
+                    let join = runtime.spawn(async move {
+                        let result = socket.recv().await.map(|message| (java_socket, message));
+                        let _ = tx.send(result);
+                    });
+                    joins.push(join);
+                }
+                drop(tx);
+
+                let result = match timeout {
+                    Some(timeout) => match tokio::time::timeout(timeout, rx.recv()).await {
+                        Ok(Some(result)) => result.map(Some),
+                        Ok(None) => Err(Error::Closed),
+                        Err(_) => Ok(None),
+                    },
+                    None => rx.recv().await.unwrap_or(Err(Error::Closed)).map(Some),
+                };
+                joins.abort_all();
+                complete_future_optional_receive_event(jvm, future, result);
             });
             Ok(async_task_handle(join))
         })();

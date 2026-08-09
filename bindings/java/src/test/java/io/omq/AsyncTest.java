@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -95,6 +96,42 @@ final class AsyncTest {
             ReceiveEvent event = either.get(5, TimeUnit.SECONDS);
             assertEquals(pull2, event.socket());
             assertEquals("second", event.message().text());
+        }
+    }
+
+    @Test
+    void receiveAnyDurationCompletesWithMessage() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull1 = context.socket(SocketType.PULL);
+             Socket pull2 = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            pull1.bind("tcp://127.0.0.1:0");
+            String endpoint2 = pull2.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint2);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            CompletableFuture<Optional<ReceiveEvent>> either =
+                    OMQ.receiveAny(Duration.ofSeconds(5), pull1, pull2);
+            push.send("timed-any");
+
+            ReceiveEvent event = either.get(5, TimeUnit.SECONDS).orElseThrow();
+            assertEquals(pull2, event.socket());
+            assertEquals("timed-any", event.message().text());
+        }
+    }
+
+    @Test
+    void receiveAnyDurationCompletesEmptyOnTimeout() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull1 = context.socket(SocketType.PULL);
+             Socket pull2 = context.socket(SocketType.PULL)) {
+            pull1.bind("tcp://127.0.0.1:0");
+            pull2.bind("tcp://127.0.0.1:0");
+
+            CompletableFuture<Optional<ReceiveEvent>> either =
+                    OMQ.receiveAny(Duration.ofMillis(20), pull1, pull2);
+
+            assertTrue(either.get(5, TimeUnit.SECONDS).isEmpty());
         }
     }
 

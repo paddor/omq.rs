@@ -56,6 +56,8 @@ final class Native {
 
     static native void socketSendMultipart(long handle, byte[][] parts);
 
+    static native int socketSendMultipartTimeout(long handle, byte[][] parts, long timeoutMillis);
+
     static native void socketSendMany(long handle, byte[][] messages);
 
     static native int socketTrySendMultipart(long handle, byte[][] parts);

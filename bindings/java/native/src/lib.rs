@@ -2,7 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use jni::objects::{
@@ -895,6 +895,39 @@ fn send_bodies(
         socket.send(Message::single(Bytes::from(byte_array(env, body)?)))?;
     }
     Ok(())
+}
+
+fn send_with_timeout(
+    socket: &BlockingSocket,
+    message: Message,
+    timeout_millis: jlong,
+) -> Result<bool, Error> {
+    if timeout_millis < 0 {
+        socket.send(message)?;
+        return Ok(true);
+    }
+
+    let timeout = duration_from_millis(timeout_millis)?;
+    let deadline = Instant::now().checked_add(timeout);
+    let mut message = message;
+    loop {
+        match socket.try_send(message) {
+            Ok(()) => return Ok(true),
+            Err(TrySendError::Full(returned)) => message = returned,
+            Err(TrySendError::Closed) => return Err(Error::Closed),
+            Err(TrySendError::Error(error)) => return Err(error),
+        }
+
+        let Some(deadline) = deadline else {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
 }
 
 fn message_to_java_parts<'local>(
@@ -1873,6 +1906,36 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipart(
             throw_omq(env, error);
         }
     });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketSendMultipartTimeout(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    parts: JObjectArray<'_>,
+    timeout_millis: jlong,
+) -> jint {
+    guard(&mut env, 0, |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?;
+            let parts = bytes_from_parts(env, parts)?;
+            send_with_timeout(
+                &socket.materialize()?,
+                Message::multipart(parts),
+                timeout_millis,
+            )
+            .map(i32::from)
+        })();
+
+        match result {
+            Ok(sent) => sent,
+            Err(error) => {
+                throw_omq(env, error);
+                0
+            }
+        }
+    })
 }
 
 #[unsafe(no_mangle)]

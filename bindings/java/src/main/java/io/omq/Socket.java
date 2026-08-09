@@ -93,6 +93,39 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Sends a single-part binary message before the timeout, or returns false. */
+    public synchronized boolean send(byte[] body, Duration timeout) {
+        Objects.requireNonNull(body, "body");
+        return send(Message.of(body), timeout);
+    }
+
+    /** Sends the remaining bytes of {@code body} before the timeout, or returns false. */
+    public synchronized boolean send(ByteBuffer body, Duration timeout) {
+        return send(Message.of(body), timeout);
+    }
+
+    /** Sends UTF-8 text before the timeout, or returns false. */
+    public synchronized boolean send(String text, Duration timeout) {
+        return send(text, StandardCharsets.UTF_8, timeout);
+    }
+
+    /** Sends text encoded with the supplied charset before the timeout, or returns false. */
+    public synchronized boolean send(String text, Charset charset, Duration timeout) {
+        Objects.requireNonNull(text, "text");
+        Objects.requireNonNull(charset, "charset");
+        return send(text.getBytes(charset), timeout);
+    }
+
+    /** Sends a message before the timeout, or returns false. */
+    public synchronized boolean send(Message message, Duration timeout) {
+        Objects.requireNonNull(message, "message");
+        Objects.requireNonNull(timeout, "timeout");
+        byte[][] parts = message.toNative();
+        long timeoutMillis = millis(timeout);
+        return withHandle(handle -> Native.socketSendMultipartTimeout(
+                handle, parts, timeoutMillis)) != 0;
+    }
+
     /** Sends each byte array as one single-part message. */
     public synchronized Socket sendManyBytes(byte[][] bodies) {
         Objects.requireNonNull(bodies, "bodies");

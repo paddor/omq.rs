@@ -268,6 +268,31 @@ final class SocketTest {
     }
 
     @Test
+    void timedSendSucceedsBeforeTimeout() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://timed-send-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            assertTrue(push.send("timed", Duration.ofSeconds(5)));
+
+            assertEquals("timed", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
+    void timedSendReturnsFalseOnTimeout() {
+        try (Context context = OMQ.context();
+             Socket push = context.socket(SocketType.PUSH)) {
+            push.bind("inproc://timed-send-timeout-" + UUID.randomUUID());
+
+            assertFalse(push.send("blocked", Duration.ofMillis(10)));
+        }
+    }
+
+    @Test
     void receiveManyBytesIntoFillsReusableArrayWithOffset() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);

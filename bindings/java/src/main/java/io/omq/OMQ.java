@@ -48,10 +48,19 @@ public final class OMQ {
         NativeFuture<ReceiveEvent> future = new NativeFuture<>();
         try {
             long task = withReceiveAnySetupLocked(copy, () -> {
+                for (Socket socket : copy) {
+                    Optional<ReceiveEvent> cached = socket.tryReceiveCachedEvent();
+                    if (cached.isPresent()) {
+                        future.complete(cached.orElseThrow());
+                        return 0;
+                    }
+                }
                 long[] handles = nativeHandles(copy);
                 return Native.receiveAnyAsync(copy, handles, future);
             });
-            future.setNativeTask(task);
+            if (task != 0) {
+                future.setNativeTask(task);
+            }
         } catch (OMQException error) {
             future.completeExceptionally(error);
         }
@@ -66,10 +75,19 @@ public final class OMQ {
         NativeFuture<Optional<ReceiveEvent>> future = new NativeFuture<>();
         try {
             long task = withReceiveAnySetupLocked(copy, () -> {
+                for (Socket socket : copy) {
+                    Optional<ReceiveEvent> cached = socket.tryReceiveCachedEvent();
+                    if (cached.isPresent()) {
+                        future.complete(cached);
+                        return 0;
+                    }
+                }
                 long[] handles = nativeHandles(copy);
                 return Native.receiveAnyAsyncOptional(copy, handles, timeoutMillis, future);
             });
-            future.setNativeTask(task);
+            if (task != 0) {
+                future.setNativeTask(task);
+            }
         } catch (OMQException error) {
             future.completeExceptionally(error);
         }

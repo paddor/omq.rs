@@ -89,6 +89,27 @@ final class SocketTest {
     }
 
     @Test
+    void receiveBytesHandlesMessageLargerThanFfmPayloadRing() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-large-external-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            byte[] body = new byte[5 * 1024 * 1024 + 17];
+            body[0] = 7;
+            body[body.length - 1] = 9;
+
+            push.send(body);
+            byte[] received = pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow();
+
+            assertEquals(body.length, received.length);
+            assertEquals(7, received[0]);
+            assertEquals(9, received[received.length - 1]);
+        }
+    }
+
+    @Test
     void tryReceiveBytesReturnsEmptyWhenNoMessageAvailable() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {

@@ -203,20 +203,18 @@ public final class Socket implements AutoCloseable {
 
     /** Receives one message, blocking forever. */
     public synchronized Message receive() {
-        return Message.fromNative(
-                this.<Object>withHandle(handle -> Native.socketRecv(handle, FOREVER)));
+        return withRecvRing((ring, handle) -> ring.receive(handle, FOREVER));
     }
 
     /** Receives one single-part message body, blocking forever. */
     public synchronized byte[] receiveBytes() {
-        return Message.bytesFromNative(
-                this.<Object>withHandle(handle -> Native.socketRecv(handle, FOREVER)));
+        return withRecvRing((ring, handle) -> ring.receiveBytes(handle, FOREVER));
     }
 
     /** Receives one single-part message body into {@code destination}, blocking forever. */
     public synchronized int receiveInto(ByteBuffer destination) {
         Objects.requireNonNull(destination, "destination");
-        return withHandle(handle -> Native.socketRecvInto(handle, destination, FOREVER));
+        return withRecvRing((ring, handle) -> ring.receiveInto(handle, destination, FOREVER));
     }
 
     /** Receives one message before the timeout, or returns empty. */
@@ -224,8 +222,7 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
-            return Optional.of(Message.fromNative(
-                    this.<Object>withHandle(handle -> Native.socketRecv(handle, timeoutMillis))));
+            return Optional.of(withRecvRing((ring, handle) -> ring.receive(handle, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -236,8 +233,8 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
-            return Optional.of(Message.bytesFromNative(
-                    this.<Object>withHandle(handle -> Native.socketRecv(handle, timeoutMillis))));
+            return Optional.of(withRecvRing(
+                    (ring, handle) -> ring.receiveBytes(handle, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -249,8 +246,8 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
-            return OptionalInt.of(withHandle(handle -> Native.socketRecvInto(
-                    handle, destination, timeoutMillis)));
+            return OptionalInt.of(withRecvRing(
+                    (ring, handle) -> ring.receiveInto(handle, destination, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
             return OptionalInt.empty();
         }
@@ -259,8 +256,7 @@ public final class Socket implements AutoCloseable {
     /** Receives one message if already available, or returns empty. */
     public synchronized Optional<Message> tryReceive() {
         try {
-            return Optional.of(Message.fromNative(
-                    this.<Object>withHandle(handle -> Native.socketRecv(handle, 0))));
+            return Optional.of(withRecvRing((ring, handle) -> ring.receive(handle, 0)));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -269,8 +265,7 @@ public final class Socket implements AutoCloseable {
     /** Receives one single-part message body if already available, or returns empty. */
     public synchronized Optional<byte[]> tryReceiveBytes() {
         try {
-            return Optional.of(Message.bytesFromNative(
-                    this.<Object>withHandle(handle -> Native.socketRecv(handle, 0))));
+            return Optional.of(withRecvRing((ring, handle) -> ring.receiveBytes(handle, 0)));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -280,7 +275,8 @@ public final class Socket implements AutoCloseable {
     public synchronized OptionalInt tryReceiveInto(ByteBuffer destination) {
         Objects.requireNonNull(destination, "destination");
         try {
-            return OptionalInt.of(withHandle(handle -> Native.socketRecvInto(handle, destination, 0)));
+            return OptionalInt.of(withRecvRing(
+                    (ring, handle) -> ring.receiveInto(handle, destination, 0)));
         } catch (TimeoutException timeoutError) {
             return OptionalInt.empty();
         }
@@ -289,15 +285,13 @@ public final class Socket implements AutoCloseable {
     /** Receives up to {@code maxMessages} messages, blocking until the first message. */
     public synchronized List<Message> receiveMany(int maxMessages) {
         requirePositive("maxMessages", maxMessages);
-        return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
-                handle, maxMessages, FOREVER)));
+        return receiveManyFromRing(maxMessages, FOREVER);
     }
 
     /** Receives up to {@code maxMessages} single-part bodies, blocking until the first message. */
     public synchronized List<byte[]> receiveManyBytes(int maxMessages) {
         requirePositive("maxMessages", maxMessages);
-        return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
-                handle, maxMessages, FOREVER)));
+        return receiveManyBytesFromRing(maxMessages, FOREVER);
     }
 
     /** Receives up to {@code maxMessages} messages before the timeout, or returns an empty list. */
@@ -306,8 +300,7 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
-            return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
-                    handle, maxMessages, timeoutMillis)));
+            return receiveManyFromRing(maxMessages, timeoutMillis);
         } catch (TimeoutException timeoutError) {
             return List.of();
         }
@@ -319,8 +312,7 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
-            return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
-                    handle, maxMessages, timeoutMillis)));
+            return receiveManyBytesFromRing(maxMessages, timeoutMillis);
         } catch (TimeoutException timeoutError) {
             return List.of();
         }
@@ -337,8 +329,7 @@ public final class Socket implements AutoCloseable {
         if (max == 0) {
             return 0;
         }
-        return withHandle(handle -> Native.socketRecvManyBytesInto(
-                handle, output, offset, max, FOREVER));
+        return receiveManyBytesIntoFromRing(output, offset, max, FOREVER);
     }
 
     /** Fills {@code output} with single-part bodies before the timeout, or returns zero. */
@@ -356,8 +347,7 @@ public final class Socket implements AutoCloseable {
         }
         long timeoutMillis = millis(timeout);
         try {
-            return withHandle(handle -> Native.socketRecvManyBytesInto(
-                    handle, output, offset, max, timeoutMillis));
+            return receiveManyBytesIntoFromRing(output, offset, max, timeoutMillis);
         } catch (TimeoutException timeoutError) {
             return 0;
         }
@@ -367,8 +357,7 @@ public final class Socket implements AutoCloseable {
     public synchronized List<Message> tryReceiveMany(int maxMessages) {
         requirePositive("maxMessages", maxMessages);
         try {
-            return messagesFromNative(withHandle(handle -> Native.socketRecvMany(
-                    handle, maxMessages, 0)));
+            return receiveManyFromRing(maxMessages, 0);
         } catch (TimeoutException timeoutError) {
             return List.of();
         }
@@ -378,8 +367,7 @@ public final class Socket implements AutoCloseable {
     public synchronized List<byte[]> tryReceiveManyBytes(int maxMessages) {
         requirePositive("maxMessages", maxMessages);
         try {
-            return bytesFromNative(withHandle(handle -> Native.socketRecvMany(
-                    handle, maxMessages, 0)));
+            return receiveManyBytesFromRing(maxMessages, 0);
         } catch (TimeoutException timeoutError) {
             return List.of();
         }
@@ -397,8 +385,7 @@ public final class Socket implements AutoCloseable {
             return 0;
         }
         try {
-            return withHandle(handle -> Native.socketRecvManyBytesInto(
-                    handle, output, offset, max, 0));
+            return receiveManyBytesIntoFromRing(output, offset, max, 0);
         } catch (TimeoutException timeoutError) {
             return 0;
         }
@@ -421,6 +408,10 @@ public final class Socket implements AutoCloseable {
 
     /** Receives one message asynchronously on the native runtime; canceling aborts the native receive. */
     public synchronized CompletableFuture<Message> receiveAsync() {
+        Optional<Message> cached = tryReceiveCachedMessage();
+        if (cached.isPresent()) {
+            return CompletableFuture.completedFuture(cached.orElseThrow());
+        }
         NativeFuture<Message> future = new NativeFuture<>();
         try {
             long task = withHandle(handle -> Native.socketRecvAsync(handle, FOREVER, future));
@@ -434,6 +425,10 @@ public final class Socket implements AutoCloseable {
     /** Receives one message asynchronously before the timeout; canceling aborts the native receive. */
     public synchronized CompletableFuture<Message> receiveAsync(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout");
+        Optional<Message> cached = tryReceiveCachedMessage();
+        if (cached.isPresent()) {
+            return CompletableFuture.completedFuture(cached.orElseThrow());
+        }
         NativeFuture<Message> future = new NativeFuture<>();
         long timeoutMillis = millis(timeout);
         try {
@@ -937,6 +932,21 @@ public final class Socket implements AutoCloseable {
         }
     }
 
+    private <T> T withRecvRing(RecvRingAction<T> action) {
+        synchronized (state) {
+            long handle = state.handle();
+            return action.apply(state.recvRing, handle);
+        }
+    }
+
+    Optional<ReceiveEvent> tryReceiveCachedEvent() {
+        synchronized (state) {
+            state.handle();
+            return state.recvRing.tryReceiveCachedMessage()
+                    .map(message -> new ReceiveEvent(this, message));
+        }
+    }
+
     /** Closes the socket and releases native resources. */
     @Override
     public void close() {
@@ -976,22 +986,6 @@ public final class Socket implements AutoCloseable {
         }
     }
 
-    private static List<Message> messagesFromNative(Object[] nativeMessages) {
-        ArrayList<Message> out = new ArrayList<>(nativeMessages.length);
-        for (Object nativeMessage : nativeMessages) {
-            out.add(Message.fromNative(nativeMessage));
-        }
-        return out;
-    }
-
-    private static List<byte[]> bytesFromNative(Object[] nativeMessages) {
-        ArrayList<byte[]> out = new ArrayList<>(nativeMessages.length);
-        for (Object nativeMessage : nativeMessages) {
-            out.add(Message.bytesFromNative(nativeMessage));
-        }
-        return out;
-    }
-
     private static byte[][] requireBodies(byte[][] bodies) {
         for (int i = 0; i < bodies.length; i++) {
             Objects.requireNonNull(bodies[i], "body " + i);
@@ -1017,9 +1011,62 @@ public final class Socket implements AutoCloseable {
         return maxMessages;
     }
 
+    private Optional<Message> tryReceiveCachedMessage() {
+        synchronized (state) {
+            state.handle();
+            return state.recvRing.tryReceiveCachedMessage();
+        }
+    }
+
+    private List<Message> receiveManyFromRing(int maxMessages, long timeoutMillis) {
+        ArrayList<Message> out = new ArrayList<>(maxMessages);
+        out.add(withRecvRing((ring, handle) -> ring.receive(handle, timeoutMillis)));
+        while (out.size() < maxMessages) {
+            try {
+                out.add(withRecvRing((ring, handle) -> ring.receive(handle, 0)));
+            } catch (TimeoutException timeoutError) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    private List<byte[]> receiveManyBytesFromRing(int maxMessages, long timeoutMillis) {
+        ArrayList<byte[]> out = new ArrayList<>(maxMessages);
+        out.add(withRecvRing((ring, handle) -> ring.receiveBytes(handle, timeoutMillis)));
+        while (out.size() < maxMessages) {
+            try {
+                out.add(withRecvRing((ring, handle) -> ring.receiveBytes(handle, 0)));
+            } catch (TimeoutException timeoutError) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    private int receiveManyBytesIntoFromRing(
+            byte[][] output, int offset, int maxMessages, long timeoutMillis) {
+        int count = 0;
+        while (count < maxMessages) {
+            long timeout = count == 0 ? timeoutMillis : 0;
+            try {
+                output[offset + count] =
+                        withRecvRing((ring, handle) -> ring.receiveBytes(handle, timeout));
+                count++;
+            } catch (TimeoutException timeoutError) {
+                if (count == 0) {
+                    throw timeoutError;
+                }
+                break;
+            }
+        }
+        return count;
+    }
+
     static final class State implements Runnable {
         private final AtomicLong handle;
         private final Set<State> owner;
+        private final RecvRing recvRing = new RecvRing();
 
         private State(long handle, Set<State> owner) {
             this.handle = new AtomicLong(handle);
@@ -1042,9 +1089,15 @@ public final class Socket implements AutoCloseable {
         synchronized void close() {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
+                recvRing.close();
                 Native.socketClose(handle);
             }
             owner.remove(this);
         }
+    }
+
+    @FunctionalInterface
+    private interface RecvRingAction<T> {
+        T apply(RecvRing ring, long handle);
     }
 }

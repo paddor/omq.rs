@@ -11,7 +11,7 @@
   <description>Java bindings for OMQ backed by omq-tokio</description>
 
   <properties>
-    <maven.compiler.release>17</maven.compiler.release>
+    <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.14.1</junit.version>
     <jeromq.version>0.6.0</jeromq.version>
@@ -102,7 +102,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.4</version>
         <configuration>
-          <argLine>-Domq.java.peer=${project.basedir}/native/target/debug/omq-java-peer</argLine>
+          <argLine>--enable-native-access=ALL-UNNAMED -Domq.java.peer=${project.basedir}/native/target/debug/omq-java-peer</argLine>
         </configuration>
       </plugin>
     </plugins>

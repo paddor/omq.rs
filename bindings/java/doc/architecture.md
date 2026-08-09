@@ -1,8 +1,8 @@
 # OMQ.java Architecture
 
-Maven/JNI binding for `omq-tokio`. The public API is synchronous Java 17.
-Rust owns the OMQ context, sockets, protocol state, queues, reconnect logic,
-auth, compression, and background I/O.
+Maven binding for `omq-tokio`. The public API targets Java 25. Rust owns the
+OMQ context, sockets, protocol state, queues, reconnect logic, auth,
+compression, and background I/O.
 
 ## Source layout
 
@@ -13,22 +13,24 @@ src/main/java/io/omq/
   Socket.java          synchronized socket facade and option setters
   Message.java         immutable single-part and multipart payloads
   Native.java          JNI declarations and packaged native library loader
+  NativeFfm.java       Java 25 FFM downcalls for fast native data paths
+  RecvRing.java        off-heap receive cache consumed from Java
   *Exception.java      unchecked exception hierarchy
 
 native/src/
-  lib.rs              JNI implementation over omq_tokio::blocking
+  lib.rs              JNI and C ABI implementation over omq_tokio::blocking
   bin/peer.rs         OMQ.rs peer used by Java interop tests
 ```
 
 ## Threading model
 
 ```
-Java caller thread -> synchronized Socket -> JNI -> omq_tokio::blocking::Socket
-                                                     |
-                                                     v
-                                  OMQ Context background I/O thread(s)
-                                  connection tasks, queues, ZMTP, auth,
-                                  compression, reconnect, transport I/O
+Java caller thread -> synchronized Socket -> JNI/FFM -> omq_tokio::blocking::Socket
+                                                         |
+                                                         v
+                                      OMQ Context background I/O thread(s)
+                                      connection tasks, queues, ZMTP, auth,
+                                      compression, reconnect, transport I/O
 ```
 
 `Context(int ioThreads)` creates a native `omq_tokio::Context` with that
@@ -50,38 +52,31 @@ itself. Native state uses an atomic handle for idempotent close and Rust
 mutexes for materialization and option mutation. `Cleaner` is a leak
 fallback, not the normal lifecycle path. Use try-with-resources.
 
-## Virtual threads
-
-OMQ.java does not use Java virtual threads internally. If application code
-calls this API from a virtual thread, the Java call enters blocking JNI.
-The JVM cannot unmount that virtual thread while native Rust is blocked,
-so the carrier thread may be pinned until the OMQ operation returns.
-
-Virtual threads are therefore a caller convenience here, not the binding's
-scaling mechanism. The scaling mechanism is still OMQ-owned background I/O
-threads plus native socket queues.
-
 ## Data path
 
-Messages cross JNI as copied `byte[]` arrays. `ByteBuffer` inputs read
-the remaining bytes into a byte array without changing the caller's buffer
-position. Java does not encode ZMTP, manage connections, or run transport
-threads. Native OMQ receives complete `Message` values and performs all
-socket semantics in Rust.
+Java does not encode ZMTP, manage connections, or run transport threads.
+Native OMQ receives complete `Message` values and performs all socket
+semantics in Rust.
 
-Synchronous single-part receives cross JNI as a raw `byte[]`, so the common
-path avoids an extra `byte[][]` allocation. `receiveBytes` returns that fresh
-native-owned array directly. Multipart receives still cross as `byte[][]`.
-Batch receives cross JNI as `Object[]`, where each element uses the same
-single-message representation. The native side blocks only for the first
-message, then drains ready messages with nonblocking recv up to the caller's
-limit. This reduces per-message JNI and Java/native synchronization cost for
-high-throughput consumers.
+Synchronous receives use a Java 25 FFM fast path. Each Java socket lazily
+creates a native off-heap receive ring on first sync receive. The Rust side
+fills that ring with `recv_many_into()` using one reused `Vec<Message>`.
+Java then drains cached descriptors and payload bytes directly from
+`MemorySegment` views. Public methods stay scalar: `receive`,
+`receiveBytes`, `receiveInto`, `tryReceive`, and duration variants all use
+hidden batches when the ring is empty.
 
-For the hottest single-part consumers, `receiveManyBytesInto` fills a
-caller-owned `byte[][]` and returns a count. The Java side can reuse that
-outer array. The JNI side reuses one native `Vec<Message>` scratch buffer per
-socket and copies each payload directly into the caller's output slots.
+The receive ring mirrors `yring`/`ypipe_t` shape. Rust owns a private producer
+cursor. Java owns `head`. Rust publishes a batch by release-storing `tail`;
+Java acquires `tail`, reads descriptors with no native call per message, and
+release-stores `head` when a cached batch is drained or before refill.
+Descriptors and payload storage are native memory. Large payloads that do not
+fit the payload ring are held as native external blocks until Java advances
+`head`.
+
+JNI remains the control plane for context/socket setup, options, auth
+callbacks, monitors, send, and async completion. The C ABI used by FFM is
+small and Java-specific; it is not `omq-libzmq`.
 
 `sendManyBytes` crosses JNI once with a Java `byte[][]` and sends each inner
 array as one single-part message. The Rust side copies each array into owned
@@ -121,6 +116,9 @@ semantic point as synchronous `send`.
 `recv()` future per socket, and returns a `ReceiveEvent` with the winning
 socket and message. Loser receives are aborted inside Rust before they can
 consume later messages. Canceling the Java future aborts all native receives.
+Before spawning native receives, async receive APIs first drain any message
+already cached in the Java FFM receive ring. This preserves receive ordering
+when sync and async APIs are mixed.
 
 ## Compression
 

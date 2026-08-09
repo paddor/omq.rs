@@ -15,6 +15,9 @@ final class Native {
     private Native() {
     }
 
+    static void ensureLoaded() {
+    }
+
     static native void asyncTaskCancel(long handle);
 
     static native long contextCreate(int ioThreads);

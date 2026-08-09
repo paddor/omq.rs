@@ -108,6 +108,7 @@ def message_count(size, args):
 def java_cmd(cp, impl, role, endpoint, size, messages, warmup, batch):
     return [
         "java",
+        "--enable-native-access=ALL-UNNAMED",
         "-Djava.library.path=" + str(ROOT / "native" / "target" / "release"),
         "-cp",
         cp,

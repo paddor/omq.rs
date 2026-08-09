@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -28,6 +29,25 @@ final class AsyncTest {
             push.send("async");
 
             assertEquals("async", received.get(5, TimeUnit.SECONDS).text());
+        }
+    }
+
+    @Test
+    void receiveAsyncReturnsCachedMessage() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-async-cached-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send("one");
+            push.send("two");
+
+            assertEquals("one", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            CompletableFuture<Message> cached = pull.receiveAsync();
+
+            assertTrue(cached.isDone());
+            assertEquals("two", cached.get(5, TimeUnit.SECONDS).text());
         }
     }
 
@@ -96,6 +116,29 @@ final class AsyncTest {
             ReceiveEvent event = either.get(5, TimeUnit.SECONDS);
             assertEquals(pull2, event.socket());
             assertEquals("second", event.message().text());
+        }
+    }
+
+    @Test
+    void receiveAnyReturnsCachedMessage() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull1 = context.socket(SocketType.PULL);
+             Socket pull2 = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            pull1.bind("inproc://receive-any-cached-unused-" + UUID.randomUUID());
+            String endpoint = pull2.bind("inproc://receive-any-cached-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            push.send("one");
+            push.send("two");
+
+            assertEquals("one", pull2.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            CompletableFuture<ReceiveEvent> either = OMQ.receiveAny(pull1, pull2);
+
+            assertTrue(either.isDone());
+            ReceiveEvent event = either.get(5, TimeUnit.SECONDS);
+            assertEquals(pull2, event.socket());
+            assertEquals("two", event.message().text());
         }
     }
 

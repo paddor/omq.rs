@@ -10,14 +10,18 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 ## Build, install, test
 
+Requires Java 25 or newer.
+
 ```sh
 mvn package
 mvn install
 mvn test
 ```
 
-Maven builds the Rust JNI library in `native/target/debug` and embeds the
+Maven builds the Rust native library in `native/target/debug` and embeds the
 current-platform native library in the jar under `io/omq/native/...`.
+Synchronous receives use Java 25 FFM and require native access:
+`--enable-native-access=ALL-UNNAMED`.
 
 ## Shape
 
@@ -29,10 +33,9 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
   multipart metadata matters.
 - `sendManyBytes` sends many single-part messages in one JNI call.
-- `receiveMany` and `receiveManyBytes` amortize JNI overhead by waiting for
-  one message and then draining currently available messages up to a limit.
-- `receiveManyBytesInto` fills a caller-owned `byte[][]` to avoid Java
-  collection and native batch-vector allocation on hot receive loops.
+- Sync receive methods transparently drain a Java 25 FFM off-heap ring filled
+  from native `recv_many_into()`, so scalar `receive*` calls amortize native
+  transition cost without exposing batch APIs.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.

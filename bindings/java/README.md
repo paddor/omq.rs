@@ -10,7 +10,7 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 ## Build, install, test
 
-Requires Java 25 or newer.
+Requires Java 25 or newer. JPMS module name: `io.omq`.
 
 Maven Central coordinates:
 
@@ -48,6 +48,7 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `Context` owns native IO threads and creates sockets.
 - `Context.shareKey()` / `Context.fromShareKey(...)` explicitly share one
   native context core and `inproc://` namespace across Java handles.
+- `SocketOptions` builds reusable pre-I/O option sets for socket creation.
 - `Socket` is `AutoCloseable`; use try-with-resources.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
@@ -73,6 +74,20 @@ try (Context ctx = OMQ.context();
     push.connect(endpoint);
     push.send("hello");
     String body = pull.receive(Duration.ofSeconds(5)).orElseThrow().text();
+}
+```
+
+Reusable socket options:
+
+```java
+SocketOptions options = SocketOptions.builder()
+        .sendHighWaterMark(10_000)
+        .heartbeatInterval(Duration.ofSeconds(5))
+        .build();
+
+try (Context ctx = OMQ.context();
+     Socket push = ctx.socket(SocketType.PUSH, options)) {
+    push.connect("tcp://127.0.0.1:5555");
 }
 ```
 

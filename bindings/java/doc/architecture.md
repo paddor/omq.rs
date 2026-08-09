@@ -28,10 +28,12 @@ Java caller thread
 
 - `src/main/java/io/omq/Context.java`: context ownership and sharing
 - `src/main/java/io/omq/Socket.java`: public socket API and lifecycle
+- `src/main/java/io/omq/SocketOptions.java`: reusable pre-I/O option sets
 - `src/main/java/io/omq/Native.java`: JNI declarations
 - `src/main/java/io/omq/NativeFfm.java`: FFM downcalls
 - `src/main/java/io/omq/RecvRing.java`, `SendRing.java`: Java ring views
 - `native/src/lib.rs`: JNI/FFM bridge to `omq-tokio`
+- `src/main/java/module-info.java`: JPMS module descriptor
 
 ## Native Boundary
 

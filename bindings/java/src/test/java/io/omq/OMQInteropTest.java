@@ -26,15 +26,16 @@ final class OMQInteropTest {
             sock.curve_server = True
             sock.curve_publickey = os.environ["SRV_PUB"].encode()
             sock.curve_secretkey = os.environ["SRV_SEC"].encode()
-            port = sock.bind_to_random_port("tcp://127.0.0.1")
-            print(f"tcp://127.0.0.1:{port}", flush=True)
+            sock.bind("tcp://127.0.0.1:*")
+            endpoint = sock.getsockopt(zmq.LAST_ENDPOINT)
+            print(endpoint.decode() if isinstance(endpoint, bytes) else endpoint, flush=True)
             msg = sock.recv()
             print(msg.decode(), flush=True)
             sock.close(0)
             ctx.term()
             """;
     private static final String PYZMQ_CURVE_PUSH = """
-            import os, zmq
+            import os, time, zmq
 
             ctx = zmq.Context()
             sock = ctx.socket(zmq.PUSH)
@@ -43,6 +44,7 @@ final class OMQInteropTest {
             sock.curve_serverkey = os.environ["SRV_PUB"].encode()
             sock.connect(os.environ["ENDPOINT"])
             sock.send(os.environ["PAYLOAD"].encode())
+            time.sleep(0.1)
             sock.close(1000)
             ctx.term()
             """;

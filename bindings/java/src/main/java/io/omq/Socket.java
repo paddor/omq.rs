@@ -5,8 +5,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -146,18 +144,6 @@ public final class Socket implements AutoCloseable {
             }
             return Native.socketSendMultipartTimeout(handle, parts, timeoutMillis) != 0;
         }
-    }
-
-    /** Sends each byte array as one single-part message. */
-    public synchronized Socket sendManyBytes(byte[][] bodies) {
-        Objects.requireNonNull(bodies, "bodies");
-        byte[][] messages = requireBodies(bodies);
-        synchronized (state) {
-            long handle = state.handle();
-            drainSendRingOrThrow(FOREVER);
-            Native.socketSendMany(handle, messages);
-        }
-        return this;
     }
 
     /** Attempts to send a single-part binary message without blocking. */
@@ -316,115 +302,6 @@ public final class Socket implements AutoCloseable {
                     (ring, handle) -> ring.receiveInto(handle, destination, 0)));
         } catch (TimeoutException timeoutError) {
             return OptionalInt.empty();
-        }
-    }
-
-    /** Receives up to {@code maxMessages} messages, blocking until the first message. */
-    public synchronized List<Message> receiveMany(int maxMessages) {
-        requirePositive("maxMessages", maxMessages);
-        return receiveManyFromRing(maxMessages, FOREVER);
-    }
-
-    /** Receives up to {@code maxMessages} single-part bodies, blocking until the first message. */
-    public synchronized List<byte[]> receiveManyBytes(int maxMessages) {
-        requirePositive("maxMessages", maxMessages);
-        return receiveManyBytesFromRing(maxMessages, FOREVER);
-    }
-
-    /** Receives up to {@code maxMessages} messages before the timeout, or returns an empty list. */
-    public synchronized List<Message> receiveMany(int maxMessages, Duration timeout) {
-        requirePositive("maxMessages", maxMessages);
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        try {
-            return receiveManyFromRing(maxMessages, timeoutMillis);
-        } catch (TimeoutException timeoutError) {
-            return List.of();
-        }
-    }
-
-    /** Receives up to {@code maxMessages} single-part bodies before the timeout, or returns an empty list. */
-    public synchronized List<byte[]> receiveManyBytes(int maxMessages, Duration timeout) {
-        requirePositive("maxMessages", maxMessages);
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        try {
-            return receiveManyBytesFromRing(maxMessages, timeoutMillis);
-        } catch (TimeoutException timeoutError) {
-            return List.of();
-        }
-    }
-
-    /** Fills {@code output} with single-part bodies, blocking until the first message. */
-    public synchronized int receiveManyBytesInto(byte[][] output) {
-        return receiveManyBytesInto(output, 0, outputLength(output));
-    }
-
-    /** Fills {@code output} with single-part bodies, blocking until the first message. */
-    public synchronized int receiveManyBytesInto(byte[][] output, int offset, int maxMessages) {
-        int max = checkOutputRange(output, offset, maxMessages);
-        if (max == 0) {
-            return 0;
-        }
-        return receiveManyBytesIntoFromRing(output, offset, max, FOREVER);
-    }
-
-    /** Fills {@code output} with single-part bodies before the timeout, or returns zero. */
-    public synchronized int receiveManyBytesInto(byte[][] output, Duration timeout) {
-        return receiveManyBytesInto(output, 0, outputLength(output), timeout);
-    }
-
-    /** Fills {@code output} with single-part bodies before the timeout, or returns zero. */
-    public synchronized int receiveManyBytesInto(
-            byte[][] output, int offset, int maxMessages, Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        int max = checkOutputRange(output, offset, maxMessages);
-        if (max == 0) {
-            return 0;
-        }
-        long timeoutMillis = millis(timeout);
-        try {
-            return receiveManyBytesIntoFromRing(output, offset, max, timeoutMillis);
-        } catch (TimeoutException timeoutError) {
-            return 0;
-        }
-    }
-
-    /** Receives available messages up to {@code maxMessages} without blocking. */
-    public synchronized List<Message> tryReceiveMany(int maxMessages) {
-        requirePositive("maxMessages", maxMessages);
-        try {
-            return receiveManyFromRing(maxMessages, 0);
-        } catch (TimeoutException timeoutError) {
-            return List.of();
-        }
-    }
-
-    /** Receives available single-part bodies up to {@code maxMessages} without blocking. */
-    public synchronized List<byte[]> tryReceiveManyBytes(int maxMessages) {
-        requirePositive("maxMessages", maxMessages);
-        try {
-            return receiveManyBytesFromRing(maxMessages, 0);
-        } catch (TimeoutException timeoutError) {
-            return List.of();
-        }
-    }
-
-    /** Fills {@code output} with available single-part bodies without blocking. */
-    public synchronized int tryReceiveManyBytesInto(byte[][] output) {
-        return tryReceiveManyBytesInto(output, 0, outputLength(output));
-    }
-
-    /** Fills {@code output} with available single-part bodies without blocking. */
-    public synchronized int tryReceiveManyBytesInto(byte[][] output, int offset, int maxMessages) {
-        int max = checkOutputRange(output, offset, maxMessages);
-        if (max == 0) {
-            return 0;
-        }
-        try {
-            return receiveManyBytesIntoFromRing(output, offset, max, 0);
-        } catch (TimeoutException timeoutError) {
-            return 0;
         }
     }
 
@@ -1067,12 +944,6 @@ public final class Socket implements AutoCloseable {
         }
     }
 
-    private static void requirePositive(String name, int value) {
-        if (value <= 0) {
-            throw new IllegalArgumentException(name + " must be greater than zero");
-        }
-    }
-
     private static void requireNonNegative(String name, long value) {
         if (value < 0) {
             throw new IllegalArgumentException(name + " must be non-negative");
@@ -1108,81 +979,11 @@ public final class Socket implements AutoCloseable {
         }
     }
 
-    private static byte[][] requireBodies(byte[][] bodies) {
-        for (int i = 0; i < bodies.length; i++) {
-            Objects.requireNonNull(bodies[i], "body " + i);
-        }
-        return bodies;
-    }
-
-    private static int outputLength(byte[][] output) {
-        return Objects.requireNonNull(output, "output").length;
-    }
-
-    private static int checkOutputRange(byte[][] output, int offset, int maxMessages) {
-        Objects.requireNonNull(output, "output");
-        if (offset < 0) {
-            throw new IndexOutOfBoundsException("offset must be non-negative");
-        }
-        if (maxMessages < 0) {
-            throw new IllegalArgumentException("maxMessages must be non-negative");
-        }
-        if (offset > output.length || maxMessages > output.length - offset) {
-            throw new IndexOutOfBoundsException("output range exceeds array length");
-        }
-        return maxMessages;
-    }
-
     private Optional<Message> tryReceiveCachedMessage() {
         synchronized (state) {
             state.handle();
             return state.recvRing.tryReceiveCachedMessage();
         }
-    }
-
-    private List<Message> receiveManyFromRing(int maxMessages, long timeoutMillis) {
-        ArrayList<Message> out = new ArrayList<>(maxMessages);
-        out.add(withRecvRing((ring, handle) -> ring.receive(handle, timeoutMillis)));
-        while (out.size() < maxMessages) {
-            try {
-                out.add(withRecvRing((ring, handle) -> ring.receive(handle, 0)));
-            } catch (TimeoutException timeoutError) {
-                break;
-            }
-        }
-        return out;
-    }
-
-    private List<byte[]> receiveManyBytesFromRing(int maxMessages, long timeoutMillis) {
-        ArrayList<byte[]> out = new ArrayList<>(maxMessages);
-        out.add(withRecvRing((ring, handle) -> ring.receiveBytes(handle, timeoutMillis)));
-        while (out.size() < maxMessages) {
-            try {
-                out.add(withRecvRing((ring, handle) -> ring.receiveBytes(handle, 0)));
-            } catch (TimeoutException timeoutError) {
-                break;
-            }
-        }
-        return out;
-    }
-
-    private int receiveManyBytesIntoFromRing(
-            byte[][] output, int offset, int maxMessages, long timeoutMillis) {
-        int count = 0;
-        while (count < maxMessages) {
-            long timeout = count == 0 ? timeoutMillis : 0;
-            try {
-                output[offset + count] =
-                        withRecvRing((ring, handle) -> ring.receiveBytes(handle, timeout));
-                count++;
-            } catch (TimeoutException timeoutError) {
-                if (count == 0) {
-                    throw timeoutError;
-                }
-                break;
-            }
-        }
-        return count;
     }
 
     private boolean usesSendRing() {

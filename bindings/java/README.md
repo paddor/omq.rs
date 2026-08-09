@@ -52,7 +52,6 @@ current-platform native library in the jar under `io/omq/native/...`.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
   multipart metadata matters.
-- `sendManyBytes` sends many single-part messages in one JNI call.
 - Sync receive methods transparently drain a Java 25 FFM off-heap ring filled
   from native `recv_many_into()`, so scalar `receive*` calls amortize native
   transition cost without exposing batch APIs.

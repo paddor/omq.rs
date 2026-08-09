@@ -122,6 +122,53 @@ final class SocketTest {
     }
 
     @Test
+    void sendBytesLargeFallbackPreservesOrderAndRingReuse() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://send-large-fallback-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            byte[] large = new byte[17 * 1024 * 1024 + 3];
+            large[0] = 7;
+            large[large.length - 1] = 9;
+
+            push.send("before");
+            push.send(large);
+            push.send("after");
+
+            assertEquals("before", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            byte[] received = pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow();
+            assertEquals(large.length, received.length);
+            assertEquals(7, received[0]);
+            assertEquals(9, received[received.length - 1]);
+            assertEquals("after", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
+    void sendBytesFastPathOrdersBeforeMultipartSend() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://send-mixed-order-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            push.send("first");
+            push.send(Message.multipart(utf8("route"), utf8("body")));
+            push.send("last");
+
+            assertEquals("first", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            Message multipart = pull.receive(Duration.ofSeconds(5)).orElseThrow();
+            assertEquals(2, multipart.partCount());
+            assertArrayEquals(utf8("route"), multipart.part(0));
+            assertArrayEquals(utf8("body"), multipart.part(1));
+            assertEquals("last", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+        }
+    }
+
+    @Test
     void receiveBytesRejectsMultipart() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);
@@ -600,5 +647,9 @@ final class SocketTest {
             assertEquals("{\"kind\":\"json\",\"value\":42}",
                     pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
         }
+    }
+
+    private static byte[] utf8(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
     }
 }

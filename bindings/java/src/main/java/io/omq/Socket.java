@@ -102,7 +102,11 @@ public final class Socket implements AutoCloseable {
     public synchronized Socket send(Message message) {
         Objects.requireNonNull(message, "message");
         byte[][] parts = message.toNative();
-        withHandleVoid(handle -> Native.socketSendMultipart(handle, parts));
+        synchronized (state) {
+            long handle = state.handle();
+            drainSendRingOrThrow(FOREVER);
+            Native.socketSendMultipart(handle, parts);
+        }
         return this;
     }
 
@@ -135,15 +139,24 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         byte[][] parts = message.toNative();
         long timeoutMillis = millis(timeout);
-        return withHandle(handle -> Native.socketSendMultipartTimeout(
-                handle, parts, timeoutMillis)) != 0;
+        synchronized (state) {
+            long handle = state.handle();
+            if (!drainSendRing(timeoutMillis)) {
+                return false;
+            }
+            return Native.socketSendMultipartTimeout(handle, parts, timeoutMillis) != 0;
+        }
     }
 
     /** Sends each byte array as one single-part message. */
     public synchronized Socket sendManyBytes(byte[][] bodies) {
         Objects.requireNonNull(bodies, "bodies");
         byte[][] messages = requireBodies(bodies);
-        withHandleVoid(handle -> Native.socketSendMany(handle, messages));
+        synchronized (state) {
+            long handle = state.handle();
+            drainSendRingOrThrow(FOREVER);
+            Native.socketSendMany(handle, messages);
+        }
         return this;
     }
 
@@ -174,7 +187,13 @@ public final class Socket implements AutoCloseable {
     public synchronized boolean trySend(Message message) {
         Objects.requireNonNull(message, "message");
         byte[][] parts = message.toNative();
-        return withHandle(handle -> Native.socketTrySendMultipart(handle, parts)) != 0;
+        synchronized (state) {
+            long handle = state.handle();
+            if (usesSendRing() && !state.sendRing.isDrained()) {
+                return false;
+            }
+            return Native.socketTrySendMultipart(handle, parts) != 0;
+        }
     }
 
     /** Sends a single-part binary message asynchronously on the native runtime. */
@@ -206,7 +225,12 @@ public final class Socket implements AutoCloseable {
         NativeFuture<Void> future = new NativeFuture<>();
         byte[][] parts = message.toNative();
         try {
-            long task = withHandle(handle -> Native.socketSendAsync(handle, parts, future));
+            long task;
+            synchronized (state) {
+                long handle = state.handle();
+                drainSendRingOrThrow(FOREVER);
+                task = Native.socketSendAsync(handle, parts, future);
+            }
             future.setNativeTask(task);
         } catch (OMQException error) {
             future.completeExceptionally(error);
@@ -995,6 +1019,16 @@ public final class Socket implements AutoCloseable {
         synchronized (state) {
             long handle = state.handle();
             return action.apply(state.recvRing, handle);
+        }
+    }
+
+    private boolean drainSendRing(long timeoutMillis) {
+        return !usesSendRing() || state.sendRing.drainIfOpen(timeoutMillis);
+    }
+
+    private void drainSendRingOrThrow(long timeoutMillis) {
+        if (!drainSendRing(timeoutMillis)) {
+            throw new TimeoutException("operation timed out");
         }
     }
 

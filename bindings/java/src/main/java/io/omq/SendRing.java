@@ -4,6 +4,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
+import java.util.concurrent.locks.LockSupport;
 
 final class SendRing implements AutoCloseable {
     private static final int DEFAULT_DESC_CAPACITY = 4096;
@@ -40,7 +41,7 @@ final class SendRing implements AutoCloseable {
     boolean send(long socketHandle, byte[] body) {
         ensure(socketHandle);
         if (body.length > payloadCapacity) {
-            close();
+            drainIfOpen(-1);
             return false;
         }
 
@@ -111,6 +112,38 @@ final class SendRing implements AutoCloseable {
         cachedHead = head;
     }
 
+    boolean drainIfOpen(long timeoutMillis) {
+        if (handle == 0) {
+            return true;
+        }
+        long start = System.nanoTime();
+        long timeoutNanos = saturatedNanos(timeoutMillis);
+        int spins = 0;
+        while (tail != headAcquire()) {
+            checkOpen();
+            if (timeoutMillis == 0) {
+                return false;
+            }
+            if (timeoutMillis > 0 && System.nanoTime() - start >= timeoutNanos) {
+                return false;
+            }
+            spins = backoff(spins);
+        }
+        reclaimConsumed();
+        return true;
+    }
+
+    boolean isDrained() {
+        if (handle == 0) {
+            return true;
+        }
+        if (tail != headAcquire()) {
+            return false;
+        }
+        reclaimConsumed();
+        return true;
+    }
+
     private long headAcquire() {
         return (long) ATOMIC_LONG.getAcquire(control, CONTROL_HEAD);
     }
@@ -178,8 +211,27 @@ final class SendRing implements AutoCloseable {
     }
 
     private static int backoff(int spins) {
-        Thread.onSpinWait();
-        return spins + 1;
+        if (spins < 256) {
+            Thread.onSpinWait();
+            return spins + 1;
+        }
+        if (spins < 512) {
+            Thread.yield();
+            return spins + 1;
+        }
+        LockSupport.parkNanos(50_000L);
+        return spins;
+    }
+
+    private static long saturatedNanos(long timeoutMillis) {
+        if (timeoutMillis <= 0) {
+            return timeoutMillis;
+        }
+        long maxMillis = Long.MAX_VALUE / 1_000_000L;
+        if (timeoutMillis >= maxMillis) {
+            return Long.MAX_VALUE;
+        }
+        return timeoutMillis * 1_000_000L;
     }
 
     private static boolean isPowerOfTwo(long value) {

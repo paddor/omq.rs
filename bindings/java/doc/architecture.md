@@ -79,10 +79,13 @@ Single-part `PUSH` and `SCATTER` sends use a matching FFM send fast path.
 Java copies the user `byte[]` into an off-heap SPSC payload ring, writes one
 descriptor, and release-stores `tail`. A native worker thread drains
 descriptors, builds OMQ `Message` values backed by the off-heap slot, and
-submits them to `omq_tokio::blocking::Socket::try_send_many()`. The slot is
-released only when Rust drops the message owner. Large messages that do not
-fit the send payload ring close the send ring and fall back to the normal JNI
-send path, preserving order before fallback.
+submits them to the same native PUSH/SCATTER path used by JNI sends. The slot
+is released only when Rust drops the message owner. JNI send paths drain any
+queued FFM sends first, preserving call order when applications mix small
+single-part sends with multipart, timeout, async, or large-message sends.
+Large messages that do not fit the send payload ring wait for the ring to
+drain and then use the normal JNI send path. The ring remains usable for
+later small messages.
 
 JNI remains the control plane for context/socket setup, options, auth
 callbacks, monitors, multipart send, non-`PUSH`/`SCATTER` send, timeout send,
@@ -123,10 +126,11 @@ and completes exceptionally with `TimeoutException` on deadline. `sendAsync`
 completes after OMQ accepts the message into outbound routing buffers, same
 semantic point as synchronous `send`.
 
-`OMQ.receiveAny(Socket...)` requires distinct sockets, races one native
-`recv()` future per socket, and returns a `ReceiveEvent` with the winning
-socket and message. Loser receives are aborted inside Rust before they can
-consume later messages. Canceling the Java future aborts all native receives.
+`OMQ.receiveAny(Socket...)` requires distinct sockets and runs one native
+task that polls nonblocking receives across them. It returns the first
+`ReceiveEvent` it consumes. It never starts loser `recv()` futures, so
+messages on other sockets remain queued. Canceling the Java future aborts
+the native poll task.
 Before spawning native receives, async receive APIs first drain any message
 already cached in the Java FFM receive ring. This preserves receive ordering
 when sync and async APIs are mixed.

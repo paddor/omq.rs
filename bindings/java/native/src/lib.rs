@@ -995,34 +995,6 @@ struct JavaAsyncTask {
     abort: tokio::task::AbortHandle,
 }
 
-struct AbortOnDrop {
-    joins: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl AbortOnDrop {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            joins: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn push(&mut self, join: tokio::task::JoinHandle<()>) {
-        self.joins.push(join);
-    }
-
-    fn abort_all(&self) {
-        for join in &self.joins {
-            join.abort();
-        }
-    }
-}
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.abort_all();
-    }
-}
-
 fn async_task_handle(join: tokio::task::JoinHandle<()>) -> jlong {
     let abort = join.abort_handle();
     Box::into_raw(Box::new(JavaAsyncTask { abort })) as jlong
@@ -1779,9 +1751,56 @@ fn send_bodies(
             return Err(Error::Config(format!("message body {i} must not be null")));
         }
         let body = JByteArray::from(body);
-        socket.send(Message::single(Bytes::from(byte_array(env, body)?)))?;
+        java_send(socket, Message::single(Bytes::from(byte_array(env, body)?)))?;
     }
     Ok(())
+}
+
+fn java_try_send(
+    socket: &BlockingSocket,
+    message: Message,
+) -> core::result::Result<(), TrySendError> {
+    match socket.socket_type() {
+        SocketType::Scatter if message.len() != 1 => {
+            Err(TrySendError::Error(Error::Protocol(format!(
+                "Scatter socket requires single-part messages (got {})",
+                message.len()
+            ))))
+        }
+        SocketType::Push | SocketType::Scatter => {
+            let mut messages = VecDeque::with_capacity(1);
+            messages.push_back(message);
+            match socket.try_send_many(&mut messages, 1) {
+                Ok(sent) if sent > 0 => Ok(()),
+                Ok(_) => {
+                    let message = messages
+                        .pop_front()
+                        .expect("try_send_many returned zero with message pending");
+                    Err(TrySendError::Full(message))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => socket.try_send(message),
+    }
+}
+
+fn java_send(socket: &BlockingSocket, message: Message) -> Result<(), Error> {
+    match socket.socket_type() {
+        SocketType::Push | SocketType::Scatter => {
+            let mut message = message;
+            loop {
+                match java_try_send(socket, message) {
+                    Ok(()) => return Ok(()),
+                    Err(TrySendError::Full(returned)) => message = returned,
+                    Err(TrySendError::Closed) => return Err(Error::Closed),
+                    Err(TrySendError::Error(error)) => return Err(error),
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        _ => socket.send(message),
+    }
 }
 
 fn send_with_timeout(
@@ -1798,7 +1817,7 @@ fn send_with_timeout(
     let deadline = Instant::now().checked_add(timeout);
     let mut message = message;
     loop {
-        match socket.try_send(message) {
+        match java_try_send(socket, message) {
             Ok(()) => return Ok(true),
             Err(TrySendError::Full(returned)) => message = returned,
             Err(TrySendError::Closed) => return Err(Error::Closed),
@@ -2128,6 +2147,46 @@ fn monitor_recv_with_timeout(
         .map_err(|_| Error::Config("monitor lock poisoned".to_string()))?;
     *guard = Some(stream);
     result
+}
+
+fn try_receive_any(
+    entries: &[(BlockingSocket, GlobalRef)],
+) -> Result<Option<(GlobalRef, Message)>, Error> {
+    for (socket, java_socket) in entries {
+        match socket.try_recv() {
+            Ok(message) => return Ok(Some((java_socket.clone(), message))),
+            Err(Error::WouldBlock | Error::Timeout) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+async fn receive_any_loop(
+    entries: Vec<(BlockingSocket, GlobalRef)>,
+    timeout: Option<Duration>,
+) -> Result<Option<(GlobalRef, Message)>, Error> {
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    let mut spins = 0u32;
+
+    loop {
+        if let Some(event) = try_receive_any(&entries)? {
+            return Ok(Some(event));
+        }
+
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            tokio::time::sleep(remaining.min(Duration::from_micros(50))).await;
+        } else if spins < 256 {
+            spins += 1;
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(Duration::from_micros(50)).await;
+        }
+    }
 }
 
 fn fill_java_byte_arrays(
@@ -2483,26 +2542,21 @@ pub extern "system" fn Java_io_omq_Native_receiveAnyAsync(
                 let socket = socket_from_handle(handle)?;
                 let java_socket = env.new_global_ref(&socket_obj).map_err(jni_error)?;
                 let runtime = socket.ctx.handle().clone();
-                let async_socket = socket.materialize()?.into_async();
-                entries.push((runtime, async_socket, java_socket));
+                let socket = socket.materialize()?;
+                entries.push((runtime, socket, java_socket));
             }
 
             let parent_runtime = entries[0].0.clone();
+            let entries: Vec<(BlockingSocket, GlobalRef)> = entries
+                .into_iter()
+                .map(|(_runtime, socket, java_socket)| (socket, java_socket))
+                .collect();
             let join = parent_runtime.spawn(async move {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let mut joins = AbortOnDrop::with_capacity(entries.len());
-                for (runtime, socket, java_socket) in entries {
-                    let tx = tx.clone();
-                    let join = runtime.spawn(async move {
-                        let result = socket.recv().await.map(|message| (java_socket, message));
-                        let _ = tx.send(result);
-                    });
-                    joins.push(join);
-                }
-                drop(tx);
-
-                let result = rx.recv().await.unwrap_or(Err(Error::Closed));
-                joins.abort_all();
+                let result = match receive_any_loop(entries, None).await {
+                    Ok(Some(event)) => Ok(event),
+                    Ok(None) => Err(Error::Closed),
+                    Err(error) => Err(error),
+                };
                 complete_future_receive_event(jvm, future, result);
             });
             Ok(async_task_handle(join))
@@ -2554,33 +2608,17 @@ pub extern "system" fn Java_io_omq_Native_receiveAnyAsyncOptional(
                 let socket = socket_from_handle(handle)?;
                 let java_socket = env.new_global_ref(&socket_obj).map_err(jni_error)?;
                 let runtime = socket.ctx.handle().clone();
-                let async_socket = socket.materialize()?.into_async();
-                entries.push((runtime, async_socket, java_socket));
+                let socket = socket.materialize()?;
+                entries.push((runtime, socket, java_socket));
             }
 
             let parent_runtime = entries[0].0.clone();
+            let entries: Vec<(BlockingSocket, GlobalRef)> = entries
+                .into_iter()
+                .map(|(_runtime, socket, java_socket)| (socket, java_socket))
+                .collect();
             let join = parent_runtime.spawn(async move {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let mut joins = AbortOnDrop::with_capacity(entries.len());
-                for (runtime, socket, java_socket) in entries {
-                    let tx = tx.clone();
-                    let join = runtime.spawn(async move {
-                        let result = socket.recv().await.map(|message| (java_socket, message));
-                        let _ = tx.send(result);
-                    });
-                    joins.push(join);
-                }
-                drop(tx);
-
-                let result = match timeout {
-                    Some(timeout) => match tokio::time::timeout(timeout, rx.recv()).await {
-                        Ok(Some(result)) => result.map(Some),
-                        Ok(None) => Err(Error::Closed),
-                        Err(_) => Ok(None),
-                    },
-                    None => rx.recv().await.unwrap_or(Err(Error::Closed)).map(Some),
-                };
-                joins.abort_all();
+                let result = receive_any_loop(entries, timeout).await;
                 complete_future_optional_receive_event(jvm, future, result);
             });
             Ok(async_task_handle(join))
@@ -2764,9 +2802,7 @@ pub extern "system" fn Java_io_omq_Native_socketSend(
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let data = byte_array(env, data)?;
-            socket
-                .materialize()?
-                .send(Message::single(Bytes::from(data)))
+            java_send(&socket.materialize()?, Message::single(Bytes::from(data)))
         })();
 
         if let Err(error) = result {
@@ -2786,7 +2822,7 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipart(
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let parts = bytes_from_parts(env, parts)?;
-            socket.materialize()?.send(Message::multipart(parts))
+            java_send(&socket.materialize()?, Message::multipart(parts))
         })();
 
         if let Err(error) = result {
@@ -2855,7 +2891,7 @@ pub extern "system" fn Java_io_omq_Native_socketTrySendMultipart(
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let parts = bytes_from_parts(env, parts)?;
-            match socket.materialize()?.try_send(Message::multipart(parts)) {
+            match java_try_send(&socket.materialize()?, Message::multipart(parts)) {
                 Ok(()) => Ok(1),
                 Err(TrySendError::Full(_)) => Ok(0),
                 Err(TrySendError::Closed) => Err(Error::Closed),

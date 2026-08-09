@@ -60,7 +60,7 @@ public final class Monitor implements AutoCloseable {
         }
 
         @Override
-        public void run() {
+        public synchronized void run() {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
                 Native.monitorClose(handle);

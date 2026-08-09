@@ -143,6 +143,36 @@ final class AsyncTest {
     }
 
     @Test
+    void receiveAnyDoesNotConsumeLosingSocket() throws Exception {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            try (Context context = OMQ.context();
+                 Socket pull1 = context.socket(SocketType.PULL);
+                 Socket pull2 = context.socket(SocketType.PULL);
+                 Socket push1 = context.socket(SocketType.PUSH);
+                 Socket push2 = context.socket(SocketType.PUSH)) {
+                String endpoint1 =
+                        pull1.bind("inproc://receive-any-loser-1-" + UUID.randomUUID());
+                String endpoint2 =
+                        pull2.bind("inproc://receive-any-loser-2-" + UUID.randomUUID());
+                push1.connect(endpoint1);
+                push2.connect(endpoint2);
+                push1.waitConnected(1, Duration.ofSeconds(5));
+                push2.waitConnected(1, Duration.ofSeconds(5));
+
+                CompletableFuture<ReceiveEvent> either = OMQ.receiveAny(pull1, pull2);
+                push1.send("one-" + attempt);
+                push2.send("two-" + attempt);
+
+                ReceiveEvent event = either.get(5, TimeUnit.SECONDS);
+                Socket loser = event.socket() == pull1 ? pull2 : pull1;
+                String expected = event.socket() == pull1 ? "two-" + attempt : "one-" + attempt;
+
+                assertEquals(expected, loser.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            }
+        }
+    }
+
+    @Test
     void receiveAnyDurationCompletesWithMessage() throws Exception {
         try (Context context = OMQ.context();
              Socket pull1 = context.socket(SocketType.PULL);

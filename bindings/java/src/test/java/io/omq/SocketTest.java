@@ -3,8 +3,6 @@ package io.omq;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -13,10 +11,11 @@ import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 final class SocketTest {
@@ -333,56 +332,53 @@ final class SocketTest {
     }
 
     @Test
-    void receiveManyBytesBlocksForFirstAndDrainsAvailable() {
+    void virtualThreadReceiveWaitsThroughAsyncPath() throws Exception {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);
              Socket push = context.socket(SocketType.PUSH)) {
-            String endpoint = pull.bind("inproc://batch-" + UUID.randomUUID());
+            String endpoint = pull.bind("inproc://virtual-receive-" + UUID.randomUUID());
             push.connect(endpoint);
             push.waitConnected(1, Duration.ofSeconds(5));
 
-            push.send("a");
-            push.send("bb");
-            push.send("ccc");
-
-            List<byte[]> batch = pull.receiveManyBytes(8, Duration.ofSeconds(5));
-            assertEquals(3, batch.size());
-            assertArrayEquals("a".getBytes(StandardCharsets.UTF_8), batch.get(0));
-            assertArrayEquals("bb".getBytes(StandardCharsets.UTF_8), batch.get(1));
-            assertArrayEquals("ccc".getBytes(StandardCharsets.UTF_8), batch.get(2));
-        }
-    }
-
-    @Test
-    void sendManyBytesSendsSinglePartMessages() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Socket push = context.socket(SocketType.PUSH)) {
-            String endpoint = pull.bind("inproc://send-batch-" + UUID.randomUUID());
-            push.connect(endpoint);
-            push.waitConnected(1, Duration.ofSeconds(5));
-
-            push.sendManyBytes(new byte[][] {
-                "a".getBytes(StandardCharsets.UTF_8),
-                "bb".getBytes(StandardCharsets.UTF_8),
-                "ccc".getBytes(StandardCharsets.UTF_8),
+            CompletableFuture<Message> received = new CompletableFuture<>();
+            Thread thread = Thread.ofVirtual().start(() -> {
+                try {
+                    received.complete(pull.receive());
+                } catch (Throwable error) {
+                    received.completeExceptionally(error);
+                }
             });
 
-            List<byte[]> batch = pull.receiveManyBytes(8, Duration.ofSeconds(5));
-            assertEquals(3, batch.size());
-            assertArrayEquals("a".getBytes(StandardCharsets.UTF_8), batch.get(0));
-            assertArrayEquals("bb".getBytes(StandardCharsets.UTF_8), batch.get(1));
-            assertArrayEquals("ccc".getBytes(StandardCharsets.UTF_8), batch.get(2));
+            try {
+                Thread.sleep(50);
+                push.send("loom");
+                assertEquals("loom", received.get(5, TimeUnit.SECONDS).text());
+            } finally {
+                thread.join(5_000);
+            }
         }
     }
 
     @Test
-    void sendManyBytesAcceptsEmptyBatch() {
+    void virtualThreadReceiveTimeoutReturnsEmpty() throws Exception {
         try (Context context = OMQ.context();
-             Socket push = context.socket(SocketType.PUSH)) {
-            push.connect("inproc://empty-send-batch-" + UUID.randomUUID());
+             Socket pull = context.socket(SocketType.PULL)) {
+            pull.bind("inproc://virtual-receive-timeout-" + UUID.randomUUID());
 
-            push.sendManyBytes(new byte[0][]);
+            CompletableFuture<Optional<Message>> received = new CompletableFuture<>();
+            Thread thread = Thread.ofVirtual().start(() -> {
+                try {
+                    received.complete(pull.receive(Duration.ofMillis(20)));
+                } catch (Throwable error) {
+                    received.completeExceptionally(error);
+                }
+            });
+
+            try {
+                assertTrue(received.get(5, TimeUnit.SECONDS).isEmpty());
+            } finally {
+                thread.join(5_000);
+            }
         }
     }
 
@@ -408,131 +404,6 @@ final class SocketTest {
             push.bind("inproc://timed-send-timeout-" + UUID.randomUUID());
 
             assertFalse(push.send("blocked", Duration.ofMillis(10)));
-        }
-    }
-
-    @Test
-    void receiveManyBytesIntoFillsReusableArrayWithOffset() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Socket push = context.socket(SocketType.PUSH)) {
-            String endpoint = pull.bind("inproc://batch-into-" + UUID.randomUUID());
-            push.connect(endpoint);
-            push.waitConnected(1, Duration.ofSeconds(5));
-            push.sendManyBytes(new byte[][] {
-                "a".getBytes(StandardCharsets.UTF_8),
-                "bb".getBytes(StandardCharsets.UTF_8),
-                "ccc".getBytes(StandardCharsets.UTF_8),
-            });
-
-            byte[][] output = new byte[5][];
-            int count = pull.receiveManyBytesInto(output, 1, 3, Duration.ofSeconds(5));
-
-            assertEquals(3, count);
-            assertNull(output[0]);
-            assertArrayEquals("a".getBytes(StandardCharsets.UTF_8), output[1]);
-            assertArrayEquals("bb".getBytes(StandardCharsets.UTF_8), output[2]);
-            assertArrayEquals("ccc".getBytes(StandardCharsets.UTF_8), output[3]);
-            assertNull(output[4]);
-        }
-    }
-
-    @Test
-    void receiveManyBytesIntoTimeoutReturnsZeroAndKeepsOutput() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
-            pull.bind("inproc://empty-batch-timeout-" + UUID.randomUUID());
-
-            byte[] sentinel = "sentinel".getBytes(StandardCharsets.UTF_8);
-            byte[][] output = new byte[][] {sentinel};
-
-            assertEquals(0, pull.receiveManyBytesInto(output, Duration.ofMillis(10)));
-            assertSame(sentinel, output[0]);
-        }
-    }
-
-    @Test
-    void tryReceiveManyBytesIntoReturnsZeroWhenNoMessageAvailable() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
-            pull.bind("inproc://empty-batch-into-" + UUID.randomUUID());
-
-            byte[][] output = new byte[2][];
-            assertEquals(0, pull.tryReceiveManyBytesInto(output));
-            assertNull(output[0]);
-            assertNull(output[1]);
-        }
-    }
-
-    @Test
-    void receiveManyBytesIntoAcceptsZeroLengthOutput() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
-            assertEquals(0, pull.receiveManyBytesInto(new byte[0][]));
-            assertEquals(0, pull.tryReceiveManyBytesInto(new byte[0][]));
-        }
-    }
-
-    @Test
-    void receiveManyBytesIntoRejectsMultipart() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Socket push = context.socket(SocketType.PUSH)) {
-            String endpoint = pull.bind("inproc://batch-into-multipart-" + UUID.randomUUID());
-            push.connect(endpoint);
-            push.waitConnected(1, Duration.ofSeconds(5));
-
-            push.send(Message.multipart("a".getBytes(), "b".getBytes()));
-
-            assertThrows(
-                    IllegalStateException.class,
-                    () -> pull.receiveManyBytesInto(new byte[2][], Duration.ofSeconds(5)));
-        }
-    }
-
-    @Test
-    void receiveManyReturnsMultipartMessages() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL);
-             Socket push = context.socket(SocketType.PUSH)) {
-            String endpoint = pull.bind("inproc://batch-multipart-" + UUID.randomUUID());
-            push.connect(endpoint);
-            push.waitConnected(1, Duration.ofSeconds(5));
-
-            push.send(Message.multipart("a".getBytes(), "b".getBytes()));
-            push.send("tail");
-
-            List<Message> batch = new ArrayList<>(pull.receiveMany(4, Duration.ofSeconds(5)));
-            if (batch.size() < 2) {
-                batch.addAll(pull.receiveMany(2 - batch.size(), Duration.ofSeconds(5)));
-            }
-            assertEquals(2, batch.size());
-            assertEquals(2, batch.get(0).partCount());
-            assertEquals("tail", batch.get(1).text());
-        }
-    }
-
-    @Test
-    void tryReceiveManyBytesReturnsEmptyWhenNoMessageAvailable() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
-            pull.bind("inproc://empty-batch-" + UUID.randomUUID());
-
-            assertTrue(pull.tryReceiveManyBytes(4).isEmpty());
-        }
-    }
-
-    @Test
-    void receiveManyRejectsNonPositiveLimit() {
-        try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
-            assertThrows(IllegalArgumentException.class, () -> pull.receiveMany(0));
-            assertThrows(IllegalArgumentException.class, () -> pull.tryReceiveManyBytes(0));
-            assertThrows(NullPointerException.class, () -> pull.sendManyBytes(new byte[][] {null}));
-            assertThrows(NullPointerException.class, () -> pull.receiveManyBytesInto(null));
-            assertThrows(IndexOutOfBoundsException.class, () -> pull.receiveManyBytesInto(new byte[1][], -1, 1));
-            assertThrows(IndexOutOfBoundsException.class, () -> pull.receiveManyBytesInto(new byte[1][], 1, 1));
-            assertThrows(IllegalArgumentException.class, () -> pull.receiveManyBytesInto(new byte[1][], 0, -1));
         }
     }
 

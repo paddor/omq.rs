@@ -40,7 +40,6 @@ struct JavaSocket {
     options: Mutex<Options>,
     socket: OnceLock<BlockingSocket>,
     materialize_lock: Mutex<()>,
-    recv_scratch: Mutex<Vec<Message>>,
     closed: AtomicBool,
 }
 
@@ -1742,23 +1741,6 @@ fn bytes_from_parts(env: &mut JNIEnv<'_>, parts: JObjectArray<'_>) -> Result<Vec
     Ok(out)
 }
 
-fn send_bodies(
-    env: &mut JNIEnv<'_>,
-    bodies: &JObjectArray<'_>,
-    socket: &BlockingSocket,
-) -> Result<(), Error> {
-    let len = env.get_array_length(bodies).map_err(jni_error)?;
-    for i in 0..len {
-        let body = env.get_object_array_element(bodies, i).map_err(jni_error)?;
-        if body.is_null() {
-            return Err(Error::Config(format!("message body {i} must not be null")));
-        }
-        let body = JByteArray::from(body);
-        java_send(socket, Message::single(Bytes::from(byte_array(env, body)?)))?;
-    }
-    Ok(())
-}
-
 fn java_try_send(
     socket: &BlockingSocket,
     message: Message,
@@ -1918,22 +1900,6 @@ fn message_to_java_native_ref<'local>(
         return message_part_to_java(env, message, 0).map(JObject::from);
     }
     message_to_java_parts(env, message).map(JObject::from)
-}
-
-fn messages_to_java_native_array(
-    env: &mut JNIEnv<'_>,
-    messages: &[Message],
-) -> Result<jobjectArray, Error> {
-    let object_class = env.find_class("java/lang/Object").map_err(jni_error)?;
-    let out = env
-        .new_object_array(messages.len() as jint, object_class, JObject::null())
-        .map_err(jni_error)?;
-    for (index, message) in messages.iter().enumerate() {
-        let item = message_to_java_native_ref(env, message)?;
-        env.set_object_array_element(&out, index as jint, item)
-            .map_err(jni_error)?;
-    }
-    Ok(out.into_raw())
 }
 
 fn recv_with_timeout(socket: &BlockingSocket, timeout_millis: jlong) -> Result<Message, Error> {
@@ -2190,28 +2156,6 @@ async fn receive_any_loop(
             tokio::time::sleep(Duration::from_micros(50)).await;
         }
     }
-}
-
-fn fill_java_byte_arrays(
-    env: &mut JNIEnv<'_>,
-    out: &JObjectArray<'_>,
-    offset: jint,
-    messages: &[Message],
-) -> Result<(), Error> {
-    for (index, message) in messages.iter().enumerate() {
-        if message.len() != 1 {
-            throw_java(
-                env,
-                "java/lang/IllegalStateException",
-                format!("message has {} parts", message.len()),
-            );
-            return Err(Error::Config("message is multipart".to_string()));
-        }
-        let body = message_part_to_java(env, message, 0)?;
-        env.set_object_array_element(out, offset + index as jint, body)
-            .map_err(jni_error)?;
-    }
-    Ok(())
 }
 
 fn duration_from_millis(millis: jlong) -> Result<Duration, Error> {
@@ -2671,7 +2615,6 @@ pub extern "system" fn Java_io_omq_Native_socketCreate(
             options: Mutex::new(Options::default()),
             socket: OnceLock::new(),
             materialize_lock: Mutex::new(()),
-            recv_scratch: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
         })) as jlong
     })
@@ -2865,25 +2808,6 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipartTimeout(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_omq_Native_socketSendMany(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    messages: JObjectArray<'_>,
-) {
-    guard(&mut env, (), |env| {
-        let result = (|| {
-            let socket = socket_from_handle(handle)?.materialize()?;
-            send_bodies(env, &messages, &socket)
-        })();
-
-        if let Err(error) = result {
-            throw_omq(env, error);
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketTrySendMultipart(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -2986,78 +2910,6 @@ pub extern "system" fn Java_io_omq_Native_socketRecvInto(
 
         match result {
             Ok(len) => len,
-            Err(error) => {
-                if env.exception_check().unwrap_or(false) {
-                    return 0;
-                }
-                throw_omq(env, error);
-                0
-            }
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_omq_Native_socketRecvMany(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    max_messages: jint,
-    timeout_millis: jlong,
-) -> jobjectArray {
-    guard(&mut env, std::ptr::null_mut(), |env| {
-        let result = (|| {
-            let java_socket = socket_from_handle(handle)?;
-            let socket = java_socket.materialize()?;
-            let mut scratch = java_socket
-                .recv_scratch
-                .lock()
-                .map_err(|_| Error::Config("recv scratch lock poisoned".to_string()))?;
-            scratch.clear();
-            recv_many_into(&socket, max_messages, timeout_millis, &mut scratch)?;
-            let out = messages_to_java_native_array(env, &scratch);
-            scratch.clear();
-            out
-        })();
-
-        match result {
-            Ok(value) => value,
-            Err(error) => {
-                throw_omq(env, error);
-                std::ptr::null_mut()
-            }
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_omq_Native_socketRecvManyBytesInto(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    out: JObjectArray<'_>,
-    offset: jint,
-    max_messages: jint,
-    timeout_millis: jlong,
-) -> jint {
-    guard(&mut env, 0, |env| {
-        let result = (|| {
-            let java_socket = socket_from_handle(handle)?;
-            let socket = java_socket.materialize()?;
-            let mut scratch = java_socket
-                .recv_scratch
-                .lock()
-                .map_err(|_| Error::Config("recv scratch lock poisoned".to_string()))?;
-            scratch.clear();
-            let count = recv_many_into(&socket, max_messages, timeout_millis, &mut scratch)?;
-            let fill_result = fill_java_byte_arrays(env, &out, offset, &scratch);
-            scratch.clear();
-            fill_result?;
-            Ok(count as jint)
-        })();
-
-        match result {
-            Ok(value) => value,
             Err(error) => {
                 if env.exception_check().unwrap_or(false) {
                     return 0;

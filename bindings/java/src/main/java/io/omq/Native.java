@@ -61,8 +61,6 @@ final class Native {
 
     static native int socketSendMultipartTimeout(long handle, byte[][] parts, long timeoutMillis);
 
-    static native void socketSendMany(long handle, byte[][] messages);
-
     static native int socketTrySendMultipart(long handle, byte[][] parts);
 
     static native long socketSendAsync(long handle, byte[][] parts, Object future);
@@ -70,11 +68,6 @@ final class Native {
     static native Object socketRecv(long handle, long timeoutMillis);
 
     static native int socketRecvInto(long handle, ByteBuffer destination, long timeoutMillis);
-
-    static native Object[] socketRecvMany(long handle, int maxMessages, long timeoutMillis);
-
-    static native int socketRecvManyBytesInto(
-            long handle, byte[][] out, int offset, int maxMessages, long timeoutMillis);
 
     static native long socketRecvAsync(long handle, long timeoutMillis, Object future);
 

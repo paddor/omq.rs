@@ -72,6 +72,22 @@ public final class Context implements AutoCloseable {
         }
     }
 
+    /** Creates a socket and applies reusable options before first I/O. */
+    public Socket socket(SocketType type, SocketOptions options) {
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(options, "options");
+        synchronized (state) {
+            Socket socket = new Socket(this, state.handle(), type, sockets);
+            try {
+                options.apply(socket);
+                return socket;
+            } catch (RuntimeException | Error error) {
+                socket.close();
+                throw error;
+            }
+        }
+    }
+
     void remove(Socket.State state) {
         sockets.remove(state);
     }

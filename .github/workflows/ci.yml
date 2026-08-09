@@ -486,7 +486,16 @@ jobs:
           java-version: "25"
           cache: maven
           cache-dependency-path: bindings/java/pom.xml
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: "3.14"
+      - name: install pyzmq
+        run: python -m pip install --upgrade pip "pyzmq>=25"
       - name: junit
+        env:
+          OMQ_INTEROP_REQUIRED: "1"
+          OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
         run: mvn -f bindings/java/pom.xml test
 
   ci-success:

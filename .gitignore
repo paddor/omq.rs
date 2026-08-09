@@ -30,4 +30,5 @@ perf.data*
 /TODO
 .chart_hw
 !bindings/pyomq/.chart_hw
+!bindings/java/.chart_hw
 .perf_hw

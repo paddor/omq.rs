@@ -1,24 +1,43 @@
 # OMQ.java
 
-Modern Java bindings for OMQ backed by `omq-tokio`.
+OMQ.java brings OMQ sockets to Java with a native Rust backend.
 
-This is not a JeroMQ compatibility layer. The Java API owns a native OMQ
-context, and that context owns the background IO thread(s), matching the normal
-libzmq architecture.
+It wraps `omq-tokio`, so routing, reconnect, fair-queueing, auth, compression,
+and transport I/O run in OMQ-owned background threads while Java code gets a
+small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
+`CompletableFuture`.
 
-Architecture detail: [`doc/architecture.md`](doc/architecture.md).
+## Highlights
+
+- Native OMQ engine shared with OMQ.rs.
+- High-throughput TCP and inproc messaging.
+- Compression transports: `lz4+tcp://` and `zstd+tcp://`.
+- Static compression dictionaries and auto-trained dictionaries.
+- PLAIN and CURVE security with Java auth callbacks and peer metadata.
+- Java 25 FFM off-heap rings hide batching behind normal scalar send/receive
+  calls.
+- Explicit native context sharing for `inproc://` across Java handles.
+
+## Performance
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/java/doc/charts/pushpull_tcp.svg" alt="OMQ.java vs JeroMQ PUSH/PULL TCP performance" width="850">
+</p>
+
+2-process loopback PUSH/PULL throughput vs JeroMQ over TCP. Results are
+median local runs from `scripts/bench_pushpull_tcp.py`.
 
 ## Build, install, test
 
-Requires Java 25 or newer.
+Requires Java 25 or newer. JPMS module name: `io.omq`.
 
-Maven Central coordinates:
+Maven Central coordinates. Use the latest version listed on Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.paddor</groupId>
   <artifactId>omq-java</artifactId>
-  <version>0.1.0</version>
+  <version>VERSION</version>
 </dependency>
 ```
 
@@ -43,24 +62,31 @@ mvn test
 Maven builds the Rust native library in `native/target/debug` and embeds the
 current-platform native library in the jar under `io/omq/native/...`.
 
-## Shape
+## API Shape
 
 - `Context` owns native IO threads and creates sockets.
 - `Context.shareKey()` / `Context.fromShareKey(...)` explicitly share one
   native context core and `inproc://` namespace across Java handles.
+- `SocketOptions` builds reusable pre-I/O option sets for socket creation.
 - `Socket` is `AutoCloseable`; use try-with-resources.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
   multipart metadata matters.
-- `sendManyBytes` sends many single-part messages in one JNI call.
 - Sync receive methods transparently drain a Java 25 FFM off-heap ring filled
   from native `recv_many_into()`, so scalar `receive*` calls amortize native
   transition cost without exposing batch APIs.
+- Blocking receives on virtual threads drain cached ring data first and then
+  park through a native async receive when empty.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.
 - Sockets are synchronized on the Java side. Treat a socket as a single-thread
   object; create more sockets for more concurrent flows.
+
+OMQ.java is not a JeroMQ compatibility layer. It follows ZMQ socket semantics,
+but exposes a modern Java API instead of mirroring JeroMQ classes.
+
+Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 Example:
 
@@ -72,6 +98,20 @@ try (Context ctx = OMQ.context();
     push.connect(endpoint);
     push.send("hello");
     String body = pull.receive(Duration.ofSeconds(5)).orElseThrow().text();
+}
+```
+
+Reusable socket options:
+
+```java
+SocketOptions options = SocketOptions.builder()
+        .sendHighWaterMark(10_000)
+        .heartbeatInterval(Duration.ofSeconds(5))
+        .build();
+
+try (Context ctx = OMQ.context();
+     Socket push = ctx.socket(SocketType.PUSH, options)) {
+    push.connect("tcp://127.0.0.1:5555");
 }
 ```
 

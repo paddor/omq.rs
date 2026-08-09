@@ -8,7 +8,7 @@
   <artifactId>omq-java</artifactId>
   <version>${revision}</version>
   <name>OMQ.java</name>
-  <description>Java bindings for OMQ backed by omq-tokio</description>
+  <description>Java bindings for OMQ, a high-performance ZeroMQ/ZMQ-compatible messaging stack with Rust native I/O, compression, and CURVE security</description>
   <url>https://github.com/paddor/omq.rs</url>
 
   <licenses>
@@ -187,6 +187,7 @@
         <version>${checkstyle.version}</version>
         <configuration>
           <configLocation>${project.basedir}/checkstyle.xml</configLocation>
+          <excludes>**/module-info.java</excludes>
           <includeTestSourceDirectory>true</includeTestSourceDirectory>
           <consoleOutput>true</consoleOutput>
           <failsOnError>true</failsOnError>
@@ -205,7 +206,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.4</version>
         <configuration>
-          <argLine>--enable-native-access=ALL-UNNAMED -Domq.java.peer=${omq.java.peer.path}</argLine>
+          <argLine>--enable-native-access=io.omq -Domq.java.peer=${omq.java.peer.path}</argLine>
         </configuration>
       </plugin>
     </plugins>

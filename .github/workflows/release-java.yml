@@ -55,6 +55,12 @@ jobs:
           java-version: "25"
           cache: maven
           cache-dependency-path: bindings/java/pom.xml
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: "3.14"
+      - name: install pyzmq
+        run: python -m pip install --upgrade pip "pyzmq>=25"
       - name: Build release native
         working-directory: bindings/java/native
         run: cargo build --release --features plain,curve,lz4,zstd
@@ -68,6 +74,9 @@ jobs:
           cp "bindings/java/native/target/release/${{ matrix.library }}" "$resource_dir/"
       - name: JUnit with release native
         shell: bash
+        env:
+          OMQ_INTEROP_REQUIRED: "1"
+          OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
         run: |
           peer_path="${GITHUB_WORKSPACE}/bindings/java/native/target/release/omq-java-peer"
           if [[ "${RUNNER_OS}" == "Windows" ]]; then

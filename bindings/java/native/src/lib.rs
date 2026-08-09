@@ -1060,9 +1060,12 @@ fn is_name_resolution_error(error: &std::io::Error) -> bool {
         || text.contains("lookup")
         || text.contains("no address")
         || text.contains("no addresses")
+        || text.contains("no such host")
         || text.contains("name or service")
         || text.contains("nodename")
+        || text.contains("host not found")
         || text.contains("temporary failure in name resolution")
+        || error.raw_os_error() == Some(11001)
 }
 
 fn throw_omq_for_endpoint(env: &mut JNIEnv<'_>, error: Error, operation: &str, endpoint: &str) {
@@ -4086,9 +4089,23 @@ pub extern "system" fn Java_io_omq_Native_socketSetXpubNoDrop(
 
 #[cfg(test)]
 mod recv_ring_tests {
+    use std::io;
+
     use bytes::Bytes;
 
     use super::*;
+
+    #[test]
+    fn windows_dns_error_is_name_resolution_error() {
+        let error = io::Error::from_raw_os_error(11001);
+        assert!(is_name_resolution_error(&error));
+    }
+
+    #[test]
+    fn windows_dns_error_message_is_name_resolution_error() {
+        let error = io::Error::other("No such host is known. (os error 11001)");
+        assert!(is_name_resolution_error(&error));
+    }
 
     #[test]
     fn encode_single_part_as_raw_payload() {

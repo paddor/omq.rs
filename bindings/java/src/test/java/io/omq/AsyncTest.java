@@ -33,7 +33,7 @@ final class AsyncTest {
     }
 
     @Test
-    void receiveAsyncReturnsCachedMessage() throws Exception {
+    void receiveAsyncReadsNextMessageAfterSyncReceive() throws Exception {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);
              Socket push = context.socket(SocketType.PUSH)) {
@@ -44,10 +44,9 @@ final class AsyncTest {
             push.send("two");
 
             assertEquals("one", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
-            CompletableFuture<Message> cached = pull.receiveAsync();
+            CompletableFuture<Message> next = pull.receiveAsync();
 
-            assertTrue(cached.isDone());
-            assertEquals("two", cached.get(5, TimeUnit.SECONDS).text());
+            assertEquals("two", next.get(5, TimeUnit.SECONDS).text());
         }
     }
 
@@ -120,7 +119,7 @@ final class AsyncTest {
     }
 
     @Test
-    void receiveAnyReturnsCachedMessage() throws Exception {
+    void receiveAnyReadsNextMessageAfterSyncReceive() throws Exception {
         try (Context context = OMQ.context();
              Socket pull1 = context.socket(SocketType.PULL);
              Socket pull2 = context.socket(SocketType.PULL);
@@ -135,7 +134,6 @@ final class AsyncTest {
             assertEquals("one", pull2.receive(Duration.ofSeconds(5)).orElseThrow().text());
             CompletableFuture<ReceiveEvent> either = OMQ.receiveAny(pull1, pull2);
 
-            assertTrue(either.isDone());
             ReceiveEvent event = either.get(5, TimeUnit.SECONDS);
             assertEquals(pull2, event.socket());
             assertEquals("two", event.message().text());

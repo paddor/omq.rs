@@ -25,11 +25,10 @@ final class ExceptionsTest {
     @Test
     void bindIoErrorRaisesBindException() {
         try (Context context = OMQ.context();
-             Socket first = context.socket(SocketType.PULL);
-             Socket second = context.socket(SocketType.PULL)) {
-            String endpoint = first.bind("tcp://127.0.0.1:0");
+             Socket socket = context.socket(SocketType.PULL)) {
+            String endpoint = "tcp://192.0.2.1:0";
 
-            BindException error = assertThrows(BindException.class, () -> second.bind(endpoint));
+            BindException error = assertThrows(BindException.class, () -> socket.bind(endpoint));
             assertEquals("bind", error.operation());
             assertEquals(endpoint, error.endpoint());
             assertTrue(error.detail().length() > 0);

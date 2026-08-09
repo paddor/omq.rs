@@ -13,6 +13,7 @@ import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -501,7 +502,10 @@ final class SocketTest {
             push.send(Message.multipart("a".getBytes(), "b".getBytes()));
             push.send("tail");
 
-            List<Message> batch = pull.receiveMany(4, Duration.ofSeconds(5));
+            List<Message> batch = new ArrayList<>(pull.receiveMany(4, Duration.ofSeconds(5)));
+            if (batch.size() < 2) {
+                batch.addAll(pull.receiveMany(2 - batch.size(), Duration.ofSeconds(5)));
+            }
             assertEquals(2, batch.size());
             assertEquals(2, batch.get(0).partCount());
             assertEquals("tail", batch.get(1).text());

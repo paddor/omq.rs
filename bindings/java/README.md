@@ -55,6 +55,8 @@ current-platform native library in the jar under `io/omq/native/...`.
 - Sync receive methods transparently drain a Java 25 FFM off-heap ring filled
   from native `recv_many_into()`, so scalar `receive*` calls amortize native
   transition cost without exposing batch APIs.
+- Blocking receives on virtual threads drain cached ring data first and then
+  park through a native async receive when empty.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.

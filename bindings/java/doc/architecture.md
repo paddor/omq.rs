@@ -64,6 +64,7 @@ ring path and use native owned storage or JNI fallback.
 - When Java's cache is empty, Rust fills descriptors and payload storage with `recv_many_into()` and reuses one internal `Vec<Message>`.
 - Java drains cached descriptors through `MemorySegment` views.
 - `receive`, `receiveBytes`, `receiveInto`, timeout variants, and try variants all use this hidden batch path.
+- On virtual threads, blocking receives drain cached ring data first; if empty, they wait through native async receive so the JVM can park the virtual thread.
 
 ## Send Path
 

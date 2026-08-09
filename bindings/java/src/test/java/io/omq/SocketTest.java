@@ -11,8 +11,11 @@ import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 final class SocketTest {
@@ -325,6 +328,57 @@ final class SocketTest {
             assertThrows(
                     IllegalStateException.class,
                     () -> pull.receiveInto(ByteBuffer.allocate(8), Duration.ofSeconds(5)));
+        }
+    }
+
+    @Test
+    void virtualThreadReceiveWaitsThroughAsyncPath() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://virtual-receive-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            CompletableFuture<Message> received = new CompletableFuture<>();
+            Thread thread = Thread.ofVirtual().start(() -> {
+                try {
+                    received.complete(pull.receive());
+                } catch (Throwable error) {
+                    received.completeExceptionally(error);
+                }
+            });
+
+            try {
+                Thread.sleep(50);
+                push.send("loom");
+                assertEquals("loom", received.get(5, TimeUnit.SECONDS).text());
+            } finally {
+                thread.join(5_000);
+            }
+        }
+    }
+
+    @Test
+    void virtualThreadReceiveTimeoutReturnsEmpty() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL)) {
+            pull.bind("inproc://virtual-receive-timeout-" + UUID.randomUUID());
+
+            CompletableFuture<Optional<Message>> received = new CompletableFuture<>();
+            Thread thread = Thread.ofVirtual().start(() -> {
+                try {
+                    received.complete(pull.receive(Duration.ofMillis(20)));
+                } catch (Throwable error) {
+                    received.completeExceptionally(error);
+                }
+            });
+
+            try {
+                assertTrue(received.get(5, TimeUnit.SECONDS).isEmpty());
+            } finally {
+                thread.join(5_000);
+            }
         }
     }
 

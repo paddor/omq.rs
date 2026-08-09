@@ -1,7 +1,9 @@
 package io.omq;
 
 import java.lang.ref.Cleaner;
+import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -10,6 +12,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
@@ -226,17 +229,26 @@ public final class Socket implements AutoCloseable {
 
     /** Receives one message, blocking forever. */
     public synchronized Message receive() {
+        if (Thread.currentThread().isVirtual()) {
+            return receiveVirtual(FOREVER);
+        }
         return withRecvRing((ring, handle) -> ring.receive(handle, FOREVER));
     }
 
     /** Receives one single-part message body, blocking forever. */
     public synchronized byte[] receiveBytes() {
+        if (Thread.currentThread().isVirtual()) {
+            return receiveVirtual(FOREVER).bytes();
+        }
         return withRecvRing((ring, handle) -> ring.receiveBytes(handle, FOREVER));
     }
 
     /** Receives one single-part message body into {@code destination}, blocking forever. */
     public synchronized int receiveInto(ByteBuffer destination) {
         Objects.requireNonNull(destination, "destination");
+        if (Thread.currentThread().isVirtual()) {
+            return writeInto(receiveVirtual(FOREVER), destination);
+        }
         return withRecvRing((ring, handle) -> ring.receiveInto(handle, destination, FOREVER));
     }
 
@@ -245,6 +257,9 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
+            if (Thread.currentThread().isVirtual()) {
+                return Optional.of(receiveVirtual(timeoutMillis));
+            }
             return Optional.of(withRecvRing((ring, handle) -> ring.receive(handle, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
@@ -256,6 +271,9 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
+            if (Thread.currentThread().isVirtual()) {
+                return Optional.of(receiveVirtual(timeoutMillis).bytes());
+            }
             return Optional.of(withRecvRing(
                     (ring, handle) -> ring.receiveBytes(handle, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
@@ -269,6 +287,9 @@ public final class Socket implements AutoCloseable {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);
         try {
+            if (Thread.currentThread().isVirtual()) {
+                return OptionalInt.of(writeInto(receiveVirtual(timeoutMillis), destination));
+            }
             return OptionalInt.of(withRecvRing(
                     (ring, handle) -> ring.receiveInto(handle, destination, timeoutMillis)));
         } catch (TimeoutException timeoutError) {
@@ -983,6 +1004,47 @@ public final class Socket implements AutoCloseable {
         synchronized (state) {
             state.handle();
             return state.recvRing.tryReceiveCachedMessage();
+        }
+    }
+
+    private Message receiveVirtual(long timeoutMillis) {
+        synchronized (state) {
+            long handle = state.handle();
+            Optional<Message> cached = state.recvRing.tryReceiveCachedMessage();
+            if (cached.isPresent()) {
+                return cached.orElseThrow();
+            }
+            NativeFuture<Message> future = new NativeFuture<>();
+            long task = Native.socketRecvAsync(handle, timeoutMillis, future);
+            future.setNativeTask(task);
+            return await(future);
+        }
+    }
+
+    private static int writeInto(Message message, ByteBuffer destination) {
+        if (destination.isReadOnly()) {
+            throw new ReadOnlyBufferException();
+        }
+        byte[] bytes = message.bytes();
+        if (bytes.length > destination.remaining()) {
+            throw new BufferOverflowException();
+        }
+        destination.put(bytes);
+        return bytes.length;
+    }
+
+    private static <T> T await(CompletableFuture<T> future) {
+        try {
+            return future.join();
+        } catch (CompletionException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error fatal) {
+                throw fatal;
+            }
+            throw error;
         }
     }
 

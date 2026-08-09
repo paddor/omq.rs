@@ -271,6 +271,13 @@ run omq_cargo clippy --all-targets --no-deps -- -D warnings
 run omq_cargo clippy -p omq-libzmq --all-targets --no-deps -- -D warnings
 run omq_cargo_with_rust_tools test
 run omq_cargo_with_rust_tools test -p omq-libzmq
+if command -v "${CXX:-c++}" >/dev/null 2>&1 \
+    && command -v pkg-config >/dev/null 2>&1 \
+    && pkg-config --exists cppzmq; then
+    run "$_repo_root/scripts/test-cppzmq.sh"
+else
+    echo "skip: cppzmq tests require C++ compiler and cppzmq"
+fi
 
 if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
     echo "skip: perf gate disabled on CI"

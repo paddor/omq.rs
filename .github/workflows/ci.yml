@@ -204,6 +204,23 @@ jobs:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
         run: cargo nextest run --profile ci -p omq-tokio --features curve --test omq_interop_pyzmq_curve
 
+  cppzmq:
+    name: cppzmq
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cppzmq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppzmq-dev
+      - name: cppzmq tests
+        run: ./scripts/test-cppzmq.sh
+
   loom:
     name: loom (yring)
     needs: [changes, linux-gate]
@@ -508,6 +525,7 @@ jobs:
         encryption,
         compression,
         interop,
+        cppzmq,
         loom,
         miri,
         fuzz-smoke,

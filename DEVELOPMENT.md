@@ -25,6 +25,7 @@ cargo test -p omq-tokio
 cargo test -p omq-proto
 cargo test -p yring
 cargo test -p omq-tokio --test omq_req_rep -- some_test_name
+./scripts/test-cppzmq.sh
 ```
 
 Feature-gated tests:
@@ -91,6 +92,7 @@ runs, on Linux only:
 | job | what |
 |-----|------|
 | `interop` | pyzmq NULL/STREAM + PLAIN + CURVE |
+| `cppzmq` | `cppzmq` API tests against `libomq_zmq` |
 | `loom` | `yring` loom suite under `--cfg loom`, release |
 | `miri` | `cargo miri test -p yring --features async`, nightly |
 | `fuzz-smoke` | parsers at 1M iters, socket actions at 200 |

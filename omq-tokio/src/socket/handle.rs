@@ -1,5 +1,6 @@
 //! Public `Socket` handle.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -433,6 +434,45 @@ impl Socket {
                     SpscPush::Full { msg, .. } => Err(TrySendError::Full(msg)),
                     SpscPush::Unavailable(msg) => self.inner.send_submitter.try_send(msg),
                 }
+            }
+        }
+    }
+
+    /// Try to send up to `max` messages from `messages` without blocking.
+    ///
+    /// Successfully submitted messages are removed from the front of
+    /// `messages`. If the socket is full before any message is submitted,
+    /// the first unsent message is returned in [`TrySendError::Full`].
+    pub fn try_send_many(
+        &self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, TrySendError> {
+        match self.inner.socket_type {
+            SocketType::Push | SocketType::Scatter => self
+                .inner
+                .send_submitter
+                .try_send_many(messages, max.min(messages.len())),
+            _ => {
+                let mut sent = 0usize;
+                while sent < max {
+                    let Some(msg) = messages.pop_front() else {
+                        break;
+                    };
+                    match self.try_send(msg) {
+                        Ok(()) => sent += 1,
+                        Err(TrySendError::Full(returned)) => {
+                            messages.push_front(returned);
+                            if sent > 0 {
+                                return Ok(sent);
+                            }
+                            let msg = messages.pop_front().expect("returned message present");
+                            return Err(TrySendError::Full(msg));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(sent)
             }
         }
     }

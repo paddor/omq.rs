@@ -24,11 +24,13 @@ public final class Socket implements AutoCloseable {
     private static final long NONE = -1;
 
     private final Context context;
+    private final SocketType type;
     private final State state;
     private final Cleaner.Cleanable cleanable;
 
     Socket(Context context, long contextHandle, SocketType type, Set<State> owner) {
         this.context = context;
+        this.type = type;
         this.state = new State(Native.socketCreate(contextHandle, type.code()), owner);
         owner.add(state);
         this.cleanable = CLEANER.register(this, state);
@@ -62,9 +64,15 @@ public final class Socket implements AutoCloseable {
     }
 
     /** Sends a single-part binary message by copying {@code body}. */
-    public synchronized Socket send(byte[] body) {
+    public Socket send(byte[] body) {
         Objects.requireNonNull(body, "body");
-        withHandleVoid(handle -> Native.socketSend(handle, body));
+        synchronized (state) {
+            long handle = state.handle();
+            if (usesSendRing() && state.sendRing.send(handle, body)) {
+                return this;
+            }
+            Native.socketSend(handle, body);
+        }
         return this;
     }
 
@@ -1063,9 +1071,14 @@ public final class Socket implements AutoCloseable {
         return count;
     }
 
+    private boolean usesSendRing() {
+        return type == SocketType.PUSH || type == SocketType.SCATTER;
+    }
+
     static final class State implements Runnable {
         private final AtomicLong handle;
         private final Set<State> owner;
+        private final SendRing sendRing = new SendRing();
         private final RecvRing recvRing = new RecvRing();
 
         private State(long handle, Set<State> owner) {
@@ -1089,6 +1102,7 @@ public final class Socket implements AutoCloseable {
         synchronized void close() {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
+                sendRing.close();
                 recvRing.close();
                 Native.socketClose(handle);
             }

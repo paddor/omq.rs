@@ -6,7 +6,7 @@
 //! when the consumer drains below LWM. Active order stays stable so a full
 //! pipe cannot reorder and bias the cursor toward another peer.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -326,6 +326,69 @@ impl Submitter {
         }
 
         Err(omq_proto::error::TrySendError::Full(msg))
+    }
+
+    pub(crate) fn try_send_many(
+        &self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, omq_proto::error::TrySendError> {
+        if messages.is_empty() || max == 0 {
+            return Ok(0);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(omq_proto::error::TrySendError::Closed);
+        }
+
+        let mut active = self.active.lock().expect("round_robin active");
+        if !active.has_any_pipe() {
+            let msg = messages.pop_front().expect("message present");
+            return Err(omq_proto::error::TrySendError::Full(msg));
+        }
+
+        if active.active.is_empty() {
+            active.try_reactivate_when_empty();
+        } else if !active.inactive.is_empty() {
+            active.try_reactivate_one();
+        }
+
+        if active.active.len() != 1 {
+            drop(active);
+            let mut sent = 0usize;
+            while sent < max {
+                let Some(msg) = messages.pop_front() else {
+                    break;
+                };
+                match self.try_send(msg) {
+                    Ok(()) => sent += 1,
+                    Err(omq_proto::error::TrySendError::Full(returned)) => {
+                        messages.push_front(returned);
+                        if sent > 0 {
+                            return Ok(sent);
+                        }
+                        let msg = messages.pop_front().expect("returned message present");
+                        return Err(omq_proto::error::TrySendError::Full(msg));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(sent);
+        }
+
+        match active.active[0].tx.try_send_many(messages, max) {
+            Ok(count) => Ok(count),
+            Err(SendPipeError::Full(returned)) => {
+                active.deactivate(0);
+                Err(omq_proto::error::TrySendError::Full(returned))
+            }
+            Err(SendPipeError::Closed(returned)) => {
+                let peer_id = active.active[0].peer_id;
+                active.pipe_peers.remove(&peer_id);
+                active.active.remove(0);
+                active.cursor = 0;
+                Err(omq_proto::error::TrySendError::Full(returned))
+            }
+        }
     }
 }
 

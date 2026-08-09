@@ -3,8 +3,10 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -74,6 +76,42 @@ struct RecvRingDesc {
     _reserved1: u64,
 }
 
+#[repr(C, align(128))]
+struct SendRingControl {
+    head: AtomicUsize,
+    _pad0: [u8; 120],
+    tail: AtomicUsize,
+    _pad1: [u8; 120],
+    closed: AtomicUsize,
+    _pad2: [u8; 120],
+}
+
+impl SendRingControl {
+    fn new() -> Self {
+        Self {
+            head: AtomicUsize::new(0),
+            _pad0: [0; 120],
+            tail: AtomicUsize::new(0),
+            _pad1: [0; 120],
+            closed: AtomicUsize::new(0),
+            _pad2: [0; 120],
+        }
+    }
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Default)]
+struct SendRingDesc {
+    payload: u64,
+    payload_len: u64,
+    payload_end: u64,
+    _reserved0: u64,
+    _reserved1: u64,
+    _reserved2: u64,
+    _reserved3: u64,
+    _reserved4: u64,
+}
+
 struct ExternalBlock {
     cursor: usize,
     _bytes: Box<[u8]>,
@@ -96,6 +134,34 @@ struct JavaRecvRing {
     external: VecDeque<ExternalBlock>,
     last_error_code: Cell<i32>,
     last_error_message: RefCell<CString>,
+}
+
+struct JavaSendRing {
+    shared: Arc<JavaSendRingShared>,
+    worker: Option<JoinHandle<()>>,
+}
+
+struct JavaSendRingShared {
+    socket: BlockingSocket,
+    control: Box<SendRingControl>,
+    desc: Box<[SendRingDesc]>,
+    payload: Box<[u8]>,
+    done: Box<[AtomicBool]>,
+    desc_mask: usize,
+    last_error_code: AtomicI32,
+    last_error_message: Mutex<CString>,
+    reclaim: Mutex<SendRingReclaim>,
+}
+
+struct SendRingReclaim {
+    cursor: usize,
+}
+
+struct SendSlotOwner {
+    shared: Arc<JavaSendRingShared>,
+    cursor: usize,
+    offset: usize,
+    len: usize,
 }
 
 const RECV_RING_STATUS_OK: i32 = 0;
@@ -410,6 +476,199 @@ impl JavaRecvRing {
     }
 }
 
+impl JavaSendRing {
+    fn new(socket: BlockingSocket, desc_capacity: usize, payload_capacity: usize) -> Self {
+        let desc_capacity = desc_capacity.max(1).next_power_of_two();
+        let payload_capacity = payload_capacity.max(1).next_power_of_two();
+        let shared = Arc::new(JavaSendRingShared {
+            socket,
+            control: Box::new(SendRingControl::new()),
+            desc: vec![SendRingDesc::default(); desc_capacity].into_boxed_slice(),
+            payload: vec![0; payload_capacity].into_boxed_slice(),
+            done: (0..desc_capacity).map(|_| AtomicBool::new(false)).collect(),
+            desc_mask: desc_capacity - 1,
+            last_error_code: AtomicI32::new(RECV_RING_STATUS_OK),
+            last_error_message: Mutex::new(empty_cstring()),
+            reclaim: Mutex::new(SendRingReclaim { cursor: 0 }),
+        });
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::spawn(move || send_ring_worker(worker_shared));
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    fn control_addr(&self) -> i64 {
+        self.shared.control.as_ref() as *const SendRingControl as i64
+    }
+
+    fn desc_addr(&self) -> i64 {
+        self.shared.desc.as_ptr() as i64
+    }
+
+    fn payload_addr(&self) -> i64 {
+        self.shared.payload.as_ptr() as i64
+    }
+
+    fn desc_capacity(&self) -> i32 {
+        self.shared.desc.len() as i32
+    }
+
+    fn payload_capacity(&self) -> i64 {
+        self.shared.payload.len() as i64
+    }
+
+    fn error_code(&self) -> i32 {
+        self.shared.last_error_code.load(Ordering::Acquire)
+    }
+
+    fn error_message_addr(&self) -> i64 {
+        self.shared
+            .last_error_message
+            .lock()
+            .map(|message| message.as_ptr() as i64)
+            .unwrap_or(0)
+    }
+
+    fn close(&mut self) {
+        self.shared.control.closed.store(1, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for JavaSendRing {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl JavaSendRingShared {
+    fn set_error(&self, code: i32, message: impl AsRef<str>) {
+        self.last_error_code.store(code, Ordering::Release);
+        if let Ok(mut slot) = self.last_error_message.lock() {
+            *slot = cstring_lossy(message.as_ref());
+        }
+        self.control.closed.store(1, Ordering::Release);
+    }
+
+    fn closed(&self) -> bool {
+        self.control.closed.load(Ordering::Acquire) != 0
+    }
+
+    fn message_at(self: &Arc<Self>, cursor: usize) -> Message {
+        let desc = self.desc[cursor & self.desc_mask];
+        let len = desc.payload_len as usize;
+        let offset = desc.payload as usize;
+        Message::single(Bytes::from_owner(SendSlotOwner {
+            shared: Arc::clone(self),
+            cursor,
+            offset,
+            len,
+        }))
+    }
+
+    fn release_slot(&self, cursor: usize) {
+        self.done[cursor & self.desc_mask].store(true, Ordering::Release);
+        let Ok(mut reclaim) = self.reclaim.lock() else {
+            return;
+        };
+        loop {
+            let index = reclaim.cursor & self.desc_mask;
+            if !self.done[index].swap(false, Ordering::AcqRel) {
+                break;
+            }
+            reclaim.cursor = reclaim.cursor.wrapping_add(1);
+            self.control.head.store(reclaim.cursor, Ordering::Release);
+        }
+    }
+}
+
+impl AsRef<[u8]> for SendSlotOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.shared.payload[self.offset..self.offset + self.len]
+    }
+}
+
+impl Drop for SendSlotOwner {
+    fn drop(&mut self) {
+        self.shared.release_slot(self.cursor);
+    }
+}
+
+fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
+    let mut head = 0usize;
+    let mut cached_tail = 0usize;
+    let mut batch = VecDeque::with_capacity(256);
+    let mut spins = 0u32;
+
+    loop {
+        while batch.len() < 256 {
+            let cursor = head.wrapping_add(batch.len());
+            if cursor == cached_tail {
+                cached_tail = shared.control.tail.load(Ordering::Acquire);
+                if cursor == cached_tail {
+                    break;
+                }
+            }
+            batch.push_back(shared.message_at(cursor));
+        }
+
+        if batch.is_empty() {
+            if shared.closed() {
+                break;
+            }
+            send_ring_backoff(&mut spins);
+            continue;
+        }
+
+        match shared.socket.try_send_many(&mut batch, 256) {
+            Ok(sent) => {
+                if sent == 0 {
+                    if shared.closed() {
+                        break;
+                    }
+                    send_ring_backoff(&mut spins);
+                    continue;
+                }
+                head = head.wrapping_add(sent);
+                spins = 0;
+            }
+            Err(TrySendError::Full(returned)) => {
+                batch.push_front(returned);
+                if shared.closed() {
+                    break;
+                }
+                send_ring_backoff(&mut spins);
+            }
+            Err(TrySendError::Closed) => {
+                shared.set_error(RECV_RING_STATUS_CLOSED, "socket closed");
+                break;
+            }
+            Err(TrySendError::Error(error)) => {
+                shared.set_error(recv_ring_status(&error), error.to_string());
+                break;
+            }
+        }
+    }
+
+    shared.control.closed.store(1, Ordering::Release);
+}
+
+fn send_ring_backoff(spins: &mut u32) {
+    if *spins < 256 {
+        std::hint::spin_loop();
+        *spins += 1;
+    } else if *spins < 512 {
+        thread::yield_now();
+        *spins += 1;
+    } else {
+        thread::sleep(Duration::from_micros(50));
+    }
+}
+
 thread_local! {
     static FFM_LAST_ERROR_CODE: Cell<i32> = const { Cell::new(RECV_RING_STATUS_OK) };
     static FFM_LAST_ERROR_MESSAGE: RefCell<CString> = RefCell::new(empty_cstring());
@@ -489,6 +748,13 @@ fn recv_ring_from_handle<'a>(handle: i64) -> Result<&'a mut JavaRecvRing, Error>
         return Err(Error::Closed);
     }
     Ok(unsafe { &mut *(handle as *mut JavaRecvRing) })
+}
+
+fn send_ring_from_handle<'a>(handle: i64) -> Result<&'a JavaSendRing, Error> {
+    if handle == 0 {
+        return Err(Error::Closed);
+    }
+    Ok(unsafe { &*(handle as *const JavaSendRing) })
 }
 
 #[unsafe(no_mangle)]
@@ -625,6 +891,104 @@ pub extern "C" fn omq_java_recv_ring_fill(
         Ok(Err(error)) => recv_ring_status(&error),
         Err(_) => RECV_RING_STATUS_ERROR,
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_create(
+    socket_handle: i64,
+    desc_capacity: i32,
+    payload_capacity: i64,
+) -> i64 {
+    clear_ffm_last_error();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if desc_capacity <= 0 {
+            return Err(Error::Config(
+                "descCapacity must be greater than zero".to_string(),
+            ));
+        }
+        if payload_capacity <= 0 {
+            return Err(Error::Config(
+                "payloadCapacity must be greater than zero".to_string(),
+            ));
+        }
+        let socket = socket_from_handle(socket_handle)?.materialize()?;
+        Ok(Box::into_raw(Box::new(JavaSendRing::new(
+            socket,
+            desc_capacity as usize,
+            payload_capacity as usize,
+        ))) as i64)
+    }));
+
+    match result {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(error)) => {
+            set_ffm_last_error(recv_ring_status(&error), error.to_string());
+            0
+        }
+        Err(_) => {
+            set_ffm_last_error(RECV_RING_STATUS_ERROR, "native OMQ panic");
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_close(handle: i64) {
+    if handle == 0 {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        drop(Box::from_raw(handle as *mut JavaSendRing));
+    }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_control_addr(handle: i64) -> i64 {
+    send_ring_from_handle(handle)
+        .map(|ring| ring.control_addr())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_desc_addr(handle: i64) -> i64 {
+    send_ring_from_handle(handle)
+        .map(|ring| ring.desc_addr())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_payload_addr(handle: i64) -> i64 {
+    send_ring_from_handle(handle)
+        .map(|ring| ring.payload_addr())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_desc_capacity(handle: i64) -> i32 {
+    send_ring_from_handle(handle)
+        .map(|ring| ring.desc_capacity())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_payload_capacity(handle: i64) -> i64 {
+    send_ring_from_handle(handle)
+        .map(|ring| ring.payload_capacity())
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_error_code(handle: i64) -> i32 {
+    send_ring_from_handle(handle)
+        .map(JavaSendRing::error_code)
+        .unwrap_or(RECV_RING_STATUS_CLOSED)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_error_message(handle: i64) -> i64 {
+    send_ring_from_handle(handle)
+        .map(JavaSendRing::error_message_addr)
+        .unwrap_or(0)
 }
 
 struct JavaAsyncTask {

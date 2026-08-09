@@ -13,6 +13,7 @@
 //! push.send(Message::from("hello")).unwrap();
 //! ```
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use omq_proto::TrySendError;
@@ -97,6 +98,19 @@ impl Socket {
 
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         self.inner.try_send(msg)
+    }
+
+    /// Try to send up to `max` messages from `messages` without blocking.
+    ///
+    /// Successfully submitted messages are removed from the front of
+    /// `messages`. If no message can be submitted, the first unsent message
+    /// is returned in [`TrySendError::Full`].
+    pub fn try_send_many(
+        &self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, TrySendError> {
+        self.inner.try_send_many(messages, max)
     }
 
     pub fn recv(&self) -> Result<Message> {

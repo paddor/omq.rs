@@ -25,6 +25,7 @@ pub(crate) mod round_robin;
 // subscription matcher lives in omq-proto now.
 pub(crate) use omq_proto::subscription;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -159,6 +160,36 @@ impl SendSubmitter {
             Self::Exclusive(s) => s.try_send(msg),
             Self::FanOut(s) => s.try_send(msg),
             Self::Identity(s) => s.try_send(msg),
+        }
+    }
+
+    pub(crate) fn try_send_many(
+        &self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, omq_proto::error::TrySendError> {
+        if let Self::RoundRobin(s) = self {
+            s.try_send_many(messages, max)
+        } else {
+            let mut sent = 0usize;
+            while sent < max {
+                let Some(msg) = messages.pop_front() else {
+                    break;
+                };
+                match self.try_send(msg) {
+                    Ok(()) => sent += 1,
+                    Err(omq_proto::error::TrySendError::Full(returned)) => {
+                        messages.push_front(returned);
+                        if sent > 0 {
+                            return Ok(sent);
+                        }
+                        let msg = messages.pop_front().expect("returned message present");
+                        return Err(omq_proto::error::TrySendError::Full(msg));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(sent)
         }
     }
 

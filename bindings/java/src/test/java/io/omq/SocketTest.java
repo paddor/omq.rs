@@ -72,6 +72,56 @@ final class SocketTest {
     }
 
     @Test
+    void sendBytesCopiesBeforeCallerCanMutate() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+            byte[] body = new byte[128];
+            body[0] = 7;
+            body[127] = 9;
+
+            push.send(body);
+            body[0] = 42;
+            body[127] = 43;
+
+            byte[] received = pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow();
+            assertEquals(128, received.length);
+            assertEquals(7, received[0]);
+            assertEquals(9, received[127]);
+        }
+    }
+
+    @Test
+    void sendBytesFastPathPreservesEmptyAndOrder() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            push.send(new byte[0]);
+            for (int i = 0; i < 64; i++) {
+                byte[] body = new byte[128];
+                body[0] = (byte) i;
+                body[127] = (byte) (255 - i);
+                push.send(body);
+            }
+
+            assertEquals(0, pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow().length);
+            for (int i = 0; i < 64; i++) {
+                byte[] received = pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow();
+                assertEquals(128, received.length);
+                assertEquals((byte) i, received[0]);
+                assertEquals((byte) (255 - i), received[127]);
+            }
+        }
+    }
+
+    @Test
     void receiveBytesRejectsMultipart() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);

@@ -1,0 +1,17 @@
+# OMQ.java Changelog
+
+## [Unreleased]
+
+## [0.2.0]
+
+- Remove public batch send/receive APIs. Scalar receive methods still use the hidden native batch receive path.
+- Add `SocketOptions` for reusable pre-I/O option sets.
+- Add `Context.socket(SocketType, SocketOptions)`.
+- Add explicit JPMS module descriptor: `io.omq`.
+- Use native async receive for blocking receive calls made from Java virtual threads when cached ring data is empty.
+
+## [0.1.1]
+
+- First Maven Central release of OMQ.java.
+- Provide Java 25 bindings backed by native `omq-tokio`.
+- Include Linux x86_64, macOS x86_64, macOS aarch64, and Windows x86_64 native libraries in the jar.

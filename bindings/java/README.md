@@ -12,13 +12,13 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 Requires Java 25 or newer. JPMS module name: `io.omq`.
 
-Maven Central coordinates:
+Maven Central coordinates. Use the latest version listed on Maven Central:
 
 ```xml
 <dependency>
   <groupId>io.github.paddor</groupId>
   <artifactId>omq-java</artifactId>
-  <version>0.1.0</version>
+  <version>VERSION</version>
 </dependency>
 ```
 

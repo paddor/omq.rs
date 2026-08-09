@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jni::objects::{
-    GlobalRef, JByteArray, JClass, JLongArray, JObject, JObjectArray, JString, JThrowable, JValue,
+    GlobalRef, JByteArray, JByteBuffer, JClass, JLongArray, JObject, JObjectArray, JString,
+    JThrowable, JValue,
 };
-use jni::sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jstring};
+use jni::sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jsize, jstring};
 use jni::{JNIEnv, JavaVM};
 use omq_proto::TrySendError;
 use omq_tokio::blocking::Socket as BlockingSocket;
@@ -152,6 +153,15 @@ fn guard<R>(env: &mut JNIEnv<'_>, default: R, body: impl FnOnce(&mut JNIEnv<'_>)
 
 fn throw_java(env: &mut JNIEnv<'_>, class: &str, message: impl AsRef<str>) {
     let _ = env.throw_new(class, message.as_ref());
+}
+
+fn throw_java_default(env: &mut JNIEnv<'_>, class: &str) {
+    let result = env
+        .new_object(class, "()V", &[])
+        .and_then(|throwable| env.throw(JThrowable::from(throwable)));
+    if result.is_err() {
+        throw_java(env, "io/omq/OMQException", class);
+    }
 }
 
 fn throw_transport_java(
@@ -992,6 +1002,115 @@ fn recv_with_timeout(socket: &BlockingSocket, timeout_millis: jlong) -> Result<M
     } else {
         socket.recv_timeout(Duration::from_millis(timeout_millis as u64))
     }
+}
+
+fn byte_buffer_int(
+    env: &mut JNIEnv<'_>,
+    buffer: &JObject<'_>,
+    method: &str,
+) -> Result<jint, Error> {
+    env.call_method(buffer, method, "()I", &[])
+        .and_then(|value| value.i())
+        .map_err(jni_error)
+}
+
+fn byte_buffer_bool(
+    env: &mut JNIEnv<'_>,
+    buffer: &JObject<'_>,
+    method: &str,
+) -> Result<bool, Error> {
+    env.call_method(buffer, method, "()Z", &[])
+        .and_then(|value| value.z())
+        .map_err(jni_error)
+}
+
+fn set_byte_buffer_position(
+    env: &mut JNIEnv<'_>,
+    buffer: &JObject<'_>,
+    position: jint,
+) -> Result<(), Error> {
+    env.call_method(
+        buffer,
+        "position",
+        "(I)Ljava/nio/Buffer;",
+        &[JValue::Int(position)],
+    )
+    .map(|_| ())
+    .map_err(jni_error)
+}
+
+fn jbyte_slice(bytes: &[u8]) -> &[i8] {
+    // Java byte is signed; JNI copies raw byte values without conversion.
+    unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) }
+}
+
+fn write_message_to_byte_buffer(
+    env: &mut JNIEnv<'_>,
+    buffer: JObject<'_>,
+    message: &Message,
+) -> Result<usize, Error> {
+    if message.len() != 1 {
+        throw_java(
+            env,
+            "java/lang/IllegalStateException",
+            format!("message has {} parts", message.len()),
+        );
+        return Err(Error::Config("message is multipart".to_string()));
+    }
+    if byte_buffer_bool(env, &buffer, "isReadOnly")? {
+        throw_java_default(env, "java/nio/ReadOnlyBufferException");
+        return Err(Error::Config("destination is read-only".to_string()));
+    }
+
+    let body = message.part_slice(0).unwrap_or_default();
+    let remaining = byte_buffer_int(env, &buffer, "remaining")?;
+    if body.len() > remaining as usize {
+        throw_java_default(env, "java/nio/BufferOverflowException");
+        return Err(Error::Config(
+            "destination has insufficient remaining space".to_string(),
+        ));
+    }
+
+    let position = byte_buffer_int(env, &buffer, "position")?;
+    if byte_buffer_bool(env, &buffer, "isDirect")? {
+        let direct = <&JByteBuffer>::from(&buffer);
+        let capacity = env.get_direct_buffer_capacity(direct).map_err(jni_error)?;
+        let end = position as usize + body.len();
+        if end > capacity {
+            throw_java_default(env, "java/nio/BufferOverflowException");
+            return Err(Error::Config(
+                "destination has insufficient direct capacity".to_string(),
+            ));
+        }
+        let base = env.get_direct_buffer_address(direct).map_err(jni_error)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(body.as_ptr(), base.add(position as usize), body.len());
+        }
+    } else if byte_buffer_bool(env, &buffer, "hasArray")? {
+        let array_offset = byte_buffer_int(env, &buffer, "arrayOffset")?;
+        let array = env
+            .call_method(&buffer, "array", "()[B", &[])
+            .and_then(|value| value.l())
+            .map(JByteArray::from)
+            .map_err(jni_error)?;
+        let start = array_offset
+            .checked_add(position)
+            .ok_or_else(|| Error::Config("byte buffer offset overflow".to_string()))?;
+        env.set_byte_array_region(&array, start as jsize, jbyte_slice(body))
+            .map_err(jni_error)?;
+    } else {
+        throw_java(
+            env,
+            "java/lang/UnsupportedOperationException",
+            "ByteBuffer must be direct or array-backed",
+        );
+        return Err(Error::Config(
+            "destination is neither direct nor array-backed".to_string(),
+        ));
+    }
+
+    set_byte_buffer_position(env, &buffer, position + body.len() as jint)?;
+    Ok(body.len())
 }
 
 fn recv_many_into(
@@ -1856,6 +1975,34 @@ pub extern "system" fn Java_io_omq_Native_socketRecv(
             Err(error) => {
                 throw_omq(env, error);
                 std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketRecvInto(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    destination: JObject<'_>,
+    timeout_millis: jlong,
+) -> jint {
+    guard(&mut env, 0, |env| {
+        let result = (|| {
+            let socket = socket_from_handle(handle)?.materialize()?;
+            let message = recv_with_timeout(&socket, timeout_millis)?;
+            write_message_to_byte_buffer(env, destination, &message).map(|len| len as jint)
+        })();
+
+        match result {
+            Ok(len) => len,
+            Err(error) => {
+                if env.exception_check().unwrap_or(false) {
+                    return 0;
+                }
+                throw_omq(env, error);
+                0
             }
         }
     })

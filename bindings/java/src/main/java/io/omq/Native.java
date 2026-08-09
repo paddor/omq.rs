@@ -2,6 +2,7 @@ package io.omq;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -62,6 +63,8 @@ final class Native {
     static native long socketSendAsync(long handle, byte[][] parts, Object future);
 
     static native Object socketRecv(long handle, long timeoutMillis);
+
+    static native int socketRecvInto(long handle, ByteBuffer destination, long timeoutMillis);
 
     static native Object[] socketRecvMany(long handle, int maxMessages, long timeoutMillis);
 

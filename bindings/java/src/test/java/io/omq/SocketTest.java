@@ -8,10 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -92,6 +95,121 @@ final class SocketTest {
             pull.bind("tcp://127.0.0.1:0");
 
             assertFalse(pull.tryReceiveBytes().isPresent());
+        }
+    }
+
+    @Test
+    void receiveIntoFillsHeapByteBufferAndAdvancesPosition() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-into-heap-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            byte[] storage = "xx.......yy".getBytes(StandardCharsets.UTF_8);
+            ByteBuffer destination = ByteBuffer.wrap(storage);
+            destination.position(2);
+            destination.limit(9);
+            push.send("payload");
+
+            OptionalInt count = pull.receiveInto(destination, Duration.ofSeconds(5));
+
+            assertEquals(7, count.orElseThrow());
+            assertEquals(9, destination.position());
+            assertEquals("xxpayloadyy", new String(storage, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void receiveIntoFillsDirectByteBuffer() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-into-direct-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            ByteBuffer destination = ByteBuffer.allocateDirect(16);
+            destination.position(1);
+            push.send("direct");
+
+            assertEquals(6, pull.receiveInto(destination));
+            assertEquals(7, destination.position());
+            destination.flip();
+            destination.position(1);
+            byte[] out = new byte[6];
+            destination.get(out);
+            assertArrayEquals("direct".getBytes(StandardCharsets.UTF_8), out);
+        }
+    }
+
+    @Test
+    void receiveIntoTimeoutReturnsEmptyAndKeepsPosition() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL)) {
+            pull.bind("inproc://receive-into-timeout-" + UUID.randomUUID());
+            ByteBuffer destination = ByteBuffer.allocate(8);
+            destination.position(3);
+
+            assertTrue(pull.receiveInto(destination, Duration.ofMillis(10)).isEmpty());
+            assertTrue(pull.tryReceiveInto(destination).isEmpty());
+            assertEquals(3, destination.position());
+        }
+    }
+
+    @Test
+    void receiveIntoRejectsTooSmallDestination() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-into-overflow-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            ByteBuffer destination = ByteBuffer.allocate(3);
+            push.send("toolong");
+
+            assertThrows(
+                    BufferOverflowException.class,
+                    () -> pull.receiveInto(destination, Duration.ofSeconds(5)));
+            assertEquals(0, destination.position());
+        }
+    }
+
+    @Test
+    void receiveIntoRejectsReadOnlyDestination() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-into-read-only-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            ByteBuffer destination = ByteBuffer.allocate(8).asReadOnlyBuffer();
+            push.send("readonly");
+
+            assertThrows(
+                    ReadOnlyBufferException.class,
+                    () -> pull.receiveInto(destination, Duration.ofSeconds(5)));
+            assertEquals(0, destination.position());
+        }
+    }
+
+    @Test
+    void receiveIntoRejectsMultipart() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            String endpoint = pull.bind("inproc://receive-into-multipart-" + UUID.randomUUID());
+            push.connect(endpoint);
+            push.waitConnected(1, Duration.ofSeconds(5));
+
+            push.send(Message.multipart("a".getBytes(), "b".getBytes()));
+
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> pull.receiveInto(ByteBuffer.allocate(8), Duration.ofSeconds(5)));
         }
     }
 

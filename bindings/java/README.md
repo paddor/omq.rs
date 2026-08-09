@@ -10,7 +10,7 @@ small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
 ## Highlights
 
 - Native OMQ engine shared with OMQ.rs.
-- High-throughput TCP and inproc messaging.
+- High-throughput `tcp://`, native `ipc://`, and `inproc://` messaging.
 - Compression transports: `lz4+tcp://` and `zstd+tcp://`.
 - Static compression dictionaries and auto-trained dictionaries.
 - PLAIN and CURVE security with Java auth callbacks and peer metadata.

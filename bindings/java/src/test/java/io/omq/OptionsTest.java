@@ -133,10 +133,15 @@ final class OptionsTest {
     }
 
     @Test
-    void validatesNativeOptionLimits() {
+    void validatesOptionLimitsBeforeNativeCall() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {
-            assertThrows(OMQException.class, () -> pull.compressionDict(new byte[9_000]));
+            assertThrows(IllegalArgumentException.class, () -> pull.compressionDict(new byte[0]));
+            assertThrows(IllegalArgumentException.class, () -> pull.compressionDict(new byte[9_000]));
+            assertThrows(IllegalArgumentException.class, () -> pull.compressionLevel(-9));
+            assertThrows(IllegalArgumentException.class, () -> pull.compressionLevel(5));
+            assertThrows(IllegalArgumentException.class,
+                    () -> pull.heartbeatTtl(Duration.ofMillis(6_553_501)));
         }
     }
 

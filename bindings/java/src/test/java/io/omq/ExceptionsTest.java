@@ -70,11 +70,11 @@ final class ExceptionsTest {
     }
 
     @Test
-    void optionValidationMapsToOmqException() {
+    void optionValidationUsesJavaArgumentException() {
         try (Context context = OMQ.context();
              Socket dealer = context.socket(SocketType.DEALER)) {
             byte[] tooLong = new byte[256];
-            assertThrows(OMQException.class, () -> dealer.identity(tooLong));
+            assertThrows(IllegalArgumentException.class, () -> dealer.identity(tooLong));
         }
     }
 

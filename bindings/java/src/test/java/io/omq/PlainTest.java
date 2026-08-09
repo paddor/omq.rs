@@ -1,6 +1,7 @@
 package io.omq;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -91,6 +92,36 @@ final class PlainTest {
             assertEquals("allowed", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
             assertEquals("alice", seen.get().username().orElseThrow());
             assertTrue(seen.get().publicKey().isEmpty());
+        }
+    }
+
+    @Test
+    void plainAuthenticatorCanRejectUser() {
+        AtomicReference<PeerInfo> seen = new AtomicReference<>();
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).plainServer(peer -> {
+                 seen.set(peer);
+                 return false;
+             });
+             Socket push = context.socket(SocketType.PUSH).plainClient("alice", "secret")) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.send("blocked");
+
+            assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
+            assertEquals("alice", seen.get().username().orElseThrow());
+        }
+    }
+
+    @Test
+    void plainCredentialsRejectZmtpOverlongStrings() {
+        String overlong = "a".repeat(256);
+        try (Context context = OMQ.context();
+             Socket socket = context.socket(SocketType.PULL)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> socket.plainServer(overlong, "secret"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> socket.plainClient("alice", overlong));
         }
     }
 }

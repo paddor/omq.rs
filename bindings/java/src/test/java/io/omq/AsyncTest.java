@@ -208,6 +208,31 @@ final class AsyncTest {
         }
     }
 
+    @Test
+    void receiveAnyRejectsEmptyAndNullSockets() {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL)) {
+            assertThrows(IllegalArgumentException.class, () -> OMQ.receiveAny(new Socket[0]));
+            assertThrows(NullPointerException.class, () -> OMQ.receiveAny(pull, null));
+            assertThrows(NullPointerException.class, () -> OMQ.receiveAny((Socket) null, pull));
+        }
+    }
+
+    @Test
+    void asyncOperationsOnClosedSocketCompleteExceptionally() throws Exception {
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL);
+             Socket push = context.socket(SocketType.PUSH)) {
+            pull.close();
+            push.close();
+
+            assertInstanceOf(ClosedException.class,
+                    assertThrowsExecution(pull.receiveAsync()).getCause());
+            assertInstanceOf(ClosedException.class,
+                    assertThrowsExecution(push.sendAsync("closed")).getCause());
+        }
+    }
+
     private static ExecutionException assertThrowsExecution(CompletableFuture<?> future)
             throws InterruptedException, java.util.concurrent.TimeoutException {
         try {

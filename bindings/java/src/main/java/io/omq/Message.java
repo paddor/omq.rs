@@ -36,7 +36,7 @@ public final class Message {
         return new Message(body, true);
     }
 
-    /** Creates a single-part message from the remaining bytes of {@code body}. */
+    /** Creates a single-part message from remaining bytes without changing position. */
     public static Message of(ByteBuffer body) {
         Objects.requireNonNull(body, "body");
         return of(readRemaining(body));
@@ -60,7 +60,7 @@ public final class Message {
         return new Message(parts);
     }
 
-    /** Creates a multipart message from the remaining bytes of every buffer. */
+    /** Creates multipart message parts from remaining bytes without changing positions. */
     public static Message multipart(ByteBuffer... parts) {
         Objects.requireNonNull(parts, "parts");
         byte[][] out = new byte[parts.length][];

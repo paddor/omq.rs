@@ -27,6 +27,7 @@ final class SendRing implements AutoCloseable {
     private MemorySegment control;
     private MemorySegment descriptors;
     private MemorySegment payload;
+    private int descCapacity;
     private long descMask;
     private long payloadMask;
     private long payloadCapacity;
@@ -70,9 +71,9 @@ final class SendRing implements AutoCloseable {
     }
 
     private boolean descIsFull() {
-        if (tail - cachedHead >= DEFAULT_DESC_CAPACITY) {
+        if (tail - cachedHead >= descCapacity) {
             cachedHead = headAcquire();
-            return tail - cachedHead >= DEFAULT_DESC_CAPACITY;
+            return tail - cachedHead >= descCapacity;
         }
         return false;
     }
@@ -137,7 +138,10 @@ final class SendRing implements AutoCloseable {
         long controlAddress = NativeFfm.sendRingControlAddress(created);
         long descAddress = NativeFfm.sendRingDescAddress(created);
         long payloadAddress = NativeFfm.sendRingPayloadAddress(created);
-        if (descCapacity != DEFAULT_DESC_CAPACITY || nativePayloadCapacity <= 0
+        if (descCapacity != DEFAULT_DESC_CAPACITY
+                || !isPowerOfTwo(descCapacity)
+                || nativePayloadCapacity <= 0
+                || !isPowerOfTwo(nativePayloadCapacity)
                 || controlAddress == 0 || descAddress == 0 || payloadAddress == 0) {
             NativeFfm.sendRingClose(created);
             throw new OMQException("native send ring returned invalid memory");
@@ -147,6 +151,7 @@ final class SendRing implements AutoCloseable {
         descriptors = MemorySegment.ofAddress(descAddress)
                 .reinterpret((long) descCapacity * DESC_BYTES);
         payload = MemorySegment.ofAddress(payloadAddress).reinterpret(nativePayloadCapacity);
+        this.descCapacity = descCapacity;
         descMask = descCapacity - 1L;
         payloadMask = nativePayloadCapacity - 1L;
         payloadCapacity = nativePayloadCapacity;
@@ -167,12 +172,17 @@ final class SendRing implements AutoCloseable {
         control = null;
         descriptors = null;
         payload = null;
+        descCapacity = 0;
         NativeFfm.sendRingClose(current);
     }
 
     private static int backoff(int spins) {
         Thread.onSpinWait();
         return spins + 1;
+    }
+
+    private static boolean isPowerOfTwo(long value) {
+        return value > 0 && (value & (value - 1)) == 0;
     }
 
     private record Reservation(long offset, long end) {

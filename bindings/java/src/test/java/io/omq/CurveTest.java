@@ -33,6 +33,8 @@ final class CurveTest {
     @Test
     void badSecretKeyIsRejected() {
         assertThrows(OMQException.class, () -> OMQ.curvePublic("not-valid-z85-key"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CurveKeypair("0".repeat(39) + "\\", "0".repeat(40)));
     }
 
     @Test
@@ -94,7 +96,29 @@ final class CurveTest {
         CurveKeypair mismatched = new CurveKeypair(first.publicKey(), second.secretKey());
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)) {
-            assertThrows(OMQException.class, () -> pull.curveServer(mismatched));
+            assertThrows(IllegalArgumentException.class, () -> pull.curveServer(mismatched));
+        }
+    }
+
+    @Test
+    void curveAuthenticatorRejectsUnknownClient() {
+        CurveKeypair serverKeypair = OMQ.curveKeypair();
+        CurveKeypair clientKeypair = OMQ.curveKeypair();
+        CurveKeypair allowedKeypair = OMQ.curveKeypair();
+        AtomicReference<PeerInfo> seen = new AtomicReference<>();
+        try (Context context = OMQ.context();
+             Socket pull = context.socket(SocketType.PULL).curveServer(serverKeypair, peer -> {
+                 seen.set(peer);
+                 return allowedKeypair.publicKey().equals(peer.publicKey().orElse(""));
+             });
+             Socket push = context.socket(SocketType.PUSH)
+                     .curveClient(clientKeypair, serverKeypair.publicKey())) {
+            String endpoint = pull.bind("tcp://127.0.0.1:0");
+            push.connect(endpoint);
+            push.send("blocked");
+
+            assertTrue(pull.receive(Duration.ofMillis(500)).isEmpty());
+            assertEquals(clientKeypair.publicKey(), seen.get().publicKey().orElseThrow());
         }
     }
 

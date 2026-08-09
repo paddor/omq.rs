@@ -15,6 +15,7 @@ src/main/java/io/omq/
   Native.java          JNI declarations and packaged native library loader
   NativeFfm.java       Java 25 FFM downcalls for fast native data paths
   RecvRing.java        off-heap receive cache consumed from Java
+  SendRing.java        off-heap single-part send ring produced by Java
   *Exception.java      unchecked exception hierarchy
 
 native/src/
@@ -74,9 +75,19 @@ Descriptors and payload storage are native memory. Large payloads that do not
 fit the payload ring are held as native external blocks until Java advances
 `head`.
 
+Single-part `PUSH` and `SCATTER` sends use a matching FFM send fast path.
+Java copies the user `byte[]` into an off-heap SPSC payload ring, writes one
+descriptor, and release-stores `tail`. A native worker thread drains
+descriptors, builds OMQ `Message` values backed by the off-heap slot, and
+submits them to `omq_tokio::blocking::Socket::try_send_many()`. The slot is
+released only when Rust drops the message owner. Large messages that do not
+fit the send payload ring close the send ring and fall back to the normal JNI
+send path, preserving order before fallback.
+
 JNI remains the control plane for context/socket setup, options, auth
-callbacks, monitors, send, and async completion. The C ABI used by FFM is
-small and Java-specific; it is not `omq-libzmq`.
+callbacks, monitors, multipart send, non-`PUSH`/`SCATTER` send, timeout send,
+and async completion. The C ABI used by FFM is small and Java-specific; it is
+not `omq-libzmq`.
 
 `sendManyBytes` crosses JNI once with a Java `byte[][]` and sends each inner
 array as one single-part message. The Rust side copies each array into owned
@@ -155,3 +166,12 @@ All OMQ Java exceptions are unchecked.
 
 Java argument validation still uses standard `NullPointerException`,
 `IllegalArgumentException`, or `IllegalStateException` where appropriate.
+
+## Tests
+
+Normal CI runs the JUnit suite with the native library built by Maven. The
+soak test is opt-in and skipped unless `OMQ_JAVA_SOAK=1` or
+`-Domq.java.soak=true` is set. `bindings/java/scripts/soak.sh` runs the same
+mixed workload at 5, 10, 30, and 60 minutes by default. It exercises TCP peer
+churn, CURVE-authenticated churn, `lz4+tcp://`, `zstd+tcp://`, and shared
+context `inproc://` traffic while checking heap and RSS growth.

@@ -22,6 +22,11 @@ public final class Socket implements AutoCloseable {
     private static final Cleaner CLEANER = Cleaner.create();
     private static final long FOREVER = -1;
     private static final long NONE = -1;
+    private static final int ZMTP_MAX_SHORT_STRING_BYTES = 255;
+    private static final int COMPRESSION_DICT_MAX_BYTES = 8 * 1024;
+    private static final int ZSTD_LEVEL_MIN = -8;
+    private static final int ZSTD_LEVEL_MAX = 4;
+    private static final long MAX_HEARTBEAT_TTL_MILLIS = 6_553_500;
 
     private final Context context;
     private final SocketType type;
@@ -76,7 +81,7 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
-    /** Sends the remaining bytes of {@code body} as one message part. */
+    /** Sends the remaining bytes of {@code body} without changing its position. */
     public synchronized Socket send(ByteBuffer body) {
         return send(Message.of(body));
     }
@@ -107,7 +112,7 @@ public final class Socket implements AutoCloseable {
         return send(Message.of(body), timeout);
     }
 
-    /** Sends the remaining bytes of {@code body} before the timeout, or returns false. */
+    /** Sends the remaining bytes of {@code body} before the timeout without changing its position. */
     public synchronized boolean send(ByteBuffer body, Duration timeout) {
         return send(Message.of(body), timeout);
     }
@@ -148,7 +153,7 @@ public final class Socket implements AutoCloseable {
         return trySend(Message.of(body));
     }
 
-    /** Attempts to send remaining buffer bytes without blocking. */
+    /** Attempts to send remaining buffer bytes without blocking or changing its position. */
     public synchronized boolean trySend(ByteBuffer body) {
         return trySend(Message.of(body));
     }
@@ -178,7 +183,7 @@ public final class Socket implements AutoCloseable {
         return sendAsync(Message.of(body));
     }
 
-    /** Sends the remaining buffer bytes asynchronously on the native runtime. */
+    /** Sends the remaining buffer bytes asynchronously without changing its position. */
     public synchronized CompletableFuture<Void> sendAsync(ByteBuffer body) {
         return sendAsync(Message.of(body));
     }
@@ -416,12 +421,13 @@ public final class Socket implements AutoCloseable {
 
     /** Receives one message asynchronously on the native runtime; canceling aborts the native receive. */
     public synchronized CompletableFuture<Message> receiveAsync() {
-        Optional<Message> cached = tryReceiveCachedMessage();
-        if (cached.isPresent()) {
-            return CompletableFuture.completedFuture(cached.orElseThrow());
-        }
         NativeFuture<Message> future = new NativeFuture<>();
         try {
+            Optional<Message> cached = tryReceiveCachedMessage();
+            if (cached.isPresent()) {
+                future.complete(cached.orElseThrow());
+                return future;
+            }
             long task = withHandle(handle -> Native.socketRecvAsync(handle, FOREVER, future));
             future.setNativeTask(task);
         } catch (OMQException error) {
@@ -433,13 +439,14 @@ public final class Socket implements AutoCloseable {
     /** Receives one message asynchronously before the timeout; canceling aborts the native receive. */
     public synchronized CompletableFuture<Message> receiveAsync(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout");
-        Optional<Message> cached = tryReceiveCachedMessage();
-        if (cached.isPresent()) {
-            return CompletableFuture.completedFuture(cached.orElseThrow());
-        }
         NativeFuture<Message> future = new NativeFuture<>();
         long timeoutMillis = millis(timeout);
         try {
+            Optional<Message> cached = tryReceiveCachedMessage();
+            if (cached.isPresent()) {
+                future.complete(cached.orElseThrow());
+                return future;
+            }
             long task = withHandle(handle -> Native.socketRecvAsync(handle, timeoutMillis, future));
             future.setNativeTask(task);
         } catch (OMQException error) {
@@ -481,11 +488,35 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
+    /** Joins a RADIO/DISH group encoded as UTF-8. */
+    public synchronized Socket join(String group) {
+        return join(group, StandardCharsets.UTF_8);
+    }
+
+    /** Joins a RADIO/DISH group encoded with the supplied charset. */
+    public synchronized Socket join(String group, Charset charset) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(charset, "charset");
+        return join(group.getBytes(charset));
+    }
+
     /** Leaves a RADIO/DISH group. */
     public synchronized Socket leave(byte[] group) {
         Objects.requireNonNull(group, "group");
         withHandleVoid(handle -> Native.socketLeave(handle, group));
         return this;
+    }
+
+    /** Leaves a RADIO/DISH group encoded as UTF-8. */
+    public synchronized Socket leave(String group) {
+        return leave(group, StandardCharsets.UTF_8);
+    }
+
+    /** Leaves a RADIO/DISH group encoded with the supplied charset. */
+    public synchronized Socket leave(String group, Charset charset) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(charset, "charset");
+        return leave(group.getBytes(charset));
     }
 
     /** Waits until at least {@code minPeers} peers are connected. */
@@ -522,6 +553,7 @@ public final class Socket implements AutoCloseable {
     /** Sets this socket identity. Must be set before first I/O. */
     public synchronized Socket identity(byte[] identity) {
         Objects.requireNonNull(identity, "identity");
+        requireMaxLength("identity", identity.length, ZMTP_MAX_SHORT_STRING_BYTES);
         withHandleVoid(handle -> Native.socketSetIdentity(handle, identity));
         return this;
     }
@@ -604,6 +636,10 @@ public final class Socket implements AutoCloseable {
 
     /** Sets compression level before first I/O. */
     public synchronized Socket compressionLevel(int level) {
+        if (level < ZSTD_LEVEL_MIN || level > ZSTD_LEVEL_MAX) {
+            throw new IllegalArgumentException(
+                    "zstd compression level must be " + ZSTD_LEVEL_MIN + "..=" + ZSTD_LEVEL_MAX);
+        }
         withHandleVoid(handle -> Native.socketSetCompressionLevel(handle, level));
         return this;
     }
@@ -618,6 +654,8 @@ public final class Socket implements AutoCloseable {
     public synchronized Socket plainServer(String username, String password) {
         Objects.requireNonNull(username, "username");
         Objects.requireNonNull(password, "password");
+        requireZmtpShortString("username", username);
+        requireZmtpShortString("password", password);
         withHandleVoid(handle -> Native.socketSetPlainServer(handle, username, password));
         return this;
     }
@@ -633,6 +671,8 @@ public final class Socket implements AutoCloseable {
     public synchronized Socket plainClient(String username, String password) {
         Objects.requireNonNull(username, "username");
         Objects.requireNonNull(password, "password");
+        requireZmtpShortString("username", username);
+        requireZmtpShortString("password", password);
         withHandleVoid(handle -> Native.socketSetPlainClient(handle, username, password));
         return this;
     }
@@ -640,6 +680,7 @@ public final class Socket implements AutoCloseable {
     /** Configures this socket as a CURVE server before first I/O. */
     public synchronized Socket curveServer(CurveKeypair keypair) {
         Objects.requireNonNull(keypair, "keypair");
+        requireMatchingCurveKeypair(keypair);
         withHandleVoid(handle -> Native.socketSetCurveServer(
                 handle, keypair.publicKey(), keypair.secretKey()));
         return this;
@@ -650,6 +691,7 @@ public final class Socket implements AutoCloseable {
             CurveKeypair keypair, Predicate<PeerInfo> authenticator) {
         Objects.requireNonNull(keypair, "keypair");
         Objects.requireNonNull(authenticator, "authenticator");
+        requireMatchingCurveKeypair(keypair);
         withHandleVoid(handle -> Native.socketSetCurveServerCallback(
                 handle, keypair.publicKey(), keypair.secretKey(), authenticator));
         return this;
@@ -659,6 +701,8 @@ public final class Socket implements AutoCloseable {
     public synchronized Socket curveClient(CurveKeypair keypair, String serverPublicKey) {
         Objects.requireNonNull(keypair, "keypair");
         Objects.requireNonNull(serverPublicKey, "serverPublicKey");
+        requireMatchingCurveKeypair(keypair);
+        requireCurvePublicKey(serverPublicKey);
         withHandleVoid(handle -> Native.socketSetCurveClient(
                 handle, keypair.publicKey(), keypair.secretKey(), serverPublicKey));
         return this;
@@ -719,6 +763,9 @@ public final class Socket implements AutoCloseable {
     public synchronized Socket heartbeatTtl(Duration ttl) {
         Objects.requireNonNull(ttl, "ttl");
         long ttlMillis = millis(ttl);
+        if (ttlMillis > MAX_HEARTBEAT_TTL_MILLIS) {
+            throw new IllegalArgumentException("heartbeat TTL exceeds ZMTP maximum of 6553.5s");
+        }
         withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, ttlMillis));
         return this;
     }
@@ -824,6 +871,10 @@ public final class Socket implements AutoCloseable {
     /** Sets a compression dictionary before first I/O. */
     public synchronized Socket compressionDict(byte[] dict) {
         Objects.requireNonNull(dict, "dict");
+        if (dict.length == 0) {
+            throw new IllegalArgumentException("compression dict must not be empty");
+        }
+        requireMaxLength("compression dict", dict.length, COMPRESSION_DICT_MAX_BYTES);
         withHandleVoid(handle -> Native.socketSetCompressionDict(handle, dict));
         return this;
     }
@@ -991,6 +1042,35 @@ public final class Socket implements AutoCloseable {
     private static void requireNonNegative(String name, long value) {
         if (value < 0) {
             throw new IllegalArgumentException(name + " must be non-negative");
+        }
+    }
+
+    private static void requireMaxLength(String name, int length, int max) {
+        if (length > max) {
+            throw new IllegalArgumentException(name + " length must be at most " + max + " bytes");
+        }
+    }
+
+    private static void requireZmtpShortString(String name, String value) {
+        requireMaxLength(
+                name,
+                value.getBytes(StandardCharsets.UTF_8).length,
+                ZMTP_MAX_SHORT_STRING_BYTES);
+    }
+
+    private static void requireCurvePublicKey(String publicKey) {
+        CurveKeys.requireZ85Key("CURVE public key", publicKey);
+    }
+
+    private static void requireMatchingCurveKeypair(CurveKeypair keypair) {
+        String derivedPublicKey;
+        try {
+            derivedPublicKey = OMQ.curvePublic(keypair.secretKey());
+        } catch (OMQException error) {
+            throw new IllegalArgumentException("CURVE secret key must be valid Z85", error);
+        }
+        if (!keypair.publicKey().equals(derivedPublicKey)) {
+            throw new IllegalArgumentException("CURVE public key does not match secret key");
         }
     }
 

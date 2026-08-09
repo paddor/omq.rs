@@ -28,7 +28,7 @@ final class RecvRing implements AutoCloseable {
     private static final long FLAG_EXTERNAL = 2;
 
     private static final ValueLayout.OfInt INT =
-            ValueLayout.JAVA_INT.withOrder(ByteOrder.nativeOrder());
+            ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
     private static final ValueLayout.OfLong LONG =
             ValueLayout.JAVA_LONG.withOrder(ByteOrder.nativeOrder());
     private static final VarHandle ATOMIC_LONG = LONG.varHandle();
@@ -217,7 +217,10 @@ final class RecvRing implements AutoCloseable {
         long controlAddress = NativeFfm.recvRingControlAddress(created);
         long descAddress = NativeFfm.recvRingDescAddress(created);
         long payloadAddress = NativeFfm.recvRingPayloadAddress(created);
-        if (descCapacity <= 0 || payloadCapacity <= 0
+        if (descCapacity <= 0
+                || !isPowerOfTwo(descCapacity)
+                || payloadCapacity <= 0
+                || !isPowerOfTwo(payloadCapacity)
                 || controlAddress == 0 || descAddress == 0 || payloadAddress == 0) {
             NativeFfm.recvRingClose(created);
             throw new OMQException("native receive ring returned invalid memory");
@@ -251,6 +254,10 @@ final class RecvRing implements AutoCloseable {
             throw new OMQException("message is too large for a Java byte array");
         }
         return (int) len;
+    }
+
+    private static boolean isPowerOfTwo(long value) {
+        return value > 0 && (value & (value - 1)) == 0;
     }
 
     private record Desc(

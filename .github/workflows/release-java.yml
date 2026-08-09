@@ -67,10 +67,14 @@ jobs:
           mkdir -p "$resource_dir"
           cp "bindings/java/native/target/release/${{ matrix.library }}" "$resource_dir/"
       - name: JUnit with release native
-        run: >
-          mvn -B -ntp -f bindings/java/pom.xml -DskipNative=true
-          -Domq.java.peer.path=${{ github.workspace }}/bindings/java/native/target/release/omq-java-peer
-          surefire:test
+        shell: bash
+        run: |
+          peer_path="${GITHUB_WORKSPACE}/bindings/java/native/target/release/omq-java-peer"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            peer_path="$(pwd -W)/bindings/java/native/target/release/omq-java-peer"
+          fi
+          mvn -B -ntp -f bindings/java/pom.xml -DskipNative=true \
+            "-Domq.java.peer.path=${peer_path}" surefire:test
       - name: Stage native artifact
         shell: bash
         run: |

@@ -18,14 +18,52 @@ type Socket struct {
 	closeOnce  sync.Once
 }
 
+type socketOpKind uint8
+
+const (
+	socketOpFunc socketOpKind = iota
+	socketOpBind
+	socketOpConnect
+	socketOpUnbind
+	socketOpDisconnect
+	socketOpSend
+	socketOpSendBatch
+	socketOpRecv
+	socketOpRecvInto
+	socketOpSubscribe
+	socketOpUnsubscribe
+	socketOpJoin
+	socketOpLeave
+	socketOpClose
+	socketOpRun
+)
+
 type socketOp struct {
-	fn   func(*nativeSocket) (any, error)
+	kind          socketOpKind
+	fn            func(*nativeSocket) (any, error)
+	endpoint      string
+	msg           Message
+	messages      []Message
+	buffer        []byte
+	data          []byte
+	linger        time.Duration
+	useConfigured bool
+	run           func(*BoundSocket) error
+	socketType    SocketType
+	call          *socketCall
+}
+
+type socketCall struct {
 	resp chan socketResult
 }
 
 type socketResult struct {
-	value any
-	err   error
+	value   any
+	message Message
+	text    string
+	count   int
+	monitor *nativeMonitor
+	err     error
 }
 
 func newSocket(handle *nativeSocket, socketType SocketType) *Socket {
@@ -39,6 +77,12 @@ func newSocket(handle *nativeSocket, socketType SocketType) *Socket {
 	return socket
 }
 
+var socketCallPool = sync.Pool{
+	New: func() any {
+		return &socketCall{resp: make(chan socketResult, 1)}
+	},
+}
+
 func (s *Socket) ownerLoop() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -46,81 +90,136 @@ func (s *Socket) ownerLoop() {
 
 	handle := s.handle
 	for op := range s.ops {
-		value, err := op.fn(handle)
-		op.resp <- socketResult{value: value, err: err}
+		op.call.resp <- runSocketOp(handle, op)
 	}
 	if handle != nil {
 		socketFreeNative(handle)
 	}
 }
 
+func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
+	switch op.kind {
+	case socketOpFunc:
+		value, err := op.fn(handle)
+		return socketResult{value: value, err: err}
+	case socketOpBind:
+		text, err := socketBindNative(handle, op.endpoint)
+		return socketResult{text: text, err: err}
+	case socketOpConnect:
+		return socketResult{err: socketConnectNative(handle, op.endpoint)}
+	case socketOpUnbind:
+		return socketResult{err: socketUnbindNative(handle, op.endpoint)}
+	case socketOpDisconnect:
+		return socketResult{err: socketDisconnectNative(handle, op.endpoint)}
+	case socketOpSend:
+		return socketResult{err: socketMessageSendNative(handle, op.msg)}
+	case socketOpSendBatch:
+		count, err := socketMessagesTrySendNative(handle, op.messages)
+		return socketResult{count: count, err: err}
+	case socketOpRecv:
+		msg, err := socketMessageRecvNative(handle)
+		return socketResult{message: msg, err: err}
+	case socketOpRecvInto:
+		count, err := socketMessageRecvIntoNative(handle, op.buffer)
+		return socketResult{count: count, err: err}
+	case socketOpSubscribe:
+		return socketResult{err: socketSubscribeNative(handle, op.data)}
+	case socketOpUnsubscribe:
+		return socketResult{err: socketUnsubscribeNative(handle, op.data)}
+	case socketOpJoin:
+		return socketResult{err: socketJoinNative(handle, op.data)}
+	case socketOpLeave:
+		return socketResult{err: socketLeaveNative(handle, op.data)}
+	case socketOpClose:
+		return socketResult{err: socketCloseNative(handle, op.linger, op.useConfigured)}
+	case socketOpRun:
+		bound := &BoundSocket{handle: handle, socketType: op.socketType}
+		err := op.run(bound)
+		closeErr := bound.close()
+		if err != nil {
+			return socketResult{err: err}
+		}
+		return socketResult{err: closeErr}
+	default:
+		return socketResult{err: &ConfigError{Err: "unknown socket op"}}
+	}
+}
+
 func (s *Socket) call(ctx context.Context, allowClosed bool, fn func(*nativeSocket) (any, error)) (value any, err error) {
+	result, err := s.do(ctx, allowClosed, socketOp{kind: socketOpFunc, fn: fn})
+	if err != nil {
+		return nil, err
+	}
+	return result.value, result.err
+}
+
+func (s *Socket) do(ctx context.Context, allowClosed bool, op socketOp) (result socketResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if s == nil || s.ops == nil {
-		return nil, ErrClosed
+		return socketResult{}, ErrClosed
 	}
 	if !allowClosed && s.closed.Load() {
-		return nil, ErrClosed
+		return socketResult{}, ErrClosed
 	}
 	defer func() {
 		if recover() != nil {
-			value = nil
+			result = socketResult{}
 			err = ErrClosed
 		}
 	}()
 
-	resp := make(chan socketResult, 1)
-	op := socketOp{fn: fn, resp: resp}
+	call := socketCallPool.Get().(*socketCall)
+	op.call = call
+	putCall := true
+	defer func() {
+		if putCall {
+			socketCallPool.Put(call)
+		}
+	}()
 	select {
 	case s.ops <- op:
 	case <-s.ownerDone:
-		return nil, ErrClosed
+		return socketResult{}, ErrClosed
 	case <-ctx.Done():
-		return nil, errFromContext(ctx)
+		return socketResult{}, errFromContext(ctx)
 	}
 	select {
-	case result := <-resp:
-		return result.value, result.err
+	case result := <-call.resp:
+		return result, result.err
 	case <-s.ownerDone:
-		return nil, ErrClosed
+		putCall = false
+		return socketResult{}, ErrClosed
 	case <-ctx.Done():
-		return nil, errFromContext(ctx)
+		putCall = false
+		return socketResult{}, errFromContext(ctx)
 	}
 }
 
 func (s *Socket) Bind(endpoint string) (string, error) {
-	value, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return socketBindNative(handle, endpoint)
-	})
+	result, err := s.do(context.Background(), false, socketOp{kind: socketOpBind, endpoint: endpoint})
 	if err != nil {
 		return "", err
 	}
 	keepAlive(s)
-	return value.(string), nil
+	return result.text, nil
 }
 
 func (s *Socket) Connect(endpoint string) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketConnectNative(handle, endpoint)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpConnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) Unbind(endpoint string) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketUnbindNative(handle, endpoint)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnbind, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) Disconnect(endpoint string) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketDisconnectNative(handle, endpoint)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpDisconnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
@@ -140,33 +239,25 @@ func (s *Socket) Send(ctx context.Context, msg Message) error {
 		if !errors.Is(err, ErrAgain) {
 			return err
 		}
-		timer := time.NewTimer(retryDelay(i))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return errFromContext(ctx)
-		case <-timer.C:
+		if err := waitRetry(ctx, i); err != nil {
+			return err
 		}
 	}
 }
 
 func (s *Socket) TrySend(msg Message) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketMessageSendNative(handle, msg)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSend, msg: msg})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) trySendBatch(messages []Message) (int, error) {
-	value, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return socketMessagesTrySendNative(handle, messages)
-	})
+	result, err := s.do(context.Background(), false, socketOp{kind: socketOpSendBatch, messages: messages})
 	if err != nil {
 		return 0, err
 	}
 	keepAlive(s)
-	return value.(int), nil
+	return result.count, nil
 }
 
 func (s *Socket) SendTimeout(msg Message, timeout time.Duration) error {
@@ -196,25 +287,49 @@ func (s *Socket) Recv(ctx context.Context) (Message, error) {
 		if !errors.Is(err, ErrAgain) {
 			return Message{}, err
 		}
-		timer := time.NewTimer(retryDelay(i))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return Message{}, errFromContext(ctx)
-		case <-timer.C:
+		if err := waitRetry(ctx, i); err != nil {
+			return Message{}, err
+		}
+	}
+}
+
+func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return 0, err
+		}
+		n, err := s.TryRecvInto(dst)
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, ErrAgain) {
+			return 0, err
+		}
+		if err := waitRetry(ctx, i); err != nil {
+			return 0, err
 		}
 	}
 }
 
 func (s *Socket) TryRecv() (Message, error) {
-	value, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return socketMessageRecvNative(handle)
-	})
+	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecv})
 	if err != nil {
 		return Message{}, err
 	}
 	keepAlive(s)
-	return value.(Message), nil
+	return result.message, nil
+}
+
+func (s *Socket) TryRecvInto(dst []byte) (int, error) {
+	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecvInto, buffer: dst})
+	if err != nil {
+		return 0, err
+	}
+	keepAlive(s)
+	return result.count, nil
 }
 
 func (s *Socket) RecvTimeout(timeout time.Duration) (Message, error) {
@@ -229,34 +344,38 @@ func (s *Socket) RecvTimeout(timeout time.Duration) (Message, error) {
 	return s.Recv(ctx)
 }
 
+func (s *Socket) RecvIntoTimeout(dst []byte, timeout time.Duration) (int, error) {
+	if timeout == 0 {
+		return s.TryRecvInto(dst)
+	}
+	if timeout < 0 {
+		return s.RecvInto(context.Background(), dst)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.RecvInto(ctx, dst)
+}
+
 func (s *Socket) Subscribe(prefix []byte) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketSubscribeNative(handle, prefix)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) Unsubscribe(prefix []byte) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketUnsubscribeNative(handle, prefix)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnsubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) Join(group []byte) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketJoinNative(handle, group)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpJoin, data: group})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) Leave(group []byte) error {
-	_, err := s.call(context.Background(), false, func(handle *nativeSocket) (any, error) {
-		return nil, socketLeaveNative(handle, group)
-	})
+	_, err := s.do(context.Background(), false, socketOp{kind: socketOpLeave, data: group})
 	keepAlive(s)
 	return err
 }
@@ -271,9 +390,7 @@ func (s *Socket) Close(ctx context.Context) error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
-		_, err = s.call(ctx, true, func(handle *nativeSocket) (any, error) {
-			return nil, socketCloseNative(handle, 0, true)
-		})
+		_, err = s.do(ctx, true, socketOp{kind: socketOpClose, useConfigured: true})
 		close(s.ops)
 		<-s.ownerDone
 		s.handle = nil
@@ -292,9 +409,7 @@ func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 	var err error
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
-		_, err = s.call(ctx, true, func(handle *nativeSocket) (any, error) {
-			return nil, socketCloseNative(handle, linger, false)
-		})
+		_, err = s.do(ctx, true, socketOp{kind: socketOpClose, linger: linger})
 		close(s.ops)
 		<-s.ownerDone
 		s.handle = nil
@@ -310,6 +425,15 @@ func (s *Socket) Type() SocketType {
 	return s.socketType
 }
 
+func (s *Socket) Run(ctx context.Context, fn func(*BoundSocket) error) error {
+	if fn == nil {
+		return &ConfigError{Err: "nil socket run function"}
+	}
+	_, err := s.do(ctx, false, socketOp{kind: socketOpRun, run: fn, socketType: s.socketType})
+	keepAlive(s)
+	return err
+}
+
 func (s *Socket) free() {
 	if s == nil || s.ops == nil {
 		return
@@ -319,4 +443,172 @@ func (s *Socket) free() {
 
 func (s *Socket) noFinalizer() {
 	runtime.SetFinalizer(s, nil)
+}
+
+type BoundSocket struct {
+	handle     *nativeSocket
+	socketType SocketType
+	sendRing   *sendRing
+	recvRing   *recvRing
+}
+
+func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return err
+		}
+		err := s.TrySend(msg)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrAgain) {
+			return err
+		}
+		if err := waitRetry(ctx, i); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *BoundSocket) TrySend(msg Message) error {
+	handled, err := s.trySendRing(msg)
+	if handled {
+		return err
+	}
+	return socketMessageSendNative(s.handle, msg)
+}
+
+func (s *BoundSocket) SendBlocking(msg Message) error {
+	for i := 0; ; i++ {
+		handled, err := s.trySendRing(msg)
+		if !handled {
+			break
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrAgain) {
+			return err
+		}
+		if err := waitRetry(context.Background(), i); err != nil {
+			return err
+		}
+	}
+	return socketMessageSendWaitNative(s.handle, msg)
+}
+
+func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return 0, err
+		}
+		n, err := socketMessageRecvIntoNative(s.handle, dst)
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, ErrAgain) {
+			return 0, err
+		}
+		if err := waitRetry(ctx, i); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return 0, err
+	}
+	return ring.tryRecvInto(dst)
+}
+
+func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return 0, err
+	}
+	return ring.recvIntoBlocking(dst)
+}
+
+type RecvView struct {
+	data []byte
+}
+
+func (v RecvView) Bytes() []byte {
+	return v.data
+}
+
+func (v RecvView) Len() int {
+	return len(v.data)
+}
+
+func (s *BoundSocket) TryRecvView() (RecvView, error) {
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return RecvView{}, err
+	}
+	return ring.tryRecvView()
+}
+
+func (s *BoundSocket) trySendRing(msg Message) (bool, error) {
+	if s.socketType != Push && s.socketType != Scatter {
+		return false, nil
+	}
+	parts := msg.partsView()
+	if len(parts) != 1 {
+		return false, nil
+	}
+	ring, err := s.ensureSendRing()
+	if err != nil {
+		return true, err
+	}
+	return ring.trySend(parts[0])
+}
+
+func (s *BoundSocket) ensureSendRing() (*sendRing, error) {
+	if s.sendRing != nil {
+		return s.sendRing, nil
+	}
+	ring, err := newSendRing(s.handle)
+	if err != nil {
+		return nil, err
+	}
+	s.sendRing = ring
+	return ring, nil
+}
+
+func (s *BoundSocket) ensureRecvRing() (*recvRing, error) {
+	if s.recvRing != nil {
+		return s.recvRing, nil
+	}
+	ring, err := newRecvRing(s.handle)
+	if err != nil {
+		return nil, err
+	}
+	s.recvRing = ring
+	return ring, nil
+}
+
+func (s *BoundSocket) close() error {
+	err := socketRecvViewClearNative(s.handle)
+	if s.recvRing != nil {
+		s.recvRing.close()
+		s.recvRing = nil
+	}
+	if s.sendRing == nil {
+		return err
+	}
+	closeErr := s.sendRing.close()
+	s.sendRing = nil
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

@@ -20,10 +20,12 @@ Public send and receive APIs are scalar:
 
 - `Send(ctx, Message)`
 - `Recv(ctx)`
+- `RecvInto(ctx, []byte)`
 - `SendTimeout(Message, time.Duration)`
 - `RecvTimeout(time.Duration)`
 - `TrySend(Message)`
 - `TryRecv()`
+- `TryRecvInto([]byte)`
 
 Timeout helpers are convenience wrappers around context-aware loops:
 
@@ -35,16 +37,31 @@ Go cancellation is handled before entering cgo and between nonblocking
 native attempts. User goroutines do not need to close a socket from another
 goroutine to interrupt a blocked receive.
 
+`Socket.Run(ctx, fn)` executes `fn` on the socket owner goroutine, pinned to
+one OS thread. It is the low-latency path for tight loops. `BoundSocket`
+keeps scalar methods, but skips the per-call owner-channel handoff while
+preserving the one-native-thread-per-socket rule.
+
 ## Data Path
 
 Go copies outbound message parts into C-owned memory before calling native
 code. Native never stores Go pointers. Inbound message parts are allocated
 by Rust and copied into Go-owned `[]byte` before the native message is freed.
 
-Receive uses hidden batching. When the native receive cache is empty,
-Rust calls `try_recv_many_into`, `recv_many_into`, or
-`recv_many_timeout_into` with a reused scratch vector, then returns one
-message to Go. No public batch API is exposed.
+Hot `BoundSocket` sends for single-part `PUSH` and `SCATTER` copy the Go
+payload into a native SPSC send ring. A native worker drains descriptors in
+batches and submits them with OMQ's private `try_send_many` path. Native
+keeps each ring slot alive until the OMQ `Message` drops, so Go buffers are
+never retained by Rust.
+
+Hot `BoundSocket` receives use a native SPSC receive ring. Rust refills the
+ring with `try_recv_many_into`, `recv_many_into`, or `recv_many_timeout_into`
+and Go drains scalar `RecvInto` calls from ring descriptors. No public batch
+API is exposed.
+
+The general scalar API remains context-aware and goroutine-safe. It pays the
+owner-channel and cgo transition costs on each operation. Use `Socket.Run`
+when a socket is on a hot path.
 
 ## Channels
 

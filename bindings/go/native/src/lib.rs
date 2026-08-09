@@ -4,13 +4,14 @@
 )]
 
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::slice;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -39,6 +40,7 @@ const MESSAGE_TOO_LARGE: i32 = 11;
 const ERROR: i32 = 99;
 
 const RECV_BATCH: usize = 64;
+const RING_BATCH: usize = 512;
 
 #[repr(C)]
 pub struct OmqGoStatus {
@@ -78,6 +80,152 @@ pub struct OmqGoEvent {
     attempt: u32,
 }
 
+#[repr(C)]
+pub struct OmqGoRecvView {
+    status: OmqGoStatus,
+    data: *const u8,
+    len: usize,
+}
+
+#[repr(C)]
+pub struct OmqGoSendRingMemory {
+    control: *mut c_void,
+    descriptors: *mut c_void,
+    payload: *mut c_void,
+    desc_capacity: usize,
+    payload_capacity: usize,
+}
+
+#[repr(C)]
+pub struct OmqGoRecvRingMemory {
+    control: *mut c_void,
+    descriptors: *mut c_void,
+    payload: *mut c_void,
+    desc_capacity: usize,
+    payload_capacity: usize,
+}
+
+#[repr(C, align(128))]
+struct RecvRingControl {
+    head: AtomicUsize,
+    _pad0: [u8; 120],
+    tail: AtomicUsize,
+    _pad1: [u8; 120],
+}
+
+impl RecvRingControl {
+    fn new() -> Self {
+        Self {
+            head: AtomicUsize::new(0),
+            _pad0: [0; 120],
+            tail: AtomicUsize::new(0),
+            _pad1: [0; 120],
+        }
+    }
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Default)]
+struct RecvRingDesc {
+    payload: u64,
+    payload_len: u64,
+    total_len: u64,
+    part_count: u64,
+    flags: u64,
+    payload_end: u64,
+    _reserved0: u64,
+    _reserved1: u64,
+}
+
+#[repr(C, align(128))]
+struct SendRingControl {
+    head: AtomicUsize,
+    _pad0: [u8; 120],
+    tail: AtomicUsize,
+    _pad1: [u8; 120],
+    closed: AtomicUsize,
+    _pad2: [u8; 120],
+}
+
+impl SendRingControl {
+    fn new() -> Self {
+        Self {
+            head: AtomicUsize::new(0),
+            _pad0: [0; 120],
+            tail: AtomicUsize::new(0),
+            _pad1: [0; 120],
+            closed: AtomicUsize::new(0),
+            _pad2: [0; 120],
+        }
+    }
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Default)]
+struct SendRingDesc {
+    payload: u64,
+    payload_len: u64,
+    payload_end: u64,
+    _reserved0: u64,
+    _reserved1: u64,
+    _reserved2: u64,
+    _reserved3: u64,
+    _reserved4: u64,
+}
+
+pub struct OmqGoSendRing {
+    shared: Arc<OmqGoSendRingShared>,
+    worker: Option<JoinHandle<()>>,
+}
+
+struct OmqGoSendRingShared {
+    socket: BlockingSocket,
+    control: Box<SendRingControl>,
+    desc: Box<[SendRingDesc]>,
+    payload: Box<[u8]>,
+    done: Box<[AtomicBool]>,
+    desc_mask: usize,
+    last_error_code: AtomicI32,
+    last_error_message: Mutex<CString>,
+    reclaim: Mutex<SendRingReclaim>,
+}
+
+struct SendRingReclaim {
+    cursor: usize,
+}
+
+struct SendSlotOwner {
+    shared: Arc<OmqGoSendRingShared>,
+    cursor: usize,
+    offset: usize,
+    len: usize,
+}
+
+struct RecvExternalBlock {
+    cursor: usize,
+    _bytes: Box<[u8]>,
+}
+
+pub struct OmqGoRecvRing {
+    socket: BlockingSocket,
+    control: Box<RecvRingControl>,
+    desc: Box<[RecvRingDesc]>,
+    payload: Box<[u8]>,
+    desc_mask: usize,
+    payload_mask: usize,
+    cursor: usize,
+    cached_head: usize,
+    reclaimed_head: usize,
+    payload_cursor: usize,
+    payload_head: usize,
+    pending: VecDeque<Message>,
+    scratch: Vec<Message>,
+    external: VecDeque<RecvExternalBlock>,
+}
+
+const RECV_RING_FLAG_MULTIPART: u64 = 1;
+const RECV_RING_FLAG_EXTERNAL: u64 = 2;
+
 pub struct OmqGoContext {
     ctx: Context,
     owner: bool,
@@ -92,6 +240,8 @@ pub struct OmqGoSocket {
     materialize_lock: Mutex<()>,
     recv_cache: Mutex<VecDeque<Message>>,
     recv_scratch: Mutex<Vec<Message>>,
+    recv_into_scratch: Mutex<Vec<u8>>,
+    recv_view_message: Mutex<Option<Message>>,
     closed: AtomicBool,
 }
 
@@ -147,6 +297,24 @@ impl OmqGoStatus {
             TrySendError::Closed => Self::err(CLOSED, "socket closed"),
             TrySendError::Error(error) => Self::from_error(error),
         }
+    }
+}
+
+fn status_code_from_error(error: &Error) -> i32 {
+    match error {
+        Error::InvalidEndpoint(_) => INVALID_ENDPOINT,
+        Error::UnsupportedScheme(_) => UNSUPPORTED_SCHEME,
+        Error::UnsupportedZmtpVersion { .. } | Error::Protocol(_) | Error::HandshakeFailed(_) => {
+            PROTOCOL
+        }
+        Error::Closed => CLOSED,
+        Error::Timeout => TIMEOUT,
+        Error::MessageTooLarge { .. } => MESSAGE_TOO_LARGE,
+        Error::Unroutable => UNROUTABLE,
+        Error::WouldBlock => AGAIN,
+        Error::Config(_) => CONFIG,
+        Error::Io(_) => IO,
+        _ => ERROR,
     }
 }
 
@@ -209,11 +377,416 @@ impl OmqGoSocket {
     }
 }
 
+impl OmqGoRecvRing {
+    fn new(socket: BlockingSocket, desc_capacity: usize, payload_capacity: usize) -> Self {
+        let desc_capacity = desc_capacity.max(1).next_power_of_two();
+        let payload_capacity = payload_capacity.max(1).next_power_of_two();
+        Self {
+            socket,
+            control: Box::new(RecvRingControl::new()),
+            desc: vec![RecvRingDesc::default(); desc_capacity].into_boxed_slice(),
+            payload: vec![0; payload_capacity].into_boxed_slice(),
+            desc_mask: desc_capacity - 1,
+            payload_mask: payload_capacity - 1,
+            cursor: 0,
+            cached_head: 0,
+            reclaimed_head: 0,
+            payload_cursor: 0,
+            payload_head: 0,
+            pending: VecDeque::new(),
+            scratch: Vec::with_capacity(desc_capacity.min(RING_BATCH)),
+            external: VecDeque::new(),
+        }
+    }
+
+    fn memory(&self) -> OmqGoRecvRingMemory {
+        OmqGoRecvRingMemory {
+            control: self.control.as_ref() as *const RecvRingControl as *mut c_void,
+            descriptors: self.desc.as_ptr() as *mut c_void,
+            payload: self.payload.as_ptr() as *mut c_void,
+            desc_capacity: self.desc.len(),
+            payload_capacity: self.payload.len(),
+        }
+    }
+
+    fn reclaim_consumed(&mut self) {
+        let head = self.control.head.load(Ordering::Acquire);
+        while self.reclaimed_head != head {
+            let index = self.reclaimed_head & self.desc_mask;
+            let desc = self.desc[index];
+            if desc.flags & RECV_RING_FLAG_EXTERNAL != 0 {
+                if self
+                    .external
+                    .front()
+                    .is_some_and(|block| block.cursor == self.reclaimed_head)
+                {
+                    self.external.pop_front();
+                }
+            } else {
+                self.payload_head = desc.payload_end as usize;
+            }
+            self.reclaimed_head = self.reclaimed_head.wrapping_add(1);
+        }
+        self.cached_head = head;
+    }
+
+    fn desc_is_full(&mut self) -> bool {
+        if self.cursor.wrapping_sub(self.cached_head) < self.desc.len() {
+            return false;
+        }
+        self.cached_head = self.control.head.load(Ordering::Acquire);
+        self.cursor.wrapping_sub(self.cached_head) >= self.desc.len()
+    }
+
+    fn reserve_payload(&mut self, len: usize) -> Option<(usize, usize)> {
+        if len == 0 {
+            return Some((0, self.payload_cursor));
+        }
+        if len > self.payload.len() {
+            return None;
+        }
+
+        let mut cursor = self.payload_cursor;
+        let mut offset = cursor & self.payload_mask;
+        let mut needed = len;
+        if offset + len > self.payload.len() {
+            let pad = self.payload.len() - offset;
+            cursor = cursor.wrapping_add(pad);
+            needed = needed.wrapping_add(pad);
+            offset = 0;
+        }
+
+        if cursor.wrapping_add(len).wrapping_sub(self.payload_head) > self.payload.len() {
+            return None;
+        }
+
+        self.payload_cursor = self.payload_cursor.wrapping_add(needed);
+        Some((offset, cursor.wrapping_add(len)))
+    }
+
+    fn publish(&mut self, message: &Message) -> bool {
+        if self.desc_is_full() {
+            return false;
+        }
+
+        let part_count = message.len();
+        let total_len = message.byte_len();
+        let encoded_len = encoded_message_len(message);
+        let cursor = self.cursor;
+        let index = cursor & self.desc_mask;
+        let flags = if part_count > 1 {
+            RECV_RING_FLAG_MULTIPART
+        } else {
+            0
+        };
+
+        if let Some((offset, payload_end)) = self.reserve_payload(encoded_len) {
+            write_message_encoded(message, &mut self.payload[offset..offset + encoded_len]);
+            self.desc[index] = RecvRingDesc {
+                payload: offset as u64,
+                payload_len: encoded_len as u64,
+                total_len: total_len as u64,
+                part_count: part_count as u64,
+                flags,
+                payload_end: payload_end as u64,
+                _reserved0: 0,
+                _reserved1: 0,
+            };
+        } else {
+            let bytes = encode_message(message).into_boxed_slice();
+            let addr = bytes.as_ptr() as u64;
+            self.external.push_back(RecvExternalBlock {
+                cursor,
+                _bytes: bytes,
+            });
+            self.desc[index] = RecvRingDesc {
+                payload: addr,
+                payload_len: encoded_len as u64,
+                total_len: total_len as u64,
+                part_count: part_count as u64,
+                flags: flags | RECV_RING_FLAG_EXTERNAL,
+                payload_end: self.payload_cursor as u64,
+                _reserved0: 0,
+                _reserved1: 0,
+            };
+        }
+
+        self.cursor = self.cursor.wrapping_add(1);
+        true
+    }
+
+    fn flush(&self, old_cursor: usize) -> usize {
+        if self.cursor == old_cursor {
+            return 0;
+        }
+        self.control.tail.store(self.cursor, Ordering::Release);
+        self.cursor.wrapping_sub(old_cursor)
+    }
+
+    fn fill(&mut self, timeout_millis: i64, max_messages: usize) -> Result<usize, Error> {
+        if max_messages == 0 {
+            return Err(Error::Config(
+                "max messages must be greater than zero".to_string(),
+            ));
+        }
+
+        self.reclaim_consumed();
+        let start_cursor = self.cursor;
+
+        while self.cursor.wrapping_sub(start_cursor) < max_messages {
+            if let Some(message) = self.pending.pop_front() {
+                if self.publish(&message) {
+                    continue;
+                }
+                self.pending.push_front(message);
+                break;
+            }
+
+            if self.desc_is_full() {
+                break;
+            }
+
+            let remaining = max_messages - self.cursor.wrapping_sub(start_cursor);
+            let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
+            let batch_max = remaining.min(desc_space).min(RING_BATCH);
+            self.scratch.clear();
+            recv_many_into(&self.socket, batch_max, timeout_millis, &mut self.scratch)?;
+
+            let mut blocked = false;
+            let mut batch = Vec::new();
+            std::mem::swap(&mut batch, &mut self.scratch);
+            let mut drained = batch.drain(..);
+            while let Some(message) = drained.next() {
+                if self.publish(&message) {
+                    continue;
+                }
+                self.pending.push_back(message);
+                self.pending.extend(&mut drained);
+                blocked = true;
+                break;
+            }
+            drop(drained);
+            batch.clear();
+            std::mem::swap(&mut batch, &mut self.scratch);
+            if blocked {
+                break;
+            }
+            break;
+        }
+
+        let filled = self.flush(start_cursor);
+        if filled == 0 {
+            return Err(Error::WouldBlock);
+        }
+        Ok(filled)
+    }
+}
+
+impl OmqGoSendRing {
+    fn new(socket: BlockingSocket, desc_capacity: usize, payload_capacity: usize) -> Self {
+        let desc_capacity = desc_capacity.max(1).next_power_of_two();
+        let payload_capacity = payload_capacity.max(1).next_power_of_two();
+        let shared = Arc::new(OmqGoSendRingShared {
+            socket,
+            control: Box::new(SendRingControl::new()),
+            desc: vec![SendRingDesc::default(); desc_capacity].into_boxed_slice(),
+            payload: vec![0; payload_capacity].into_boxed_slice(),
+            done: (0..desc_capacity).map(|_| AtomicBool::new(false)).collect(),
+            desc_mask: desc_capacity - 1,
+            last_error_code: AtomicI32::new(OK),
+            last_error_message: Mutex::new(empty_cstring()),
+            reclaim: Mutex::new(SendRingReclaim { cursor: 0 }),
+        });
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::spawn(move || send_ring_worker(worker_shared));
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    fn memory(&self) -> OmqGoSendRingMemory {
+        OmqGoSendRingMemory {
+            control: self.shared.control.as_ref() as *const SendRingControl as *mut c_void,
+            descriptors: self.shared.desc.as_ptr() as *mut c_void,
+            payload: self.shared.payload.as_ptr() as *mut c_void,
+            desc_capacity: self.shared.desc.len(),
+            payload_capacity: self.shared.payload.len(),
+        }
+    }
+
+    fn status(&self) -> OmqGoStatus {
+        let code = self.shared.last_error_code.load(Ordering::Acquire);
+        if code == OK {
+            if self.shared.closed() {
+                return OmqGoStatus::err(CLOSED, "send ring closed");
+            }
+            return OmqGoStatus::ok();
+        }
+        let message = self
+            .shared
+            .last_error_message
+            .lock()
+            .map(|message| message.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "send ring error".to_string());
+        OmqGoStatus::err(code, message)
+    }
+
+    fn close(&mut self) {
+        self.shared.control.closed.store(1, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for OmqGoSendRing {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl AsRef<[u8]> for SendSlotOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.shared.payload[self.offset..self.offset + self.len]
+    }
+}
+
+impl Drop for SendSlotOwner {
+    fn drop(&mut self) {
+        self.shared.release_slot(self.cursor);
+    }
+}
+
+impl OmqGoSendRingShared {
+    fn set_error(&self, code: i32, message: impl AsRef<str>) {
+        self.last_error_code.store(code, Ordering::Release);
+        if let Ok(mut slot) = self.last_error_message.lock() {
+            *slot = cstring_lossy(message.as_ref());
+        }
+        self.control.closed.store(1, Ordering::Release);
+    }
+
+    fn closed(&self) -> bool {
+        self.control.closed.load(Ordering::Acquire) != 0
+    }
+
+    fn message_at(self: &Arc<Self>, cursor: usize) -> Message {
+        let desc = self.desc[cursor & self.desc_mask];
+        Message::single(Bytes::from_owner(SendSlotOwner {
+            shared: Arc::clone(self),
+            cursor,
+            offset: desc.payload as usize,
+            len: desc.payload_len as usize,
+        }))
+    }
+
+    fn release_slot(&self, cursor: usize) {
+        self.done[cursor & self.desc_mask].store(true, Ordering::Release);
+        let Ok(mut reclaim) = self.reclaim.lock() else {
+            return;
+        };
+        loop {
+            let index = reclaim.cursor & self.desc_mask;
+            if !self.done[index].swap(false, Ordering::AcqRel) {
+                break;
+            }
+            reclaim.cursor = reclaim.cursor.wrapping_add(1);
+            self.control.head.store(reclaim.cursor, Ordering::Release);
+        }
+    }
+}
+
+fn send_ring_worker(shared: Arc<OmqGoSendRingShared>) {
+    let mut head = 0usize;
+    let mut cached_tail = 0usize;
+    let mut batch = VecDeque::with_capacity(RING_BATCH);
+    let mut spins = 0u32;
+
+    loop {
+        while batch.len() < RING_BATCH {
+            let cursor = head.wrapping_add(batch.len());
+            if cursor == cached_tail {
+                cached_tail = shared.control.tail.load(Ordering::Acquire);
+                if cursor == cached_tail {
+                    break;
+                }
+            }
+            batch.push_back(shared.message_at(cursor));
+        }
+
+        if batch.is_empty() {
+            if shared.closed() {
+                break;
+            }
+            send_ring_backoff(&mut spins);
+            continue;
+        }
+
+        match shared.socket.try_send_many(&mut batch, RING_BATCH) {
+            Ok(sent) => {
+                if sent == 0 {
+                    if shared.closed() {
+                        break;
+                    }
+                    send_ring_backoff(&mut spins);
+                    continue;
+                }
+                head = head.wrapping_add(sent);
+                spins = 0;
+            }
+            Err(TrySendError::Full(returned)) => {
+                batch.push_front(returned);
+                if shared.closed() {
+                    break;
+                }
+                send_ring_backoff(&mut spins);
+            }
+            Err(TrySendError::Closed) => {
+                shared.set_error(CLOSED, "socket closed");
+                break;
+            }
+            Err(TrySendError::Error(error)) => {
+                shared.set_error(status_code_from_error(&error), error.to_string());
+                break;
+            }
+        }
+    }
+
+    shared.control.closed.store(1, Ordering::Release);
+}
+
+fn send_ring_backoff(spins: &mut u32) {
+    if *spins < 256 {
+        std::hint::spin_loop();
+        *spins += 1;
+    } else if *spins < 512 {
+        thread::yield_now();
+        *spins += 1;
+    } else {
+        thread::sleep(Duration::from_micros(50));
+    }
+}
+
 fn status_from_result(result: Result<(), Error>) -> OmqGoStatus {
     match result {
         Ok(()) => OmqGoStatus::ok(),
         Err(error) => OmqGoStatus::from_error(error),
     }
+}
+
+fn empty_cstring() -> CString {
+    CString::new("").expect("empty string contains no NUL")
+}
+
+fn cstring_lossy(message: &str) -> CString {
+    let bytes: Vec<u8> = message
+        .as_bytes()
+        .iter()
+        .copied()
+        .filter(|byte| *byte != 0)
+        .collect();
+    CString::new(bytes).unwrap_or_else(|_| empty_cstring())
 }
 
 fn string_to_raw(value: String) -> *mut c_char {
@@ -239,6 +812,16 @@ fn bytes_from_c<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], Error> {
         return Err(Error::Config("null byte pointer".to_string()));
     }
     Ok(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
+fn bytes_from_c_mut<'a>(ptr: *mut u8, len: usize) -> Result<&'a mut [u8], Error> {
+    if len == 0 {
+        return Ok(&mut []);
+    }
+    if ptr.is_null() {
+        return Err(Error::Config("null byte pointer".to_string()));
+    }
+    Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
 }
 
 fn endpoint_from_c(ptr: *const c_char) -> Result<Endpoint, Error> {
@@ -325,6 +908,38 @@ fn messages_from_c(
     Ok(out)
 }
 
+fn encoded_message_len(message: &Message) -> usize {
+    if message.len() == 1 {
+        return message.part_slice(0).unwrap_or_default().len();
+    }
+    4 + 4 * message.len() + message.byte_len()
+}
+
+fn encode_message(message: &Message) -> Vec<u8> {
+    let mut out = vec![0; encoded_message_len(message)];
+    write_message_encoded(message, &mut out);
+    out
+}
+
+fn write_message_encoded(message: &Message, out: &mut [u8]) {
+    if message.len() == 1 {
+        let body = message.part_slice(0).unwrap_or_default();
+        out.copy_from_slice(body);
+        return;
+    }
+
+    let part_count = message.len() as u32;
+    out[..4].copy_from_slice(&part_count.to_ne_bytes());
+    let mut offset = 4 + 4 * message.len();
+    for index in 0..message.len() {
+        let part = message.part_slice(index).unwrap_or_default();
+        let len_offset = 4 + 4 * index;
+        out[len_offset..len_offset + 4].copy_from_slice(&(part.len() as u32).to_ne_bytes());
+        out[offset..offset + part.len()].copy_from_slice(part);
+        offset += part.len();
+    }
+}
+
 fn raw_bytes(bytes: &[u8]) -> (*mut u8, usize) {
     if bytes.is_empty() {
         return (ptr::null_mut(), 0);
@@ -361,6 +976,19 @@ fn message_to_c(message: Message) -> OmqGoMessage {
     }
 }
 
+fn recv_many_into(
+    native: &BlockingSocket,
+    max: usize,
+    timeout_millis: i64,
+    out: &mut Vec<Message>,
+) -> Result<usize, Error> {
+    match timeout_millis {
+        i64::MIN..=-1 => native.recv_many_into(max, out),
+        0 => native.try_recv_many_into(max, out),
+        _ => native.recv_many_timeout_into(max, Duration::from_millis(timeout_millis as u64), out),
+    }
+}
+
 fn refill_recv_cache(socket: &OmqGoSocket, timeout_millis: i64) -> Result<(), Error> {
     let native = socket.materialize()?;
     let mut scratch = socket
@@ -369,15 +997,7 @@ fn refill_recv_cache(socket: &OmqGoSocket, timeout_millis: i64) -> Result<(), Er
         .map_err(|_| Error::Config("receive scratch lock poisoned".to_string()))?;
     scratch.clear();
 
-    let received = match timeout_millis {
-        i64::MIN..=-1 => native.recv_many_into(RECV_BATCH, &mut scratch),
-        0 => native.try_recv_many_into(RECV_BATCH, &mut scratch),
-        _ => native.recv_many_timeout_into(
-            RECV_BATCH,
-            Duration::from_millis(timeout_millis as u64),
-            &mut scratch,
-        ),
-    }?;
+    let received = recv_many_into(&native, RECV_BATCH, timeout_millis, &mut scratch)?;
 
     if received == 0 {
         return Err(Error::WouldBlock);
@@ -412,6 +1032,65 @@ fn recv_one(socket: &OmqGoSocket, timeout_millis: i64) -> Result<Message, Error>
         .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?
         .pop_front()
         .ok_or(Error::WouldBlock)
+}
+
+fn copy_message_into(message: &Message, destination: &mut [u8]) -> Result<usize, Error> {
+    if message.len() != 1 {
+        return Err(Error::Config(
+            "RecvInto requires a single-part message".to_string(),
+        ));
+    }
+    let part = message
+        .part_slice(0)
+        .ok_or_else(|| Error::Config("missing message part".to_string()))?;
+    if part.len() > destination.len() {
+        return Err(Error::MessageTooLarge {
+            size: part.len(),
+            max: destination.len(),
+        });
+    }
+    destination[..part.len()].copy_from_slice(part);
+    Ok(part.len())
+}
+
+fn copy_message_to_scratch(
+    message: &Message,
+    capacity: usize,
+    scratch: &mut Vec<u8>,
+) -> Result<usize, Error> {
+    if message.len() != 1 {
+        return Err(Error::Config(
+            "RecvInto requires a single-part message".to_string(),
+        ));
+    }
+    let part = message
+        .part_slice(0)
+        .ok_or_else(|| Error::Config("missing message part".to_string()))?;
+    if part.len() > capacity {
+        return Err(Error::MessageTooLarge {
+            size: part.len(),
+            max: capacity,
+        });
+    }
+    scratch.clear();
+    scratch.extend_from_slice(part);
+    Ok(part.len())
+}
+
+fn message_part_view(message: &Message) -> Result<(*const u8, usize), Error> {
+    if message.len() != 1 {
+        return Err(Error::Config(
+            "RecvView requires a single-part message".to_string(),
+        ));
+    }
+    let part = message
+        .part_slice(0)
+        .ok_or_else(|| Error::Config("missing message part".to_string()))?;
+    if part.is_empty() {
+        Ok((ptr::null(), 0))
+    } else {
+        Ok((part.as_ptr(), part.len()))
+    }
 }
 
 fn try_send_with_timeout(
@@ -781,6 +1460,8 @@ pub extern "C" fn omq_go_socket_new(
             materialize_lock: Mutex::new(()),
             recv_cache: Mutex::new(VecDeque::new()),
             recv_scratch: Mutex::new(Vec::with_capacity(RECV_BATCH)),
+            recv_into_scratch: Mutex::new(Vec::new()),
+            recv_view_message: Mutex::new(None),
             closed: AtomicBool::new(false),
         }));
     }
@@ -875,6 +1556,31 @@ pub extern "C" fn omq_go_socket_send(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_send_one(
+    socket: *mut OmqGoSocket,
+    data: *const u8,
+    len: usize,
+    timeout_millis: i64,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        if socket.closed.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        let native = socket.materialize()?;
+        let message = Message::from_slice(bytes_from_c(data, len)?);
+        Ok((native, message))
+    })();
+    match result {
+        Ok((native, message)) => try_send_with_timeout(&native, message, timeout_millis),
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_try_send_batch(
     socket: *mut OmqGoSocket,
     messages: *const OmqGoWireMessage,
@@ -936,6 +1642,130 @@ pub extern "C" fn omq_go_socket_recv(
         }
         Err(error) => OmqGoStatus::from_error(error),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_recv_one_into(
+    socket: *mut OmqGoSocket,
+    timeout_millis: i64,
+    data: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if written.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive length pointer");
+    }
+    unsafe {
+        *written = 0;
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let destination = bytes_from_c_mut(data, capacity)?;
+        let message = recv_one(socket, timeout_millis)?;
+        let copied = copy_message_into(&message, destination)?;
+        unsafe {
+            *written = copied;
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_recv_one_borrow(
+    socket: *mut OmqGoSocket,
+    timeout_millis: i64,
+    capacity: usize,
+    data: *mut *const u8,
+    written: *mut usize,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if data.is_null() || written.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive borrow pointer");
+    }
+    unsafe {
+        *data = ptr::null();
+        *written = 0;
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let message = recv_one(socket, timeout_millis)?;
+        let mut scratch = socket
+            .recv_into_scratch
+            .lock()
+            .map_err(|_| Error::Config("receive-into scratch lock poisoned".to_string()))?;
+        let copied = copy_message_to_scratch(&message, capacity, &mut scratch)?;
+        unsafe {
+            *written = copied;
+            *data = if copied == 0 {
+                ptr::null()
+            } else {
+                scratch.as_ptr()
+            };
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_recv_one_view(
+    socket: *mut OmqGoSocket,
+    timeout_millis: i64,
+) -> OmqGoRecvView {
+    if socket.is_null() {
+        return OmqGoRecvView {
+            status: OmqGoStatus::err(CLOSED, "socket closed"),
+            data: ptr::null(),
+            len: 0,
+        };
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let message = recv_one(socket, timeout_millis)?;
+        let mut guard = socket
+            .recv_view_message
+            .lock()
+            .map_err(|_| Error::Config("receive view lock poisoned".to_string()))?;
+        *guard = Some(message);
+        let message = guard
+            .as_ref()
+            .ok_or_else(|| Error::Config("receive view missing message".to_string()))?;
+        message_part_view(message)
+    })();
+    match result {
+        Ok((data, len)) => OmqGoRecvView {
+            status: OmqGoStatus::ok(),
+            data,
+            len,
+        },
+        Err(error) => OmqGoRecvView {
+            status: OmqGoStatus::from_error(error),
+            data: ptr::null(),
+            len: 0,
+        },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_clear_recv_view(socket: *mut OmqGoSocket) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    let socket = unsafe { &*socket };
+    let result = socket
+        .recv_view_message
+        .lock()
+        .map_err(|_| Error::Config("receive view lock poisoned".to_string()))
+        .map(|mut guard| {
+            guard.take();
+        });
+    status_from_result(result)
 }
 
 #[unsafe(no_mangle)]
@@ -1225,6 +2055,156 @@ pub extern "C" fn omq_go_monitor_free(monitor: *mut OmqGoMonitor) {
     omq_go_monitor_close(monitor);
     unsafe {
         drop(Box::from_raw(monitor));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_create(
+    socket: *mut OmqGoSocket,
+    desc_capacity: usize,
+    payload_capacity: usize,
+    out: *mut *mut OmqGoSendRing,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null send ring output pointer");
+    }
+    unsafe {
+        *out = ptr::null_mut();
+    }
+    if desc_capacity == 0 {
+        return OmqGoStatus::err(CONFIG, "send ring descriptor capacity must be positive");
+    }
+    if payload_capacity == 0 {
+        return OmqGoStatus::err(CONFIG, "send ring payload capacity must be positive");
+    }
+
+    let socket = unsafe { &*socket };
+    match socket.materialize() {
+        Ok(native) => {
+            let ring = OmqGoSendRing::new(native, desc_capacity, payload_capacity);
+            unsafe {
+                *out = Box::into_raw(Box::new(ring));
+            }
+            OmqGoStatus::ok()
+        }
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_memory(
+    ring: *mut OmqGoSendRing,
+    out: *mut OmqGoSendRingMemory,
+) -> OmqGoStatus {
+    if ring.is_null() {
+        return OmqGoStatus::err(CLOSED, "send ring closed");
+    }
+    if out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null send ring memory pointer");
+    }
+    unsafe {
+        *out = (&*ring).memory();
+    }
+    OmqGoStatus::ok()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_error(ring: *mut OmqGoSendRing) -> OmqGoStatus {
+    if ring.is_null() {
+        return OmqGoStatus::err(CLOSED, "send ring closed");
+    }
+    unsafe { (&*ring).status() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_close(ring: *mut OmqGoSendRing) {
+    if ring.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ring));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_recv_ring_create(
+    socket: *mut OmqGoSocket,
+    desc_capacity: usize,
+    payload_capacity: usize,
+    out: *mut *mut OmqGoRecvRing,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive ring output pointer");
+    }
+    unsafe {
+        *out = ptr::null_mut();
+    }
+    if desc_capacity == 0 {
+        return OmqGoStatus::err(CONFIG, "receive ring descriptor capacity must be positive");
+    }
+    if payload_capacity == 0 {
+        return OmqGoStatus::err(CONFIG, "receive ring payload capacity must be positive");
+    }
+
+    let socket = unsafe { &*socket };
+    match socket.materialize() {
+        Ok(native) => {
+            let ring = OmqGoRecvRing::new(native, desc_capacity, payload_capacity);
+            unsafe {
+                *out = Box::into_raw(Box::new(ring));
+            }
+            OmqGoStatus::ok()
+        }
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_recv_ring_memory(
+    ring: *mut OmqGoRecvRing,
+    out: *mut OmqGoRecvRingMemory,
+) -> OmqGoStatus {
+    if ring.is_null() {
+        return OmqGoStatus::err(CLOSED, "receive ring closed");
+    }
+    if out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive ring memory pointer");
+    }
+    unsafe {
+        *out = (&*ring).memory();
+    }
+    OmqGoStatus::ok()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_recv_ring_fill(
+    ring: *mut OmqGoRecvRing,
+    timeout_millis: i64,
+    max_messages: usize,
+) -> OmqGoStatus {
+    if ring.is_null() {
+        return OmqGoStatus::err(CLOSED, "receive ring closed");
+    }
+    let ring = unsafe { &mut *ring };
+    match ring.fill(timeout_millis, max_messages) {
+        Ok(_) => OmqGoStatus::ok(),
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_recv_ring_close(ring: *mut OmqGoRecvRing) {
+    if ring.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ring));
     }
 }
 

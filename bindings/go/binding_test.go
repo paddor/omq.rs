@@ -90,6 +90,101 @@ func TestTimeoutsAndTry(t *testing.T) {
 	}
 }
 
+func TestRunRecvInto(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	bound, err := pull.Bind("inproc://go-run-recv-into")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(bound); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- push.Run(runCtx, func(socket *BoundSocket) error {
+			return socket.SendBlocking(Bytes([]byte("ring")))
+		})
+	}()
+
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
+		buf := make([]byte, 16)
+		n, err := socket.RecvIntoBlocking(buf)
+		if err != nil {
+			return err
+		}
+		if got := string(buf[:n]); got != "ring" {
+			t.Fatalf("message = %q, want ring", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRecvViewReleasesSendRingSlot(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	bound, err := pull.Bind("inproc://go-run-recv-view")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(bound); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- push.Run(runCtx, func(socket *BoundSocket) error {
+			return socket.SendBlocking(Bytes([]byte("view")))
+		})
+	}()
+
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
+		view, err := socket.TryRecvView()
+		for errors.Is(err, ErrAgain) {
+			if err := runCtx.Err(); err != nil {
+				return err
+			}
+			view, err = socket.TryRecvView()
+		}
+		if err != nil {
+			return err
+		}
+		if got := string(view.Bytes()); got != "view" {
+			t.Fatalf("message = %q, want view", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChannels(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

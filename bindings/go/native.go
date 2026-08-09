@@ -20,6 +20,24 @@ import (
 type nativeContext = C.OmqGoContext
 type nativeSocket = C.OmqGoSocket
 type nativeMonitor = C.OmqGoMonitor
+type nativeSendRing = C.OmqGoSendRing
+type nativeRecvRing = C.OmqGoRecvRing
+
+type sendRingMemory struct {
+	control         unsafe.Pointer
+	descriptors     unsafe.Pointer
+	payload         unsafe.Pointer
+	descCapacity    int
+	payloadCapacity int
+}
+
+type recvRingMemory struct {
+	control         unsafe.Pointer
+	descriptors     unsafe.Pointer
+	payload         unsafe.Pointer
+	descCapacity    int
+	payloadCapacity int
+}
 
 func statusErr(status C.OmqGoStatus) error {
 	if status.code == C.OMQ_GO_OK {
@@ -137,9 +155,31 @@ func socketDisconnectNative(socket *nativeSocket, endpoint string) error {
 }
 
 func socketMessageSendNative(socket *nativeSocket, msg Message) error {
+	return socketMessageSendNativeTimeout(socket, msg, 0)
+}
+
+func socketMessageSendWaitNative(socket *nativeSocket, msg Message) error {
+	return socketMessageSendNativeTimeout(socket, msg, -1)
+}
+
+func socketMessageSendNativeTimeout(socket *nativeSocket, msg Message, timeoutMillis int64) error {
+	if parts := msg.partsView(); len(parts) == 1 {
+		part := parts[0]
+		if len(part) == 0 {
+			return statusErr(C.omq_go_socket_send_one((*C.OmqGoSocket)(socket), nil, 0, C.int64_t(timeoutMillis)))
+		}
+		status := C.omq_go_socket_send_one(
+			(*C.OmqGoSocket)(socket),
+			(*C.uint8_t)(unsafe.Pointer(&part[0])),
+			C.size_t(len(part)),
+			C.int64_t(timeoutMillis),
+		)
+		runtime.KeepAlive(part)
+		return statusErr(status)
+	}
 	parts, count, free := messageToC(msg)
 	defer free()
-	return statusErr(C.omq_go_socket_send((*C.OmqGoSocket)(socket), parts, count, 0))
+	return statusErr(C.omq_go_socket_send((*C.OmqGoSocket)(socket), parts, count, C.int64_t(timeoutMillis)))
 }
 
 func socketMessagesTrySendNative(socket *nativeSocket, messages []Message) (int, error) {
@@ -175,6 +215,121 @@ func socketMessageRecvNative(socket *nativeSocket) (Message, error) {
 	}
 	defer C.omq_go_message_free(out)
 	return messageFromC(out), nil
+}
+
+func socketMessageRecvIntoNative(socket *nativeSocket, dst []byte) (int, error) {
+	return socketMessageRecvIntoNativeTimeout(socket, dst, 0)
+}
+
+func socketMessageRecvIntoWaitNative(socket *nativeSocket, dst []byte) (int, error) {
+	return socketMessageRecvIntoNativeTimeout(socket, dst, -1)
+}
+
+func socketMessageRecvIntoNativeTimeout(socket *nativeSocket, dst []byte, timeoutMillis int64) (int, error) {
+	var written C.size_t
+	var data *C.uint8_t
+	if len(dst) > 0 {
+		data = (*C.uint8_t)(unsafe.Pointer(&dst[0]))
+	}
+	err := statusErr(C.omq_go_socket_recv_one_into(
+		(*C.OmqGoSocket)(socket),
+		C.int64_t(timeoutMillis),
+		data,
+		C.size_t(len(dst)),
+		&written,
+	))
+	runtime.KeepAlive(dst)
+	if err != nil {
+		return 0, err
+	}
+	return int(written), nil
+}
+
+func socketMessageRecvViewNative(socket *nativeSocket) (RecvView, error) {
+	raw := C.omq_go_socket_recv_one_view((*C.OmqGoSocket)(socket), 0)
+	if err := statusErr(raw.status); err != nil {
+		return RecvView{}, err
+	}
+	if raw.data == nil || raw.len == 0 {
+		return RecvView{}, nil
+	}
+	return RecvView{data: unsafe.Slice((*byte)(unsafe.Pointer(raw.data)), int(raw.len))}, nil
+}
+
+func socketRecvViewClearNative(socket *nativeSocket) error {
+	return statusErr(C.omq_go_socket_clear_recv_view((*C.OmqGoSocket)(socket)))
+}
+
+func sendRingCreateNative(socket *nativeSocket, descCapacity, payloadCapacity int) (*nativeSendRing, sendRingMemory, error) {
+	var out *C.OmqGoSendRing
+	err := statusErr(C.omq_go_send_ring_create(
+		(*C.OmqGoSocket)(socket),
+		C.size_t(descCapacity),
+		C.size_t(payloadCapacity),
+		&out,
+	))
+	if err != nil {
+		return nil, sendRingMemory{}, err
+	}
+	var memory C.OmqGoSendRingMemory
+	err = statusErr(C.omq_go_send_ring_memory(out, &memory))
+	if err != nil {
+		C.omq_go_send_ring_close(out)
+		return nil, sendRingMemory{}, err
+	}
+	return (*nativeSendRing)(out), sendRingMemory{
+		control:         unsafe.Pointer(memory.control),
+		descriptors:     unsafe.Pointer(memory.descriptors),
+		payload:         unsafe.Pointer(memory.payload),
+		descCapacity:    int(memory.desc_capacity),
+		payloadCapacity: int(memory.payload_capacity),
+	}, nil
+}
+
+func sendRingErrorNative(ring *nativeSendRing) error {
+	return statusErr(C.omq_go_send_ring_error((*C.OmqGoSendRing)(ring)))
+}
+
+func sendRingCloseNative(ring *nativeSendRing) {
+	C.omq_go_send_ring_close((*C.OmqGoSendRing)(ring))
+}
+
+func recvRingCreateNative(socket *nativeSocket, descCapacity, payloadCapacity int) (*nativeRecvRing, recvRingMemory, error) {
+	var out *C.OmqGoRecvRing
+	err := statusErr(C.omq_go_recv_ring_create(
+		(*C.OmqGoSocket)(socket),
+		C.size_t(descCapacity),
+		C.size_t(payloadCapacity),
+		&out,
+	))
+	if err != nil {
+		return nil, recvRingMemory{}, err
+	}
+	var memory C.OmqGoRecvRingMemory
+	err = statusErr(C.omq_go_recv_ring_memory(out, &memory))
+	if err != nil {
+		C.omq_go_recv_ring_close(out)
+		return nil, recvRingMemory{}, err
+	}
+	return (*nativeRecvRing)(out), recvRingMemory{
+		control:         unsafe.Pointer(memory.control),
+		descriptors:     unsafe.Pointer(memory.descriptors),
+		payload:         unsafe.Pointer(memory.payload),
+		descCapacity:    int(memory.desc_capacity),
+		payloadCapacity: int(memory.payload_capacity),
+	}, nil
+}
+
+func recvRingFillNative(ring *nativeRecvRing, timeoutMillis int64, maxMessages int) error {
+	return statusErr(C.omq_go_recv_ring_fill(
+		(*C.OmqGoRecvRing)(ring),
+		C.int64_t(timeoutMillis),
+		C.size_t(maxMessages),
+	))
+}
+
+func recvRingCloseNative(ring *nativeRecvRing) {
+	C.omq_go_recv_ring_close((*C.OmqGoRecvRing)(ring))
 }
 
 func socketSubscribeNative(socket *nativeSocket, data []byte) error {
@@ -326,7 +481,7 @@ func monitorFreeNative(monitor *nativeMonitor) {
 }
 
 func messageToC(msg Message) (*C.OmqGoPart, C.size_t, func()) {
-	parts := msg.Parts()
+	parts := msg.partsView()
 	if len(parts) == 0 {
 		return nil, 0, func() {}
 	}
@@ -367,7 +522,7 @@ func messageFromC(raw C.OmqGoMessage) Message {
 		}
 		out[i] = C.GoBytes(unsafe.Pointer(part.data), C.int(part.len))
 	}
-	return NewMessage(out...)
+	return Message{parts: out}
 }
 
 func eventFromC(raw C.OmqGoEvent) MonitorEvent {
@@ -409,6 +564,24 @@ func retryDelay(iteration int) time.Duration {
 		return 250 * time.Microsecond
 	}
 	return time.Millisecond
+}
+
+func waitRetry(ctx context.Context, iteration int) error {
+	if iteration < 8 {
+		return nil
+	}
+	if iteration < 256 {
+		runtime.Gosched()
+		return nil
+	}
+	timer := time.NewTimer(retryDelay(iteration))
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return errFromContext(ctx)
+	case <-timer.C:
+		return nil
+	}
 }
 
 func errFromContext(ctx context.Context) error {

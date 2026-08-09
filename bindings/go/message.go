@@ -32,11 +32,15 @@ func (m Message) Parts() [][]byte {
 	return out
 }
 
+func (m Message) partsView() [][]byte {
+	return m.parts
+}
+
 func (m Message) Bytes() []byte {
 	if len(m.parts) == 0 {
 		return nil
 	}
-	return append([]byte(nil), m.parts[0]...)
+	return m.parts[0]
 }
 
 func (m Message) String() string {

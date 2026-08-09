@@ -11,6 +11,8 @@ extern "C" {
 typedef struct OmqGoContext OmqGoContext;
 typedef struct OmqGoSocket OmqGoSocket;
 typedef struct OmqGoMonitor OmqGoMonitor;
+typedef struct OmqGoSendRing OmqGoSendRing;
+typedef struct OmqGoRecvRing OmqGoRecvRing;
 
 typedef struct {
   int32_t code;
@@ -45,6 +47,28 @@ typedef struct {
   uint32_t attempt;
 } OmqGoEvent;
 
+typedef struct {
+  OmqGoStatus status;
+  const uint8_t *data;
+  size_t len;
+} OmqGoRecvView;
+
+typedef struct {
+  void *control;
+  void *descriptors;
+  void *payload;
+  size_t desc_capacity;
+  size_t payload_capacity;
+} OmqGoSendRingMemory;
+
+typedef struct {
+  void *control;
+  void *descriptors;
+  void *payload;
+  size_t desc_capacity;
+  size_t payload_capacity;
+} OmqGoRecvRingMemory;
+
 enum {
   OMQ_GO_OK = 0,
   OMQ_GO_AGAIN = 1,
@@ -73,8 +97,13 @@ OmqGoStatus omq_go_socket_connect(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_unbind(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_disconnect(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_send(OmqGoSocket *socket, const OmqGoPart *parts, size_t part_count, int64_t timeout_millis);
+OmqGoStatus omq_go_socket_send_one(OmqGoSocket *socket, const uint8_t *data, size_t len, int64_t timeout_millis);
 OmqGoStatus omq_go_socket_try_send_batch(OmqGoSocket *socket, const OmqGoWireMessage *messages, size_t message_count, size_t *sent);
 OmqGoStatus omq_go_socket_recv(OmqGoSocket *socket, int64_t timeout_millis, OmqGoMessage *out);
+OmqGoStatus omq_go_socket_recv_one_into(OmqGoSocket *socket, int64_t timeout_millis, uint8_t *data, size_t capacity, size_t *written);
+OmqGoStatus omq_go_socket_recv_one_borrow(OmqGoSocket *socket, int64_t timeout_millis, size_t capacity, const uint8_t **data, size_t *written);
+OmqGoRecvView omq_go_socket_recv_one_view(OmqGoSocket *socket, int64_t timeout_millis);
+OmqGoStatus omq_go_socket_clear_recv_view(OmqGoSocket *socket);
 OmqGoStatus omq_go_socket_subscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_unsubscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_join(OmqGoSocket *socket, const uint8_t *data, size_t len);
@@ -98,6 +127,16 @@ OmqGoStatus omq_go_socket_monitor(OmqGoSocket *socket, OmqGoMonitor **out);
 OmqGoStatus omq_go_monitor_recv(OmqGoMonitor *monitor, int64_t timeout_millis, OmqGoEvent *out);
 void omq_go_monitor_close(OmqGoMonitor *monitor);
 void omq_go_monitor_free(OmqGoMonitor *monitor);
+
+OmqGoStatus omq_go_send_ring_create(OmqGoSocket *socket, size_t desc_capacity, size_t payload_capacity, OmqGoSendRing **out);
+OmqGoStatus omq_go_send_ring_memory(OmqGoSendRing *ring, OmqGoSendRingMemory *out);
+OmqGoStatus omq_go_send_ring_error(OmqGoSendRing *ring);
+void omq_go_send_ring_close(OmqGoSendRing *ring);
+
+OmqGoStatus omq_go_recv_ring_create(OmqGoSocket *socket, size_t desc_capacity, size_t payload_capacity, OmqGoRecvRing **out);
+OmqGoStatus omq_go_recv_ring_memory(OmqGoRecvRing *ring, OmqGoRecvRingMemory *out);
+OmqGoStatus omq_go_recv_ring_fill(OmqGoRecvRing *ring, int64_t timeout_millis, size_t max_messages);
+void omq_go_recv_ring_close(OmqGoRecvRing *ring);
 
 void omq_go_message_free(OmqGoMessage message);
 void omq_go_event_free(OmqGoEvent event);

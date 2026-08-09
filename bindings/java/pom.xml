@@ -8,7 +8,7 @@
   <artifactId>omq-java</artifactId>
   <version>${revision}</version>
   <name>OMQ.java</name>
-  <description>Java bindings for OMQ backed by omq-tokio</description>
+  <description>Java bindings for OMQ, a high-performance ZeroMQ/ZMQ-compatible messaging stack with Rust native I/O, compression, and CURVE security</description>
   <url>https://github.com/paddor/omq.rs</url>
 
   <licenses>

@@ -1,0 +1,14 @@
+get_filename_component(_omq_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+set(omq-libzmq_FOUND TRUE)
+set(omq-libzmq_VERSION "@version@")
+set(omq-libzmq_INCLUDE_DIR "${_omq_prefix}/include")
+set(omq-libzmq_LIBRARY "${_omq_prefix}/lib/@omq_dynamic@")
+
+if(NOT TARGET omq_libzmq::omq_zmq)
+  add_library(omq_libzmq::omq_zmq UNKNOWN IMPORTED)
+  set_target_properties(omq_libzmq::omq_zmq PROPERTIES
+    IMPORTED_LOCATION "${omq-libzmq_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${omq-libzmq_INCLUDE_DIR}"
+  )
+endif()

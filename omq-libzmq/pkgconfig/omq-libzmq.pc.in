@@ -1,0 +1,11 @@
+prefix=@prefix@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: omq-libzmq
+Description: libzmq-compatible C ABI backed by omq-libzmq
+Version: @version@
+Libs: -L${libdir} -lomq_zmq
+Libs.private: -lpthread -ldl -lm
+Cflags: -I${includedir}

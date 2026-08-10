@@ -1,0 +1,14 @@
+get_filename_component(_omq_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+set(ZeroMQ_FOUND TRUE)
+set(ZeroMQ_VERSION "@version@")
+set(ZeroMQ_INCLUDE_DIR "${_omq_prefix}/include")
+set(ZeroMQ_LIBRARY "${_omq_prefix}/lib/@zmq_dynamic@")
+
+if(NOT TARGET ZeroMQ::ZeroMQ)
+  add_library(ZeroMQ::ZeroMQ UNKNOWN IMPORTED)
+  set_target_properties(ZeroMQ::ZeroMQ PROPERTIES
+    IMPORTED_LOCATION "${ZeroMQ_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ZeroMQ_INCLUDE_DIR}"
+  )
+endif()

@@ -6,21 +6,30 @@ import (
 	"sync"
 )
 
+// ChannelOptions configures Socket.Channels.
 type ChannelOptions struct {
-	Capacity      int
+	// Capacity sets Go channel capacity.
+	Capacity int
+	// OverrunPolicy controls receive channel overrun behavior.
 	OverrunPolicy OverrunPolicy
 }
 
+// SocketChannels exposes a socket through Go channels.
 type SocketChannels struct {
-	Rx     <-chan Message
-	Tx     chan<- Message
+	// Rx receives socket messages when the socket can receive.
+	Rx <-chan Message
+	// Tx sends socket messages when the socket can send.
+	Tx chan<- Message
+	// Events receives monitor events when monitoring is available.
 	Events <-chan MonitorEvent
+	// Errors receives worker errors.
 	Errors <-chan error
 
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
+// Channels adapts a socket to Go channels.
 func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChannels, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -130,6 +139,7 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 	}, nil
 }
 
+// Close stops channel workers.
 func (c *SocketChannels) Close() {
 	if c == nil {
 		return

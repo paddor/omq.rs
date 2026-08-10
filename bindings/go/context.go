@@ -7,12 +7,17 @@ import (
 	"sync/atomic"
 )
 
+// Config controls native context and Go ring defaults.
 type Config struct {
-	IOThreads     int
-	RingSize      int
+	// IOThreads sets native OMQ I/O thread count.
+	IOThreads int
+	// RingSize sets private Go/native ring descriptor capacity.
+	RingSize int
+	// OverrunPolicy sets default channel overrun behavior.
 	OverrunPolicy OverrunPolicy
 }
 
+// Context owns a native OMQ context and its sockets.
 type Context struct {
 	handle    *nativeContext
 	ringSize  int
@@ -25,6 +30,7 @@ type Context struct {
 	closeDone chan struct{}
 }
 
+// Open creates a native OMQ context.
 func Open(config Config) (*Context, error) {
 	ioThreads := config.IOThreads
 	if ioThreads == 0 {
@@ -51,6 +57,7 @@ func Open(config Config) (*Context, error) {
 	return ctx, nil
 }
 
+// OpenShared imports a process-local shared native context.
 func OpenShared(key ShareKey) (*Context, error) {
 	handle, err := contextFromShareKeyNative(key)
 	if err != nil {
@@ -65,6 +72,7 @@ func OpenShared(key ShareKey) (*Context, error) {
 	return ctx, nil
 }
 
+// ShareKey returns a process-local key for sharing this context.
 func (c *Context) ShareKey() (ShareKey, error) {
 	if c == nil || c.handle == nil || c.closed.Load() {
 		return ShareKey{}, ErrClosed
@@ -74,6 +82,7 @@ func (c *Context) ShareKey() (ShareKey, error) {
 	return key, err
 }
 
+// Socket creates a socket and applies pre-I/O options.
 func (c *Context) Socket(socketType SocketType, opts ...SocketOption) (*Socket, error) {
 	if c == nil || c.handle == nil || c.closed.Load() {
 		return nil, ErrClosed
@@ -102,10 +111,12 @@ func (c *Context) Socket(socketType SocketType, opts ...SocketOption) (*Socket, 
 	return socket, nil
 }
 
+// Close closes all owned sockets and terminates the context.
 func (c *Context) Close() error {
 	return c.CloseContext(context.Background())
 }
 
+// CloseContext closes the context, bounded by ctx.
 func (c *Context) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()

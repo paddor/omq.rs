@@ -104,6 +104,119 @@ func TestOptionsCopyByteSlices(t *testing.T) {
 	if got := string(request.Part(0)); got != "before" {
 		t.Fatalf("identity = %q, want before", got)
 	}
+
+	options := dealer.Options()
+	if !options.Identity.Set || string(options.Identity.Value) != "before" {
+		t.Fatalf("identity option = %q/%v, want before/true", options.Identity.Value, options.Identity.Set)
+	}
+	options.Identity.Value[0] = 'z'
+	again := dealer.Options()
+	if string(again.Identity.Value) != "before" {
+		t.Fatalf("identity option mutated = %q, want before", again.Identity.Value)
+	}
+}
+
+func TestOptionsSnapshotReportsConfiguredValues(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	socket, err := ctx.Socket(Push,
+		SendHWM(7),
+		RecvHWM(8),
+		Linger(2*time.Millisecond),
+		HeartbeatOff(),
+		NoHeartbeatTTL(),
+		DefaultHeartbeatTimeout(),
+		NoHandshakeTimeout(),
+		NoMaxMessageSize(),
+		PlainClient("alice", "secret"),
+		Workload(WorkloadLatency),
+		ReconnectExponential(time.Millisecond, 10*time.Millisecond),
+		ReconnectStopConnRefused(true),
+		MaxPendingHandshakes(4),
+		Conflate(true),
+		RouterMandatory(true),
+		OnMutePolicy(OnMuteDropNewest),
+		TCPKeepalive(time.Second, time.Second, 2),
+		SendBufferSize(1024),
+		RecvBufferSize(2048),
+		XPubNoDrop(true),
+		CompressionAutoTrain(true),
+		CompressionThreshold(64),
+		CompressionLevel(1),
+		CompressionDict([]byte("abcd")),
+		CompressionDictCapacity(4096),
+		MaxRecvDictSize(8192),
+		CompressionOffloadThreshold(16384),
+		LargeMessageThreshold(32768),
+		ArenaThreshold(65536),
+		TransmitSlotCapacity(131072),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, socket)
+
+	options := socket.Options()
+	if !options.SendHWM.Set || options.SendHWM.Value != 7 {
+		t.Fatalf("SendHWM = %#v", options.SendHWM)
+	}
+	if !options.RecvHWM.Set || options.RecvHWM.Value != 8 {
+		t.Fatalf("RecvHWM = %#v", options.RecvHWM)
+	}
+	if !options.Linger.Set || options.Linger.Value != 2*time.Millisecond {
+		t.Fatalf("Linger = %#v", options.Linger)
+	}
+	if !options.HeartbeatOff || !options.NoHeartbeatTTL || !options.DefaultHeartbeatTimeout ||
+		!options.NoHandshakeTimeout || !options.NoMaxMessageSize {
+		t.Fatalf("duration sentinel options = %#v", options)
+	}
+	if !options.PlainClient.Set || options.PlainClient.Value.Username != "alice" ||
+		options.PlainClient.Value.Password != "secret" {
+		t.Fatalf("PlainClient = %#v", options.PlainClient)
+	}
+	if !options.Workload.Set || options.Workload.Value != WorkloadLatency {
+		t.Fatalf("Workload = %#v", options.Workload)
+	}
+	if !options.Reconnect.Set || options.Reconnect.Value.Mode != "exponential" {
+		t.Fatalf("Reconnect = %#v", options.Reconnect)
+	}
+	if !options.ReconnectStopConnRefused.Set || !options.ReconnectStopConnRefused.Value {
+		t.Fatalf("ReconnectStopConnRefused = %#v", options.ReconnectStopConnRefused)
+	}
+	if !options.MaxPendingHandshakes.Set || options.MaxPendingHandshakes.Value != 4 {
+		t.Fatalf("MaxPendingHandshakes = %#v", options.MaxPendingHandshakes)
+	}
+	if !options.Conflate.Set || !options.Conflate.Value ||
+		!options.RouterMandatory.Set || !options.RouterMandatory.Value ||
+		!options.XPubNoDrop.Set || !options.XPubNoDrop.Value {
+		t.Fatalf("bool options = %#v", options)
+	}
+	if !options.OnMute.Set || options.OnMute.Value != OnMuteDropNewest {
+		t.Fatalf("OnMute = %#v", options.OnMute)
+	}
+	if !options.TCPKeepalive.Set || options.TCPKeepalive.Value.Mode != "enabled" ||
+		options.TCPKeepalive.Value.Count != 2 {
+		t.Fatalf("TCPKeepalive = %#v", options.TCPKeepalive)
+	}
+	if !options.SendBufferSize.Set || options.SendBufferSize.Value != 1024 ||
+		!options.RecvBufferSize.Set || options.RecvBufferSize.Value != 2048 {
+		t.Fatalf("buffer sizes = %#v/%#v", options.SendBufferSize, options.RecvBufferSize)
+	}
+	if !options.CompressionAutoTrain.Set || !options.CompressionAutoTrain.Value ||
+		!options.CompressionThreshold.Set || options.CompressionThreshold.Value != 64 ||
+		!options.CompressionLevel.Set || options.CompressionLevel.Value != 1 ||
+		!options.CompressionDict.Set || string(options.CompressionDict.Value) != "abcd" {
+		t.Fatalf("compression basics = %#v", options)
+	}
+	if !options.CompressionDictCapacity.Set || options.CompressionDictCapacity.Value != 4096 ||
+		!options.MaxRecvDictSize.Set || options.MaxRecvDictSize.Value != 8192 ||
+		!options.CompressionOffloadThreshold.Set || options.CompressionOffloadThreshold.Value != 16384 ||
+		!options.LargeMessageThreshold.Set || options.LargeMessageThreshold.Value != 32768 ||
+		!options.ArenaThreshold.Set || options.ArenaThreshold.Value != 65536 ||
+		!options.TransmitSlotCapacity.Set || options.TransmitSlotCapacity.Value != 131072 {
+		t.Fatalf("compression/perf sizes = %#v", options)
+	}
 }
 
 func TestOptionsCannotChangeAfterMaterialization(t *testing.T) {

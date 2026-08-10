@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// Socket is a goroutine-safe OMQ socket handle.
 type Socket struct {
 	handle     *nativeSocket
 	socketType SocketType
@@ -23,6 +24,8 @@ type Socket struct {
 	closeErr   error
 	authMu     sync.Mutex
 	authIDs    []uint64
+	optionsMu  sync.RWMutex
+	options    SocketOptions
 }
 
 type socketOpKind uint8
@@ -225,6 +228,7 @@ func (s *Socket) do(ctx context.Context, allowClosed bool, op socketOp) (result 
 	}
 }
 
+// Bind binds this socket to an endpoint and returns the bound endpoint.
 func (s *Socket) Bind(endpoint string) (string, error) {
 	result, err := s.do(context.Background(), false, socketOp{kind: socketOpBind, endpoint: endpoint})
 	if err != nil {
@@ -234,24 +238,28 @@ func (s *Socket) Bind(endpoint string) (string, error) {
 	return result.text, nil
 }
 
+// Connect connects this socket to an endpoint.
 func (s *Socket) Connect(endpoint string) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpConnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
+// Unbind removes a previously bound endpoint.
 func (s *Socket) Unbind(endpoint string) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnbind, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
+// Disconnect removes a previously connected endpoint.
 func (s *Socket) Disconnect(endpoint string) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpDisconnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
+// Send sends a message, waiting until ctx is done or the socket accepts it.
 func (s *Socket) Send(ctx context.Context, msg Message) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -273,6 +281,7 @@ func (s *Socket) Send(ctx context.Context, msg Message) error {
 	}
 }
 
+// TrySend sends a message without waiting for queue capacity.
 func (s *Socket) TrySend(msg Message) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSend, msg: msg})
 	keepAlive(s)
@@ -288,6 +297,7 @@ func (s *Socket) trySendBatch(messages []Message) (int, error) {
 	return result.count, nil
 }
 
+// SendTimeout sends a message with libzmq-style timeout semantics.
 func (s *Socket) SendTimeout(msg Message, timeout time.Duration) error {
 	if timeout == 0 {
 		return s.TrySend(msg)
@@ -300,6 +310,7 @@ func (s *Socket) SendTimeout(msg Message, timeout time.Duration) error {
 	return s.Send(ctx, msg)
 }
 
+// Recv receives the next complete message.
 func (s *Socket) Recv(ctx context.Context) (Message, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -321,6 +332,7 @@ func (s *Socket) Recv(ctx context.Context) (Message, error) {
 	}
 }
 
+// RecvInto receives a single-part message into dst.
 func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -342,6 +354,7 @@ func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 	}
 }
 
+// TryRecv receives one message without waiting.
 func (s *Socket) TryRecv() (Message, error) {
 	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecv})
 	if err != nil {
@@ -351,6 +364,7 @@ func (s *Socket) TryRecv() (Message, error) {
 	return result.message, nil
 }
 
+// TryRecvInto receives one single-part message into dst without waiting.
 func (s *Socket) TryRecvInto(dst []byte) (int, error) {
 	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecvInto, buffer: dst})
 	if err != nil {
@@ -360,6 +374,7 @@ func (s *Socket) TryRecvInto(dst []byte) (int, error) {
 	return result.count, nil
 }
 
+// RecvTimeout receives one message with libzmq-style timeout semantics.
 func (s *Socket) RecvTimeout(timeout time.Duration) (Message, error) {
 	if timeout == 0 {
 		return s.TryRecv()
@@ -372,6 +387,7 @@ func (s *Socket) RecvTimeout(timeout time.Duration) (Message, error) {
 	return s.Recv(ctx)
 }
 
+// RecvIntoTimeout receives one single-part message into dst with timeout semantics.
 func (s *Socket) RecvIntoTimeout(dst []byte, timeout time.Duration) (int, error) {
 	if timeout == 0 {
 		return s.TryRecvInto(dst)
@@ -384,46 +400,55 @@ func (s *Socket) RecvIntoTimeout(dst []byte, timeout time.Duration) (int, error)
 	return s.RecvInto(ctx, dst)
 }
 
+// Subscribe adds a SUB prefix.
 func (s *Socket) Subscribe(prefix []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
 
+// SubscribeString adds a SUB prefix from a string.
 func (s *Socket) SubscribeString(prefix string) error {
 	return s.Subscribe([]byte(prefix))
 }
 
+// Unsubscribe removes a SUB prefix.
 func (s *Socket) Unsubscribe(prefix []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnsubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
 
+// UnsubscribeString removes a SUB prefix from a string.
 func (s *Socket) UnsubscribeString(prefix string) error {
 	return s.Unsubscribe([]byte(prefix))
 }
 
+// Join adds a DISH group.
 func (s *Socket) Join(group []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpJoin, data: group})
 	keepAlive(s)
 	return err
 }
 
+// JoinString adds a DISH group from a string.
 func (s *Socket) JoinString(group string) error {
 	return s.Join([]byte(group))
 }
 
+// Leave removes a DISH group.
 func (s *Socket) Leave(group []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpLeave, data: group})
 	keepAlive(s)
 	return err
 }
 
+// LeaveString removes a DISH group from a string.
 func (s *Socket) LeaveString(group string) error {
 	return s.Leave([]byte(group))
 }
 
+// WaitConnected waits until at least minPeers are connected.
 func (s *Socket) WaitConnected(ctx context.Context, minPeers int) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -447,6 +472,7 @@ func (s *Socket) WaitConnected(ctx context.Context, minPeers int) (int, error) {
 	}
 }
 
+// WaitConnectedTimeout waits until at least minPeers are connected.
 func (s *Socket) WaitConnectedTimeout(minPeers int, timeout time.Duration) (int, error) {
 	if timeout == 0 {
 		return s.waitConnectedOnce(context.Background(), minPeers)
@@ -469,6 +495,7 @@ func (s *Socket) waitConnectedOnce(ctx context.Context, minPeers int) (int, erro
 	return value.(int), nil
 }
 
+// WaitSubscribed waits until at least minSubscriptions are visible.
 func (s *Socket) WaitSubscribed(ctx context.Context, minSubscriptions uint64) (uint64, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -492,6 +519,7 @@ func (s *Socket) WaitSubscribed(ctx context.Context, minSubscriptions uint64) (u
 	}
 }
 
+// WaitSubscribedTimeout waits until at least minSubscriptions are visible.
 func (s *Socket) WaitSubscribedTimeout(minSubscriptions uint64, timeout time.Duration) (uint64, error) {
 	if timeout == 0 {
 		return s.waitSubscribedOnce(context.Background(), minSubscriptions)
@@ -514,6 +542,7 @@ func (s *Socket) waitSubscribedOnce(ctx context.Context, minSubscriptions uint64
 	return value.(uint64), nil
 }
 
+// Close closes the socket using configured linger.
 func (s *Socket) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -528,6 +557,7 @@ func (s *Socket) Close(ctx context.Context) error {
 	return s.waitClose(ctx)
 }
 
+// CloseLinger closes the socket with an explicit linger.
 func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -542,6 +572,7 @@ func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 	return s.waitClose(ctx)
 }
 
+// Type returns this socket's type.
 func (s *Socket) Type() SocketType {
 	if s == nil {
 		return 0
@@ -549,6 +580,17 @@ func (s *Socket) Type() SocketType {
 	return s.socketType
 }
 
+// Options returns a copy of options configured through OMQ.go.
+func (s *Socket) Options() SocketOptions {
+	if s == nil {
+		return SocketOptions{}
+	}
+	s.optionsMu.RLock()
+	defer s.optionsMu.RUnlock()
+	return cloneSocketOptions(s.options)
+}
+
+// Run executes fn on the socket owner goroutine.
 func (s *Socket) Run(ctx context.Context, fn func(*BoundSocket) error) error {
 	if fn == nil {
 		return &ConfigError{Err: "nil socket run function"}
@@ -619,6 +661,22 @@ func (s *Socket) releaseAuthCallbacks() {
 	}
 }
 
+func (s *Socket) recordOption(record func(*SocketOptions)) {
+	if record == nil || s == nil {
+		return
+	}
+	s.optionsMu.Lock()
+	record(&s.options)
+	s.optionsMu.Unlock()
+}
+
+func cloneSocketOptions(options SocketOptions) SocketOptions {
+	options.Identity.Value = append([]byte(nil), options.Identity.Value...)
+	options.CompressionDict.Value = append([]byte(nil), options.CompressionDict.Value...)
+	return options
+}
+
+// BoundSocket is a socket handle valid only inside Socket.Run.
 type BoundSocket struct {
 	handle     *nativeSocket
 	socketType SocketType
@@ -628,6 +686,7 @@ type BoundSocket struct {
 	recvRing   *recvRing
 }
 
+// Context returns the Run context.
 func (s *BoundSocket) Context() context.Context {
 	if s == nil || s.ctx == nil {
 		return context.Background()
@@ -635,6 +694,7 @@ func (s *BoundSocket) Context() context.Context {
 	return s.ctx
 }
 
+// Send sends a message from the owner goroutine.
 func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -656,6 +716,7 @@ func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
 	}
 }
 
+// TrySend sends without waiting from the owner goroutine.
 func (s *BoundSocket) TrySend(msg Message) error {
 	handled, err := s.trySendRing(msg)
 	if handled {
@@ -664,6 +725,7 @@ func (s *BoundSocket) TrySend(msg Message) error {
 	return socketMessageSendNative(s.handle, msg)
 }
 
+// SendBlocking sends using the Run context until accepted or canceled.
 func (s *BoundSocket) SendBlocking(msg Message) error {
 	ctx := s.Context()
 	for i := 0; ; i++ {
@@ -684,6 +746,7 @@ func (s *BoundSocket) SendBlocking(msg Message) error {
 	return s.Send(ctx, msg)
 }
 
+// RecvInto receives a single-part message into dst.
 func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -705,6 +768,7 @@ func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 	}
 }
 
+// TryRecvInto receives a single-part message into dst without waiting.
 func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
 	ring, err := s.ensureRecvRing()
 	if err != nil {
@@ -713,6 +777,7 @@ func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
 	return ring.tryRecvInto(dst)
 }
 
+// RecvIntoBlocking receives into dst using the Run context.
 func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 	ctx := s.Context()
 	for i := 0; ; i++ {
@@ -729,18 +794,22 @@ func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 	}
 }
 
+// RecvView is a borrowed single-part receive view.
 type RecvView struct {
 	data []byte
 }
 
+// Bytes returns the borrowed payload.
 func (v RecvView) Bytes() []byte {
 	return v.data
 }
 
+// Len returns the borrowed payload length.
 func (v RecvView) Len() int {
 	return len(v.data)
 }
 
+// TryRecvView receives a borrowed single-part view without waiting.
 func (s *BoundSocket) TryRecvView() (RecvView, error) {
 	ring, err := s.ensureRecvRing()
 	if err != nil {

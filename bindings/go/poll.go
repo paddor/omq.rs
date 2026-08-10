@@ -6,11 +6,15 @@ import (
 	"time"
 )
 
+// ReceiveEvent identifies the socket that produced a message.
 type ReceiveEvent struct {
-	Socket  *Socket
+	// Socket is the socket that produced Message.
+	Socket *Socket
+	// Message is the received message.
 	Message Message
 }
 
+// TryReceiveAny receives from the first ready socket without waiting.
 func TryReceiveAny(sockets ...*Socket) (ReceiveEvent, error) {
 	if err := validateReceiveAnySockets(sockets); err != nil {
 		return ReceiveEvent{}, err
@@ -27,6 +31,7 @@ func TryReceiveAny(sockets ...*Socket) (ReceiveEvent, error) {
 	return ReceiveEvent{}, ErrAgain
 }
 
+// ReceiveAny receives from any supplied socket until ctx is done.
 func ReceiveAny(ctx context.Context, sockets ...*Socket) (ReceiveEvent, error) {
 	if err := validateReceiveAnySockets(sockets); err != nil {
 		return ReceiveEvent{}, err
@@ -51,6 +56,7 @@ func ReceiveAny(ctx context.Context, sockets ...*Socket) (ReceiveEvent, error) {
 	}
 }
 
+// ReceiveAnyTimeout receives from any socket with libzmq-style timeout semantics.
 func ReceiveAnyTimeout(timeout time.Duration, sockets ...*Socket) (ReceiveEvent, error) {
 	if timeout == 0 {
 		return TryReceiveAny(sockets...)

@@ -1,9 +1,11 @@
 package omq
 
+// Message is an immutable OMQ message with zero or more parts.
 type Message struct {
 	parts [][]byte
 }
 
+// NewMessage copies parts into a message.
 func NewMessage(parts ...[]byte) Message {
 	out := Message{parts: make([][]byte, len(parts))}
 	for i, part := range parts {
@@ -12,22 +14,27 @@ func NewMessage(parts ...[]byte) Message {
 	return out
 }
 
+// Bytes creates a single-part binary message.
 func Bytes(data []byte) Message {
 	return NewMessage(data)
 }
 
+// String creates a single-part UTF-8 message.
 func String(data string) Message {
 	return NewMessage([]byte(data))
 }
 
+// Multipart creates a multipart message.
 func Multipart(parts ...[]byte) Message {
 	return NewMessage(parts...)
 }
 
+// Group creates a RADIO/DISH group message.
 func Group(group string, body []byte) Message {
 	return Multipart([]byte(group), body)
 }
 
+// Route prefixes a message with a routing identity.
 func Route(identity []byte, body Message) Message {
 	parts := make([][]byte, 0, len(body.parts)+1)
 	parts = append(parts, identity)
@@ -35,6 +42,7 @@ func Route(identity []byte, body Message) Message {
 	return NewMessage(parts...)
 }
 
+// Parts returns copies of all message parts.
 func (m Message) Parts() [][]byte {
 	out := make([][]byte, len(m.parts))
 	for i, part := range m.parts {
@@ -47,11 +55,13 @@ func (m Message) partsView() [][]byte {
 	return m.parts
 }
 
+// Bytes returns a copy of the first part.
 func (m Message) Bytes() []byte {
 	part := m.Part(0)
 	return part
 }
 
+// BytesOK returns the single part when the message has exactly one part.
 func (m Message) BytesOK() ([]byte, bool) {
 	if len(m.parts) != 1 {
 		return nil, false
@@ -59,6 +69,7 @@ func (m Message) BytesOK() ([]byte, bool) {
 	return append([]byte(nil), m.parts[0]...), true
 }
 
+// Part returns a copy of one part or nil when index is out of range.
 func (m Message) Part(index int) []byte {
 	part, ok := m.PartOK(index)
 	if !ok {
@@ -67,6 +78,7 @@ func (m Message) Part(index int) []byte {
 	return part
 }
 
+// PartOK returns a copy of one part and whether it exists.
 func (m Message) PartOK(index int) ([]byte, bool) {
 	if index < 0 || index >= len(m.parts) {
 		return nil, false
@@ -74,6 +86,7 @@ func (m Message) PartOK(index int) ([]byte, bool) {
 	return append([]byte(nil), m.parts[index]...), true
 }
 
+// String decodes the first part as UTF-8 text.
 func (m Message) String() string {
 	if len(m.parts) == 0 {
 		return ""
@@ -81,14 +94,17 @@ func (m Message) String() string {
 	return string(m.parts[0])
 }
 
+// Len returns the number of parts.
 func (m Message) Len() int {
 	return len(m.parts)
 }
 
+// IsMultipart reports whether the message has more than one part.
 func (m Message) IsMultipart() bool {
 	return len(m.parts) > 1
 }
 
+// ByteLen returns the total bytes across all parts.
 func (m Message) ByteLen() int {
 	var total int
 	for _, part := range m.parts {
@@ -97,18 +113,22 @@ func (m Message) ByteLen() int {
 	return total
 }
 
+// Empty reports whether the message has no parts.
 func (m Message) Empty() bool {
 	return len(m.parts) == 0
 }
 
+// Route returns the first part as a routing identity.
 func (m Message) Route() []byte {
 	return m.Part(0)
 }
 
+// RouteOK returns the routing identity and whether it exists.
 func (m Message) RouteOK() ([]byte, bool) {
 	return m.PartOK(0)
 }
 
+// Group returns the first part as a group name.
 func (m Message) Group() string {
 	group, ok := m.GroupOK()
 	if !ok {
@@ -117,6 +137,7 @@ func (m Message) Group() string {
 	return group
 }
 
+// GroupOK returns the group name and whether it exists.
 func (m Message) GroupOK() (string, bool) {
 	part, ok := m.PartOK(0)
 	if !ok {
@@ -125,6 +146,7 @@ func (m Message) GroupOK() (string, bool) {
 	return string(part), true
 }
 
+// Body returns all parts after the first part.
 func (m Message) Body() Message {
 	if len(m.parts) <= 1 {
 		return Message{}
@@ -132,6 +154,7 @@ func (m Message) Body() Message {
 	return NewMessage(m.parts[1:]...)
 }
 
+// Equal reports whether two messages have identical parts.
 func (m Message) Equal(other Message) bool {
 	if len(m.parts) != len(other.parts) {
 		return false

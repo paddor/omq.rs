@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 )
 
+// Authenticator decides whether to accept a peer handshake.
 type Authenticator func(PeerInfo) bool
 
 var (

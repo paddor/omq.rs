@@ -6,12 +6,17 @@ import (
 	"errors"
 )
 
+// ProxyOptions configures Proxy.
 type ProxyOptions struct {
-	Capture   *Socket
-	Control   *Socket
+	// Capture receives best-effort copies of forwarded messages.
+	Capture *Socket
+	// Control receives PAUSE, RESUME, TERMINATE, and KILL commands.
+	Control *Socket
+	// BurstSize limits messages forwarded from one side per turn.
 	BurstSize int
 }
 
+// Proxy forwards messages between frontend and backend.
 func Proxy(ctx context.Context, frontend, backend *Socket, opts ProxyOptions) error {
 	if ctx == nil {
 		ctx = context.Background()

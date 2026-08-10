@@ -38,13 +38,20 @@ typedef struct {
   char *kind;
   char *endpoint;
   char *peer_ident;
+  char *peer_address;
+  char *peer_socket_type;
   char *reason;
   char *command_name;
   uint8_t *data;
   size_t data_len;
+  uint8_t *peer_identity;
+  size_t peer_identity_len;
   uint64_t connection_id;
   uint64_t retry_millis;
   uint32_t attempt;
+  uint32_t zmtp_major;
+  uint32_t zmtp_minor;
+  int has_peer;
 } OmqGoEvent;
 
 typedef struct {

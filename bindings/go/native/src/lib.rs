@@ -25,7 +25,7 @@ use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
     Context, ContextConfig, DisconnectReason, Endpoint, Error, MechanismSetup, Message,
     MonitorEvent as NativeMonitorEvent, MonitorRecvError, MonitorStream, MonitorTryRecvError,
-    Options, PeerCommandKind, SocketType,
+    Options, PeerCommandKind, PeerInfo as NativePeerInfo, SocketType,
 };
 #[cfg(feature = "curve")]
 use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
@@ -78,13 +78,20 @@ pub struct OmqGoEvent {
     kind: *mut c_char,
     endpoint: *mut c_char,
     peer_ident: *mut c_char,
+    peer_address: *mut c_char,
+    peer_socket_type: *mut c_char,
     reason: *mut c_char,
     command_name: *mut c_char,
     data: *mut u8,
     data_len: usize,
+    peer_identity: *mut u8,
+    peer_identity_len: usize,
     connection_id: u64,
     retry_millis: u64,
     attempt: u32,
+    zmtp_major: u32,
+    zmtp_minor: u32,
+    has_peer: c_int,
 }
 
 #[repr(C)]
@@ -1273,6 +1280,24 @@ fn bytes_to_event_data(bytes: Bytes) -> (*mut u8, usize) {
     raw_bytes(&bytes)
 }
 
+fn fill_monitor_peer(out: &mut OmqGoEvent, peer: NativePeerInfo) {
+    out.has_peer = 1;
+    out.connection_id = peer.connection_id;
+    out.zmtp_major = u32::from(peer.zmtp_version.0);
+    out.zmtp_minor = u32::from(peer.zmtp_version.1);
+    if let Some(identity) = peer.peer_identity {
+        let (data, len) = bytes_to_event_data(identity);
+        out.peer_identity = data;
+        out.peer_identity_len = len;
+    }
+    if let Some(address) = peer.peer_address {
+        out.peer_address = string_to_raw(address.to_string());
+    }
+    if let Some(socket_type) = peer.peer_properties.socket_type {
+        out.peer_socket_type = string_to_raw(format!("{socket_type:?}").to_ascii_uppercase());
+    }
+}
+
 #[cfg(any(feature = "plain", feature = "curve"))]
 fn go_authenticator(callback_id: u64) -> Authenticator {
     Authenticator::new(move |peer| go_authenticate(callback_id, peer))
@@ -1343,13 +1368,20 @@ fn event_to_c(event: NativeMonitorEvent) -> OmqGoEvent {
         kind: ptr::null_mut(),
         endpoint: ptr::null_mut(),
         peer_ident: ptr::null_mut(),
+        peer_address: ptr::null_mut(),
+        peer_socket_type: ptr::null_mut(),
         reason: ptr::null_mut(),
         command_name: ptr::null_mut(),
         data: ptr::null_mut(),
         data_len: 0,
+        peer_identity: ptr::null_mut(),
+        peer_identity_len: 0,
         connection_id: 0,
         retry_millis: 0,
         attempt: 0,
+        zmtp_major: 0,
+        zmtp_minor: 0,
+        has_peer: 0,
     };
 
     match event {
@@ -1380,7 +1412,7 @@ fn event_to_c(event: NativeMonitorEvent) -> OmqGoEvent {
         NativeMonitorEvent::HandshakeSucceeded { endpoint, peer } => {
             out.kind = string_to_raw("HANDSHAKE_SUCCEEDED".to_string());
             out.endpoint = string_to_raw(endpoint.to_string());
-            out.connection_id = peer.connection_id;
+            fill_monitor_peer(&mut out, peer);
         }
         NativeMonitorEvent::HandshakeFailed {
             endpoint,
@@ -1409,7 +1441,7 @@ fn event_to_c(event: NativeMonitorEvent) -> OmqGoEvent {
         } => {
             out.kind = string_to_raw("DISCONNECTED".to_string());
             out.endpoint = string_to_raw(endpoint.to_string());
-            out.connection_id = peer.connection_id;
+            fill_monitor_peer(&mut out, peer);
             out.reason = string_to_raw(disconnect_reason(reason));
         }
         NativeMonitorEvent::SubscribeReceived { prefix } => {
@@ -2932,6 +2964,8 @@ pub extern "C" fn omq_go_event_free(event: OmqGoEvent) {
     omq_go_string_free(event.kind);
     omq_go_string_free(event.endpoint);
     omq_go_string_free(event.peer_ident);
+    omq_go_string_free(event.peer_address);
+    omq_go_string_free(event.peer_socket_type);
     omq_go_string_free(event.reason);
     omq_go_string_free(event.command_name);
     if !event.data.is_null() && event.data_len > 0 {
@@ -2939,6 +2973,14 @@ pub extern "C" fn omq_go_event_free(event: OmqGoEvent) {
             drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
                 event.data,
                 event.data_len,
+            )));
+        }
+    }
+    if !event.peer_identity.is_null() && event.peer_identity_len > 0 {
+        unsafe {
+            drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
+                event.peer_identity,
+                event.peer_identity_len,
             )));
         }
     }

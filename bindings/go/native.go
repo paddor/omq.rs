@@ -744,11 +744,22 @@ func eventFromC(raw C.OmqGoEvent) MonitorEvent {
 		Kind:         goString(raw.kind),
 		Endpoint:     goString(raw.endpoint),
 		PeerIdent:    goString(raw.peer_ident),
+		HasPeer:      raw.has_peer != 0,
 		Reason:       goString(raw.reason),
 		CommandName:  goString(raw.command_name),
 		ConnectionID: uint64(raw.connection_id),
 		Retry:        time.Duration(uint64(raw.retry_millis)) * time.Millisecond,
 		Attempt:      uint32(raw.attempt),
+	}
+	if ev.HasPeer {
+		ev.Peer = PeerInfo{
+			Identity:     copyFromCPtr(raw.peer_identity, raw.peer_identity_len),
+			ConnectionID: uint64(raw.connection_id),
+			PeerAddress:  goString(raw.peer_address),
+			SocketType:   goString(raw.peer_socket_type),
+			ZMTPMajor:    uint8(raw.zmtp_major),
+			ZMTPMinor:    uint8(raw.zmtp_minor),
+		}
 	}
 	if raw.data != nil && raw.data_len > 0 {
 		ev.Data = copyFromCPtr(raw.data, raw.data_len)

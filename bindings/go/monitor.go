@@ -17,6 +17,8 @@ type MonitorEvent struct {
 	Kind         string
 	Endpoint     string
 	PeerIdent    string
+	Peer         PeerInfo
+	HasPeer      bool
 	Reason       string
 	CommandName  string
 	Data         []byte

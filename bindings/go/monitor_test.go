@@ -38,6 +38,18 @@ func TestMonitorHandshakeEvent(t *testing.T) {
 	if event.Endpoint != endpoint {
 		t.Fatalf("event endpoint = %q, want %q", event.Endpoint, endpoint)
 	}
+	if !event.HasPeer {
+		t.Fatal("monitor event has no peer info")
+	}
+	if event.Peer.SocketType != "PUSH" {
+		t.Fatalf("peer socket type = %q, want PUSH", event.Peer.SocketType)
+	}
+	if string(event.Peer.Identity) != "push-id" {
+		t.Fatalf("peer identity = %q, want push-id", event.Peer.Identity)
+	}
+	if event.Peer.ZMTPMajor != 3 || event.Peer.ZMTPMinor == 0 {
+		t.Fatalf("ZMTP version = %d.%d, want 3.x", event.Peer.ZMTPMajor, event.Peer.ZMTPMinor)
+	}
 }
 
 func TestMonitorTimeoutAndClose(t *testing.T) {

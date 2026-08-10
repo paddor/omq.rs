@@ -146,6 +146,9 @@ func TestPeerRoundTrip(t *testing.T) {
 	if err := b.Connect(endpoint); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := b.WaitConnectedTimeout(1, time.Second); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.SendTimeout(Multipart([]byte("peer-a"), []byte("hello a")), time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +301,11 @@ func TestRadioDishFiltersGroupsAndStringHelpers(t *testing.T) {
 	defer closeSocket(t, radio)
 	dish := newTestSocket(t, ctx, Dish)
 	defer closeSocket(t, dish)
+	monitor, err := radio.Monitor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer monitor.Close()
 
 	endpoint, err := radio.Bind("inproc://go-radio-dish")
 	if err != nil {
@@ -312,6 +320,7 @@ func TestRadioDishFiltersGroupsAndStringHelpers(t *testing.T) {
 	if _, err := radio.WaitConnectedTimeout(1, time.Second); err != nil {
 		t.Fatal(err)
 	}
+	_ = receiveMonitorKind(t, monitor, "JOIN_RECEIVED")
 
 	if err := radio.SendTimeout(Group("news", []byte("ignored")), time.Second); err != nil {
 		t.Fatal(err)

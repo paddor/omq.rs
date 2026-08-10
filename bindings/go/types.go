@@ -110,11 +110,16 @@ type CurveKeypair struct {
 }
 
 type PeerInfo struct {
-	Mechanism string
-	PublicKey string
-	Identity  []byte
-	Username  string
-	Password  string
+	Mechanism    string
+	PublicKey    string
+	Identity     []byte
+	Username     string
+	Password     string
+	ConnectionID uint64
+	PeerAddress  string
+	SocketType   string
+	ZMTPMajor    uint8
+	ZMTPMinor    uint8
 }
 
 type WorkloadProfile int32

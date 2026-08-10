@@ -115,13 +115,6 @@ unsafe extern "C" {
 }
 
 #[repr(C)]
-pub struct OmqGoRecvView {
-    status: OmqGoStatus,
-    data: *const u8,
-    len: usize,
-}
-
-#[repr(C)]
 pub struct OmqGoSendRingMemory {
     control: *mut c_void,
     descriptors: *mut c_void,
@@ -278,8 +271,6 @@ pub struct OmqGoSocket {
     materialize_lock: Mutex<()>,
     recv_cache: Mutex<VecDeque<Message>>,
     recv_scratch: Mutex<Vec<Message>>,
-    recv_into_scratch: Mutex<Vec<u8>>,
-    recv_view_message: Mutex<Option<Message>>,
     closed: AtomicBool,
 }
 
@@ -1249,46 +1240,6 @@ fn copy_message_into(message: &Message, destination: &mut [u8]) -> Result<usize,
     Ok(part.len())
 }
 
-fn copy_message_to_scratch(
-    message: &Message,
-    capacity: usize,
-    scratch: &mut Vec<u8>,
-) -> Result<usize, Error> {
-    if message.len() != 1 {
-        return Err(Error::Config(
-            "RecvInto requires a single-part message".to_string(),
-        ));
-    }
-    let part = message
-        .part_slice(0)
-        .ok_or_else(|| Error::Config("missing message part".to_string()))?;
-    if part.len() > capacity {
-        return Err(Error::MessageTooLarge {
-            size: part.len(),
-            max: capacity,
-        });
-    }
-    scratch.clear();
-    scratch.extend_from_slice(part);
-    Ok(part.len())
-}
-
-fn message_part_view(message: &Message) -> Result<(*const u8, usize), Error> {
-    if message.len() != 1 {
-        return Err(Error::Config(
-            "RecvView requires a single-part message".to_string(),
-        ));
-    }
-    let part = message
-        .part_slice(0)
-        .ok_or_else(|| Error::Config("missing message part".to_string()))?;
-    if part.is_empty() {
-        Ok((ptr::null(), 0))
-    } else {
-        Ok((part.as_ptr(), part.len()))
-    }
-}
-
 fn try_send_with_timeout(
     native: &BlockingSocket,
     mut message: Message,
@@ -1800,8 +1751,6 @@ pub extern "C" fn omq_go_socket_new(
             materialize_lock: Mutex::new(()),
             recv_cache: Mutex::new(VecDeque::new()),
             recv_scratch: Mutex::new(Vec::with_capacity(RECV_BATCH)),
-            recv_into_scratch: Mutex::new(Vec::new()),
-            recv_view_message: Mutex::new(None),
             closed: AtomicBool::new(false),
         }));
     }
@@ -2072,100 +2021,6 @@ pub extern "C" fn omq_go_socket_recv_one_into(
         }
         Ok(())
     })();
-    status_from_result(result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn omq_go_socket_recv_one_borrow(
-    socket: *mut OmqGoSocket,
-    timeout_millis: i64,
-    capacity: usize,
-    data: *mut *const u8,
-    written: *mut usize,
-) -> OmqGoStatus {
-    if socket.is_null() {
-        return OmqGoStatus::err(CLOSED, "socket closed");
-    }
-    if data.is_null() || written.is_null() {
-        return OmqGoStatus::err(CONFIG, "null receive borrow pointer");
-    }
-    unsafe {
-        *data = ptr::null();
-        *written = 0;
-    }
-    let socket = unsafe { &*socket };
-    let result = (|| {
-        let message = recv_one(socket, timeout_millis)?;
-        let mut scratch = socket
-            .recv_into_scratch
-            .lock()
-            .map_err(|_| Error::Config("receive-into scratch lock poisoned".to_string()))?;
-        let copied = copy_message_to_scratch(&message, capacity, &mut scratch)?;
-        unsafe {
-            *written = copied;
-            *data = if copied == 0 {
-                ptr::null()
-            } else {
-                scratch.as_ptr()
-            };
-        }
-        Ok(())
-    })();
-    status_from_result(result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn omq_go_socket_recv_one_view(
-    socket: *mut OmqGoSocket,
-    timeout_millis: i64,
-) -> OmqGoRecvView {
-    if socket.is_null() {
-        return OmqGoRecvView {
-            status: OmqGoStatus::err(CLOSED, "socket closed"),
-            data: ptr::null(),
-            len: 0,
-        };
-    }
-    let socket = unsafe { &*socket };
-    let result = (|| {
-        let message = recv_one(socket, timeout_millis)?;
-        let mut guard = socket
-            .recv_view_message
-            .lock()
-            .map_err(|_| Error::Config("receive view lock poisoned".to_string()))?;
-        *guard = Some(message);
-        let message = guard
-            .as_ref()
-            .ok_or_else(|| Error::Config("receive view missing message".to_string()))?;
-        message_part_view(message)
-    })();
-    match result {
-        Ok((data, len)) => OmqGoRecvView {
-            status: OmqGoStatus::ok(),
-            data,
-            len,
-        },
-        Err(error) => OmqGoRecvView {
-            status: OmqGoStatus::from_error(error),
-            data: ptr::null(),
-            len: 0,
-        },
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn omq_go_socket_clear_recv_view(socket: *mut OmqGoSocket) -> OmqGoStatus {
-    if socket.is_null() {
-        return OmqGoStatus::err(CLOSED, "socket closed");
-    }
-    let socket = unsafe { &*socket };
-    let result = socket
-        .recv_view_message
-        .lock()
-        .map_err(|_| Error::Config("receive view lock poisoned".to_string()))
-        .map(|mut guard| {
-            guard.take();
-        });
     status_from_result(result)
 }
 

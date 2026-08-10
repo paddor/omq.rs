@@ -335,14 +335,18 @@ func BenchmarkInprocPushPullRunTryRecvView128B(b *testing.B) {
 			return nil
 		})
 	}()
+	expectedLen := len(payload)
+	checkPayload := func(view []byte) error {
+		if len(view) != expectedLen {
+			return fmt.Errorf("payload len = %d", len(view))
+		}
+		return nil
+	}
 	err = pull.Run(context.Background(), func(socket *BoundSocket) error {
 		for i := 0; i < b.N; i++ {
 			for {
-				view, err := socket.TryRecvView()
+				err := socket.TryRecvView(checkPayload)
 				if err == nil {
-					if view.Len() != len(payload) {
-						return fmt.Errorf("payload len = %d", view.Len())
-					}
 					break
 				}
 				if !errors.Is(err, ErrAgain) {

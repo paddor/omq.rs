@@ -325,21 +325,6 @@ func socketMessageRecvIntoNativeTimeout(socket *nativeSocket, dst []byte, timeou
 	return int(written), nil
 }
 
-func socketMessageRecvViewNative(socket *nativeSocket) (RecvView, error) {
-	raw := C.omq_go_socket_recv_one_view((*C.OmqGoSocket)(socket), 0)
-	if err := statusErr(raw.status); err != nil {
-		return RecvView{}, err
-	}
-	if raw.data == nil || raw.len == 0 {
-		return RecvView{}, nil
-	}
-	return RecvView{data: unsafe.Slice((*byte)(unsafe.Pointer(raw.data)), int(raw.len))}, nil
-}
-
-func socketRecvViewClearNative(socket *nativeSocket) error {
-	return statusErr(C.omq_go_socket_clear_recv_view((*C.OmqGoSocket)(socket)))
-}
-
 func sendRingCreateNative(socket *nativeSocket, descCapacity, payloadCapacity int) (*nativeSendRing, sendRingMemory, error) {
 	var out *C.OmqGoSendRing
 	err := statusErr(C.omq_go_send_ring_create(

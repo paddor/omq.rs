@@ -36,7 +36,6 @@ type recvRing struct {
 	head         uint64
 	releasedHead uint64
 	cachedTail   uint64
-	viewActive   bool
 }
 
 func newRecvRing(socket *nativeSocket, ringSize int) (*recvRing, error) {
@@ -68,25 +67,40 @@ func newRecvRing(socket *nativeSocket, ringSize int) (*recvRing, error) {
 	}, nil
 }
 
-func (r *recvRing) tryRecvView() (RecvView, error) {
+func (r *recvRing) tryRecvView(fn func([]byte) error) (bool, error) {
 	if r == nil || r.handle == nil {
-		return RecvView{}, ErrClosed
+		return false, ErrClosed
 	}
-	r.releaseActiveView()
 	if err := r.fillIfEmpty(0); err != nil {
-		return RecvView{}, err
+		return false, err
 	}
 	desc := r.current()
+	defer r.advance()
 	if desc.partCount != 1 {
-		r.advance()
-		return RecvView{}, &ConfigError{Err: "RecvView requires a single-part message"}
+		return true, &ConfigError{Err: "RecvView requires a single-part message"}
 	}
 	if desc.flags&recvRingFlagExternal != 0 {
-		r.advance()
-		return RecvView{}, &ConfigError{Err: "RecvView payload exceeds receive ring capacity"}
+		return true, &ConfigError{Err: "RecvView payload exceeds receive ring capacity"}
 	}
-	r.viewActive = true
-	return RecvView{data: r.source(desc)}, nil
+	return true, fn(r.source(desc))
+}
+
+func (r *recvRing) recvViewCancelable(cancel *nativeCancel, fn func([]byte) error) (bool, error) {
+	if r == nil || r.handle == nil {
+		return false, ErrClosed
+	}
+	if err := r.fillIfEmptyCancelable(cancel); err != nil {
+		return false, err
+	}
+	desc := r.current()
+	defer r.advance()
+	if desc.partCount != 1 {
+		return true, &ConfigError{Err: "RecvView requires a single-part message"}
+	}
+	if desc.flags&recvRingFlagExternal != 0 {
+		return true, &ConfigError{Err: "RecvView payload exceeds receive ring capacity"}
+	}
+	return true, fn(r.source(desc))
 }
 
 func (r *recvRing) tryRecvInto(dst []byte) (int, error) {
@@ -101,7 +115,6 @@ func (r *recvRing) recvIntoCancelable(dst []byte, cancel *nativeCancel) (int, er
 	if r == nil || r.handle == nil {
 		return 0, ErrClosed
 	}
-	r.releaseActiveView()
 	if err := r.fillIfEmptyCancelable(cancel); err != nil {
 		return 0, err
 	}
@@ -125,7 +138,6 @@ func (r *recvRing) recvInto(dst []byte, timeoutMillis int64) (int, error) {
 	if r == nil || r.handle == nil {
 		return 0, ErrClosed
 	}
-	r.releaseActiveView()
 	if err := r.fillIfEmpty(timeoutMillis); err != nil {
 		return 0, err
 	}
@@ -149,7 +161,6 @@ func (r *recvRing) close() {
 	if r == nil || r.handle == nil {
 		return
 	}
-	r.releaseActiveView()
 	r.releaseConsumed()
 	recvRingCloseNative(r.handle)
 	r.handle = nil
@@ -205,13 +216,6 @@ func (r *recvRing) source(desc recvRingDesc) []byte {
 		return nil
 	}
 	return r.payload[desc.payload : desc.payload+desc.payloadLen]
-}
-
-func (r *recvRing) releaseActiveView() {
-	if r.viewActive {
-		r.advance()
-		r.viewActive = false
-	}
 }
 
 func (r *recvRing) advance() {

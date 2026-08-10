@@ -69,12 +69,6 @@ typedef struct {
 } OmqGoAuthPeer;
 
 typedef struct {
-  OmqGoStatus status;
-  const uint8_t *data;
-  size_t len;
-} OmqGoRecvView;
-
-typedef struct {
   void *control;
   void *descriptors;
   void *payload;
@@ -126,9 +120,6 @@ OmqGoStatus omq_go_socket_try_send_batch(OmqGoSocket *socket, const OmqGoWireMes
 OmqGoStatus omq_go_receive_any(OmqGoSocket **sockets, size_t socket_count, int64_t timeout_millis, size_t *index, OmqGoMessage *out);
 OmqGoStatus omq_go_socket_recv(OmqGoSocket *socket, int64_t timeout_millis, OmqGoMessage *out);
 OmqGoStatus omq_go_socket_recv_one_into(OmqGoSocket *socket, int64_t timeout_millis, uint8_t *data, size_t capacity, size_t *written);
-OmqGoStatus omq_go_socket_recv_one_borrow(OmqGoSocket *socket, int64_t timeout_millis, size_t capacity, const uint8_t **data, size_t *written);
-OmqGoRecvView omq_go_socket_recv_one_view(OmqGoSocket *socket, int64_t timeout_millis);
-OmqGoStatus omq_go_socket_clear_recv_view(OmqGoSocket *socket);
 OmqGoStatus omq_go_socket_subscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_unsubscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_join(OmqGoSocket *socket, const uint8_t *data, size_t len);

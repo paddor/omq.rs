@@ -162,25 +162,102 @@ func TestRunRecvViewReleasesSendRingSlot(t *testing.T) {
 	}()
 
 	err = pull.Run(runCtx, func(socket *BoundSocket) error {
-		view, err := socket.TryRecvView()
-		for errors.Is(err, ErrAgain) {
+		for {
+			err := socket.TryRecvView(func(payload []byte) error {
+				if got := string(payload); got != "view" {
+					t.Fatalf("message = %q, want view", got)
+				}
+				return nil
+			})
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, ErrAgain) {
+				return err
+			}
 			if err := runCtx.Err(); err != nil {
 				return err
 			}
-			view, err = socket.TryRecvView()
 		}
-		if err != nil {
-			return err
-		}
-		if got := string(view.Bytes()); got != "view" {
-			t.Fatalf("message = %q, want view", got)
-		}
-		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRecvViewReturnsCallbackErrAgain(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	bound, err := pull.Bind("inproc://go-run-recv-view-callback-again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(String("first"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(String("second"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(String("third"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
+		calls := 0
+		err := socket.RecvViewBlocking(func(payload []byte) error {
+			calls++
+			if got := string(payload); got != "first" {
+				t.Fatalf("message = %q, want first", got)
+			}
+			return ErrAgain
+		})
+		if !errors.Is(err, ErrAgain) {
+			t.Fatalf("RecvViewBlocking err = %v, want ErrAgain", err)
+		}
+		if calls != 1 {
+			t.Fatalf("callback calls = %d, want 1", calls)
+		}
+
+		calls = 0
+		err = socket.RecvView(runCtx, func(payload []byte) error {
+			calls++
+			if got := string(payload); got != "second" {
+				t.Fatalf("message = %q, want second", got)
+			}
+			return ErrAgain
+		})
+		if !errors.Is(err, ErrAgain) {
+			t.Fatalf("RecvView err = %v, want ErrAgain", err)
+		}
+		if calls != 1 {
+			t.Fatalf("callback calls = %d, want 1", calls)
+		}
+
+		buf := make([]byte, 16)
+		n, err := socket.RecvIntoBlocking(buf)
+		if err != nil {
+			return err
+		}
+		if got := string(buf[:n]); got != "third" {
+			t.Fatalf("message = %q, want third", got)
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }

@@ -834,28 +834,81 @@ func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 	}
 }
 
-// RecvView is a borrowed single-part receive view.
-type RecvView struct {
-	data []byte
+// RecvView receives a borrowed single-part payload and passes it to fn.
+//
+// The payload slice is valid only until fn returns. fn must not retain it.
+func (s *BoundSocket) RecvView(ctx context.Context, fn func([]byte) error) error {
+	if fn == nil {
+		return &ConfigError{Err: "nil RecvView callback"}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return err
+		}
+		delivered, err := s.tryRecvView(fn)
+		if delivered {
+			return err
+		}
+		if !errors.Is(err, ErrAgain) {
+			return err
+		}
+		if err := waitRetry(ctx, i); err != nil {
+			return err
+		}
+	}
 }
 
-// Bytes returns the borrowed payload.
-func (v RecvView) Bytes() []byte {
-	return v.data
+// TryRecvView receives a borrowed single-part payload without waiting.
+//
+// The payload slice is valid only until fn returns. fn must not retain it.
+func (s *BoundSocket) TryRecvView(fn func([]byte) error) error {
+	if fn == nil {
+		return &ConfigError{Err: "nil RecvView callback"}
+	}
+	_, err := s.tryRecvView(fn)
+	return err
 }
 
-// Len returns the borrowed payload length.
-func (v RecvView) Len() int {
-	return len(v.data)
-}
-
-// TryRecvView receives a borrowed single-part view without waiting.
-func (s *BoundSocket) TryRecvView() (RecvView, error) {
+func (s *BoundSocket) tryRecvView(fn func([]byte) error) (bool, error) {
 	ring, err := s.ensureRecvRing()
 	if err != nil {
-		return RecvView{}, err
+		return false, err
 	}
-	return ring.tryRecvView()
+	return ring.tryRecvView(fn)
+}
+
+// RecvViewBlocking receives a borrowed payload using the Run context.
+//
+// The payload slice is valid only until fn returns. fn must not retain it.
+func (s *BoundSocket) RecvViewBlocking(fn func([]byte) error) error {
+	if fn == nil {
+		return &ConfigError{Err: "nil RecvView callback"}
+	}
+	ctx := s.Context()
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return err
+	}
+	for {
+		if err := errFromContext(ctx); err != nil {
+			return err
+		}
+		delivered, err := ring.recvViewCancelable(s.cancel, fn)
+		if delivered {
+			return err
+		}
+		if errors.Is(err, ErrCanceled) {
+			if ctxErr := errFromContext(ctx); ctxErr != nil {
+				return ctxErr
+			}
+		}
+		if !errors.Is(err, ErrAgain) {
+			return err
+		}
+	}
 }
 
 func (s *BoundSocket) trySendRing(msg Message) (bool, error) {
@@ -898,18 +951,14 @@ func (s *BoundSocket) ensureRecvRing() (*recvRing, error) {
 }
 
 func (s *BoundSocket) close() error {
-	err := socketRecvViewClearNative(s.handle)
 	if s.recvRing != nil {
 		s.recvRing.close()
 		s.recvRing = nil
 	}
 	if s.sendRing == nil {
-		return err
+		return nil
 	}
 	closeErr := s.sendRing.close()
 	s.sendRing = nil
-	if err != nil {
-		return err
-	}
 	return closeErr
 }

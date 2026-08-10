@@ -124,6 +124,104 @@ func TestChannelAndPairRoundTrip(t *testing.T) {
 	testBidirectionalInproc(t, Pair, "inproc://go-pair", "x", "y")
 }
 
+func TestPeerRoundTrip(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	a, err := ctx.Socket(Peer, Identity([]byte("peer-a")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, a)
+	b, err := ctx.Socket(Peer, Identity([]byte("peer-b")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, b)
+
+	endpoint, err := a.Bind("inproc://go-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SendTimeout(Multipart([]byte("peer-a"), []byte("hello a")), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(Multipart([]byte("peer-b"), []byte("hello a"))) {
+		t.Fatalf("message = %#v", got.Parts())
+	}
+	if err := a.SendTimeout(Multipart([]byte("peer-b"), []byte("hello b")), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, err = b.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(Multipart([]byte("peer-a"), []byte("hello b"))) {
+		t.Fatalf("message = %#v", got.Parts())
+	}
+}
+
+func TestClientServerMultipleClients(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	server := newTestSocket(t, ctx, Server)
+	defer closeSocket(t, server)
+	clients := make([]*Socket, 3)
+	for i := range clients {
+		client, err := ctx.Socket(Client, Identity([]byte{'c', byte('0' + i)}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeSocket(t, client)
+		clients[i] = client
+	}
+
+	endpoint, err := server.Bind("inproc://go-client-server-many")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, client := range clients {
+		if err := client.Connect(endpoint); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, client := range clients {
+		if err := client.SendTimeout(String("from-"+string(rune('0'+i))), time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < len(clients); i++ {
+		request, err := server.RecvTimeout(time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.Len() != 2 {
+			t.Fatalf("request parts = %#v", request.Parts())
+		}
+		reply := Route(request.Route(), String("re:"+string(request.Part(1))))
+		if err := server.SendTimeout(reply, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, client := range clients {
+		msg, err := client.RecvTimeout(time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := msg.String(); len(got) < 3 || got[:3] != "re:" {
+			t.Fatalf("reply = %q, want re:*", got)
+		}
+	}
+}
+
 func testBidirectionalInproc(t *testing.T, socketType SocketType, endpoint, first, second string) {
 	t.Helper()
 	ctx := openTestContext(t)

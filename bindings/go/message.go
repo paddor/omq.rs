@@ -52,11 +52,26 @@ func (m Message) Bytes() []byte {
 	return part
 }
 
+func (m Message) BytesOK() ([]byte, bool) {
+	if len(m.parts) != 1 {
+		return nil, false
+	}
+	return append([]byte(nil), m.parts[0]...), true
+}
+
 func (m Message) Part(index int) []byte {
-	if len(m.parts) == 0 {
+	part, ok := m.PartOK(index)
+	if !ok {
 		return nil
 	}
-	return append([]byte(nil), m.parts[index]...)
+	return part
+}
+
+func (m Message) PartOK(index int) ([]byte, bool) {
+	if index < 0 || index >= len(m.parts) {
+		return nil, false
+	}
+	return append([]byte(nil), m.parts[index]...), true
 }
 
 func (m Message) String() string {
@@ -84,4 +99,47 @@ func (m Message) ByteLen() int {
 
 func (m Message) Empty() bool {
 	return len(m.parts) == 0
+}
+
+func (m Message) Route() []byte {
+	return m.Part(0)
+}
+
+func (m Message) RouteOK() ([]byte, bool) {
+	return m.PartOK(0)
+}
+
+func (m Message) Group() string {
+	group, ok := m.GroupOK()
+	if !ok {
+		return ""
+	}
+	return group
+}
+
+func (m Message) GroupOK() (string, bool) {
+	part, ok := m.PartOK(0)
+	if !ok {
+		return "", false
+	}
+	return string(part), true
+}
+
+func (m Message) Body() Message {
+	if len(m.parts) <= 1 {
+		return Message{}
+	}
+	return NewMessage(m.parts[1:]...)
+}
+
+func (m Message) Equal(other Message) bool {
+	if len(m.parts) != len(other.parts) {
+		return false
+	}
+	for i, part := range m.parts {
+		if string(part) != string(other.parts[i]) {
+			return false
+		}
+	}
+	return true
 }

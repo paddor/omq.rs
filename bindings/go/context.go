@@ -21,6 +21,7 @@ type Context struct {
 	sockets   map[*Socket]struct{}
 	closed    atomic.Bool
 	closeOnce sync.Once
+	freeOnce  sync.Once
 	closeDone chan struct{}
 }
 
@@ -131,11 +132,9 @@ func (c *Context) free() {
 	}
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
-		go c.closeAll()
+		c.closeAll()
 	})
 	<-c.closeDone
-	contextFreeNative(c.handle)
-	c.handle = nil
 }
 
 func (c *Context) removeSocket(socket *Socket) {
@@ -145,12 +144,15 @@ func (c *Context) removeSocket(socket *Socket) {
 }
 
 func (c *Context) closeAll() {
+	defer close(c.closeDone)
 	sockets := c.detachSockets()
 	for _, socket := range sockets {
 		_ = socket.Close(context.Background())
 	}
-	contextCloseNative(c.handle)
-	close(c.closeDone)
+	c.freeOnce.Do(func() {
+		contextFreeNative(c.handle)
+	})
+	runtime.SetFinalizer(c, nil)
 }
 
 func (c *Context) detachSockets() []*Socket {

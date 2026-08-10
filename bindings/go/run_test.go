@@ -246,9 +246,6 @@ func TestBoundSocketRejectsUseAfterRun(t *testing.T) {
 	if _, err := boundPull.TryRecvInto(buf); !errors.Is(err, ErrClosed) {
 		t.Fatalf("TryRecvInto err = %v, want ErrClosed", err)
 	}
-	if err := boundPull.TryRecvView(func([]byte) error { return nil }); !errors.Is(err, ErrClosed) {
-		t.Fatalf("TryRecvView err = %v, want ErrClosed", err)
-	}
 }
 
 func TestRunSendRingCloseDoesNotHangWithoutPeer(t *testing.T) {

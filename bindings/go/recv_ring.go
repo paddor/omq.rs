@@ -67,42 +67,6 @@ func newRecvRing(socket *nativeSocket, ringSize int) (*recvRing, error) {
 	}, nil
 }
 
-func (r *recvRing) tryRecvView(fn func([]byte) error) (bool, error) {
-	if r == nil || r.handle == nil {
-		return false, ErrClosed
-	}
-	if err := r.fillIfEmpty(0); err != nil {
-		return false, err
-	}
-	desc := r.current()
-	defer r.advance()
-	if desc.partCount != 1 {
-		return true, &ConfigError{Err: "RecvView requires a single-part message"}
-	}
-	if desc.flags&recvRingFlagExternal != 0 {
-		return true, &ConfigError{Err: "RecvView payload exceeds receive ring capacity"}
-	}
-	return true, fn(r.source(desc))
-}
-
-func (r *recvRing) recvViewCancelable(cancel *nativeCancel, fn func([]byte) error) (bool, error) {
-	if r == nil || r.handle == nil {
-		return false, ErrClosed
-	}
-	if err := r.fillIfEmptyCancelable(cancel); err != nil {
-		return false, err
-	}
-	desc := r.current()
-	defer r.advance()
-	if desc.partCount != 1 {
-		return true, &ConfigError{Err: "RecvView requires a single-part message"}
-	}
-	if desc.flags&recvRingFlagExternal != 0 {
-		return true, &ConfigError{Err: "RecvView payload exceeds receive ring capacity"}
-	}
-	return true, fn(r.source(desc))
-}
-
 func (r *recvRing) tryRecvInto(dst []byte) (int, error) {
 	return r.recvInto(dst, 0)
 }

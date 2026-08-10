@@ -190,7 +190,9 @@ async function runOmqInprocThroughput({ mode, durationMs, size, runId }) {
   } finally {
     push.close();
     context.close();
-    receiver?.terminate();
+    if (receiver !== undefined) {
+      await receiver.terminate();
+    }
   }
 }
 

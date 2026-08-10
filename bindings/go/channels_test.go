@@ -3,6 +3,7 @@ package omq
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -93,6 +94,42 @@ func TestSendChannelBatchStopsBeforeDrainWhenCanceled(t *testing.T) {
 	if got := len(tx); got != 1 {
 		t.Fatalf("queued messages drained after cancel = %d, want 1", got)
 	}
+}
+
+func TestSendRxBlockCancelSynctest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		rx := make(chan Message)
+		done := make(chan struct{})
+		var ok bool
+		var err error
+
+		go func() {
+			ok, err = sendRx(ctx, rx, String("blocked"), OverrunBlock)
+			close(done)
+		}()
+
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("sendRx returned before cancellation")
+		default:
+		}
+
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("sendRx did not return after cancellation")
+		}
+		if ok {
+			t.Fatal("sendRx reported success after cancellation")
+		}
+		if err != nil {
+			t.Fatalf("sendRx err = %v", err)
+		}
+	})
 }
 
 func TestChannelsCloseStopsBusyTxWorker(t *testing.T) {

@@ -1,0 +1,27 @@
+[package]
+name = "zguide-10-binary-star"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+omq-tokio = { version = "0.21.1", path = "../../../omq-tokio" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+bytes = "1"
+
+[[bin]]
+name = "zg10_primary"
+path = "primary.rs"
+
+[[bin]]
+name = "zg10_backup"
+path = "backup.rs"
+
+[[bin]]
+name = "zg10_client"
+path = "client.rs"
+
+
+
+[lints]
+workspace = true

@@ -14,6 +14,11 @@ import (
 
 const benchPayloadSize = 128
 
+// These paired throughput benchmarks intentionally use b.N instead of B.Loop.
+// Sender and receiver, sometimes in different processes, must agree on the
+// exact message count before timed work starts. B.Loop exposes final b.N only
+// after the benchmark loop exits.
+
 func TestMain(m *testing.M) {
 	switch os.Getenv("OMQ_GO_BENCH_PEER") {
 	case "push", "push-run":
@@ -41,7 +46,7 @@ func BenchmarkInprocPushPull128B(b *testing.B) {
 
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
-	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
@@ -87,7 +92,7 @@ func BenchmarkInprocPushPullRecvInto128B(b *testing.B) {
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
 	dst := make([]byte, benchPayloadSize)
-	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
@@ -137,7 +142,7 @@ func BenchmarkInprocPushPullRunRecvInto128B(b *testing.B) {
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
 	dst := make([]byte, benchPayloadSize)
-	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
@@ -194,13 +199,15 @@ func BenchmarkInprocPushPullRunBlockingRecvInto128B(b *testing.B) {
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
 	dst := make([]byte, benchPayloadSize)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
+	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
 	b.ReportAllocs()
 	b.ResetTimer()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- push.Run(context.Background(), func(socket *BoundSocket) error {
+		errCh <- push.Run(runCtx, func(socket *BoundSocket) error {
 			for i := 0; i < b.N; i++ {
 				if err := socket.SendBlocking(msg); err != nil {
 					return err
@@ -209,7 +216,7 @@ func BenchmarkInprocPushPullRunBlockingRecvInto128B(b *testing.B) {
 			return nil
 		})
 	}()
-	err = pull.Run(context.Background(), func(socket *BoundSocket) error {
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
 		for i := 0; i < b.N; i++ {
 			n, err := socket.RecvIntoBlocking(dst)
 			if err != nil {
@@ -249,13 +256,15 @@ func BenchmarkInprocPushPullRunTryRecvInto128B(b *testing.B) {
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
 	dst := make([]byte, benchPayloadSize)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
+	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
 	b.ReportAllocs()
 	b.ResetTimer()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- push.Run(context.Background(), func(socket *BoundSocket) error {
+		errCh <- push.Run(runCtx, func(socket *BoundSocket) error {
 			for i := 0; i < b.N; i++ {
 				for {
 					err := socket.TrySend(msg)
@@ -270,7 +279,7 @@ func BenchmarkInprocPushPullRunTryRecvInto128B(b *testing.B) {
 			return nil
 		})
 	}()
-	err = pull.Run(context.Background(), func(socket *BoundSocket) error {
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
 		for i := 0; i < b.N; i++ {
 			for {
 				n, err := socket.TryRecvInto(dst)
@@ -314,13 +323,15 @@ func BenchmarkInprocPushPullRunTryRecvView128B(b *testing.B) {
 
 	payload := make([]byte, benchPayloadSize)
 	msg := Bytes(payload)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
+	defer cancel()
 
 	b.SetBytes(benchPayloadSize)
 	b.ReportAllocs()
 	b.ResetTimer()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- push.Run(context.Background(), func(socket *BoundSocket) error {
+		errCh <- push.Run(runCtx, func(socket *BoundSocket) error {
 			for i := 0; i < b.N; i++ {
 				for {
 					err := socket.TrySend(msg)
@@ -342,7 +353,7 @@ func BenchmarkInprocPushPullRunTryRecvView128B(b *testing.B) {
 		}
 		return nil
 	}
-	err = pull.Run(context.Background(), func(socket *BoundSocket) error {
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
 		for i := 0; i < b.N; i++ {
 			for {
 				err := socket.TryRecvView(checkPayload)
@@ -415,7 +426,7 @@ func benchmarkTCPPushPullTwoProcesses(b *testing.B, runFastPath bool) {
 	waitBenchHandshake(b, monitor)
 
 	payload := make([]byte, benchPayloadSize)
-	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	runCtx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 	defer cancel()
 	if _, err := stdin.Write([]byte{1}); err != nil {
 		b.Fatal(err)

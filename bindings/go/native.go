@@ -25,6 +25,27 @@ type nativeSendRing = C.OmqGoSendRing
 type nativeRecvRing = C.OmqGoRecvRing
 type nativeCancel = C.OmqGoCancel
 
+type nativeStats struct {
+	contextsCreated  uint64
+	contextsFreed    uint64
+	contextsLive     uint64
+	socketsCreated   uint64
+	socketsFreed     uint64
+	socketsLive      uint64
+	monitorsCreated  uint64
+	monitorsFreed    uint64
+	monitorsLive     uint64
+	sendRingsCreated uint64
+	sendRingsFreed   uint64
+	sendRingsLive    uint64
+	recvRingsCreated uint64
+	recvRingsFreed   uint64
+	recvRingsLive    uint64
+	cancelsCreated   uint64
+	cancelsFreed     uint64
+	cancelsLive      uint64
+}
+
 type sendRingMemory struct {
 	control         unsafe.Pointer
 	descriptors     unsafe.Pointer
@@ -85,6 +106,31 @@ func contextOpenNative(ioThreads int) (*nativeContext, error) {
 		return nil, err
 	}
 	return (*nativeContext)(out), nil
+}
+
+func nativeStatsNative() nativeStats {
+	var out C.OmqGoNativeStats
+	C.omq_go_native_stats(&out)
+	return nativeStats{
+		contextsCreated:  uint64(out.contexts_created),
+		contextsFreed:    uint64(out.contexts_freed),
+		contextsLive:     uint64(out.contexts_live),
+		socketsCreated:   uint64(out.sockets_created),
+		socketsFreed:     uint64(out.sockets_freed),
+		socketsLive:      uint64(out.sockets_live),
+		monitorsCreated:  uint64(out.monitors_created),
+		monitorsFreed:    uint64(out.monitors_freed),
+		monitorsLive:     uint64(out.monitors_live),
+		sendRingsCreated: uint64(out.send_rings_created),
+		sendRingsFreed:   uint64(out.send_rings_freed),
+		sendRingsLive:    uint64(out.send_rings_live),
+		recvRingsCreated: uint64(out.recv_rings_created),
+		recvRingsFreed:   uint64(out.recv_rings_freed),
+		recvRingsLive:    uint64(out.recv_rings_live),
+		cancelsCreated:   uint64(out.cancels_created),
+		cancelsFreed:     uint64(out.cancels_freed),
+		cancelsLive:      uint64(out.cancels_live),
+	}
 }
 
 func contextFromShareKeyNative(key ShareKey) (*nativeContext, error) {

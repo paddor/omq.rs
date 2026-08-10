@@ -27,14 +27,35 @@ const (
 )
 
 type soakCounters struct {
-	tcpMessages         atomic.Uint64
-	curveMessages       atomic.Uint64
-	compressionMessages atomic.Uint64
-	inprocMessages      atomic.Uint64
-	pollerMessages      atomic.Uint64
-	pubSubMessages      atomic.Uint64
-	contextCycles       atomic.Uint64
-	monitorEvents       atomic.Uint64
+	tcpMessages          atomic.Uint64
+	curveMessages        atomic.Uint64
+	compressionMessages  atomic.Uint64
+	inprocMessages       atomic.Uint64
+	pollerMessages       atomic.Uint64
+	pubSubMessages       atomic.Uint64
+	contextCycles        atomic.Uint64
+	monitorEvents        atomic.Uint64
+	tcpLifecycle         soakLifecycleCounters
+	curveLifecycle       soakLifecycleCounters
+	compressionLifecycle soakLifecycleCounters
+	inprocLifecycle      soakLifecycleCounters
+	pollerLifecycle      soakLifecycleCounters
+	pubSubLifecycle      soakLifecycleCounters
+	contextLifecycle     soakLifecycleCounters
+}
+
+type soakLifecycleCounters struct {
+	socketsCreated  atomic.Uint64
+	socketsClosed   atomic.Uint64
+	contextsCreated atomic.Uint64
+	contextsClosed  atomic.Uint64
+}
+
+type soakLifecycleSnapshot struct {
+	socketsCreated  uint64
+	socketsClosed   uint64
+	contextsCreated uint64
+	contextsClosed  uint64
 }
 
 type soakState struct {
@@ -88,7 +109,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 	var tcpEndpoint string
 	var tcpPull *Socket
 	if scenarios.enabled("tcp") {
-		tcpEndpoint, tcpPull = startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", nil)
+		tcpEndpoint, tcpPull = startSoakPull(t, omqCtx, counters, "tcp", "tcp://127.0.0.1:*", nil)
 		startWorker(&wg, state, "tcp-pull", func(ctx context.Context) error {
 			return soakDrainMessages(ctx, tcpPull, &counters.tcpMessages)
 		})
@@ -116,7 +137,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		curveEndpoint, curvePull = startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", []SocketOption{
+		curveEndpoint, curvePull = startSoakPull(t, omqCtx, counters, "curve", "tcp://127.0.0.1:*", []SocketOption{
 			CurveServerAuth(serverKey, func(peer PeerInfo) bool {
 				return peer.Mechanism == "CURVE" && peer.PublicKey == clientKey.Public
 			}),
@@ -131,7 +152,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 		for i := 0; i < churnWorkers; i++ {
 			workerID := i
 			startWorker(&wg, state, fmt.Sprintf("tcp-churn-%d", workerID), func(ctx context.Context) error {
-				return soakChurnPush(ctx, omqCtx, tcpEndpoint, workerID, nil)
+				return soakChurnPush(ctx, omqCtx, counters, "tcp", tcpEndpoint, workerID, nil)
 			})
 		}
 	}
@@ -139,7 +160,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 		for i := 0; i < churnWorkers; i++ {
 			workerID := i
 			startWorker(&wg, state, fmt.Sprintf("curve-churn-%d", workerID), func(ctx context.Context) error {
-				return soakChurnPush(ctx, omqCtx, curveEndpoint, workerID, []SocketOption{
+				return soakChurnPush(ctx, omqCtx, counters, "curve", curveEndpoint, workerID, []SocketOption{
 					CurveClient(clientKey, serverKey.Public),
 				})
 			})
@@ -183,9 +204,9 @@ func TestSoakMixedWorkloads(t *testing.T) {
 			goto done
 		case <-ticker.C:
 			elapsed := time.Since(start)
-			current := resources.sample(t, elapsed)
+			current := resources.sample()
 			t.Logf(
-				"[go-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d poller=%d pubsub=%d contexts=%d monitor=%d heap=%dMB rss=%dMB fds=%d",
+				"[go-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d poller=%d pubsub=%d contexts=%d monitor=%d heap=%dMB rss=%dMB fds=%d goroutines=%d threads=%d cgo=%d",
 				elapsed.Seconds(),
 				counters.tcpMessages.Load(),
 				counters.curveMessages.Load(),
@@ -198,7 +219,14 @@ func TestSoakMixedWorkloads(t *testing.T) {
 				current.heapBytes/1_048_576,
 				current.rssBytes/1_048_576,
 				current.fdCount,
+				current.goroutines,
+				current.threads,
+				current.cgoCalls,
 			)
+			logSoakResourceDetails(t, current)
+			logSoakNativeStats(t, current.native)
+			logSoakLifecycle(t, counters)
+			resources.assertLive(t, elapsed, current)
 			if err := state.err(); err != nil {
 				cancel()
 			}
@@ -209,10 +237,10 @@ done:
 	cancel()
 	waitForSoakWorkers(t, &wg)
 	if tcpPull != nil {
-		closeSoakSocket(tcpPull)
+		closeSoakScenarioSocket(tcpPull, counters, "tcp")
 	}
 	if curvePull != nil {
-		closeSoakSocket(curvePull)
+		closeSoakScenarioSocket(curvePull, counters, "curve")
 	}
 	if err := omqCtx.CloseContext(context.Background()); err != nil {
 		t.Fatal(err)
@@ -221,23 +249,31 @@ done:
 	time.Sleep(200 * time.Millisecond)
 	runtime.GC()
 	resources.assertFinal(t, time.Since(start))
+	logSoakLifecycle(t, counters)
 	if err := state.err(); err != nil {
 		t.Fatal(err)
 	}
 	assertSoakProgress(t, scenarios, counters)
 }
 
-func startSoakPull(t *testing.T, ctx *Context, endpoint string, extra []SocketOption) (string, *Socket) {
+func startSoakPull(
+	t *testing.T,
+	ctx *Context,
+	counters *soakCounters,
+	scenario string,
+	endpoint string,
+	extra []SocketOption,
+) (string, *Socket) {
 	t.Helper()
 	opts := append([]SocketOption{}, soakRecvOptions()...)
 	opts = append(opts, extra...)
-	pull, err := ctx.Socket(Pull, opts...)
+	pull, err := soakNewSocket(ctx, counters, scenario, Pull, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bound, err := pull.Bind(endpoint)
 	if err != nil {
-		closeSoakSocket(pull)
+		closeSoakScenarioSocket(pull, counters, scenario)
 		t.Fatal(err)
 	}
 	return bound, pull
@@ -304,21 +340,29 @@ func soakDrainMonitor(ctx context.Context, monitor *Monitor, counter *atomic.Uin
 	return errFromContext(ctx)
 }
 
-func soakChurnPush(ctx context.Context, shared *Context, endpoint string, workerID int, extra []SocketOption) error {
+func soakChurnPush(
+	ctx context.Context,
+	shared *Context,
+	counters *soakCounters,
+	scenario string,
+	endpoint string,
+	workerID int,
+	extra []SocketOption,
+) error {
 	seq := uint64(0)
 	for ctx.Err() == nil {
 		opts := append([]SocketOption{}, soakSendOptions()...)
 		opts = append(opts, extra...)
-		push, err := shared.Socket(Push, opts...)
+		push, err := soakNewSocket(shared, counters, scenario, Push, opts...)
 		if err != nil {
 			return err
 		}
 		if err := push.Connect(endpoint); err != nil {
-			closeSoakSocket(push)
+			closeSoakScenarioSocket(push, counters, scenario)
 			return err
 		}
 		if _, err := push.WaitConnectedTimeout(1, soakConnectTimeout); err != nil {
-			closeSoakSocket(push)
+			closeSoakScenarioSocket(push, counters, scenario)
 			if ctx.Err() != nil || errors.Is(err, ErrTimeout) {
 				continue
 			}
@@ -329,12 +373,12 @@ func soakChurnPush(ctx context.Context, shared *Context, endpoint string, worker
 			payload[0] = byte(i)
 			if err := push.SendTimeout(Bytes(payload), soakSendTimeout); err != nil &&
 				!errors.Is(err, ErrTimeout) && !errors.Is(err, ErrAgain) {
-				closeSoakSocket(push)
+				closeSoakScenarioSocket(push, counters, scenario)
 				return err
 			}
 			seq++
 		}
-		closeSoakSocket(push)
+		closeSoakScenarioSocket(push, counters, scenario)
 	}
 	return errFromContext(ctx)
 }
@@ -353,16 +397,16 @@ func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, 
 		pullOpts = append(pullOpts, CompressionDict(dict))
 		pushOpts = append(pushOpts, CompressionDict(dict))
 	}
-	pull, err := shared.Socket(Pull, pullOpts...)
+	pull, err := soakNewSocket(shared, counters, "compression", Pull, pullOpts...)
 	if err != nil {
 		return err
 	}
-	defer closeSoakSocket(pull)
-	push, err := shared.Socket(Push, pushOpts...)
+	defer closeSoakScenarioSocket(pull, counters, "compression")
+	push, err := soakNewSocket(shared, counters, "compression", Push, pushOpts...)
 	if err != nil {
 		return err
 	}
-	defer closeSoakSocket(push)
+	defer closeSoakScenarioSocket(push, counters, "compression")
 	bound, err := pull.Bind(endpoint)
 	if err != nil {
 		return err
@@ -393,16 +437,16 @@ func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, 
 }
 
 func soakInprocReqRep(ctx context.Context, shared *Context, counters *soakCounters) error {
-	rep, err := shared.Socket(Rep, soakRecvOptions()...)
+	rep, err := soakNewSocket(shared, counters, "inproc", Rep, soakRecvOptions()...)
 	if err != nil {
 		return err
 	}
-	defer closeSoakSocket(rep)
-	req, err := shared.Socket(Req, soakSendOptions()...)
+	defer closeSoakScenarioSocket(rep, counters, "inproc")
+	req, err := soakNewSocket(shared, counters, "inproc", Req, soakSendOptions()...)
 	if err != nil {
 		return err
 	}
-	defer closeSoakSocket(req)
+	defer closeSoakScenarioSocket(req, counters, "inproc")
 	endpoint, err := rep.Bind(fmt.Sprintf("inproc://go-soak-req-rep-%d", os.Getpid()))
 	if err != nil {
 		return err
@@ -443,24 +487,24 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 	pulls := make([]*Socket, 0, channels)
 	pushes := make([]*Socket, 0, channels)
 	for i := 0; i < channels; i++ {
-		pull, err := shared.Socket(Pull, soakRecvOptions()...)
+		pull, err := soakNewSocket(shared, counters, "poller", Pull, soakRecvOptions()...)
 		if err != nil {
 			return err
 		}
-		push, err := shared.Socket(Push, soakSendOptions()...)
+		push, err := soakNewSocket(shared, counters, "poller", Push, soakSendOptions()...)
 		if err != nil {
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
 		}
 		endpoint, err := pull.Bind(fmt.Sprintf("inproc://go-soak-poller-%d-%d", os.Getpid(), i))
 		if err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "poller")
+			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
 		}
 		if err := push.Connect(endpoint); err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "poller")
+			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
 		}
 		pulls = append(pulls, pull)
@@ -468,10 +512,10 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 	}
 	defer func() {
 		for _, push := range pushes {
-			closeSoakSocket(push)
+			closeSoakScenarioSocket(push, counters, "poller")
 		}
 		for _, pull := range pulls {
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(pull, counters, "poller")
 		}
 	}()
 
@@ -527,7 +571,7 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 
 func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounters) error {
 	topics := []string{"fast.", "slow.", "all.", "rare."}
-	pub, err := shared.Socket(Pub,
+	pub, err := soakNewSocket(shared, counters, "pubsub", Pub,
 		Linger(0),
 		SendHWM(8192),
 		OnMutePolicy(OnMuteDropNewest),
@@ -536,7 +580,7 @@ func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounter
 	if err != nil {
 		return err
 	}
-	defer closeSoakSocket(pub)
+	defer closeSoakScenarioSocket(pub, counters, "pubsub")
 	endpoint, err := pub.Bind("tcp://127.0.0.1:*")
 	if err != nil {
 		return err
@@ -545,7 +589,7 @@ func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounter
 	var subs []*Socket
 	defer func() {
 		for _, sub := range subs {
-			closeSoakSocket(sub)
+			closeSoakScenarioSocket(sub, counters, "pubsub")
 		}
 	}()
 
@@ -576,21 +620,21 @@ func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounter
 		if time.Since(lastChurn) >= 500*time.Millisecond {
 			lastChurn = time.Now()
 			if len(subs) > 0 {
-				closeSoakSocket(subs[0])
+				closeSoakScenarioSocket(subs[0], counters, "pubsub")
 				copy(subs, subs[1:])
 				subs = subs[:len(subs)-1]
 			}
 			if len(subs) < 10 {
-				sub, err := shared.Socket(Sub, soakRecvOptions()...)
+				sub, err := soakNewSocket(shared, counters, "pubsub", Sub, soakRecvOptions()...)
 				if err != nil {
 					return err
 				}
 				if err := sub.Connect(endpoint); err != nil {
-					closeSoakSocket(sub)
+					closeSoakScenarioSocket(sub, counters, "pubsub")
 					return err
 				}
 				if err := sub.SubscribeString(topics[len(subs)%len(topics)]); err != nil {
-					closeSoakSocket(sub)
+					closeSoakScenarioSocket(sub, counters, "pubsub")
 					return err
 				}
 				subs = append(subs, sub)
@@ -607,54 +651,64 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		if err != nil {
 			return err
 		}
-		pull, err := churnCtx.Socket(Pull, Linger(0))
+		counters.scenarioContextCreated("context-churn")
+		pull, err := soakNewSocket(churnCtx, counters, "context-churn", Pull, Linger(0))
 		if err != nil {
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
-		push, err := churnCtx.Socket(Push, Linger(0))
+		push, err := soakNewSocket(churnCtx, counters, "context-churn", Push, Linger(0))
 		if err != nil {
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		endpoint, err := pull.Bind(fmt.Sprintf("inproc://go-soak-context-%d-%d", os.Getpid(), seq))
 		if err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "context-churn")
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if err := push.Connect(endpoint); err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "context-churn")
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if err := push.SendTimeout(String("x"), time.Second); err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "context-churn")
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		msg, err := pull.RecvTimeout(time.Second)
 		if err != nil {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "context-churn")
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if msg.String() != "x" {
-			closeSoakSocket(push)
-			closeSoakSocket(pull)
+			closeSoakScenarioSocket(push, counters, "context-churn")
+			closeSoakScenarioSocket(pull, counters, "context-churn")
 			_ = churnCtx.Close()
+			counters.scenarioContextClosed("context-churn")
 			return fmt.Errorf("context churn payload mismatch: %q", msg.String())
 		}
-		closeSoakSocket(push)
-		closeSoakSocket(pull)
+		closeSoakScenarioSocket(push, counters, "context-churn")
+		closeSoakScenarioSocket(pull, counters, "context-churn")
 		if err := churnCtx.CloseContext(context.Background()); err != nil {
+			counters.scenarioContextClosed("context-churn")
 			return err
 		}
+		counters.scenarioContextClosed("context-churn")
 		counters.contextCycles.Add(1)
 		seq++
 	}
@@ -850,6 +904,128 @@ func TestResourceRSSResidualDetectsRetainedTail(t *testing.T) {
 	}
 }
 
+func TestResourceParsesProcStatus(t *testing.T) {
+	status := parseProcStatus("Name:\tgo.test\nVmRSS:\t  1234 kB\nVmData:\t  5678 kB\nThreads:\t42\n")
+	if status.vmRSSBytes != 1234*1024 {
+		t.Fatalf("vmRSSBytes = %d", status.vmRSSBytes)
+	}
+	if status.vmDataBytes != 5678*1024 {
+		t.Fatalf("vmDataBytes = %d", status.vmDataBytes)
+	}
+	if status.threads != 42 {
+		t.Fatalf("threads = %d", status.threads)
+	}
+}
+
+func TestResourceParsesProcSmapsRollup(t *testing.T) {
+	smaps := parseProcSmapsRollup("Rss: 100 kB\nAnonymous: 80 kB\nPrivate_Dirty: 60 kB\n")
+	if smaps.rssBytes != 100*1024 {
+		t.Fatalf("rssBytes = %d", smaps.rssBytes)
+	}
+	if smaps.anonymousBytes != 80*1024 {
+		t.Fatalf("anonymousBytes = %d", smaps.anonymousBytes)
+	}
+	if smaps.privateDirtyBytes != 60*1024 {
+		t.Fatalf("privateDirtyBytes = %d", smaps.privateDirtyBytes)
+	}
+}
+
+func TestResourceNativeStatsLiveGrowth(t *testing.T) {
+	baseline := nativeStats{socketsLive: 1, sendRingsLive: 2}
+	current := nativeStats{socketsLive: 2, sendRingsLive: 2}
+	if got := current.liveGrowthSince(baseline); got != "sockets=1" {
+		t.Fatalf("liveGrowthSince = %q", got)
+	}
+	if got := baseline.liveGrowthSince(current); got != "" {
+		t.Fatalf("liveGrowthSince with no growth = %q", got)
+	}
+}
+
+func (c *soakCounters) scenario(name string) *soakLifecycleCounters {
+	switch name {
+	case "tcp":
+		return &c.tcpLifecycle
+	case "curve":
+		return &c.curveLifecycle
+	case "compression":
+		return &c.compressionLifecycle
+	case "inproc":
+		return &c.inprocLifecycle
+	case "poller":
+		return &c.pollerLifecycle
+	case "pubsub":
+		return &c.pubSubLifecycle
+	case "context-churn":
+		return &c.contextLifecycle
+	default:
+		return nil
+	}
+}
+
+func (c *soakCounters) scenarioSocketCreated(name string) {
+	if lifecycle := c.scenario(name); lifecycle != nil {
+		lifecycle.socketsCreated.Add(1)
+	}
+}
+
+func (c *soakCounters) scenarioSocketClosed(name string) {
+	if lifecycle := c.scenario(name); lifecycle != nil {
+		lifecycle.socketsClosed.Add(1)
+	}
+}
+
+func (c *soakCounters) scenarioContextCreated(name string) {
+	if lifecycle := c.scenario(name); lifecycle != nil {
+		lifecycle.contextsCreated.Add(1)
+	}
+}
+
+func (c *soakCounters) scenarioContextClosed(name string) {
+	if lifecycle := c.scenario(name); lifecycle != nil {
+		lifecycle.contextsClosed.Add(1)
+	}
+}
+
+func (c *soakCounters) lifecycleString(name string) string {
+	lifecycle := c.scenario(name)
+	if lifecycle == nil {
+		return "s=0/0 c=0/0"
+	}
+	snapshot := lifecycle.snapshot()
+	return fmt.Sprintf(
+		"s=%d/%d c=%d/%d",
+		snapshot.socketsCreated,
+		snapshot.socketsClosed,
+		snapshot.contextsCreated,
+		snapshot.contextsClosed,
+	)
+}
+
+func (c *soakLifecycleCounters) snapshot() soakLifecycleSnapshot {
+	return soakLifecycleSnapshot{
+		socketsCreated:  c.socketsCreated.Load(),
+		socketsClosed:   c.socketsClosed.Load(),
+		contextsCreated: c.contextsCreated.Load(),
+		contextsClosed:  c.contextsClosed.Load(),
+	}
+}
+
+func (stats nativeStats) liveGrowthSince(baseline nativeStats) string {
+	parts := make([]string, 0, 6)
+	add := func(name string, current uint64, base uint64) {
+		if current > base {
+			parts = append(parts, fmt.Sprintf("%s=%d", name, current-base))
+		}
+	}
+	add("contexts", stats.contextsLive, baseline.contextsLive)
+	add("sockets", stats.socketsLive, baseline.socketsLive)
+	add("monitors", stats.monitorsLive, baseline.monitorsLive)
+	add("send_rings", stats.sendRingsLive, baseline.sendRingsLive)
+	add("recv_rings", stats.recvRingsLive, baseline.recvRingsLive)
+	add("cancels", stats.cancelsLive, baseline.cancelsLive)
+	return strings.Join(parts, " ")
+}
+
 func soakSendOptions() []SocketOption {
 	return []SocketOption{
 		Linger(0),
@@ -1000,9 +1176,24 @@ type soakResourceLimits struct {
 }
 
 type soakResources struct {
-	heapBytes uint64
-	rssBytes  uint64
-	fdCount   uint64
+	heapBytes              uint64
+	heapInuseBytes         uint64
+	heapIdleBytes          uint64
+	heapReleasedBytes      uint64
+	heapSysBytes           uint64
+	stackInuseBytes        uint64
+	sysBytes               uint64
+	rssBytes               uint64
+	vmRSSBytes             uint64
+	vmDataBytes            uint64
+	smapsRSSBytes          uint64
+	smapsAnonymousBytes    uint64
+	smapsPrivateDirtyBytes uint64
+	fdCount                uint64
+	goroutines             uint64
+	cgoCalls               uint64
+	threads                uint64
+	native                 nativeStats
 }
 
 type soakResourceSample struct {
@@ -1071,10 +1262,14 @@ func newSoakResourceTracker(
 	return tracker
 }
 
-func (r *soakResourceTracker) sample(t *testing.T, elapsed time.Duration) soakResources {
-	t.Helper()
+func (r *soakResourceTracker) sample() soakResources {
 	current := readSoakResources()
 	r.appendSample(time.Now(), current)
+	return current
+}
+
+func (r *soakResourceTracker) assertLive(t *testing.T, elapsed time.Duration, current soakResources) {
+	t.Helper()
 	assertSoakResources(t, elapsed, r.baseline, current, r.limits)
 	if err := liveGrowthError(
 		"heap",
@@ -1102,23 +1297,26 @@ func (r *soakResourceTracker) sample(t *testing.T, elapsed time.Duration) soakRe
 	); err != nil {
 		t.Fatal(err)
 	}
-	return current
 }
 
 func (r *soakResourceTracker) assertFinal(t *testing.T, elapsed time.Duration) {
 	t.Helper()
-	current := r.sample(t, elapsed)
+	current := r.sample()
 	t.Logf(
 		"[go-soak] final resources heap=%dMB rss=%dMB fds=%d",
 		current.heapBytes/1_048_576,
 		current.rssBytes/1_048_576,
 		current.fdCount,
 	)
+	logSoakResourceDetails(t, current)
+	logSoakNativeStats(t, current.native)
 	r.logSlope(t, "heap", r.heap, 1024, "KiB")
 	r.logSlope(t, "RSS", r.rss, 1024, "KiB")
 	r.logSlope(t, "FD", r.fds, 1, "FDs")
 	r.logRSSPeak(t)
+	r.assertLive(t, elapsed, current)
 	r.assertHeapResidual(t, current)
+	r.assertNativeResidual(t, current)
 	r.assertRSSResidualStable(t, current)
 	if current.fdCount > r.baseline.fdCount+r.limits.finalFDGrowth {
 		t.Fatalf(
@@ -1174,6 +1372,64 @@ func (r *soakResourceTracker) logRSSPeak(t *testing.T) {
 	t.Logf("[go-soak] RSS peak %.1f MiB (informational)", float64(peak)/1_048_576)
 }
 
+func logSoakResourceDetails(t *testing.T, current soakResources) {
+	t.Helper()
+	t.Logf(
+		"[go-soak-resources] heap_alloc=%dMB heap_inuse=%dMB heap_idle=%dMB heap_released=%dMB heap_sys=%dMB stack_inuse=%dMB sys=%dMB vmrss=%dMB vmdata=%dMB smaps_rss=%dMB anon=%dMB private_dirty=%dMB",
+		current.heapBytes/1_048_576,
+		current.heapInuseBytes/1_048_576,
+		current.heapIdleBytes/1_048_576,
+		current.heapReleasedBytes/1_048_576,
+		current.heapSysBytes/1_048_576,
+		current.stackInuseBytes/1_048_576,
+		current.sysBytes/1_048_576,
+		current.vmRSSBytes/1_048_576,
+		current.vmDataBytes/1_048_576,
+		current.smapsRSSBytes/1_048_576,
+		current.smapsAnonymousBytes/1_048_576,
+		current.smapsPrivateDirtyBytes/1_048_576,
+	)
+}
+
+func logSoakNativeStats(t *testing.T, stats nativeStats) {
+	t.Helper()
+	t.Logf(
+		"[go-soak-native] ctx=%d/%d/%d sockets=%d/%d/%d monitors=%d/%d/%d send_rings=%d/%d/%d recv_rings=%d/%d/%d cancels=%d/%d/%d",
+		stats.contextsCreated,
+		stats.contextsFreed,
+		stats.contextsLive,
+		stats.socketsCreated,
+		stats.socketsFreed,
+		stats.socketsLive,
+		stats.monitorsCreated,
+		stats.monitorsFreed,
+		stats.monitorsLive,
+		stats.sendRingsCreated,
+		stats.sendRingsFreed,
+		stats.sendRingsLive,
+		stats.recvRingsCreated,
+		stats.recvRingsFreed,
+		stats.recvRingsLive,
+		stats.cancelsCreated,
+		stats.cancelsFreed,
+		stats.cancelsLive,
+	)
+}
+
+func logSoakLifecycle(t *testing.T, counters *soakCounters) {
+	t.Helper()
+	t.Logf(
+		"[go-soak-lifecycle] tcp=%s curve=%s compression=%s inproc=%s poller=%s pubsub=%s context-churn=%s",
+		counters.lifecycleString("tcp"),
+		counters.lifecycleString("curve"),
+		counters.lifecycleString("compression"),
+		counters.lifecycleString("inproc"),
+		counters.lifecycleString("poller"),
+		counters.lifecycleString("pubsub"),
+		counters.lifecycleString("context-churn"),
+	)
+}
+
 func (r *soakResourceTracker) assertHeapResidual(t *testing.T, current soakResources) {
 	t.Helper()
 	peak := maxSampleValue(r.heap, r.baseline.heapBytes)
@@ -1192,6 +1448,13 @@ func (r *soakResourceTracker) assertHeapResidual(t *testing.T, current soakResou
 			float64(growth)/1024,
 			float64(threshold)/1_048_576,
 		)
+	}
+}
+
+func (r *soakResourceTracker) assertNativeResidual(t *testing.T, current soakResources) {
+	t.Helper()
+	if leak := current.native.liveGrowthSince(r.baseline.native); leak != "" {
+		t.Fatalf("native handle leak detected: %s", leak)
 	}
 }
 
@@ -1237,10 +1500,27 @@ func readSoakResources() soakResources {
 	if rss == 0 {
 		rss = stats.Sys
 	}
+	status := readProcStatus()
+	smaps := readProcSmapsRollup()
 	return soakResources{
-		heapBytes: stats.Alloc,
-		rssBytes:  rss,
-		fdCount:   readFDCount(),
+		heapBytes:              stats.Alloc,
+		heapInuseBytes:         stats.HeapInuse,
+		heapIdleBytes:          stats.HeapIdle,
+		heapReleasedBytes:      stats.HeapReleased,
+		heapSysBytes:           stats.HeapSys,
+		stackInuseBytes:        stats.StackInuse,
+		sysBytes:               stats.Sys,
+		rssBytes:               rss,
+		vmRSSBytes:             status.vmRSSBytes,
+		vmDataBytes:            status.vmDataBytes,
+		smapsRSSBytes:          smaps.rssBytes,
+		smapsAnonymousBytes:    smaps.anonymousBytes,
+		smapsPrivateDirtyBytes: smaps.privateDirtyBytes,
+		fdCount:                readFDCount(),
+		goroutines:             uint64(runtime.NumGoroutine()),
+		cgoCalls:               uint64(runtime.NumCgoCall()),
+		threads:                status.threads,
+		native:                 nativeStatsNative(),
 	}
 }
 
@@ -1468,6 +1748,88 @@ func readRSSBytes() uint64 {
 	return pages * uint64(os.Getpagesize())
 }
 
+type procStatusResources struct {
+	vmRSSBytes  uint64
+	vmDataBytes uint64
+	threads     uint64
+}
+
+type procSmapsResources struct {
+	rssBytes          uint64
+	anonymousBytes    uint64
+	privateDirtyBytes uint64
+}
+
+func readProcStatus() procStatusResources {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return procStatusResources{}
+	}
+	return parseProcStatus(string(data))
+}
+
+func parseProcStatus(data string) procStatusResources {
+	var resources procStatusResources
+	for _, line := range strings.Split(data, "\n") {
+		switch {
+		case strings.HasPrefix(line, "VmRSS:"):
+			resources.vmRSSBytes = parseProcKBLine(line)
+		case strings.HasPrefix(line, "VmData:"):
+			resources.vmDataBytes = parseProcKBLine(line)
+		case strings.HasPrefix(line, "Threads:"):
+			resources.threads = parseProcUintLine(line)
+		}
+	}
+	return resources
+}
+
+func readProcSmapsRollup() procSmapsResources {
+	data, err := os.ReadFile("/proc/self/smaps_rollup")
+	if err != nil {
+		return procSmapsResources{}
+	}
+	return parseProcSmapsRollup(string(data))
+}
+
+func parseProcSmapsRollup(data string) procSmapsResources {
+	var resources procSmapsResources
+	for _, line := range strings.Split(data, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Rss:"):
+			resources.rssBytes = parseProcKBLine(line)
+		case strings.HasPrefix(line, "Anonymous:"):
+			resources.anonymousBytes = parseProcKBLine(line)
+		case strings.HasPrefix(line, "Private_Dirty:"):
+			resources.privateDirtyBytes = parseProcKBLine(line)
+		}
+	}
+	return resources
+}
+
+func parseProcKBLine(line string) uint64 {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0
+	}
+	value, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value * 1024
+}
+
+func parseProcUintLine(line string) uint64 {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0
+	}
+	value, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
 func readFDCount() uint64 {
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
@@ -1476,9 +1838,36 @@ func readFDCount() uint64 {
 	return uint64(len(entries))
 }
 
+func soakNewSocket(
+	ctx *Context,
+	counters *soakCounters,
+	scenario string,
+	socketType SocketType,
+	opts ...SocketOption,
+) (*Socket, error) {
+	socket, err := ctx.Socket(socketType, opts...)
+	if err != nil {
+		return nil, err
+	}
+	counters.scenarioSocketCreated(scenario)
+	return socket, nil
+}
+
 func closeSoakSocket(socket *Socket) {
 	if socket != nil {
 		_ = socket.Close(context.Background())
+	}
+}
+
+func closeSoakScenarioSocket(socket *Socket, counters *soakCounters, scenario string) {
+	if socket == nil {
+		return
+	}
+	state := socket.stateOrNil()
+	wasClosed := state == nil || state.closed.Load()
+	_ = socket.Close(context.Background())
+	if !wasClosed {
+		counters.scenarioSocketClosed(scenario)
 	}
 }
 

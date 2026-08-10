@@ -9,7 +9,7 @@ use std::ptr;
 use std::slice;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -49,6 +49,19 @@ const ERROR: i32 = 99;
 
 const RECV_BATCH: usize = 64;
 const RING_BATCH: usize = 512;
+
+static CONTEXTS_CREATED: AtomicU64 = AtomicU64::new(0);
+static CONTEXTS_FREED: AtomicU64 = AtomicU64::new(0);
+static SOCKETS_CREATED: AtomicU64 = AtomicU64::new(0);
+static SOCKETS_FREED: AtomicU64 = AtomicU64::new(0);
+static MONITORS_CREATED: AtomicU64 = AtomicU64::new(0);
+static MONITORS_FREED: AtomicU64 = AtomicU64::new(0);
+static SEND_RINGS_CREATED: AtomicU64 = AtomicU64::new(0);
+static SEND_RINGS_FREED: AtomicU64 = AtomicU64::new(0);
+static RECV_RINGS_CREATED: AtomicU64 = AtomicU64::new(0);
+static RECV_RINGS_FREED: AtomicU64 = AtomicU64::new(0);
+static CANCELS_CREATED: AtomicU64 = AtomicU64::new(0);
+static CANCELS_FREED: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 pub struct OmqGoStatus {
@@ -130,6 +143,29 @@ pub struct OmqGoRecvRingMemory {
     payload: *mut c_void,
     desc_capacity: usize,
     payload_capacity: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OmqGoNativeStats {
+    contexts_created: u64,
+    contexts_freed: u64,
+    contexts_live: u64,
+    sockets_created: u64,
+    sockets_freed: u64,
+    sockets_live: u64,
+    monitors_created: u64,
+    monitors_freed: u64,
+    monitors_live: u64,
+    send_rings_created: u64,
+    send_rings_freed: u64,
+    send_rings_live: u64,
+    recv_rings_created: u64,
+    recv_rings_freed: u64,
+    recv_rings_live: u64,
+    cancels_created: u64,
+    cancels_freed: u64,
+    cancels_live: u64,
 }
 
 #[repr(C, align(128))]
@@ -327,6 +363,16 @@ impl OmqGoStatus {
             TrySendError::Error(error) => Self::from_error(error),
         }
     }
+}
+
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+fn snapshot_counter(created: &AtomicU64, freed: &AtomicU64) -> (u64, u64, u64) {
+    let created = created.load(Ordering::Relaxed);
+    let freed = freed.load(Ordering::Relaxed);
+    (created, freed, created.saturating_sub(freed))
 }
 
 fn status_code_from_error(error: &Error) -> i32 {
@@ -1601,6 +1647,7 @@ pub extern "C" fn omq_go_context_open(
             closed: AtomicBool::new(false),
         }));
     }
+    bump(&CONTEXTS_CREATED);
     OmqGoStatus::ok()
 }
 
@@ -1624,6 +1671,7 @@ pub extern "C" fn omq_go_context_from_share_key(
             closed: AtomicBool::new(false),
         }));
     }
+    bump(&CONTEXTS_CREATED);
     OmqGoStatus::ok()
 }
 
@@ -1666,6 +1714,7 @@ pub extern "C" fn omq_go_context_free(ctx: *mut OmqGoContext) {
         return;
     }
     omq_go_context_close(ctx);
+    bump(&CONTEXTS_FREED);
     unsafe {
         drop(Box::from_raw(ctx));
     }
@@ -1754,6 +1803,7 @@ pub extern "C" fn omq_go_socket_new(
             closed: AtomicBool::new(false),
         }));
     }
+    bump(&SOCKETS_CREATED);
     OmqGoStatus::ok()
 }
 
@@ -2160,6 +2210,7 @@ pub extern "C" fn omq_go_socket_free(socket: *mut OmqGoSocket) {
         return;
     }
     let _ = omq_go_socket_close(socket, -2);
+    bump(&SOCKETS_FREED);
     unsafe {
         drop(Box::from_raw(socket));
     }
@@ -2773,6 +2824,7 @@ pub extern "C" fn omq_go_socket_monitor(
                     closed: AtomicBool::new(false),
                 }));
             }
+            bump(&MONITORS_CREATED);
             OmqGoStatus::ok()
         }
         Err(error) => OmqGoStatus::from_error(error),
@@ -2828,6 +2880,7 @@ pub extern "C" fn omq_go_monitor_free(monitor: *mut OmqGoMonitor) {
         return;
     }
     omq_go_monitor_close(monitor);
+    bump(&MONITORS_FREED);
     unsafe {
         drop(Box::from_raw(monitor));
     }
@@ -2863,6 +2916,7 @@ pub extern "C" fn omq_go_send_ring_create(
             unsafe {
                 *out = Box::into_raw(Box::new(ring));
             }
+            bump(&SEND_RINGS_CREATED);
             OmqGoStatus::ok()
         }
         Err(error) => OmqGoStatus::from_error(error),
@@ -2899,6 +2953,7 @@ pub extern "C" fn omq_go_send_ring_close(ring: *mut OmqGoSendRing) {
     if ring.is_null() {
         return;
     }
+    bump(&SEND_RINGS_FREED);
     unsafe {
         drop(Box::from_raw(ring));
     }
@@ -2934,6 +2989,7 @@ pub extern "C" fn omq_go_recv_ring_create(
             unsafe {
                 *out = Box::into_raw(Box::new(ring));
             }
+            bump(&RECV_RINGS_CREATED);
             OmqGoStatus::ok()
         }
         Err(error) => OmqGoStatus::from_error(error),
@@ -2999,6 +3055,7 @@ pub extern "C" fn omq_go_recv_ring_close(ring: *mut OmqGoRecvRing) {
     if ring.is_null() {
         return;
     }
+    bump(&RECV_RINGS_FREED);
     unsafe {
         drop(Box::from_raw(ring));
     }
@@ -3006,9 +3063,11 @@ pub extern "C" fn omq_go_recv_ring_close(ring: *mut OmqGoRecvRing) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_go_cancel_new() -> *mut OmqGoCancel {
-    Box::into_raw(Box::new(OmqGoCancel {
+    let cancel = Box::into_raw(Box::new(OmqGoCancel {
         inner: BlockingRecvCancel::new(),
-    }))
+    }));
+    bump(&CANCELS_CREATED);
+    cancel
 }
 
 #[unsafe(no_mangle)]
@@ -3036,6 +3095,7 @@ pub extern "C" fn omq_go_cancel_free(cancel: *mut OmqGoCancel) {
     if cancel.is_null() {
         return;
     }
+    bump(&CANCELS_FREED);
     unsafe {
         drop(Box::from_raw(cancel));
     }
@@ -3098,5 +3158,48 @@ pub extern "C" fn omq_go_string_free(value: *mut c_char) {
     }
     unsafe {
         drop(CString::from_raw(value));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_native_stats(out: *mut OmqGoNativeStats) {
+    if out.is_null() {
+        return;
+    }
+
+    let (contexts_created, contexts_freed, contexts_live) =
+        snapshot_counter(&CONTEXTS_CREATED, &CONTEXTS_FREED);
+    let (sockets_created, sockets_freed, sockets_live) =
+        snapshot_counter(&SOCKETS_CREATED, &SOCKETS_FREED);
+    let (monitors_created, monitors_freed, monitors_live) =
+        snapshot_counter(&MONITORS_CREATED, &MONITORS_FREED);
+    let (send_rings_created, send_rings_freed, send_rings_live) =
+        snapshot_counter(&SEND_RINGS_CREATED, &SEND_RINGS_FREED);
+    let (recv_rings_created, recv_rings_freed, recv_rings_live) =
+        snapshot_counter(&RECV_RINGS_CREATED, &RECV_RINGS_FREED);
+    let (cancels_created, cancels_freed, cancels_live) =
+        snapshot_counter(&CANCELS_CREATED, &CANCELS_FREED);
+
+    unsafe {
+        *out = OmqGoNativeStats {
+            contexts_created,
+            contexts_freed,
+            contexts_live,
+            sockets_created,
+            sockets_freed,
+            sockets_live,
+            monitors_created,
+            monitors_freed,
+            monitors_live,
+            send_rings_created,
+            send_rings_freed,
+            send_rings_live,
+            recv_rings_created,
+            recv_rings_freed,
+            recv_rings_live,
+            cancels_created,
+            cancels_freed,
+            cancels_live,
+        };
     }
 }

@@ -84,6 +84,27 @@ typedef struct {
   size_t payload_capacity;
 } OmqGoRecvRingMemory;
 
+typedef struct {
+  uint64_t contexts_created;
+  uint64_t contexts_freed;
+  uint64_t contexts_live;
+  uint64_t sockets_created;
+  uint64_t sockets_freed;
+  uint64_t sockets_live;
+  uint64_t monitors_created;
+  uint64_t monitors_freed;
+  uint64_t monitors_live;
+  uint64_t send_rings_created;
+  uint64_t send_rings_freed;
+  uint64_t send_rings_live;
+  uint64_t recv_rings_created;
+  uint64_t recv_rings_freed;
+  uint64_t recv_rings_live;
+  uint64_t cancels_created;
+  uint64_t cancels_freed;
+  uint64_t cancels_live;
+} OmqGoNativeStats;
+
 enum {
   OMQ_GO_OK = 0,
   OMQ_GO_AGAIN = 1,
@@ -190,6 +211,7 @@ void omq_go_cancel_free(OmqGoCancel *cancel);
 void omq_go_message_free(OmqGoMessage message);
 void omq_go_event_free(OmqGoEvent event);
 void omq_go_string_free(char *value);
+void omq_go_native_stats(OmqGoNativeStats *out);
 
 #ifdef __cplusplus
 }

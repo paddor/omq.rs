@@ -16,6 +16,45 @@ func TestOpenRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestNativeStatsTrackContextAndSocket(t *testing.T) {
+	baseline := nativeStatsNative()
+	ctx, err := Open(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterOpen := nativeStatsNative()
+	if afterOpen.contextsCreated != baseline.contextsCreated+1 {
+		t.Fatalf("contextsCreated = %d, want %d", afterOpen.contextsCreated, baseline.contextsCreated+1)
+	}
+	if afterOpen.contextsLive != baseline.contextsLive+1 {
+		t.Fatalf("contextsLive = %d, want %d", afterOpen.contextsLive, baseline.contextsLive+1)
+	}
+
+	socket, err := ctx.Socket(Pull, Linger(0))
+	if err != nil {
+		_ = ctx.Close()
+		t.Fatal(err)
+	}
+	afterSocket := nativeStatsNative()
+	if afterSocket.socketsCreated != baseline.socketsCreated+1 {
+		t.Fatalf("socketsCreated = %d, want %d", afterSocket.socketsCreated, baseline.socketsCreated+1)
+	}
+	if afterSocket.socketsLive != baseline.socketsLive+1 {
+		t.Fatalf("socketsLive = %d, want %d", afterSocket.socketsLive, baseline.socketsLive+1)
+	}
+
+	if err := socket.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	final := nativeStatsNative()
+	if leak := final.liveGrowthSince(baseline); leak != "" {
+		t.Fatalf("native live growth after close: %s", leak)
+	}
+}
+
 func TestContextCloseClosesOwnedSockets(t *testing.T) {
 	ctx := openTestContext(t)
 	pull := newTestSocket(t, ctx, Pull)

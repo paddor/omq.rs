@@ -11,22 +11,28 @@ import (
 
 // Socket is a goroutine-safe OMQ socket handle.
 type Socket struct {
-	handle     *nativeSocket
+	state      *socketState
 	socketType SocketType
 	owner      *Context
 	ringSize   int
 	overrun    OverrunPolicy
-	handleMu   sync.RWMutex
-	closed     atomic.Bool
-	ops        chan socketOp
-	ownerDone  chan struct{}
-	closeDone  chan struct{}
-	closeOnce  sync.Once
-	closeErr   error
-	authMu     sync.Mutex
-	authIDs    []uint64
+	cleanup    runtime.Cleanup
 	optionsMu  sync.RWMutex
 	options    SocketOptions
+}
+
+type socketState struct {
+	handle    *nativeSocket
+	owner     *contextState
+	handleMu  sync.RWMutex
+	closed    atomic.Bool
+	ops       chan socketOp
+	ownerDone chan struct{}
+	closeDone chan struct{}
+	closeOnce sync.Once
+	closeErr  error
+	authMu    sync.Mutex
+	authIDs   []uint64
 }
 
 type socketOpKind uint8
@@ -83,20 +89,26 @@ func newSocket(
 	handle *nativeSocket,
 	socketType SocketType,
 	owner *Context,
+	ownerState *contextState,
 	ringSize int,
 	overrun OverrunPolicy,
 ) *Socket {
+	state := &socketState{
+		handle:    handle,
+		owner:     ownerState,
+		ops:       make(chan socketOp, 1024),
+		ownerDone: make(chan struct{}),
+		closeDone: make(chan struct{}),
+	}
 	socket := &Socket{
-		handle:     handle,
+		state:      state,
 		socketType: socketType,
 		owner:      owner,
 		ringSize:   ringSize,
 		overrun:    overrun,
-		ops:        make(chan socketOp, 1024),
-		ownerDone:  make(chan struct{}),
-		closeDone:  make(chan struct{}),
 	}
-	go socket.ownerLoop()
+	socket.cleanup = runtime.AddCleanup(socket, cleanupSocketState, state)
+	go state.ownerLoop()
 	return socket
 }
 
@@ -106,7 +118,7 @@ var socketCallPool = sync.Pool{
 	},
 }
 
-func (s *Socket) ownerLoop() {
+func (s *socketState) ownerLoop() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(s.ownerDone)
@@ -199,14 +211,18 @@ func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
 }
 
 func (s *Socket) call(ctx context.Context, allowClosed bool, fn func(*nativeSocket) (any, error)) (value any, err error) {
-	result, err := s.do(ctx, allowClosed, socketOp{kind: socketOpFunc, fn: fn})
+	state := s.stateOrNil()
+	if state == nil {
+		return nil, ErrClosed
+	}
+	result, err := state.do(ctx, allowClosed, socketOp{kind: socketOpFunc, fn: fn})
 	if err != nil {
 		return nil, err
 	}
 	return result.value, result.err
 }
 
-func (s *Socket) do(ctx context.Context, allowClosed bool, op socketOp) (result socketResult, err error) {
+func (s *socketState) do(ctx context.Context, allowClosed bool, op socketOp) (result socketResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -255,7 +271,11 @@ func (s *Socket) do(ctx context.Context, allowClosed bool, op socketOp) (result 
 
 // Bind binds this socket to an endpoint and returns the bound endpoint.
 func (s *Socket) Bind(endpoint string) (string, error) {
-	result, err := s.do(context.Background(), false, socketOp{kind: socketOpBind, endpoint: endpoint})
+	state := s.stateOrNil()
+	if state == nil {
+		return "", ErrClosed
+	}
+	result, err := state.do(context.Background(), false, socketOp{kind: socketOpBind, endpoint: endpoint})
 	if err != nil {
 		return "", err
 	}
@@ -265,21 +285,33 @@ func (s *Socket) Bind(endpoint string) (string, error) {
 
 // Connect connects this socket to an endpoint.
 func (s *Socket) Connect(endpoint string) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpConnect, endpoint: endpoint})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpConnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
 // Unbind removes a previously bound endpoint.
 func (s *Socket) Unbind(endpoint string) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnbind, endpoint: endpoint})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpUnbind, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
 
 // Disconnect removes a previously connected endpoint.
 func (s *Socket) Disconnect(endpoint string) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpDisconnect, endpoint: endpoint})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpDisconnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
@@ -312,13 +344,21 @@ func (s *Socket) TrySend(msg Message) error {
 }
 
 func (s *Socket) trySend(ctx context.Context, msg Message) error {
-	_, err := s.do(ctx, false, socketOp{kind: socketOpSend, msg: msg})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(ctx, false, socketOp{kind: socketOpSend, msg: msg})
 	keepAlive(s)
 	return err
 }
 
 func (s *Socket) trySendBatch(messages []Message) (int, error) {
-	result, err := s.do(context.Background(), false, socketOp{kind: socketOpSendBatch, messages: messages})
+	state := s.stateOrNil()
+	if state == nil {
+		return 0, ErrClosed
+	}
+	result, err := state.do(context.Background(), false, socketOp{kind: socketOpSendBatch, messages: messages})
 	if err != nil {
 		return 0, err
 	}
@@ -389,7 +429,11 @@ func (s *Socket) TryRecv() (Message, error) {
 }
 
 func (s *Socket) tryRecv(ctx context.Context) (Message, error) {
-	result, err := s.do(ctx, false, socketOp{kind: socketOpRecv})
+	state := s.stateOrNil()
+	if state == nil {
+		return Message{}, ErrClosed
+	}
+	result, err := state.do(ctx, false, socketOp{kind: socketOpRecv})
 	if err != nil {
 		return Message{}, err
 	}
@@ -403,7 +447,11 @@ func (s *Socket) TryRecvInto(dst []byte) (int, error) {
 }
 
 func (s *Socket) tryRecvInto(ctx context.Context, dst []byte) (int, error) {
-	result, err := s.do(ctx, false, socketOp{kind: socketOpRecvInto, buffer: dst})
+	state := s.stateOrNil()
+	if state == nil {
+		return 0, ErrClosed
+	}
+	result, err := state.do(ctx, false, socketOp{kind: socketOpRecvInto, buffer: dst})
 	if err != nil {
 		return 0, err
 	}
@@ -439,7 +487,11 @@ func (s *Socket) RecvIntoTimeout(dst []byte, timeout time.Duration) (int, error)
 
 // Subscribe adds a SUB prefix.
 func (s *Socket) Subscribe(prefix []byte) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSubscribe, data: prefix})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpSubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
@@ -451,7 +503,11 @@ func (s *Socket) SubscribeString(prefix string) error {
 
 // Unsubscribe removes a SUB prefix.
 func (s *Socket) Unsubscribe(prefix []byte) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnsubscribe, data: prefix})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpUnsubscribe, data: prefix})
 	keepAlive(s)
 	return err
 }
@@ -463,7 +519,11 @@ func (s *Socket) UnsubscribeString(prefix string) error {
 
 // Join adds a DISH group.
 func (s *Socket) Join(group []byte) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpJoin, data: group})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpJoin, data: group})
 	keepAlive(s)
 	return err
 }
@@ -475,7 +535,11 @@ func (s *Socket) JoinString(group string) error {
 
 // Leave removes a DISH group.
 func (s *Socket) Leave(group []byte) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpLeave, data: group})
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(context.Background(), false, socketOp{kind: socketOpLeave, data: group})
 	keepAlive(s)
 	return err
 }
@@ -584,14 +648,14 @@ func (s *Socket) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.ops == nil {
+	state := s.stateOrNil()
+	if state == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() {
-		s.startClose(socketOp{kind: socketOpClose, useConfigured: true})
-	})
+	err := state.close(ctx, socketOp{kind: socketOpClose, useConfigured: true})
+	s.cleanup.Stop()
 	keepAlive(s)
-	return s.waitClose(ctx)
+	return err
 }
 
 // CloseLinger closes the socket with an explicit linger.
@@ -599,14 +663,14 @@ func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.ops == nil {
+	state := s.stateOrNil()
+	if state == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() {
-		s.startClose(socketOp{kind: socketOpClose, linger: linger})
-	})
+	err := state.close(ctx, socketOp{kind: socketOpClose, linger: linger})
+	s.cleanup.Stop()
 	keepAlive(s)
-	return s.waitClose(ctx)
+	return err
 }
 
 // Type returns this socket's type.
@@ -635,7 +699,11 @@ func (s *Socket) Run(ctx context.Context, fn func(*BoundSocket) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, err := s.do(ctx, false, socketOp{
+	state := s.stateOrNil()
+	if state == nil {
+		return ErrClosed
+	}
+	_, err := state.do(ctx, false, socketOp{
 		kind:       socketOpRun,
 		ctx:        ctx,
 		run:        fn,
@@ -646,14 +714,26 @@ func (s *Socket) Run(ctx context.Context, fn func(*BoundSocket) error) error {
 	return err
 }
 
-func (s *Socket) free() {
-	if s == nil || s.ops == nil {
+func cleanupSocketState(state *socketState) {
+	if state == nil {
 		return
 	}
-	_ = s.Close(context.Background())
+	go func() {
+		_ = state.close(context.Background(), socketOp{kind: socketOpClose, useConfigured: true})
+	}()
 }
 
-func (s *Socket) startClose(op socketOp) {
+func (s *socketState) close(ctx context.Context, op socketOp) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.closeOnce.Do(func() {
+		s.startClose(op)
+	})
+	return s.waitClose(ctx)
+}
+
+func (s *socketState) startClose(op socketOp) {
 	s.closed.Store(true)
 	go func() {
 		_, err := s.do(context.Background(), true, op)
@@ -668,7 +748,7 @@ func (s *Socket) startClose(op socketOp) {
 	}()
 }
 
-func (s *Socket) waitClose(ctx context.Context) error {
+func (s *socketState) waitClose(ctx context.Context) error {
 	select {
 	case <-s.closeDone:
 		return s.closeErr
@@ -684,17 +764,36 @@ func socketOpContextErr(op socketOp) error {
 	return errFromContext(op.ctx)
 }
 
+func (s *Socket) stateOrNil() *socketState {
+	if s == nil {
+		return nil
+	}
+	return s.state
+}
+
 func (s *Socket) noFinalizer() {
-	runtime.SetFinalizer(s, nil)
+	if s == nil {
+		return
+	}
+	s.cleanup.Stop()
+	keepAlive(s)
 }
 
 func (s *Socket) addAuthCallback(id uint64) {
+	state := s.stateOrNil()
+	if state == nil {
+		return
+	}
+	state.addAuthCallback(id)
+}
+
+func (s *socketState) addAuthCallback(id uint64) {
 	s.authMu.Lock()
 	s.authIDs = append(s.authIDs, id)
 	s.authMu.Unlock()
 }
 
-func (s *Socket) releaseAuthCallbacks() {
+func (s *socketState) releaseAuthCallbacks() {
 	s.authMu.Lock()
 	ids := s.authIDs
 	s.authIDs = nil
@@ -714,15 +813,16 @@ func (s *Socket) recordOption(record func(*SocketOptions)) {
 }
 
 func (s *Socket) nativeHandle() (*nativeSocket, error) {
-	if s == nil || s.closed.Load() {
+	state := s.stateOrNil()
+	if state == nil || state.closed.Load() {
 		return nil, ErrClosed
 	}
-	s.handleMu.RLock()
-	defer s.handleMu.RUnlock()
-	if s.handle == nil {
+	state.handleMu.RLock()
+	defer state.handleMu.RUnlock()
+	if state.handle == nil {
 		return nil, ErrClosed
 	}
-	return s.handle, nil
+	return state.handle, nil
 }
 
 func cloneSocketOptions(options SocketOptions) SocketOptions {

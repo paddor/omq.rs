@@ -11,6 +11,11 @@ import (
 
 // Monitor receives native socket monitor events.
 type Monitor struct {
+	state   *monitorState
+	cleanup runtime.Cleanup
+}
+
+type monitorState struct {
 	handle *nativeMonitor
 	mu     sync.Mutex
 	closed atomic.Bool
@@ -50,8 +55,9 @@ func (s *Socket) Monitor() (*Monitor, error) {
 	if err != nil {
 		return nil, err
 	}
-	monitor := &Monitor{handle: value.(*nativeMonitor)}
-	runtime.SetFinalizer(monitor, (*Monitor).free)
+	state := &monitorState{handle: value.(*nativeMonitor)}
+	monitor := &Monitor{state: state}
+	monitor.cleanup = runtime.AddCleanup(monitor, cleanupMonitorState, state)
 	keepAlive(s)
 	return monitor, nil
 }
@@ -93,37 +99,52 @@ func (m *Monitor) RecvTimeout(timeout time.Duration) (MonitorEvent, error) {
 
 // TryRecv receives a monitor event without waiting.
 func (m *Monitor) TryRecv() (MonitorEvent, error) {
-	if m == nil {
+	state := m.stateOrNil()
+	if state == nil {
 		return MonitorEvent{}, ErrClosed
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.handle == nil || m.closed.Load() {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.handle == nil || state.closed.Load() {
 		return MonitorEvent{}, ErrClosed
 	}
-	event, err := monitorRecvNative(m.handle)
+	event, err := monitorRecvNative(state.handle)
 	keepAlive(m)
 	return event, err
 }
 
 // Close closes the monitor stream.
 func (m *Monitor) Close() {
-	if m == nil {
+	state := m.stateOrNil()
+	if state == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed.Swap(true) {
-		return
-	}
-	if m.handle != nil {
-		monitorFreeNative(m.handle)
-		m.handle = nil
-	}
-	runtime.SetFinalizer(m, nil)
+	state.close()
+	m.cleanup.Stop()
 	keepAlive(m)
 }
 
-func (m *Monitor) free() {
-	m.Close()
+func (m *Monitor) stateOrNil() *monitorState {
+	if m == nil {
+		return nil
+	}
+	return m.state
+}
+
+func cleanupMonitorState(state *monitorState) {
+	if state != nil {
+		state.close()
+	}
+}
+
+func (state *monitorState) close() {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed.Swap(true) {
+		return
+	}
+	if state.handle != nil {
+		monitorFreeNative(state.handle)
+		state.handle = nil
+	}
 }

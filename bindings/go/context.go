@@ -19,11 +19,16 @@ type Config struct {
 
 // Context owns a native OMQ context and its sockets.
 type Context struct {
+	state   *contextState
+	cleanup runtime.Cleanup
+}
+
+type contextState struct {
 	handle    *nativeContext
 	ringSize  int
 	overrun   OverrunPolicy
 	mu        sync.Mutex
-	sockets   map[*Socket]struct{}
+	sockets   map[*socketState]struct{}
 	closed    atomic.Bool
 	closeOnce sync.Once
 	freeOnce  sync.Once
@@ -46,14 +51,15 @@ func Open(config Config) (*Context, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx := &Context{
+	state := &contextState{
 		handle:    handle,
 		ringSize:  config.RingSize,
 		overrun:   config.OverrunPolicy,
-		sockets:   make(map[*Socket]struct{}),
+		sockets:   make(map[*socketState]struct{}),
 		closeDone: make(chan struct{}),
 	}
-	runtime.SetFinalizer(ctx, (*Context).free)
+	ctx := &Context{state: state}
+	ctx.cleanup = runtime.AddCleanup(ctx, cleanupContextState, state)
 	return ctx, nil
 }
 
@@ -63,47 +69,54 @@ func OpenShared(key ShareKey) (*Context, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx := &Context{
+	state := &contextState{
 		handle:    handle,
-		sockets:   make(map[*Socket]struct{}),
+		sockets:   make(map[*socketState]struct{}),
 		closeDone: make(chan struct{}),
 	}
-	runtime.SetFinalizer(ctx, (*Context).free)
+	ctx := &Context{state: state}
+	ctx.cleanup = runtime.AddCleanup(ctx, cleanupContextState, state)
 	return ctx, nil
 }
 
 // ShareKey returns a process-local key for sharing this context.
 func (c *Context) ShareKey() (ShareKey, error) {
-	if c == nil || c.handle == nil || c.closed.Load() {
+	state := c.stateOrNil()
+	if state == nil || state.closed.Load() {
 		return ShareKey{}, ErrClosed
 	}
-	key, err := contextShareKeyNative(c.handle)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed.Load() || state.handle == nil {
+		return ShareKey{}, ErrClosed
+	}
+	key, err := contextShareKeyNative(state.handle)
 	keepAlive(c)
 	return key, err
 }
 
 // Socket creates a socket and applies pre-I/O options.
 func (c *Context) Socket(socketType SocketType, opts ...SocketOption) (*Socket, error) {
-	if c == nil || c.handle == nil || c.closed.Load() {
+	state := c.stateOrNil()
+	if state == nil || state.closed.Load() {
 		return nil, ErrClosed
 	}
-	c.mu.Lock()
-	if c.closed.Load() {
-		c.mu.Unlock()
+	state.mu.Lock()
+	if state.closed.Load() || state.handle == nil {
+		state.mu.Unlock()
 		return nil, ErrClosed
 	}
-	handle, err := socketNewNative(c.handle, socketType)
+	handle, err := socketNewNative(state.handle, socketType)
 	if err != nil {
-		c.mu.Unlock()
+		state.mu.Unlock()
 		return nil, err
 	}
-	socket := newSocket(handle, socketType, c, c.ringSize, c.overrun)
-	runtime.SetFinalizer(socket, (*Socket).free)
-	c.sockets[socket] = struct{}{}
-	c.mu.Unlock()
+	socket := newSocket(handle, socketType, c, state, state.ringSize, state.overrun)
+	state.sockets[socket.state] = struct{}{}
+	state.mu.Unlock()
 	for _, opt := range opts {
 		if err := opt(socket); err != nil {
-			socket.free()
+			_ = socket.Close(context.Background())
 			return nil, err
 		}
 	}
@@ -121,61 +134,82 @@ func (c *Context) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if c == nil || c.handle == nil {
+	state := c.stateOrNil()
+	if state == nil {
 		return nil
 	}
-	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		go c.closeAll()
-	})
+	state.startClose()
 	select {
-	case <-c.closeDone:
+	case <-state.closeDone:
+		c.cleanup.Stop()
 		keepAlive(c)
 		return nil
 	case <-ctx.Done():
+		keepAlive(c)
 		return errFromContext(ctx)
 	}
 }
 
-func (c *Context) free() {
-	if c == nil || c.handle == nil {
+func cleanupContextState(state *contextState) {
+	if state == nil {
 		return
 	}
-	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		c.closeAll()
-	})
-	<-c.closeDone
+	go state.closeBackground()
 }
 
-func (c *Context) removeSocket(socket *Socket) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.sockets, socket)
-}
-
-func (c *Context) closeAll() {
-	defer close(c.closeDone)
-	sockets := c.detachSockets()
-	for _, socket := range sockets {
-		_ = socket.Close(context.Background())
-	}
-	c.freeOnce.Do(func() {
-		contextFreeNative(c.handle)
-	})
-	runtime.SetFinalizer(c, nil)
-}
-
-func (c *Context) detachSockets() []*Socket {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.sockets) == 0 {
+func (c *Context) stateOrNil() *contextState {
+	if c == nil {
 		return nil
 	}
-	sockets := make([]*Socket, 0, len(c.sockets))
-	for socket := range c.sockets {
+	return c.state
+}
+
+func (state *contextState) startClose() {
+	state.closeOnce.Do(func() {
+		state.closed.Store(true)
+		go state.closeAll()
+	})
+}
+
+func (state *contextState) closeBackground() {
+	state.closeOnce.Do(func() {
+		state.closed.Store(true)
+		state.closeAll()
+	})
+}
+
+func (state *contextState) removeSocket(socket *socketState) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	delete(state.sockets, socket)
+}
+
+func (state *contextState) closeAll() {
+	defer close(state.closeDone)
+	sockets := state.detachSockets()
+	for _, socket := range sockets {
+		_ = socket.close(context.Background(), socketOp{kind: socketOpClose, useConfigured: true})
+	}
+	state.freeOnce.Do(func() {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if state.handle != nil {
+			contextFreeNative(state.handle)
+			state.handle = nil
+		}
+	})
+}
+
+func (state *contextState) detachSockets() []*socketState {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.sockets) == 0 {
+		return nil
+	}
+	sockets := make([]*socketState, 0, len(state.sockets))
+	for socket := range state.sockets {
 		sockets = append(sockets, socket)
 	}
-	c.sockets = make(map[*Socket]struct{})
+	state.sockets = make(map[*socketState]struct{})
 	return sockets
 }

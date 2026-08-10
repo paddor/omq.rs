@@ -296,7 +296,7 @@ func lockNativeSockets(sockets []*Socket) ([]*nativeSocket, func(), error) {
 		return uintptr(unsafe.Pointer(order[i])) < uintptr(unsafe.Pointer(order[j]))
 	})
 
-	locked := make([]*Socket, 0, len(order))
+	locked := make([]*socketState, 0, len(order))
 	unlock := func() {
 		for i := len(locked) - 1; i >= 0; i-- {
 			locked[i].handleMu.RUnlock()
@@ -307,18 +307,23 @@ func lockNativeSockets(sockets []*Socket) ([]*nativeSocket, func(), error) {
 			unlock()
 			return nil, nil, &ConfigError{Err: "receive-any socket is nil"}
 		}
-		socket.handleMu.RLock()
-		if socket.closed.Load() || socket.handle == nil {
-			socket.handleMu.RUnlock()
+		state := socket.stateOrNil()
+		if state == nil {
 			unlock()
 			return nil, nil, ErrClosed
 		}
-		locked = append(locked, socket)
+		state.handleMu.RLock()
+		if state.closed.Load() || state.handle == nil {
+			state.handleMu.RUnlock()
+			unlock()
+			return nil, nil, ErrClosed
+		}
+		locked = append(locked, state)
 	}
 
 	handles := make([]*nativeSocket, len(sockets))
 	for i, socket := range sockets {
-		handles[i] = socket.handle
+		handles[i] = socket.state.handle
 	}
 	return handles, unlock, nil
 }

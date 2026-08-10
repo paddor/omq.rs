@@ -3,6 +3,7 @@ package omq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -204,6 +205,9 @@ func TestRunRecvViewReturnsCallbackErrAgain(t *testing.T) {
 	if err := push.Connect(bound); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := push.WaitConnectedTimeout(1, time.Second); err != nil {
+		t.Fatal(err)
+	}
 	if err := push.SendTimeout(String("first"), time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +225,7 @@ func TestRunRecvViewReturnsCallbackErrAgain(t *testing.T) {
 		err := socket.RecvViewBlocking(func(payload []byte) error {
 			calls++
 			if got := string(payload); got != "first" {
-				t.Fatalf("message = %q, want first", got)
+				return fmt.Errorf("message = %q, want first", got)
 			}
 			return ErrAgain
 		})
@@ -236,7 +240,7 @@ func TestRunRecvViewReturnsCallbackErrAgain(t *testing.T) {
 		err = socket.RecvView(runCtx, func(payload []byte) error {
 			calls++
 			if got := string(payload); got != "second" {
-				t.Fatalf("message = %q, want second", got)
+				return fmt.Errorf("message = %q, want second", got)
 			}
 			return ErrAgain
 		})

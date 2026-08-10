@@ -48,6 +48,9 @@ Runnable C ZGuide suites live in [examples/zguide/](examples/zguide/):
 omq-libzmq/examples/zguide/run_all.sh
 ```
 
+cppzmq users can use upstream cppzmq directly; see
+[doc/cppzmq.md](doc/cppzmq.md) and [examples/cppzmq/](examples/cppzmq/).
+
 To stage drop-in C/C++ build files:
 
 ```sh

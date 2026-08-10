@@ -67,6 +67,93 @@ func TestBoundRecvIntoUsesContextAndRing(t *testing.T) {
 	}
 }
 
+func TestBoundRecvIntoTimeoutReceivesMessage(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	bound, err := pull.Bind("inproc://go-bound-recv-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(String("timeout-message"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = pull.Run(runCtx, func(socket *BoundSocket) error {
+		buf := make([]byte, 32)
+		n, err := socket.RecvIntoTimeout(buf, time.Second)
+		if err != nil {
+			return err
+		}
+		if got := string(buf[:n]); got != "timeout-message" {
+			t.Fatalf("message = %q, want timeout-message", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBoundRecvIntoTimeoutSemantics(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	if _, err := pull.Bind("inproc://go-bound-recv-timeout-empty"); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := pull.Run(runCtx, func(socket *BoundSocket) error {
+		buf := make([]byte, 8)
+		if _, err := socket.RecvIntoTimeout(buf, 0); !errors.Is(err, ErrAgain) {
+			t.Fatalf("RecvIntoTimeout(0) err = %v, want ErrAgain", err)
+		}
+		if _, err := socket.RecvIntoTimeout(buf, time.Millisecond); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("RecvIntoTimeout(positive) err = %v, want ErrTimeout", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBoundRecvIntoTimeoutNegativeUsesRunContext(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	if _, err := pull.Bind("inproc://go-bound-recv-negative-timeout"); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	err := pull.Run(runCtx, func(socket *BoundSocket) error {
+		buf := make([]byte, 8)
+		_, err := socket.RecvIntoTimeout(buf, -1)
+		return err
+	})
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Run err = %v, want ErrTimeout", err)
+	}
+}
+
 func TestCloseContextReturnsWhileRunCallbackIsActive(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

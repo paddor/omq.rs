@@ -969,6 +969,23 @@ func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 	}
 }
 
+// RecvIntoTimeout receives a single-part message into dst with timeout semantics.
+func (s *BoundSocket) RecvIntoTimeout(dst []byte, timeout time.Duration) (int, error) {
+	if timeout == 0 {
+		return s.TryRecvInto(dst)
+	}
+	if timeout < 0 {
+		return s.RecvIntoBlocking(dst)
+	}
+	ctx := s.Context()
+	if err := errFromContext(ctx); err != nil {
+		return 0, err
+	}
+	recvCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return s.RecvInto(recvCtx, dst)
+}
+
 func (s *BoundSocket) ensureOpen() error {
 	if s == nil || s.handle == nil || s.closed.Load() {
 		return ErrClosed

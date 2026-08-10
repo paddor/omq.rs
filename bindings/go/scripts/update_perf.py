@@ -689,7 +689,7 @@ def write_harness():
             f"""\
             module omq-go-perf
 
-            go 1.22
+            go 1.25
 
             require (
             \tgithub.com/paddor/omq.rs/bindings/go v0.0.0

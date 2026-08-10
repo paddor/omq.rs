@@ -11,7 +11,7 @@ socket owner goroutine.
 
 ## Build, install, test
 
-Requires Go 1.22 or newer, cgo, and a Rust toolchain.
+Requires Go 1.25 or newer, cgo, and a Rust toolchain.
 
 Module path:
 

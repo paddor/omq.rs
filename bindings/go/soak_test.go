@@ -20,6 +20,10 @@ const (
 	soakSendTimeout    = 500 * time.Millisecond
 	soakConnectTimeout = 5 * time.Second
 	soakReportInterval = 10 * time.Second
+
+	soakResourceWarmup     = 30 * time.Second
+	soakResourceWindow     = 2 * time.Minute
+	soakResourceMinSamples = 6
 )
 
 type soakCounters struct {
@@ -54,8 +58,8 @@ func TestSoakMixedWorkloads(t *testing.T) {
 	defer cancel()
 	state := &soakState{ctx: runCtx, cancel: cancel}
 	counters := &soakCounters{}
-	limits := readSoakResourceLimits()
 	baseline := readSoakResources()
+	limits := readSoakResourceLimits()
 
 	omqCtx, err := Open(Config{IOThreads: workers, RingSize: 4096})
 	if err != nil {
@@ -64,6 +68,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 	var wg sync.WaitGroup
 	start := time.Now()
+	resources := newSoakResourceTracker(start, baseline, limits)
 
 	tcpEndpoint, tcpPull := startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", nil)
 	tcpMonitor, err := tcpPull.Monitor()
@@ -135,7 +140,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 			goto done
 		case <-ticker.C:
 			elapsed := time.Since(start)
-			resources := readSoakResources()
+			current := resources.sample(t, elapsed)
 			t.Logf(
 				"[go-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d poller=%d pubsub=%d contexts=%d monitor=%d heap=%dMB rss=%dMB fds=%d",
 				elapsed.Seconds(),
@@ -147,11 +152,10 @@ func TestSoakMixedWorkloads(t *testing.T) {
 				counters.pubSubMessages.Load(),
 				counters.contextCycles.Load(),
 				counters.monitorEvents.Load(),
-				resources.heapBytes/1_048_576,
-				resources.rssBytes/1_048_576,
-				resources.fdCount,
+				current.heapBytes/1_048_576,
+				current.rssBytes/1_048_576,
+				current.fdCount,
 			)
-			assertSoakResources(t, elapsed, baseline, resources, limits)
 			if err := state.err(); err != nil {
 				cancel()
 			}
@@ -167,7 +171,9 @@ done:
 		t.Fatal(err)
 	}
 	runtime.GC()
-	assertSoakResources(t, time.Since(start), baseline, readSoakResources(), limits)
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+	resources.assertFinal(t, time.Since(start))
 	if err := state.err(); err != nil {
 		t.Fatal(err)
 	}
@@ -642,6 +648,68 @@ func assertSoakProgress(t *testing.T, counters *soakCounters) {
 	}
 }
 
+func TestResourceSlopePerSecond(t *testing.T) {
+	start := time.Unix(0, 0)
+	samples := []soakResourceSample{
+		{at: start, value: 10},
+		{at: start.Add(time.Second), value: 20},
+		{at: start.Add(2 * time.Second), value: 30},
+	}
+	slope, ok := slopePerSecond(samples)
+	if !ok {
+		t.Fatal("slopePerSecond returned !ok")
+	}
+	if slope < 9.999 || slope > 10.001 {
+		t.Fatalf("slope = %f, want 10", slope)
+	}
+}
+
+func TestResourceLiveGrowthDetectsSustainedRSSGrowth(t *testing.T) {
+	start := time.Unix(0, 0)
+	var samples []soakResourceSample
+	for seconds := 0; seconds <= 180; seconds += 20 {
+		samples = append(samples, soakResourceSample{
+			at:    start.Add(time.Duration(seconds) * time.Second),
+			value: uint64(seconds) * 1_048_576,
+		})
+	}
+	err := liveGrowthError("RSS", start, samples, 128, 8*1_048_576)
+	if err == nil {
+		t.Fatal("liveGrowthError returned nil")
+	}
+}
+
+func TestResourceLiveGrowthIgnoresPlateau(t *testing.T) {
+	start := time.Unix(0, 0)
+	var samples []soakResourceSample
+	for seconds := 0; seconds <= 180; seconds += 20 {
+		value := uint64(min(seconds, 60)) * 1_048_576
+		samples = append(samples, soakResourceSample{
+			at:    start.Add(time.Duration(seconds) * time.Second),
+			value: value,
+		})
+	}
+	err := liveGrowthError("RSS", start, samples, 128, 8*1_048_576)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResourceLiveFDGrowthDetectsSustainedGrowth(t *testing.T) {
+	start := time.Unix(0, 0)
+	var samples []soakResourceSample
+	for seconds := 0; seconds <= 180; seconds += 20 {
+		samples = append(samples, soakResourceSample{
+			at:    start.Add(time.Duration(seconds) * time.Second),
+			value: uint64(10 + seconds/2),
+		})
+	}
+	err := liveFDGrowthError(start, samples, 0.05, 32)
+	if err == nil {
+		t.Fatal("liveFDGrowthError returned nil")
+	}
+}
+
 func soakSendOptions() []SocketOption {
 	return []SocketOption{
 		Linger(0),
@@ -703,10 +771,43 @@ func int64Config(names []string, fallback int64) int64 {
 	return fallback
 }
 
+func nonNegativeInt64Config(names []string, fallback int64) int64 {
+	value := int64Config(names, fallback)
+	if value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func mibConfig(names []string, fallback int64) uint64 {
+	return uint64(nonNegativeInt64Config(names, fallback)) * 1_048_576
+}
+
+func float64Config(names []string, fallback float64) float64 {
+	for _, name := range names {
+		value := os.Getenv(name)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
 type soakResourceLimits struct {
-	heapGrowthBytes uint64
-	rssGrowthBytes  uint64
-	fdGrowth        uint64
+	heapGrowthBytes    uint64
+	rssGrowthBytes     uint64
+	fdGrowth           uint64
+	finalFDGrowth      uint64
+	heapSlopeKiBPerSec float64
+	rssSlopeKiBPerSec  float64
+	fdSlopePerSec      float64
+	heapSlopeMinGrowth uint64
+	rssSlopeMinGrowth  uint64
+	fdSlopeMinGrowth   uint64
 }
 
 type soakResources struct {
@@ -715,12 +816,158 @@ type soakResources struct {
 	fdCount   uint64
 }
 
+type soakResourceSample struct {
+	at    time.Time
+	value uint64
+}
+
+type soakResourceTracker struct {
+	started  time.Time
+	baseline soakResources
+	limits   soakResourceLimits
+	heap     []soakResourceSample
+	rss      []soakResourceSample
+	fds      []soakResourceSample
+}
+
 func readSoakResourceLimits() soakResourceLimits {
 	return soakResourceLimits{
-		heapGrowthBytes: uint64(int64Config([]string{"OMQ_GO_SOAK_MAX_HEAP_GROWTH_MB"}, 384)) * 1_048_576,
-		rssGrowthBytes:  uint64(int64Config([]string{"OMQ_GO_SOAK_MAX_RSS_GROWTH_MB"}, 768)) * 1_048_576,
-		fdGrowth:        uint64(int64Config([]string{"OMQ_GO_SOAK_MAX_FD_GROWTH"}, 1024)),
+		heapGrowthBytes: mibConfig(
+			[]string{"OMQ_GO_SOAK_MAX_HEAP_GROWTH_MB"}, 128,
+		),
+		rssGrowthBytes: mibConfig(
+			[]string{"OMQ_GO_SOAK_MAX_RSS_GROWTH_MB"}, 256,
+		),
+		fdGrowth: uint64(nonNegativeInt64Config(
+			[]string{"OMQ_GO_SOAK_MAX_FD_GROWTH"}, 128,
+		)),
+		finalFDGrowth: uint64(nonNegativeInt64Config(
+			[]string{"OMQ_GO_SOAK_MAX_FINAL_FD_GROWTH"}, 16,
+		)),
+		heapSlopeKiBPerSec: float64Config(
+			[]string{"OMQ_GO_SOAK_HEAP_SLOPE_LIMIT_KIB_S"}, 512,
+		),
+		rssSlopeKiBPerSec: float64Config(
+			[]string{"OMQ_GO_SOAK_RSS_SLOPE_LIMIT_KIB_S"}, 1024,
+		),
+		fdSlopePerSec: float64Config(
+			[]string{"OMQ_GO_SOAK_FD_SLOPE_LIMIT_PER_SEC"}, 0.05,
+		),
+		heapSlopeMinGrowth: mibConfig(
+			[]string{"OMQ_GO_SOAK_HEAP_SLOPE_MIN_GROWTH_MB"}, 16,
+		),
+		rssSlopeMinGrowth: mibConfig(
+			[]string{"OMQ_GO_SOAK_RSS_SLOPE_MIN_GROWTH_MB"}, 64,
+		),
+		fdSlopeMinGrowth: uint64(nonNegativeInt64Config(
+			[]string{"OMQ_GO_SOAK_FD_SLOPE_MIN_GROWTH"}, 32,
+		)),
 	}
+}
+
+func newSoakResourceTracker(
+	started time.Time,
+	baseline soakResources,
+	limits soakResourceLimits,
+) *soakResourceTracker {
+	tracker := &soakResourceTracker{
+		started:  started,
+		baseline: baseline,
+		limits:   limits,
+	}
+	tracker.appendSample(started, baseline)
+	return tracker
+}
+
+func (r *soakResourceTracker) sample(t *testing.T, elapsed time.Duration) soakResources {
+	t.Helper()
+	current := readSoakResources()
+	r.appendSample(time.Now(), current)
+	assertSoakResources(t, elapsed, r.baseline, current, r.limits)
+	if err := liveGrowthError(
+		"heap",
+		r.started,
+		r.heap,
+		r.limits.heapSlopeKiBPerSec,
+		r.limits.heapSlopeMinGrowth,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := liveGrowthError(
+		"RSS",
+		r.started,
+		r.rss,
+		r.limits.rssSlopeKiBPerSec,
+		r.limits.rssSlopeMinGrowth,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := liveFDGrowthError(
+		r.started,
+		r.fds,
+		r.limits.fdSlopePerSec,
+		r.limits.fdSlopeMinGrowth,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func (r *soakResourceTracker) assertFinal(t *testing.T, elapsed time.Duration) {
+	t.Helper()
+	current := r.sample(t, elapsed)
+	t.Logf(
+		"[go-soak] final resources heap=%dMB rss=%dMB fds=%d",
+		current.heapBytes/1_048_576,
+		current.rssBytes/1_048_576,
+		current.fdCount,
+	)
+	r.logSlope(t, "heap", r.heap, 1024, "KiB")
+	r.logSlope(t, "RSS", r.rss, 1024, "KiB")
+	r.logSlope(t, "FD", r.fds, 1, "FDs")
+	if current.fdCount > r.baseline.fdCount+r.limits.finalFDGrowth {
+		t.Fatalf(
+			"final FD growth exceeded limit: baseline=%d current=%d limit=%d",
+			r.baseline.fdCount,
+			current.fdCount,
+			r.limits.finalFDGrowth,
+		)
+	}
+}
+
+func (r *soakResourceTracker) appendSample(at time.Time, resources soakResources) {
+	r.heap = append(r.heap, soakResourceSample{at: at, value: resources.heapBytes})
+	r.rss = append(r.rss, soakResourceSample{at: at, value: resources.rssBytes})
+	r.fds = append(r.fds, soakResourceSample{at: at, value: resources.fdCount})
+}
+
+func (r *soakResourceTracker) logSlope(
+	t *testing.T,
+	metric string,
+	samples []soakResourceSample,
+	scale float64,
+	unit string,
+) {
+	t.Helper()
+	if len(samples) < 2 {
+		return
+	}
+	warmup := len(samples) / 5
+	postWarmup := samples[warmup:]
+	slope, ok := slopePerSecond(postWarmup)
+	if !ok {
+		return
+	}
+	minValue, maxValue := sampleRange(postWarmup)
+	t.Logf(
+		"[go-soak] %s range %.1f..%.1f %s slope %.3f %s/s",
+		metric,
+		float64(minValue)/scale,
+		float64(maxValue)/scale,
+		unit,
+		slope/scale,
+		unit,
+	)
 }
 
 func readSoakResources() soakResources {
@@ -735,6 +982,143 @@ func readSoakResources() soakResources {
 		rssBytes:  rss,
 		fdCount:   readFDCount(),
 	}
+}
+
+func liveGrowthError(
+	metric string,
+	started time.Time,
+	samples []soakResourceSample,
+	slopeLimitKiBPerSec float64,
+	minGrowthBytes uint64,
+) error {
+	window, ok := liveGrowthWindow(started, samples)
+	if !ok {
+		return nil
+	}
+	current := window[len(window)-1].value
+	growth := saturatingSub(current, window[0].value)
+	if growth < minGrowthBytes {
+		return nil
+	}
+	slope, ok := slopePerSecond(window)
+	if !ok {
+		return nil
+	}
+	slopeKiBPerSec := slope / 1024
+	if slopeKiBPerSec <= slopeLimitKiBPerSec {
+		return nil
+	}
+	return fmt.Errorf(
+		"live %s growth detected: slope %.1f KiB/s over %.0fs, growth %.1f MiB, current %.1f MiB, limit %.1f KiB/s",
+		metric,
+		slopeKiBPerSec,
+		soakResourceWindow.Seconds(),
+		float64(growth)/1_048_576,
+		float64(current)/1_048_576,
+		slopeLimitKiBPerSec,
+	)
+}
+
+func liveFDGrowthError(
+	started time.Time,
+	samples []soakResourceSample,
+	slopeLimitPerSec float64,
+	minGrowth uint64,
+) error {
+	window, ok := liveGrowthWindow(started, samples)
+	if !ok {
+		return nil
+	}
+	current := window[len(window)-1].value
+	growth := saturatingSub(current, window[0].value)
+	if growth < minGrowth {
+		return nil
+	}
+	slope, ok := slopePerSecond(window)
+	if !ok || slope <= slopeLimitPerSec {
+		return nil
+	}
+	minFD, maxFD := sampleRange(window)
+	return fmt.Errorf(
+		"live FD growth detected: slope %.4f FDs/s over %.0fs, range %d..%d, limit %.4f FDs/s",
+		slope,
+		soakResourceWindow.Seconds(),
+		minFD,
+		maxFD,
+		slopeLimitPerSec,
+	)
+}
+
+func liveGrowthWindow(
+	started time.Time,
+	samples []soakResourceSample,
+) ([]soakResourceSample, bool) {
+	if len(samples) < soakResourceMinSamples {
+		return nil, false
+	}
+	now := samples[len(samples)-1].at
+	if now.Sub(started) < soakResourceWarmup+soakResourceWindow {
+		return nil, false
+	}
+	windowStart := now.Add(-soakResourceWindow)
+	first := 0
+	for i, sample := range samples {
+		if !sample.at.Before(windowStart) {
+			first = i
+			break
+		}
+	}
+	window := samples[first:]
+	if len(window) < soakResourceMinSamples {
+		return nil, false
+	}
+	return window, true
+}
+
+func slopePerSecond(samples []soakResourceSample) (float64, bool) {
+	if len(samples) < 2 {
+		return 0, false
+	}
+	first := samples[0].at
+	elapsed := samples[len(samples)-1].at.Sub(first).Seconds()
+	if elapsed < 1 {
+		return 0, false
+	}
+	n := float64(len(samples))
+	var sumX, sumY, sumXY, sumXX float64
+	for _, sample := range samples {
+		x := sample.at.Sub(first).Seconds()
+		y := float64(sample.value)
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumXX += x * x
+	}
+	denom := n*sumXX - sumX*sumX
+	if denom == 0 {
+		return 0, false
+	}
+	return (n*sumXY - sumX*sumY) / denom, true
+}
+
+func sampleRange(samples []soakResourceSample) (uint64, uint64) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	minValue := samples[0].value
+	maxValue := samples[0].value
+	for _, sample := range samples[1:] {
+		minValue = min(minValue, sample.value)
+		maxValue = max(maxValue, sample.value)
+	}
+	return minValue, maxValue
+}
+
+func saturatingSub(value uint64, other uint64) uint64 {
+	if value < other {
+		return 0
+	}
+	return value - other
 }
 
 func assertSoakResources(

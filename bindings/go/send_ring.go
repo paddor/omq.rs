@@ -109,7 +109,7 @@ func (r *sendRing) close() error {
 	if r == nil || r.handle == nil {
 		return nil
 	}
-	_, err := r.drain(-1)
+	_, err := r.drain(0)
 	sendRingCloseNative(r.handle)
 	r.handle = nil
 	r.control = nil

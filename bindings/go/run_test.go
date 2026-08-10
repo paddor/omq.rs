@@ -250,3 +250,26 @@ func TestBoundSocketRejectsUseAfterRun(t *testing.T) {
 		t.Fatalf("TryRecvView err = %v, want ErrClosed", err)
 	}
 }
+
+func TestRunSendRingCloseDoesNotHangWithoutPeer(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- push.Run(context.Background(), func(socket *BoundSocket) error {
+			return socket.SendBlocking(String("queued"))
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after send ring close")
+	}
+}

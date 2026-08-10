@@ -95,10 +95,109 @@ jobs:
           name: java-native-${{ matrix.platform }}
           path: native-resource
 
+  package:
+    name: Package release artifacts
+    runs-on: ubuntu-latest
+    needs: [native]
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: java-native-*
+          merge-multiple: true
+          path: bindings/java/target/generated-resources/native
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: bindings/java/pom.xml
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#omq-java-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Package release artifacts
+        run: >
+          mvn -B -ntp -f bindings/java/pom.xml -Prelease
+          -Drevision=${{ steps.version.outputs.version }}
+          -DskipNative=true -DskipTests -Dgpg.skip=true
+          package
+      - name: Stage smoke artifacts
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          rm -rf java-release-smoke
+          mkdir -p java-release-smoke/jars java-release-smoke/test-classes
+          cp bindings/java/target/omq-java-"${version}"*.jar java-release-smoke/jars/
+          cp -R bindings/java/target/test-classes/io java-release-smoke/test-classes/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: java-release-smoke
+          path: java-release-smoke
+          retention-days: 7
+
+  classifier-smoke:
+    name: Smoke packaged ${{ matrix.platform }} classifier
+    runs-on: ${{ matrix.runner }}
+    needs: [package]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          - platform: macos-aarch64
+            runner: macos-latest
+          - platform: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: java-release-smoke
+          path: java-release-smoke
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Smoke classifier jar
+        shell: bash
+        run: |
+          version="${{ needs.package.outputs.version }}"
+          jar="java-release-smoke/jars/omq-java-${version}-${{ matrix.platform }}.jar"
+          test_classes="java-release-smoke/test-classes"
+          if [[ ! -f "$jar" ]]; then
+            echo "missing classifier jar: $jar" >&2
+            exit 1
+          fi
+
+          cp_sep=":"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            cp_sep=";"
+          fi
+
+          java --enable-native-access=ALL-UNNAMED \
+            -cp "${test_classes}${cp_sep}${jar}" \
+            io.omq.smoke.PackagingSmoke
+          java --enable-native-access=io.omq \
+            --module-path "${jar}" --add-modules io.omq \
+            -cp "${test_classes}" \
+            io.omq.smoke.PackagingSmoke
+
   publish:
     name: Upload to Maven Central
     runs-on: ubuntu-latest
-    needs: [native]
+    needs: [native, classifier-smoke]
     timeout-minutes: 30
     environment:
       name: maven-central
@@ -130,23 +229,6 @@ jobs:
           else
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
-      - name: Package release artifacts
-        run: >
-          mvn -B -ntp -f bindings/java/pom.xml -Prelease
-          -Drevision=${{ steps.version.outputs.version }}
-          -DskipNative=true -DskipTests -Dgpg.skip=true
-          package
-      - name: Smoke packaged Linux classifier
-        shell: bash
-        run: |
-          jar="bindings/java/target/omq-java-${{ steps.version.outputs.version }}-linux-x86_64.jar"
-          java --enable-native-access=ALL-UNNAMED \
-            -cp "bindings/java/target/test-classes:${jar}" \
-            io.omq.smoke.PackagingSmoke
-          java --enable-native-access=io.omq \
-            --module-path "${jar}" --add-modules io.omq \
-            -cp bindings/java/target/test-classes \
-            io.omq.smoke.PackagingSmoke
       - name: Upload for validation
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}

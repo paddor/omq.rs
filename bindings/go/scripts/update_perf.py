@@ -70,6 +70,7 @@ import (
 const hwm = 1_000_000
 const linger = 5 * time.Second
 const timeout = 120 * time.Second
+const maxTimeCheckMessages = 1024
 
 type result struct {
 	Impl     string  `json:"impl"`
@@ -85,30 +86,38 @@ type result struct {
 
 func main() {
 	if len(os.Args) != 8 {
-		die("usage: perf-peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <messages> <warmup>")
+		die("usage: perf-peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <duration|messages> <warmup>")
 	}
 	bench := os.Args[1]
 	impl := os.Args[2]
 	role := os.Args[3]
 	endpoint := os.Args[4]
 	size := parseInt(os.Args[5], "size")
-	messages := parseInt(os.Args[6], "messages")
-	warmup := parseInt(os.Args[7], "warmup")
-	if size < 0 || messages <= 0 || warmup < 0 {
-		die("invalid size/messages/warmup")
+	if size < 0 {
+		die("invalid size")
 	}
 
 	switch bench {
 	case "pushpull":
+		duration := parseDurationSeconds(os.Args[6], "duration")
+		warmup := parseDurationSeconds(os.Args[7], "warmup")
+		if duration <= 0 || warmup < 0 {
+			die("invalid duration/warmup")
+		}
 		switch role {
 		case "pull":
-			runPull(impl, endpoint, size, messages, warmup)
+			runPull(impl, endpoint, size, duration, warmup)
 		case "push":
-			runPush(impl, endpoint, size, messages, warmup)
+			runPush(impl, endpoint, size)
 		default:
 			die("bad pushpull role: " + role)
 		}
 	case "reqrep":
+		messages := parseInt(os.Args[6], "messages")
+		warmup := parseInt(os.Args[7], "warmup")
+		if messages <= 0 || warmup < 0 {
+			die("invalid messages/warmup")
+		}
 		switch role {
 		case "rep":
 			runRep(impl, endpoint, size, messages, warmup)
@@ -128,6 +137,14 @@ func parseInt(value string, name string) int {
 		die("invalid " + name + ": " + value)
 	}
 	return parsed
+}
+
+func parseDurationSeconds(value string, name string) time.Duration {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		die("invalid " + name + ": " + value)
+	}
+	return time.Duration(parsed * float64(time.Second))
 }
 
 func die(message string) {
@@ -159,27 +176,27 @@ func benchContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), timeout)
 }
 
-func runPull(impl string, endpoint string, size int, messages int, warmup int) {
+func runPull(impl string, endpoint string, size int, duration time.Duration, warmup time.Duration) {
 	switch impl {
 	case "omq":
-		runOMQPull(endpoint, size, messages, warmup, false)
+		runOMQPull(endpoint, size, duration, warmup, false)
 	case "omq-run-into":
-		runOMQPull(endpoint, size, messages, warmup, true)
+		runOMQPull(endpoint, size, duration, warmup, true)
 	case "zmq4":
-		runZMQPull(endpoint, size, messages, warmup)
+		runZMQPull(endpoint, size, duration, warmup)
 	default:
 		die("bad impl: " + impl)
 	}
 }
 
-func runPush(impl string, endpoint string, size int, messages int, warmup int) {
+func runPush(impl string, endpoint string, size int) {
 	switch impl {
 	case "omq":
-		runOMQPush(endpoint, size, messages, warmup, false)
+		runOMQPush(endpoint, size, false)
 	case "omq-run-into":
-		runOMQPush(endpoint, size, messages, warmup, true)
+		runOMQPush(endpoint, size, true)
 	case "zmq4":
-		runZMQPush(endpoint, size, messages, warmup)
+		runZMQPush(endpoint, size)
 	default:
 		die("bad impl: " + impl)
 	}
@@ -204,7 +221,7 @@ func openOMQSocket(socketType omq.SocketType, sender bool) (*omq.Context, *omq.S
 	return ctx, socket
 }
 
-func runOMQPull(endpoint string, size int, messages int, warmup int, into bool) {
+func runOMQPull(endpoint string, size int, duration time.Duration, warmup time.Duration, into bool) {
 	ctx, pull := openOMQSocket(omq.Pull, false)
 	defer ctx.Close()
 	defer pull.Close(context.Background())
@@ -219,27 +236,35 @@ func runOMQPull(endpoint string, size int, messages int, warmup int, into bool) 
 		buffer := make([]byte, size)
 		var started time.Time
 		var ended time.Time
+		var count int
 		err := pull.Run(runCtx, func(socket *omq.BoundSocket) error {
-			recvOMQInto(socket, buffer, size, warmup)
+			if warmup > 0 {
+				if _, err := recvOMQIntoFor(socket, buffer, size, warmup); err != nil {
+					return err
+				}
+			}
 			started = time.Now()
-			recvOMQInto(socket, buffer, size, messages)
+			var err error
+			count, err = recvOMQIntoFor(socket, buffer, size, duration)
 			ended = time.Now()
-			return nil
+			return err
 		})
 		if err != nil {
 			die(err.Error())
 		}
-		printThroughput("omq-run-into", endpoint, size, messages, started, ended)
+		printThroughput("omq-run-into", endpoint, size, count, started, ended)
 		return
 	}
 
-	recvOMQ(pull, runCtx, size, warmup)
+	if warmup > 0 {
+		recvOMQFor(pull, runCtx, size, warmup)
+	}
 	started := time.Now()
-	recvOMQ(pull, runCtx, size, messages)
-	printThroughput("omq", endpoint, size, messages, started, time.Now())
+	count := recvOMQFor(pull, runCtx, size, duration)
+	printThroughput("omq", endpoint, size, count, started, time.Now())
 }
 
-func runOMQPush(endpoint string, size int, messages int, warmup int, run bool) {
+func runOMQPush(endpoint string, size int, run bool) {
 	ctx, push := openOMQSocket(omq.Push, true)
 	defer ctx.Close()
 	defer push.Close(context.Background())
@@ -248,12 +273,11 @@ func runOMQPush(endpoint string, size int, messages int, warmup int, run bool) {
 	}
 	payload := makePayload(size)
 	msg := omq.Bytes(payload)
-	total := messages + warmup
 	runCtx, cancel := benchContext()
 	defer cancel()
 	if run {
 		err := push.Run(runCtx, func(socket *omq.BoundSocket) error {
-			for i := 0; i < total; i++ {
+			for {
 				if err := socket.SendBlocking(msg); err != nil {
 					return err
 				}
@@ -265,15 +289,18 @@ func runOMQPush(endpoint string, size int, messages int, warmup int, run bool) {
 		}
 		return
 	}
-	for i := 0; i < total; i++ {
+	for {
 		if err := push.Send(runCtx, msg); err != nil {
 			die(err.Error())
 		}
 	}
 }
 
-func recvOMQ(pull *omq.Socket, ctx context.Context, size int, count int) {
-	for i := 0; i < count; i++ {
+func recvOMQFor(pull *omq.Socket, ctx context.Context, size int, duration time.Duration) int {
+	count := 0
+	checkEvery := timeCheckEvery(size)
+	deadline := time.Now().Add(duration)
+	for {
 		msg, err := pull.Recv(ctx)
 		if err != nil {
 			die(err.Error())
@@ -281,19 +308,44 @@ func recvOMQ(pull *omq.Socket, ctx context.Context, size int, count int) {
 		if len(msg.Bytes()) != size {
 			die(fmt.Sprintf("expected %d bytes, got %d", size, len(msg.Bytes())))
 		}
+		count++
+		if count%checkEvery == 0 && !time.Now().Before(deadline) {
+			return count
+		}
 	}
 }
 
-func recvOMQInto(pull *omq.BoundSocket, buffer []byte, size int, count int) {
-	for i := 0; i < count; i++ {
+func recvOMQIntoFor(pull *omq.BoundSocket, buffer []byte, size int, duration time.Duration) (int, error) {
+	count := 0
+	checkEvery := timeCheckEvery(size)
+	deadline := time.Now().Add(duration)
+	for {
 		n, err := pull.RecvIntoBlocking(buffer)
 		if err != nil {
-			die(err.Error())
+			return count, err
 		}
 		if n != size {
-			die(fmt.Sprintf("expected %d bytes, got %d", size, n))
+			return count, fmt.Errorf("expected %d bytes, got %d", size, n)
+		}
+		count++
+		if count%checkEvery == 0 && !time.Now().Before(deadline) {
+			return count, nil
 		}
 	}
+}
+
+func timeCheckEvery(size int) int {
+	if size <= 0 {
+		return maxTimeCheckMessages
+	}
+	n := (1024 * 1024) / size
+	if n < 1 {
+		return 1
+	}
+	if n > maxTimeCheckMessages {
+		return maxTimeCheckMessages
+	}
+	return n
 }
 
 func openZMQSocket(socketType zmq4.Type, sender bool) (*zmq4.Context, *zmq4.Socket) {
@@ -325,7 +377,7 @@ func openZMQSocket(socketType zmq4.Type, sender bool) (*zmq4.Context, *zmq4.Sock
 	return ctx, socket
 }
 
-func runZMQPull(endpoint string, size int, messages int, warmup int) {
+func runZMQPull(endpoint string, size int, duration time.Duration, warmup time.Duration) {
 	ctx, pull := openZMQSocket(zmq4.PULL, false)
 	defer ctx.Term()
 	defer pull.Close()
@@ -333,13 +385,15 @@ func runZMQPull(endpoint string, size int, messages int, warmup int) {
 		die(err.Error())
 	}
 	ready(endpoint)
-	recvZMQ(pull, size, warmup)
+	if warmup > 0 {
+		recvZMQFor(pull, size, warmup)
+	}
 	started := time.Now()
-	recvZMQ(pull, size, messages)
-	printThroughput("zmq4", endpoint, size, messages, started, time.Now())
+	count := recvZMQFor(pull, size, duration)
+	printThroughput("zmq4", endpoint, size, count, started, time.Now())
 }
 
-func runZMQPush(endpoint string, size int, messages int, warmup int) {
+func runZMQPush(endpoint string, size int) {
 	ctx, push := openZMQSocket(zmq4.PUSH, true)
 	defer ctx.Term()
 	defer push.Close()
@@ -347,22 +401,28 @@ func runZMQPush(endpoint string, size int, messages int, warmup int) {
 		die(err.Error())
 	}
 	payload := makePayload(size)
-	total := messages + warmup
-	for i := 0; i < total; i++ {
+	for {
 		if _, err := push.SendBytes(payload, 0); err != nil {
 			die(err.Error())
 		}
 	}
 }
 
-func recvZMQ(pull *zmq4.Socket, size int, count int) {
-	for i := 0; i < count; i++ {
+func recvZMQFor(pull *zmq4.Socket, size int, duration time.Duration) int {
+	count := 0
+	checkEvery := timeCheckEvery(size)
+	deadline := time.Now().Add(duration)
+	for {
 		msg, err := pull.RecvBytes(0)
 		if err != nil {
 			die(err.Error())
 		}
 		if len(msg) != size {
 			die(fmt.Sprintf("expected %d bytes, got %d", size, len(msg)))
+		}
+		count++
+		if count%checkEvery == 0 && !time.Now().Before(deadline) {
+			return count
 		}
 	}
 }
@@ -734,11 +794,6 @@ def free_endpoint():
     return f"tcp://127.0.0.1:{port}"
 
 
-def message_count(size, args):
-    by_bytes = args.target_bytes // max(size, 1)
-    return max(args.min_messages, min(args.max_messages, by_bytes))
-
-
 def read_line_timeout(proc, seconds):
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
@@ -751,7 +806,7 @@ def read_line_timeout(proc, seconds):
         selector.close()
 
 
-def peer_cmd(bench, impl, role, endpoint, size, messages, warmup):
+def peer_cmd(bench, impl, role, endpoint, size, amount, warmup):
     return [
         str(HARNESS_BIN),
         bench,
@@ -759,7 +814,7 @@ def peer_cmd(bench, impl, role, endpoint, size, messages, warmup):
         role,
         endpoint,
         str(size),
-        str(messages),
+        str(amount),
         str(warmup),
     ]
 
@@ -779,9 +834,50 @@ def fail_on_noise(name, stdout, stderr):
 
 def kill(proc):
     if proc.poll() is not None:
-        return
+        return proc.communicate(timeout=5)
     proc.kill()
-    proc.communicate(timeout=5)
+    return proc.communicate(timeout=5)
+
+
+def run_throughput_pair_once(impl, size, duration, warmup, timeout):
+    endpoint = free_endpoint()
+    env = env_with_native_lib()
+    receiver = subprocess.Popen(
+        peer_cmd("pushpull", impl, "pull", endpoint, size, f"{duration:.6f}", f"{warmup:.6f}"),
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    sender = None
+    try:
+        ready = read_line_timeout(receiver, 10)
+        if ready is None or not ready.startswith("READY "):
+            out, err = receiver.communicate(timeout=1) if receiver.poll() is not None else ("", "")
+            raise RuntimeError(f"receiver did not become ready:\n{ready or ''}{out}{err}")
+
+        sender = subprocess.Popen(
+            peer_cmd("pushpull", impl, "push", endpoint, size, f"{duration:.6f}", f"{warmup:.6f}"),
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        out, err = receiver.communicate(timeout=timeout)
+        out = ready + out
+        fail_on_noise("receiver", out, err)
+        if receiver.returncode != 0:
+            raise RuntimeError(f"receiver failed:\n{out}{err}")
+        sender_out, sender_err = kill(sender)
+        fail_on_noise("sender", sender_out, sender_err)
+        return parse_result(out)
+    except Exception:
+        kill(receiver)
+        if sender is not None:
+            kill(sender)
+        raise
 
 
 def run_pair_once(bench, impl, receiver_role, sender_role, size, messages, warmup, timeout):
@@ -829,17 +925,23 @@ def run_pair_once(bench, impl, receiver_role, sender_role, size, messages, warmu
 
 
 def run_throughput_cell(impl, size, args):
-    messages = message_count(size, args)
-    warmup = args.warmup_messages if args.warmup_messages is not None else max(1000, messages // 20)
     runs = []
     total = args.warmup_rounds + args.rounds
+    timeout = args.timeout + args.warmup_duration + args.duration
     for round_index in range(total):
-        row = run_pair_once("pushpull", impl, "pull", "push", size, messages, warmup, args.timeout)
+        row = run_throughput_pair_once(
+            impl,
+            size,
+            args.duration,
+            args.warmup_duration,
+            timeout,
+        )
         if round_index >= args.warmup_rounds:
             runs.append(row)
         print(
             f"  {impl:12s} size={size:6d} round={round_index + 1}/{total} "
-            f"{row['msgs_s']:12.0f} msg/s {row['gb_s']:7.3f} GB/s",
+            f"{row['msgs_s']:12.0f} msg/s {row['gb_s']:7.3f} GB/s "
+            f"n={row['messages']} t={row['seconds']:.3f}s",
             flush=True,
         )
     return sorted(runs, key=lambda row: row["msgs_s"])[len(runs) // 2]
@@ -1257,10 +1359,8 @@ def main():
     parser.add_argument("--latency-impls", type=parse_csv_strings, default=DEFAULT_LATENCY_IMPLS)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warmup-rounds", type=int, default=1)
-    parser.add_argument("--target-bytes", type=int, default=256 * 1024 * 1024)
-    parser.add_argument("--min-messages", type=int, default=20_000)
-    parser.add_argument("--max-messages", type=int, default=1_000_000)
-    parser.add_argument("--warmup-messages", type=int)
+    parser.add_argument("--duration", type=float, default=3.0)
+    parser.add_argument("--warmup-duration", type=float, default=0.5)
     parser.add_argument("--latency-iters", type=int, default=10_000)
     parser.add_argument("--latency-warmup", type=int, default=1_000)
     parser.add_argument("--timeout", type=float, default=120.0)
@@ -1280,17 +1380,18 @@ def main():
     if args.quick:
         args.rounds = min(args.rounds, 1)
         args.warmup_rounds = 0
-        args.target_bytes = min(args.target_bytes, 64 * 1024 * 1024)
+        args.duration = min(args.duration, 1.5)
+        args.warmup_duration = min(args.warmup_duration, 0.2)
         args.latency_iters = min(args.latency_iters, 1_000)
         args.latency_warmup = min(args.latency_warmup, 100)
     if args.rounds < 1:
         parser.error("--rounds must be at least 1")
     if args.warmup_rounds < 0:
         parser.error("--warmup-rounds cannot be negative")
-    if args.target_bytes <= 0:
-        parser.error("--target-bytes must be positive")
-    if args.min_messages < 1 or args.max_messages < args.min_messages:
-        parser.error("invalid min/max messages")
+    if args.duration <= 0:
+        parser.error("--duration must be positive")
+    if args.warmup_duration < 0:
+        parser.error("--warmup-duration cannot be negative")
     if args.latency_iters < 1 or args.latency_warmup < 0:
         parser.error("invalid latency iteration counts")
     for impl in args.impls:

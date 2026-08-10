@@ -59,8 +59,11 @@ cat > "$tmp/cmake/CMakeLists.txt" <<'CMAKE'
 cmake_minimum_required(VERSION 3.16)
 project(omq_libzmq_packaging_smoke CXX)
 find_package(ZeroMQ REQUIRED CONFIG)
+find_package(omq-libzmq REQUIRED CONFIG)
 add_executable(cmake-smoke main.cpp)
 target_link_libraries(cmake-smoke PRIVATE ZeroMQ::ZeroMQ)
+add_executable(cmake-omq-smoke main.cpp)
+target_link_libraries(cmake-omq-smoke PRIVATE omq_libzmq::omq_zmq)
 CMAKE
 cat > "$tmp/cmake/main.cpp" <<'CPP'
 #include <cstring>
@@ -82,5 +85,6 @@ CPP
 cmake -S "$tmp/cmake" -B "$tmp/cmake-build" -DCMAKE_PREFIX_PATH="$prefix" >/dev/null
 cmake --build "$tmp/cmake-build" >/dev/null
 "$tmp/cmake-build/cmake-smoke"
+"$tmp/cmake-build/cmake-omq-smoke"
 
 echo "libzmq packaging smoke passed"

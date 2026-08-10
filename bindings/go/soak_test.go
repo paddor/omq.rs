@@ -831,6 +831,8 @@ type soakResourceTracker struct {
 }
 
 func readSoakResourceLimits() soakResourceLimits {
+	// RSS has normal delayed native warm-up under churn. Keep the live
+	// slope gate focused on sustained growth large enough to matter.
 	return soakResourceLimits{
 		heapGrowthBytes: mibConfig(
 			[]string{"OMQ_GO_SOAK_MAX_HEAP_GROWTH_MB"}, 128,
@@ -857,7 +859,7 @@ func readSoakResourceLimits() soakResourceLimits {
 			[]string{"OMQ_GO_SOAK_HEAP_SLOPE_MIN_GROWTH_MB"}, 16,
 		),
 		rssSlopeMinGrowth: mibConfig(
-			[]string{"OMQ_GO_SOAK_RSS_SLOPE_MIN_GROWTH_MB"}, 64,
+			[]string{"OMQ_GO_SOAK_RSS_SLOPE_MIN_GROWTH_MB"}, 128,
 		),
 		fdSlopeMinGrowth: uint64(nonNegativeInt64Config(
 			[]string{"OMQ_GO_SOAK_FD_SLOPE_MIN_GROWTH"}, 32,

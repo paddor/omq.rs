@@ -44,6 +44,10 @@ rcgen = "0.14"
 serial_test = "4"
 
 [[test]]
+name = "omq_libzmq_abi_matrix"
+path = "tests/abi_matrix.rs"
+
+[[test]]
 name = "omq_libzmq_basic"
 path = "tests/basic.rs"
 

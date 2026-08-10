@@ -160,23 +160,24 @@ final class Native {
 
     @SuppressWarnings("restricted")
     private static void load() {
+        String platform = platform();
         try {
             System.loadLibrary("omq_java");
             return;
         } catch (UnsatisfiedLinkError first) {
             try {
-                loadFromResource();
+                loadFromResource(platform);
                 return;
-            } catch (IOException | UnsatisfiedLinkError ignored) {
-                throw first;
+            } catch (IOException | UnsatisfiedLinkError second) {
+                throw loadError(platform, first, second);
             }
         }
     }
 
     @SuppressWarnings("restricted")
-    private static void loadFromResource() throws IOException {
+    private static void loadFromResource(String platform) throws IOException {
         String library = System.mapLibraryName("omq_java");
-        String resource = "/io/omq/native/" + platform() + "/" + library;
+        String resource = "/io/omq/native/" + platform + "/" + library;
         try (InputStream input = Native.class.getResourceAsStream(resource)) {
             if (input == null) {
                 throw new UnsatisfiedLinkError("native library resource not found: " + resource);
@@ -186,6 +187,22 @@ final class Native {
             Files.copy(input, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             System.load(temp.toAbsolutePath().toString());
         }
+    }
+
+    private static UnsatisfiedLinkError loadError(
+            String platform, UnsatisfiedLinkError systemError, Throwable resourceError) {
+        UnsatisfiedLinkError error = new UnsatisfiedLinkError(
+                "failed to load OMQ.java native library for "
+                        + platform
+                        + "; add dependency classifier "
+                        + platform
+                        + " for io.github.paddor:omq-java, or set java.library.path; system load failed: "
+                        + systemError.getMessage()
+                        + "; resource load failed: "
+                        + resourceError.getMessage());
+        error.addSuppressed(systemError);
+        error.addSuppressed(resourceError);
+        return error;
     }
 
     private static String platform() {

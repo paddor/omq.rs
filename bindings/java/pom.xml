@@ -46,17 +46,21 @@
   </issueManagement>
 
   <properties>
-    <revision>0.1.0-SNAPSHOT</revision>
+    <revision>0.3.0-SNAPSHOT</revision>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.14.1</junit.version>
     <jeromq.version>0.6.0</jeromq.version>
     <checkstyle.version>3.5.0</checkstyle.version>
     <spotless.version>2.44.0</spotless.version>
+    <antrun.version>3.2.0</antrun.version>
+    <build-helper.version>3.6.1</build-helper.version>
     <central.autoPublish>false</central.autoPublish>
     <central.waitUntil>validated</central.waitUntil>
     <native.library>libomq_java.so</native.library>
     <native.platform>linux-x86_64</native.platform>
+    <native.generated.resources>${project.build.directory}/generated-resources/native</native.generated.resources>
+    <native.classifier.classes>${project.build.directory}/native-classifiers/classes</native.classifier.classes>
     <omq.java.peer.path>${project.basedir}/native/target/debug/omq-java-peer</omq.java.peer.path>
     <skipNative>false</skipNative>
   </properties>
@@ -81,9 +85,6 @@
       <resource>
         <directory>src/main/resources</directory>
       </resource>
-      <resource>
-        <directory>${project.build.directory}/generated-resources/native</directory>
-      </resource>
     </resources>
     <plugins>
       <plugin>
@@ -93,7 +94,7 @@
         <executions>
           <execution>
             <id>cargo-build-native</id>
-            <phase>generate-resources</phase>
+            <phase>generate-test-resources</phase>
             <goals>
               <goal>exec</goal>
             </goals>
@@ -117,13 +118,13 @@
         <executions>
           <execution>
             <id>copy-native-library</id>
-            <phase>process-resources</phase>
+            <phase>process-test-resources</phase>
             <goals>
               <goal>copy-resources</goal>
             </goals>
             <configuration>
               <skip>${skipNative}</skip>
-              <outputDirectory>${project.build.outputDirectory}/io/omq/native/${native.platform}</outputDirectory>
+              <outputDirectory>${project.build.testOutputDirectory}/io/omq/native/${native.platform}</outputDirectory>
               <resources>
                 <resource>
                   <directory>${project.basedir}/native/target/debug</directory>
@@ -141,6 +142,9 @@
         <artifactId>maven-jar-plugin</artifactId>
         <version>3.5.1</version>
         <configuration>
+          <excludes>
+            <exclude>io/omq/native/**</exclude>
+          </excludes>
           <archive>
             <manifestEntries>
               <Automatic-Module-Name>io.omq</Automatic-Module-Name>
@@ -239,6 +243,151 @@
                 <goals>
                   <goal>jar</goal>
                 </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>${antrun.version}</version>
+            <executions>
+              <execution>
+                <id>package-native-classifier-jars</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <delete dir="${project.build.directory}/native-classifiers"/>
+                    <macrodef name="runtime-jar">
+                      <attribute name="classifier"/>
+                      <attribute name="library"/>
+                      <sequential>
+                        <mkdir dir="${native.classifier.classes}/@{classifier}"/>
+                        <copy todir="${native.classifier.classes}/@{classifier}">
+                          <fileset dir="${project.build.outputDirectory}">
+                            <exclude name="io/omq/native/**"/>
+                          </fileset>
+                        </copy>
+                        <copy file="${native.generated.resources}/io/omq/native/@{classifier}/@{library}"
+                              todir="${native.classifier.classes}/@{classifier}/io/omq/native/@{classifier}"/>
+                        <jar destfile="${project.build.directory}/${project.build.finalName}-@{classifier}.jar"
+                             basedir="${native.classifier.classes}/@{classifier}">
+                          <manifest>
+                            <attribute name="Automatic-Module-Name" value="io.omq"/>
+                          </manifest>
+                        </jar>
+                      </sequential>
+                    </macrodef>
+
+                    <runtime-jar classifier="linux-x86_64" library="libomq_java.so"/>
+                    <runtime-jar classifier="macos-x86_64" library="libomq_java.dylib"/>
+                    <runtime-jar classifier="macos-aarch64" library="libomq_java.dylib"/>
+                    <runtime-jar classifier="windows-x86_64" library="omq_java.dll"/>
+                  </target>
+                </configuration>
+              </execution>
+              <execution>
+                <id>verify-native-classifier-jars</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <fail message="main jar must not contain native resources">
+                      <condition>
+                        <not>
+                          <resourcecount count="0">
+                            <zipfileset src="${project.build.directory}/${project.build.finalName}.jar"
+                                        includes="io/omq/native/**"/>
+                          </resourcecount>
+                        </not>
+                      </condition>
+                    </fail>
+
+                    <macrodef name="verify-runtime-jar">
+                      <attribute name="classifier"/>
+                      <attribute name="library"/>
+                      <sequential>
+                        <fail message="@{classifier} classifier jar must contain Java classes">
+                          <condition>
+                            <not>
+                              <resourcecount count="1">
+                                <zipfileset src="${project.build.directory}/${project.build.finalName}-@{classifier}.jar"
+                                            includes="io/omq/OMQ.class"/>
+                              </resourcecount>
+                            </not>
+                          </condition>
+                        </fail>
+                        <fail message="@{classifier} classifier jar must contain exactly its native library">
+                          <condition>
+                            <not>
+                              <resourcecount count="1">
+                                <zipfileset src="${project.build.directory}/${project.build.finalName}-@{classifier}.jar"
+                                            includes="io/omq/native/@{classifier}/@{library}"/>
+                              </resourcecount>
+                            </not>
+                          </condition>
+                        </fail>
+                        <fail message="@{classifier} classifier jar must not contain other native libraries">
+                          <condition>
+                            <not>
+                              <resourcecount count="1">
+                                <zipfileset src="${project.build.directory}/${project.build.finalName}-@{classifier}.jar"
+                                            includes="io/omq/native/**"/>
+                              </resourcecount>
+                            </not>
+                          </condition>
+                        </fail>
+                      </sequential>
+                    </macrodef>
+
+                    <verify-runtime-jar classifier="linux-x86_64" library="libomq_java.so"/>
+                    <verify-runtime-jar classifier="macos-x86_64" library="libomq_java.dylib"/>
+                    <verify-runtime-jar classifier="macos-aarch64" library="libomq_java.dylib"/>
+                    <verify-runtime-jar classifier="windows-x86_64" library="omq_java.dll"/>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>${build-helper.version}</version>
+            <executions>
+              <execution>
+                <id>attach-native-classifier-jars</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>attach-artifact</goal>
+                </goals>
+                <configuration>
+                  <artifacts>
+                    <artifact>
+                      <file>${project.build.directory}/${project.build.finalName}-linux-x86_64.jar</file>
+                      <type>jar</type>
+                      <classifier>linux-x86_64</classifier>
+                    </artifact>
+                    <artifact>
+                      <file>${project.build.directory}/${project.build.finalName}-macos-x86_64.jar</file>
+                      <type>jar</type>
+                      <classifier>macos-x86_64</classifier>
+                    </artifact>
+                    <artifact>
+                      <file>${project.build.directory}/${project.build.finalName}-macos-aarch64.jar</file>
+                      <type>jar</type>
+                      <classifier>macos-aarch64</classifier>
+                    </artifact>
+                    <artifact>
+                      <file>${project.build.directory}/${project.build.finalName}-windows-x86_64.jar</file>
+                      <type>jar</type>
+                      <classifier>windows-x86_64</classifier>
+                    </artifact>
+                  </artifacts>
+                </configuration>
               </execution>
             </executions>
           </plugin>

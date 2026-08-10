@@ -5,27 +5,34 @@ exports.curveKeypair = curveKeypair;
 exports.curvePublic = curvePublic;
 const node_buffer_1 = require("node:buffer");
 const node_module_1 = require("node:module");
+const promises_1 = require("node:timers/promises");
 const native = loadNative();
 const RECV_PREFETCH = 64;
+/** Immutable OMQ message wrapper with one or more frames. */
 class Message {
     materializedParts;
     singlePart;
     packedData;
     packedOffset;
     packedLength;
+    /** Create a message from one frame or a multipart frame array. */
     constructor(input = new Uint8Array()) {
         const parts = Array.isArray(input) ? input : [input];
         this.materializedParts = parts.map(toBytes);
     }
+    /** Return input unchanged when already a message, otherwise wrap it. */
     static from(input) {
         return input instanceof Message ? input : new Message(input);
     }
+    /** Message frames as byte arrays. */
     get parts() {
         return this.materializeParts();
     }
+    /** Number of frames in the message. */
     get length() {
         return this.materializedParts?.length ?? (this.singlePart !== undefined || this.packedData !== undefined ? 1 : 0);
     }
+    /** Return one frame by index. */
     part(index = 0) {
         if (this.materializedParts === undefined && index !== 0) {
             throw new RangeError(`message part ${index} out of range`);
@@ -50,13 +57,16 @@ class Message {
         }
         return part;
     }
+    /** Decode one frame as text. */
     string(index = 0, encoding = "utf8") {
         const part = this.part(index);
         return node_buffer_1.Buffer.from(part.buffer, part.byteOffset, part.byteLength).toString(encoding);
     }
+    /** Return a shallow copy of the frame array. */
     toArray() {
         return this.parts.slice();
     }
+    /** Iterate over message frames. */
     [Symbol.iterator]() {
         return this.parts[Symbol.iterator]();
     }
@@ -80,24 +90,31 @@ class Message {
     }
 }
 exports.Message = Message;
+/** Generate a new CURVE key pair. */
 function curveKeypair() {
     return native.curveKeypair();
 }
+/** Derive a CURVE public key from a Z85 secret key. */
 function curvePublic(secretKey) {
     return native.curvePublic(secretKey);
 }
+/** OMQ context that owns transport runtimes and inproc namespace. */
 class Context {
     #native;
     #closed = false;
     constructor(options = {}, nativeContext) {
         this.#native = nativeContext ?? new native.NativeContext(options);
     }
+    /** Recreate a JavaScript context wrapper for an existing native context. */
     static fromShareKey(shareKey) {
-        return new Context({}, native.nativeContextFromShareKey(shareKey));
+        const construct = Context;
+        return new construct({}, native.nativeContextFromShareKey(shareKey));
     }
+    /** Create a socket on this context. */
     socket(socketType, options = {}) {
         return new Socket(socketType, options, this);
     }
+    /** Close this context and terminate its owned native runtime. */
     close() {
         if (this.#closed) {
             return;
@@ -105,12 +122,18 @@ class Context {
         this.#closed = true;
         this.#native.close();
     }
+    /** Close this context when used with JavaScript explicit resource management. */
+    [Symbol.dispose]() {
+        this.close();
+    }
+    /** Return the native share key used for inproc sharing. */
     shareKey() {
         if (this.#closed) {
             throw new Error("context closed");
         }
         return this.#native.shareKey();
     }
+    /** @internal Create a native socket for the high-level Socket wrapper. */
     _socket(socketType, options) {
         if (this.#closed) {
             throw new Error("context closed");
@@ -119,43 +142,58 @@ class Context {
     }
 }
 exports.Context = Context;
+/** Base class for OMQ sockets. */
 class Socket {
+    /** Socket type name. */
     type;
     native;
+    #context;
+    #closeContextOnClose;
     #recvPrefetch;
     #recvQueue = [];
     #recvQueueOffset = 0;
     #closed = false;
-    constructor(socketType, options = {}, context = defaultContext(options)) {
+    /** Create a socket of the given type. Prefer concrete subclasses for normal use. */
+    constructor(socketType, options = {}, context) {
+        const contextRef = context ?? defaultContext(options);
         this.type = socketType;
+        this.#context = contextRef;
+        this.#closeContextOnClose = context === undefined && options.ioThreads !== undefined;
         this.#recvPrefetch = recvPrefetchFor(socketType);
-        this.native = context._socket(socketType, options);
+        this.native = contextSocket(contextRef, socketType, options);
     }
+    /** Bind the socket and resolve with the concrete endpoint. */
     bind(endpoint) {
         this.#checkOpen();
         return callAsPromise(() => this.native.bind(endpoint));
     }
+    /** Connect the socket to an endpoint. */
     connect(endpoint) {
         this.#checkOpen();
         return callAsPromise(() => this.native.connect(endpoint));
     }
+    /** Stop listening on a bound endpoint. */
     unbind(endpoint) {
         this.#checkOpen();
         return callAsPromise(() => this.native.unbind(endpoint));
     }
+    /** Disconnect from a connected endpoint. */
     disconnect(endpoint) {
         this.#checkOpen();
         return callAsPromise(() => this.native.disconnect(endpoint));
     }
+    /** Send one message and resolve when accepted by the socket. */
     send(message) {
         this.#checkOpen();
         sendNativeSync(this.native, message);
         return Promise.resolve();
     }
+    /** Synchronously send one message. */
     sendSync(message) {
         this.#checkOpen();
         sendNativeSync(this.native, message);
     }
+    /** Receive one message, optionally aborting while waiting. */
     async recv(options = {}) {
         this.#checkOpen();
         if (options.signal)
@@ -168,22 +206,26 @@ class Socket {
             if (options.signal)
                 throwIfAborted(options.signal);
             this.#checkOpen();
-            await yieldToEventLoop();
+            await yieldToEventLoop(options.signal);
         }
     }
+    /** Synchronously receive one message. */
     recvSync() {
         this.#checkOpen();
         return this.#recvRawSync();
     }
+    /** Return one message if available, otherwise null. */
     tryRecv() {
         this.#checkOpen();
         const raw = this.#tryRecvRaw();
         return raw;
     }
+    /** Wait until at least minPeers are connected, returning connected peer count. */
     waitConnectedSync(minPeers = 1, timeoutMs = 5000) {
         this.#checkOpen();
         return this.native.waitConnectedSync(minPeers, timeoutMs);
     }
+    /** Receive up to max messages synchronously. */
     recvManySync(max, timeoutMs) {
         this.#checkOpen();
         const messages = [];
@@ -204,6 +246,7 @@ class Socket {
         }
         return messages;
     }
+    /** Close the socket. */
     close() {
         if (this.#closed) {
             return;
@@ -211,8 +254,20 @@ class Socket {
         this.#closed = true;
         this.#recvQueue = [];
         this.#recvQueueOffset = 0;
-        this.native.close();
+        try {
+            this.native.close();
+        }
+        finally {
+            if (this.#closeContextOnClose) {
+                this.#context.close();
+            }
+        }
     }
+    /** Close this socket when used with JavaScript explicit resource management. */
+    [Symbol.dispose]() {
+        this.close();
+    }
+    /** Async iterator over received messages until the socket closes. */
     async *[Symbol.asyncIterator]() {
         while (!this.#closed) {
             try {
@@ -261,151 +316,199 @@ class Socket {
         }
         return this.#recvQueue[this.#recvQueueOffset++];
     }
+    /** Subscribe a SUB/XSUB socket to a prefix. */
     subscribeNative(prefix) {
         this.#checkOpen();
         return callAsPromise(() => this.native.subscribe(toBytes(prefix)));
     }
+    /** Remove a SUB/XSUB prefix subscription. */
     unsubscribeNative(prefix) {
         this.#checkOpen();
         return callAsPromise(() => this.native.unsubscribe(toBytes(prefix)));
     }
+    /** Join a RADIO/DISH group. */
     joinNative(group) {
         this.#checkOpen();
         return callAsPromise(() => this.native.join(toBytes(group)));
     }
+    /** Leave a RADIO/DISH group. */
     leaveNative(group) {
         this.#checkOpen();
         return callAsPromise(() => this.native.leave(toBytes(group)));
     }
 }
 exports.Socket = Socket;
+/** Strict request socket. Send and receive must alternate. */
 class Req extends Socket {
+    /** Create a REQ socket. */
     constructor(options, context) {
         super("REQ", options, context);
     }
 }
 exports.Req = Req;
+/** Strict reply socket. Receive and send must alternate. */
 class Rep extends Socket {
+    /** Create a REP socket. */
     constructor(options, context) {
         super("REP", options, context);
     }
 }
 exports.Rep = Rep;
+/** Publisher socket that fans messages out to subscribers. */
 class Pub extends Socket {
+    /** Create a PUB socket. */
     constructor(options, context) {
         super("PUB", options, context);
     }
 }
 exports.Pub = Pub;
+/** Subscriber socket with prefix subscriptions. */
 class Sub extends Socket {
+    /** Create a SUB socket. */
     constructor(options, context) {
         super("SUB", options, context);
     }
+    /** Subscribe to messages whose first frame starts with prefix. */
     subscribe(prefix) {
         return this.subscribeNative(prefix);
     }
+    /** Remove a prefix subscription. */
     unsubscribe(prefix) {
         return this.unsubscribeNative(prefix);
     }
 }
 exports.Sub = Sub;
+/** Raw publisher side of an XPUB/XSUB proxy. */
 class XPub extends Socket {
+    /** Create an XPUB socket. */
     constructor(options, context) {
         super("XPUB", options, context);
     }
 }
 exports.XPub = XPub;
+/** Raw subscriber side of an XPUB/XSUB proxy. */
 class XSub extends Socket {
+    /** Create an XSUB socket. */
     constructor(options, context) {
         super("XSUB", options, context);
     }
 }
 exports.XSub = XSub;
+/** Pipeline sender socket. */
 class Push extends Socket {
+    /** Create a PUSH socket. */
     constructor(options, context) {
         super("PUSH", options, context);
     }
 }
 exports.Push = Push;
+/** Pipeline receiver socket. */
 class Pull extends Socket {
+    /** Create a PULL socket. */
     constructor(options, context) {
         super("PULL", options, context);
     }
 }
 exports.Pull = Pull;
+/** Async request socket without REQ send/receive alternation. */
 class Dealer extends Socket {
+    /** Create a DEALER socket. */
     constructor(options, context) {
         super("DEALER", options, context);
     }
 }
 exports.Dealer = Dealer;
+/** Async reply router socket that exposes routing identities. */
 class Router extends Socket {
+    /** Create a ROUTER socket. */
     constructor(options, context) {
         super("ROUTER", options, context);
     }
 }
 exports.Router = Router;
+/** Exclusive bidirectional socket. */
 class Pair extends Socket {
+    /** Create a PAIR socket. */
     constructor(options, context) {
         super("PAIR", options, context);
     }
 }
 exports.Pair = Pair;
+/** CLIENT socket for single-frame request/reply. */
 class Client extends Socket {
+    /** Create a CLIENT socket. */
     constructor(options, context) {
         super("CLIENT", options, context);
     }
 }
 exports.Client = Client;
+/** SERVER socket for single-frame routed replies. */
 class Server extends Socket {
+    /** Create a SERVER socket. */
     constructor(options, context) {
         super("SERVER", options, context);
     }
 }
 exports.Server = Server;
+/** RADIO group publisher socket. */
 class Radio extends Socket {
+    /** Create a RADIO socket. */
     constructor(options, context) {
         super("RADIO", options, context);
     }
 }
 exports.Radio = Radio;
+/** DISH group subscriber socket. */
 class Dish extends Socket {
+    /** Create a DISH socket. */
     constructor(options, context) {
         super("DISH", options, context);
     }
+    /** Join a message group. */
     join(group) {
         return this.joinNative(group);
     }
+    /** Leave a message group. */
     leave(group) {
         return this.leaveNative(group);
     }
 }
 exports.Dish = Dish;
+/** Single-frame pipeline sender socket. */
 class Scatter extends Socket {
+    /** Create a SCATTER socket. */
     constructor(options, context) {
         super("SCATTER", options, context);
     }
 }
 exports.Scatter = Scatter;
+/** Single-frame pipeline receiver socket. */
 class Gather extends Socket {
+    /** Create a GATHER socket. */
     constructor(options, context) {
         super("GATHER", options, context);
     }
 }
 exports.Gather = Gather;
+/** Single-frame exclusive bidirectional socket. */
 class Channel extends Socket {
+    /** Create a CHANNEL socket. */
     constructor(options, context) {
         super("CHANNEL", options, context);
     }
 }
 exports.Channel = Channel;
+/** Bidirectional peer socket with routing identities. */
 class Peer extends Socket {
+    /** Create a PEER socket. */
     constructor(options, context) {
         super("PEER", options, context);
     }
 }
 exports.Peer = Peer;
+/** Raw TCP stream socket. */
 class Stream extends Socket {
+    /** Create a STREAM socket. */
     constructor(options, context) {
         super("STREAM", options, context);
     }
@@ -413,10 +516,16 @@ class Stream extends Socket {
 exports.Stream = Stream;
 let sharedContext;
 function defaultContext(options) {
-    if (sharedContext === undefined || options.ioThreads !== undefined) {
-        sharedContext = new Context({ ioThreads: options.ioThreads });
+    if (options.ioThreads !== undefined) {
+        return new Context({ ioThreads: options.ioThreads });
+    }
+    if (sharedContext === undefined) {
+        sharedContext = new Context();
     }
     return sharedContext;
+}
+function contextSocket(context, socketType, options) {
+    return context._socket(socketType, options);
 }
 function recvPrefetchFor(socketType) {
     switch (socketType) {
@@ -545,8 +654,8 @@ function throwIfAborted(signal) {
 function isClosedError(error) {
     return error instanceof Error && error.message.toLowerCase().includes("closed");
 }
-function yieldToEventLoop() {
-    return new Promise((resolve) => setImmediate(resolve));
+function yieldToEventLoop(signal) {
+    return signal === undefined ? (0, promises_1.setImmediate)() : (0, promises_1.setImmediate)(undefined, { signal });
 }
 function loadNative() {
     const require = (0, node_module_1.createRequire)(__filename);

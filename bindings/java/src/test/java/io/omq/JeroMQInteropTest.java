@@ -43,6 +43,7 @@ final class JeroMQInteropTest {
             ZMQ.Socket push = zcontext.createSocket(org.zeromq.SocketType.PUSH);
             try {
                 push.connect(endpoint);
+                pull.waitConnected(1, Duration.ofSeconds(5));
                 assertEquals(true, push.send("hello-omq".getBytes(StandardCharsets.UTF_8), 0));
 
                 Message received = pull.receive(Duration.ofSeconds(5)).orElseThrow();

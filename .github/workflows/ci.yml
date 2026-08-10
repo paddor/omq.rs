@@ -24,6 +24,7 @@ jobs:
       lint_matrix: ${{ steps.matrix.outputs.lint_matrix }}
       run_pyomq: ${{ steps.scope.outputs.pyomq }}
       run_java: ${{ steps.scope.outputs.java }}
+      run_go: ${{ steps.scope.outputs.go }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -53,6 +54,14 @@ jobs:
             java:
               - 'bindings/java/**'
               - '.github/workflows/ci.yml'
+            go:
+              - 'bindings/go/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
       - id: matrix
         run: |
           echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
@@ -62,6 +71,58 @@ jobs:
           else
             echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"}]}' >> "$GITHUB_OUTPUT"
           fi
+
+  go-fmt:
+    name: go fmt
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+          cache-dependency-path: bindings/go/go.mod
+      - name: gofmt
+        working-directory: bindings/go
+        run: |
+          files="$(gofmt -l .)"
+          if [[ -n "$files" ]]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
+  go-test:
+    name: go test
+    needs: [changes, go-fmt]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/go/native
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+          cache-dependency-path: bindings/go/go.mod
+      - name: build native
+        run: cargo build --release --manifest-path bindings/go/native/Cargo.toml
+      - name: go vet
+        working-directory: bindings/go
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
+        run: go vet ./...
+      - name: go test
+        working-directory: bindings/go
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
+        run: go test -count=1 ./...
 
   linux-gate:
     name: linux gate
@@ -534,6 +595,8 @@ jobs:
         pyomq-test,
         java-lint,
         java-test,
+        go-fmt,
+        go-test,
       ]
     runs-on: ubuntu-latest
     if: always()

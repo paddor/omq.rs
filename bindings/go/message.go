@@ -24,6 +24,17 @@ func Multipart(parts ...[]byte) Message {
 	return NewMessage(parts...)
 }
 
+func Group(group string, body []byte) Message {
+	return Multipart([]byte(group), body)
+}
+
+func Route(identity []byte, body Message) Message {
+	parts := make([][]byte, 0, len(body.parts)+1)
+	parts = append(parts, identity)
+	parts = append(parts, body.parts...)
+	return NewMessage(parts...)
+}
+
 func (m Message) Parts() [][]byte {
 	out := make([][]byte, len(m.parts))
 	for i, part := range m.parts {
@@ -37,18 +48,38 @@ func (m Message) partsView() [][]byte {
 }
 
 func (m Message) Bytes() []byte {
+	part := m.Part(0)
+	return part
+}
+
+func (m Message) Part(index int) []byte {
 	if len(m.parts) == 0 {
 		return nil
 	}
-	return m.parts[0]
+	return append([]byte(nil), m.parts[index]...)
 }
 
 func (m Message) String() string {
-	return string(m.Bytes())
+	if len(m.parts) == 0 {
+		return ""
+	}
+	return string(m.parts[0])
 }
 
 func (m Message) Len() int {
 	return len(m.parts)
+}
+
+func (m Message) IsMultipart() bool {
+	return len(m.parts) > 1
+}
+
+func (m Message) ByteLen() int {
+	var total int
+	for _, part := range m.parts {
+		total += len(part)
+	}
+	return total
 }
 
 func (m Message) Empty() bool {

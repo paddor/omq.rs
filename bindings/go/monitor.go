@@ -53,14 +53,22 @@ func (m *Monitor) Recv(ctx context.Context) (MonitorEvent, error) {
 		if !errors.Is(err, ErrAgain) {
 			return MonitorEvent{}, err
 		}
-		timer := time.NewTimer(retryDelay(i))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return MonitorEvent{}, errFromContext(ctx)
-		case <-timer.C:
+		if err := waitRetry(ctx, i); err != nil {
+			return MonitorEvent{}, err
 		}
 	}
+}
+
+func (m *Monitor) RecvTimeout(timeout time.Duration) (MonitorEvent, error) {
+	if timeout == 0 {
+		return m.TryRecv()
+	}
+	if timeout < 0 {
+		return m.Recv(context.Background())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return m.Recv(ctx)
 }
 
 func (m *Monitor) TryRecv() (MonitorEvent, error) {

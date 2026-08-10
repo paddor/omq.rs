@@ -91,6 +91,9 @@ OmqGoStatus omq_go_context_share_key(OmqGoContext *ctx, uint64_t *high, uint64_t
 void omq_go_context_close(OmqGoContext *ctx);
 void omq_go_context_free(OmqGoContext *ctx);
 
+OmqGoStatus omq_go_curve_keypair(char **public_key, char **secret_key);
+OmqGoStatus omq_go_curve_public(const char *secret_key, char **public_key);
+
 OmqGoStatus omq_go_socket_new(OmqGoContext *ctx, int32_t socket_type, OmqGoSocket **out);
 OmqGoStatus omq_go_socket_bind(OmqGoSocket *socket, const char *endpoint, char **bound_endpoint);
 OmqGoStatus omq_go_socket_connect(OmqGoSocket *socket, const char *endpoint);
@@ -108,6 +111,8 @@ OmqGoStatus omq_go_socket_subscribe(OmqGoSocket *socket, const uint8_t *data, si
 OmqGoStatus omq_go_socket_unsubscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_join(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_leave(OmqGoSocket *socket, const uint8_t *data, size_t len);
+OmqGoStatus omq_go_socket_wait_connected(OmqGoSocket *socket, size_t min_peers, int64_t timeout_millis, size_t *out);
+OmqGoStatus omq_go_socket_wait_subscribed(OmqGoSocket *socket, uint64_t min_subscriptions, int64_t timeout_millis, uint64_t *out);
 OmqGoStatus omq_go_socket_close(OmqGoSocket *socket, int64_t linger_millis);
 void omq_go_socket_free(OmqGoSocket *socket);
 
@@ -115,13 +120,36 @@ OmqGoStatus omq_go_socket_set_send_hwm(OmqGoSocket *socket, uint32_t value);
 OmqGoStatus omq_go_socket_set_recv_hwm(OmqGoSocket *socket, uint32_t value);
 OmqGoStatus omq_go_socket_set_linger(OmqGoSocket *socket, int64_t millis);
 OmqGoStatus omq_go_socket_set_identity(OmqGoSocket *socket, const uint8_t *data, size_t len);
+OmqGoStatus omq_go_socket_set_heartbeat_interval(OmqGoSocket *socket, int64_t millis);
+OmqGoStatus omq_go_socket_set_handshake_timeout(OmqGoSocket *socket, int64_t millis);
+OmqGoStatus omq_go_socket_set_max_message_size(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_plain_server(OmqGoSocket *socket, const char *username, const char *password);
+OmqGoStatus omq_go_socket_set_plain_client(OmqGoSocket *socket, const char *username, const char *password);
+OmqGoStatus omq_go_socket_set_curve_server(OmqGoSocket *socket, const char *public_key, const char *secret_key);
+OmqGoStatus omq_go_socket_set_curve_client(OmqGoSocket *socket, const char *public_key, const char *secret_key, const char *server_public_key);
+OmqGoStatus omq_go_socket_set_workload_profile(OmqGoSocket *socket, int32_t profile);
+OmqGoStatus omq_go_socket_set_reconnect(OmqGoSocket *socket, int32_t mode, int64_t min_millis, int64_t max_millis);
+OmqGoStatus omq_go_socket_set_reconnect_stop_conn_refused(OmqGoSocket *socket, int enabled);
+OmqGoStatus omq_go_socket_set_heartbeat_ttl(OmqGoSocket *socket, int64_t millis);
+OmqGoStatus omq_go_socket_set_heartbeat_timeout(OmqGoSocket *socket, int64_t millis);
+OmqGoStatus omq_go_socket_set_max_pending_handshakes(OmqGoSocket *socket, size_t max);
 OmqGoStatus omq_go_socket_set_conflate(OmqGoSocket *socket, int enabled);
 OmqGoStatus omq_go_socket_set_router_mandatory(OmqGoSocket *socket, int enabled);
+OmqGoStatus omq_go_socket_set_on_mute(OmqGoSocket *socket, int32_t mode);
+OmqGoStatus omq_go_socket_set_tcp_keepalive(OmqGoSocket *socket, int32_t mode, int64_t idle_millis, int64_t interval_millis, uint32_t count);
+OmqGoStatus omq_go_socket_set_send_buffer_size(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_recv_buffer_size(OmqGoSocket *socket, int64_t bytes);
 OmqGoStatus omq_go_socket_set_xpub_nodrop(OmqGoSocket *socket, int enabled);
 OmqGoStatus omq_go_socket_set_compression_auto_train(OmqGoSocket *socket, int enabled);
 OmqGoStatus omq_go_socket_set_compression_threshold(OmqGoSocket *socket, int64_t bytes);
 OmqGoStatus omq_go_socket_set_compression_level(OmqGoSocket *socket, int64_t level);
 OmqGoStatus omq_go_socket_set_compression_dict(OmqGoSocket *socket, const uint8_t *data, size_t len);
+OmqGoStatus omq_go_socket_set_compression_dict_capacity(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_max_recv_dict_size(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_compression_offload_threshold(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_large_message_threshold(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_arena_threshold(OmqGoSocket *socket, int64_t bytes);
+OmqGoStatus omq_go_socket_set_transmit_slot_cap(OmqGoSocket *socket, int64_t bytes);
 
 OmqGoStatus omq_go_socket_monitor(OmqGoSocket *socket, OmqGoMonitor **out);
 OmqGoStatus omq_go_monitor_recv(OmqGoMonitor *monitor, int64_t timeout_millis, OmqGoEvent *out);

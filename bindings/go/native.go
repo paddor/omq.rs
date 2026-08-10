@@ -112,6 +112,33 @@ func contextFreeNative(ctx *nativeContext) {
 	C.omq_go_context_free((*C.OmqGoContext)(ctx))
 }
 
+func curveKeypairNative() (CurveKeypair, error) {
+	var publicKey *C.char
+	var secretKey *C.char
+	err := statusErr(C.omq_go_curve_keypair(&publicKey, &secretKey))
+	if err != nil {
+		return CurveKeypair{}, err
+	}
+	defer C.omq_go_string_free(publicKey)
+	defer C.omq_go_string_free(secretKey)
+	return CurveKeypair{
+		Public: C.GoString(publicKey),
+		Secret: C.GoString(secretKey),
+	}, nil
+}
+
+func curvePublicNative(secretKey string) (string, error) {
+	cSecret := C.CString(secretKey)
+	defer C.free(unsafe.Pointer(cSecret))
+	var publicKey *C.char
+	err := statusErr(C.omq_go_curve_public(cSecret, &publicKey))
+	if err != nil {
+		return "", err
+	}
+	defer C.omq_go_string_free(publicKey)
+	return C.GoString(publicKey), nil
+}
+
 func socketNewNative(ctx *nativeContext, socketType SocketType) (*nativeSocket, error) {
 	var out *C.OmqGoSocket
 	err := statusErr(C.omq_go_socket_new((*C.OmqGoContext)(ctx), C.int32_t(socketType), &out))
@@ -368,6 +395,31 @@ func socketLeaveNative(socket *nativeSocket, data []byte) error {
 	return statusErr(C.omq_go_socket_leave((*C.OmqGoSocket)(socket), (*C.uint8_t)(ptr), C.size_t(len(data))))
 }
 
+func socketWaitConnectedNative(socket *nativeSocket, minPeers int, timeout time.Duration) (int, error) {
+	if minPeers < 0 {
+		return 0, &ConfigError{Err: "min peers must be non-negative"}
+	}
+	var out C.size_t
+	err := statusErr(C.omq_go_socket_wait_connected(
+		(*C.OmqGoSocket)(socket),
+		C.size_t(minPeers),
+		C.int64_t(durationMillis(timeout)),
+		&out,
+	))
+	return int(out), err
+}
+
+func socketWaitSubscribedNative(socket *nativeSocket, minSubscriptions uint64, timeout time.Duration) (uint64, error) {
+	var out C.uint64_t
+	err := statusErr(C.omq_go_socket_wait_subscribed(
+		(*C.OmqGoSocket)(socket),
+		C.uint64_t(minSubscriptions),
+		C.int64_t(durationMillis(timeout)),
+		&out,
+	))
+	return uint64(out), err
+}
+
 func socketCloseNative(socket *nativeSocket, linger time.Duration, useConfigured bool) error {
 	millis := int64(-2)
 	if !useConfigured {
@@ -398,6 +450,91 @@ func setIdentityNative(socket *nativeSocket, value []byte) error {
 	})
 }
 
+func setHeartbeatIntervalNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_heartbeat_interval((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setHandshakeTimeoutNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_handshake_timeout((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setMaxMessageSizeNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_max_message_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setPlainServerNative(socket *nativeSocket, username, password string) error {
+	cUsername := C.CString(username)
+	defer C.free(unsafe.Pointer(cUsername))
+	cPassword := C.CString(password)
+	defer C.free(unsafe.Pointer(cPassword))
+	return statusErr(C.omq_go_socket_set_plain_server((*C.OmqGoSocket)(socket), cUsername, cPassword))
+}
+
+func setPlainClientNative(socket *nativeSocket, username, password string) error {
+	cUsername := C.CString(username)
+	defer C.free(unsafe.Pointer(cUsername))
+	cPassword := C.CString(password)
+	defer C.free(unsafe.Pointer(cPassword))
+	return statusErr(C.omq_go_socket_set_plain_client((*C.OmqGoSocket)(socket), cUsername, cPassword))
+}
+
+func setCurveServerNative(socket *nativeSocket, keypair CurveKeypair) error {
+	cPublic := C.CString(keypair.Public)
+	defer C.free(unsafe.Pointer(cPublic))
+	cSecret := C.CString(keypair.Secret)
+	defer C.free(unsafe.Pointer(cSecret))
+	return statusErr(C.omq_go_socket_set_curve_server((*C.OmqGoSocket)(socket), cPublic, cSecret))
+}
+
+func setCurveClientNative(socket *nativeSocket, keypair CurveKeypair, serverPublicKey string) error {
+	cPublic := C.CString(keypair.Public)
+	defer C.free(unsafe.Pointer(cPublic))
+	cSecret := C.CString(keypair.Secret)
+	defer C.free(unsafe.Pointer(cSecret))
+	cServerPublic := C.CString(serverPublicKey)
+	defer C.free(unsafe.Pointer(cServerPublic))
+	return statusErr(C.omq_go_socket_set_curve_client(
+		(*C.OmqGoSocket)(socket),
+		cPublic,
+		cSecret,
+		cServerPublic,
+	))
+}
+
+func setWorkloadProfileNative(socket *nativeSocket, value int32) error {
+	return statusErr(C.omq_go_socket_set_workload_profile((*C.OmqGoSocket)(socket), C.int32_t(value)))
+}
+
+func setReconnectNative(socket *nativeSocket, mode int32, minMillis, maxMillis int64) error {
+	return statusErr(C.omq_go_socket_set_reconnect(
+		(*C.OmqGoSocket)(socket),
+		C.int32_t(mode),
+		C.int64_t(minMillis),
+		C.int64_t(maxMillis),
+	))
+}
+
+func setReconnectStopConnRefusedNative(socket *nativeSocket, enabled bool) error {
+	return socketSetBoolNative(socket, enabled, func(s *C.OmqGoSocket, enabled C.int) C.OmqGoStatus {
+		return C.omq_go_socket_set_reconnect_stop_conn_refused(s, enabled)
+	})
+}
+
+func setHeartbeatTTLNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_heartbeat_ttl((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setHeartbeatTimeoutNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_heartbeat_timeout((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setMaxPendingHandshakesNative(socket *nativeSocket, value int) error {
+	if value <= 0 {
+		return &ConfigError{Err: "max pending handshakes must be greater than zero"}
+	}
+	return statusErr(C.omq_go_socket_set_max_pending_handshakes((*C.OmqGoSocket)(socket), C.size_t(value)))
+}
+
 func setConflateNative(socket *nativeSocket, value bool) error {
 	return socketSetBoolNative(socket, value, func(s *C.OmqGoSocket, enabled C.int) C.OmqGoStatus {
 		return C.omq_go_socket_set_conflate(s, enabled)
@@ -408,6 +545,28 @@ func setRouterMandatoryNative(socket *nativeSocket, value bool) error {
 	return socketSetBoolNative(socket, value, func(s *C.OmqGoSocket, enabled C.int) C.OmqGoStatus {
 		return C.omq_go_socket_set_router_mandatory(s, enabled)
 	})
+}
+
+func setOnMuteNative(socket *nativeSocket, mode int32) error {
+	return statusErr(C.omq_go_socket_set_on_mute((*C.OmqGoSocket)(socket), C.int32_t(mode)))
+}
+
+func setTCPKeepaliveNative(socket *nativeSocket, mode int32, idleMillis, intervalMillis int64, count uint32) error {
+	return statusErr(C.omq_go_socket_set_tcp_keepalive(
+		(*C.OmqGoSocket)(socket),
+		C.int32_t(mode),
+		C.int64_t(idleMillis),
+		C.int64_t(intervalMillis),
+		C.uint32_t(count),
+	))
+}
+
+func setSendBufferSizeNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_send_buffer_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setRecvBufferSizeNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_recv_buffer_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
 }
 
 func setXPubNoDropNative(socket *nativeSocket, value bool) error {
@@ -434,6 +593,30 @@ func setCompressionDictNative(socket *nativeSocket, value []byte) error {
 	return socketSetBytesNative(socket, value, func(s *C.OmqGoSocket, p *C.uint8_t, n C.size_t) C.OmqGoStatus {
 		return C.omq_go_socket_set_compression_dict(s, p, n)
 	})
+}
+
+func setCompressionDictCapacityNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_compression_dict_capacity((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setMaxRecvDictSizeNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_max_recv_dict_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setCompressionOffloadThresholdNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_compression_offload_threshold((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setLargeMessageThresholdNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_large_message_threshold((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setArenaThresholdNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_arena_threshold((*C.OmqGoSocket)(socket), C.int64_t(value)))
+}
+
+func setTransmitSlotCapacityNative(socket *nativeSocket, value int64) error {
+	return statusErr(C.omq_go_socket_set_transmit_slot_cap((*C.OmqGoSocket)(socket), C.int64_t(value)))
 }
 
 func socketSetBoolNative(socket *nativeSocket, value bool, op func(*C.OmqGoSocket, C.int) C.OmqGoStatus) error {

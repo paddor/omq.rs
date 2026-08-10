@@ -16,12 +16,17 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_proto::TrySendError;
+#[cfg(feature = "plain")]
+use omq_tokio::Authenticator;
 use omq_tokio::blocking::Socket as BlockingSocket;
+use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
-    Context, ContextConfig, DisconnectReason, Endpoint, Error, Message,
+    Context, ContextConfig, DisconnectReason, Endpoint, Error, MechanismSetup, Message,
     MonitorEvent as NativeMonitorEvent, MonitorRecvError, MonitorStream, MonitorTryRecvError,
     Options, PeerCommandKind, SocketType,
 };
+#[cfg(feature = "curve")]
+use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("OMQ Go native binding requires a 64-bit target");
@@ -862,12 +867,44 @@ fn duration_from_timeout_millis(timeout_millis: i64) -> Option<Duration> {
     }
 }
 
+fn duration_from_millis(millis: i64) -> Result<Duration, Error> {
+    if millis < 0 {
+        return Err(Error::Config("duration must be non-negative".to_string()));
+    }
+    Ok(Duration::from_millis(millis as u64))
+}
+
+fn optional_duration_from_millis(millis: i64) -> Result<Option<Duration>, Error> {
+    if millis < 0 {
+        Ok(None)
+    } else {
+        duration_from_millis(millis).map(Some)
+    }
+}
+
+fn optional_usize_from_i64(name: &str, value: i64) -> Result<Option<usize>, Error> {
+    if value < 0 {
+        Ok(None)
+    } else {
+        usize::try_from(value)
+            .map(Some)
+            .map_err(|_| Error::Config(format!("{name} exceeds usize")))
+    }
+}
+
 fn linger_from_millis(millis: i64) -> Option<Duration> {
     if millis < 0 {
         None
     } else {
         Some(Duration::from_millis(millis as u64))
     }
+}
+
+#[cfg(feature = "curve")]
+fn curve_keypair_from_z85(public_key: &str, secret_key: &str) -> Result<CurveKeypair, Error> {
+    let public = CurvePublicKey::from_z85(public_key)?;
+    let secret = CurveSecretKey::from_z85(secret_key)?;
+    Ok(CurveKeypair { public, secret })
 }
 
 fn message_from_c(parts: *const OmqGoPart, part_count: usize) -> Result<Message, Error> {
@@ -1435,6 +1472,60 @@ pub extern "C" fn omq_go_context_free(ctx: *mut OmqGoContext) {
 }
 
 #[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
+pub extern "C" fn omq_go_curve_keypair(
+    public_key: *mut *mut c_char,
+    secret_key: *mut *mut c_char,
+) -> OmqGoStatus {
+    if public_key.is_null() || secret_key.is_null() {
+        return OmqGoStatus::err(CONFIG, "null CURVE key output pointer");
+    }
+    let keypair = CurveKeypair::generate();
+    unsafe {
+        *public_key = string_to_raw(keypair.public.to_z85());
+        *secret_key = string_to_raw(keypair.secret.to_z85());
+    }
+    OmqGoStatus::ok()
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "C" fn omq_go_curve_keypair(
+    _public_key: *mut *mut c_char,
+    _secret_key: *mut *mut c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "CURVE support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
+pub extern "C" fn omq_go_curve_public(
+    secret_key: *const c_char,
+    public_key: *mut *mut c_char,
+) -> OmqGoStatus {
+    if public_key.is_null() {
+        return OmqGoStatus::err(CONFIG, "null CURVE public key output pointer");
+    }
+    let result = (|| {
+        let secret = CurveSecretKey::from_z85(str_from_c(secret_key)?)?;
+        unsafe {
+            *public_key = string_to_raw(secret.derive_public().to_z85());
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "C" fn omq_go_curve_public(
+    _secret_key: *const c_char,
+    _public_key: *mut *mut c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "CURVE support not enabled")
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_new(
     ctx: *mut OmqGoContext,
     socket_type: i32,
@@ -1812,6 +1903,52 @@ pub extern "C" fn omq_go_socket_leave(
     })
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_wait_connected(
+    socket: *mut OmqGoSocket,
+    min_peers: usize,
+    timeout_millis: i64,
+    out: *mut usize,
+) -> OmqGoStatus {
+    if socket.is_null() || out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null wait_connected pointer");
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let timeout = duration_from_millis(timeout_millis)?;
+        let count = socket.materialize()?.wait_connected(min_peers, timeout)?;
+        unsafe {
+            *out = count;
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_wait_subscribed(
+    socket: *mut OmqGoSocket,
+    min_subscriptions: u64,
+    timeout_millis: i64,
+    out: *mut u64,
+) -> OmqGoStatus {
+    if socket.is_null() || out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null wait_subscribed pointer");
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let timeout = duration_from_millis(timeout_millis)?;
+        let count = socket
+            .materialize()?
+            .wait_subscribed(min_subscriptions, timeout)?;
+        unsafe {
+            *out = count;
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
 fn socket_bytes_op<F>(socket: *mut OmqGoSocket, data: *const u8, len: usize, op: F) -> OmqGoStatus
 where
     F: FnOnce(BlockingSocket, &[u8]) -> Result<(), Error>,
@@ -1894,6 +2031,268 @@ pub extern "C" fn omq_go_socket_set_identity(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_heartbeat_interval(
+    socket: *mut OmqGoSocket,
+    millis: i64,
+) -> OmqGoStatus {
+    let interval = match optional_duration_from_millis(millis) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.heartbeat_interval = interval)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_handshake_timeout(
+    socket: *mut OmqGoSocket,
+    millis: i64,
+) -> OmqGoStatus {
+    let timeout = match optional_duration_from_millis(millis) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.handshake_timeout = timeout)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_max_message_size(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let max = match optional_usize_from_i64("max message size", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.max_message_size = max)
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
+pub extern "C" fn omq_go_socket_set_plain_server(
+    socket: *mut OmqGoSocket,
+    username: *const c_char,
+    password: *const c_char,
+) -> OmqGoStatus {
+    let result = (|| {
+        let expected_username = str_from_c(username)?.to_string();
+        let expected_password = str_from_c(password)?.to_string();
+        Ok(set_socket_option(socket, move |options| {
+            options.mechanism = MechanismSetup::PlainServer {
+                authenticator: Authenticator::new(move |peer| {
+                    peer.username.as_deref() == Some(expected_username.as_str())
+                        && peer.password.as_deref() == Some(expected_password.as_str())
+                }),
+            };
+        }))
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "C" fn omq_go_socket_set_plain_server(
+    _socket: *mut OmqGoSocket,
+    _username: *const c_char,
+    _password: *const c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "PLAIN support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
+pub extern "C" fn omq_go_socket_set_plain_client(
+    socket: *mut OmqGoSocket,
+    username: *const c_char,
+    password: *const c_char,
+) -> OmqGoStatus {
+    let result = (|| {
+        let username = str_from_c(username)?.to_string();
+        let password = str_from_c(password)?.to_string();
+        Ok(set_socket_option(socket, move |options| {
+            options.mechanism = MechanismSetup::PlainClient { username, password };
+        }))
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "C" fn omq_go_socket_set_plain_client(
+    _socket: *mut OmqGoSocket,
+    _username: *const c_char,
+    _password: *const c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "PLAIN support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
+pub extern "C" fn omq_go_socket_set_curve_server(
+    socket: *mut OmqGoSocket,
+    public_key: *const c_char,
+    secret_key: *const c_char,
+) -> OmqGoStatus {
+    let result = (|| {
+        let keypair = curve_keypair_from_z85(str_from_c(public_key)?, str_from_c(secret_key)?)?;
+        Ok(set_socket_option(socket, move |options| {
+            options.mechanism = MechanismSetup::CurveServer {
+                our_keypair: keypair,
+                options: CurveServerOptions::default(),
+            };
+        }))
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "C" fn omq_go_socket_set_curve_server(
+    _socket: *mut OmqGoSocket,
+    _public_key: *const c_char,
+    _secret_key: *const c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "CURVE support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
+pub extern "C" fn omq_go_socket_set_curve_client(
+    socket: *mut OmqGoSocket,
+    public_key: *const c_char,
+    secret_key: *const c_char,
+    server_public_key: *const c_char,
+) -> OmqGoStatus {
+    let result = (|| {
+        let keypair = curve_keypair_from_z85(str_from_c(public_key)?, str_from_c(secret_key)?)?;
+        let server_public = CurvePublicKey::from_z85(str_from_c(server_public_key)?)?;
+        Ok(set_socket_option(socket, move |options| {
+            options.mechanism = MechanismSetup::CurveClient {
+                our_keypair: keypair,
+                server_public,
+            };
+        }))
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "C" fn omq_go_socket_set_curve_client(
+    _socket: *mut OmqGoSocket,
+    _public_key: *const c_char,
+    _secret_key: *const c_char,
+    _server_public_key: *const c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "CURVE support not enabled")
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_workload_profile(
+    socket: *mut OmqGoSocket,
+    profile: i32,
+) -> OmqGoStatus {
+    let profile = match profile {
+        -1 => None,
+        0 => Some(WorkloadProfile::Throughput),
+        1 => Some(WorkloadProfile::Latency),
+        other => return OmqGoStatus::err(CONFIG, format!("unknown workload profile {other}")),
+    };
+    set_socket_option(socket, move |options| options.workload_profile = profile)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_reconnect(
+    socket: *mut OmqGoSocket,
+    mode: i32,
+    min_millis: i64,
+    max_millis: i64,
+) -> OmqGoStatus {
+    let reconnect = match mode {
+        0 => ReconnectPolicy::Disabled,
+        1 => match duration_from_millis(min_millis) {
+            Ok(min) => ReconnectPolicy::Fixed(min),
+            Err(error) => return OmqGoStatus::from_error(error),
+        },
+        2 => {
+            let min = match duration_from_millis(min_millis) {
+                Ok(min) => min,
+                Err(error) => return OmqGoStatus::from_error(error),
+            };
+            let max = match duration_from_millis(max_millis) {
+                Ok(max) => max,
+                Err(error) => return OmqGoStatus::from_error(error),
+            };
+            if max < min {
+                return OmqGoStatus::err(
+                    CONFIG,
+                    "reconnect max must be greater than or equal to min",
+                );
+            }
+            ReconnectPolicy::Exponential { min, max }
+        }
+        other => return OmqGoStatus::err(CONFIG, format!("unknown reconnect mode {other}")),
+    };
+    set_socket_option(socket, move |options| options.reconnect = reconnect)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_reconnect_stop_conn_refused(
+    socket: *mut OmqGoSocket,
+    enabled: i32,
+) -> OmqGoStatus {
+    set_socket_option(socket, move |options| {
+        options.reconnect_stop_conn_refused = enabled != 0
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_heartbeat_ttl(
+    socket: *mut OmqGoSocket,
+    millis: i64,
+) -> OmqGoStatus {
+    let ttl = match optional_duration_from_millis(millis) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.heartbeat_ttl = ttl)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_heartbeat_timeout(
+    socket: *mut OmqGoSocket,
+    millis: i64,
+) -> OmqGoStatus {
+    let timeout = match optional_duration_from_millis(millis) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.heartbeat_timeout = timeout)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_max_pending_handshakes(
+    socket: *mut OmqGoSocket,
+    max: usize,
+) -> OmqGoStatus {
+    if max == 0 {
+        return OmqGoStatus::err(CONFIG, "max pending handshakes must be greater than zero");
+    }
+    set_socket_option(socket, move |options| options.max_pending_handshakes = max)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_set_conflate(
     socket: *mut OmqGoSocket,
     enabled: i32,
@@ -1907,6 +2306,75 @@ pub extern "C" fn omq_go_socket_set_router_mandatory(
     enabled: i32,
 ) -> OmqGoStatus {
     set_socket_option(socket, |options| options.router_mandatory = enabled != 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_on_mute(socket: *mut OmqGoSocket, mode: i32) -> OmqGoStatus {
+    let on_mute = match mode {
+        0 => OnMute::Block,
+        1 => OnMute::DropNewest,
+        2 => OnMute::DropOldest,
+        other => return OmqGoStatus::err(CONFIG, format!("unknown on-mute mode {other}")),
+    };
+    set_socket_option(socket, move |options| options.on_mute = on_mute)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_tcp_keepalive(
+    socket: *mut OmqGoSocket,
+    mode: i32,
+    idle_millis: i64,
+    interval_millis: i64,
+    count: u32,
+) -> OmqGoStatus {
+    let keepalive = match mode {
+        0 => KeepAlive::Default,
+        1 => KeepAlive::Disabled,
+        2 => {
+            if count == 0 {
+                return OmqGoStatus::err(CONFIG, "TCP keepalive count must be greater than zero");
+            }
+            let idle = match duration_from_millis(idle_millis) {
+                Ok(idle) => idle,
+                Err(error) => return OmqGoStatus::from_error(error),
+            };
+            let intvl = match duration_from_millis(interval_millis) {
+                Ok(intvl) => intvl,
+                Err(error) => return OmqGoStatus::from_error(error),
+            };
+            KeepAlive::Enabled {
+                idle,
+                intvl,
+                cnt: count,
+            }
+        }
+        other => return OmqGoStatus::err(CONFIG, format!("unknown TCP keepalive mode {other}")),
+    };
+    set_socket_option(socket, move |options| options.tcp_keepalive = keepalive)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_send_buffer_size(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("send buffer size", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.send_buffer_size = bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_recv_buffer_size(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("receive buffer size", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.recv_buffer_size = bytes)
 }
 
 #[unsafe(no_mangle)]
@@ -1968,6 +2436,84 @@ pub extern "C" fn omq_go_socket_set_compression_dict(
         }
     };
     set_socket_option(socket, |options| options.compression_dict = value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_compression_dict_capacity(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("compression dictionary capacity", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| {
+        options.compression_dict_capacity = bytes
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_max_recv_dict_size(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("max receive dictionary size", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.max_recv_dict_size = bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_compression_offload_threshold(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("compression offload threshold", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| {
+        options.compression_offload_threshold = bytes
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_large_message_threshold(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("large message threshold", bytes) {
+        Ok(value) => value.filter(|bytes| *bytes != 0),
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| {
+        options.large_message_threshold = bytes
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_arena_threshold(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("arena threshold", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.arena_threshold = bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_set_transmit_slot_cap(
+    socket: *mut OmqGoSocket,
+    bytes: i64,
+) -> OmqGoStatus {
+    let bytes = match optional_usize_from_i64("transmit slot capacity", bytes) {
+        Ok(value) => value,
+        Err(error) => return OmqGoStatus::from_error(error),
+    };
+    set_socket_option(socket, move |options| options.transmit_slot_cap = bytes)
 }
 
 fn set_socket_option<F>(socket: *mut OmqGoSocket, f: F) -> OmqGoStatus

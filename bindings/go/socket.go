@@ -385,10 +385,18 @@ func (s *Socket) Subscribe(prefix []byte) error {
 	return err
 }
 
+func (s *Socket) SubscribeString(prefix string) error {
+	return s.Subscribe([]byte(prefix))
+}
+
 func (s *Socket) Unsubscribe(prefix []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpUnsubscribe, data: prefix})
 	keepAlive(s)
 	return err
+}
+
+func (s *Socket) UnsubscribeString(prefix string) error {
+	return s.Unsubscribe([]byte(prefix))
 }
 
 func (s *Socket) Join(group []byte) error {
@@ -397,10 +405,108 @@ func (s *Socket) Join(group []byte) error {
 	return err
 }
 
+func (s *Socket) JoinString(group string) error {
+	return s.Join([]byte(group))
+}
+
 func (s *Socket) Leave(group []byte) error {
 	_, err := s.do(context.Background(), false, socketOp{kind: socketOpLeave, data: group})
 	keepAlive(s)
 	return err
+}
+
+func (s *Socket) LeaveString(group string) error {
+	return s.Leave([]byte(group))
+}
+
+func (s *Socket) WaitConnected(ctx context.Context, minPeers int) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var last int
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return last, err
+		}
+		count, err := s.waitConnectedOnce(ctx, minPeers)
+		if err == nil {
+			return count, nil
+		}
+		if !errors.Is(err, ErrTimeout) {
+			return count, err
+		}
+		last = count
+		if err := waitRetry(ctx, i); err != nil {
+			return last, err
+		}
+	}
+}
+
+func (s *Socket) WaitConnectedTimeout(minPeers int, timeout time.Duration) (int, error) {
+	if timeout == 0 {
+		return s.waitConnectedOnce(context.Background(), minPeers)
+	}
+	if timeout < 0 {
+		return s.WaitConnected(context.Background(), minPeers)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.WaitConnected(ctx, minPeers)
+}
+
+func (s *Socket) waitConnectedOnce(ctx context.Context, minPeers int) (int, error) {
+	value, err := s.call(ctx, false, func(handle *nativeSocket) (any, error) {
+		return socketWaitConnectedNative(handle, minPeers, 0)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return value.(int), nil
+}
+
+func (s *Socket) WaitSubscribed(ctx context.Context, minSubscriptions uint64) (uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var last uint64
+	for i := 0; ; i++ {
+		if err := errFromContext(ctx); err != nil {
+			return last, err
+		}
+		count, err := s.waitSubscribedOnce(ctx, minSubscriptions)
+		if err == nil {
+			return count, nil
+		}
+		if !errors.Is(err, ErrTimeout) {
+			return count, err
+		}
+		last = count
+		if err := waitRetry(ctx, i); err != nil {
+			return last, err
+		}
+	}
+}
+
+func (s *Socket) WaitSubscribedTimeout(minSubscriptions uint64, timeout time.Duration) (uint64, error) {
+	if timeout == 0 {
+		return s.waitSubscribedOnce(context.Background(), minSubscriptions)
+	}
+	if timeout < 0 {
+		return s.WaitSubscribed(context.Background(), minSubscriptions)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.WaitSubscribed(ctx, minSubscriptions)
+}
+
+func (s *Socket) waitSubscribedOnce(ctx context.Context, minSubscriptions uint64) (uint64, error) {
+	value, err := s.call(ctx, false, func(handle *nativeSocket) (any, error) {
+		return socketWaitSubscribedNative(handle, minSubscriptions, 0)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return value.(uint64), nil
 }
 
 func (s *Socket) Close(ctx context.Context) error {

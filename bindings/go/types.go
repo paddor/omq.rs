@@ -103,3 +103,23 @@ type ShareKey struct {
 	High uint64
 	Low  uint64
 }
+
+type CurveKeypair struct {
+	Public string
+	Secret string
+}
+
+type WorkloadProfile int32
+
+const (
+	WorkloadThroughput WorkloadProfile = iota
+	WorkloadLatency
+)
+
+type OnMute int32
+
+const (
+	OnMuteBlock OnMute = iota
+	OnMuteDropNewest
+	OnMuteDropOldest
+)

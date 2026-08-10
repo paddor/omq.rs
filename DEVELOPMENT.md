@@ -367,7 +367,7 @@ GitHub releases. Configuration lives in `release-plz.toml`.
    versioned sections.
 
 3. **Update zguide examples.** Bump `omq-tokio` versions in
-   `examples/zguide-tokio/*/Cargo.toml`.
+   `examples/zguide/*/Cargo.toml`.
 
 4. **Merge the release PR.** release-plz tags and publishes to
    crates.io automatically.

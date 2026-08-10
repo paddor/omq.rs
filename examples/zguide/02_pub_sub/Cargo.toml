@@ -1,0 +1,27 @@
+[package]
+name = "zguide-02-pub-sub"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+omq-tokio = { version = "0.21.1", path = "../../../omq-tokio" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+bytes = "1"
+
+[[bin]]
+name = "zg02_publisher"
+path = "publisher.rs"
+
+[[bin]]
+name = "zg02_subscriber"
+path = "subscriber.rs"
+
+[[bin]]
+name = "zg02_proxy"
+path = "proxy.rs"
+
+
+
+[lints]
+workspace = true

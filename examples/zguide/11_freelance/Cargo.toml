@@ -1,0 +1,31 @@
+[package]
+name = "zguide-11-freelance"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+omq-tokio = { version = "0.21.1", path = "../../../omq-tokio" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+bytes = "1"
+
+[[bin]]
+name = "zg11_server"
+path = "server.rs"
+
+[[bin]]
+name = "zg11_client_sequential"
+path = "client_sequential.rs"
+
+[[bin]]
+name = "zg11_client_shotgun"
+path = "client_shotgun.rs"
+
+[[bin]]
+name = "zg11_client_tracked"
+path = "client_tracked.rs"
+
+
+
+[lints]
+workspace = true

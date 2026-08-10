@@ -100,7 +100,7 @@ let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
 
-More examples in [examples/zguide-tokio/](examples/zguide-tokio/), a
+More examples in [examples/zguide/](examples/zguide/), a
 port of the ZeroMQ Guide patterns to OMQ.
 
 ## Cargo features

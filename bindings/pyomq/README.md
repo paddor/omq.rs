@@ -43,6 +43,8 @@ await sock.send(b"hello")
 await sock.close()
 ```
 
+Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
+
 ## Status
 
 Sync and `asyncio` APIs both ship in this release. All 20 ZMTP socket types are wired:

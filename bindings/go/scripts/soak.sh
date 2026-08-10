@@ -25,6 +25,6 @@ for duration in ${durations}; do
         OMQ_GO_SOAK_DURATION_SECS="${duration}" \
         OMQ_GO_SOAK_WORKERS="${workers}" \
         GOMAXPROCS="${workers}" \
-            go test -count=1 -run '^TestSoak' -parallel="${workers}" -timeout "$((duration + 120))s"
+            go test -v -count=1 -run '^TestSoak' -parallel="${workers}" -timeout "$((duration + 120))s"
     )
 done

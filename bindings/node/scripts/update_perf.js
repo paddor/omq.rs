@@ -10,15 +10,15 @@ const { Worker, isMainThread, parentPort, workerData } = require("node:worker_th
 const CACHE_DIR = path.join(os.homedir(), ".cache", "omq.node");
 const DATA_FILE = path.join(CACHE_DIR, "bindings.jsonl");
 const CHART_FILE = path.resolve(__dirname, "../doc/charts/bindings.svg");
-const DEFAULT_COUNT = 1_000_000;
 const DEFAULT_LATENCY_COUNT = 50_000;
+const DEFAULT_THROUGHPUT_DURATION_MS = 2500;
+const DEFAULT_WARMUP_DURATION_MS = 500;
 const DEFAULT_BENCH_TIMEOUT_MS = 60_000;
 const DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
 const QUICK_SIZES = [16];
 const STOP_PAYLOAD = "__OMQ_NODE_BENCH_STOP__";
 const STOP_BUFFER = Buffer.from(STOP_PAYLOAD);
-const SEND_YIELD_INTERVAL = 128;
-const SEND_YIELD_MIN_SIZE = 4096;
+const THROUGHPUT_HWM_BYTES = 128 * 1024 * 1024;
 
 if (process.env.OMQ_NODE_BENCH_DEBUG_ARGV) {
   console.error(JSON.stringify(process.argv));
@@ -61,8 +61,9 @@ if (!isMainThread) {
 
 async function main() {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
-  const count = positiveInt(process.env.OMQ_NODE_BENCH_MESSAGES, DEFAULT_COUNT);
   const latencyCount = positiveInt(process.env.OMQ_NODE_BENCH_LATENCY_MESSAGES, DEFAULT_LATENCY_COUNT);
+  const throughputDurationMs = throughputDurationMsFromEnv();
+  const warmupDurationMs = warmupDurationMsFromEnv();
   const timeoutMs = positiveInt(process.env.OMQ_NODE_BENCH_TIMEOUT_MS, DEFAULT_BENCH_TIMEOUT_MS);
   const sizes = parseSizes(process.env.OMQ_NODE_BENCH_SIZES ?? process.env.OMQ_NODE_BENCH_SIZE);
   const impls = parseImpls(process.env.OMQ_NODE_BENCH_IMPLS);
@@ -78,18 +79,36 @@ async function main() {
   }
 
   for (const size of sizes) {
-    const throughputCount = throughputCountForSize(count, size);
     const latencyCountForThisSize = latencyCountForSize(latencyCount, size);
 
     if (runOmq) {
-      appendRecord(await runOmqInprocThroughput({ count: throughputCount, size, runId }));
-      appendRecord(await runOmqTcpThroughput({ count: throughputCount, size, runId, timeoutMs }));
-      appendRecord(await runOmqTcpLatency({ count: latencyCountForThisSize, size, runId, timeoutMs }));
+      await warmupThroughput(warmupDurationMs, (durationMs) =>
+        runOmqInprocThroughput({ mode: "sync", durationMs, size, runId: `${runId}-warmup` }),
+      );
+      appendRecord(await runOmqInprocThroughput({ mode: "sync", durationMs: throughputDurationMs, size, runId }));
+      await warmupThroughput(warmupDurationMs, (durationMs) =>
+        runOmqTcpThroughput({ mode: "sync", durationMs, size, runId: `${runId}-warmup`, timeoutMs }),
+      );
+      appendRecord(await runOmqTcpThroughput({ mode: "sync", durationMs: throughputDurationMs, size, runId, timeoutMs }));
+      appendRecord(await runOmqTcpLatency({ mode: "sync", count: latencyCountForThisSize, size, runId, timeoutMs }));
+
+      await warmupThroughput(warmupDurationMs, (durationMs) =>
+        runOmqInprocThroughput({ mode: "async", durationMs, size, runId: `${runId}-warmup` }),
+      );
+      appendRecord(await runOmqInprocThroughput({ mode: "async", durationMs: throughputDurationMs, size, runId }));
+      await warmupThroughput(warmupDurationMs, (durationMs) =>
+        runOmqTcpThroughput({ mode: "async", durationMs, size, runId: `${runId}-warmup`, timeoutMs }),
+      );
+      appendRecord(await runOmqTcpThroughput({ mode: "async", durationMs: throughputDurationMs, size, runId, timeoutMs }));
+      appendRecord(await runOmqTcpLatency({ mode: "async", count: latencyCountForThisSize, size, runId, timeoutMs }));
     }
 
     if (runZeromq) {
+      await warmupThroughput(warmupDurationMs, (durationMs) =>
+        runZeromqTcpThroughput({ durationMs, size, runId: `${runId}-warmup`, timeoutMs }),
+      );
       appendRecord(await runZeromqTcpThroughput({
-        count: throughputCount,
+        durationMs: throughputDurationMs,
         size,
         runId,
         timeoutMs,
@@ -115,6 +134,13 @@ function appendRecord(record) {
   printRecord(record);
 }
 
+async function warmupThroughput(durationMs, run) {
+  if (durationMs <= 0) {
+    return;
+  }
+  await run(durationMs);
+}
+
 function buildDistIfNeeded() {
   const dist = path.resolve(__dirname, "../dist/index.js");
   const addon = path.resolve(__dirname, "../omq_node.node");
@@ -123,10 +149,10 @@ function buildDistIfNeeded() {
   }
 }
 
-async function runOmqInprocThroughput({ count, size, runId }) {
+async function runOmqInprocThroughput({ mode, durationMs, size, runId }) {
   const { Context, Push } = require("../dist");
   const context = new Context();
-  const push = new Push(benchOptions({ count, metric: "throughput" }), context);
+  const push = new Push(benchOptions({ durationMs, metric: "throughput", mode, size }), context);
   let receiver;
   try {
     const endpoint = `inproc://omq-node-bench-${process.pid}-${Date.now()}-${size}`;
@@ -135,28 +161,31 @@ async function runOmqInprocThroughput({ count, size, runId }) {
         kind: "omq-inproc-pull",
         endpoint,
         shareKey: context.shareKey(),
-        count,
+        durationMs,
+        mode,
+        size,
         metric: "throughput",
       },
     });
     await waitWorker(receiver, "ready");
     await push.connect(endpoint);
     push.waitConnectedSync(1, 5000);
+    receiver.postMessage({ kind: "start" });
     const payload = Buffer.alloc(size, 7);
-    const start = process.hrtime.bigint();
-    for (let i = 0; i < count; i++) {
-      push.sendSync(payload);
-      if (size >= SEND_YIELD_MIN_SIZE && (i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
-    }
+    const send = mode === "async"
+      ? await sendOmqForDurationAsync(push, payload, durationMs)
+      : sendOmqForDurationSync(push, payload, durationMs);
+    if (mode === "async") await push.send(STOP_PAYLOAD);
+    else push.sendSync(STOP_PAYLOAD);
     const recv = await waitWorker(receiver, "done");
-    const elapsedSec = secondsSince(start);
     return throughputRecord({
       runId,
       impl: "omq-node",
+      mode,
       transport: "inproc",
       count: recv.count,
       size,
-      elapsedSec,
+      elapsedSec: Math.max(recv.elapsedSec, send.elapsedSec),
     });
   } finally {
     push.close();
@@ -165,9 +194,9 @@ async function runOmqInprocThroughput({ count, size, runId }) {
   }
 }
 
-async function runOmqTcpThroughput({ count, size, runId, timeoutMs }) {
+async function runOmqTcpThroughput({ mode, durationMs, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const common = { impl: "omq-node", transport: "tcp", metric: "throughput", endpoint, count, size };
+  const common = { impl: "omq-node", mode, transport: "tcp", metric: "throughput", endpoint, durationMs, size };
   const receiver = forkPeer({ ...common, role: "pull" });
   let sender;
   try {
@@ -185,6 +214,7 @@ async function runOmqTcpThroughput({ count, size, runId, timeoutMs }) {
     return throughputRecord({
       runId,
       impl: "omq-node",
+      mode,
       transport: "tcp",
       count: recv.count,
       size,
@@ -196,9 +226,9 @@ async function runOmqTcpThroughput({ count, size, runId, timeoutMs }) {
   }
 }
 
-async function runOmqTcpLatency({ count, size, runId, timeoutMs }) {
+async function runOmqTcpLatency({ mode, count, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const common = { impl: "omq-node", transport: "tcp", metric: "latency", endpoint, count, size };
+  const common = { impl: "omq-node", mode, transport: "tcp", metric: "latency", endpoint, count, size };
   const rep = forkPeer({ ...common, role: "rep" });
   let req;
   try {
@@ -211,6 +241,7 @@ async function runOmqTcpLatency({ count, size, runId, timeoutMs }) {
     return latencyRecord({
       runId,
       impl: "omq-node",
+      mode,
       transport: "tcp",
       count,
       size,
@@ -226,9 +257,9 @@ async function runOmqTcpLatency({ count, size, runId, timeoutMs }) {
   }
 }
 
-async function runZeromqTcpThroughput({ count, size, runId, timeoutMs }) {
+async function runZeromqTcpThroughput({ durationMs, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const common = { impl: "zeromq.js", transport: "tcp", metric: "throughput", endpoint, count, size };
+  const common = { impl: "zeromq.js", transport: "tcp", metric: "throughput", endpoint, durationMs, size };
   const receiver = forkPeer({ ...common, role: "pull" });
   let sender;
   try {
@@ -246,6 +277,7 @@ async function runZeromqTcpThroughput({ count, size, runId, timeoutMs }) {
     return throughputRecord({
       runId,
       impl: "zeromq.js",
+      mode: "async",
       transport: "tcp",
       count: recv.count,
       size,
@@ -272,6 +304,7 @@ async function runZeromqTcpLatency({ count, size, runId, timeoutMs }) {
     return latencyRecord({
       runId,
       impl: "zeromq.js",
+      mode: "async",
       transport: "tcp",
       count,
       size,
@@ -301,11 +334,12 @@ async function runWorker(config) {
   }
   const { Context, Pull } = require("../dist");
   const context = Context.fromShareKey(config.shareKey);
-    const pull = new Pull(benchOptions(config), context);
+  const pull = new Pull(benchOptions(config), context);
   try {
     await pull.bind(config.endpoint);
     parentPort.postMessage({ kind: "ready" });
-    const result = recvCountSync(pull, config.count);
+    await waitWorkerStart();
+    const result = config.mode === "async" ? await recvUntilStopAsync(pull) : recvUntilStopSync(pull);
     parentPort.postMessage({ kind: "done", count: result.count, elapsedSec: result.elapsedSec });
   } finally {
     pull.close();
@@ -326,19 +360,20 @@ async function runOmqProcessPeer(config) {
     await sendReady();
     await waitUntilStart(config);
     if (config.role === "pull") {
-      const result = recvCountSync(socket, config.count);
+      const result = config.mode === "async" ? await recvUntilStopAsync(socket) : recvUntilStopSync(socket);
       await sendIpc({ kind: "done", count: result.count, elapsedSec: result.elapsedSec });
       socket.close();
       process.exit(0);
       return;
     }
     const payload = Buffer.alloc(config.size, 7);
-    const start = process.hrtime.bigint();
-    for (let i = 0; i < config.count; i++) {
-      socket.sendSync(payload);
-      if (config.size >= SEND_YIELD_MIN_SIZE && (i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
-    }
-    await sendIpc({ kind: "done", count: config.count, elapsedSec: secondsSince(start) });
+    const result =
+      config.mode === "async"
+        ? await sendOmqForDurationAsync(socket, payload, config.durationMs)
+        : sendOmqForDurationSync(socket, payload, config.durationMs);
+    if (config.mode === "async") await socket.send(STOP_PAYLOAD);
+    else socket.sendSync(STOP_PAYLOAD);
+    await sendIpc({ kind: "done", count: result.count, elapsedSec: result.elapsedSec });
     await waitProcess("shutdown");
     socket.close();
     process.exit(0);
@@ -351,12 +386,14 @@ async function runOmqProcessPeer(config) {
     await sendReady();
     await waitUntilStart(config);
     while (true) {
-      const request = rep.recvSync();
+      const request = config.mode === "async" ? await rep.recv() : rep.recvSync();
       if (isStopMessage(request)) {
-        rep.sendSync("ok");
+        if (config.mode === "async") await rep.send("ok");
+        else rep.sendSync("ok");
         break;
       }
-      rep.sendSync(request);
+      if (config.mode === "async") await rep.send(request);
+      else rep.sendSync(request);
     }
     process.exit(0);
     return;
@@ -372,14 +409,24 @@ async function runOmqProcessPeer(config) {
   const rtts = [];
   for (let i = 0; i < config.count; i++) {
     const roundStart = process.hrtime.bigint();
-    req.sendSync(payload);
-    req.recvSync();
+    if (config.mode === "async") {
+      await req.send(payload);
+      await req.recv();
+    } else {
+      req.sendSync(payload);
+      req.recvSync();
+    }
     rtts.push(secondsSince(roundStart) * 1_000_000);
   }
   const elapsedSec = secondsSince(start);
   rtts.sort((a, b) => a - b);
-  req.sendSync(STOP_PAYLOAD);
-  req.recvSync();
+  if (config.mode === "async") {
+    await req.send(STOP_PAYLOAD);
+    await req.recv();
+  } else {
+    req.sendSync(STOP_PAYLOAD);
+    req.recvSync();
+  }
   await sendIpc({
     kind: "done",
     latencyUs: elapsedSec * 1_000_000 / config.count,
@@ -394,31 +441,40 @@ async function runOmqProcessPeer(config) {
 async function runZeromqProcessPeer(config) {
   const zmq = require("zeromq");
   if (config.role === "pull") {
-    const pull = new zmq.Pull({ receiveHighWaterMark: Math.max(1000, config.count) });
+    const pull = new zmq.Pull({ receiveHighWaterMark: throughputHighWaterMarkForSize(config.size) });
     await pull.bind(config.endpoint);
     await sendReady();
     await waitUntilStart(config);
     const start = process.hrtime.bigint();
-    for (let received = 0; received < config.count; received++) {
-      await pull.receive();
+    let count = 0;
+    while (true) {
+      const [message] = await pull.receive();
+      if (isStopMessage(message)) {
+        break;
+      }
+      count++;
     }
     const elapsedSec = secondsSince(start);
-    await sendIpc({ kind: "done", count: config.count, elapsedSec });
+    await sendIpc({ kind: "done", count, elapsedSec });
     pull.close();
     process.exit(0);
     return;
   }
   if (config.role === "push") {
-    const push = new zmq.Push({ sendHighWaterMark: Math.max(1000, config.count) });
+    const push = new zmq.Push({ sendHighWaterMark: throughputHighWaterMarkForSize(config.size) });
     push.connect(config.endpoint);
     await sendReady();
     await waitUntilStart(config);
     const payload = Buffer.alloc(config.size, 7);
     const start = process.hrtime.bigint();
-    for (let i = 0; i < config.count; i++) {
+    const deadline = start + BigInt(Math.round(config.durationMs * 1_000_000));
+    let count = 0;
+    do {
       await push.send(payload);
-    }
-    await sendIpc({ kind: "done", count: config.count, elapsedSec: secondsSince(start) });
+      count++;
+    } while (process.hrtime.bigint() < deadline);
+    await push.send(STOP_PAYLOAD);
+    await sendIpc({ kind: "done", count, elapsedSec: secondsSince(start) });
     await waitProcess("shutdown");
     push.close();
     process.exit(0);
@@ -471,7 +527,12 @@ async function runZeromqProcessPeer(config) {
 }
 
 function benchOptions(config) {
-  const hwmBase = Number.isFinite(config.count) ? config.count + 1 : 262_144;
+  const hwmBase =
+    config.metric === "throughput"
+      ? throughputHighWaterMarkForSize(config.size)
+      : Number.isFinite(config.count)
+        ? config.count + 1
+        : 262_144;
   return {
     sendHighWaterMark: Math.max(1000, Math.min(hwmBase, 262_144)),
     receiveHighWaterMark: Math.max(1000, Math.min(hwmBase, 262_144)),
@@ -480,13 +541,66 @@ function benchOptions(config) {
   };
 }
 
-function recvCountSync(socket, expected) {
+function recvUntilStopSync(socket) {
   const start = process.hrtime.bigint();
-  for (let received = 0; received < expected; received++) {
-    socket.recvSync();
+  let count = 0;
+  while (true) {
+    const message = socket.recvSync();
+    if (isStopMessage(message)) {
+      break;
+    }
+    count++;
   }
   const elapsedSec = secondsSince(start);
-  return { count: expected, elapsedSec };
+  return { count, elapsedSec };
+}
+
+async function recvUntilStopAsync(socket) {
+  const start = process.hrtime.bigint();
+  let count = 0;
+  while (true) {
+    const message = await socket.recv();
+    if (isStopMessage(message)) {
+      break;
+    }
+    count++;
+  }
+  const elapsedSec = secondsSince(start);
+  return { count, elapsedSec };
+}
+
+function sendOmqForDurationSync(socket, payload, durationMs) {
+  const start = process.hrtime.bigint();
+  const deadline = start + BigInt(Math.round(durationMs * 1_000_000));
+  const checkInterval = timeCheckIntervalForSize(payload.length);
+  let count = 0;
+  do {
+    for (let i = 0; i < checkInterval; i++) {
+      socket.sendSync(payload);
+      count++;
+    }
+  } while (process.hrtime.bigint() < deadline);
+  return { count, elapsedSec: secondsSince(start) };
+}
+
+async function sendOmqForDurationAsync(socket, payload, durationMs) {
+  const start = process.hrtime.bigint();
+  const deadline = start + BigInt(Math.round(durationMs * 1_000_000));
+  const checkInterval = timeCheckIntervalForSize(payload.length);
+  let count = 0;
+  do {
+    for (let i = 0; i < checkInterval; i++) {
+      await socket.send(payload);
+      count++;
+    }
+  } while (process.hrtime.bigint() < deadline);
+  return { count, elapsedSec: secondsSince(start) };
+}
+
+function timeCheckIntervalForSize(size) {
+  if (size >= 16 * 1024) return 16;
+  if (size >= 4 * 1024) return 64;
+  return 512;
 }
 
 function isStopMessage(message) {
@@ -550,6 +664,16 @@ function waitWorker(worker, kind) {
     worker.on("message", onMessage);
     worker.once("error", onError);
     worker.once("exit", onExit);
+  });
+}
+
+function waitWorkerStart() {
+  return new Promise((resolve) => {
+    parentPort.once("message", (message) => {
+      if (message.kind === "start") {
+        resolve();
+      }
+    });
   });
 }
 
@@ -684,11 +808,12 @@ function canLoadZeromq() {
   }
 }
 
-function throughputRecord({ runId, impl, transport, count, size, elapsedSec }) {
+function throughputRecord({ runId, impl, mode, transport, count, size, elapsedSec }) {
   return {
     runId,
     date: new Date().toISOString(),
     impl,
+    mode,
     metric: "throughput",
     transport,
     size,
@@ -698,11 +823,12 @@ function throughputRecord({ runId, impl, transport, count, size, elapsedSec }) {
   };
 }
 
-function latencyRecord({ runId, impl, transport, count, size, latencyUs, avgLatencyUs, p99Us, p999Us, maxUs }) {
+function latencyRecord({ runId, impl, mode, transport, count, size, latencyUs, avgLatencyUs, p99Us, p999Us, maxUs }) {
   return {
     runId,
     date: new Date().toISOString(),
     impl,
+    mode,
     metric: "latency",
     transport,
     size,
@@ -716,14 +842,15 @@ function latencyRecord({ runId, impl, transport, count, size, latencyUs, avgLate
 }
 
 function printRecord(record) {
+  const mode = record.mode === undefined ? "" : ` ${record.mode}`;
   if (record.metric === "throughput") {
     console.log(
-      `${record.impl} ${record.transport} throughput ${formatRate(record.msgPerSec)} msg/s ` +
+      `${record.impl}${mode} ${record.transport} throughput ${formatRate(record.msgPerSec)} msg/s ` +
         `(${record.count} x ${record.size}B)`,
     );
   } else {
     console.log(
-      `${record.impl} ${record.transport} req/rep latency ${record.latencyUs.toFixed(1)} us ` +
+      `${record.impl}${mode} ${record.transport} req/rep latency ${record.latencyUs.toFixed(1)} us ` +
         `p50 (${record.count} x ${record.size}B)`,
     );
   }
@@ -753,6 +880,38 @@ function positiveInt(raw, fallback) {
   const value = raw === undefined ? fallback : Number(raw);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function positiveNumber(raw, fallback) {
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return value;
+}
+
+function throughputDurationMsFromEnv() {
+  const rawMs = process.env.OMQ_NODE_BENCH_THROUGHPUT_DURATION_MS;
+  if (rawMs !== undefined) {
+    return Math.round(positiveNumber(rawMs, DEFAULT_THROUGHPUT_DURATION_MS));
+  }
+  const rawSecs =
+    process.env.OMQ_NODE_BENCH_THROUGHPUT_DURATION_SECS ??
+    process.env.OMQ_NODE_BENCH_DURATION_SECS;
+  const seconds = positiveNumber(rawSecs, DEFAULT_THROUGHPUT_DURATION_MS / 1000);
+  return Math.round(seconds * 1000);
+}
+
+function warmupDurationMsFromEnv() {
+  const rawMs = process.env.OMQ_NODE_BENCH_WARMUP_DURATION_MS;
+  if (rawMs !== undefined) {
+    return Math.round(positiveNumber(rawMs, DEFAULT_WARMUP_DURATION_MS));
+  }
+  const rawSecs = process.env.OMQ_NODE_BENCH_WARMUP_DURATION_SECS;
+  const seconds = positiveNumber(rawSecs, DEFAULT_WARMUP_DURATION_MS / 1000);
+  return Math.round(seconds * 1000);
+}
+
+function throughputHighWaterMarkForSize(size) {
+  return Math.max(1000, Math.min(262_144, Math.floor(THROUGHPUT_HWM_BYTES / Math.max(size, 1))));
 }
 
 function parseImpls(raw) {
@@ -800,11 +959,6 @@ function parseSizes(raw) {
     throw new Error("at least one benchmark size required");
   }
   return sizes;
-}
-
-function throughputCountForSize(baseCount, size) {
-  const byteBudget = 32 * 1024 * 1024;
-  return Math.min(baseCount, 250_000, Math.max(1000, Math.floor(byteBudget / size)));
 }
 
 function latencyCountForSize(baseCount, size) {

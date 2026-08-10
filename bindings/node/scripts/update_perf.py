@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate omq-node sync API vs zeromq.js benchmark charts.
+"""Generate omq-node sync/async API vs zeromq.js benchmark charts.
 
 Chart style is intentionally kept in sync with bindings/pyomq/scripts/update_perf.py.
 The benchmark runner appends rows to ~/.cache/omq.node/bindings.jsonl, then this
@@ -19,7 +19,8 @@ _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "omq.node")
 JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
 # Colors: warm = omq-node, cool = zeromq.js
-C_OMQ = "#dc2626"
+C_OMQ_SYNC = "#dc2626"
+C_OMQ_ASYNC = "#f97316"
 C_ZMQ = "#2563eb"
 
 
@@ -56,14 +57,22 @@ def _p50_us(row):
     return row.get("p50_us") or row.get("p50Us") or row.get("latencyUs") or 0.0
 
 
+def _mode(row):
+    mode = row.get("mode")
+    if mode:
+        return mode
+    return "async" if row.get("impl") == "zeromq.js" else "sync"
+
+
 def _latest_by_key(rows):
     latest = {}
     for row in rows:
         impl = row.get("impl", "")
+        mode = _mode(row)
         kind = _kind(row)
         transport = row.get("transport", "")
         size = _msg_size(row)
-        key = (impl, kind, transport, size)
+        key = (impl, mode, kind, transport, size)
         prev = latest.get(key)
         if prev is None or _run_id(row) >= _run_id(prev):
             latest[key] = row
@@ -74,14 +83,15 @@ def _latest_complete_rows(rows):
     by_run = {}
     for row in rows:
         impl = row.get("impl", "")
+        mode = _mode(row)
         run_id = _run_id(row)
         if not impl or not run_id:
             continue
         key = (_kind(row), row.get("transport", ""), _msg_size(row))
-        by_run.setdefault((impl, run_id), {})[key] = row
+        by_run.setdefault((impl, mode, run_id), {})[key] = row
 
     latest = {}
-    for impl in ["omq-node", "zeromq.js"]:
+    for impl, mode in [("omq-node", "sync"), ("omq-node", "async"), ("zeromq.js", "async")]:
         required = set()
         for size in SIZES:
             required.add(("throughput", "tcp", size))
@@ -89,15 +99,15 @@ def _latest_complete_rows(rows):
 
         complete = [
             (run_id, run_rows)
-            for (run_impl, run_id), run_rows in by_run.items()
-            if run_impl == impl and required.issubset(run_rows)
+            for (run_impl, run_mode, run_id), run_rows in by_run.items()
+            if run_impl == impl and run_mode == mode and required.issubset(run_rows)
         ]
         if not complete:
             continue
 
         _, run_rows = max(complete, key=lambda item: item[0])
         for kind, transport, size in required:
-            latest[(impl, kind, transport, size)] = run_rows[(kind, transport, size)]
+            latest[(impl, mode, kind, transport, size)] = run_rows[(kind, transport, size)]
     return latest
 
 
@@ -111,19 +121,21 @@ def _latest_rows(rows):
 def chart_data_from_jsonl():
     latest = _latest_rows(load_jsonl())
 
-    def get_tp(impl, transport, size):
-        row = latest.get((impl, "throughput", transport, size))
+    def get_tp(impl, mode, transport, size):
+        row = latest.get((impl, mode, "throughput", transport, size))
         return _msgs_s(row) if row else 0.0
 
-    def get_lat(impl, size):
-        row = latest.get((impl, "latency", "tcp", size))
+    def get_lat(impl, mode, size):
+        row = latest.get((impl, mode, "latency", "tcp", size))
         return _p50_us(row) if row else 0.0
 
     return {
-        "omq_tp": [get_tp("omq-node", "tcp", size) for size in SIZES],
-        "zmq_tp": [get_tp("zeromq.js", "tcp", size) for size in SIZES],
-        "omq_lat": [get_lat("omq-node", size) for size in SIZES],
-        "zmq_lat": [get_lat("zeromq.js", size) for size in SIZES],
+        "omq_sync_tp": [get_tp("omq-node", "sync", "tcp", size) for size in SIZES],
+        "omq_async_tp": [get_tp("omq-node", "async", "tcp", size) for size in SIZES],
+        "zmq_async_tp": [get_tp("zeromq.js", "async", "tcp", size) for size in SIZES],
+        "omq_sync_lat": [get_lat("omq-node", "sync", size) for size in SIZES],
+        "omq_async_lat": [get_lat("omq-node", "async", size) for size in SIZES],
+        "zmq_async_lat": [get_lat("zeromq.js", "async", size) for size in SIZES],
     }
 
 
@@ -233,10 +245,11 @@ def gen_combined_chart(data, path):
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
     mid_x = (x_left + x_right) / 2
 
-    omq_tp = data["omq_tp"]
-    zmq_tp = data["zmq_tp"]
+    omq_sync_tp = data["omq_sync_tp"]
+    omq_async_tp = data["omq_async_tp"]
+    zmq_async_tp = data["zmq_async_tp"]
 
-    msg_max = 5_000_000
+    msg_max = 2_000_000
     mbps_max = 5_000
 
     def y_msg(v):
@@ -317,8 +330,9 @@ def gen_combined_chart(data, path):
     )
 
     tp_series = [
-        ("omq-node sync API", C_OMQ, omq_tp),
-        ("zeromq.js", C_ZMQ, zmq_tp),
+        ("omq-node sync API", C_OMQ_SYNC, omq_sync_tp),
+        ("omq-node async API", C_OMQ_ASYNC, omq_async_tp),
+        ("zeromq.js async API", C_ZMQ, zmq_async_tp),
     ]
 
     for _, color, vals in tp_series:
@@ -384,8 +398,9 @@ def gen_combined_chart(data, path):
     )
 
     lat_series = [
-        ("omq-node sync API", C_OMQ, data["omq_lat"]),
-        ("zeromq.js", C_ZMQ, data["zmq_lat"]),
+        ("omq-node sync API", C_OMQ_SYNC, data["omq_sync_lat"]),
+        ("omq-node async API", C_OMQ_ASYNC, data["omq_async_lat"]),
+        ("zeromq.js async API", C_ZMQ, data["zmq_async_lat"]),
     ]
 
     for _, color, vals in lat_series:
@@ -407,10 +422,11 @@ def gen_combined_chart(data, path):
 
     leg_y = t2_bot + 40
     legend_items = [
-        ("omq-node sync API", C_OMQ),
-        ("zeromq.js", C_ZMQ),
+        ("omq-node sync API", C_OMQ_SYNC),
+        ("omq-node async API", C_OMQ_ASYNC),
+        ("zeromq.js async API", C_ZMQ),
     ]
-    item_w = 155
+    item_w = 180
     total_w = len(legend_items) * item_w
     start_x = mid_x - total_w / 2
 

@@ -42,6 +42,12 @@ Produces `libomq_zmq.so` / `libomq_zmq.a` / `libomq_zmq.dylib`.
 cargo build -p omq-libzmq --release
 ```
 
+Runnable C ZGuide suites live in [examples/zguide/](examples/zguide/):
+
+```sh
+omq-libzmq/examples/zguide/run_all.sh
+```
+
 ## License
 
 ISC

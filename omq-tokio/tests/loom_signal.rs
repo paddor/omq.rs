@@ -313,6 +313,50 @@ impl ModelBlockingRecvWaker {
     }
 }
 
+#[derive(Debug)]
+struct ModelBlockingRecvCancel {
+    canceled: AtomicBool,
+    registered: AtomicBool,
+    thread_present: Mutex<bool>,
+    unparked: AtomicBool,
+}
+
+impl ModelBlockingRecvCancel {
+    fn new() -> Self {
+        Self {
+            canceled: AtomicBool::new(false),
+            registered: AtomicBool::new(false),
+            thread_present: Mutex::new(false),
+            unparked: AtomicBool::new(false),
+        }
+    }
+
+    fn register_current_thread_once(&self) {
+        if self
+            .registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        *self.thread_present.lock().unwrap() = true;
+        if self.canceled.load(Ordering::Acquire) {
+            self.unparked.store(true, Ordering::Release);
+        }
+    }
+
+    fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        if *self.thread_present.lock().unwrap() {
+            self.unparked.store(true, Ordering::Release);
+        }
+    }
+
+    fn was_unparked(&self) -> bool {
+        self.unparked.load(Ordering::Acquire)
+    }
+}
+
 #[test]
 fn state_signal_catches_change_between_check_and_wait_registration() {
     loom::model(|| {
@@ -350,6 +394,33 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
         assert!(
             observed.load(Ordering::SeqCst) || signal.has_woken_waiter(),
             "generation change must be observed or wake a registered waiter"
+        );
+    });
+}
+
+#[test]
+fn blocking_recv_cancel_registration_cannot_lose_cancel_wake() {
+    loom::model(|| {
+        let cancel = Arc::new(ModelBlockingRecvCancel::new());
+
+        let register_cancel = cancel.clone();
+        let register = thread::spawn(move || {
+            thread::yield_now();
+            register_cancel.register_current_thread_once();
+        });
+
+        let fire_cancel = cancel.clone();
+        let fire = thread::spawn(move || {
+            thread::yield_now();
+            fire_cancel.cancel();
+        });
+
+        register.join().unwrap();
+        fire.join().unwrap();
+
+        assert!(
+            cancel.was_unparked(),
+            "cancel racing with thread registration must leave an unpark token"
         );
     });
 }

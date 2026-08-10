@@ -97,6 +97,30 @@ func (r *recvRing) recvIntoBlocking(dst []byte) (int, error) {
 	return r.recvInto(dst, -1)
 }
 
+func (r *recvRing) recvIntoCancelable(dst []byte, cancel *nativeCancel) (int, error) {
+	if r == nil || r.handle == nil {
+		return 0, ErrClosed
+	}
+	r.releaseActiveView()
+	if err := r.fillIfEmptyCancelable(cancel); err != nil {
+		return 0, err
+	}
+	desc := r.current()
+	defer r.advance()
+	if desc.partCount != 1 {
+		return 0, &ConfigError{Err: "RecvInto requires a single-part message"}
+	}
+	if desc.flags&recvRingFlagExternal != 0 {
+		return 0, &ConfigError{Err: "RecvInto payload exceeds receive ring capacity"}
+	}
+	if desc.payloadLen > uint64(len(dst)) {
+		return 0, &MessageTooLargeError{Err: "destination buffer too small"}
+	}
+	body := r.source(desc)
+	copy(dst, body)
+	return len(body), nil
+}
+
 func (r *recvRing) recvInto(dst []byte, timeoutMillis int64) (int, error) {
 	if r == nil || r.handle == nil {
 		return 0, ErrClosed
@@ -140,6 +164,21 @@ func (r *recvRing) fillIfEmpty(timeoutMillis int64) error {
 	}
 	r.releaseConsumed()
 	if err := recvRingFillNative(r.handle, timeoutMillis, recvRingFillBatch); err != nil {
+		return err
+	}
+	r.cachedTail = r.tailAcquire()
+	if !r.hasCached() {
+		return ErrAgain
+	}
+	return nil
+}
+
+func (r *recvRing) fillIfEmptyCancelable(cancel *nativeCancel) error {
+	if r.hasCached() {
+		return nil
+	}
+	r.releaseConsumed()
+	if err := recvRingFillCancelableNative(r.handle, cancel, recvRingFillBatch); err != nil {
 		return err
 	}
 	r.cachedTail = r.tailAcquire()

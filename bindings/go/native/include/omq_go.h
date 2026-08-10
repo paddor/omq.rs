@@ -13,6 +13,7 @@ typedef struct OmqGoSocket OmqGoSocket;
 typedef struct OmqGoMonitor OmqGoMonitor;
 typedef struct OmqGoSendRing OmqGoSendRing;
 typedef struct OmqGoRecvRing OmqGoRecvRing;
+typedef struct OmqGoCancel OmqGoCancel;
 
 typedef struct {
   int32_t code;
@@ -187,7 +188,13 @@ void omq_go_send_ring_close(OmqGoSendRing *ring);
 OmqGoStatus omq_go_recv_ring_create(OmqGoSocket *socket, size_t desc_capacity, size_t payload_capacity, OmqGoRecvRing **out);
 OmqGoStatus omq_go_recv_ring_memory(OmqGoRecvRing *ring, OmqGoRecvRingMemory *out);
 OmqGoStatus omq_go_recv_ring_fill(OmqGoRecvRing *ring, int64_t timeout_millis, size_t max_messages);
+OmqGoStatus omq_go_recv_ring_fill_cancelable(OmqGoRecvRing *ring, const OmqGoCancel *cancel, size_t max_messages);
 void omq_go_recv_ring_close(OmqGoRecvRing *ring);
+
+OmqGoCancel *omq_go_cancel_new(void);
+void omq_go_cancel(const OmqGoCancel *cancel);
+void omq_go_cancel_register_current(const OmqGoCancel *cancel);
+void omq_go_cancel_free(OmqGoCancel *cancel);
 
 void omq_go_message_free(OmqGoMessage message);
 void omq_go_event_free(OmqGoEvent event);

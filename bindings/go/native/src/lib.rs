@@ -20,7 +20,7 @@ use omq_proto::TrySendError;
 use omq_tokio::Authenticator;
 #[cfg(any(feature = "plain", feature = "curve"))]
 use omq_tokio::MechanismPeerInfo;
-use omq_tokio::blocking::Socket as BlockingSocket;
+use omq_tokio::blocking::{BlockingRecvCancel, Socket as BlockingSocket};
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
     Context, ContextConfig, DisconnectReason, Endpoint, Error, MechanismSetup, Message,
@@ -37,6 +37,7 @@ const OK: i32 = 0;
 const AGAIN: i32 = 1;
 const CLOSED: i32 = 2;
 const TIMEOUT: i32 = 3;
+const CANCELED: i32 = 4;
 const INVALID_ENDPOINT: i32 = 5;
 const UNSUPPORTED_SCHEME: i32 = 6;
 const PROTOCOL: i32 = 7;
@@ -254,6 +255,10 @@ pub struct OmqGoRecvRing {
     pending: VecDeque<Message>,
     scratch: Vec<Message>,
     external: VecDeque<RecvExternalBlock>,
+}
+
+pub struct OmqGoCancel {
+    inner: BlockingRecvCancel,
 }
 
 const RECV_RING_FLAG_MULTIPART: u64 = 1;
@@ -612,6 +617,74 @@ impl OmqGoRecvRing {
             return Err(Error::WouldBlock);
         }
         Ok(filled)
+    }
+
+    fn fill_cancelable(
+        &mut self,
+        cancel: &BlockingRecvCancel,
+        max_messages: usize,
+    ) -> Result<Option<usize>, Error> {
+        if max_messages == 0 {
+            return Err(Error::Config(
+                "max messages must be greater than zero".to_string(),
+            ));
+        }
+        self.reclaim_consumed();
+        let start_cursor = self.cursor;
+
+        while self.cursor.wrapping_sub(start_cursor) < max_messages {
+            if let Some(message) = self.pending.pop_front() {
+                if self.publish(&message) {
+                    continue;
+                }
+                self.pending.push_front(message);
+                break;
+            }
+
+            if self.desc_is_full() {
+                break;
+            }
+
+            let remaining = max_messages - self.cursor.wrapping_sub(start_cursor);
+            let desc_space = self.desc.len() - self.cursor.wrapping_sub(self.cached_head);
+            let batch_max = remaining.min(desc_space).min(RING_BATCH);
+            self.scratch.clear();
+            let Some(_) = self.socket.recv_many_registered_cancelable_into(
+                batch_max,
+                cancel,
+                &mut self.scratch,
+            )?
+            else {
+                return Ok(None);
+            };
+
+            let mut blocked = false;
+            let mut batch = Vec::new();
+            std::mem::swap(&mut batch, &mut self.scratch);
+            let mut drained = batch.drain(..);
+            while let Some(message) = drained.next() {
+                if self.publish(&message) {
+                    continue;
+                }
+                self.pending.push_back(message);
+                self.pending.extend(&mut drained);
+                blocked = true;
+                break;
+            }
+            drop(drained);
+            batch.clear();
+            std::mem::swap(&mut batch, &mut self.scratch);
+            if blocked {
+                break;
+            }
+            break;
+        }
+
+        let filled = self.flush(start_cursor);
+        if filled == 0 {
+            return Err(Error::WouldBlock);
+        }
+        Ok(Some(filled))
     }
 }
 
@@ -3046,12 +3119,70 @@ pub extern "C" fn omq_go_recv_ring_fill(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_recv_ring_fill_cancelable(
+    ring: *mut OmqGoRecvRing,
+    cancel: *const OmqGoCancel,
+    max_messages: usize,
+) -> OmqGoStatus {
+    if ring.is_null() {
+        return OmqGoStatus::err(CLOSED, "receive ring closed");
+    }
+    if cancel.is_null() {
+        return OmqGoStatus::err(CONFIG, "receive cancel handle is null");
+    }
+    let ring = unsafe { &mut *ring };
+    let cancel = unsafe { &*cancel };
+    match ring.fill_cancelable(&cancel.inner, max_messages) {
+        Ok(Some(_)) => OmqGoStatus::ok(),
+        Ok(None) => OmqGoStatus::err(CANCELED, "operation canceled"),
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_recv_ring_close(ring: *mut OmqGoRecvRing) {
     if ring.is_null() {
         return;
     }
     unsafe {
         drop(Box::from_raw(ring));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_cancel_new() -> *mut OmqGoCancel {
+    Box::into_raw(Box::new(OmqGoCancel {
+        inner: BlockingRecvCancel::new(),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_cancel(cancel: *const OmqGoCancel) {
+    if cancel.is_null() {
+        return;
+    }
+    unsafe {
+        (*cancel).inner.cancel();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_cancel_register_current(cancel: *const OmqGoCancel) {
+    if cancel.is_null() {
+        return;
+    }
+    unsafe {
+        (*cancel).inner.register_current_thread_once();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_cancel_free(cancel: *mut OmqGoCancel) {
+    if cancel.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(cancel));
     }
 }
 

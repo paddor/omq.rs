@@ -22,6 +22,7 @@ type nativeSocket = C.OmqGoSocket
 type nativeMonitor = C.OmqGoMonitor
 type nativeSendRing = C.OmqGoSendRing
 type nativeRecvRing = C.OmqGoRecvRing
+type nativeCancel = C.OmqGoCancel
 
 type sendRingMemory struct {
 	control         unsafe.Pointer
@@ -407,8 +408,32 @@ func recvRingFillNative(ring *nativeRecvRing, timeoutMillis int64, maxMessages i
 	))
 }
 
+func recvRingFillCancelableNative(ring *nativeRecvRing, cancel *nativeCancel, maxMessages int) error {
+	return statusErr(C.omq_go_recv_ring_fill_cancelable(
+		(*C.OmqGoRecvRing)(ring),
+		(*C.OmqGoCancel)(cancel),
+		C.size_t(maxMessages),
+	))
+}
+
 func recvRingCloseNative(ring *nativeRecvRing) {
 	C.omq_go_recv_ring_close((*C.OmqGoRecvRing)(ring))
+}
+
+func cancelNewNative() *nativeCancel {
+	return (*nativeCancel)(C.omq_go_cancel_new())
+}
+
+func cancelNative(cancel *nativeCancel) {
+	C.omq_go_cancel((*C.OmqGoCancel)(cancel))
+}
+
+func cancelRegisterCurrentNative(cancel *nativeCancel) {
+	C.omq_go_cancel_register_current((*C.OmqGoCancel)(cancel))
+}
+
+func cancelFreeNative(cancel *nativeCancel) {
+	C.omq_go_cancel_free((*C.OmqGoCancel)(cancel))
 }
 
 func socketSubscribeNative(socket *nativeSocket, data []byte) error {

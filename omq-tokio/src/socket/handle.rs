@@ -18,7 +18,7 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
-use super::recv::{SpscAwareRecv, SpscHandles, SpscPush};
+use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles, SpscPush};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocRegistry;
 
@@ -593,6 +593,124 @@ impl Socket {
         }
     }
 
+    pub(crate) fn blocking_recv_cancelable(
+        &self,
+        cancel: &BlockingRecvCancel,
+    ) -> Result<Option<Message>> {
+        match self.inner.socket_type {
+            SocketType::Req => loop {
+                let Some(mut msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
+                    return Ok(None);
+                };
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                return Ok(Some(msg));
+            },
+            SocketType::Rep => loop {
+                let Some(msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
+                    return Ok(None);
+                };
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(Some(msg));
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(Some(body));
+                }
+            },
+            _ => self.inner.recv_rx.blocking_recv_cancelable(cancel),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn blocking_recv_registered_cancelable(
+        &self,
+        cancel: &BlockingRecvCancel,
+    ) -> Result<Option<Message>> {
+        match self.inner.socket_type {
+            SocketType::Req => loop {
+                let Some(mut msg) = self
+                    .inner
+                    .recv_rx
+                    .blocking_recv_registered_cancelable(cancel)?
+                else {
+                    return Ok(None);
+                };
+                match msg.pop_front() {
+                    Some(delim) if delim.is_empty() => {}
+                    _ => continue,
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                return Ok(Some(msg));
+            },
+            SocketType::Rep => loop {
+                let Some(msg) = self
+                    .inner
+                    .recv_rx
+                    .blocking_recv_registered_cancelable(cancel)?
+                else {
+                    return Ok(None);
+                };
+                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(Some(msg));
+                }
+                let body = self
+                    .inner
+                    .type_state
+                    .lock()
+                    .expect("type_state")
+                    .post_recv(SocketType::Rep, msg)?;
+                if let Some(body) = body {
+                    let current = self
+                        .inner
+                        .rep_pending
+                        .lock()
+                        .expect("rep pending")
+                        .pop_front();
+                    *self.inner.rep_current.lock().expect("rep current") = current;
+                    return Ok(Some(body));
+                }
+            },
+            _ => self
+                .inner
+                .recv_rx
+                .blocking_recv_registered_cancelable(cancel),
+        }
+    }
+
     /// Blocking receive with a timeout for sync callers.
     pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
         let now = std::time::Instant::now();
@@ -661,6 +779,43 @@ impl Socket {
         let start_len = out.len();
         out.push(self.blocking_recv()?);
         self.try_recv_many_after_first(max, start_len, out)
+    }
+
+    pub(crate) fn blocking_recv_many_cancelable_into(
+        &self,
+        max: usize,
+        cancel: &BlockingRecvCancel,
+        out: &mut Vec<Message>,
+    ) -> Result<Option<usize>> {
+        if max == 0 {
+            return Ok(Some(0));
+        }
+        let start_len = out.len();
+        let Some(message) = self.blocking_recv_cancelable(cancel)? else {
+            return Ok(None);
+        };
+        out.push(message);
+        self.try_recv_many_after_first(max, start_len, out)
+            .map(Some)
+    }
+
+    #[inline]
+    pub(crate) fn blocking_recv_many_registered_cancelable_into(
+        &self,
+        max: usize,
+        cancel: &BlockingRecvCancel,
+        out: &mut Vec<Message>,
+    ) -> Result<Option<usize>> {
+        if max == 0 {
+            return Ok(Some(0));
+        }
+        let start_len = out.len();
+        let Some(message) = self.blocking_recv_registered_cancelable(cancel)? else {
+            return Ok(None);
+        };
+        out.push(message);
+        self.try_recv_many_after_first(max, start_len, out)
+            .map(Some)
     }
 
     pub(crate) fn blocking_recv_many_timeout(

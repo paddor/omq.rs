@@ -79,8 +79,6 @@ type socketResult struct {
 	err     error
 }
 
-const boundSocketBlockingPollMillis int64 = 1
-
 func newSocket(
 	handle *nativeSocket,
 	socketType SocketType,
@@ -162,14 +160,29 @@ func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		cancel := cancelNewNative()
+		if cancel == nil {
+			return socketResult{err: &Error{Err: "run cancellation allocation failed"}}
+		}
+		cancelRegisterCurrentNative(cancel)
+		cancelDone := make(chan struct{})
+		stopCancel := context.AfterFunc(ctx, func() {
+			cancelNative(cancel)
+			close(cancelDone)
+		})
 		bound := &BoundSocket{
 			handle:     handle,
 			socketType: op.socketType,
 			ringSize:   op.ringSize,
 			ctx:        ctx,
+			cancel:     cancel,
 		}
 		err := op.run(bound)
+		if !stopCancel() {
+			<-cancelDone
+		}
 		closeErr := bound.close()
+		cancelFreeNative(cancel)
 		if err != nil {
 			return socketResult{err: err}
 		}
@@ -699,6 +712,7 @@ type BoundSocket struct {
 	socketType SocketType
 	ringSize   int
 	ctx        context.Context
+	cancel     *nativeCancel
 	sendRing   *sendRing
 	recvRing   *recvRing
 }
@@ -805,11 +819,16 @@ func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 		if err := errFromContext(ctx); err != nil {
 			return 0, err
 		}
-		n, err := ring.recvInto(dst, boundSocketBlockingPollMillis)
+		n, err := ring.recvIntoCancelable(dst, s.cancel)
 		if err == nil {
 			return n, nil
 		}
-		if !errors.Is(err, ErrAgain) && !errors.Is(err, ErrTimeout) {
+		if errors.Is(err, ErrCanceled) {
+			if ctxErr := errFromContext(ctx); ctxErr != nil {
+				return 0, ctxErr
+			}
+		}
+		if !errors.Is(err, ErrAgain) {
 			return 0, err
 		}
 	}

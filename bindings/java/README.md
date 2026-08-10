@@ -42,13 +42,14 @@ Maven Central coordinates. Use the latest version listed on Maven Central:
 </dependency>
 ```
 
-Synchronous receives use Java 25 FFM and require native access:
+OMQ.java loads native code and uses Java 25 FFM, so applications must enable
+native access:
 
 ```sh
 --enable-native-access=ALL-UNNAMED
 ```
 
-If the jar is used on the module path, enable only the automatic module:
+If the jar is used on the module path, enable only the named module:
 
 ```sh
 --enable-native-access=io.omq

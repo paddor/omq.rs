@@ -104,6 +104,10 @@ name = "omq_libzmq_multipart"
 path = "tests/multipart.rs"
 
 [[test]]
+name = "omq_libzmq_msg_ownership"
+path = "tests/msg_ownership.rs"
+
+[[test]]
 name = "omq_libzmq_opts"
 path = "tests/opts.rs"
 

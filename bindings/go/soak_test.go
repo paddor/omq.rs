@@ -832,6 +832,24 @@ func TestResourceTailGrowthIgnoresPlateau(t *testing.T) {
 	}
 }
 
+func TestResourceRSSResidualIgnoresReleasedHighWater(t *testing.T) {
+	baseline := uint64(124 * 1_048_576)
+	tailMax := uint64(259 * 1_048_576)
+	final := uint64(124 * 1_048_576)
+	if rssResidualLeak(baseline, tailMax, final, 25, 128*1_048_576) {
+		t.Fatal("rssResidualLeak reported released high-water as a leak")
+	}
+}
+
+func TestResourceRSSResidualDetectsRetainedTail(t *testing.T) {
+	baseline := uint64(124 * 1_048_576)
+	tailMax := uint64(259 * 1_048_576)
+	final := uint64(258 * 1_048_576)
+	if !rssResidualLeak(baseline, tailMax, final, 25, 128*1_048_576) {
+		t.Fatal("rssResidualLeak missed retained RSS growth")
+	}
+}
+
 func soakSendOptions() []SocketOption {
 	return []SocketOption{
 		Linger(0),
@@ -1101,7 +1119,7 @@ func (r *soakResourceTracker) assertFinal(t *testing.T, elapsed time.Duration) {
 	r.logSlope(t, "FD", r.fds, 1, "FDs")
 	r.logRSSPeak(t)
 	r.assertHeapResidual(t, current)
-	r.assertRSSTailStable(t)
+	r.assertRSSResidualStable(t, current)
 	if current.fdCount > r.baseline.fdCount+r.limits.finalFDGrowth {
 		t.Fatalf(
 			"final FD growth exceeded limit: baseline=%d current=%d limit=%d",
@@ -1177,28 +1195,38 @@ func (r *soakResourceTracker) assertHeapResidual(t *testing.T, current soakResou
 	}
 }
 
-func (r *soakResourceTracker) assertRSSTailStable(t *testing.T) {
+func (r *soakResourceTracker) assertRSSResidualStable(t *testing.T, current soakResources) {
 	t.Helper()
 	baseline, tailMax, ok := tailGrowthWindow(r.rss)
 	if !ok || baseline == 0 {
 		return
 	}
-	growth := saturatingSub(tailMax, baseline)
-	growthPercent := float64(growth) / float64(baseline) * 100
+	tailGrowth := saturatingSub(tailMax, baseline)
+	tailGrowthPercent := percentGrowth(tailGrowth, baseline)
+	finalGrowth := saturatingSub(current.rssBytes, baseline)
+	finalGrowthPercent := percentGrowth(finalGrowth, baseline)
 	t.Logf(
-		"[go-soak] RSS tail baseline %.1f MiB tail max %.1f MiB growth %.1f%%",
+		"[go-soak] RSS tail baseline %.1f MiB tail max %.1f MiB growth %.1f%% final growth %.1f%%",
 		float64(baseline)/1_048_576,
 		float64(tailMax)/1_048_576,
-		growthPercent,
+		tailGrowthPercent,
+		finalGrowthPercent,
 	)
-	if growth < r.limits.rssTailGrowthMinBytes ||
-		growthPercent <= r.limits.rssTailGrowthPercent {
+	if !rssResidualLeak(
+		baseline,
+		tailMax,
+		current.rssBytes,
+		r.limits.rssTailGrowthPercent,
+		r.limits.rssTailGrowthMinBytes,
+	) {
 		return
 	}
 	t.Fatalf(
-		"RSS leak detected: tail grew %.1f%% / %.1f MiB from post-warmup baseline",
-		growthPercent,
-		float64(growth)/1_048_576,
+		"RSS leak detected: tail grew %.1f%% / %.1f MiB and final RSS retained %.1f%% / %.1f MiB from post-warmup baseline",
+		tailGrowthPercent,
+		float64(tailGrowth)/1_048_576,
+		finalGrowthPercent,
+		float64(finalGrowth)/1_048_576,
 	)
 }
 
@@ -1372,6 +1400,32 @@ func tailGrowthWindow(samples []soakResourceSample) (uint64, uint64, bool) {
 	tailStart := len(postWarmup) * 4 / 5
 	_, tailMax := sampleRange(postWarmup[tailStart:])
 	return baseline, tailMax, true
+}
+
+func rssResidualLeak(
+	baseline uint64,
+	tailMax uint64,
+	final uint64,
+	percentLimit float64,
+	minGrowthBytes uint64,
+) bool {
+	if baseline == 0 {
+		return false
+	}
+	tailGrowth := saturatingSub(tailMax, baseline)
+	finalGrowth := saturatingSub(final, baseline)
+	if tailGrowth < minGrowthBytes || finalGrowth < minGrowthBytes {
+		return false
+	}
+	return percentGrowth(tailGrowth, baseline) > percentLimit &&
+		percentGrowth(finalGrowth, baseline) > percentLimit
+}
+
+func percentGrowth(growth uint64, baseline uint64) float64 {
+	if baseline == 0 {
+		return 0
+	}
+	return float64(growth) / float64(baseline) * 100
 }
 
 func saturatingSub(value uint64, other uint64) uint64 {

@@ -105,6 +105,17 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
     ready
 }
 
+fn any_socket_terminated(items: &[ZmqPollItem]) -> bool {
+    items.iter().any(|item| {
+        if item.socket.is_null() {
+            return false;
+        }
+        // SAFETY: socket is non-null (checked above); caller guarantees a valid socket.
+        let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
+        sock.ctx.is_effectively_terminated()
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poll(
     items: *mut ZmqPollItem,
@@ -124,6 +135,10 @@ pub extern "C" fn zmq_poll(
         // SAFETY: items is non-null (checked above) with nitems elements.
         unsafe { std::slice::from_raw_parts_mut(items, n) }
     };
+
+    if any_socket_terminated(items_slice) {
+        return crate::error::fail(crate::error::ETERM);
+    }
 
     let ready = check_immediate(items_slice);
     if ready > 0 || timeout_ms == 0 {

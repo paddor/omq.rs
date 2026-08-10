@@ -21,11 +21,12 @@ small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
 ## Performance
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/java/doc/charts/pushpull_tcp.svg" alt="OMQ.java vs JeroMQ PUSH/PULL TCP performance" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/java/doc/charts/pushpull_tcp.svg" alt="OMQ.java vs JeroMQ TCP throughput and latency" width="850">
 </p>
 
-2-process loopback PUSH/PULL throughput vs JeroMQ over TCP. Results are
-median local runs from `scripts/bench_pushpull_tcp.py`.
+2-process loopback PUSH/PULL throughput and REQ/REP p50 latency vs JeroMQ
+over TCP. Both panels warm the JVM before timed samples. Results are median
+local runs from `scripts/bench_pushpull_tcp.py`.
 
 ## Build, install, test
 

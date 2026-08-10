@@ -8,22 +8,30 @@ export declare class NativeContext {
 }
 
 export declare class NativeSocket {
-  bind(endpoint: string): Promise<string>
-  connect(endpoint: string): Promise<void>
-  unbind(endpoint: string): Promise<void>
-  disconnect(endpoint: string): Promise<void>
-  send(parts: Array<Uint8Array>): Promise<void>
+  bind(endpoint: string): string
+  connect(endpoint: string): void
+  unbind(endpoint: string): void
+  disconnect(endpoint: string): void
+  send(parts: Array<Uint8Array>): void
   sendSync(parts: Array<Uint8Array>): void
-  recv(): Promise<Array<Buffer>>
-  recvSync(): Array<Buffer>
-  recvTimeout(timeoutMs: number): Promise<Array<Buffer> | null>
-  tryRecv(): Array<Buffer> | null
+  sendOneSync(payload: Uint8Array): void
+  sendBufferSync(payload: Buffer): void
+  recv(): Array<Uint8Array>
+  recvSync(): Array<Uint8Array>
+  recvRawSync(): Uint8Array | Array<Uint8Array>
+  recvTimeout(timeoutMs: number): Array<Uint8Array> | null
+  tryRecv(): Array<Uint8Array> | null
+  tryRecvRaw(): Uint8Array | Array<Uint8Array> | null
+  recvRawManySync(max: number): Array<Uint8Array | Array<Uint8Array>>
+  recvPackedManySync(max: number): NativePackedMessages
+  tryRecvRawManySync(max: number): Array<Uint8Array | Array<Uint8Array>>
+  tryRecvPackedManySync(max: number): NativePackedMessages
   waitConnectedSync(minPeers: number, timeoutMs: number): number
-  recvManySync(max: number, timeoutMs?: number | undefined | null): Array<Array<Buffer>>
-  subscribe(prefix: Uint8Array): Promise<void>
-  unsubscribe(prefix: Uint8Array): Promise<void>
-  join(group: Uint8Array): Promise<void>
-  leave(group: Uint8Array): Promise<void>
+  recvManySync(max: number, timeoutMs?: number | undefined | null): Array<Array<Uint8Array>>
+  subscribe(prefix: Uint8Array): void
+  unsubscribe(prefix: Uint8Array): void
+  join(group: Uint8Array): void
+  leave(group: Uint8Array): void
   close(): void
 }
 
@@ -47,6 +55,13 @@ export interface NativeCurveOptions {
   publicKey: string
   secretKey: string
   server?: boolean
+}
+
+export interface NativePackedMessages {
+  data: Uint8Array
+  partOffsets: Uint32Array
+  partLengths: Uint32Array
+  messageParts: Uint32Array
 }
 
 export interface NativePlainOptions {

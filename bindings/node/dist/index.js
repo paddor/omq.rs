@@ -6,33 +6,77 @@ exports.curvePublic = curvePublic;
 const node_buffer_1 = require("node:buffer");
 const node_module_1 = require("node:module");
 const native = loadNative();
+const RECV_PREFETCH = 64;
 class Message {
-    parts;
+    materializedParts;
+    singlePart;
+    packedData;
+    packedOffset;
+    packedLength;
     constructor(input = new Uint8Array()) {
         const parts = Array.isArray(input) ? input : [input];
-        this.parts = parts.map(toBytes);
+        this.materializedParts = parts.map(toBytes);
     }
     static from(input) {
         return input instanceof Message ? input : new Message(input);
     }
+    get parts() {
+        return this.materializeParts();
+    }
     get length() {
-        return this.parts.length;
+        return this.materializedParts?.length ?? (this.singlePart !== undefined || this.packedData !== undefined ? 1 : 0);
     }
     part(index = 0) {
-        const part = this.parts[index];
+        if (this.materializedParts === undefined && index !== 0) {
+            throw new RangeError(`message part ${index} out of range`);
+        }
+        if (this.materializedParts === undefined && this.singlePart !== undefined) {
+            return this.singlePart;
+        }
+        if (this.materializedParts === undefined &&
+            this.packedData !== undefined &&
+            this.packedOffset !== undefined &&
+            this.packedLength !== undefined) {
+            const part = this.packedData.subarray(this.packedOffset, this.packedOffset + this.packedLength);
+            this.singlePart = part;
+            this.packedData = undefined;
+            this.packedOffset = undefined;
+            this.packedLength = undefined;
+            return part;
+        }
+        const part = this.materializeParts()[index];
         if (part === undefined) {
             throw new RangeError(`message part ${index} out of range`);
         }
         return part;
     }
     string(index = 0, encoding = "utf8") {
-        return node_buffer_1.Buffer.from(this.part(index).buffer, this.part(index).byteOffset, this.part(index).byteLength).toString(encoding);
+        const part = this.part(index);
+        return node_buffer_1.Buffer.from(part.buffer, part.byteOffset, part.byteLength).toString(encoding);
     }
     toArray() {
         return this.parts.slice();
     }
     [Symbol.iterator]() {
         return this.parts[Symbol.iterator]();
+    }
+    materializeParts() {
+        if (this.materializedParts !== undefined) {
+            return this.materializedParts;
+        }
+        if (this.singlePart !== undefined) {
+            this.materializedParts = [this.singlePart];
+            return this.materializedParts;
+        }
+        if (this.packedData !== undefined && this.packedOffset !== undefined && this.packedLength !== undefined) {
+            this.materializedParts = [this.packedData.subarray(this.packedOffset, this.packedOffset + this.packedLength)];
+            this.packedData = undefined;
+            this.packedOffset = undefined;
+            this.packedLength = undefined;
+            return this.materializedParts;
+        }
+        this.materializedParts = [];
+        return this.materializedParts;
     }
 }
 exports.Message = Message;
@@ -78,58 +122,63 @@ exports.Context = Context;
 class Socket {
     type;
     native;
+    #recvPrefetch;
+    #recvQueue = [];
+    #recvQueueOffset = 0;
     #closed = false;
     constructor(socketType, options = {}, context = defaultContext(options)) {
         this.type = socketType;
+        this.#recvPrefetch = recvPrefetchFor(socketType);
         this.native = context._socket(socketType, options);
     }
     bind(endpoint) {
         this.#checkOpen();
-        return this.native.bind(endpoint);
+        return callAsPromise(() => this.native.bind(endpoint));
     }
     connect(endpoint) {
         this.#checkOpen();
-        return this.native.connect(endpoint);
+        return callAsPromise(() => this.native.connect(endpoint));
     }
     unbind(endpoint) {
         this.#checkOpen();
-        return this.native.unbind(endpoint);
+        return callAsPromise(() => this.native.unbind(endpoint));
     }
     disconnect(endpoint) {
         this.#checkOpen();
-        return this.native.disconnect(endpoint);
+        return callAsPromise(() => this.native.disconnect(endpoint));
     }
     send(message) {
         this.#checkOpen();
-        return this.native.send(partsFrom(message));
+        sendNativeSync(this.native, message);
+        return Promise.resolve();
     }
     sendSync(message) {
         this.#checkOpen();
-        this.native.sendSync(partsFrom(message));
+        sendNativeSync(this.native, message);
     }
     async recv(options = {}) {
         this.#checkOpen();
-        if (!options.signal) {
-            return new Message(await this.native.recv());
-        }
-        throwIfAborted(options.signal);
-        while (true) {
-            const parts = await this.native.recvTimeout(50);
-            if (parts !== null) {
-                return new Message(parts);
-            }
+        if (options.signal)
             throwIfAborted(options.signal);
+        while (true) {
+            const raw = this.#tryRecvRaw();
+            if (raw !== null) {
+                return raw;
+            }
+            if (options.signal)
+                throwIfAborted(options.signal);
             this.#checkOpen();
+            await yieldToEventLoop();
         }
     }
     recvSync() {
         this.#checkOpen();
-        return new Message(this.native.recvSync());
+        return this.#recvRawSync();
     }
     tryRecv() {
         this.#checkOpen();
-        const parts = this.native.tryRecv();
-        return parts === null ? null : new Message(parts);
+        const raw = this.#tryRecvRaw();
+        return raw;
     }
     waitConnectedSync(minPeers = 1, timeoutMs = 5000) {
         this.#checkOpen();
@@ -137,13 +186,31 @@ class Socket {
     }
     recvManySync(max, timeoutMs) {
         this.#checkOpen();
-        return this.native.recvManySync(max, timeoutMs).map((parts) => new Message(parts));
+        const messages = [];
+        while (messages.length < max) {
+            const raw = this.#takeQueuedRaw();
+            if (raw === null)
+                break;
+            messages.push(raw);
+        }
+        if (messages.length < max) {
+            const remaining = max - messages.length;
+            if (timeoutMs === undefined) {
+                messages.push(...messagesFromPacked(this.native.recvPackedManySync(remaining)));
+            }
+            else {
+                messages.push(...this.native.recvManySync(remaining, timeoutMs).map(messageFromNative));
+            }
+        }
+        return messages;
     }
     close() {
         if (this.#closed) {
             return;
         }
         this.#closed = true;
+        this.#recvQueue = [];
+        this.#recvQueueOffset = 0;
         this.native.close();
     }
     async *[Symbol.asyncIterator]() {
@@ -164,21 +231,51 @@ class Socket {
             throw new Error("socket closed");
         }
     }
+    #recvRawSync() {
+        const queued = this.#takeQueuedRaw();
+        if (queued !== null)
+            return queued;
+        if (this.#recvPrefetch <= 1)
+            return messageFromNative(this.native.recvRawSync());
+        this.#recvQueue = messagesFromPacked(this.native.recvPackedManySync(this.#recvPrefetch));
+        this.#recvQueueOffset = 0;
+        return this.#takeQueuedRaw() ?? messageFromNative(this.native.recvRawSync());
+    }
+    #tryRecvRaw() {
+        const queued = this.#takeQueuedRaw();
+        if (queued !== null)
+            return queued;
+        if (this.#recvPrefetch <= 1) {
+            const raw = this.native.tryRecvRaw();
+            return raw === null ? null : messageFromNative(raw);
+        }
+        this.#recvQueue = messagesFromPacked(this.native.tryRecvPackedManySync(this.#recvPrefetch));
+        this.#recvQueueOffset = 0;
+        return this.#takeQueuedRaw();
+    }
+    #takeQueuedRaw() {
+        if (this.#recvQueueOffset >= this.#recvQueue.length) {
+            this.#recvQueue = [];
+            this.#recvQueueOffset = 0;
+            return null;
+        }
+        return this.#recvQueue[this.#recvQueueOffset++];
+    }
     subscribeNative(prefix) {
         this.#checkOpen();
-        return this.native.subscribe(toBytes(prefix));
+        return callAsPromise(() => this.native.subscribe(toBytes(prefix)));
     }
     unsubscribeNative(prefix) {
         this.#checkOpen();
-        return this.native.unsubscribe(toBytes(prefix));
+        return callAsPromise(() => this.native.unsubscribe(toBytes(prefix)));
     }
     joinNative(group) {
         this.#checkOpen();
-        return this.native.join(toBytes(group));
+        return callAsPromise(() => this.native.join(toBytes(group)));
     }
     leaveNative(group) {
         this.#checkOpen();
-        return this.native.leave(toBytes(group));
+        return callAsPromise(() => this.native.leave(toBytes(group)));
     }
 }
 exports.Socket = Socket;
@@ -321,6 +418,26 @@ function defaultContext(options) {
     }
     return sharedContext;
 }
+function recvPrefetchFor(socketType) {
+    switch (socketType) {
+        case "PULL":
+        case "SUB":
+        case "XSUB":
+        case "GATHER":
+        case "DISH":
+            return RECV_PREFETCH;
+        default:
+            return 1;
+    }
+}
+function callAsPromise(fn) {
+    try {
+        return Promise.resolve(fn());
+    }
+    catch (error) {
+        return Promise.reject(error);
+    }
+}
 function normalizeOptions(options) {
     return {
         identity: options.identity === undefined ? undefined : toBytes(options.identity),
@@ -341,8 +458,71 @@ function normalizeOptions(options) {
         curve: options.curve,
     };
 }
-function partsFrom(input) {
-    return Message.from(input).parts;
+function sendNativeSync(socket, input) {
+    if (input instanceof Message) {
+        if (input.length === 1) {
+            sendSingleNativeSync(socket, input.part(0));
+            return;
+        }
+        socket.sendSync(input.parts);
+        return;
+    }
+    if (Array.isArray(input)) {
+        if (input.length === 1) {
+            sendSingleNativeSync(socket, input[0]);
+            return;
+        }
+        socket.sendSync(input.map(toBytes));
+        return;
+    }
+    sendSingleNativeSync(socket, input);
+}
+function sendSingleNativeSync(socket, input) {
+    if (node_buffer_1.Buffer.isBuffer(input)) {
+        socket.sendBufferSync(input);
+        return;
+    }
+    socket.sendOneSync(toBytes(input));
+}
+function messageFromNative(nativeMessage) {
+    const message = Object.create(Message.prototype);
+    if (Array.isArray(nativeMessage)) {
+        message.materializedParts = nativeMessage;
+    }
+    else {
+        message.singlePart = nativeMessage;
+    }
+    return message;
+}
+function messagesFromPacked(batch) {
+    const messages = new Array(batch.messageParts.length);
+    let partIndex = 0;
+    for (let messageIndex = 0; messageIndex < batch.messageParts.length; messageIndex++) {
+        const result = messageFromPackedAt(batch, messageIndex, partIndex);
+        messages[messageIndex] = result.message;
+        partIndex = result.nextPartIndex;
+    }
+    return messages;
+}
+function messageFromPackedAt(batch, messageIndex, partIndex) {
+    const partCount = batch.messageParts[messageIndex];
+    if (partCount === 1) {
+        const offset = batch.partOffsets[partIndex];
+        const length = batch.partLengths[partIndex];
+        const message = Object.create(Message.prototype);
+        message.packedData = batch.data;
+        message.packedOffset = offset;
+        message.packedLength = length;
+        return { message, nextPartIndex: partIndex + 1 };
+    }
+    const parts = new Array(partCount);
+    for (let index = 0; index < partCount; index++) {
+        const offset = batch.partOffsets[partIndex];
+        const length = batch.partLengths[partIndex];
+        parts[index] = batch.data.subarray(offset, offset + length);
+        partIndex++;
+    }
+    return { message: messageFromNative(parts), nextPartIndex: partIndex };
 }
 function toBytes(part) {
     if (typeof part === "string") {
@@ -364,6 +544,9 @@ function throwIfAborted(signal) {
 }
 function isClosedError(error) {
     return error instanceof Error && error.message.toLowerCase().includes("closed");
+}
+function yieldToEventLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
 }
 function loadNative() {
     const require = (0, node_module_1.createRequire)(__filename);

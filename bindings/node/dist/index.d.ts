@@ -24,28 +24,43 @@ type NativeSocketOptions = {
         server?: boolean;
     };
 };
+type NativeRawMessage = Uint8Array | Uint8Array[];
+type NativePackedMessages = {
+    data: Uint8Array;
+    partOffsets: Uint32Array;
+    partLengths: Uint32Array;
+    messageParts: Uint32Array;
+};
 type NativeContext = {
     socket(socketType: string, options?: NativeSocketOptions): NativeSocket;
     shareKey(): string;
     close(): void;
 };
 type NativeSocket = {
-    bind(endpoint: string): Promise<string>;
-    connect(endpoint: string): Promise<void>;
-    unbind(endpoint: string): Promise<void>;
-    disconnect(endpoint: string): Promise<void>;
-    send(parts: Uint8Array[]): Promise<void>;
+    bind(endpoint: string): string;
+    connect(endpoint: string): void;
+    unbind(endpoint: string): void;
+    disconnect(endpoint: string): void;
+    send(parts: Uint8Array[]): void;
     sendSync(parts: Uint8Array[]): void;
-    recv(): Promise<Uint8Array[]>;
+    sendBufferSync(payload: Buffer): void;
+    sendOneSync(payload: Uint8Array): void;
+    recv(): Uint8Array[];
+    recvRawSync(): Uint8Array | Uint8Array[];
     recvSync(): Uint8Array[];
-    recvTimeout(timeoutMs: number): Promise<Uint8Array[] | null>;
+    recvTimeout(timeoutMs: number): Uint8Array[] | null;
     tryRecv(): Uint8Array[] | null;
+    tryRecvRaw(): Uint8Array | Uint8Array[] | null;
+    recvRawManySync(max: number): NativeRawMessage[];
+    tryRecvRawManySync(max: number): NativeRawMessage[];
+    recvPackedManySync(max: number): NativePackedMessages;
+    tryRecvPackedManySync(max: number): NativePackedMessages;
     waitConnectedSync(minPeers: number, timeoutMs: number): number;
     recvManySync(max: number, timeoutMs?: number): Uint8Array[][];
-    subscribe(prefix: Uint8Array): Promise<void>;
-    unsubscribe(prefix: Uint8Array): Promise<void>;
-    join(group: Uint8Array): Promise<void>;
-    leave(group: Uint8Array): Promise<void>;
+    subscribe(prefix: Uint8Array): void;
+    unsubscribe(prefix: Uint8Array): void;
+    join(group: Uint8Array): void;
+    leave(group: Uint8Array): void;
     close(): void;
 };
 export type MessagePart = string | ArrayBuffer | Uint8Array | Buffer;
@@ -89,14 +104,20 @@ export interface RecvOptions {
     signal?: AbortSignal;
 }
 export declare class Message {
-    readonly parts: Uint8Array[];
+    private materializedParts?;
+    private singlePart?;
+    private packedData?;
+    private packedOffset?;
+    private packedLength?;
     constructor(input?: MessagePart | MessagePart[]);
     static from(input: Message | MessagePart | MessagePart[]): Message;
+    get parts(): Uint8Array[];
     get length(): number;
     part(index?: number): Uint8Array;
     string(index?: number, encoding?: BufferEncoding): string;
     toArray(): Uint8Array[];
     [Symbol.iterator](): Iterator<Uint8Array>;
+    private materializeParts;
 }
 export declare function curveKeypair(): CurveKeypair;
 export declare function curvePublic(secretKey: string): string;

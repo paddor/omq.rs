@@ -12,12 +12,13 @@ const DATA_FILE = path.join(CACHE_DIR, "bindings.jsonl");
 const CHART_FILE = path.resolve(__dirname, "../doc/charts/bindings.svg");
 const DEFAULT_COUNT = 1_000_000;
 const DEFAULT_LATENCY_COUNT = 50_000;
-const DEFAULT_SETUP_DELAY_MS = 250;
+const DEFAULT_BENCH_TIMEOUT_MS = 60_000;
 const DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
 const QUICK_SIZES = [16];
 const STOP_PAYLOAD = "__OMQ_NODE_BENCH_STOP__";
 const STOP_BUFFER = Buffer.from(STOP_PAYLOAD);
 const SEND_YIELD_INTERVAL = 128;
+const SEND_YIELD_MIN_SIZE = 4096;
 
 if (process.env.OMQ_NODE_BENCH_DEBUG_ARGV) {
   console.error(JSON.stringify(process.argv));
@@ -62,14 +63,17 @@ async function main() {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   const count = positiveInt(process.env.OMQ_NODE_BENCH_MESSAGES, DEFAULT_COUNT);
   const latencyCount = positiveInt(process.env.OMQ_NODE_BENCH_LATENCY_MESSAGES, DEFAULT_LATENCY_COUNT);
-  const setupDelayMs = positiveInt(process.env.OMQ_NODE_BENCH_SETUP_DELAY_MS, DEFAULT_SETUP_DELAY_MS);
+  const timeoutMs = positiveInt(process.env.OMQ_NODE_BENCH_TIMEOUT_MS, DEFAULT_BENCH_TIMEOUT_MS);
   const sizes = parseSizes(process.env.OMQ_NODE_BENCH_SIZES ?? process.env.OMQ_NODE_BENCH_SIZE);
+  const impls = parseImpls(process.env.OMQ_NODE_BENCH_IMPLS);
   const zeromqLoadable = canLoadZeromq();
   const runId = `${Date.now()}-${process.pid}`;
+  const runOmq = impls.has("omq-node");
+  const runZeromq = impls.has("zeromq.js") && zeromqLoadable;
 
   buildDistIfNeeded();
 
-  if (!zeromqLoadable) {
+  if (impls.has("zeromq.js") && !zeromqLoadable) {
     console.log("zeromq.js baseline skipped: package not loadable");
   }
 
@@ -77,27 +81,33 @@ async function main() {
     const throughputCount = throughputCountForSize(count, size);
     const latencyCountForThisSize = latencyCountForSize(latencyCount, size);
 
-    appendRecord(await runOmqInprocThroughput({ count: throughputCount, size, runId }));
-    appendRecord(await runOmqTcpThroughput({ count: throughputCount, size, runId, setupDelayMs }));
-    appendRecord(await runOmqTcpLatency({ count: latencyCountForThisSize, size, runId, setupDelayMs }));
+    if (runOmq) {
+      appendRecord(await runOmqInprocThroughput({ count: throughputCount, size, runId }));
+      appendRecord(await runOmqTcpThroughput({ count: throughputCount, size, runId, timeoutMs }));
+      appendRecord(await runOmqTcpLatency({ count: latencyCountForThisSize, size, runId, timeoutMs }));
+    }
 
-    if (zeromqLoadable) {
+    if (runZeromq) {
       appendRecord(await runZeromqTcpThroughput({
         count: throughputCount,
         size,
         runId,
-        setupDelayMs,
+        timeoutMs,
       }));
       appendRecord(await runZeromqTcpLatency({
         count: latencyCountForThisSize,
         size,
         runId,
-        setupDelayMs,
+        timeoutMs,
       }));
     }
   }
-  renderChart();
-  console.log(`chart: ${CHART_FILE}`);
+  if (process.env.OMQ_NODE_BENCH_NO_CHART === "1") {
+    console.log("chart: skipped");
+  } else {
+    renderChart();
+    console.log(`chart: ${CHART_FILE}`);
+  }
 }
 
 function appendRecord(record) {
@@ -136,9 +146,8 @@ async function runOmqInprocThroughput({ count, size, runId }) {
     const start = process.hrtime.bigint();
     for (let i = 0; i < count; i++) {
       push.sendSync(payload);
-      if ((i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
+      if (size >= SEND_YIELD_MIN_SIZE && (i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
     }
-    push.sendSync(STOP_PAYLOAD);
     const recv = await waitWorker(receiver, "done");
     const elapsedSec = secondsSince(start);
     return throughputRecord({
@@ -156,88 +165,126 @@ async function runOmqInprocThroughput({ count, size, runId }) {
   }
 }
 
-async function runOmqTcpThroughput({ count, size, runId, setupDelayMs }) {
+async function runOmqTcpThroughput({ count, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const startAtMs = Date.now() + setupDelayMs * 2;
-  const common = { impl: "omq-node", transport: "tcp", metric: "throughput", endpoint, count, size, startAtMs };
+  const common = { impl: "omq-node", transport: "tcp", metric: "throughput", endpoint, count, size };
   const receiver = forkPeer({ ...common, role: "pull" });
-  await sleep(Math.max(25, Math.floor(setupDelayMs / 2)));
-  const sender = forkPeer({ ...common, role: "push" });
-  const [recv, send] = await Promise.all([waitChild(receiver, "done"), waitChild(sender, "done")]);
-  await Promise.all([waitExit(receiver), waitExit(sender)]);
-  return throughputRecord({
-    runId,
-    impl: "omq-node",
-    transport: "tcp",
-    count: recv.count,
-    size,
-    elapsedSec: Math.max(recv.elapsedSec, send.elapsedSec),
-  });
+  let sender;
+  try {
+    await waitChildWithTimeout(receiver, "ready", timeoutMs, `omq-node tcp throughput ${size}B pull ready`);
+    sender = forkPeer({ ...common, role: "push" });
+    await waitChildWithTimeout(sender, "ready", timeoutMs, `omq-node tcp throughput ${size}B push ready`);
+    await Promise.all([sendChild(receiver, { kind: "start" }), sendChild(sender, { kind: "start" })]);
+    const [recv, send] = await withTimeout(
+      Promise.all([waitChild(receiver, "done"), waitChild(sender, "done")]),
+      timeoutMs,
+      `omq-node tcp throughput ${size}B`,
+    );
+    await sendChild(sender, { kind: "shutdown" });
+    await Promise.all([waitExit(receiver), waitExit(sender)]);
+    return throughputRecord({
+      runId,
+      impl: "omq-node",
+      transport: "tcp",
+      count: recv.count,
+      size,
+      elapsedSec: Math.max(recv.elapsedSec, send.elapsedSec),
+    });
+  } finally {
+    killIfRunning(receiver);
+    if (sender) killIfRunning(sender);
+  }
 }
 
-async function runOmqTcpLatency({ count, size, runId, setupDelayMs }) {
+async function runOmqTcpLatency({ count, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const startAtMs = Date.now() + setupDelayMs * 2;
-  const common = { impl: "omq-node", transport: "tcp", metric: "latency", endpoint, count, size, startAtMs };
+  const common = { impl: "omq-node", transport: "tcp", metric: "latency", endpoint, count, size };
   const rep = forkPeer({ ...common, role: "rep" });
-  await sleep(Math.max(25, Math.floor(setupDelayMs / 2)));
-  const req = forkPeer({ ...common, role: "req" });
-  const result = await waitChild(req, "done");
-  await Promise.all([waitExit(req), waitExit(rep)]);
-  return latencyRecord({
-    runId,
-    impl: "omq-node",
-    transport: "tcp",
-    count,
-    size,
-    latencyUs: result.p50Us,
-    avgLatencyUs: result.latencyUs,
-    p99Us: result.p99Us,
-    p999Us: result.p999Us,
-    maxUs: result.maxUs,
-  });
+  let req;
+  try {
+    await waitChildWithTimeout(rep, "ready", timeoutMs, `omq-node tcp latency ${size}B rep ready`);
+    req = forkPeer({ ...common, role: "req" });
+    await waitChildWithTimeout(req, "ready", timeoutMs, `omq-node tcp latency ${size}B req ready`);
+    await Promise.all([sendChild(rep, { kind: "start" }), sendChild(req, { kind: "start" })]);
+    const result = await waitChildWithTimeout(req, "done", timeoutMs, `omq-node tcp latency ${size}B`);
+    await Promise.all([waitExit(req), waitExit(rep)]);
+    return latencyRecord({
+      runId,
+      impl: "omq-node",
+      transport: "tcp",
+      count,
+      size,
+      latencyUs: result.p50Us,
+      avgLatencyUs: result.latencyUs,
+      p99Us: result.p99Us,
+      p999Us: result.p999Us,
+      maxUs: result.maxUs,
+    });
+  } finally {
+    killIfRunning(rep);
+    if (req) killIfRunning(req);
+  }
 }
 
-async function runZeromqTcpThroughput({ count, size, runId, setupDelayMs }) {
+async function runZeromqTcpThroughput({ count, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const startAtMs = Date.now() + setupDelayMs * 2;
-  const common = { impl: "zeromq.js", transport: "tcp", metric: "throughput", endpoint, count, size, startAtMs };
+  const common = { impl: "zeromq.js", transport: "tcp", metric: "throughput", endpoint, count, size };
   const receiver = forkPeer({ ...common, role: "pull" });
-  await sleep(Math.max(25, Math.floor(setupDelayMs / 2)));
-  const sender = forkPeer({ ...common, role: "push" });
-  const [recv, send] = await Promise.all([waitChild(receiver, "done"), waitChild(sender, "done")]);
-  await Promise.all([waitExit(receiver), waitExit(sender)]);
-  return throughputRecord({
-    runId,
-    impl: "zeromq.js",
-    transport: "tcp",
-    count: recv.count,
-    size,
-    elapsedSec: Math.max(recv.elapsedSec, send.elapsedSec),
-  });
+  let sender;
+  try {
+    await waitChildWithTimeout(receiver, "ready", timeoutMs, `zeromq.js tcp throughput ${size}B pull ready`);
+    sender = forkPeer({ ...common, role: "push" });
+    await waitChildWithTimeout(sender, "ready", timeoutMs, `zeromq.js tcp throughput ${size}B push ready`);
+    await Promise.all([sendChild(receiver, { kind: "start" }), sendChild(sender, { kind: "start" })]);
+    const [recv, send] = await withTimeout(
+      Promise.all([waitChild(receiver, "done"), waitChild(sender, "done")]),
+      timeoutMs,
+      `zeromq.js tcp throughput ${size}B`,
+    );
+    await sendChild(sender, { kind: "shutdown" });
+    await Promise.all([waitExit(receiver), waitExit(sender)]);
+    return throughputRecord({
+      runId,
+      impl: "zeromq.js",
+      transport: "tcp",
+      count: recv.count,
+      size,
+      elapsedSec: Math.max(recv.elapsedSec, send.elapsedSec),
+    });
+  } finally {
+    killIfRunning(receiver);
+    if (sender) killIfRunning(sender);
+  }
 }
 
-async function runZeromqTcpLatency({ count, size, runId, setupDelayMs }) {
+async function runZeromqTcpLatency({ count, size, runId, timeoutMs }) {
   const endpoint = await freeTcpEndpoint();
-  const startAtMs = Date.now() + setupDelayMs * 2;
-  const common = { impl: "zeromq.js", transport: "tcp", metric: "latency", endpoint, count, size, startAtMs };
+  const common = { impl: "zeromq.js", transport: "tcp", metric: "latency", endpoint, count, size };
   const rep = forkPeer({ ...common, role: "rep" });
-  await sleep(Math.max(25, Math.floor(setupDelayMs / 2)));
-  const req = forkPeer({ ...common, role: "req" });
-  const result = await waitChild(req, "done");
-  await Promise.all([waitExit(req), waitExit(rep)]);
-  return latencyRecord({
-    runId,
-    impl: "zeromq.js",
-    transport: "tcp",
-    count,
-    size,
-    latencyUs: result.p50Us,
-    avgLatencyUs: result.latencyUs,
-    p99Us: result.p99Us,
-    p999Us: result.p999Us,
-    maxUs: result.maxUs,
-  });
+  let req;
+  try {
+    await waitChildWithTimeout(rep, "ready", timeoutMs, `zeromq.js tcp latency ${size}B rep ready`);
+    req = forkPeer({ ...common, role: "req" });
+    await waitChildWithTimeout(req, "ready", timeoutMs, `zeromq.js tcp latency ${size}B req ready`);
+    await Promise.all([sendChild(rep, { kind: "start" }), sendChild(req, { kind: "start" })]);
+    const result = await waitChildWithTimeout(req, "done", timeoutMs, `zeromq.js tcp latency ${size}B`);
+    await Promise.all([waitExit(req), waitExit(rep)]);
+    return latencyRecord({
+      runId,
+      impl: "zeromq.js",
+      transport: "tcp",
+      count,
+      size,
+      latencyUs: result.p50Us,
+      avgLatencyUs: result.latencyUs,
+      p99Us: result.p99Us,
+      p999Us: result.p999Us,
+      maxUs: result.maxUs,
+    });
+  } finally {
+    killIfRunning(rep);
+    if (req) killIfRunning(req);
+  }
 }
 
 async function runProcessPeer(config) {
@@ -254,11 +301,11 @@ async function runWorker(config) {
   }
   const { Context, Pull } = require("../dist");
   const context = Context.fromShareKey(config.shareKey);
-  const pull = new Pull(benchOptions(config), context);
+    const pull = new Pull(benchOptions(config), context);
   try {
     await pull.bind(config.endpoint);
     parentPort.postMessage({ kind: "ready" });
-    const result = recvUntilStopSync(pull);
+    const result = recvCountSync(pull, config.count);
     parentPort.postMessage({ kind: "done", count: result.count, elapsedSec: result.elapsedSec });
   } finally {
     pull.close();
@@ -279,8 +326,9 @@ async function runOmqProcessPeer(config) {
     await sendReady();
     await waitUntilStart(config);
     if (config.role === "pull") {
-      const result = recvUntilStopSync(socket);
+      const result = recvCountSync(socket, config.count);
       await sendIpc({ kind: "done", count: result.count, elapsedSec: result.elapsedSec });
+      socket.close();
       process.exit(0);
       return;
     }
@@ -288,10 +336,11 @@ async function runOmqProcessPeer(config) {
     const start = process.hrtime.bigint();
     for (let i = 0; i < config.count; i++) {
       socket.sendSync(payload);
-      if ((i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
+      if (config.size >= SEND_YIELD_MIN_SIZE && (i + 1) % SEND_YIELD_INTERVAL === 0) await sleep(0);
     }
-    socket.sendSync(STOP_PAYLOAD);
     await sendIpc({ kind: "done", count: config.count, elapsedSec: secondsSince(start) });
+    await waitProcess("shutdown");
+    socket.close();
     process.exit(0);
     return;
   }
@@ -346,17 +395,15 @@ async function runZeromqProcessPeer(config) {
   const zmq = require("zeromq");
   if (config.role === "pull") {
     const pull = new zmq.Pull({ receiveHighWaterMark: Math.max(1000, config.count) });
-    const stopPayload = Buffer.from(STOP_PAYLOAD);
     await pull.bind(config.endpoint);
     await sendReady();
     await waitUntilStart(config);
-    let received = 0;
     const start = process.hrtime.bigint();
-    for await (const [message] of pull) {
-      if (message.length === stopPayload.length && message.equals(stopPayload)) break;
-      if (message) received++;
+    for (let received = 0; received < config.count; received++) {
+      await pull.receive();
     }
-    await sendIpc({ kind: "done", count: received, elapsedSec: secondsSince(start) });
+    const elapsedSec = secondsSince(start);
+    await sendIpc({ kind: "done", count: config.count, elapsedSec });
     pull.close();
     process.exit(0);
     return;
@@ -371,9 +418,8 @@ async function runZeromqProcessPeer(config) {
     for (let i = 0; i < config.count; i++) {
       await push.send(payload);
     }
-    await push.send(STOP_PAYLOAD);
     await sendIpc({ kind: "done", count: config.count, elapsedSec: secondsSince(start) });
-    await sleep(1000);
+    await waitProcess("shutdown");
     push.close();
     process.exit(0);
     return;
@@ -434,15 +480,13 @@ function benchOptions(config) {
   };
 }
 
-function recvUntilStopSync(socket) {
-  let received = 0;
+function recvCountSync(socket, expected) {
   const start = process.hrtime.bigint();
-  while (true) {
-    const message = socket.recvSync();
-    if (isStopMessage(message)) break;
-    received++;
+  for (let received = 0; received < expected; received++) {
+    socket.recvSync();
   }
-  return { count: received, elapsedSec: secondsSince(start) };
+  const elapsedSec = secondsSince(start);
+  return { count: expected, elapsedSec };
 }
 
 function isStopMessage(message) {
@@ -550,6 +594,20 @@ function waitChild(child, kind) {
   });
 }
 
+function waitChildWithTimeout(child, kind, timeoutMs, label) {
+  return withTimeout(waitChild(child, kind), timeoutMs, label);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function waitProcess(kind) {
   const cachedIndex = processMessages.findIndex((message) => message.kind === kind);
   if (cachedIndex !== -1) {
@@ -558,6 +616,16 @@ function waitProcess(kind) {
   }
   return new Promise((resolve) => {
     processWaiters.push({ kind, resolve });
+  });
+}
+
+function sendChild(child, message) {
+  return new Promise((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null || !child.connected) {
+      resolve();
+      return;
+    }
+    child.send(message, (error) => (error ? reject(error) : resolve()));
   });
 }
 
@@ -599,6 +667,12 @@ function waitExit(child) {
       else reject(new Error(`peer failed: code=${code} signal=${signal}`));
     });
   });
+}
+
+function killIfRunning(child) {
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill();
+  }
 }
 
 function canLoadZeromq() {
@@ -679,6 +753,31 @@ function positiveInt(raw, fallback) {
   const value = raw === undefined ? fallback : Number(raw);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function parseImpls(raw) {
+  if (raw === undefined || raw === "" || raw === "all") {
+    return new Set(["omq-node", "zeromq.js"]);
+  }
+  const aliases = new Map([
+    ["omq", "omq-node"],
+    ["omq-node", "omq-node"],
+    ["zeromq", "zeromq.js"],
+    ["zeromq.js", "zeromq.js"],
+    ["zmq", "zeromq.js"],
+  ]);
+  const impls = new Set();
+  for (const item of String(raw).split(",")) {
+    const impl = aliases.get(item.trim().toLowerCase());
+    if (impl === undefined) {
+      throw new Error(`invalid benchmark implementation ${item}`);
+    }
+    impls.add(impl);
+  }
+  if (impls.size === 0) {
+    throw new Error("at least one benchmark implementation required");
+  }
+  return impls;
 }
 
 function parseSizes(raw) {

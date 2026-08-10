@@ -630,7 +630,6 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "omq-tokio",
- "tokio",
 ]
 
 [[package]]

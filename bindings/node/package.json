@@ -23,7 +23,7 @@
     "test": "node --test test/*.test.js",
     "bench": "node scripts/update_perf.js",
     "chart": "python3 scripts/update_perf.py --chart-only",
-    "soak": "node --test --test-concurrency=1 test/soak/*.test.js"
+    "soak": "node --expose-gc --test --test-concurrency=1 test/soak/*.test.js"
   },
   "napi": {
     "binaryName": "omq_node",

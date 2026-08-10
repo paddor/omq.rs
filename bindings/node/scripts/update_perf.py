@@ -56,7 +56,7 @@ def _p50_us(row):
     return row.get("p50_us") or row.get("p50Us") or row.get("latencyUs") or 0.0
 
 
-def _latest_rows(rows):
+def _latest_by_key(rows):
     latest = {}
     for row in rows:
         impl = row.get("impl", "")
@@ -67,6 +67,44 @@ def _latest_rows(rows):
         prev = latest.get(key)
         if prev is None or _run_id(row) >= _run_id(prev):
             latest[key] = row
+    return latest
+
+
+def _latest_complete_rows(rows):
+    by_run = {}
+    for row in rows:
+        impl = row.get("impl", "")
+        run_id = _run_id(row)
+        if not impl or not run_id:
+            continue
+        key = (_kind(row), row.get("transport", ""), _msg_size(row))
+        by_run.setdefault((impl, run_id), {})[key] = row
+
+    latest = {}
+    for impl in ["omq-node", "zeromq.js"]:
+        required = set()
+        for size in SIZES:
+            required.add(("throughput", "tcp", size))
+            required.add(("latency", "tcp", size))
+
+        complete = [
+            (run_id, run_rows)
+            for (run_impl, run_id), run_rows in by_run.items()
+            if run_impl == impl and required.issubset(run_rows)
+        ]
+        if not complete:
+            continue
+
+        _, run_rows = max(complete, key=lambda item: item[0])
+        for kind, transport, size in required:
+            latest[(impl, kind, transport, size)] = run_rows[(kind, transport, size)]
+    return latest
+
+
+def _latest_rows(rows):
+    latest = _latest_complete_rows(rows)
+    for key, row in _latest_by_key(rows).items():
+        latest.setdefault(key, row)
     return latest
 
 
@@ -198,12 +236,8 @@ def gen_combined_chart(data, path):
     omq_tp = data["omq_tp"]
     zmq_tp = data["zmq_tp"]
 
-    tp_values = omq_tp + zmq_tp
-    mbps_values = [(omq_tp[i] * SIZES[i] / 1e6) for i in range(n)] + [
-        (zmq_tp[i] * SIZES[i] / 1e6) for i in range(n)
-    ]
-    msg_max = max(100_000, _nice_ceil(max(tp_values or [0]) * 1.05))
-    mbps_max = max(100, _nice_ceil(max(mbps_values or [0]) * 1.05))
+    msg_max = 5_000_000
+    mbps_max = 5_000
 
     def y_msg(v):
         return t1_bot - (v / msg_max) * t1_h if msg_max > 0 else t1_bot
@@ -211,9 +245,8 @@ def gen_combined_chart(data, path):
     def y_mbps(v):
         return t1_bot - (v / mbps_max) * t1_h if mbps_max > 0 else t1_bot
 
-    latency_values = data["omq_lat"] + data["zmq_lat"]
-    lat_max = max(200.0, _nice_ceil(max(latency_values or [0]) * 1.05))
-    lat_step = lat_max / 10
+    lat_max = 200.0
+    lat_step = 20
 
     def y_lat(v):
         return t2_bot - (v / lat_max) * t2_h if lat_max > 0 else t2_bot

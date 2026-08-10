@@ -276,7 +276,7 @@ pub(crate) async fn connect(
     port: u16,
     path: &str,
     tls: bool,
-    accept_invalid_certs: bool,
+    wss_tls: &omq_proto::options::WssTls,
     mechanism: &omq_proto::MechanismSetup,
 ) -> Result<WsConnected> {
     let addrs = match host {
@@ -304,13 +304,13 @@ pub(crate) async fn connect(
     let _ = stream.set_nodelay(true);
 
     let mut transport = if tls {
-        let connector = build_tls_connector(accept_invalid_certs)?;
-        let host_str = match host {
+        let connector = build_tls_connector(wss_tls)?;
+        let host_str = wss_tls.hostname.clone().unwrap_or_else(|| match host {
             omq_proto::endpoint::Host::Name(n) => n.clone(),
             omq_proto::endpoint::Host::Ip(ip) => ip.to_string(),
             omq_proto::endpoint::Host::Wildcard => "localhost".into(),
             _ => unreachable!(),
-        };
+        });
         let domain = rustls_pki_types::ServerName::try_from(host_str).map_err(ws_err)?;
         let tls_stream = connector.connect(domain, stream).await.map_err(Error::Io)?;
         WsTransport::Tls(tls_stream)
@@ -375,27 +375,39 @@ async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {
     })))
 }
 
-fn build_tls_connector(accept_invalid_certs: bool) -> Result<tokio_rustls::TlsConnector> {
+fn build_tls_connector(wss_tls: &omq_proto::options::WssTls) -> Result<tokio_rustls::TlsConnector> {
+    use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject;
     use std::sync::Arc;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
-    if accept_invalid_certs {
+    if wss_tls.accept_invalid_certs {
         config
             .dangerous()
             .set_certificate_verifier(Arc::new(NoVerify));
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        let cert_result = rustls_native_certs::load_native_certs();
-        if cert_result.certs.is_empty() && !cert_result.errors.is_empty() {
-            return Err(crate::Error::Io(std::io::Error::other(format!(
-                "failed to load system certificates: {:?}",
-                cert_result.errors
-            ))));
+        if wss_tls.trust_system {
+            let cert_result = rustls_native_certs::load_native_certs();
+            if cert_result.certs.is_empty() && !cert_result.errors.is_empty() {
+                return Err(crate::Error::Io(std::io::Error::other(format!(
+                    "failed to load system certificates: {:?}",
+                    cert_result.errors
+                ))));
+            }
+            for cert in cert_result.certs {
+                let _ = roots.add(cert);
+            }
         }
-        for cert in cert_result.certs {
-            let _ = roots.add(cert);
+        if let Some(trust_pem) = wss_tls.trust_pem.as_deref() {
+            for cert in CertificateDer::pem_slice_iter(trust_pem) {
+                let cert = cert.map_err(|e| Error::Protocol(format!("invalid trust PEM: {e}")))?;
+                roots
+                    .add(cert)
+                    .map_err(|e| Error::Protocol(format!("invalid trust certificate: {e}")))?;
+            }
         }
         config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)

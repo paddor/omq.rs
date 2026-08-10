@@ -251,14 +251,34 @@ pub struct Options {
 /// and client-side server certificate validation only. Mutual TLS/client
 /// certificate authentication is not implemented.
 #[cfg(feature = "ws")]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WssTls {
     /// PEM-encoded server certificate chain for WSS bind.
     pub server_cert_pem: Option<Vec<u8>>,
     /// PEM-encoded server private key for WSS bind.
     pub server_key_pem: Option<Vec<u8>>,
+    /// PEM-encoded trust anchors for WSS connect.
+    pub trust_pem: Option<Vec<u8>>,
+    /// Override server name used for WSS certificate verification.
+    pub hostname: Option<String>,
+    /// Trust the platform certificate store for WSS connect.
+    pub trust_system: bool,
     /// Accept invalid server certificates on connect (for testing).
     pub accept_invalid_certs: bool,
+}
+
+#[cfg(feature = "ws")]
+impl Default for WssTls {
+    fn default() -> Self {
+        Self {
+            server_cert_pem: None,
+            server_key_pem: None,
+            trust_pem: None,
+            hostname: None,
+            trust_system: true,
+            accept_invalid_certs: false,
+        }
+    }
 }
 
 /// Backward-compatible alias. [`MechanismSetup`] is the canonical type.

@@ -36,6 +36,7 @@ async fn wss_rejects_invalid_cert() {
             server_cert_pem: Some(cert_pem),
             server_key_pem: Some(key_pem),
             accept_invalid_certs: false,
+            ..WssTls::default()
         },
         ..Options::default()
     };

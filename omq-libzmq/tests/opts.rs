@@ -710,6 +710,11 @@ const ZMQ_LAST_ENDPOINT: i32 = 32;
 const ZMQ_EVENTS: i32 = 15;
 const ZMQ_POLLIN_: i32 = 1;
 const ZMQ_POLLOUT_: i32 = 2;
+const ZMQ_WSS_KEY_PEM: i32 = 103;
+const ZMQ_WSS_CERT_PEM: i32 = 104;
+const ZMQ_WSS_TRUST_PEM: i32 = 105;
+const ZMQ_WSS_HOSTNAME: i32 = 106;
+const ZMQ_WSS_TRUST_SYSTEM: i32 = 107;
 
 #[test]
 fn ipv6_roundtrip() {
@@ -747,6 +752,46 @@ fn compat_noop_options_roundtrip() {
 
     assert_eq!(set_i32(s, ZMQ_XPUB_NODROP, 1), 0);
     assert_eq!(get_i32(s, ZMQ_XPUB_NODROP), 1);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn wss_options_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(s, ZMQ_WSS_TRUST_SYSTEM), 1);
+
+    assert_eq!(set_bytes(s, ZMQ_WSS_KEY_PEM, b"server-key"), 0);
+    assert_eq!(set_bytes(s, ZMQ_WSS_CERT_PEM, b"server-cert"), 0);
+    assert_eq!(set_bytes(s, ZMQ_WSS_TRUST_PEM, b"trust-cert"), 0);
+    assert_eq!(set_bytes(s, ZMQ_WSS_HOSTNAME, b"example.test"), 0);
+    assert_eq!(set_i32(s, ZMQ_WSS_TRUST_SYSTEM, 0), 0);
+
+    let mut buf = [0u8; 64];
+
+    let len = get_bytes(s, ZMQ_WSS_KEY_PEM, &mut buf);
+    assert_eq!(&buf[..len], b"server-key");
+
+    let len = get_bytes(s, ZMQ_WSS_CERT_PEM, &mut buf);
+    assert_eq!(&buf[..len], b"server-cert");
+
+    let len = get_bytes(s, ZMQ_WSS_TRUST_PEM, &mut buf);
+    assert_eq!(&buf[..len], b"trust-cert");
+
+    let len = get_bytes(s, ZMQ_WSS_HOSTNAME, &mut buf);
+    let hostname = std::ffi::CStr::from_bytes_until_nul(&buf[..len])
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(hostname, "example.test");
+    assert_eq!(get_i32(s, ZMQ_WSS_TRUST_SYSTEM), 0);
+
+    assert_eq!(set_bytes(s, ZMQ_WSS_KEY_PEM, b""), 0);
+    let len = get_bytes(s, ZMQ_WSS_KEY_PEM, &mut buf);
+    assert_eq!(len, 0);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

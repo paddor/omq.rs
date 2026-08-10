@@ -61,7 +61,7 @@ use crate::transport::{
 #[cfg(feature = "ws")]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct WsConnectOptions<'a> {
-    pub(super) accept_invalid_certs: bool,
+    pub(super) wss_tls: &'a omq_proto::options::WssTls,
     pub(super) mechanism: &'a omq_proto::MechanismSetup,
 }
 
@@ -555,7 +555,7 @@ pub(super) async fn connect_any(
             port,
             path,
             matches!(plain, Endpoint::Wss { .. }),
-            ws_options.accept_invalid_certs,
+            ws_options.wss_tls,
             ws_options.mechanism,
         )
         .await?;

@@ -16,9 +16,15 @@ const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
 const ZMQ_PUB: i32 = 1;
 const ZMQ_SUB: i32 = 2;
+const ZMQ_LINGER: i32 = 17;
 const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_SUBSCRIBE: i32 = 6;
+const ZMQ_WSS_KEY_PEM: i32 = 103;
+const ZMQ_WSS_CERT_PEM: i32 = 104;
+const ZMQ_WSS_TRUST_PEM: i32 = 105;
+const ZMQ_WSS_HOSTNAME: i32 = 106;
+const ZMQ_WSS_TRUST_SYSTEM: i32 = 107;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
     zmq_setsockopt(
@@ -33,6 +39,43 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
         (&ms as *const i32).cast(),
         size_of::<i32>(),
     );
+}
+
+fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
+    assert_eq!(
+        zmq_setsockopt(sock, opt, (&value as *const i32).cast(), size_of::<i32>(),),
+        0,
+        "setsockopt {opt} failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+}
+
+fn set_bytes(sock: *mut c_void, opt: i32, data: &[u8]) {
+    assert_eq!(
+        zmq_setsockopt(sock, opt, data.as_ptr().cast(), data.len()),
+        0,
+        "setsockopt {opt} failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+}
+
+fn test_tls_chain() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+    let server_key = rcgen::KeyPair::generate().unwrap();
+    let mut server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
+    server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = server_params.signed_by(&server_key, &ca_issuer).unwrap();
+
+    (
+        server_cert.pem().into_bytes(),
+        server_key.serialize_pem().into_bytes(),
+        ca_cert.pem().into_bytes(),
+    )
 }
 
 /// Generate platform-specific IPC endpoint for testing.
@@ -233,6 +276,68 @@ fn tcp_pub_sub_multiple_subscribers() {
     zmq_close(sub1);
     zmq_close(sub2);
     zmq_close(pub_);
+    zmq_ctx_term(ctx);
+}
+
+// --- WSS TLS option wiring ---
+
+#[test]
+fn wss_push_pull_with_tls_options() {
+    let (cert_pem, key_pem, ca_pem) = test_tls_chain();
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    set_i32(push, ZMQ_LINGER, 0);
+    set_i32(pull, ZMQ_LINGER, 0);
+    set_timeo(push, 2000);
+    set_timeo(pull, 2000);
+
+    set_bytes(pull, ZMQ_WSS_CERT_PEM, &cert_pem);
+    set_bytes(pull, ZMQ_WSS_KEY_PEM, &key_pem);
+
+    let bind_addr = CString::new("wss://127.0.0.1:0/").unwrap();
+    assert_eq!(
+        zmq_bind(pull, bind_addr.as_ptr()),
+        0,
+        "wss bind failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+    let addr = helpers::last_endpoint(pull);
+
+    set_i32(push, ZMQ_WSS_TRUST_SYSTEM, 0);
+    set_bytes(push, ZMQ_WSS_TRUST_PEM, &ca_pem);
+    set_bytes(push, ZMQ_WSS_HOSTNAME, b"127.0.0.1");
+
+    assert_eq!(
+        zmq_connect(push, addr.as_ptr()),
+        0,
+        "wss connect failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+
+    let payload = b"wss-c-abi";
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+        i32::try_from(payload.len()).unwrap(),
+        "wss send failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+
+    let mut buf = [0u8; 64];
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(
+        rc,
+        i32::try_from(payload.len()).unwrap(),
+        "wss recv failed, errno={}",
+        omq_zmq::zmq_errno()
+    );
+    assert_eq!(&buf[..payload.len()], payload);
+
+    zmq_close(push);
+    zmq_close(pull);
     zmq_ctx_term(ctx);
 }
 

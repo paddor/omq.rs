@@ -60,6 +60,11 @@ pub(crate) struct SocketOverlay {
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
     pub reconnect_stop: i32,
+    pub wss_key_pem: Option<Vec<u8>>,
+    pub wss_cert_pem: Option<Vec<u8>>,
+    pub wss_trust_pem: Option<Vec<u8>>,
+    pub wss_hostname: Option<String>,
+    pub wss_trust_system: bool,
 }
 
 impl Default for SocketOverlay {
@@ -95,6 +100,11 @@ impl Default for SocketOverlay {
             req_relaxed: false,
             xpub_nodrop: false,
             reconnect_stop: 0,
+            wss_key_pem: None,
+            wss_cert_pem: None,
+            wss_trust_pem: None,
+            wss_hostname: None,
+            wss_trust_system: true,
         }
     }
 }
@@ -214,6 +224,14 @@ impl SocketOverlay {
             mechanism,
             xpub_nodrop: self.xpub_nodrop,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
+            wss_tls: omq_tokio::options::WssTls {
+                server_cert_pem: self.wss_cert_pem.clone(),
+                server_key_pem: self.wss_key_pem.clone(),
+                trust_pem: self.wss_trust_pem.clone(),
+                hostname: self.wss_hostname.clone(),
+                trust_system: self.wss_trust_system,
+                accept_invalid_certs: false,
+            },
             ..Default::default()
         }
     }
@@ -714,6 +732,36 @@ pub extern "C" fn zmq_setsockopt(
             };
             lock_overlay!(sock_arc).reconnect_stop = v;
         }
+        ZMQ_WSS_KEY_PEM => {
+            let Some(v) = read_bytes(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).wss_key_pem = none_if_empty(v);
+        }
+        ZMQ_WSS_CERT_PEM => {
+            let Some(v) = read_bytes(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).wss_cert_pem = none_if_empty(v);
+        }
+        ZMQ_WSS_TRUST_PEM => {
+            let Some(v) = read_bytes(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).wss_trust_pem = none_if_empty(v);
+        }
+        ZMQ_WSS_HOSTNAME => {
+            let Some(v) = read_string(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).wss_hostname = if v.is_empty() { None } else { Some(v) };
+        }
+        ZMQ_WSS_TRUST_SYSTEM => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).wss_trust_system = v != 0;
+        }
         #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
         | ZMQ_RATE
@@ -765,11 +813,6 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_SOCKS_PASSWORD
         | ZMQ_IN_BATCH_SIZE
         | ZMQ_OUT_BATCH_SIZE
-        | ZMQ_WSS_KEY_PEM
-        | ZMQ_WSS_CERT_PEM
-        | ZMQ_WSS_TRUST_PEM
-        | ZMQ_WSS_HOSTNAME
-        | ZMQ_WSS_TRUST_SYSTEM
         | ZMQ_ONLY_FIRST_SUBSCRIBE
         | ZMQ_HELLO_MSG
         | ZMQ_DISCONNECT_MSG
@@ -1125,6 +1168,35 @@ pub extern "C" fn zmq_getsockopt(
             i32::from(lock_overlay!(sock_arc).xpub_nodrop),
         ),
         ZMQ_RECONNECT_STOP => write_i32(optval, optvallen, lock_overlay!(sock_arc).reconnect_stop),
+        ZMQ_WSS_KEY_PEM => {
+            let ov = lock_overlay!(sock_arc);
+            write_bytes(optval, optvallen, ov.wss_key_pem.as_deref().unwrap_or(b""))
+        }
+        ZMQ_WSS_CERT_PEM => {
+            let ov = lock_overlay!(sock_arc);
+            write_bytes(optval, optvallen, ov.wss_cert_pem.as_deref().unwrap_or(b""))
+        }
+        ZMQ_WSS_TRUST_PEM => {
+            let ov = lock_overlay!(sock_arc);
+            write_bytes(
+                optval,
+                optvallen,
+                ov.wss_trust_pem.as_deref().unwrap_or(b""),
+            )
+        }
+        ZMQ_WSS_HOSTNAME => {
+            let ov = lock_overlay!(sock_arc);
+            write_string(
+                optval,
+                optvallen,
+                ov.wss_hostname.as_deref().unwrap_or("").as_bytes(),
+            )
+        }
+        ZMQ_WSS_TRUST_SYSTEM => write_i32(
+            optval,
+            optvallen,
+            i32::from(lock_overlay!(sock_arc).wss_trust_system),
+        ),
         ZMQ_IPV4ONLY => write_i32(optval, optvallen, i32::from(!lock_overlay!(sock_arc).ipv6)),
         ZMQ_MULTICAST_MAXTPDU => write_i32(optval, optvallen, 1500),
         ZMQ_USE_FD => write_i32(optval, optvallen, -1),
@@ -1157,7 +1229,6 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_XPUB_MANUAL_LAST_VALUE
         | ZMQ_IN_BATCH_SIZE
         | ZMQ_OUT_BATCH_SIZE
-        | ZMQ_WSS_TRUST_SYSTEM
         | ZMQ_ONLY_FIRST_SUBSCRIBE
         | ZMQ_PRIORITY
         | ZMQ_BUSY_POLL
@@ -1180,11 +1251,7 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_BINDTODEVICE
         | ZMQ_METADATA
         | ZMQ_SOCKS_USERNAME
-        | ZMQ_SOCKS_PASSWORD
-        | ZMQ_WSS_KEY_PEM
-        | ZMQ_WSS_CERT_PEM
-        | ZMQ_WSS_TRUST_PEM
-        | ZMQ_WSS_HOSTNAME => write_string(optval, optvallen, b""),
+        | ZMQ_SOCKS_PASSWORD => write_string(optval, optvallen, b""),
         ZMQ_XPUB_WELCOME_MSG | ZMQ_HELLO_MSG | ZMQ_DISCONNECT_MSG | ZMQ_HICCUP_MSG => {
             write_bytes(optval, optvallen, b"")
         }
@@ -1218,6 +1285,21 @@ fn read_string(optval: *const libc::c_void, optvallen: usize) -> Option<String> 
     // SAFETY: optval is non-null with optvallen > 0 (checked above).
     let slice = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
     Some(String::from_utf8_lossy(slice).into_owned())
+}
+
+fn read_bytes(optval: *const libc::c_void, optvallen: usize) -> Option<Vec<u8>> {
+    if optvallen == 0 {
+        return Some(Vec::new());
+    }
+    if optval.is_null() {
+        return None;
+    }
+    // SAFETY: optval is non-null with optvallen > 0 (checked above).
+    Some(unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) }.to_vec())
+}
+
+fn none_if_empty(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    if bytes.is_empty() { None } else { Some(bytes) }
 }
 
 fn read_key(optval: *const libc::c_void, optvallen: usize) -> Option<[u8; 32]> {

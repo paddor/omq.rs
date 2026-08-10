@@ -198,10 +198,16 @@ func sendRx(ctx context.Context, rx chan Message, msg Message, policy OverrunPol
 }
 
 func sendChannelBatch(ctx context.Context, socket *Socket, tx <-chan Message, first Message, errorsCh chan<- error) bool {
+	if errFromContext(ctx) != nil {
+		return false
+	}
 	batch := make([]Message, 0, 64)
 	batch = append(batch, first)
 drain:
 	for len(batch) < cap(batch) {
+		if errFromContext(ctx) != nil {
+			return false
+		}
 		select {
 		case msg, ok := <-tx:
 			if !ok {
@@ -214,6 +220,9 @@ drain:
 	}
 
 	for len(batch) > 0 {
+		if errFromContext(ctx) != nil {
+			return false
+		}
 		sent, err := socket.trySendBatch(batch)
 		if sent > 0 {
 			batch = batch[sent:]

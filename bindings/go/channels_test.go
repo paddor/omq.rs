@@ -78,3 +78,50 @@ func TestChannelsCloseClosesErrors(t *testing.T) {
 		t.Fatal("Errors not closed")
 	}
 }
+
+func TestSendChannelBatchStopsBeforeDrainWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tx := make(chan Message, 1)
+	tx <- String("queued")
+	errorsCh := make(chan error, 1)
+
+	if sendChannelBatch(ctx, nil, tx, String("first"), errorsCh) {
+		t.Fatal("sendChannelBatch reported success after cancel")
+	}
+	if got := len(tx); got != 1 {
+		t.Fatalf("queued messages drained after cancel = %d, want 1", got)
+	}
+}
+
+func TestChannelsCloseStopsBusyTxWorker(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	runCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	channels, err := push.Channels(runCtx, ChannelOptions{Capacity: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer channels.Close()
+
+	for i := 0; i < 128; i++ {
+		channels.Tx <- String("queued")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		channels.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Channels.Close did not stop busy Tx worker")
+	}
+}

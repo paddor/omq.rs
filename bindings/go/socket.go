@@ -16,6 +16,7 @@ type Socket struct {
 	owner      *Context
 	ringSize   int
 	overrun    OverrunPolicy
+	handleMu   sync.RWMutex
 	closed     atomic.Bool
 	ops        chan socketOp
 	ownerDone  chan struct{}
@@ -622,7 +623,9 @@ func (s *Socket) startClose(op socketOp) {
 		_, err := s.do(context.Background(), true, op)
 		close(s.ops)
 		<-s.ownerDone
+		s.handleMu.Lock()
 		s.handle = nil
+		s.handleMu.Unlock()
 		s.releaseAuthCallbacks()
 		if s.owner != nil {
 			s.owner.removeSocket(s)
@@ -668,6 +671,18 @@ func (s *Socket) recordOption(record func(*SocketOptions)) {
 	s.optionsMu.Lock()
 	record(&s.options)
 	s.optionsMu.Unlock()
+}
+
+func (s *Socket) nativeHandle() (*nativeSocket, error) {
+	if s == nil || s.closed.Load() {
+		return nil, ErrClosed
+	}
+	s.handleMu.RLock()
+	defer s.handleMu.RUnlock()
+	if s.handle == nil {
+		return nil, ErrClosed
+	}
+	return s.handle, nil
 }
 
 func cloneSocketOptions(options SocketOptions) SocketOptions {

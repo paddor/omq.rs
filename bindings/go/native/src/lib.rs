@@ -1099,6 +1099,64 @@ fn recv_one(socket: &OmqGoSocket, timeout_millis: i64) -> Result<Message, Error>
         .ok_or(Error::WouldBlock)
 }
 
+struct ReceiveAnyEntry<'a> {
+    index: usize,
+    socket: &'a OmqGoSocket,
+    native: BlockingSocket,
+}
+
+fn try_receive_any_entry(
+    entries: &[ReceiveAnyEntry<'_>],
+) -> Result<Option<(usize, Message)>, Error> {
+    for entry in entries {
+        if entry.socket.closed.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        if let Some(message) = entry
+            .socket
+            .recv_cache
+            .lock()
+            .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?
+            .pop_front()
+        {
+            return Ok(Some((entry.index, message)));
+        }
+        match entry.native.try_recv() {
+            Ok(message) => return Ok(Some((entry.index, message))),
+            Err(Error::WouldBlock | Error::Timeout) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+async fn receive_any_loop(
+    entries: Vec<ReceiveAnyEntry<'_>>,
+    timeout: Option<Duration>,
+) -> Result<Option<(usize, Message)>, Error> {
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    let mut spins = 0u32;
+
+    loop {
+        if let Some(event) = try_receive_any_entry(&entries)? {
+            return Ok(Some(event));
+        }
+
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            tokio::time::sleep(remaining.min(Duration::from_micros(50))).await;
+        } else if spins < 256 {
+            spins += 1;
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(Duration::from_micros(50)).await;
+        }
+    }
+}
+
 fn copy_message_into(message: &Message, destination: &mut [u8]) -> Result<usize, Error> {
     if message.len() != 1 {
         return Err(Error::Config(
@@ -1827,6 +1885,67 @@ pub extern "C" fn omq_go_socket_try_send_batch(
         }
     })();
     status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_receive_any(
+    sockets: *const *mut OmqGoSocket,
+    socket_count: usize,
+    timeout_millis: i64,
+    index: *mut usize,
+    out: *mut OmqGoMessage,
+) -> OmqGoStatus {
+    if socket_count == 0 {
+        return OmqGoStatus::err(CONFIG, "receive-any requires at least one socket");
+    }
+    if sockets.is_null() || index.is_null() || out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive-any pointer");
+    }
+    unsafe {
+        *index = 0;
+        *out = OmqGoMessage {
+            parts: ptr::null_mut(),
+            part_count: 0,
+        };
+    }
+
+    let raw_sockets = unsafe { slice::from_raw_parts(sockets, socket_count) };
+    let mut entries = Vec::with_capacity(socket_count);
+    for (entry_index, socket) in raw_sockets.iter().copied().enumerate() {
+        if socket.is_null() {
+            return OmqGoStatus::err(CONFIG, "receive-any socket is null");
+        }
+        let socket = unsafe { &*socket };
+        if socket.closed.load(Ordering::Acquire) {
+            return OmqGoStatus::err(CLOSED, "socket closed");
+        }
+        match socket.materialize() {
+            Ok(native) => entries.push(ReceiveAnyEntry {
+                index: entry_index,
+                socket,
+                native,
+            }),
+            Err(error) => return OmqGoStatus::from_error(error),
+        }
+    }
+
+    let timeout = duration_from_timeout_millis(timeout_millis);
+    let ctx = entries[0].socket.ctx.clone();
+    match ctx.block_on(receive_any_loop(entries, timeout)) {
+        Ok(Some((event_index, message))) => unsafe {
+            *index = event_index;
+            *out = message_to_c(message);
+            OmqGoStatus::ok()
+        },
+        Ok(None) => {
+            if timeout_millis == 0 {
+                OmqGoStatus::err(AGAIN, "operation would block")
+            } else {
+                OmqGoStatus::err(TIMEOUT, "operation timed out")
+            }
+        }
+        Err(error) => OmqGoStatus::from_error(error),
+    }
 }
 
 #[unsafe(no_mangle)]

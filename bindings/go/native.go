@@ -245,6 +245,47 @@ func socketMessagesTrySendNative(socket *nativeSocket, messages []Message) (int,
 	return int(sent), err
 }
 
+func receiveAnyNative(sockets []*Socket, timeoutMillis int64) (ReceiveEvent, error) {
+	if len(sockets) == 0 {
+		return ReceiveEvent{}, &ConfigError{Err: "receive-any requires at least one socket"}
+	}
+	size := C.size_t(len(sockets)) * C.size_t(unsafe.Sizeof(uintptr(0)))
+	ptr := C.malloc(size)
+	if ptr == nil {
+		return ReceiveEvent{}, &Error{Err: "receive-any allocation failed"}
+	}
+	defer C.free(ptr)
+
+	handles := unsafe.Slice((**C.OmqGoSocket)(ptr), len(sockets))
+	for i, socket := range sockets {
+		handle, err := socket.nativeHandle()
+		if err != nil {
+			return ReceiveEvent{}, err
+		}
+		handles[i] = (*C.OmqGoSocket)(handle)
+	}
+
+	var index C.size_t
+	var out C.OmqGoMessage
+	err := statusErr(C.omq_go_receive_any(
+		(**C.OmqGoSocket)(ptr),
+		C.size_t(len(sockets)),
+		C.int64_t(timeoutMillis),
+		&index,
+		&out,
+	))
+	if err != nil {
+		return ReceiveEvent{}, err
+	}
+	defer C.omq_go_message_free(out)
+	goIndex := int(index)
+	if goIndex < 0 || goIndex >= len(sockets) {
+		return ReceiveEvent{}, &Error{Err: "native receive-any returned invalid socket index"}
+	}
+	keepAlive(sockets)
+	return ReceiveEvent{Socket: sockets[goIndex], Message: messageFromC(out)}, nil
+}
+
 func socketMessageRecvNative(socket *nativeSocket) (Message, error) {
 	var out C.OmqGoMessage
 	err := statusErr(C.omq_go_socket_recv((*C.OmqGoSocket)(socket), 0, &out))

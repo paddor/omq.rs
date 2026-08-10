@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const receiveAnyContextPoll = time.Millisecond
+
 // ReceiveEvent identifies the socket that produced a message.
 type ReceiveEvent struct {
 	// Socket is the socket that produced Message.
@@ -19,16 +21,7 @@ func TryReceiveAny(sockets ...*Socket) (ReceiveEvent, error) {
 	if err := validateReceiveAnySockets(sockets); err != nil {
 		return ReceiveEvent{}, err
 	}
-	for _, socket := range sockets {
-		msg, err := socket.TryRecv()
-		if err == nil {
-			return ReceiveEvent{Socket: socket, Message: msg}, nil
-		}
-		if !errors.Is(err, ErrAgain) {
-			return ReceiveEvent{}, err
-		}
-	}
-	return ReceiveEvent{}, ErrAgain
+	return receiveAnyNative(sockets, 0)
 }
 
 // ReceiveAny receives from any supplied socket until ctx is done.
@@ -39,18 +32,15 @@ func ReceiveAny(ctx context.Context, sockets ...*Socket) (ReceiveEvent, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for i := 0; ; i++ {
+	for {
 		if err := errFromContext(ctx); err != nil {
 			return ReceiveEvent{}, err
 		}
-		event, err := TryReceiveAny(sockets...)
+		event, err := receiveAnyNative(sockets, receiveAnyTimeoutMillis(ctx))
 		if err == nil {
 			return event, nil
 		}
-		if !errors.Is(err, ErrAgain) {
-			return ReceiveEvent{}, err
-		}
-		if err := waitRetry(ctx, i); err != nil {
+		if !errors.Is(err, ErrAgain) && !errors.Is(err, ErrTimeout) {
 			return ReceiveEvent{}, err
 		}
 	}
@@ -62,11 +52,15 @@ func ReceiveAnyTimeout(timeout time.Duration, sockets ...*Socket) (ReceiveEvent,
 		return TryReceiveAny(sockets...)
 	}
 	if timeout < 0 {
-		return ReceiveAny(context.Background(), sockets...)
+		if err := validateReceiveAnySockets(sockets); err != nil {
+			return ReceiveEvent{}, err
+		}
+		return receiveAnyNative(sockets, -1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return ReceiveAny(ctx, sockets...)
+	if err := validateReceiveAnySockets(sockets); err != nil {
+		return ReceiveEvent{}, err
+	}
+	return receiveAnyNative(sockets, durationMillis(timeout))
 }
 
 func validateReceiveAnySockets(sockets []*Socket) error {
@@ -84,4 +78,63 @@ func validateReceiveAnySockets(sockets []*Socket) error {
 		seen[socket] = struct{}{}
 	}
 	return nil
+}
+
+func receiveAnyTimeoutMillis(ctx context.Context) int64 {
+	timeout := receiveAnyContextPoll
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return durationMillis(timeout)
+}
+
+// Poller receives from a stable set of sockets.
+type Poller struct {
+	sockets []*Socket
+}
+
+// NewPoller creates a poller for distinct sockets.
+func NewPoller(sockets ...*Socket) (*Poller, error) {
+	if err := validateReceiveAnySockets(sockets); err != nil {
+		return nil, err
+	}
+	return &Poller{sockets: append([]*Socket(nil), sockets...)}, nil
+}
+
+// Sockets returns a copy of this poller's sockets.
+func (p *Poller) Sockets() []*Socket {
+	if p == nil {
+		return nil
+	}
+	return append([]*Socket(nil), p.sockets...)
+}
+
+// TryRecv receives from the first ready poller socket without waiting.
+func (p *Poller) TryRecv() (ReceiveEvent, error) {
+	if p == nil {
+		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
+	}
+	return TryReceiveAny(p.sockets...)
+}
+
+// Recv receives from any poller socket until ctx is done.
+func (p *Poller) Recv(ctx context.Context) (ReceiveEvent, error) {
+	if p == nil {
+		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
+	}
+	return ReceiveAny(ctx, p.sockets...)
+}
+
+// RecvTimeout receives from any poller socket with timeout semantics.
+func (p *Poller) RecvTimeout(timeout time.Duration) (ReceiveEvent, error) {
+	if p == nil {
+		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
+	}
+	return ReceiveAnyTimeout(timeout, p.sockets...)
 }

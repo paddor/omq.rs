@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "esModuleInterop": true,
+    "lib": ["ES2024"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist",
+    "rootDir": "ts",
+    "strict": true,
+    "target": "ES2024"
+  },
+  "include": ["ts/**/*.ts"]
+}

@@ -1,0 +1,19 @@
+[package]
+name = "omq-node"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes = "1.12.0"
+napi = { version = "3.12.1", features = ["async", "napi8"] }
+napi-derive = "3.6.3"
+omq-tokio = { path = "../../omq-tokio", default-features = false, features = ["plain", "curve", "lz4", "ws"] }
+tokio = { version = "1.52.0", features = ["rt", "sync"] }
+
+[build-dependencies]
+napi-build = "2.4.1"

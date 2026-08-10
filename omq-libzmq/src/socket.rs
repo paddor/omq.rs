@@ -663,6 +663,24 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_char) -> u32 {
+    if sock_ptr.is_null() {
+        set_errno(crate::error::ENOTSOCK);
+        return 0;
+    }
+    set_errno(crate::error::ENOTSUP);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, _routing_id: u32) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(crate::error::ENOTSOCK);
+    }
+    fail(crate::error::ENOTSUP)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
     let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
         Ok(t) => t,
@@ -761,6 +779,40 @@ pub extern "C" fn zmq_socket_monitor(
         Ok(Err(ref e)) => fail(map_omq_err(e)),
         Err(()) => fail(ETERM),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_socket_monitor_versioned(
+    sock_ptr: *mut c_void,
+    addr: *const libc::c_char,
+    events: u64,
+    event_version: c_int,
+    _type: c_int,
+) -> c_int {
+    if event_version != 1 || events > c_int::MAX as u64 {
+        return fail(crate::error::ENOTSUP);
+    }
+    zmq_socket_monitor(sock_ptr, addr, events as c_int)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_socket_monitor_pipes_stats(sock_ptr: *mut c_void) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(crate::error::ENOTSOCK);
+    }
+    fail(crate::error::ENOTSUP)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_socket_get_peer_state(
+    socket: *mut c_void,
+    _routing_id: *const c_void,
+    _routing_id_size: usize,
+) -> c_int {
+    if socket.is_null() {
+        return fail(crate::error::ENOTSOCK);
+    }
+    fail(crate::error::ENOTSUP)
 }
 
 async fn push_to_pump(

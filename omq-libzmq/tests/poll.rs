@@ -10,8 +10,8 @@ use std::time::Duration;
 use serial_test::serial;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_poll, zmq_recv, zmq_send,
-    zmq_setsockopt, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_poll, zmq_ppoll, zmq_recv,
+    zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -22,6 +22,7 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
+const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 #[repr(C)]
 struct PollItem {
@@ -50,6 +51,22 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 fn poll_null_items_zero_count_is_valid() {
     let rc = zmq_poll(std::ptr::null_mut(), 0, 0);
     assert_eq!(rc, 0);
+}
+
+#[test]
+fn ppoll_null_sigmask_delegates_to_poll() {
+    assert_eq!(zmq_ppoll(std::ptr::null_mut(), 0, 0, std::ptr::null()), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ppoll_non_null_sigmask_returns_enotsup() {
+    let mask = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
+    assert_eq!(
+        zmq_ppoll(std::ptr::null_mut(), 0, 0, mask.as_ptr().cast()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
 }
 
 #[test]

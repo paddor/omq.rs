@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_setsockopt, zmq_socket,
-    zmq_socket_monitor,
+    zmq_socket_get_peer_state, zmq_socket_monitor, zmq_socket_monitor_pipes_stats,
+    zmq_socket_monitor_versioned,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -24,6 +25,9 @@ const ZMQ_EVENT_ACCEPTED: u16 = 0x0020;
 const ZMQ_EVENT_CONNECTED: u16 = 0x0001;
 const ZMQ_EVENT_HANDSHAKE_SUCCEEDED: u16 = 0x1000;
 const ZMQ_EVENT_ALL: i32 = 0xFFFF;
+const ZMQ_CURRENT_EVENT_VERSION: i32 = 1;
+const ZMQ_CURRENT_EVENT_VERSION_DRAFT: i32 = 2;
+const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
     zmq_setsockopt(
@@ -57,6 +61,46 @@ fn recv_monitor_event(mon: *mut c_void) -> Option<(u16, String)> {
     };
 
     Some((event_id, endpoint))
+}
+
+#[test]
+fn monitor_versioned_v1_delegates_and_v2_stubs_return_enotsup() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let mon_addr = CString::new("inproc://test-monitor-versioned-v1").unwrap();
+
+    assert_eq!(
+        zmq_socket_monitor_versioned(
+            pull,
+            mon_addr.as_ptr(),
+            ZMQ_EVENT_ALL as u64,
+            ZMQ_CURRENT_EVENT_VERSION,
+            ZMQ_PAIR,
+        ),
+        0
+    );
+
+    let pull2 = zmq_socket(ctx, ZMQ_PULL);
+    let mon_addr2 = CString::new("inproc://test-monitor-versioned-v2").unwrap();
+    assert_eq!(
+        zmq_socket_monitor_versioned(
+            pull2,
+            mon_addr2.as_ptr(),
+            ZMQ_EVENT_ALL as u64,
+            ZMQ_CURRENT_EVENT_VERSION_DRAFT,
+            ZMQ_PAIR,
+        ),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+    assert_eq!(zmq_socket_monitor_pipes_stats(pull2), -1);
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+    assert_eq!(zmq_socket_get_peer_state(pull2, std::ptr::null(), 0), -1);
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+
+    zmq_close(pull2);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
 }
 
 #[test]

@@ -13,6 +13,13 @@ use crate::error::{ETERM, fail, map_omq_err};
 use crate::notify::NotifyHandle;
 use crate::socket::OmqSocket;
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct ZmqIovec {
+    pub iov_base: *mut libc::c_void,
+    pub iov_len: usize,
+}
+
 fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
     c_int::try_from(n).map_err(|_| libc::EMSGSIZE)
 }
@@ -504,6 +511,38 @@ pub extern "C" fn zmq_recv(
     zmq_recv_impl(sock, buf, buf_len, flags)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_sendiov(
+    sock_ptr: *mut libc::c_void,
+    iov: *mut ZmqIovec,
+    count: usize,
+    _flags: c_int,
+) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    if iov.is_null() && count > 0 {
+        return fail(libc::EFAULT);
+    }
+    fail(crate::error::ENOTSUP)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_recviov(
+    sock_ptr: *mut libc::c_void,
+    iov: *mut ZmqIovec,
+    count: *mut usize,
+    _flags: c_int,
+) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    if iov.is_null() || count.is_null() {
+        return fail(libc::EFAULT);
+    }
+    fail(crate::error::ENOTSUP)
+}
+
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     use std::sync::atomic::Ordering;
 
@@ -850,5 +889,35 @@ fn copy_to_buf(buf: *mut libc::c_void, buf_len: usize, src: &[u8]) {
     // SAFETY: buf is non-null with buf_len writable bytes; copy_len <= buf_len.
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), buf.cast::<u8>(), copy_len);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ZMQ_PUSH: c_int = 8;
+    const ZMQ_ENOTSUP: c_int = crate::error::ENOTSUP;
+
+    #[test]
+    fn iovec_apis_are_link_compatible_stubs() {
+        let ctx = crate::zmq_ctx_new();
+        let push = crate::zmq_socket(ctx, ZMQ_PUSH);
+        assert!(!push.is_null());
+
+        let mut byte = b'x';
+        let mut iov = ZmqIovec {
+            iov_base: (&raw mut byte).cast(),
+            iov_len: 1,
+        };
+        assert_eq!(zmq_sendiov(push, &raw mut iov, 1, 0), -1);
+        assert_eq!(crate::zmq_errno(), ZMQ_ENOTSUP);
+
+        let mut count = 1usize;
+        assert_eq!(zmq_recviov(push, &raw mut iov, &raw mut count, 0), -1);
+        assert_eq!(crate::zmq_errno(), ZMQ_ENOTSUP);
+
+        crate::zmq_close(push);
+        crate::zmq_ctx_term(ctx);
     }
 }

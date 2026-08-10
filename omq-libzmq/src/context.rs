@@ -302,6 +302,7 @@ const ZMQ_MAX_SOCKETS: c_int = 2;
 const ZMQ_SOCKET_LIMIT: c_int = 3;
 const ZMQ_MAX_MSGSZ: c_int = 5;
 const ZMQ_MSG_T_SIZE: c_int = 6;
+const ZMQ_THREAD_NAME_PREFIX: c_int = 9;
 const ZMQ_ZERO_COPY_RECV: c_int = 10;
 const ZMQ_IPV6_CTX: c_int = 42;
 const ZMQ_BLOCKY: c_int = 70;
@@ -362,4 +363,81 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
         ZMQ_BLOCKY => c_int::from(ctx.blocky.load(Ordering::Acquire)),
         _ => crate::error::fail(libc::EINVAL),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_ctx_set_ext(
+    ctx_ptr: *mut libc::c_void,
+    option: c_int,
+    optval: *const c_void,
+    optvallen: usize,
+) -> c_int {
+    if option == ZMQ_THREAD_NAME_PREFIX {
+        if optval.is_null() && optvallen > 0 {
+            return crate::error::fail(libc::EFAULT);
+        }
+        return 0;
+    }
+    if optval.is_null() || optvallen < std::mem::size_of::<c_int>() {
+        return crate::error::fail(libc::EINVAL);
+    }
+    // SAFETY: optval is non-null and at least sizeof(int) bytes (checked above).
+    let value = unsafe { std::ptr::read_unaligned(optval.cast::<c_int>()) };
+    zmq_ctx_set(ctx_ptr, option, value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_ctx_get_ext(
+    ctx_ptr: *mut libc::c_void,
+    option: c_int,
+    optval: *mut c_void,
+    optvallen: *mut usize,
+) -> c_int {
+    if option == ZMQ_THREAD_NAME_PREFIX {
+        return write_bytes(optval, optvallen, b"");
+    }
+    let value = zmq_ctx_get(ctx_ptr, option);
+    if value == -1 && option != ZMQ_MAX_MSGSZ {
+        return -1;
+    }
+    write_i32(optval, optvallen, value)
+}
+
+fn write_i32(optval: *mut c_void, optvallen: *mut usize, value: c_int) -> c_int {
+    if optval.is_null() || optvallen.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
+    // SAFETY: optvallen is non-null (checked above).
+    let avail = unsafe { *optvallen };
+    if avail < std::mem::size_of::<c_int>() {
+        return crate::error::fail(libc::EINVAL);
+    }
+    // SAFETY: output buffer is non-null and large enough (checked above).
+    unsafe {
+        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
+        std::ptr::write_unaligned(optval.cast::<c_int>(), value);
+        *optvallen = std::mem::size_of::<c_int>();
+    }
+    0
+}
+
+fn write_bytes(optval: *mut c_void, optvallen: *mut usize, bytes: &[u8]) -> c_int {
+    if optval.is_null() || optvallen.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
+    // SAFETY: optvallen is non-null (checked above).
+    let avail = unsafe { *optvallen };
+    let needed = bytes.len() + 1;
+    if avail < needed {
+        return crate::error::fail(libc::EINVAL);
+    }
+    // SAFETY: output buffer is non-null and large enough (checked above).
+    unsafe {
+        std::ptr::write_bytes(optval.cast::<u8>(), 0, avail);
+        if !bytes.is_empty() {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), optval.cast::<u8>(), bytes.len());
+        }
+        *optvallen = needed;
+    }
+    0
 }

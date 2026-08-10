@@ -8,9 +8,9 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_getsockopt, zmq_join,
-    zmq_msg_close, zmq_msg_init_buffer, zmq_msg_send, zmq_msg_set_group, zmq_recv, zmq_send,
-    zmq_setsockopt, zmq_socket,
+    zmq_bind, zmq_close, zmq_connect, zmq_connect_peer, zmq_ctx_new, zmq_ctx_term,
+    zmq_disconnect_peer, zmq_getsockopt, zmq_join, zmq_msg_close, zmq_msg_init_buffer,
+    zmq_msg_send, zmq_msg_set_group, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_SERVER: i32 = 12;
@@ -27,6 +27,7 @@ const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_TYPE: i32 = 16;
 const ZMQ_IDENTITY: i32 = 5;
+const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
 
@@ -77,6 +78,22 @@ fn rcvmore(sock: *mut c_void) -> bool {
     let mut sz = size_of::<i32>();
     zmq_getsockopt(sock, ZMQ_RCVMORE, (&mut v as *mut i32).cast(), &mut sz);
     v != 0
+}
+
+#[test]
+fn peer_connect_peer_stubs_return_enotsup() {
+    let ctx = zmq_ctx_new();
+    let peer = zmq_socket(ctx, ZMQ_PEER);
+    assert!(!peer.is_null());
+
+    let addr = CString::new("inproc://peer-connect-peer-stub").unwrap();
+    assert_eq!(zmq_connect_peer(peer, addr.as_ptr()), 0);
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+    assert_eq!(zmq_disconnect_peer(peer, 1), -1);
+    assert_eq!(omq_zmq::zmq_errno(), ZMQ_ENOTSUP);
+
+    zmq_close(peer);
+    zmq_ctx_term(ctx);
 }
 
 /// SERVER/CLIENT: SERVER receives [`routing_id`, body], replies [`routing_id`, body].

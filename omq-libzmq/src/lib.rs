@@ -33,14 +33,16 @@ mod msg;
 mod notify;
 mod opts;
 pub mod poll;
+mod poller;
 pub mod proxy;
 mod send_recv;
 mod socket;
+mod timers;
 mod util;
 
 pub use context::{
-    omq_ctx_from_share_key, omq_ctx_share_key, zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_new,
-    zmq_ctx_set, zmq_ctx_shutdown, zmq_ctx_term, zmq_init, zmq_term,
+    omq_ctx_from_share_key, omq_ctx_share_key, zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_get_ext,
+    zmq_ctx_new, zmq_ctx_set, zmq_ctx_set_ext, zmq_ctx_shutdown, zmq_ctx_term, zmq_init, zmq_term,
 };
 pub use curve::{zmq_curve_keypair, zmq_curve_public, zmq_z85_decode, zmq_z85_encode};
 pub use error::{zmq_errno, zmq_strerror};
@@ -50,17 +52,28 @@ pub use msg::{
     zmq_msg_move, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set, zmq_msg_set_group,
     zmq_msg_set_routing_id, zmq_msg_size, zmq_recvmsg, zmq_sendmsg,
 };
-pub use poll::zmq_poll;
+pub use poll::{zmq_poll, zmq_ppoll};
+pub use poller::{
+    zmq_poller_add, zmq_poller_add_fd, zmq_poller_destroy, zmq_poller_fd, zmq_poller_modify,
+    zmq_poller_modify_fd, zmq_poller_new, zmq_poller_remove, zmq_poller_remove_fd, zmq_poller_size,
+    zmq_poller_wait, zmq_poller_wait_all,
+};
 pub use proxy::{zmq_proxy, zmq_proxy_steerable};
-pub use send_recv::{zmq_recv, zmq_send, zmq_send_const};
+pub use send_recv::{zmq_recv, zmq_recviov, zmq_send, zmq_send_const, zmq_sendiov};
 pub use socket::{
-    zmq_bind, zmq_close, zmq_connect, zmq_disconnect, zmq_join, zmq_leave, zmq_socket,
-    zmq_socket_monitor, zmq_unbind,
+    zmq_bind, zmq_close, zmq_connect, zmq_connect_peer, zmq_disconnect, zmq_disconnect_peer,
+    zmq_join, zmq_leave, zmq_socket, zmq_socket_get_peer_state, zmq_socket_monitor,
+    zmq_socket_monitor_pipes_stats, zmq_socket_monitor_versioned, zmq_unbind,
+};
+pub use timers::{
+    zmq_timers_add, zmq_timers_cancel, zmq_timers_destroy, zmq_timers_execute, zmq_timers_new,
+    zmq_timers_reset, zmq_timers_set_interval, zmq_timers_timeout,
 };
 pub use util::{
     zmq_atomic_counter_dec, zmq_atomic_counter_destroy, zmq_atomic_counter_inc,
-    zmq_atomic_counter_new, zmq_atomic_counter_set, zmq_atomic_counter_value, zmq_has, zmq_sleep,
-    zmq_stopwatch_intermediate, zmq_stopwatch_start, zmq_stopwatch_stop, zmq_version,
+    zmq_atomic_counter_new, zmq_atomic_counter_set, zmq_atomic_counter_value, zmq_device, zmq_has,
+    zmq_sleep, zmq_stopwatch_intermediate, zmq_stopwatch_start, zmq_stopwatch_stop,
+    zmq_threadclose, zmq_threadstart, zmq_version,
 };
 
 // The opts module exports setsockopt/getsockopt directly as C symbols.

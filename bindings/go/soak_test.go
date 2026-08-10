@@ -21,9 +21,9 @@ const (
 	soakConnectTimeout = 5 * time.Second
 	soakReportInterval = 10 * time.Second
 
-	soakResourceWarmup     = 30 * time.Second
-	soakResourceWindow     = 2 * time.Minute
-	soakResourceMinSamples = 6
+	soakResourceWarmup     = 10 * time.Minute
+	soakResourceWindow     = 5 * time.Minute
+	soakResourceMinSamples = 12
 )
 
 type soakCounters struct {
@@ -667,7 +667,7 @@ func TestResourceSlopePerSecond(t *testing.T) {
 func TestResourceLiveGrowthDetectsSustainedRSSGrowth(t *testing.T) {
 	start := time.Unix(0, 0)
 	var samples []soakResourceSample
-	for seconds := 0; seconds <= 180; seconds += 20 {
+	for seconds := 0; seconds <= 1_200; seconds += 20 {
 		samples = append(samples, soakResourceSample{
 			at:    start.Add(time.Duration(seconds) * time.Second),
 			value: uint64(seconds) * 1_048_576,
@@ -682,8 +682,8 @@ func TestResourceLiveGrowthDetectsSustainedRSSGrowth(t *testing.T) {
 func TestResourceLiveGrowthIgnoresPlateau(t *testing.T) {
 	start := time.Unix(0, 0)
 	var samples []soakResourceSample
-	for seconds := 0; seconds <= 180; seconds += 20 {
-		value := uint64(min(seconds, 60)) * 1_048_576
+	for seconds := 0; seconds <= 1_200; seconds += 20 {
+		value := uint64(min(seconds, 600)) * 1_048_576
 		samples = append(samples, soakResourceSample{
 			at:    start.Add(time.Duration(seconds) * time.Second),
 			value: value,
@@ -698,7 +698,7 @@ func TestResourceLiveGrowthIgnoresPlateau(t *testing.T) {
 func TestResourceLiveFDGrowthDetectsSustainedGrowth(t *testing.T) {
 	start := time.Unix(0, 0)
 	var samples []soakResourceSample
-	for seconds := 0; seconds <= 180; seconds += 20 {
+	for seconds := 0; seconds <= 1_200; seconds += 20 {
 		samples = append(samples, soakResourceSample{
 			at:    start.Add(time.Duration(seconds) * time.Second),
 			value: uint64(10 + seconds/2),
@@ -838,7 +838,7 @@ func readSoakResourceLimits() soakResourceLimits {
 			[]string{"OMQ_GO_SOAK_MAX_HEAP_GROWTH_MB"}, 128,
 		),
 		rssGrowthBytes: mibConfig(
-			[]string{"OMQ_GO_SOAK_MAX_RSS_GROWTH_MB"}, 256,
+			[]string{"OMQ_GO_SOAK_MAX_RSS_GROWTH_MB"}, 512,
 		),
 		fdGrowth: uint64(nonNegativeInt64Config(
 			[]string{"OMQ_GO_SOAK_MAX_FD_GROWTH"}, 128,

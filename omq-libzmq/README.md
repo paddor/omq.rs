@@ -8,12 +8,14 @@ in other languages) to link against omq instead of libzmq.
 
 ## Features
 
-- **Transports:** `inproc://`, `tcp://`, `ipc://` (including Windows named pipes), `ws://`, `wss://`
-- **Socket Types:** All standard ZMQ types (PUSH/PULL, PUB/SUB, REQ/REP, DEALER/ROUTER, etc.)
+- **Transports:** `inproc://`, `tcp://`, `ipc://` (including Windows named
+  pipes), `ws://`, `wss://`
+- **Socket Types:** Standard ZMQ types except DGRAM (PUSH/PULL, PUB/SUB,
+  REQ/REP, DEALER/ROUTER, etc.)
 - **Security:** PLAIN, CURVE
 - **Compression:** LZ4 and Zstd over TCP
 - **Cross-Platform:** Linux, macOS, Windows, BSD
-- **API Compatibility:** Drop-in libzmq replacement with identical ABI
+- **API Compatibility:** Drop-in ABI target with documented compatibility gaps
 
 32-bit Linux support covers `i686-unknown-linux-gnu` and
 `armv7-unknown-linux-gnueabihf`. `zmq_msg_t` is 64 bytes and pointer-aligned,
@@ -24,15 +26,17 @@ matching libzmq; `zmq_ctx_get(ctx, ZMQ_MSG_T_SIZE)` returns 64.
 The bundled `zmq.h` tracks the libzmq 4.3.6 C ABI and is compiled against
 cppzmq by `scripts/test-cppzmq.sh`.
 
-Draft/legacy helper APIs needed by modern bindings are link-compatible. Unsupported
-draft behavior returns `ENOTSUP`; this currently includes peer connect/disconnect,
-monitor v2 pipe stats, peer state, `zmq_ppoll` with a signal mask, and deprecated
-iovec send/recv. `zmq_poller_fd` returns `EINVAL` because this poller is emulated
-over `zmq_poll` and has no native pollable fd.
+Draft/legacy helper APIs needed by modern bindings are link-compatible.
+Unsupported draft behavior returns `ENOTSUP`; this currently includes peer
+connect/disconnect, monitor v2 pipe stats, peer state, `zmq_ppoll` with a
+signal mask, and deprecated iovec send/recv. `zmq_poller_fd` returns `EINVAL`
+because this poller is emulated over `zmq_poll` and has no native pollable fd.
 
 WSS TLS options (`ZMQ_WSS_KEY_PEM`, `ZMQ_WSS_CERT_PEM`, `ZMQ_WSS_TRUST_PEM`,
 `ZMQ_WSS_HOSTNAME`, `ZMQ_WSS_TRUST_SYSTEM`) are wired into `wss://` binds and
 connects.
+
+Detailed support notes live in [doc/compatibility.md](doc/compatibility.md).
 
 ## Build
 

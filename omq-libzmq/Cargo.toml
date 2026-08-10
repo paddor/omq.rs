@@ -108,6 +108,10 @@ name = "omq_libzmq_opts"
 path = "tests/opts.rs"
 
 [[test]]
+name = "omq_libzmq_opts_torture"
+path = "tests/opts_torture.rs"
+
+[[test]]
 name = "omq_libzmq_poll"
 path = "tests/poll.rs"
 

@@ -79,6 +79,8 @@ type socketResult struct {
 	err     error
 }
 
+const boundSocketBlockingPollMillis int64 = 1
+
 func newSocket(
 	handle *nativeSocket,
 	socketType SocketType,
@@ -795,15 +797,19 @@ func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
 // RecvIntoBlocking receives into dst using the Run context.
 func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
 	ctx := s.Context()
-	for i := 0; ; i++ {
-		n, err := s.TryRecvInto(dst)
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return 0, err
+	}
+	for {
+		if err := errFromContext(ctx); err != nil {
+			return 0, err
+		}
+		n, err := ring.recvInto(dst, boundSocketBlockingPollMillis)
 		if err == nil {
 			return n, nil
 		}
-		if !errors.Is(err, ErrAgain) {
-			return 0, err
-		}
-		if err := waitRetry(ctx, i); err != nil {
+		if !errors.Is(err, ErrAgain) && !errors.Is(err, ErrTimeout) {
 			return 0, err
 		}
 	}

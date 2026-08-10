@@ -18,7 +18,9 @@ type Socket struct {
 	closed     atomic.Bool
 	ops        chan socketOp
 	ownerDone  chan struct{}
+	closeDone  chan struct{}
 	closeOnce  sync.Once
+	closeErr   error
 }
 
 type socketOpKind uint8
@@ -86,6 +88,7 @@ func newSocket(
 		overrun:    overrun,
 		ops:        make(chan socketOp, 1024),
 		ownerDone:  make(chan struct{}),
+		closeDone:  make(chan struct{}),
 	}
 	go socket.ownerLoop()
 	return socket
@@ -516,19 +519,11 @@ func (s *Socket) Close(ctx context.Context) error {
 	if s == nil || s.ops == nil {
 		return nil
 	}
-	var err error
 	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		_, err = s.do(ctx, true, socketOp{kind: socketOpClose, useConfigured: true})
-		close(s.ops)
-		<-s.ownerDone
-		s.handle = nil
-		if s.owner != nil {
-			s.owner.removeSocket(s)
-		}
+		s.startClose(socketOp{kind: socketOpClose, useConfigured: true})
 	})
 	keepAlive(s)
-	return err
+	return s.waitClose(ctx)
 }
 
 func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
@@ -538,19 +533,11 @@ func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 	if s == nil || s.ops == nil {
 		return nil
 	}
-	var err error
 	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		_, err = s.do(ctx, true, socketOp{kind: socketOpClose, linger: linger})
-		close(s.ops)
-		<-s.ownerDone
-		s.handle = nil
-		if s.owner != nil {
-			s.owner.removeSocket(s)
-		}
+		s.startClose(socketOp{kind: socketOpClose, linger: linger})
 	})
 	keepAlive(s)
-	return err
+	return s.waitClose(ctx)
 }
 
 func (s *Socket) Type() SocketType {
@@ -583,6 +570,30 @@ func (s *Socket) free() {
 		return
 	}
 	_ = s.Close(context.Background())
+}
+
+func (s *Socket) startClose(op socketOp) {
+	s.closed.Store(true)
+	go func() {
+		_, err := s.do(context.Background(), true, op)
+		close(s.ops)
+		<-s.ownerDone
+		s.handle = nil
+		if s.owner != nil {
+			s.owner.removeSocket(s)
+		}
+		s.closeErr = err
+		close(s.closeDone)
+	}()
+}
+
+func (s *Socket) waitClose(ctx context.Context) error {
+	select {
+	case <-s.closeDone:
+		return s.closeErr
+	case <-ctx.Done():
+		return errFromContext(ctx)
+	}
 }
 
 func (s *Socket) noFinalizer() {

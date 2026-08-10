@@ -66,3 +66,45 @@ func TestBoundRecvIntoUsesContextAndRing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCloseContextReturnsWhileRunCallbackIsActive(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = pull.Run(context.Background(), func(socket *BoundSocket) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not start")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if err := pull.Close(closeCtx); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Close err = %v, want ErrTimeout", err)
+	}
+	close(release)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- pull.Close(context.Background())
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("socket close did not finish")
+	}
+}

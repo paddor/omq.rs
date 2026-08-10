@@ -124,6 +124,14 @@ func PlainServer(username, password string) SocketOption {
 	})
 }
 
+func PlainServerAuth(auth Authenticator) SocketOption {
+	return authOption(auth, func(id uint64) SocketOption {
+		return nativeOption(func(handle *nativeSocket) error {
+			return setPlainServerAuthNative(handle, id)
+		})
+	})
+}
+
 func PlainClient(username, password string) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
 		if err := validateZmtpShortString("PLAIN username", username); err != nil {
@@ -142,6 +150,17 @@ func CurveServer(keypair CurveKeypair) SocketOption {
 			return err
 		}
 		return setCurveServerNative(handle, keypair)
+	})
+}
+
+func CurveServerAuth(keypair CurveKeypair, auth Authenticator) SocketOption {
+	return authOption(auth, func(id uint64) SocketOption {
+		return nativeOption(func(handle *nativeSocket) error {
+			if err := validateCurveKeypair(keypair); err != nil {
+				return err
+			}
+			return setCurveServerAuthNative(handle, keypair, id)
+		})
 	})
 }
 
@@ -424,6 +443,24 @@ func validateZmtpShortString(name, value string) error {
 		return &ConfigError{Err: name + " length must be at most 255 bytes"}
 	}
 	return nil
+}
+
+func authOption(auth Authenticator, option func(uint64) SocketOption) SocketOption {
+	return func(s *Socket) error {
+		if auth == nil {
+			return &ConfigError{Err: "authenticator must not be nil"}
+		}
+		if s == nil {
+			return ErrClosed
+		}
+		id := registerAuthCallback(auth)
+		if err := option(id)(s); err != nil {
+			unregisterAuthCallback(id)
+			return err
+		}
+		s.addAuthCallback(id)
+		return nil
+	}
 }
 
 func validateCurveKeypair(keypair CurveKeypair) error {

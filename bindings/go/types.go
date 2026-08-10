@@ -109,6 +109,14 @@ type CurveKeypair struct {
 	Secret string
 }
 
+type PeerInfo struct {
+	Mechanism string
+	PublicKey string
+	Identity  []byte
+	Username  string
+	Password  string
+}
+
 type WorkloadProfile int32
 
 const (

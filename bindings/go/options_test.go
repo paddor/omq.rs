@@ -154,6 +154,8 @@ func TestOptionsRejectInvalidValues(t *testing.T) {
 		Identity(make([]byte, zmtpMaxShortStringBytes+1)),
 		PlainServer(string(make([]byte, zmtpMaxShortStringBytes+1)), "secret"),
 		PlainClient("alice", string(make([]byte, zmtpMaxShortStringBytes+1))),
+		PlainServerAuth(nil),
+		CurveServerAuth(CurveKeypair{}, nil),
 	}
 	for _, option := range invalid {
 		if err := option(pull); !isConfigError(err) {

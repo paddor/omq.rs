@@ -48,6 +48,19 @@ typedef struct {
 } OmqGoEvent;
 
 typedef struct {
+  const uint8_t *mechanism_data;
+  size_t mechanism_len;
+  const uint8_t *public_key_data;
+  size_t public_key_len;
+  const uint8_t *identity_data;
+  size_t identity_len;
+  const uint8_t *username_data;
+  size_t username_len;
+  const uint8_t *password_data;
+  size_t password_len;
+} OmqGoAuthPeer;
+
+typedef struct {
   OmqGoStatus status;
   const uint8_t *data;
   size_t len;
@@ -124,8 +137,10 @@ OmqGoStatus omq_go_socket_set_heartbeat_interval(OmqGoSocket *socket, int64_t mi
 OmqGoStatus omq_go_socket_set_handshake_timeout(OmqGoSocket *socket, int64_t millis);
 OmqGoStatus omq_go_socket_set_max_message_size(OmqGoSocket *socket, int64_t bytes);
 OmqGoStatus omq_go_socket_set_plain_server(OmqGoSocket *socket, const char *username, const char *password);
+OmqGoStatus omq_go_socket_set_plain_server_callback(OmqGoSocket *socket, uint64_t callback_id);
 OmqGoStatus omq_go_socket_set_plain_client(OmqGoSocket *socket, const char *username, const char *password);
 OmqGoStatus omq_go_socket_set_curve_server(OmqGoSocket *socket, const char *public_key, const char *secret_key);
+OmqGoStatus omq_go_socket_set_curve_server_callback(OmqGoSocket *socket, const char *public_key, const char *secret_key, uint64_t callback_id);
 OmqGoStatus omq_go_socket_set_curve_client(OmqGoSocket *socket, const char *public_key, const char *secret_key, const char *server_public_key);
 OmqGoStatus omq_go_socket_set_workload_profile(OmqGoSocket *socket, int32_t profile);
 OmqGoStatus omq_go_socket_set_reconnect(OmqGoSocket *socket, int32_t mode, int64_t min_millis, int64_t max_millis);

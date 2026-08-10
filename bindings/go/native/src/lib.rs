@@ -4,7 +4,7 @@
 )]
 
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::slice;
 use std::str::FromStr;
@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_proto::TrySendError;
-#[cfg(feature = "plain")]
+#[cfg(any(feature = "plain", feature = "curve"))]
 use omq_tokio::Authenticator;
+#[cfg(any(feature = "plain", feature = "curve"))]
+use omq_tokio::MechanismPeerInfo;
 use omq_tokio::blocking::Socket as BlockingSocket;
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
@@ -83,6 +85,25 @@ pub struct OmqGoEvent {
     connection_id: u64,
     retry_millis: u64,
     attempt: u32,
+}
+
+#[repr(C)]
+pub struct OmqGoAuthPeer {
+    mechanism_data: *const u8,
+    mechanism_len: usize,
+    public_key_data: *const u8,
+    public_key_len: usize,
+    identity_data: *const u8,
+    identity_len: usize,
+    username_data: *const u8,
+    username_len: usize,
+    password_data: *const u8,
+    password_len: usize,
+}
+
+#[cfg(any(feature = "plain", feature = "curve"))]
+unsafe extern "C" {
+    fn omqGoAuthCallback(callback_id: u64, peer: *const OmqGoAuthPeer) -> c_int;
 }
 
 #[repr(C)]
@@ -1252,6 +1273,71 @@ fn bytes_to_event_data(bytes: Bytes) -> (*mut u8, usize) {
     raw_bytes(&bytes)
 }
 
+#[cfg(any(feature = "plain", feature = "curve"))]
+fn go_authenticator(callback_id: u64) -> Authenticator {
+    Authenticator::new(move |peer| go_authenticate(callback_id, peer))
+}
+
+#[cfg(any(feature = "plain", feature = "curve"))]
+fn go_authenticate(callback_id: u64, peer: &MechanismPeerInfo) -> bool {
+    let mechanism = peer.mechanism.as_str().unwrap_or("");
+    let public_key = peer_public_key_z85(peer);
+
+    let (mechanism_data, mechanism_len) = str_view(mechanism);
+    let (public_key_data, public_key_len) = str_view(&public_key);
+    let (identity_data, identity_len) = optional_bytes_view(peer.identity.as_deref());
+    let (username_data, username_len) = optional_str_view(peer.username.as_deref());
+    let (password_data, password_len) = optional_str_view(peer.password.as_deref());
+
+    let c_peer = OmqGoAuthPeer {
+        mechanism_data,
+        mechanism_len,
+        public_key_data,
+        public_key_len,
+        identity_data,
+        identity_len,
+        username_data,
+        username_len,
+        password_data,
+        password_len,
+    };
+    unsafe { omqGoAuthCallback(callback_id, &c_peer) != 0 }
+}
+
+#[cfg(feature = "curve")]
+fn peer_public_key_z85(peer: &MechanismPeerInfo) -> String {
+    if peer.mechanism == omq_proto::proto::MechanismName::CURVE {
+        return CurvePublicKey::from_bytes(peer.public_key).to_z85();
+    }
+    String::new()
+}
+
+#[cfg(not(feature = "curve"))]
+fn peer_public_key_z85(_peer: &MechanismPeerInfo) -> String {
+    String::new()
+}
+
+#[cfg(any(feature = "plain", feature = "curve"))]
+fn str_view(value: &str) -> (*const u8, usize) {
+    if value.is_empty() {
+        return (ptr::null(), 0);
+    }
+    (value.as_ptr(), value.len())
+}
+
+#[cfg(any(feature = "plain", feature = "curve"))]
+fn optional_str_view(value: Option<&str>) -> (*const u8, usize) {
+    value.map_or((ptr::null(), 0), str_view)
+}
+
+#[cfg(any(feature = "plain", feature = "curve"))]
+fn optional_bytes_view(value: Option<&[u8]>) -> (*const u8, usize) {
+    match value {
+        Some(bytes) if !bytes.is_empty() => (bytes.as_ptr(), bytes.len()),
+        _ => (ptr::null(), 0),
+    }
+}
+
 fn event_to_c(event: NativeMonitorEvent) -> OmqGoEvent {
     let mut out = OmqGoEvent {
         kind: ptr::null_mut(),
@@ -2103,6 +2189,31 @@ pub extern "C" fn omq_go_socket_set_plain_server(
 
 #[unsafe(no_mangle)]
 #[cfg(feature = "plain")]
+pub extern "C" fn omq_go_socket_set_plain_server_callback(
+    socket: *mut OmqGoSocket,
+    callback_id: u64,
+) -> OmqGoStatus {
+    if callback_id == 0 {
+        return OmqGoStatus::err(CONFIG, "invalid auth callback id");
+    }
+    set_socket_option(socket, move |options| {
+        options.mechanism = MechanismSetup::PlainServer {
+            authenticator: go_authenticator(callback_id),
+        };
+    })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "plain"))]
+pub extern "C" fn omq_go_socket_set_plain_server_callback(
+    _socket: *mut OmqGoSocket,
+    _callback_id: u64,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "PLAIN support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "plain")]
 pub extern "C" fn omq_go_socket_set_plain_client(
     socket: *mut OmqGoSocket,
     username: *const c_char,
@@ -2159,6 +2270,45 @@ pub extern "C" fn omq_go_socket_set_curve_server(
     _socket: *mut OmqGoSocket,
     _public_key: *const c_char,
     _secret_key: *const c_char,
+) -> OmqGoStatus {
+    OmqGoStatus::err(CONFIG, "CURVE support not enabled")
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "curve")]
+pub extern "C" fn omq_go_socket_set_curve_server_callback(
+    socket: *mut OmqGoSocket,
+    public_key: *const c_char,
+    secret_key: *const c_char,
+    callback_id: u64,
+) -> OmqGoStatus {
+    if callback_id == 0 {
+        return OmqGoStatus::err(CONFIG, "invalid auth callback id");
+    }
+    let result = (|| {
+        let keypair = curve_keypair_from_z85(str_from_c(public_key)?, str_from_c(secret_key)?)?;
+        Ok(set_socket_option(socket, move |options| {
+            let mut curve_options = CurveServerOptions::default();
+            curve_options.authenticator = Some(go_authenticator(callback_id));
+            options.mechanism = MechanismSetup::CurveServer {
+                our_keypair: keypair,
+                options: curve_options,
+            };
+        }))
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "curve"))]
+pub extern "C" fn omq_go_socket_set_curve_server_callback(
+    _socket: *mut OmqGoSocket,
+    _public_key: *const c_char,
+    _secret_key: *const c_char,
+    _callback_id: u64,
 ) -> OmqGoStatus {
     OmqGoStatus::err(CONFIG, "CURVE support not enabled")
 }

@@ -21,6 +21,8 @@ type Socket struct {
 	closeDone  chan struct{}
 	closeOnce  sync.Once
 	closeErr   error
+	authMu     sync.Mutex
+	authIDs    []uint64
 }
 
 type socketOpKind uint8
@@ -579,6 +581,7 @@ func (s *Socket) startClose(op socketOp) {
 		close(s.ops)
 		<-s.ownerDone
 		s.handle = nil
+		s.releaseAuthCallbacks()
 		if s.owner != nil {
 			s.owner.removeSocket(s)
 		}
@@ -598,6 +601,22 @@ func (s *Socket) waitClose(ctx context.Context) error {
 
 func (s *Socket) noFinalizer() {
 	runtime.SetFinalizer(s, nil)
+}
+
+func (s *Socket) addAuthCallback(id uint64) {
+	s.authMu.Lock()
+	s.authIDs = append(s.authIDs, id)
+	s.authMu.Unlock()
+}
+
+func (s *Socket) releaseAuthCallbacks() {
+	s.authMu.Lock()
+	ids := s.authIDs
+	s.authIDs = nil
+	s.authMu.Unlock()
+	for _, id := range ids {
+		unregisterAuthCallback(id)
+	}
 }
 
 type BoundSocket struct {

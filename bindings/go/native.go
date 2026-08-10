@@ -139,6 +139,17 @@ func curvePublicNative(secretKey string) (string, error) {
 	return C.GoString(publicKey), nil
 }
 
+//export omqGoAuthCallback
+func omqGoAuthCallback(id C.uint64_t, peer *C.OmqGoAuthPeer) C.int {
+	if peer == nil {
+		return 0
+	}
+	if callAuthCallback(uint64(id), peerInfoFromC(peer)) {
+		return 1
+	}
+	return 0
+}
+
 func socketNewNative(ctx *nativeContext, socketType SocketType) (*nativeSocket, error) {
 	var out *C.OmqGoSocket
 	err := statusErr(C.omq_go_socket_new((*C.OmqGoContext)(ctx), C.int32_t(socketType), &out))
@@ -470,6 +481,13 @@ func setPlainServerNative(socket *nativeSocket, username, password string) error
 	return statusErr(C.omq_go_socket_set_plain_server((*C.OmqGoSocket)(socket), cUsername, cPassword))
 }
 
+func setPlainServerAuthNative(socket *nativeSocket, callbackID uint64) error {
+	return statusErr(C.omq_go_socket_set_plain_server_callback(
+		(*C.OmqGoSocket)(socket),
+		C.uint64_t(callbackID),
+	))
+}
+
 func setPlainClientNative(socket *nativeSocket, username, password string) error {
 	cUsername := C.CString(username)
 	defer C.free(unsafe.Pointer(cUsername))
@@ -484,6 +502,19 @@ func setCurveServerNative(socket *nativeSocket, keypair CurveKeypair) error {
 	cSecret := C.CString(keypair.Secret)
 	defer C.free(unsafe.Pointer(cSecret))
 	return statusErr(C.omq_go_socket_set_curve_server((*C.OmqGoSocket)(socket), cPublic, cSecret))
+}
+
+func setCurveServerAuthNative(socket *nativeSocket, keypair CurveKeypair, callbackID uint64) error {
+	cPublic := C.CString(keypair.Public)
+	defer C.free(unsafe.Pointer(cPublic))
+	cSecret := C.CString(keypair.Secret)
+	defer C.free(unsafe.Pointer(cSecret))
+	return statusErr(C.omq_go_socket_set_curve_server_callback(
+		(*C.OmqGoSocket)(socket),
+		cPublic,
+		cSecret,
+		C.uint64_t(callbackID),
+	))
 }
 
 func setCurveClientNative(socket *nativeSocket, keypair CurveKeypair, serverPublicKey string) error {
@@ -723,6 +754,30 @@ func eventFromC(raw C.OmqGoEvent) MonitorEvent {
 		ev.Data = copyFromCPtr(raw.data, raw.data_len)
 	}
 	return ev
+}
+
+func peerInfoFromC(raw *C.OmqGoAuthPeer) PeerInfo {
+	return PeerInfo{
+		Mechanism: stringFromCBytes(raw.mechanism_data, raw.mechanism_len),
+		PublicKey: stringFromCBytes(raw.public_key_data, raw.public_key_len),
+		Identity:  bytesFromCBytes(raw.identity_data, raw.identity_len),
+		Username:  stringFromCBytes(raw.username_data, raw.username_len),
+		Password:  stringFromCBytes(raw.password_data, raw.password_len),
+	}
+}
+
+func stringFromCBytes(data *C.uint8_t, length C.size_t) string {
+	if data == nil || length == 0 {
+		return ""
+	}
+	return string(unsafe.Slice((*byte)(unsafe.Pointer(data)), int(length)))
+}
+
+func bytesFromCBytes(data *C.uint8_t, length C.size_t) []byte {
+	if data == nil || length == 0 {
+		return nil
+	}
+	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(data)), int(length))...)
 }
 
 func copyFromCPtr(data *C.uint8_t, length C.size_t) []byte {

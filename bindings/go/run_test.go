@@ -108,3 +108,106 @@ func TestCloseContextReturnsWhileRunCallbackIsActive(t *testing.T) {
 		t.Fatal("socket close did not finish")
 	}
 }
+
+func TestQueuedSendDoesNotRunAfterContextCancel(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	endpoint, err := pull.Bind("inproc://go-run-canceled-send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- push.Run(context.Background(), func(socket *BoundSocket) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not start")
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	err = push.Send(sendCtx, String("late"))
+	cancel()
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Send err = %v, want ErrTimeout", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pull.RecvTimeout(20 * time.Millisecond); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("RecvTimeout err = %v, want ErrTimeout", err)
+	}
+}
+
+func TestQueuedRecvDoesNotRunAfterContextCancel(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	endpoint, err := pull.Bind("inproc://go-run-canceled-recv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.SendTimeout(String("kept"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- pull.Run(context.Background(), func(socket *BoundSocket) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not start")
+	}
+
+	recvCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	_, err = pull.Recv(recvCtx)
+	cancel()
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Recv err = %v, want ErrTimeout", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	msg, err := pull.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.String(); got != "kept" {
+		t.Fatalf("message = %q, want kept", got)
+	}
+}

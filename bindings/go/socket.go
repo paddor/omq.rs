@@ -121,6 +121,9 @@ func (s *Socket) ownerLoop() {
 }
 
 func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
+	if err := socketOpContextErr(op); err != nil {
+		return socketResult{err: err}
+	}
 	switch op.kind {
 	case socketOpFunc:
 		value, err := op.fn(handle)
@@ -210,6 +213,9 @@ func (s *Socket) do(ctx context.Context, allowClosed bool, op socketOp) (result 
 	if !allowClosed && s.closed.Load() {
 		return socketResult{}, ErrClosed
 	}
+	if op.ctx == nil {
+		op.ctx = ctx
+	}
 	defer func() {
 		if recover() != nil {
 			result = socketResult{}
@@ -284,7 +290,7 @@ func (s *Socket) Send(ctx context.Context, msg Message) error {
 		if err := errFromContext(ctx); err != nil {
 			return err
 		}
-		err := s.TrySend(msg)
+		err := s.trySend(ctx, msg)
 		if err == nil {
 			return nil
 		}
@@ -299,7 +305,11 @@ func (s *Socket) Send(ctx context.Context, msg Message) error {
 
 // TrySend sends a message without waiting for queue capacity.
 func (s *Socket) TrySend(msg Message) error {
-	_, err := s.do(context.Background(), false, socketOp{kind: socketOpSend, msg: msg})
+	return s.trySend(context.Background(), msg)
+}
+
+func (s *Socket) trySend(ctx context.Context, msg Message) error {
+	_, err := s.do(ctx, false, socketOp{kind: socketOpSend, msg: msg})
 	keepAlive(s)
 	return err
 }
@@ -335,7 +345,7 @@ func (s *Socket) Recv(ctx context.Context) (Message, error) {
 		if err := errFromContext(ctx); err != nil {
 			return Message{}, err
 		}
-		msg, err := s.TryRecv()
+		msg, err := s.tryRecv(ctx)
 		if err == nil {
 			return msg, nil
 		}
@@ -357,7 +367,7 @@ func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 		if err := errFromContext(ctx); err != nil {
 			return 0, err
 		}
-		n, err := s.TryRecvInto(dst)
+		n, err := s.tryRecvInto(ctx, dst)
 		if err == nil {
 			return n, nil
 		}
@@ -372,7 +382,11 @@ func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 
 // TryRecv receives one message without waiting.
 func (s *Socket) TryRecv() (Message, error) {
-	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecv})
+	return s.tryRecv(context.Background())
+}
+
+func (s *Socket) tryRecv(ctx context.Context) (Message, error) {
+	result, err := s.do(ctx, false, socketOp{kind: socketOpRecv})
 	if err != nil {
 		return Message{}, err
 	}
@@ -382,7 +396,11 @@ func (s *Socket) TryRecv() (Message, error) {
 
 // TryRecvInto receives one single-part message into dst without waiting.
 func (s *Socket) TryRecvInto(dst []byte) (int, error) {
-	result, err := s.do(context.Background(), false, socketOp{kind: socketOpRecvInto, buffer: dst})
+	return s.tryRecvInto(context.Background(), dst)
+}
+
+func (s *Socket) tryRecvInto(ctx context.Context, dst []byte) (int, error) {
+	result, err := s.do(ctx, false, socketOp{kind: socketOpRecvInto, buffer: dst})
 	if err != nil {
 		return 0, err
 	}
@@ -657,6 +675,13 @@ func (s *Socket) waitClose(ctx context.Context) error {
 	case <-ctx.Done():
 		return errFromContext(ctx)
 	}
+}
+
+func socketOpContextErr(op socketOp) error {
+	if op.ctx == nil {
+		return nil
+	}
+	return errFromContext(op.ctx)
 }
 
 func (s *Socket) noFinalizer() {

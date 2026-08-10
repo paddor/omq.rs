@@ -1040,6 +1040,12 @@ def detect_hardware():
     return None
 
 
+def chart_selection(args, sizes):
+    if args.latency_only or args.throughput_only:
+        return DEFAULT_SIZES, DEFAULT_IMPLS, DEFAULT_LATENCY_IMPLS
+    return sizes, args.impls, args.latency_impls
+
+
 def svg_line(points, color, dashed=False):
     dash = ' stroke-dasharray="6,4"' if dashed else ""
     return (
@@ -1330,8 +1336,9 @@ def main():
     print_table(rows, sizes, [] if args.latency_only else args.impls, [] if args.throughput_only else args.latency_impls)
 
     if not args.no_chart and not args.no_save:
-        data = latest_chart_data(sizes, args.impls, args.latency_impls)
-        gen_chart(data, CHART, sizes, args.impls, args.latency_impls)
+        chart_sizes, chart_impls, chart_latency_impls = chart_selection(args, sizes)
+        data = latest_chart_data(chart_sizes, chart_impls, chart_latency_impls)
+        gen_chart(data, CHART, chart_sizes, chart_impls, chart_latency_impls)
 
 
 if __name__ == "__main__":

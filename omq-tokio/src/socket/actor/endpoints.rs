@@ -384,7 +384,7 @@ impl SocketDriver {
         let max_message_size = self.options.max_message_size;
         let inproc_registry = self.inproc_registry.clone();
         #[cfg(feature = "ws")]
-        let accept_invalid_certs = self.options.wss_tls.accept_invalid_certs;
+        let wss_tls = self.options.wss_tls.clone();
         #[cfg(feature = "ws")]
         let mechanism = self.options.mechanism.clone();
         let task = tokio::spawn(async move {
@@ -400,7 +400,7 @@ impl SocketDriver {
                         max_message_size,
                         #[cfg(feature = "ws")]
                         WsConnectOptions {
-                            accept_invalid_certs,
+                            wss_tls: &wss_tls,
                             mechanism: &mechanism,
                         },
                     )

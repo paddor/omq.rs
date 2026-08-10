@@ -35,6 +35,7 @@ async fn wss_push_pull() {
             server_cert_pem: Some(cert_pem),
             server_key_pem: Some(key_pem),
             accept_invalid_certs: false,
+            ..WssTls::default()
         },
         ..Options::default()
     };
@@ -76,6 +77,7 @@ async fn wss_multipart() {
             server_cert_pem: Some(cert_pem),
             server_key_pem: Some(key_pem),
             accept_invalid_certs: false,
+            ..WssTls::default()
         },
         ..Options::default()
     };

@@ -5,6 +5,13 @@ import "time"
 type SocketOption func(*Socket) error
 
 const defaultCompressionLevel = int64(-1 << 63)
+const (
+	zmtpMaxShortStringBytes = 255
+	compressionDictMaxBytes = 8 * 1024
+	zstdLevelMin            = -8
+	zstdLevelMax            = 4
+	maxHeartbeatTTLMillis   = 6_553_500
+)
 
 func nativeOption(op func(*nativeSocket) error) SocketOption {
 	return func(s *Socket) error {
@@ -28,9 +35,7 @@ func RecvHWM(value uint32) SocketOption {
 }
 
 func Linger(value time.Duration) SocketOption {
-	return nativeOption(func(handle *nativeSocket) error {
-		return setLingerNative(handle, durationMillis(value))
-	})
+	return durationOption(value, setLingerNative)
 }
 
 func LingerForever() SocketOption {
@@ -41,6 +46,9 @@ func LingerForever() SocketOption {
 
 func Identity(value []byte) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if len(value) > zmtpMaxShortStringBytes {
+			return &ConfigError{Err: "identity length must be at most 255 bytes"}
+		}
 		return setIdentityNative(handle, value)
 	})
 }
@@ -56,7 +64,16 @@ func HeartbeatOff() SocketOption {
 }
 
 func HeartbeatTTL(value time.Duration) SocketOption {
-	return durationOption(value, setHeartbeatTTLNative)
+	return nativeOption(func(handle *nativeSocket) error {
+		millis, err := nonNegativeMillis("heartbeat TTL", value)
+		if err != nil {
+			return err
+		}
+		if millis > maxHeartbeatTTLMillis {
+			return &ConfigError{Err: "heartbeat TTL exceeds ZMTP maximum of 6553.5s"}
+		}
+		return setHeartbeatTTLNative(handle, millis)
+	})
 }
 
 func NoHeartbeatTTL() SocketOption {
@@ -97,24 +114,42 @@ func NoMaxMessageSize() SocketOption {
 
 func PlainServer(username, password string) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if err := validateZmtpShortString("PLAIN username", username); err != nil {
+			return err
+		}
+		if err := validateZmtpShortString("PLAIN password", password); err != nil {
+			return err
+		}
 		return setPlainServerNative(handle, username, password)
 	})
 }
 
 func PlainClient(username, password string) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if err := validateZmtpShortString("PLAIN username", username); err != nil {
+			return err
+		}
+		if err := validateZmtpShortString("PLAIN password", password); err != nil {
+			return err
+		}
 		return setPlainClientNative(handle, username, password)
 	})
 }
 
 func CurveServer(keypair CurveKeypair) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if err := validateCurveKeypair(keypair); err != nil {
+			return err
+		}
 		return setCurveServerNative(handle, keypair)
 	})
 }
 
 func CurveClient(keypair CurveKeypair, serverPublicKey string) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if err := validateCurveKeypair(keypair); err != nil {
+			return err
+		}
 		return setCurveClientNative(handle, keypair, serverPublicKey)
 	})
 }
@@ -267,6 +302,9 @@ func CompressionDefaultThreshold() SocketOption {
 
 func CompressionLevel(level int) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if level < zstdLevelMin || level > zstdLevelMax {
+			return &ConfigError{Err: "zstd compression level must be -8..=4"}
+		}
 		return setCompressionLevelNative(handle, int64(level))
 	})
 }
@@ -279,6 +317,12 @@ func CompressionDefaultLevel() SocketOption {
 
 func CompressionDict(value []byte) SocketOption {
 	return nativeOption(func(handle *nativeSocket) error {
+		if len(value) == 0 {
+			return &ConfigError{Err: "compression dict must not be empty"}
+		}
+		if len(value) > compressionDictMaxBytes {
+			return &ConfigError{Err: "compression dict length must be at most 8192 bytes"}
+		}
 		return setCompressionDictNative(handle, value)
 	})
 }
@@ -373,4 +417,22 @@ func nonNegativeInt64Option(name string, value int64, set func(*nativeSocket, in
 		}
 		return set(handle, value)
 	})
+}
+
+func validateZmtpShortString(name, value string) error {
+	if len([]byte(value)) > zmtpMaxShortStringBytes {
+		return &ConfigError{Err: name + " length must be at most 255 bytes"}
+	}
+	return nil
+}
+
+func validateCurveKeypair(keypair CurveKeypair) error {
+	public, err := CurvePublic(keypair.Secret)
+	if err != nil {
+		return err
+	}
+	if public != keypair.Public {
+		return &ConfigError{Err: "CURVE public key does not match secret key"}
+	}
+	return nil
 }

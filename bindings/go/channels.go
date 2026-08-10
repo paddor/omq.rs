@@ -1,0 +1,244 @@
+package omq
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+// ChannelOptions configures Socket.Channels.
+type ChannelOptions struct {
+	// Capacity sets Go channel capacity.
+	Capacity int
+	// OverrunPolicy controls receive channel overrun behavior.
+	OverrunPolicy OverrunPolicy
+}
+
+// SocketChannels exposes a socket through Go channels.
+type SocketChannels struct {
+	// Rx receives socket messages when the socket can receive.
+	Rx <-chan Message
+	// Tx sends socket messages when the socket can send.
+	Tx chan<- Message
+	// Events receives monitor events when monitoring is available.
+	Events <-chan MonitorEvent
+	// Errors receives worker errors.
+	Errors <-chan error
+
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// Channels adapts a socket to Go channels.
+func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChannels, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	policy := opts.OverrunPolicy
+	if policy == OverrunBlock {
+		policy = s.overrun
+	}
+	capacity := opts.Capacity
+	if capacity <= 0 {
+		capacity = 1024
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	errorsCh := make(chan error, capacity)
+	eventsCh := make(chan MonitorEvent, capacity)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	var rx chan Message
+	var tx chan Message
+
+	if s.socketType.canRecv() {
+		rx = make(chan Message, capacity)
+		wg.Go(func() {
+			defer close(rx)
+			for {
+				msg, err := s.Recv(ctx)
+				if err != nil {
+					if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+						reportError(ctx, errorsCh, err)
+					}
+					return
+				}
+				ok, err := sendRx(ctx, rx, msg, policy)
+				if err != nil {
+					reportError(ctx, errorsCh, err)
+				}
+				if !ok {
+					return
+				}
+			}
+		})
+	}
+
+	if s.socketType.canSend() {
+		tx = make(chan Message, capacity)
+		wg.Go(func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg, ok := <-tx:
+					if !ok {
+						return
+					}
+					if !sendChannelBatch(ctx, s, tx, msg, errorsCh) {
+						return
+					}
+				}
+			}
+		})
+	}
+
+	monitor, err := s.Monitor()
+	if err == nil {
+		wg.Go(func() {
+			defer monitor.Close()
+			defer close(eventsCh)
+			for {
+				event, err := monitor.Recv(ctx)
+				if err != nil {
+					if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+						reportError(ctx, errorsCh, err)
+					}
+					return
+				}
+				select {
+				case eventsCh <- event:
+				case <-ctx.Done():
+					return
+				}
+			}
+		})
+	} else {
+		close(eventsCh)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errorsCh)
+		close(done)
+	}()
+
+	return &SocketChannels{
+		Rx:     rx,
+		Tx:     tx,
+		Events: eventsCh,
+		Errors: errorsCh,
+		cancel: cancel,
+		done:   done,
+	}, nil
+}
+
+// Close stops channel workers.
+func (c *SocketChannels) Close() {
+	if c == nil {
+		return
+	}
+	c.cancel()
+	<-c.done
+}
+
+func reportError(ctx context.Context, errorsCh chan<- error, err error) {
+	select {
+	case errorsCh <- err:
+	case <-ctx.Done():
+	default:
+	}
+}
+
+func sendRx(ctx context.Context, rx chan Message, msg Message, policy OverrunPolicy) (bool, error) {
+	switch policy {
+	case OverrunDropNewest:
+		select {
+		case rx <- msg:
+		default:
+		}
+		return true, nil
+	case OverrunDropOldest:
+		select {
+		case rx <- msg:
+			return true, nil
+		default:
+		}
+		select {
+		case <-rx:
+		default:
+		}
+		select {
+		case rx <- msg:
+		case <-ctx.Done():
+			return false, nil
+		}
+		return true, nil
+	case OverrunReturnError:
+		select {
+		case rx <- msg:
+			return true, nil
+		default:
+			return false, &Error{Err: "receive channel overrun"}
+		}
+	default:
+		select {
+		case rx <- msg:
+			return true, nil
+		case <-ctx.Done():
+			return false, nil
+		}
+	}
+}
+
+func sendChannelBatch(ctx context.Context, socket *Socket, tx <-chan Message, first Message, errorsCh chan<- error) bool {
+	if errFromContext(ctx) != nil {
+		return false
+	}
+	batch := make([]Message, 0, 64)
+	batch = append(batch, first)
+drain:
+	for len(batch) < cap(batch) {
+		if errFromContext(ctx) != nil {
+			return false
+		}
+		select {
+		case msg, ok := <-tx:
+			if !ok {
+				break drain
+			}
+			batch = append(batch, msg)
+		default:
+			break drain
+		}
+	}
+
+	for len(batch) > 0 {
+		if errFromContext(ctx) != nil {
+			return false
+		}
+		sent, err := socket.trySendBatch(batch)
+		if sent > 0 {
+			batch = batch[sent:]
+			continue
+		}
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, ErrAgain) {
+			if err := socket.Send(ctx, batch[0]); err != nil {
+				if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+					reportError(ctx, errorsCh, err)
+				}
+				return false
+			}
+			batch = batch[1:]
+			continue
+		}
+		if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+			reportError(ctx, errorsCh, err)
+		}
+		return false
+	}
+	return true
+}

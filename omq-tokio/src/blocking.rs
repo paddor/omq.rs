@@ -24,6 +24,7 @@ use omq_proto::message::Message;
 use crate::context::Context;
 use crate::socket::handle::Socket as AsyncSocket;
 use crate::socket::monitor::{ConnectionStatus, MonitorStream};
+pub use crate::socket::recv::BlockingRecvCancel;
 
 /// Blocking socket handle.
 ///
@@ -133,6 +134,37 @@ impl Socket {
         self.inner.blocking_recv_many_into(max, out)
     }
 
+    /// Receive up to `max` messages unless `cancel` fires first.
+    ///
+    /// Returns `Ok(None)` when canceled before the first message arrives.
+    /// After the first message, ready messages are drained without checking
+    /// cancellation.
+    pub fn recv_many_cancelable_into(
+        &self,
+        max: usize,
+        cancel: &BlockingRecvCancel,
+        out: &mut Vec<Message>,
+    ) -> Result<Option<usize>> {
+        self.inner
+            .blocking_recv_many_cancelable_into(max, cancel, out)
+    }
+
+    /// Receive up to `max` messages using a pre-registered cancel handle.
+    ///
+    /// This is for foreign runtimes that pin the blocking socket to one OS
+    /// thread and call [`BlockingRecvCancel::register_current_thread_once`]
+    /// before repeated receives.
+    #[inline]
+    pub fn recv_many_registered_cancelable_into(
+        &self,
+        max: usize,
+        cancel: &BlockingRecvCancel,
+        out: &mut Vec<Message>,
+    ) -> Result<Option<usize>> {
+        self.inner
+            .blocking_recv_many_registered_cancelable_into(max, cancel, out)
+    }
+
     pub fn recv_many_timeout(&self, max: usize, timeout: Duration) -> Result<Vec<Message>> {
         self.inner.blocking_recv_many_timeout(max, timeout)
     }
@@ -231,5 +263,132 @@ impl Socket {
         let s = self.inner;
         self.ctx
             .block_on(async move { s.close_with_linger(linger).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Options, SocketType};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    static NEXT_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
+
+    fn endpoint(prefix: &str) -> Endpoint {
+        format!(
+            "inproc://{prefix}-{}",
+            NEXT_ENDPOINT.fetch_add(1, Ordering::Relaxed)
+        )
+        .parse()
+        .unwrap()
+    }
+
+    fn blocking_pull(ctx: &Context, endpoint: &Endpoint) -> Socket {
+        let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+        pull.bind(endpoint.clone()).unwrap();
+        pull
+    }
+
+    #[test]
+    fn cancelable_recv_returns_none_when_pre_canceled() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-cancel-pre");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let cancel = BlockingRecvCancel::new();
+        cancel.cancel();
+
+        let mut messages = Vec::new();
+        let received = pull
+            .recv_many_cancelable_into(1, &cancel, &mut messages)
+            .unwrap();
+
+        assert_eq!(received, None);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn registered_cancelable_recv_returns_none_when_pre_canceled() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-cancel-registered-pre");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let cancel = BlockingRecvCancel::new();
+        cancel.register_current_thread_once();
+        cancel.cancel();
+
+        let mut messages = Vec::new();
+        let received = pull
+            .recv_many_registered_cancelable_into(1, &cancel, &mut messages)
+            .unwrap();
+
+        assert_eq!(received, None);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn cancelable_recv_wakes_parked_receiver() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-cancel-parked");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let cancel = Arc::new(BlockingRecvCancel::new());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_cancel = Arc::clone(&cancel);
+
+        std::thread::spawn(move || {
+            let mut messages = Vec::new();
+            started_tx.send(()).unwrap();
+            let result = pull.recv_many_cancelable_into(1, &worker_cancel, &mut messages);
+            done_tx.send((result, messages.len())).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        cancel.cancel();
+
+        let (result, len) = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn cancelable_recv_returns_message_when_data_arrives() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-cancel-data");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let push = ctx.blocking_socket(SocketType::Push, Options::default());
+        push.connect(endpoint).unwrap();
+
+        let cancel = Arc::new(BlockingRecvCancel::new());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_cancel = Arc::clone(&cancel);
+
+        std::thread::spawn(move || {
+            let mut messages = Vec::new();
+            started_tx.send(()).unwrap();
+            let result = pull
+                .recv_many_cancelable_into(8, &worker_cancel, &mut messages)
+                .map(|count| {
+                    let first = messages
+                        .first()
+                        .and_then(|message| message.part_bytes(0))
+                        .map(|bytes| bytes.to_vec());
+                    (count, first)
+                });
+            done_tx.send(result).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        push.send(Message::from_slice(b"ok")).unwrap();
+
+        let (count, first) = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, Some(1));
+        assert_eq!(first.as_deref(), Some(&b"ok"[..]));
     }
 }

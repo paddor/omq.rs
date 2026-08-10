@@ -139,6 +139,93 @@ impl std::fmt::Debug for BlockingRecvWaker {
     }
 }
 
+/// Cancellation handle for blocking receive calls.
+#[derive(Debug)]
+pub struct BlockingRecvCancel {
+    canceled: AtomicBool,
+    registered: AtomicBool,
+    thread: Mutex<Option<std::thread::Thread>>,
+}
+
+impl BlockingRecvCancel {
+    /// Create a cancel handle in the active state.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            canceled: AtomicBool::new(false),
+            registered: AtomicBool::new(false),
+            thread: Mutex::new(None),
+        }
+    }
+
+    /// Cancel current and future receive waits.
+    #[inline]
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.lock().unwrap().clone() {
+            thread.unpark();
+        }
+    }
+
+    /// Returns whether this handle has been canceled.
+    #[inline]
+    #[must_use]
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn register(&self, thread: &std::thread::Thread) {
+        *self.thread.lock().unwrap() = Some(thread.clone());
+        self.registered.store(true, Ordering::Release);
+        if self.is_canceled() {
+            thread.unpark();
+        }
+    }
+
+    /// Register the current OS thread once for repeated cancelable receives.
+    ///
+    /// This avoids per-call registration when a foreign binding owns the
+    /// blocking socket thread.
+    pub fn register_current_thread_once(&self) {
+        if self
+            .registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let thread = std::thread::current();
+        *self.thread.lock().unwrap() = Some(thread.clone());
+        if self.is_canceled() {
+            thread.unpark();
+        }
+    }
+
+    #[inline]
+    fn unregister(&self) {
+        *self.thread.lock().unwrap() = None;
+        self.registered.store(false, Ordering::Release);
+    }
+}
+
+impl Default for BlockingRecvCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct BlockingRecvCancelGuard<'a> {
+    cancel: &'a BlockingRecvCancel,
+}
+
+impl Drop for BlockingRecvCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.cancel.unregister();
+    }
+}
+
 /// Bumped by the actor whenever the consumers Vec changes. Lets
 /// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
 pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
@@ -670,6 +757,64 @@ impl SpscAwareRecv {
                         continue;
                     }
                     std::thread::park();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn blocking_recv_cancelable(
+        &self,
+        cancel: &BlockingRecvCancel,
+    ) -> Result<Option<Message>> {
+        let thread = std::thread::current();
+        self.blocking_recv_waker.register(thread.clone());
+        cancel.register(&thread);
+        let _guard = BlockingRecvCancelGuard { cancel };
+        if cancel.is_canceled() {
+            return Ok(None);
+        }
+        self.blocking_recv_registered_cancelable(cancel)
+    }
+
+    #[inline]
+    pub(crate) fn blocking_recv_registered_cancelable(
+        &self,
+        cancel: &BlockingRecvCancel,
+    ) -> Result<Option<Message>> {
+        self.blocking_recv_waker.register(std::thread::current());
+        let mut woke_without_message = false;
+        loop {
+            match self.try_drain() {
+                DrainResult::Message(msg) => return Ok(Some(msg)),
+                DrainResult::Closed => return Err(Error::Closed),
+                DrainResult::Empty => {
+                    if woke_without_message && cancel.is_canceled() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        return Ok(None);
+                    }
+                    woke_without_message = false;
+                }
+            }
+            self.blocking_recv_waker.prepare_sleep();
+            match self.try_drain() {
+                DrainResult::Message(msg) => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Ok(Some(msg));
+                }
+                DrainResult::Closed => {
+                    self.blocking_recv_waker.cancel_sleep();
+                    return Err(Error::Closed);
+                }
+                DrainResult::Empty => {
+                    if !self.buffered_sources_empty() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        if cancel.is_canceled() {
+                            return Ok(None);
+                        }
+                        continue;
+                    }
+                    std::thread::park();
+                    woke_without_message = true;
                 }
             }
         }

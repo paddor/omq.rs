@@ -59,6 +59,15 @@ ring with `try_recv_many_into`, `recv_many_into`, or `recv_many_timeout_into`
 and Go drains scalar `RecvInto` calls from ring descriptors. No public batch
 API is exposed.
 
+OPTIMIZE: the current hot path still copies payload bytes at the Go/native
+boundary. Single-part sends copy into the native send ring. Single-part
+receives copy from OMQ `Message` into the native receive ring and then into
+the caller's `RecvInto` buffer. This keeps cgo pointer ownership simple, but
+large payload throughput is limited by memory bandwidth. Future work should
+measure owned native send buffers that Go fills before transfer to OMQ, plus
+a direct native `RecvInto` path that decodes single-part messages into the
+caller buffer when batching would not be harmed.
+
 The general scalar API remains context-aware and goroutine-safe. It pays the
 owner-channel and cgo transition costs on each operation. Use `Socket.Run`
 when a socket is on a hot path.

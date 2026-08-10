@@ -342,7 +342,7 @@ impl<T> ProducerOwner<T> {
     }
 }
 
-static NEXT_THREAD_TOKEN: AtomicUsize = AtomicUsize::new(1);
+static NEXT_THREAD_TOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 thread_local! {
     static THREAD_TOKEN: Cell<usize> = const { Cell::new(0) };
@@ -355,7 +355,7 @@ fn current_thread_token() -> usize {
         if current != 0 {
             return current;
         }
-        let current = NEXT_THREAD_TOKEN.fetch_add(1, Ordering::Relaxed);
+        let current = NEXT_THREAD_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         token.set(current);
         current
     })

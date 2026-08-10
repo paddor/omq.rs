@@ -211,3 +211,42 @@ func TestQueuedRecvDoesNotRunAfterContextCancel(t *testing.T) {
 		t.Fatalf("message = %q, want kept", got)
 	}
 }
+
+func TestBoundSocketRejectsUseAfterRun(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+
+	var boundPush *BoundSocket
+	if err := push.Run(context.Background(), func(socket *BoundSocket) error {
+		boundPush = socket
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := boundPush.TrySend(String("late")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("TrySend err = %v, want ErrClosed", err)
+	}
+	if err := boundPush.SendBlocking(String("late")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("SendBlocking err = %v, want ErrClosed", err)
+	}
+
+	var boundPull *BoundSocket
+	if err := pull.Run(context.Background(), func(socket *BoundSocket) error {
+		boundPull = socket
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	if _, err := boundPull.TryRecvInto(buf); !errors.Is(err, ErrClosed) {
+		t.Fatalf("TryRecvInto err = %v, want ErrClosed", err)
+	}
+	if err := boundPull.TryRecvView(func([]byte) error { return nil }); !errors.Is(err, ErrClosed) {
+		t.Fatalf("TryRecvView err = %v, want ErrClosed", err)
+	}
+}

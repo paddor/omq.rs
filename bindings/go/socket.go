@@ -738,6 +738,7 @@ type BoundSocket struct {
 	ringSize   int
 	ctx        context.Context
 	cancel     *nativeCancel
+	closed     atomic.Bool
 	sendRing   *sendRing
 	recvRing   *recvRing
 }
@@ -774,6 +775,9 @@ func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
 
 // TrySend sends without waiting from the owner goroutine.
 func (s *BoundSocket) TrySend(msg Message) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
 	handled, err := s.trySendRing(msg)
 	if handled {
 		return err
@@ -784,6 +788,9 @@ func (s *BoundSocket) TrySend(msg Message) error {
 // SendBlocking sends using the Run context until accepted or canceled.
 func (s *BoundSocket) SendBlocking(msg Message) error {
 	ctx := s.Context()
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
 	for i := 0; ; i++ {
 		handled, err := s.trySendRing(msg)
 		if !handled {
@@ -826,6 +833,9 @@ func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 
 // TryRecvInto receives a single-part message into dst without waiting.
 func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
+	if err := s.ensureOpen(); err != nil {
+		return 0, err
+	}
 	ring, err := s.ensureRecvRing()
 	if err != nil {
 		return 0, err
@@ -898,6 +908,9 @@ func (s *BoundSocket) TryRecvView(fn func([]byte) error) error {
 }
 
 func (s *BoundSocket) tryRecvView(fn func([]byte) error) (bool, error) {
+	if err := s.ensureOpen(); err != nil {
+		return false, err
+	}
 	ring, err := s.ensureRecvRing()
 	if err != nil {
 		return false, err
@@ -936,6 +949,13 @@ func (s *BoundSocket) RecvViewBlocking(fn func([]byte) error) error {
 	}
 }
 
+func (s *BoundSocket) ensureOpen() error {
+	if s == nil || s.handle == nil || s.closed.Load() {
+		return ErrClosed
+	}
+	return nil
+}
+
 func (s *BoundSocket) trySendRing(msg Message) (bool, error) {
 	if s.socketType != Push && s.socketType != Scatter {
 		return false, nil
@@ -952,6 +972,9 @@ func (s *BoundSocket) trySendRing(msg Message) (bool, error) {
 }
 
 func (s *BoundSocket) ensureSendRing() (*sendRing, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if s.sendRing != nil {
 		return s.sendRing, nil
 	}
@@ -964,6 +987,9 @@ func (s *BoundSocket) ensureSendRing() (*sendRing, error) {
 }
 
 func (s *BoundSocket) ensureRecvRing() (*recvRing, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if s.recvRing != nil {
 		return s.recvRing, nil
 	}
@@ -976,6 +1002,10 @@ func (s *BoundSocket) ensureRecvRing() (*recvRing, error) {
 }
 
 func (s *BoundSocket) close() error {
+	s.closed.Store(true)
+	defer func() {
+		s.handle = nil
+	}()
 	if s.recvRing != nil {
 		s.recvRing.close()
 		s.recvRing = nil

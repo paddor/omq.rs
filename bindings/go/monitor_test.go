@@ -1,6 +1,7 @@
 package omq
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -71,6 +72,35 @@ func TestMonitorTimeoutAndClose(t *testing.T) {
 	monitor.Close()
 	if _, err := monitor.TryRecv(); !errors.Is(err, ErrClosed) {
 		t.Fatalf("TryRecv after close err = %v, want ErrClosed", err)
+	}
+	monitor.Close()
+}
+
+func TestMonitorConcurrentCloseAndRecv(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	monitor, err := pull.Monitor()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := monitor.Recv(context.Background())
+		errCh <- err
+	}()
+	time.Sleep(time.Millisecond)
+	monitor.Close()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("Monitor Recv err = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Monitor Recv did not unblock after close")
 	}
 }
 

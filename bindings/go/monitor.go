@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 // Monitor receives native socket monitor events.
 type Monitor struct {
 	handle *nativeMonitor
+	mu     sync.Mutex
 	closed atomic.Bool
 }
 
@@ -91,7 +93,12 @@ func (m *Monitor) RecvTimeout(timeout time.Duration) (MonitorEvent, error) {
 
 // TryRecv receives a monitor event without waiting.
 func (m *Monitor) TryRecv() (MonitorEvent, error) {
-	if m == nil || m.handle == nil || m.closed.Load() {
+	if m == nil {
+		return MonitorEvent{}, ErrClosed
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.handle == nil || m.closed.Load() {
 		return MonitorEvent{}, ErrClosed
 	}
 	event, err := monitorRecvNative(m.handle)
@@ -101,20 +108,22 @@ func (m *Monitor) TryRecv() (MonitorEvent, error) {
 
 // Close closes the monitor stream.
 func (m *Monitor) Close() {
-	if m == nil || m.handle == nil {
+	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed.Swap(true) {
 		return
 	}
-	monitorCloseNative(m.handle)
+	if m.handle != nil {
+		monitorFreeNative(m.handle)
+		m.handle = nil
+	}
+	runtime.SetFinalizer(m, nil)
 	keepAlive(m)
 }
 
 func (m *Monitor) free() {
-	if m == nil || m.handle == nil {
-		return
-	}
-	monitorFreeNative(m.handle)
-	m.handle = nil
+	m.Close()
 }

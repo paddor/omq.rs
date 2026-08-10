@@ -157,6 +157,14 @@ maturin develop --release
 OMQ_SOAK_DURATION_SECS=120 python3 -m pytest tests/soak/ -v --tb=short
 ```
 
+### OMQ.go Soak Tests
+
+```sh
+bindings/go/scripts/soak.sh
+OMQ_GO_SOAK_DURATIONS="300 600 1800 3600" OMQ_GO_SOAK_WORKERS=12 \
+  bindings/go/scripts/soak.sh
+```
+
 ## Stress Tests
 
 ```sh

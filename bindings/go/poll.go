@@ -3,6 +3,7 @@ package omq
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -96,7 +97,9 @@ func receiveAnyTimeoutMillis(ctx context.Context) int64 {
 
 // Poller receives from a stable set of sockets.
 type Poller struct {
+	mu      sync.Mutex
 	sockets []*Socket
+	next    int
 }
 
 // NewPoller creates a poller for distinct sockets.
@@ -112,6 +115,8 @@ func (p *Poller) Sockets() []*Socket {
 	if p == nil {
 		return nil
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return append([]*Socket(nil), p.sockets...)
 }
 
@@ -120,7 +125,12 @@ func (p *Poller) TryRecv() (ReceiveEvent, error) {
 	if p == nil {
 		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
 	}
-	return TryReceiveAny(p.sockets...)
+	sockets := p.orderedSockets()
+	event, err := TryReceiveAny(sockets...)
+	if err == nil {
+		p.advance(event.Socket)
+	}
+	return event, err
 }
 
 // Recv receives from any poller socket until ctx is done.
@@ -128,7 +138,12 @@ func (p *Poller) Recv(ctx context.Context) (ReceiveEvent, error) {
 	if p == nil {
 		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
 	}
-	return ReceiveAny(ctx, p.sockets...)
+	sockets := p.orderedSockets()
+	event, err := ReceiveAny(ctx, sockets...)
+	if err == nil {
+		p.advance(event.Socket)
+	}
+	return event, err
 }
 
 // RecvTimeout receives from any poller socket with timeout semantics.
@@ -136,5 +151,35 @@ func (p *Poller) RecvTimeout(timeout time.Duration) (ReceiveEvent, error) {
 	if p == nil {
 		return ReceiveEvent{}, &ConfigError{Err: "poller is nil"}
 	}
-	return ReceiveAnyTimeout(timeout, p.sockets...)
+	sockets := p.orderedSockets()
+	event, err := ReceiveAnyTimeout(timeout, sockets...)
+	if err == nil {
+		p.advance(event.Socket)
+	}
+	return event, err
+}
+
+func (p *Poller) orderedSockets() []*Socket {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := len(p.sockets)
+	if n == 0 {
+		return nil
+	}
+	out := make([]*Socket, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, p.sockets[(p.next+i)%n])
+	}
+	return out
+}
+
+func (p *Poller) advance(socket *Socket) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, candidate := range p.sockets {
+		if candidate == socket {
+			p.next = (i + 1) % len(p.sockets)
+			return
+		}
+	}
 }

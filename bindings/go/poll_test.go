@@ -92,6 +92,63 @@ func TestReceiveAnyDoesNotConsumeLosingSocket(t *testing.T) {
 	}
 }
 
+func TestPollerRotatesReadySockets(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull1 := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull1)
+	pull2 := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull2)
+	push1 := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push1)
+	push2 := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push2)
+
+	endpoint1, err := pull1.Bind("inproc://go-poller-rotate-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint2, err := pull2.Bind("inproc://go-poller-rotate-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := push1.Connect(endpoint1); err != nil {
+		t.Fatal(err)
+	}
+	if err := push2.Connect(endpoint2); err != nil {
+		t.Fatal(err)
+	}
+	if err := push1.SendTimeout(String("one"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := push1.SendTimeout(String("one-again"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := push2.SendTimeout(String("two"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewPoller(pull1, pull2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := poller.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := poller.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Socket != pull1 || first.Message.String() != "one" {
+		t.Fatalf("first event = %#v", first)
+	}
+	if second.Socket != pull2 || second.Message.String() != "two" {
+		t.Fatalf("second event = %#v", second)
+	}
+}
+
 func TestReceiveAnyContextCancellation(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

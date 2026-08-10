@@ -232,10 +232,10 @@ func LingerForever() SocketOption {
 func Identity(value []byte) SocketOption {
 	copied := append([]byte(nil), value...)
 	return trackedOption(func(handle *nativeSocket) error {
-		if len(value) > zmtpMaxShortStringBytes {
+		if len(copied) > zmtpMaxShortStringBytes {
 			return &ConfigError{Err: "identity length must be at most 255 bytes"}
 		}
-		return setIdentityNative(handle, value)
+		return setIdentityNative(handle, copied)
 	}, func(options *SocketOptions) {
 		options.Identity = OptionValue[[]byte]{Value: append([]byte(nil), copied...), Set: true}
 	})
@@ -699,13 +699,13 @@ func CompressionDefaultLevel() SocketOption {
 func CompressionDict(value []byte) SocketOption {
 	copied := append([]byte(nil), value...)
 	return trackedOption(func(handle *nativeSocket) error {
-		if len(value) == 0 {
+		if len(copied) == 0 {
 			return &ConfigError{Err: "compression dict must not be empty"}
 		}
-		if len(value) > compressionDictMaxBytes {
+		if len(copied) > compressionDictMaxBytes {
 			return &ConfigError{Err: "compression dict length must be at most 8192 bytes"}
 		}
-		return setCompressionDictNative(handle, value)
+		return setCompressionDictNative(handle, copied)
 	}, func(options *SocketOptions) {
 		options.CompressionDict = OptionValue[[]byte]{Value: append([]byte(nil), copied...), Set: true}
 		options.NoCompressionDict = false

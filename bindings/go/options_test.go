@@ -78,12 +78,13 @@ func TestOptionsCopyByteSlices(t *testing.T) {
 	defer closeContext(t, ctx)
 
 	identity := []byte("before")
-	dealer, err := ctx.Socket(Dealer, Identity(identity))
+	identityOption := Identity(identity)
+	identity[0] = 'x'
+	dealer, err := ctx.Socket(Dealer, identityOption)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeSocket(t, dealer)
-	identity[0] = 'x'
 	router := newTestSocket(t, ctx, Router)
 	defer closeSocket(t, router)
 
@@ -113,6 +114,24 @@ func TestOptionsCopyByteSlices(t *testing.T) {
 	again := dealer.Options()
 	if string(again.Identity.Value) != "before" {
 		t.Fatalf("identity option mutated = %q, want before", again.Identity.Value)
+	}
+
+	dict := []byte("abcd")
+	dictOption := CompressionDict(dict)
+	dict[0] = 'z'
+	push, err := ctx.Socket(Push, dictOption)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, push)
+	pushOptions := push.Options()
+	if !pushOptions.CompressionDict.Set || string(pushOptions.CompressionDict.Value) != "abcd" {
+		t.Fatalf("compression dict option = %q/%v, want abcd/true", pushOptions.CompressionDict.Value, pushOptions.CompressionDict.Set)
+	}
+	pushOptions.CompressionDict.Value[0] = 'y'
+	pushAgain := push.Options()
+	if string(pushAgain.CompressionDict.Value) != "abcd" {
+		t.Fatalf("compression dict option mutated = %q, want abcd", pushAgain.CompressionDict.Value)
 	}
 }
 

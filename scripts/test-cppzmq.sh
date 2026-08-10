@@ -12,14 +12,20 @@ if ! command -v "$cxx" >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! command -v pkg-config >/dev/null 2>&1; then
-    echo "error: pkg-config not found" >&2
-    exit 1
-fi
+if [[ -n "${CPPZMQ_CFLAGS:-}" ]]; then
+    read -r -a cppzmq_cflags <<<"$CPPZMQ_CFLAGS"
+else
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        echo "error: pkg-config not found" >&2
+        exit 1
+    fi
 
-if ! pkg-config --exists cppzmq; then
-    echo "error: cppzmq not found. Install cppzmq-dev." >&2
-    exit 1
+    if ! pkg-config --exists cppzmq; then
+        echo "error: cppzmq not found. Install cppzmq-dev." >&2
+        exit 1
+    fi
+
+    read -r -a cppzmq_cflags <<<"$(pkg-config --cflags cppzmq)"
 fi
 
 "$cargo_cmd" build -p omq-libzmq
@@ -28,8 +34,6 @@ out_dir="$repo_root/target/omq-test-tools"
 lib_dir="$repo_root/target/debug"
 cppzmq_dir="$repo_root/omq-libzmq/tests/cppzmq"
 mkdir -p "$out_dir"
-
-read -r -a cppzmq_cflags <<<"$(pkg-config --cflags cppzmq)"
 
 case "$(uname -s)" in
     Darwin)

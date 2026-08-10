@@ -520,7 +520,7 @@ func messageFromC(raw C.OmqGoMessage) Message {
 			out[i] = []byte{}
 			continue
 		}
-		out[i] = C.GoBytes(unsafe.Pointer(part.data), C.int(part.len))
+		out[i] = copyFromCPtr(part.data, part.len)
 	}
 	return Message{parts: out}
 }
@@ -537,9 +537,19 @@ func eventFromC(raw C.OmqGoEvent) MonitorEvent {
 		Attempt:      uint32(raw.attempt),
 	}
 	if raw.data != nil && raw.data_len > 0 {
-		ev.Data = C.GoBytes(unsafe.Pointer(raw.data), C.int(raw.data_len))
+		ev.Data = copyFromCPtr(raw.data, raw.data_len)
 	}
 	return ev
+}
+
+func copyFromCPtr(data *C.uint8_t, length C.size_t) []byte {
+	n := int(length)
+	if C.size_t(n) != length {
+		panic("omq: native message exceeds Go slice capacity")
+	}
+	out := make([]byte, n)
+	copy(out, unsafe.Slice((*byte)(unsafe.Pointer(data)), n))
+	return out
 }
 
 func goString(value *C.char) string {
@@ -553,7 +563,11 @@ func durationMillis(value time.Duration) int64 {
 	if value < 0 {
 		return -1
 	}
-	return int64(value / time.Millisecond)
+	millis := value / time.Millisecond
+	if value%time.Millisecond != 0 {
+		millis++
+	}
+	return int64(millis)
 }
 
 func retryDelay(iteration int) time.Duration {

@@ -25,6 +25,10 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	policy := opts.OverrunPolicy
+	if policy == OverrunBlock {
+		policy = s.overrun
+	}
 	capacity := opts.Capacity
 	if capacity <= 0 {
 		capacity = 1024
@@ -52,7 +56,11 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 					}
 					return
 				}
-				if !sendRx(ctx, rx, msg, opts.OverrunPolicy) {
+				ok, err := sendRx(ctx, rx, msg, policy)
+				if err != nil {
+					reportError(ctx, errorsCh, err)
+				}
+				if !ok {
 					return
 				}
 			}
@@ -108,6 +116,7 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 
 	go func() {
 		wg.Wait()
+		close(errorsCh)
 		close(done)
 	}()
 
@@ -137,18 +146,18 @@ func reportError(ctx context.Context, errorsCh chan<- error, err error) {
 	}
 }
 
-func sendRx(ctx context.Context, rx chan Message, msg Message, policy OverrunPolicy) bool {
+func sendRx(ctx context.Context, rx chan Message, msg Message, policy OverrunPolicy) (bool, error) {
 	switch policy {
 	case OverrunDropNewest:
 		select {
 		case rx <- msg:
 		default:
 		}
-		return true
+		return true, nil
 	case OverrunDropOldest:
 		select {
 		case rx <- msg:
-			return true
+			return true, nil
 		default:
 		}
 		select {
@@ -158,22 +167,22 @@ func sendRx(ctx context.Context, rx chan Message, msg Message, policy OverrunPol
 		select {
 		case rx <- msg:
 		case <-ctx.Done():
-			return false
+			return false, nil
 		}
-		return true
+		return true, nil
 	case OverrunReturnError:
 		select {
 		case rx <- msg:
-			return true
+			return true, nil
 		default:
-			return false
+			return false, &Error{Err: "receive channel overrun"}
 		}
 	default:
 		select {
 		case rx <- msg:
-			return true
+			return true, nil
 		case <-ctx.Done():
-			return false
+			return false, nil
 		}
 	}
 }

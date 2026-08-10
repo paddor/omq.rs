@@ -12,6 +12,9 @@ import (
 type Socket struct {
 	handle     *nativeSocket
 	socketType SocketType
+	owner      *Context
+	ringSize   int
+	overrun    OverrunPolicy
 	closed     atomic.Bool
 	ops        chan socketOp
 	ownerDone  chan struct{}
@@ -48,8 +51,10 @@ type socketOp struct {
 	data          []byte
 	linger        time.Duration
 	useConfigured bool
+	ctx           context.Context
 	run           func(*BoundSocket) error
 	socketType    SocketType
+	ringSize      int
 	call          *socketCall
 }
 
@@ -66,10 +71,19 @@ type socketResult struct {
 	err     error
 }
 
-func newSocket(handle *nativeSocket, socketType SocketType) *Socket {
+func newSocket(
+	handle *nativeSocket,
+	socketType SocketType,
+	owner *Context,
+	ringSize int,
+	overrun OverrunPolicy,
+) *Socket {
 	socket := &Socket{
 		handle:     handle,
 		socketType: socketType,
+		owner:      owner,
+		ringSize:   ringSize,
+		overrun:    overrun,
 		ops:        make(chan socketOp, 1024),
 		ownerDone:  make(chan struct{}),
 	}
@@ -133,7 +147,16 @@ func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
 	case socketOpClose:
 		return socketResult{err: socketCloseNative(handle, op.linger, op.useConfigured)}
 	case socketOpRun:
-		bound := &BoundSocket{handle: handle, socketType: op.socketType}
+		ctx := op.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		bound := &BoundSocket{
+			handle:     handle,
+			socketType: op.socketType,
+			ringSize:   op.ringSize,
+			ctx:        ctx,
+		}
 		err := op.run(bound)
 		closeErr := bound.close()
 		if err != nil {
@@ -394,6 +417,9 @@ func (s *Socket) Close(ctx context.Context) error {
 		close(s.ops)
 		<-s.ownerDone
 		s.handle = nil
+		if s.owner != nil {
+			s.owner.removeSocket(s)
+		}
 	})
 	keepAlive(s)
 	return err
@@ -413,6 +439,9 @@ func (s *Socket) CloseLinger(ctx context.Context, linger time.Duration) error {
 		close(s.ops)
 		<-s.ownerDone
 		s.handle = nil
+		if s.owner != nil {
+			s.owner.removeSocket(s)
+		}
 	})
 	keepAlive(s)
 	return err
@@ -429,7 +458,16 @@ func (s *Socket) Run(ctx context.Context, fn func(*BoundSocket) error) error {
 	if fn == nil {
 		return &ConfigError{Err: "nil socket run function"}
 	}
-	_, err := s.do(ctx, false, socketOp{kind: socketOpRun, run: fn, socketType: s.socketType})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err := s.do(ctx, false, socketOp{
+		kind:       socketOpRun,
+		ctx:        ctx,
+		run:        fn,
+		socketType: s.socketType,
+		ringSize:   s.ringSize,
+	})
 	keepAlive(s)
 	return err
 }
@@ -448,8 +486,17 @@ func (s *Socket) noFinalizer() {
 type BoundSocket struct {
 	handle     *nativeSocket
 	socketType SocketType
+	ringSize   int
+	ctx        context.Context
 	sendRing   *sendRing
 	recvRing   *recvRing
+}
+
+func (s *BoundSocket) Context() context.Context {
+	if s == nil || s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
 }
 
 func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
@@ -482,6 +529,7 @@ func (s *BoundSocket) TrySend(msg Message) error {
 }
 
 func (s *BoundSocket) SendBlocking(msg Message) error {
+	ctx := s.Context()
 	for i := 0; ; i++ {
 		handled, err := s.trySendRing(msg)
 		if !handled {
@@ -493,11 +541,11 @@ func (s *BoundSocket) SendBlocking(msg Message) error {
 		if !errors.Is(err, ErrAgain) {
 			return err
 		}
-		if err := waitRetry(context.Background(), i); err != nil {
+		if err := waitRetry(ctx, i); err != nil {
 			return err
 		}
 	}
-	return socketMessageSendWaitNative(s.handle, msg)
+	return s.Send(ctx, msg)
 }
 
 func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
@@ -508,7 +556,7 @@ func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 		if err := errFromContext(ctx); err != nil {
 			return 0, err
 		}
-		n, err := socketMessageRecvIntoNative(s.handle, dst)
+		n, err := s.TryRecvInto(dst)
 		if err == nil {
 			return n, nil
 		}
@@ -530,11 +578,19 @@ func (s *BoundSocket) TryRecvInto(dst []byte) (int, error) {
 }
 
 func (s *BoundSocket) RecvIntoBlocking(dst []byte) (int, error) {
-	ring, err := s.ensureRecvRing()
-	if err != nil {
-		return 0, err
+	ctx := s.Context()
+	for i := 0; ; i++ {
+		n, err := s.TryRecvInto(dst)
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, ErrAgain) {
+			return 0, err
+		}
+		if err := waitRetry(ctx, i); err != nil {
+			return 0, err
+		}
 	}
-	return ring.recvIntoBlocking(dst)
 }
 
 type RecvView struct {
@@ -576,7 +632,7 @@ func (s *BoundSocket) ensureSendRing() (*sendRing, error) {
 	if s.sendRing != nil {
 		return s.sendRing, nil
 	}
-	ring, err := newSendRing(s.handle)
+	ring, err := newSendRing(s.handle, s.ringSize)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +644,7 @@ func (s *BoundSocket) ensureRecvRing() (*recvRing, error) {
 	if s.recvRing != nil {
 		return s.recvRing, nil
 	}
-	ring, err := newRecvRing(s.handle)
+	ring, err := newRecvRing(s.handle, s.ringSize)
 	if err != nil {
 		return nil, err
 	}

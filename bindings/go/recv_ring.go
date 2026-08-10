@@ -39,10 +39,14 @@ type recvRing struct {
 	viewActive   bool
 }
 
-func newRecvRing(socket *nativeSocket) (*recvRing, error) {
+func newRecvRing(socket *nativeSocket, ringSize int) (*recvRing, error) {
+	descCapacity := defaultRecvRingDescCapacity
+	if ringSize > 0 {
+		descCapacity = ringSize
+	}
 	handle, memory, err := recvRingCreateNative(
 		socket,
-		defaultRecvRingDescCapacity,
+		descCapacity,
 		defaultRecvRingPayloadCapacity,
 	)
 	if err != nil {

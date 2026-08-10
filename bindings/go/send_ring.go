@@ -37,10 +37,14 @@ type sendRing struct {
 	payloadHead   uint64
 }
 
-func newSendRing(socket *nativeSocket) (*sendRing, error) {
+func newSendRing(socket *nativeSocket, ringSize int) (*sendRing, error) {
+	descCapacity := defaultSendRingDescCapacity
+	if ringSize > 0 {
+		descCapacity = ringSize
+	}
 	handle, memory, err := sendRingCreateNative(
 		socket,
-		defaultSendRingDescCapacity,
+		descCapacity,
 		defaultSendRingPayloadCapacity,
 	)
 	if err != nil {
@@ -67,7 +71,7 @@ func (r *sendRing) trySend(body []byte) (bool, error) {
 	if r == nil || r.handle == nil {
 		return false, nil
 	}
-	if len(body) > len(r.payload) {
+	if len(body) >= len(r.payload) {
 		if ok, err := r.drain(-1); err != nil || !ok {
 			return true, err
 		}

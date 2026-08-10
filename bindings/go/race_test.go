@@ -29,9 +29,7 @@ func TestConcurrentSendReceive(t *testing.T) {
 	const perGoroutine = 64
 	var wg sync.WaitGroup
 	for worker := 0; worker < goroutines; worker++ {
-		wg.Add(1)
-		go func(worker int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; i < perGoroutine; i++ {
 				sendCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 				err := push.Send(sendCtx, String("msg"))
@@ -41,7 +39,7 @@ func TestConcurrentSendReceive(t *testing.T) {
 					return
 				}
 			}
-		}(worker)
+		})
 	}
 
 	for i := 0; i < goroutines*perGoroutine; i++ {

@@ -53,10 +53,8 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 
 	if s.socketType.canRecv() {
 		rx = make(chan Message, capacity)
-		wg.Add(1)
-		go func() {
+		wg.Go(func() {
 			defer close(rx)
-			defer wg.Done()
 			for {
 				msg, err := s.Recv(ctx)
 				if err != nil {
@@ -73,14 +71,12 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	if s.socketType.canSend() {
 		tx = make(chan Message, capacity)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -94,16 +90,14 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	monitor, err := s.Monitor()
 	if err == nil {
-		wg.Add(1)
-		go func() {
+		wg.Go(func() {
 			defer monitor.Close()
 			defer close(eventsCh)
-			defer wg.Done()
 			for {
 				event, err := monitor.Recv(ctx)
 				if err != nil {
@@ -118,7 +112,7 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 					return
 				}
 			}
-		}()
+		})
 	} else {
 		close(eventsCh)
 	}

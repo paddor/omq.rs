@@ -191,9 +191,7 @@ func startSoakPull(t *testing.T, ctx *Context, endpoint string, extra []SocketOp
 }
 
 func startWorker(wg *sync.WaitGroup, state *soakState, name string, fn func(context.Context) error) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				state.fail(fmt.Errorf("%s: panic: %v", name, recovered))
@@ -204,7 +202,7 @@ func startWorker(wg *sync.WaitGroup, state *soakState, name string, fn func(cont
 			return
 		}
 		state.fail(fmt.Errorf("%s: %w", name, err))
-	}()
+	})
 }
 
 func (s *soakState) fail(err error) {
@@ -434,9 +432,7 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 	for i, push := range pushes {
 		idx := byte(i)
 		socket := push
-		senders.Add(1)
-		go func() {
-			defer senders.Done()
+		senders.Go(func() {
 			payload := []byte{idx, 0, 0, 0, 0, 0, 0, 0}
 			for senderCtx.Err() == nil {
 				if err := socket.SendTimeout(Bytes(payload), soakSendTimeout); err != nil &&
@@ -445,7 +441,7 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 				}
 				payload[1]++
 			}
-		}()
+		})
 	}
 
 	poller, err := NewPoller(pulls...)

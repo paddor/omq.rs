@@ -116,7 +116,10 @@ func (s *Socket) ownerLoop() {
 		op.call.resp <- runSocketOp(handle, op)
 	}
 	if handle != nil {
+		s.handleMu.Lock()
 		socketFreeNative(handle)
+		s.handle = nil
+		s.handleMu.Unlock()
 	}
 }
 
@@ -656,9 +659,6 @@ func (s *Socket) startClose(op socketOp) {
 		_, err := s.do(context.Background(), true, op)
 		close(s.ops)
 		<-s.ownerDone
-		s.handleMu.Lock()
-		s.handle = nil
-		s.handleMu.Unlock()
 		s.releaseAuthCallbacks()
 		if s.owner != nil {
 			s.owner.removeSocket(s)

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sort"
 	"time"
 	"unsafe"
 )
@@ -250,6 +251,12 @@ func receiveAnyNative(sockets []*Socket, timeoutMillis int64) (ReceiveEvent, err
 	if len(sockets) == 0 {
 		return ReceiveEvent{}, &ConfigError{Err: "receive-any requires at least one socket"}
 	}
+	nativeHandles, unlock, err := lockNativeSockets(sockets)
+	if err != nil {
+		return ReceiveEvent{}, err
+	}
+	defer unlock()
+
 	size := C.size_t(len(sockets)) * C.size_t(unsafe.Sizeof(uintptr(0)))
 	ptr := C.malloc(size)
 	if ptr == nil {
@@ -258,17 +265,13 @@ func receiveAnyNative(sockets []*Socket, timeoutMillis int64) (ReceiveEvent, err
 	defer C.free(ptr)
 
 	handles := unsafe.Slice((**C.OmqGoSocket)(ptr), len(sockets))
-	for i, socket := range sockets {
-		handle, err := socket.nativeHandle()
-		if err != nil {
-			return ReceiveEvent{}, err
-		}
+	for i, handle := range nativeHandles {
 		handles[i] = (*C.OmqGoSocket)(handle)
 	}
 
 	var index C.size_t
 	var out C.OmqGoMessage
-	err := statusErr(C.omq_go_receive_any(
+	err = statusErr(C.omq_go_receive_any(
 		(**C.OmqGoSocket)(ptr),
 		C.size_t(len(sockets)),
 		C.int64_t(timeoutMillis),
@@ -285,6 +288,39 @@ func receiveAnyNative(sockets []*Socket, timeoutMillis int64) (ReceiveEvent, err
 	}
 	keepAlive(sockets)
 	return ReceiveEvent{Socket: sockets[goIndex], Message: messageFromC(out)}, nil
+}
+
+func lockNativeSockets(sockets []*Socket) ([]*nativeSocket, func(), error) {
+	order := append([]*Socket(nil), sockets...)
+	sort.Slice(order, func(i, j int) bool {
+		return uintptr(unsafe.Pointer(order[i])) < uintptr(unsafe.Pointer(order[j]))
+	})
+
+	locked := make([]*Socket, 0, len(order))
+	unlock := func() {
+		for i := len(locked) - 1; i >= 0; i-- {
+			locked[i].handleMu.RUnlock()
+		}
+	}
+	for _, socket := range order {
+		if socket == nil {
+			unlock()
+			return nil, nil, &ConfigError{Err: "receive-any socket is nil"}
+		}
+		socket.handleMu.RLock()
+		if socket.closed.Load() || socket.handle == nil {
+			socket.handleMu.RUnlock()
+			unlock()
+			return nil, nil, ErrClosed
+		}
+		locked = append(locked, socket)
+	}
+
+	handles := make([]*nativeSocket, len(sockets))
+	for i, socket := range sockets {
+		handles[i] = socket.handle
+	}
+	return handles, unlock, nil
 }
 
 func socketMessageRecvNative(socket *nativeSocket) (Message, error) {

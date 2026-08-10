@@ -166,6 +166,34 @@ func TestReceiveAnyContextCancellation(t *testing.T) {
 	}
 }
 
+func TestReceiveAnyConcurrentClose(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	pull := newTestSocket(t, ctx, Pull)
+	if _, err := pull.Bind("inproc://go-receive-any-close"); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ReceiveAny(context.Background(), pull)
+		errCh <- err
+	}()
+	time.Sleep(time.Millisecond)
+	if err := pull.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("ReceiveAny err = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReceiveAny did not unblock after close")
+	}
+}
+
 func TestPollerRejectsInvalidSockets(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

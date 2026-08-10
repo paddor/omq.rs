@@ -48,6 +48,16 @@ Runnable C ZGuide suites live in [examples/zguide/](examples/zguide/):
 omq-libzmq/examples/zguide/run_all.sh
 ```
 
+To stage drop-in C/C++ build files:
+
+```sh
+omq-libzmq/scripts/stage-compat.sh /tmp/omq-libzmq
+```
+
+This writes `include/zmq.h`, `lib/libomq_zmq.*`, `lib/libzmq.*` aliases,
+`lib/pkgconfig/{libzmq,omq-libzmq}.pc`, and CMake package configs for
+`ZeroMQ::ZeroMQ` and `omq_libzmq::omq_zmq`.
+
 ## License
 
 ISC

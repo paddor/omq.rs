@@ -2,6 +2,10 @@
 
 use std::ffi::{CStr, c_int};
 
+use crate::error::fail;
+
+type ThreadFn = unsafe extern "C" fn(*mut libc::c_void);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_version(major: *mut c_int, minor: *mut c_int, patch: *mut c_int) {
     // SAFETY: each pointer is checked for null before writing.
@@ -120,5 +124,87 @@ pub extern "C" fn zmq_atomic_counter_destroy(counter_p: *mut *mut libc::c_void) 
             let _ = unsafe { Box::from_raw(p.cast::<std::sync::atomic::AtomicI32>()) };
             unsafe { *counter_p = std::ptr::null_mut() };
         }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_device(
+    device: c_int,
+    frontend: *mut libc::c_void,
+    backend: *mut libc::c_void,
+) -> c_int {
+    match device {
+        1..=3 => crate::zmq_proxy(frontend, backend, std::ptr::null_mut()),
+        _ => fail(libc::EINVAL),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_threadstart(
+    func: Option<ThreadFn>,
+    arg: *mut libc::c_void,
+) -> *mut libc::c_void {
+    let Some(func) = func else {
+        fail(libc::EFAULT);
+        return std::ptr::null_mut();
+    };
+    let arg = arg as usize;
+    let Ok(handle) = std::thread::Builder::new().spawn(move || {
+        // SAFETY: caller provided a C function pointer and opaque argument.
+        unsafe { func(arg as *mut libc::c_void) };
+    }) else {
+        fail(libc::EAGAIN);
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(handle)).cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_threadclose(thread: *mut libc::c_void) {
+    if thread.is_null() {
+        return;
+    }
+    // SAFETY: thread came from Box::into_raw in zmq_threadstart.
+    let handle = unsafe { Box::from_raw(thread.cast::<std::thread::JoinHandle<()>>()) };
+    let _ = handle.join();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    unsafe extern "C" fn set_flag(arg: *mut libc::c_void) {
+        // SAFETY: test passes an AtomicUsize pointer as thread arg.
+        let flag = unsafe { &*arg.cast::<AtomicUsize>() };
+        flag.store(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn threadstart_runs_and_threadclose_joins() {
+        let flag = AtomicUsize::new(0);
+        let thread = zmq_threadstart(
+            Some(set_flag),
+            std::ptr::from_ref(&flag).cast::<libc::c_void>().cast_mut(),
+        );
+        assert!(!thread.is_null());
+        zmq_threadclose(thread);
+        assert_eq!(flag.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn threadstart_null_function_returns_efault() {
+        assert!(zmq_threadstart(None, std::ptr::null_mut()).is_null());
+        assert_eq!(crate::zmq_errno(), libc::EFAULT);
+    }
+
+    #[test]
+    fn device_rejects_unknown_type() {
+        assert_eq!(
+            zmq_device(99, std::ptr::null_mut(), std::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::zmq_errno(), libc::EINVAL);
     }
 }

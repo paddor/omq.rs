@@ -1,9 +1,9 @@
 //! Context lifecycle tests.
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_new, zmq_ctx_set, zmq_ctx_shutdown,
-    zmq_ctx_term, zmq_getsockopt, zmq_init, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
-    zmq_term,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_get, zmq_ctx_get_ext, zmq_ctx_new, zmq_ctx_set,
+    zmq_ctx_set_ext, zmq_ctx_shutdown, zmq_ctx_term, zmq_getsockopt, zmq_init, zmq_recv, zmq_send,
+    zmq_setsockopt, zmq_socket, zmq_term,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
@@ -16,6 +16,7 @@ const ZMQ_MAX_SOCKETS: i32 = 2;
 const ZMQ_SOCKET_LIMIT: i32 = 3;
 const ZMQ_MAX_MSGSZ: i32 = 5;
 const ZMQ_MSG_T_SIZE: i32 = 6;
+const ZMQ_THREAD_NAME_PREFIX: i32 = 9;
 const ZMQ_IPV6: i32 = 42;
 const ZMQ_BLOCKY: i32 = 70;
 const ZMQ_LINGER: i32 = 17;
@@ -84,6 +85,80 @@ fn ctx_set_io_threads_before_socket_creation() {
     let ctx = zmq_ctx_new();
     assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 3), 0);
     assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 3);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_ext_int_options_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let value = 3i32;
+    assert_eq!(
+        zmq_ctx_set_ext(
+            ctx,
+            ZMQ_IO_THREADS,
+            std::ptr::from_ref(&value).cast(),
+            size_of::<i32>(),
+        ),
+        0
+    );
+
+    let mut got = 0i32;
+    let mut got_size = size_of::<i32>();
+    assert_eq!(
+        zmq_ctx_get_ext(
+            ctx,
+            ZMQ_IO_THREADS,
+            (&raw mut got).cast(),
+            &raw mut got_size,
+        ),
+        0
+    );
+    assert_eq!(got, value);
+    assert_eq!(got_size, size_of::<i32>());
+
+    let mut too_small = 0usize;
+    assert_eq!(
+        zmq_ctx_get_ext(
+            ctx,
+            ZMQ_IO_THREADS,
+            (&raw mut got).cast(),
+            &raw mut too_small,
+        ),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_ext_thread_name_prefix_is_accepted_noop() {
+    let ctx = zmq_ctx_new();
+    let prefix = CString::new("omq").unwrap();
+    assert_eq!(
+        zmq_ctx_set_ext(
+            ctx,
+            ZMQ_THREAD_NAME_PREFIX,
+            prefix.as_ptr().cast(),
+            prefix.as_bytes_with_nul().len(),
+        ),
+        0
+    );
+
+    let mut buf = [0xFF_u8; 4];
+    let mut len = buf.len();
+    assert_eq!(
+        zmq_ctx_get_ext(
+            ctx,
+            ZMQ_THREAD_NAME_PREFIX,
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+        ),
+        0
+    );
+    assert_eq!(len, 1);
+    assert_eq!(buf[0], 0);
+
     zmq_ctx_term(ctx);
 }
 

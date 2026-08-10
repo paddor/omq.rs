@@ -379,8 +379,11 @@ mod unix {
         }
 
         pub(crate) fn prepare_for_wait(&mut self) {
-            for pfd in &mut self.pfds {
+            for (pfd_idx, pfd) in self.pfds.iter_mut().enumerate() {
                 if pfd.fd < 0 {
+                    continue;
+                }
+                if self.map[pfd_idx].1 == 0 {
                     continue;
                 }
                 #[cfg(target_os = "linux")]

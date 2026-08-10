@@ -13,6 +13,11 @@ use std::sync::Arc;
 use crate::consts;
 use crate::socket::OmqSocket;
 
+#[cfg(unix)]
+pub(crate) type ZmqFd = libc::c_int;
+#[cfg(windows)]
+pub(crate) type ZmqFd = usize;
+
 pub(crate) const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
 pub(crate) const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
 #[allow(dead_code)]
@@ -23,7 +28,7 @@ pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_sho
 #[derive(Debug)]
 pub struct ZmqPollItem {
     pub socket: *mut libc::c_void,
-    pub fd: libc::c_int,
+    pub fd: ZmqFd,
     pub events: libc::c_short,
     pub revents: libc::c_short,
 }
@@ -150,4 +155,17 @@ pub extern "C" fn zmq_poll(
         }
     }
     ready
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zmq_ppoll(
+    items: *mut ZmqPollItem,
+    nitems: c_int,
+    timeout_ms: libc::c_long,
+    sigmask: *const libc::c_void,
+) -> c_int {
+    if !sigmask.is_null() {
+        return crate::error::fail(crate::error::ENOTSUP);
+    }
+    zmq_poll(items, nitems, timeout_ms)
 }

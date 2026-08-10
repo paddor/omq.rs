@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -20,10 +21,15 @@ struct ContextState {
     owns_runtime: bool,
 }
 
-#[derive(Debug)]
 struct SocketState {
-    socket: Mutex<Option<omq_tokio::blocking::Socket>>,
+    worker: Mutex<Option<SocketWorker>>,
+    interrupt: omq_tokio::blocking::Socket,
     closed: AtomicBool,
+}
+
+struct SocketWorker {
+    tx: mpsc::Sender<SocketCommand>,
+    join: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -32,10 +38,74 @@ pub struct NativeContext {
     inner: Arc<ContextState>,
 }
 
-#[derive(Debug)]
 #[napi]
 pub struct NativeSocket {
     inner: Arc<SocketState>,
+}
+
+type WorkerResult<T> = std::result::Result<T, String>;
+type Reply<T> = mpsc::Sender<WorkerResult<T>>;
+
+enum SocketCommand {
+    Bind {
+        endpoint: String,
+        reply: Reply<String>,
+    },
+    Connect {
+        endpoint: String,
+        reply: Reply<()>,
+    },
+    Unbind {
+        endpoint: String,
+        reply: Reply<()>,
+    },
+    Disconnect {
+        endpoint: String,
+        reply: Reply<()>,
+    },
+    Send {
+        parts: Vec<Bytes>,
+        reply: Reply<()>,
+    },
+    Recv {
+        reply: Reply<Vec<Bytes>>,
+    },
+    RecvTimeout {
+        timeout: Duration,
+        reply: Reply<Option<Vec<Bytes>>>,
+    },
+    TryRecv {
+        reply: Reply<Option<Vec<Bytes>>>,
+    },
+    WaitConnected {
+        min_peers: u32,
+        timeout: Duration,
+        reply: Reply<u32>,
+    },
+    RecvMany {
+        max: usize,
+        timeout: Option<Duration>,
+        reply: Reply<Vec<Vec<Bytes>>>,
+    },
+    Subscribe {
+        prefix: Bytes,
+        reply: Reply<()>,
+    },
+    Unsubscribe {
+        prefix: Bytes,
+        reply: Reply<()>,
+    },
+    Join {
+        group: Bytes,
+        reply: Reply<()>,
+    },
+    Leave {
+        group: Bytes,
+        reply: Reply<()>,
+    },
+    Close {
+        reply: Option<Reply<()>>,
+    },
 }
 
 #[expect(
@@ -122,9 +192,12 @@ impl NativeContext {
         let socket_type = parse_socket_type(&socket_type)?;
         let options = build_options(options)?;
         let socket = self.inner.ctx.blocking_socket(socket_type, options);
+        let interrupt = socket.clone();
+        let worker = SocketWorker::spawn(socket);
         Ok(NativeSocket {
             inner: Arc::new(SocketState {
-                socket: Mutex::new(Some(socket)),
+                worker: Mutex::new(Some(worker)),
+                interrupt,
                 closed: AtomicBool::new(false),
             }),
         })
@@ -148,180 +221,182 @@ impl NativeContext {
 impl NativeSocket {
     #[napi]
     pub async fn bind(&self, endpoint: String) -> Result<String> {
-        let socket = self.socket()?;
-        run_blocking(move || {
-            let endpoint = parse_endpoint(&endpoint)?;
-            socket
-                .bind(endpoint)
-                .map(|bound| bound.to_string())
-                .map_err(map_omq_error)
-        })
-        .await
+        self.request_async(|reply| SocketCommand::Bind { endpoint, reply })
+            .await
     }
 
     #[napi]
     pub async fn connect(&self, endpoint: String) -> Result<()> {
-        let socket = self.socket()?;
-        run_blocking(move || {
-            let endpoint = parse_endpoint(&endpoint)?;
-            socket.connect(endpoint).map_err(map_omq_error)
-        })
-        .await
+        self.request_async(|reply| SocketCommand::Connect { endpoint, reply })
+            .await
     }
 
     #[napi]
     pub async fn unbind(&self, endpoint: String) -> Result<()> {
-        let socket = self.socket()?;
-        run_blocking(move || {
-            let endpoint = parse_endpoint(&endpoint)?;
-            socket.unbind(endpoint).map_err(map_omq_error)
-        })
-        .await
+        self.request_async(|reply| SocketCommand::Unbind { endpoint, reply })
+            .await
     }
 
     #[napi]
     pub async fn disconnect(&self, endpoint: String) -> Result<()> {
-        let socket = self.socket()?;
-        run_blocking(move || {
-            let endpoint = parse_endpoint(&endpoint)?;
-            socket.disconnect(endpoint).map_err(map_omq_error)
-        })
-        .await
+        self.request_async(|reply| SocketCommand::Disconnect { endpoint, reply })
+            .await
     }
 
     #[napi]
     pub async fn send(&self, parts: Vec<Uint8Array>) -> Result<()> {
-        let socket = self.socket()?;
-        let message = message_from_parts(parts);
-        run_blocking(move || socket.send(message).map_err(map_omq_error)).await
+        let parts = copy_parts(parts);
+        self.request_async(|reply| SocketCommand::Send { parts, reply })
+            .await
     }
 
     #[napi]
     pub fn send_sync(&self, parts: Vec<Uint8Array>) -> Result<()> {
-        let socket = self.socket()?;
-        socket
-            .send(message_from_parts(parts))
-            .map_err(map_omq_error)
+        let parts = copy_parts(parts);
+        self.request_sync(|reply| SocketCommand::Send { parts, reply })
     }
 
     #[napi]
     pub async fn recv(&self) -> Result<Vec<Buffer>> {
-        let socket = self.socket()?;
-        run_blocking(move || socket.recv().map(message_to_buffers).map_err(map_omq_error)).await
+        self.request_async(|reply| SocketCommand::Recv { reply })
+            .await
+            .map(parts_to_buffers)
     }
 
     #[napi]
     pub fn recv_sync(&self) -> Result<Vec<Buffer>> {
-        let socket = self.socket()?;
-        socket.recv().map(message_to_buffers).map_err(map_omq_error)
+        self.request_sync(|reply| SocketCommand::Recv { reply })
+            .map(parts_to_buffers)
     }
 
     #[napi]
     pub async fn recv_timeout(&self, timeout_ms: u32) -> Result<Option<Vec<Buffer>>> {
-        let socket = self.socket()?;
-        run_blocking(
-            move || match socket.recv_timeout(Duration::from_millis(timeout_ms.into())) {
-                Ok(message) => Ok(Some(message_to_buffers(message))),
-                Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
-                Err(error) => Err(map_omq_error(error)),
-            },
-        )
+        self.request_async(move |reply| SocketCommand::RecvTimeout {
+            timeout: Duration::from_millis(timeout_ms.into()),
+            reply,
+        })
         .await
+        .map(|value| value.map(parts_to_buffers))
     }
 
     #[napi]
     pub fn try_recv(&self) -> Result<Option<Vec<Buffer>>> {
-        let socket = self.socket()?;
-        match socket.try_recv() {
-            Ok(message) => Ok(Some(message_to_buffers(message))),
-            Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
-            Err(error) => Err(map_omq_error(error)),
-        }
+        self.request_sync(|reply| SocketCommand::TryRecv { reply })
+            .map(|value| value.map(parts_to_buffers))
     }
 
     #[napi]
     pub fn wait_connected_sync(&self, min_peers: u32, timeout_ms: u32) -> Result<u32> {
-        let socket = self.socket()?;
-        socket
-            .wait_connected(min_peers as usize, Duration::from_millis(timeout_ms.into()))
-            .map(|count| count as u32)
-            .map_err(map_omq_error)
+        self.request_sync(|reply| SocketCommand::WaitConnected {
+            min_peers,
+            timeout: Duration::from_millis(timeout_ms.into()),
+            reply,
+        })
     }
 
     #[napi]
     pub fn recv_many_sync(&self, max: u32, timeout_ms: Option<u32>) -> Result<Vec<Vec<Buffer>>> {
-        let socket = self.socket()?;
-        let max = max as usize;
-        let mut out = Vec::with_capacity(max.min(512));
-        let received = match timeout_ms {
-            Some(timeout_ms) => socket.recv_many_timeout_into(
-                max,
-                Duration::from_millis(timeout_ms.into()),
-                &mut out,
-            ),
-            None => socket.recv_many_into(max, &mut out),
-        };
-        match received {
-            Ok(_) => Ok(out.into_iter().map(message_to_buffers).collect()),
-            Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(Vec::new()),
-            Err(error) => Err(map_omq_error(error)),
-        }
+        let timeout = timeout_ms.map(|timeout_ms| Duration::from_millis(timeout_ms.into()));
+        self.request_sync(|reply| SocketCommand::RecvMany {
+            max: max as usize,
+            timeout,
+            reply,
+        })
+        .map(|messages| messages.into_iter().map(parts_to_buffers).collect())
     }
 
     #[napi]
     pub async fn subscribe(&self, prefix: Uint8Array) -> Result<()> {
-        let socket = self.socket()?;
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
-        run_blocking(move || socket.subscribe(prefix).map_err(map_omq_error)).await
+        self.request_async(|reply| SocketCommand::Subscribe { prefix, reply })
+            .await
     }
 
     #[napi]
     pub async fn unsubscribe(&self, prefix: Uint8Array) -> Result<()> {
-        let socket = self.socket()?;
         let prefix = Bytes::copy_from_slice(prefix.as_ref());
-        run_blocking(move || socket.unsubscribe(prefix).map_err(map_omq_error)).await
+        self.request_async(|reply| SocketCommand::Unsubscribe { prefix, reply })
+            .await
     }
 
     #[napi]
     pub async fn join(&self, group: Uint8Array) -> Result<()> {
-        let socket = self.socket()?;
         let group = Bytes::copy_from_slice(group.as_ref());
-        run_blocking(move || socket.join(group).map_err(map_omq_error)).await
+        self.request_async(|reply| SocketCommand::Join { group, reply })
+            .await
     }
 
     #[napi]
     pub async fn leave(&self, group: Uint8Array) -> Result<()> {
-        let socket = self.socket()?;
         let group = Bytes::copy_from_slice(group.as_ref());
-        run_blocking(move || socket.leave(group).map_err(map_omq_error)).await
+        self.request_async(|reply| SocketCommand::Leave { group, reply })
+            .await
     }
 
     #[napi]
     pub fn close(&self) -> Result<()> {
         self.inner.closed.store(true, Ordering::Release);
-        let socket = self
-            .inner
-            .socket
-            .lock()
-            .map_err(|_| napi_error("socket lock poisoned"))?
-            .take();
-        if let Some(socket) = socket {
-            socket.close().map_err(map_omq_error)?;
+        if let Some(mut worker) = self.take_worker()? {
+            let _ = self.inner.interrupt.clone().close();
+            let (reply, rx) = mpsc::channel();
+            let _ = worker.tx.send(SocketCommand::Close { reply: Some(reply) });
+            let result = rx
+                .recv()
+                .unwrap_or_else(|_| Err("socket worker closed".to_string()))
+                .map_err(napi_error);
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+            result?;
         }
         Ok(())
     }
 
-    fn socket(&self) -> Result<omq_tokio::blocking::Socket> {
+    fn request_sync<T, F>(&self, build: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Reply<T>) -> SocketCommand,
+    {
+        let tx = self.worker_tx()?;
+        let (reply, rx) = mpsc::channel();
+        tx.send(build(reply))
+            .map_err(|_| napi_error("socket closed"))?;
+        rx.recv()
+            .unwrap_or_else(|_| Err("socket worker closed".to_string()))
+            .map_err(napi_error)
+    }
+
+    async fn request_async<T, F>(&self, build: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Reply<T>) -> SocketCommand + Send + 'static,
+    {
+        let tx = self.worker_tx()?;
+        let (reply, rx) = mpsc::channel();
+        tx.send(build(reply))
+            .map_err(|_| napi_error("socket closed"))?;
+        run_blocking_recv(rx).await
+    }
+
+    fn worker_tx(&self) -> Result<mpsc::Sender<SocketCommand>> {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(napi_error("socket closed"));
         }
         self.inner
-            .socket
+            .worker
             .lock()
             .map_err(|_| napi_error("socket lock poisoned"))?
             .as_ref()
-            .cloned()
+            .map(|worker| worker.tx.clone())
             .ok_or_else(|| napi_error("socket closed"))
+    }
+
+    fn take_worker(&self) -> Result<Option<SocketWorker>> {
+        self.inner
+            .worker
+            .lock()
+            .map_err(|_| napi_error("socket lock poisoned"))
+            .map(|mut guard| guard.take())
     }
 }
 
@@ -358,22 +433,155 @@ pub fn native_context_from_share_key(share_key: String) -> Result<NativeContext>
 impl Drop for NativeSocket {
     fn drop(&mut self) {
         self.inner.closed.store(true, Ordering::Release);
-        if let Ok(mut guard) = self.inner.socket.lock()
-            && let Some(socket) = guard.take()
+        if let Ok(mut guard) = self.inner.worker.lock()
+            && let Some(mut worker) = guard.take()
         {
-            let _ = socket.close();
+            let _ = self.inner.interrupt.clone().close();
+            let _ = worker.tx.send(SocketCommand::Close { reply: None });
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
         }
     }
 }
 
-async fn run_blocking<T, F>(f: F) -> Result<T>
+async fn run_blocking_recv<T>(rx: mpsc::Receiver<WorkerResult<T>>) -> Result<T>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|error| napi_error(format!("native worker failed: {error}")))?
+    tokio::task::spawn_blocking(move || {
+        rx.recv()
+            .unwrap_or_else(|_| Err("socket worker closed".to_string()))
+    })
+    .await
+    .map_err(|error| napi_error(format!("native worker failed: {error}")))?
+    .map_err(napi_error)
+}
+
+impl SocketWorker {
+    fn spawn(socket: omq_tokio::blocking::Socket) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let join = thread::Builder::new()
+            .name("omq-node-socket".to_string())
+            .spawn(move || run_socket_worker(socket, rx))
+            .expect("failed to spawn omq-node socket worker");
+        Self {
+            tx,
+            join: Some(join),
+        }
+    }
+}
+
+fn run_socket_worker(socket: omq_tokio::blocking::Socket, rx: mpsc::Receiver<SocketCommand>) {
+    for command in rx {
+        match command {
+            SocketCommand::Bind { endpoint, reply } => {
+                let result = parse_endpoint_worker(&endpoint)
+                    .and_then(|endpoint| socket.bind(endpoint).map_err(worker_error))
+                    .map(|endpoint| endpoint.to_string());
+                let _ = reply.send(result);
+            }
+            SocketCommand::Connect { endpoint, reply } => {
+                let result = parse_endpoint_worker(&endpoint)
+                    .and_then(|endpoint| socket.connect(endpoint).map_err(worker_error));
+                let _ = reply.send(result);
+            }
+            SocketCommand::Unbind { endpoint, reply } => {
+                let result = parse_endpoint_worker(&endpoint)
+                    .and_then(|endpoint| socket.unbind(endpoint).map_err(worker_error));
+                let _ = reply.send(result);
+            }
+            SocketCommand::Disconnect { endpoint, reply } => {
+                let result = parse_endpoint_worker(&endpoint)
+                    .and_then(|endpoint| socket.disconnect(endpoint).map_err(worker_error));
+                let _ = reply.send(result);
+            }
+            SocketCommand::Send { parts, reply } => {
+                let result = socket
+                    .send(message_from_bytes(parts))
+                    .map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::Recv { reply } => {
+                let result = socket.recv().map(message_to_bytes).map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::RecvTimeout { timeout, reply } => {
+                let result = match socket.recv_timeout(timeout) {
+                    Ok(message) => Ok(Some(message_to_bytes(message))),
+                    Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
+                    Err(error) => Err(worker_error(error)),
+                };
+                let _ = reply.send(result);
+            }
+            SocketCommand::TryRecv { reply } => {
+                let result = match socket.try_recv() {
+                    Ok(message) => Ok(Some(message_to_bytes(message))),
+                    Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
+                    Err(error) => Err(worker_error(error)),
+                };
+                let _ = reply.send(result);
+            }
+            SocketCommand::WaitConnected {
+                min_peers,
+                timeout,
+                reply,
+            } => {
+                let result = socket
+                    .wait_connected(min_peers as usize, timeout)
+                    .map(|count| count as u32)
+                    .map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::RecvMany {
+                max,
+                timeout,
+                reply,
+            } => {
+                let mut out = Vec::with_capacity(max.min(512));
+                let received = match timeout {
+                    Some(timeout) => socket.recv_many_timeout_into(max, timeout, &mut out),
+                    None => socket.recv_many_into(max, &mut out),
+                };
+                let result = match received {
+                    Ok(_) => Ok(out.into_iter().map(message_to_bytes).collect()),
+                    Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(Vec::new()),
+                    Err(error) => Err(worker_error(error)),
+                };
+                let _ = reply.send(result);
+            }
+            SocketCommand::Subscribe { prefix, reply } => {
+                let result = socket.subscribe(prefix).map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::Unsubscribe { prefix, reply } => {
+                let result = socket.unsubscribe(prefix).map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::Join { group, reply } => {
+                let result = socket.join(group).map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::Leave { group, reply } => {
+                let result = socket.leave(group).map_err(worker_error);
+                let _ = reply.send(result);
+            }
+            SocketCommand::Close { reply } => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(()));
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn parse_endpoint_worker(endpoint: &str) -> WorkerResult<Endpoint> {
+    Endpoint::from_str(endpoint).map_err(worker_error)
+}
+
+fn worker_error(error: omq_tokio::Error) -> String {
+    error.to_string()
 }
 
 fn parse_socket_type(name: &str) -> Result<SocketType> {
@@ -507,31 +715,36 @@ fn parse_workload_profile(value: &str) -> Result<WorkloadProfile> {
     })
 }
 
-fn parse_endpoint(endpoint: &str) -> Result<Endpoint> {
-    Endpoint::from_str(endpoint).map_err(map_omq_error)
+fn copy_parts(parts: Vec<Uint8Array>) -> Vec<Bytes> {
+    parts
+        .into_iter()
+        .map(|part| Bytes::copy_from_slice(part.as_ref()))
+        .collect()
 }
 
-fn message_from_parts(parts: Vec<Uint8Array>) -> Message {
+fn message_from_bytes(mut parts: Vec<Bytes>) -> Message {
     if parts.len() == 1 {
-        return Message::from_slice(parts[0].as_ref());
+        return Message::single(parts.remove(0));
     }
-    Message::multipart(
-        parts
-            .into_iter()
-            .map(|part| Bytes::copy_from_slice(part.as_ref())),
-    )
+    Message::multipart(parts)
 }
 
-fn message_to_buffers(message: Message) -> Vec<Buffer> {
+fn message_to_bytes(message: Message) -> Vec<Bytes> {
     (0..message.len())
         .map(|index| {
-            Buffer::from(
+            Bytes::copy_from_slice(
                 message
                     .part_slice(index)
-                    .expect("message part index checked")
-                    .to_vec(),
+                    .expect("message part index checked"),
             )
         })
+        .collect()
+}
+
+fn parts_to_buffers(parts: Vec<Bytes>) -> Vec<Buffer> {
+    parts
+        .into_iter()
+        .map(|part| Buffer::from(part.to_vec()))
         .collect()
 }
 

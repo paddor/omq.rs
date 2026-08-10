@@ -169,6 +169,7 @@ const RECV_RING_STATUS_CLOSED: i32 = 2;
 const RECV_RING_STATUS_INVALID_ENDPOINT: i32 = 3;
 const RECV_RING_STATUS_PROTOCOL: i32 = 4;
 const RECV_RING_STATUS_ERROR: i32 = 5;
+const MAX_ERROR_MESSAGE_BYTES: usize = 4095;
 
 const RECV_RING_FLAG_MULTIPART: u64 = 1;
 const RECV_RING_FLAG_EXTERNAL: u64 = 2;
@@ -678,12 +679,18 @@ fn empty_cstring() -> CString {
 }
 
 fn cstring_lossy(message: &str) -> CString {
-    let bytes: Vec<u8> = message
-        .as_bytes()
-        .iter()
-        .copied()
-        .filter(|b| *b != 0)
-        .collect();
+    let mut bytes = Vec::with_capacity(message.len().min(MAX_ERROR_MESSAGE_BYTES));
+    for ch in message.chars() {
+        if ch == '\0' {
+            continue;
+        }
+        let mut encoded = [0; 4];
+        let chunk = ch.encode_utf8(&mut encoded).as_bytes();
+        if bytes.len() + chunk.len() > MAX_ERROR_MESSAGE_BYTES {
+            break;
+        }
+        bytes.extend_from_slice(chunk);
+    }
     CString::new(bytes).unwrap_or_else(|_| empty_cstring())
 }
 
@@ -3957,6 +3964,26 @@ mod recv_ring_tests {
     fn windows_dns_error_message_is_name_resolution_error() {
         let error = io::Error::other("No such host is known. (os error 11001)");
         assert!(is_name_resolution_error(&error));
+    }
+
+    #[test]
+    fn cstring_lossy_removes_nul_and_fits_java_read_window() {
+        let message = format!("a\0{}", "b".repeat(MAX_ERROR_MESSAGE_BYTES + 10));
+        let cstring = cstring_lossy(&message);
+        let bytes = cstring.to_bytes();
+
+        assert_eq!(MAX_ERROR_MESSAGE_BYTES, bytes.len());
+        assert!(!bytes.contains(&0));
+    }
+
+    #[test]
+    fn cstring_lossy_truncates_at_utf8_boundary() {
+        let message = "é".repeat(MAX_ERROR_MESSAGE_BYTES);
+        let cstring = cstring_lossy(&message);
+        let bytes = cstring.to_bytes();
+
+        assert_eq!(MAX_ERROR_MESSAGE_BYTES - 1, bytes.len());
+        assert!(std::str::from_utf8(bytes).is_ok());
     }
 
     #[test]

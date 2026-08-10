@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Maven version to publish, for example 0.1.0
+        description: Maven version to publish, for example 0.3.0
         required: true
 
 permissions:
@@ -69,7 +69,7 @@ jobs:
       - name: Stage release native for tests
         shell: bash
         run: |
-          resource_dir="bindings/java/target/classes/io/omq/native/${{ matrix.platform }}"
+          resource_dir="bindings/java/target/test-classes/io/omq/native/${{ matrix.platform }}"
           mkdir -p "$resource_dir"
           cp "bindings/java/native/target/release/${{ matrix.library }}" "$resource_dir/"
       - name: JUnit with release native
@@ -130,6 +130,23 @@ jobs:
           else
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
+      - name: Package release artifacts
+        run: >
+          mvn -B -ntp -f bindings/java/pom.xml -Prelease
+          -Drevision=${{ steps.version.outputs.version }}
+          -DskipNative=true -DskipTests -Dgpg.skip=true
+          package
+      - name: Smoke packaged Linux classifier
+        shell: bash
+        run: |
+          jar="bindings/java/target/omq-java-${{ steps.version.outputs.version }}-linux-x86_64.jar"
+          java --enable-native-access=ALL-UNNAMED \
+            -cp "bindings/java/target/test-classes:${jar}" \
+            io.omq.smoke.PackagingSmoke
+          java --enable-native-access=io.omq \
+            --module-path "${jar}" --add-modules io.omq \
+            -cp bindings/java/target/test-classes \
+            io.omq.smoke.PackagingSmoke
       - name: Upload for validation
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}

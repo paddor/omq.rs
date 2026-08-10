@@ -39,16 +39,25 @@ Maven Central coordinates. Use the latest version listed on Maven Central:
   <groupId>io.github.paddor</groupId>
   <artifactId>omq-java</artifactId>
   <version>VERSION</version>
+  <classifier>linux-x86_64</classifier>
 </dependency>
 ```
 
-Synchronous receives use Java 25 FFM and require native access:
+Use exactly one runtime classifier for your platform:
+
+- `linux-x86_64`
+- `macos-x86_64`
+- `macos-aarch64`
+- `windows-x86_64`
+
+OMQ.java loads native code and uses Java 25 FFM, so applications must enable
+native access:
 
 ```sh
 --enable-native-access=ALL-UNNAMED
 ```
 
-If the jar is used on the module path, enable only the automatic module:
+If the jar is used on the module path, enable only the named module:
 
 ```sh
 --enable-native-access=io.omq
@@ -60,8 +69,10 @@ mvn install
 mvn test
 ```
 
-Maven builds the Rust native library in `native/target/debug` and embeds the
-current-platform native library in the jar under `io/omq/native/...`.
+Maven builds the Rust native library in `native/target/debug` and places the
+current-platform native library on the test runtime path. Release builds publish
+Java-only main jars plus platform classifier jars with release native libraries
+under `io/omq/native/...`.
 
 ## API Shape
 

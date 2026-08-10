@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.3.0]
+
+- Publish OMQ.java as a Java-only main jar plus platform classifier runtime jars.
+- Build and test release native libraries on CI before Maven Central upload.
+- Report the required Maven classifier when native loading fails.
+- Tighten Java soak resource checks with FD tracking, RSS/FD slope gates, and
+  post-GC heap cleanup checks.
+
 ## [0.2.0]
 
 - Remove public batch send/receive APIs. Scalar receive methods still use the hidden native batch receive path.

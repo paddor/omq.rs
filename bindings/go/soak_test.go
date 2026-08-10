@@ -44,6 +44,20 @@ type soakState struct {
 	failure atomic.Value
 }
 
+type soakScenarios struct {
+	selected map[string]bool
+}
+
+var allSoakScenarios = []string{
+	"tcp",
+	"curve",
+	"compression",
+	"inproc",
+	"poller",
+	"pubsub",
+	"context-churn",
+}
+
 func TestSoakMixedWorkloads(t *testing.T) {
 	if !soakEnabled() {
 		t.Skip("set OMQ_GO_SOAK=1 to run Go soak")
@@ -51,6 +65,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 	duration := soakDuration()
 	workers := soakWorkers()
+	scenarios := readSoakScenarios(t)
 	oldProcs := runtime.GOMAXPROCS(workers)
 	defer runtime.GOMAXPROCS(oldProcs)
 
@@ -70,67 +85,95 @@ func TestSoakMixedWorkloads(t *testing.T) {
 	start := time.Now()
 	resources := newSoakResourceTracker(start, baseline, limits)
 
-	tcpEndpoint, tcpPull := startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", nil)
-	tcpMonitor, err := tcpPull.Monitor()
-	if err != nil {
-		t.Fatal(err)
+	var tcpEndpoint string
+	var tcpPull *Socket
+	if scenarios.enabled("tcp") {
+		tcpEndpoint, tcpPull = startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", nil)
+		startWorker(&wg, state, "tcp-pull", func(ctx context.Context) error {
+			return soakDrainMessages(ctx, tcpPull, &counters.tcpMessages)
+		})
+		tcpMonitor, err := tcpPull.Monitor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		startWorker(&wg, state, "tcp-monitor", func(ctx context.Context) error {
+			defer tcpMonitor.Close()
+			return soakDrainMonitor(ctx, tcpMonitor, &counters.monitorEvents)
+		})
 	}
-	startWorker(&wg, state, "tcp-pull", func(ctx context.Context) error {
-		return soakDrainMessages(ctx, tcpPull, &counters.tcpMessages)
-	})
-	startWorker(&wg, state, "tcp-monitor", func(ctx context.Context) error {
-		defer tcpMonitor.Close()
-		return soakDrainMonitor(ctx, tcpMonitor, &counters.monitorEvents)
-	})
 
-	serverKey, err := GenerateCurveKeypair()
-	if err != nil {
-		t.Fatal(err)
+	var curveEndpoint string
+	var curvePull *Socket
+	var serverKey CurveKeypair
+	var clientKey CurveKeypair
+	if scenarios.enabled("curve") {
+		var err error
+		serverKey, err = GenerateCurveKeypair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientKey, err = GenerateCurveKeypair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		curveEndpoint, curvePull = startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", []SocketOption{
+			CurveServerAuth(serverKey, func(peer PeerInfo) bool {
+				return peer.Mechanism == "CURVE" && peer.PublicKey == clientKey.Public
+			}),
+		})
+		startWorker(&wg, state, "curve-pull", func(ctx context.Context) error {
+			return soakDrainMessages(ctx, curvePull, &counters.curveMessages)
+		})
 	}
-	clientKey, err := GenerateCurveKeypair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	curveEndpoint, curvePull := startSoakPull(t, omqCtx, "tcp://127.0.0.1:*", []SocketOption{
-		CurveServerAuth(serverKey, func(peer PeerInfo) bool {
-			return peer.Mechanism == "CURVE" && peer.PublicKey == clientKey.Public
-		}),
-	})
-	startWorker(&wg, state, "curve-pull", func(ctx context.Context) error {
-		return soakDrainMessages(ctx, curvePull, &counters.curveMessages)
-	})
 
 	churnWorkers := max(1, workers/3)
-	for i := 0; i < churnWorkers; i++ {
-		workerID := i
-		startWorker(&wg, state, fmt.Sprintf("tcp-churn-%d", workerID), func(ctx context.Context) error {
-			return soakChurnPush(ctx, omqCtx, tcpEndpoint, workerID, nil)
-		})
-		startWorker(&wg, state, fmt.Sprintf("curve-churn-%d", workerID), func(ctx context.Context) error {
-			return soakChurnPush(ctx, omqCtx, curveEndpoint, workerID, []SocketOption{
-				CurveClient(clientKey, serverKey.Public),
+	if scenarios.enabled("tcp") {
+		for i := 0; i < churnWorkers; i++ {
+			workerID := i
+			startWorker(&wg, state, fmt.Sprintf("tcp-churn-%d", workerID), func(ctx context.Context) error {
+				return soakChurnPush(ctx, omqCtx, tcpEndpoint, workerID, nil)
 			})
-		})
+		}
+	}
+	if scenarios.enabled("curve") {
+		for i := 0; i < churnWorkers; i++ {
+			workerID := i
+			startWorker(&wg, state, fmt.Sprintf("curve-churn-%d", workerID), func(ctx context.Context) error {
+				return soakChurnPush(ctx, omqCtx, curveEndpoint, workerID, []SocketOption{
+					CurveClient(clientKey, serverKey.Public),
+				})
+			})
+		}
 	}
 
-	startWorker(&wg, state, "lz4-compression", func(ctx context.Context) error {
-		return soakCompressionPair(ctx, omqCtx, "lz4+tcp://127.0.0.1:*", nil, counters)
-	})
-	startWorker(&wg, state, "zstd-compression", func(ctx context.Context) error {
-		return soakCompressionPair(ctx, omqCtx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
-	})
-	startWorker(&wg, state, "inproc-req-rep", func(ctx context.Context) error {
-		return soakInprocReqRep(ctx, omqCtx, counters)
-	})
-	startWorker(&wg, state, "poller-fanin", func(ctx context.Context) error {
-		return soakPollerFanIn(ctx, omqCtx, max(2, min(workers/2, 6)), counters)
-	})
-	startWorker(&wg, state, "pub-sub-churn", func(ctx context.Context) error {
-		return soakPubSubChurn(ctx, omqCtx, counters)
-	})
-	startWorker(&wg, state, "context-churn", func(ctx context.Context) error {
-		return soakContextChurn(ctx, counters)
-	})
+	if scenarios.enabled("compression") {
+		startWorker(&wg, state, "lz4-compression", func(ctx context.Context) error {
+			return soakCompressionPair(ctx, omqCtx, "lz4+tcp://127.0.0.1:*", nil, counters)
+		})
+		startWorker(&wg, state, "zstd-compression", func(ctx context.Context) error {
+			return soakCompressionPair(ctx, omqCtx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
+		})
+	}
+	if scenarios.enabled("inproc") {
+		startWorker(&wg, state, "inproc-req-rep", func(ctx context.Context) error {
+			return soakInprocReqRep(ctx, omqCtx, counters)
+		})
+	}
+	if scenarios.enabled("poller") {
+		startWorker(&wg, state, "poller-fanin", func(ctx context.Context) error {
+			return soakPollerFanIn(ctx, omqCtx, max(2, min(workers/2, 6)), counters)
+		})
+	}
+	if scenarios.enabled("pubsub") {
+		startWorker(&wg, state, "pub-sub-churn", func(ctx context.Context) error {
+			return soakPubSubChurn(ctx, omqCtx, counters)
+		})
+	}
+	if scenarios.enabled("context-churn") {
+		startWorker(&wg, state, "context-churn", func(ctx context.Context) error {
+			return soakContextChurn(ctx, counters)
+		})
+	}
 
 	ticker := time.NewTicker(soakReportInterval)
 	defer ticker.Stop()
@@ -165,8 +208,12 @@ func TestSoakMixedWorkloads(t *testing.T) {
 done:
 	cancel()
 	waitForSoakWorkers(t, &wg)
-	closeSoakSocket(tcpPull)
-	closeSoakSocket(curvePull)
+	if tcpPull != nil {
+		closeSoakSocket(tcpPull)
+	}
+	if curvePull != nil {
+		closeSoakSocket(curvePull)
+	}
 	if err := omqCtx.CloseContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +224,7 @@ done:
 	if err := state.err(); err != nil {
 		t.Fatal(err)
 	}
-	assertSoakProgress(t, counters)
+	assertSoakProgress(t, scenarios, counters)
 }
 
 func startSoakPull(t *testing.T, ctx *Context, endpoint string, extra []SocketOption) (string, *Socket) {
@@ -628,18 +675,53 @@ func waitForSoakWorkers(t *testing.T, wg *sync.WaitGroup) {
 	}
 }
 
-func assertSoakProgress(t *testing.T, counters *soakCounters) {
+func assertSoakProgress(t *testing.T, scenarios soakScenarios, counters *soakCounters) {
 	t.Helper()
 	checks := []struct {
 		name  string
 		count uint64
-	}{
-		{"tcp", counters.tcpMessages.Load()},
-		{"curve", counters.curveMessages.Load()},
-		{"compression", counters.compressionMessages.Load()},
-		{"inproc", counters.inprocMessages.Load()},
-		{"poller", counters.pollerMessages.Load()},
-		{"context-churn", counters.contextCycles.Load()},
+	}{}
+	if scenarios.enabled("tcp") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"tcp", counters.tcpMessages.Load()})
+	}
+	if scenarios.enabled("curve") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"curve", counters.curveMessages.Load()})
+	}
+	if scenarios.enabled("compression") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"compression", counters.compressionMessages.Load()})
+	}
+	if scenarios.enabled("inproc") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"inproc", counters.inprocMessages.Load()})
+	}
+	if scenarios.enabled("poller") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"poller", counters.pollerMessages.Load()})
+	}
+	if scenarios.enabled("pubsub") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"pubsub", counters.pubSubMessages.Load()})
+	}
+	if scenarios.enabled("context-churn") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"context-churn", counters.contextCycles.Load()})
 	}
 	for _, check := range checks {
 		if check.count == 0 {
@@ -755,6 +837,54 @@ func soakWorkers() int {
 		return 1
 	}
 	return workers
+}
+
+func readSoakScenarios(t *testing.T) soakScenarios {
+	t.Helper()
+	all := make(map[string]bool, len(allSoakScenarios))
+	selected := make(map[string]bool, len(allSoakScenarios))
+	for _, name := range allSoakScenarios {
+		all[name] = true
+		selected[name] = true
+	}
+	if only := scenarioSet(os.Getenv("OMQ_GO_SOAK_SCENARIOS")); len(only) > 0 {
+		validateSoakScenarioSet(t, only, all)
+		selected = only
+	}
+	skip := scenarioSet(os.Getenv("OMQ_GO_SOAK_SKIP_SCENARIOS"))
+	validateSoakScenarioSet(t, skip, all)
+	for name := range skip {
+		delete(selected, name)
+	}
+	if len(selected) == 0 {
+		t.Fatal("OMQ_GO_SOAK_SCENARIOS selected no soak scenarios")
+	}
+	return soakScenarios{selected: selected}
+}
+
+func scenarioSet(raw string) map[string]bool {
+	set := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		set[name] = true
+	}
+	return set
+}
+
+func validateSoakScenarioSet(t *testing.T, set map[string]bool, all map[string]bool) {
+	t.Helper()
+	for name := range set {
+		if !all[name] {
+			t.Fatalf("unknown soak scenario %q", name)
+		}
+	}
+}
+
+func (s soakScenarios) enabled(name string) bool {
+	return s.selected[name]
 }
 
 func int64Config(names []string, fallback int64) int64 {

@@ -642,7 +642,7 @@ jobs:
 
   java-test:
     name: java-test (${{ matrix.os }})
-    needs: [changes, java-lint]
+    needs: [changes, linux-gate, java-lint]
     if: needs.changes.outputs.run_java == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30

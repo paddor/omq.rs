@@ -22,9 +22,9 @@ an implementation detail used by the public wrapper and tests.
 ## Threading
 
 Each Lua socket follows the libzmq rule: one socket, one application thread.
-`SocketInner` stores the raw `omq-libzmq` socket pointer and a reusable receive
-scratch buffer. `close()` swaps the raw pointer to zero so drop and explicit
-close are idempotent.
+`SocketInner` stores the raw `omq-libzmq` socket pointer in an `Rc`, so the
+socket handle is not `Send` or `Sync` at the Rust type level. `close()` swaps
+the raw pointer to zero so drop and explicit close are idempotent.
 
 `omq-libzmq` owns the OMQ context and IO threads. Lua caller threads do not own
 transport, reconnect, ZMTP, compression, or routing state.
@@ -48,8 +48,7 @@ Receive:
 ```text
 IO thread reads and decodes transport
   -> omq-libzmq receive queue
-  -> zmq_recv
-  -> native receive scratch buffer
+  -> zmq_msg_recv
   -> Lua string
 ```
 
@@ -84,8 +83,8 @@ The extra safety and integration layers cost little in absolute time, but at
 
 OPTIMIZATION: If small-message throughput becomes a focused target, add raw
 Lua C API fast paths for `Socket:send(string[, flags])` and
-`Socket:recv([capacity, flags])`. They can store the raw socket pointer in Lua
-userdata, call `zmq_send`/`zmq_recv` directly, and use `lua_pushlstring` for
+`Socket:recv([max_size, flags])`. They can store the raw socket pointer in Lua
+userdata, call `zmq_send`/`zmq_msg_recv` directly, and use `lua_pushlstring` for
 receive. Keep setup, options, multipart, docs, and tests in the current mlua
 layer. This narrows the gap to lzmq but adds unsafe Lua stack code and needs
 dedicated regression and perf tests.

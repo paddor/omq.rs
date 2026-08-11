@@ -31,6 +31,23 @@ cargo fmt --manifest-path bindings/lua/native/Cargo.toml
 cargo clippy --manifest-path bindings/lua/native/Cargo.toml --all-targets -- -D warnings
 ```
 
+## Soak Tests
+
+The Lua soak wrapper builds the native module in release mode and runs the
+mixed workload soak with `/usr/bin/lua`:
+
+```sh
+bindings/lua/scripts/soak.sh
+```
+
+Default durations are `600 1800 3600` seconds. Useful env:
+
+- `OMQ_LUA_SOAK_DURATIONS="600 1800 3600"`
+- `OMQ_LUA_SOAK_WORKERS=12`
+- `OMQ_LUA_SOAK_TIMEOUT_EXTRA_SECS=120`
+- `OMQ_LUA_SOAK_SCENARIOS=tcp,inproc,pubsub,context-churn`
+- `OMQ_LUA_SOAK_SKIP_SCENARIOS=pubsub`
+
 ## Benchmark Chart
 
 The chart script follows the Go and Python binding benchmark shape. It runs two

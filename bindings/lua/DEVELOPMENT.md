@@ -79,5 +79,9 @@ Useful flags:
 - `--no-chart`
 - `--no-build`
 
+Useful env:
+
+- `OMQ_BENCH_ARENA_THRESHOLD=2048` overrides OMQ.lua's frame arena threshold.
+
 The machine is noisy; treat current rows as provisional and rerun on an idle
 system before publishing performance claims.

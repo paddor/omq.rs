@@ -1,24 +1,27 @@
 use std::cell::UnsafeCell;
+#[cfg(debug_assertions)]
 use std::sync::OnceLock;
 
-/// Single-threaded interior mutability without runtime overhead.
+/// Single-threaded interior mutability.
 ///
-/// Wraps `UnsafeCell<T>` behind an owner-thread check. The first `get`
-/// call binds the cell to the current thread; later calls from another
-/// thread panic before touching the cell.
+/// Debug builds wrap `UnsafeCell<T>` behind an owner-thread check. Release
+/// builds trust libzmq's one-thread-per-socket contract and avoid the check
+/// on the hot path.
 pub(crate) struct LocalCell<T> {
     value: UnsafeCell<T>,
+    #[cfg(debug_assertions)]
     owner: OnceLock<std::thread::ThreadId>,
 }
 
-// SAFETY: `get` binds access to one thread before touching the UnsafeCell.
-// Calls from other threads panic without accessing the cell.
+// SAFETY: ZMQ sockets are not thread-safe. Callers must access each socket
+// from one application thread at a time. Debug builds enforce this.
 unsafe impl<T: Send> Sync for LocalCell<T> {}
 
 impl<T> LocalCell<T> {
     pub(crate) fn new(val: T) -> Self {
         Self {
             value: UnsafeCell::new(val),
+            #[cfg(debug_assertions)]
             owner: OnceLock::new(),
         }
     }
@@ -26,12 +29,15 @@ impl<T> LocalCell<T> {
     #[inline]
     #[expect(clippy::mut_from_ref)]
     pub(crate) unsafe fn get(&self) -> &mut T {
-        let current = std::thread::current().id();
-        let owner = self.owner.get_or_init(|| current);
-        assert_eq!(
-            *owner, current,
-            "LocalCell accessed from multiple socket threads"
-        );
+        #[cfg(debug_assertions)]
+        {
+            let current = std::thread::current().id();
+            let owner = self.owner.get_or_init(|| current);
+            assert_eq!(
+                *owner, current,
+                "LocalCell accessed from multiple socket threads"
+            );
+        }
         // SAFETY: caller upholds the socket single-thread access invariant.
         unsafe { &mut *self.value.get() }
     }
@@ -68,6 +74,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn rejects_access_from_second_thread() {
         let cell = Arc::new(LocalCell::new(1usize));
 

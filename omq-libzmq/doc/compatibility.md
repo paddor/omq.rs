@@ -46,6 +46,9 @@ Socket options fall into three groups:
   do not map to omq-tokio behavior, such as ZAP, SOCKS, GSSAPI, VMCI, NORM,
   multicast tuning, batch sizes, busy-poll, and most XPUB manual knobs.
 
+`OMQ_ARENA_THRESHOLD` is an OMQ extension. It sets the outbound frame arena
+threshold before first bind/connect; `-1` restores the 4 KiB native default.
+
 `ZMQ_RECONNECT_STOP` is stored and returned. Only the connection-refused bit is
 currently wired into backend behavior.
 

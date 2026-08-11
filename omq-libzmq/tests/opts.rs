@@ -37,6 +37,7 @@ const ZMQ_HEARTBEAT_TTL: i32 = 76;
 const ZMQ_HEARTBEAT_TIMEOUT: i32 = 77;
 const ZMQ_HANDSHAKE_IVL: i32 = 66;
 const ZMQ_MAXMSGSIZE: i32 = 22;
+const OMQ_ARENA_THRESHOLD: i32 = 10_001;
 const ZMQ_ROUTER_MANDATORY: i32 = 33;
 const ZMQ_CONFLATE: i32 = 54;
 const ZMQ_TCP_KEEPALIVE: i32 = 34;
@@ -370,6 +371,31 @@ fn immediate_push_connect_without_peer_is_muted_like_libzmq() {
 }
 
 #[test]
+fn immediate_set_after_first_connect_does_not_change_send_routing() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_i32(push, ZMQ_LINGER, 0);
+
+    let endpoint = std::ffi::CString::new(format!("tcp://127.0.0.1:{port}")).unwrap();
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    assert_eq!(set_i32(push, ZMQ_IMMEDIATE, 1), 0);
+    assert_eq!(get_i32(push, ZMQ_IMMEDIATE), 1);
+
+    let payload = b"queued";
+    assert_eq!(
+        zmq_send(push, payload.as_ptr().cast(), payload.len(), ZMQ_DONTWAIT),
+        i32::try_from(payload.len()).unwrap()
+    );
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn identity_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_DEALER);
@@ -513,6 +539,30 @@ fn maxmsgsize_roundtrip() {
 
     set_i64(s, ZMQ_MAXMSGSIZE, -1);
     assert_eq!(get_i64(s, ZMQ_MAXMSGSIZE), -1);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn arena_threshold_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 4 * 1024);
+
+    assert_eq!(set_i64(s, OMQ_ARENA_THRESHOLD, 2048), 0);
+    assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 2048);
+
+    assert_eq!(set_i64(s, OMQ_ARENA_THRESHOLD, 0), 0);
+    assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 0);
+
+    assert_eq!(set_i64(s, OMQ_ARENA_THRESHOLD, -1), 0);
+    assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 4 * 1024);
+
+    assert_eq!(set_i64(s, OMQ_ARENA_THRESHOLD, -2), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 4 * 1024);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

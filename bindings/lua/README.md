@@ -66,6 +66,17 @@ Generate a quick local chart:
 bindings/lua/scripts/update_perf.py --quick
 ```
 
+The script uses the same append-only cache and SVG chart shape as the Go and
+Python bindings. It benchmarks `omq.lua` and, when `require("lzmq")` works for
+the selected Lua binary, `lzmq`. User-local rocks are visible when `luarocks`
+is available.
+
+Limit a run to one implementation:
+
+```sh
+bindings/lua/scripts/update_perf.py --quick --impls omq.lua --latency-impls omq.lua
+```
+
 Benchmark rows append to:
 
 ```text

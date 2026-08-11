@@ -23,46 +23,47 @@ public final class PushPullTcpPeer {
         if (args.length != 6 && args.length != 7) {
             throw new IllegalArgumentException(
                     "usage: <omq|omq-into|jeromq|jeromq-into> "
-                            + "<push|pull> <endpoint> <size> <messages> <warmup> [batch]");
+                            + "<push|pull> <endpoint> <size> "
+                            + "<duration_secs> <warmup_secs> [batch]");
         }
 
         Impl impl = Impl.parse(args[0]);
         Role role = Role.parse(args[1]);
         String endpoint = args[2];
         int size = Integer.parseInt(args[3]);
-        int messages = Integer.parseInt(args[4]);
-        int warmup = Integer.parseInt(args[5]);
+        long durationNanos = parsePositiveSeconds(args[4], "duration_secs");
+        long warmupNanos = parseNonNegativeSeconds(args[5], "warmup_secs");
         int batch = args.length == 7 ? Integer.parseInt(args[6]) : 64;
-        if (size < 0 || messages <= 0 || warmup < 0 || batch <= 0) {
-            throw new IllegalArgumentException("invalid size/messages/warmup");
+        if (size < 0 || batch <= 0) {
+            throw new IllegalArgumentException("invalid size/batch");
         }
 
         if (role == Role.PULL) {
-            runPull(impl, endpoint, size, messages, warmup, batch);
+            runPull(impl, endpoint, size, durationNanos, warmupNanos, batch);
         } else {
-            runPush(impl, endpoint, size, messages, warmup);
+            runPush(impl, endpoint, size);
         }
     }
 
     private static void runPull(
-            Impl impl, String endpoint, int size, int messages, int warmup, int batch) {
+            Impl impl, String endpoint, int size, long durationNanos, long warmupNanos, int batch) {
         switch (impl) {
-            case OMQ -> runOmqPull(endpoint, size, messages, warmup, false);
-            case OMQ_INTO -> runOmqPull(endpoint, size, messages, warmup, true);
-            case JEROMQ -> runJeroPull(endpoint, size, messages, warmup, false);
-            case JEROMQ_INTO -> runJeroPull(endpoint, size, messages, warmup, true);
+            case OMQ -> runOmqPull(endpoint, size, durationNanos, warmupNanos, false);
+            case OMQ_INTO -> runOmqPull(endpoint, size, durationNanos, warmupNanos, true);
+            case JEROMQ -> runJeroPull(endpoint, size, durationNanos, warmupNanos, false);
+            case JEROMQ_INTO -> runJeroPull(endpoint, size, durationNanos, warmupNanos, true);
         }
     }
 
-    private static void runPush(Impl impl, String endpoint, int size, int messages, int warmup) {
+    private static void runPush(Impl impl, String endpoint, int size) {
         switch (impl) {
-            case OMQ, OMQ_INTO -> runOmqPush(endpoint, size, messages, warmup);
-            case JEROMQ, JEROMQ_INTO -> runJeroPush(endpoint, size, messages, warmup);
+            case OMQ, OMQ_INTO -> runOmqPush(endpoint, size);
+            case JEROMQ, JEROMQ_INTO -> runJeroPush(endpoint, size);
         }
     }
 
     private static void runOmqPull(
-            String endpoint, int size, int messages, int warmup, boolean receiveInto) {
+            String endpoint, int size, long durationNanos, long warmupNanos, boolean receiveInto) {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL)
                      .workloadProfile(WorkloadProfile.THROUGHPUT)
@@ -72,20 +73,20 @@ public final class PushPullTcpPeer {
             ready(endpoint);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                receiveInto(pull, buffer, size, warmup);
+                receiveIntoUntil(pull, buffer, size, System.nanoTime() + warmupNanos);
                 long started = System.nanoTime();
-                receiveInto(pull, buffer, size, messages);
-                result(Impl.OMQ_INTO.name, endpoint, size, messages, started, System.nanoTime());
+                long count = receiveIntoUntil(pull, buffer, size, started + durationNanos);
+                result(Impl.OMQ_INTO.name, endpoint, size, count, started, System.nanoTime());
             } else {
-                receiveBytes(pull, size, warmup);
+                receiveBytesUntil(pull, size, System.nanoTime() + warmupNanos);
                 long started = System.nanoTime();
-                receiveBytes(pull, size, messages);
-                result(Impl.OMQ.name, endpoint, size, messages, started, System.nanoTime());
+                long count = receiveBytesUntil(pull, size, started + durationNanos);
+                result(Impl.OMQ.name, endpoint, size, count, started, System.nanoTime());
             }
         }
     }
 
-    private static void runOmqPush(String endpoint, int size, int messages, int warmup) {
+    private static void runOmqPush(String endpoint, int size) {
         byte[] payload = payload(size);
         try (Context context = OMQ.context();
              Socket push = context.socket(SocketType.PUSH)
@@ -94,12 +95,12 @@ public final class PushPullTcpPeer {
                      .linger(LINGER)) {
             push.connect(endpoint);
             push.waitConnected(1, CONNECT_TIMEOUT);
-            sendOmq(push, payload, warmup + messages);
+            sendOmqForever(push, payload);
         }
     }
 
     private static void runJeroPull(
-            String endpoint, int size, int messages, int warmup, boolean receiveInto) {
+            String endpoint, int size, long durationNanos, long warmupNanos, boolean receiveInto) {
         try (org.zeromq.ZContext context = new org.zeromq.ZContext();
              org.zeromq.ZMQ.Socket pull = context.createSocket(org.zeromq.SocketType.PULL)) {
             pull.setRcvHWM(HWM);
@@ -108,20 +109,20 @@ public final class PushPullTcpPeer {
             ready(endpoint);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                receiveJeroInto(pull, buffer, size, warmup);
+                receiveJeroIntoUntil(pull, buffer, size, System.nanoTime() + warmupNanos);
                 long started = System.nanoTime();
-                receiveJeroInto(pull, buffer, size, messages);
-                result(Impl.JEROMQ_INTO.name, endpoint, size, messages, started, System.nanoTime());
+                long count = receiveJeroIntoUntil(pull, buffer, size, started + durationNanos);
+                result(Impl.JEROMQ_INTO.name, endpoint, size, count, started, System.nanoTime());
             } else {
-                receiveJero(pull, size, warmup);
+                receiveJeroUntil(pull, size, System.nanoTime() + warmupNanos);
                 long started = System.nanoTime();
-                receiveJero(pull, size, messages);
-                result(Impl.JEROMQ.name, endpoint, size, messages, started, System.nanoTime());
+                long count = receiveJeroUntil(pull, size, started + durationNanos);
+                result(Impl.JEROMQ.name, endpoint, size, count, started, System.nanoTime());
             }
         }
     }
 
-    private static void runJeroPush(String endpoint, int size, int messages, int warmup) {
+    private static void runJeroPush(String endpoint, int size) {
         byte[] payload = payload(size);
         try (org.zeromq.ZContext context = new org.zeromq.ZContext();
              org.zeromq.ZMQ.Socket push = context.createSocket(org.zeromq.SocketType.PUSH)) {
@@ -129,61 +130,74 @@ public final class PushPullTcpPeer {
             push.setLinger((int) LINGER.toMillis());
             push.connect(endpoint);
             sleep(250);
-            sendJero(push, payload, warmup + messages);
+            sendJeroForever(push, payload);
         }
     }
 
-    private static void sendOmq(Socket push, byte[] payload, int count) {
-        for (int i = 0; i < count; i++) {
+    private static void sendOmqForever(Socket push, byte[] payload) {
+        while (true) {
             push.send(payload);
         }
     }
 
-    private static void sendJero(org.zeromq.ZMQ.Socket push, byte[] payload, int count) {
-        for (int i = 0; i < count; i++) {
+    private static void sendJeroForever(org.zeromq.ZMQ.Socket push, byte[] payload) {
+        while (true) {
             if (!push.send(payload, 0)) {
                 throw new IllegalStateException("JeroMQ send failed");
             }
         }
     }
 
-    private static void receiveBytes(Socket pull, int size, int count) {
-        for (int i = 0; i < count; i++) {
+    private static long receiveBytesUntil(Socket pull, int size, long deadlineNanos) {
+        long count = 0;
+        while (System.nanoTime() < deadlineNanos) {
             byte[] body = pull.receiveBytes();
             if (body.length != size) {
                 throw new IllegalStateException("expected " + size + " bytes, got " + body.length);
             }
+            count++;
         }
+        return count;
     }
 
-    private static void receiveInto(Socket pull, ByteBuffer buffer, int size, int count) {
-        for (int i = 0; i < count; i++) {
+    private static long receiveIntoUntil(
+            Socket pull, ByteBuffer buffer, int size, long deadlineNanos) {
+        long count = 0;
+        while (System.nanoTime() < deadlineNanos) {
             buffer.clear();
             int received = pull.receiveInto(buffer);
             if (received != size) {
                 throw new IllegalStateException("expected " + size + " bytes, got " + received);
             }
+            count++;
         }
+        return count;
     }
 
-    private static void receiveJero(org.zeromq.ZMQ.Socket pull, int size, int count) {
-        for (int i = 0; i < count; i++) {
+    private static long receiveJeroUntil(org.zeromq.ZMQ.Socket pull, int size, long deadlineNanos) {
+        long count = 0;
+        while (System.nanoTime() < deadlineNanos) {
             byte[] body = pull.recv(0);
             if (body.length != size) {
                 throw new IllegalStateException("expected " + size + " bytes, got " + body.length);
             }
+            count++;
         }
+        return count;
     }
 
-    private static void receiveJeroInto(
-            org.zeromq.ZMQ.Socket pull, ByteBuffer buffer, int size, int count) {
-        for (int i = 0; i < count; i++) {
+    private static long receiveJeroIntoUntil(
+            org.zeromq.ZMQ.Socket pull, ByteBuffer buffer, int size, long deadlineNanos) {
+        long count = 0;
+        while (System.nanoTime() < deadlineNanos) {
             buffer.clear();
             int received = pull.recvByteBuffer(buffer, 0);
             if (received != size) {
                 throw new IllegalStateException("expected " + size + " bytes, got " + received);
             }
+            count++;
         }
+        return count;
     }
 
     private static byte[] payload(int size) {
@@ -200,7 +214,7 @@ public final class PushPullTcpPeer {
     }
 
     private static void result(
-            String impl, String endpoint, int size, int messages, long started, long ended) {
+            String impl, String endpoint, int size, long messages, long started, long ended) {
         double seconds = (ended - started) / 1_000_000_000.0;
         double messagesPerSecond = messages / seconds;
         double gbPerSecond = messagesPerSecond * size / 1_000_000_000.0;
@@ -210,6 +224,34 @@ public final class PushPullTcpPeer {
                         + "\"messages\":%d,\"seconds\":%.9f,\"msgs_s\":%.3f,\"gb_s\":%.6f}%n",
                 impl, endpoint, size, messages, seconds, messagesPerSecond, gbPerSecond);
         System.out.flush();
+    }
+
+    private static long parsePositiveSeconds(String value, String label) {
+        long nanos = parseSeconds(value, label);
+        if (nanos <= 0) {
+            throw new IllegalArgumentException(label + " must be greater than zero");
+        }
+        return nanos;
+    }
+
+    private static long parseNonNegativeSeconds(String value, String label) {
+        long nanos = parseSeconds(value, label);
+        if (nanos < 0) {
+            throw new IllegalArgumentException(label + " must be non-negative");
+        }
+        return nanos;
+    }
+
+    private static long parseSeconds(String value, String label) {
+        double seconds = Double.parseDouble(value);
+        if (!Double.isFinite(seconds)) {
+            throw new IllegalArgumentException(label + " must be finite");
+        }
+        double nanos = seconds * 1_000_000_000.0;
+        if (nanos > Long.MAX_VALUE) {
+            throw new IllegalArgumentException(label + " is too large");
+        }
+        return Math.round(nanos);
     }
 
     private static void sleep(long millis) {

@@ -21,8 +21,10 @@ REQREP_CLASS = "io.omq.perf.ReqRepTcpPeer"
 DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [8, 128, 1024, 4096, 32768]
 DEFAULT_IMPLS = ["omq", "omq-into", "jeromq", "jeromq-into"]
-DEFAULT_THROUGHPUT_WARMUP = 50_000
-QUICK_THROUGHPUT_WARMUP = 5_000
+DEFAULT_THROUGHPUT_DURATION = 2.0
+QUICK_THROUGHPUT_DURATION = 0.5
+DEFAULT_THROUGHPUT_WARMUP = 0.5
+QUICK_THROUGHPUT_WARMUP = 0.1
 DEFAULT_LATENCY_WARMUP = 50_000
 DEFAULT_LATENCY_ITERS = 50_000
 QUICK_LATENCY_WARMUP = 5_000
@@ -129,22 +131,10 @@ def free_endpoint():
     return f"tcp://127.0.0.1:{port}"
 
 
-def message_count(size, args):
-    by_bytes = args.target_bytes // max(size, 1)
-    return max(args.min_messages, min(args.max_messages, by_bytes))
-
-
-def throughput_warmup_count(messages, args):
-    if args.warmup_messages is not None:
-        return args.warmup_messages
-    base = QUICK_THROUGHPUT_WARMUP if args.quick else DEFAULT_THROUGHPUT_WARMUP
-    return min(messages, max(base, messages // 20))
-
-
-def java_cmd(class_name, cp, impl, role, endpoint, size, messages, warmup, batch=None):
+def java_cmd(class_name, cp, impl, role, endpoint, size, measure, warmup, batch=None):
     args = [
         str(size),
-        str(messages),
+        str(measure),
         str(warmup),
     ]
     if batch is not None:
@@ -192,61 +182,90 @@ def fail_on_noise(name, stdout, stderr):
 def kill(proc):
     if proc.poll() is None:
         proc.kill()
-        proc.communicate(timeout=5)
+    return proc.communicate(timeout=5)
 
 
-def run_cell_once(cp, impl, size, messages, warmup, batch, timeout):
+def run_cell_once(cp, impl, size, duration, warmup, batch, timeout):
     endpoint = free_endpoint()
     pull = subprocess.Popen(
-        java_cmd(PUSHPULL_CLASS, cp, impl, "pull", endpoint, size, messages, warmup, batch),
+        java_cmd(PUSHPULL_CLASS, cp, impl, "pull", endpoint, size, duration, warmup, batch),
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    push = None
     try:
         ready = read_line_timeout(pull, 10)
         if ready is None or not ready.startswith("READY "):
             out, err = pull.communicate(timeout=1) if pull.poll() is not None else ("", "")
             raise RuntimeError(f"receiver did not become ready:\n{ready or ''}{out}{err}")
 
-        push = subprocess.run(
-            java_cmd(PUSHPULL_CLASS, cp, impl, "push", endpoint, size, messages, warmup, batch),
+        push = subprocess.Popen(
+            java_cmd(PUSHPULL_CLASS, cp, impl, "push", endpoint, size, duration, warmup, batch),
             cwd=ROOT,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
         )
-        fail_on_noise("sender", push.stdout, push.stderr)
-        if push.returncode != 0:
-            raise RuntimeError(f"sender failed:\n{push.stdout}{push.stderr}")
 
-        out, err = pull.communicate(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while pull.poll() is None:
+            if push.poll() is not None:
+                push_out, push_err = push.communicate(timeout=1)
+                pull_out, pull_err = kill(pull)
+                raise RuntimeError(
+                    "sender exited before receiver:\n"
+                    + push_out
+                    + push_err
+                    + "\nreceiver output:\n"
+                    + ready
+                    + pull_out
+                    + pull_err
+                )
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(pull.args, timeout)
+            time.sleep(0.05)
+
+        out, err = pull.communicate(timeout=1)
         out = ready + out
+        push_out, push_err = kill(push)
+        push = None
+        fail_on_noise("sender", push_out, push_err)
         fail_on_noise("receiver", out, err)
         if pull.returncode != 0:
             raise RuntimeError(f"receiver failed:\n{out}{err}")
         return parse_result(out)
-    except Exception:
+    except Exception as exc:
         kill(pull)
+        if push is not None:
+            push_out, push_err = kill(push)
+            if push_out or push_err:
+                raise RuntimeError(f"sender output before failure:\n{push_out}{push_err}") from exc
         raise
 
 
 def run_cell(cp, impl, size, args):
-    messages = message_count(size, args)
-    warmup = throughput_warmup_count(messages, args)
     runs = []
     total = args.warmup_rounds + args.rounds
     for round_index in range(total):
-        result = run_cell_once(cp, impl, size, messages, warmup, args.batch_size, args.timeout)
-        result["warmup_messages"] = warmup
+        result = run_cell_once(
+            cp,
+            impl,
+            size,
+            args.throughput_duration,
+            args.throughput_warmup,
+            args.batch_size,
+            args.timeout,
+        )
+        result["target_seconds"] = args.throughput_duration
+        result["warmup_seconds"] = args.throughput_warmup
         if round_index >= args.warmup_rounds:
             runs.append(result)
         print(
             f"  {impl:8s} size={size:6d} round={round_index + 1}/{total} "
-            f"warmup={warmup:7d} {result['msgs_s']:12.0f} msg/s {result['gb_s']:7.3f} GB/s",
+            f"{result['seconds']:5.2f}s {result['msgs_s']:12.0f} msg/s "
+            f"{result['gb_s']:7.3f} GB/s",
             flush=True,
         )
     return sorted(runs, key=lambda row: row["msgs_s"])[len(runs) // 2]
@@ -710,19 +729,25 @@ def main():
     parser.add_argument("--impls", type=parse_csv_strings, default=DEFAULT_IMPLS)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warmup-rounds", type=int, default=1)
-    parser.add_argument("--target-bytes", type=int, default=256 * 1024 * 1024)
-    parser.add_argument("--min-messages", type=int, default=20_000)
-    parser.add_argument("--max-messages", type=int, default=1_000_000)
+    parser.add_argument("--throughput-duration", type=float)
     parser.add_argument(
         "--throughput-warmup",
-        "--throughput-warmup-messages",
-        "--warmup-messages",
-        dest="warmup_messages",
-        type=int,
+        dest="throughput_warmup",
+        type=float,
     )
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--latency-warmup", "--latency-warmup-messages", dest="latency_warmup_messages", type=int)
-    parser.add_argument("--latency-iters", "--latency-iterations", dest="latency_iterations", type=int)
+    parser.add_argument(
+        "--latency-warmup",
+        "--latency-warmup-messages",
+        dest="latency_warmup_messages",
+        type=int,
+    )
+    parser.add_argument(
+        "--latency-iters",
+        "--latency-iterations",
+        dest="latency_iterations",
+        type=int,
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--chart-only", action="store_true")
@@ -739,7 +764,17 @@ def main():
         parser.error("--rounds must be at least 1")
     if args.warmup_rounds < 0:
         parser.error("--warmup-rounds cannot be negative")
-    if args.warmup_messages is not None and args.warmup_messages < 0:
+    if args.throughput_duration is None:
+        args.throughput_duration = (
+            QUICK_THROUGHPUT_DURATION if args.quick else DEFAULT_THROUGHPUT_DURATION
+        )
+    if args.throughput_warmup is None:
+        args.throughput_warmup = (
+            QUICK_THROUGHPUT_WARMUP if args.quick else DEFAULT_THROUGHPUT_WARMUP
+        )
+    if args.throughput_duration <= 0:
+        parser.error("--throughput-duration must be greater than zero")
+    if args.throughput_warmup < 0:
         parser.error("--throughput-warmup cannot be negative")
     if args.latency_warmup_messages is None:
         args.latency_warmup_messages = (

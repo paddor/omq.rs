@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Use timed PUSH/PULL throughput samples for the OMQ.java performance chart
+  instead of fixed message-count runs.
+
 ## [0.3.0]
 
 - Publish OMQ.java as a Java-only main jar plus platform classifier runtime jars.

@@ -22,6 +22,7 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
+#[cfg(unix)]
 const ZMQ_ENOTSUP: i32 = 156_384_713;
 
 #[repr(C)]

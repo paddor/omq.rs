@@ -35,7 +35,5 @@ scripts/omq_libzmq_bench_peer
 perf.data*
 /TODO
 .chart_hw
-!bindings/pyomq/.chart_hw
-!bindings/java/.chart_hw
 !bindings/node/Cargo.lock
 .perf_hw

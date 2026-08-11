@@ -30,6 +30,7 @@ PROXY_DURATION_S = 2.0
 THROUGHPUT_MAX_BYTES = None
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
     "omq",
@@ -1103,7 +1104,7 @@ def _fmt_mbps(val):
 
 def _read_chart_hw():
     config = {}
-    path = os.path.join(os.path.dirname(__file__), "..", ".chart_hw")
+    path = os.path.join(REPO_ROOT, ".chart_hw")
     try:
         with open(path) as f:
             for line in f:

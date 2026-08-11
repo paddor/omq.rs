@@ -221,7 +221,8 @@ prefix=Linux VM on a 2018 Mac Mini
 postfix=performance governor, turbo off
 ```
 
-`omq-bench` reads `.chart_hw` automatically.
+`omq-bench` and binding chart scripts read the repo-root `.chart_hw`
+automatically.
 
 ### Main TCP Charts
 

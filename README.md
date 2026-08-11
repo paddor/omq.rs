@@ -9,9 +9,13 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - 3 security mechanisms: NULL, PLAIN, CURVE
 - OMQ-owned background I/O threads on Linux, macOS, and Windows
 - No C compiler, no libzmq, no libsodium
-- Bindings: [OMQ.rb](https://github.com/zeromq/omq.rb) (Ruby),
-  [pyomq](bindings/pyomq/) (Python), [OMQ.java](bindings/java/) (Java),
-  and C API ([omq-libzmq](omq-libzmq/))
+- Bindings and compatibility APIs:
+  - [omq-libzmq](omq-libzmq/) C API, libzmq-compatible `libomq_zmq`
+  - [pyomq](bindings/pyomq/) Python, sync + asyncio
+  - [OMQ.rb](https://github.com/zeromq/omq.rb) Ruby
+  - [OMQ.java](bindings/java/) Java 25, sync + async
+  - [OMQ.go](bindings/go/) Go 1.25, goroutine-safe API
+  - [@zeromq/omq-node](bindings/node/) Node.js 24.11, native addon
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
@@ -137,6 +141,8 @@ Five Cargo workspace crates plus language bindings.
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
 | [`OMQ.java`](bindings/java/) | Java 25 binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
+| [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
+| [`@zeromq/omq-node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
 
 ## Testing
 

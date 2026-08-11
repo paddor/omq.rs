@@ -30,7 +30,7 @@ CACHE_DIR = Path(
 )
 JSONL = CACHE_DIR / "bindings.jsonl"
 HARNESS_DIR = CACHE_DIR / "pushpull_tcp_peer"
-HARNESS_BIN = HARNESS_DIR / "perf-peer"
+HARNESS_BIN = HARNESS_DIR / "omq-go-bench-peer"
 CHART_DIR = ROOT / "doc" / "charts"
 CHART = CHART_DIR / "bindings.svg"
 
@@ -86,7 +86,7 @@ type result struct {
 
 func main() {
 	if len(os.Args) != 8 {
-		die("usage: perf-peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <duration|messages> <warmup>")
+		die("usage: omq-go-bench-peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <duration|messages> <warmup>")
 	}
 	bench := os.Args[1]
 	impl := os.Args[2]

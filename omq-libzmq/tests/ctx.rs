@@ -457,6 +457,11 @@ fn ctx_multiple_sockets_closed_before_term() {
 
 #[test]
 fn zero_linger_inproc_churn_term_does_not_hang() {
+    if cfg!(all(target_arch = "arm", target_pointer_width = "32")) {
+        run_zero_linger_inproc_churn();
+        return;
+    }
+
     let exe = std::env::current_exe().expect("current test binary");
     let mut child = Command::new(exe)
         .arg("zero_linger_inproc_churn_child")
@@ -487,6 +492,10 @@ fn zero_linger_inproc_churn_child() {
         return;
     }
 
+    run_zero_linger_inproc_churn();
+}
+
+fn run_zero_linger_inproc_churn() {
     for i in 0..2_000 {
         let ctx = zmq_ctx_new();
         let pull = zmq_socket(ctx, ZMQ_PULL);

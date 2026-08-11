@@ -960,6 +960,7 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable
+            crate::socket::adopt_pending_bypass_recv(sock_arc);
             let drain_nonempty = sock_arc
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);

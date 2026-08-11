@@ -763,6 +763,7 @@ pub(crate) use unix::UnixNotifyHandle as PlatformNotifyHandle;
 pub(crate) use windows::WindowsNotifyHandle as PlatformNotifyHandle;
 
 pub(crate) fn has_bypass_data(sock: &crate::socket::OmqSocket) -> bool {
+    crate::socket::adopt_pending_bypass_recv(sock);
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let bypass_ptr = &*unsafe { sock.bypass_recv.get() };
     bypass_ptr.as_ref().is_some_and(|br| !br.is_empty())

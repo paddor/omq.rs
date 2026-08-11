@@ -25,6 +25,9 @@ const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 /// completed the ZMTP handshake.
 pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 
+/// Default per-`FrameBuffer` arena threshold.
+pub const DEFAULT_ARENA_THRESHOLD: usize = crate::frame_buffer::ARENA_THRESHOLD;
+
 /// Per-socket configuration.
 ///
 /// # Compatibility warnings
@@ -571,10 +574,18 @@ impl Options {
 
     /// Set the per-`FrameBuffer` arena threshold. Messages smaller than
     /// this are copied into a contiguous arena buffer; larger ones use
-    /// zero-copy gather-write. Default: 4 KiB.
+    /// zero-copy gather-write. `0` forces gather-write for every
+    /// non-empty message. Default: 4 KiB.
     #[must_use]
     pub fn arena_threshold(mut self, bytes: usize) -> Self {
         self.arena_threshold = Some(bytes);
+        self
+    }
+
+    /// Restore the default per-`FrameBuffer` arena threshold.
+    #[must_use]
+    pub fn default_arena_threshold(mut self) -> Self {
+        self.arena_threshold = None;
         self
     }
 
@@ -917,6 +928,22 @@ mod tests {
             Options::new()
                 .disable_large_message_path()
                 .large_message_threshold,
+            None,
+        );
+    }
+
+    #[test]
+    fn arena_threshold_setters() {
+        assert_eq!(
+            Options::new().arena_threshold(2048).arena_threshold,
+            Some(2048)
+        );
+        assert_eq!(Options::new().arena_threshold(0).arena_threshold, Some(0));
+        assert_eq!(
+            Options::new()
+                .arena_threshold(2048)
+                .default_arena_threshold()
+                .arena_threshold,
             None,
         );
     }

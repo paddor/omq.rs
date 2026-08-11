@@ -12,7 +12,7 @@ Built on [omq-proto](https://crates.io/crates/omq-proto) and
 |-|-|
 | Multi-threaded | Concurrent `send`/`recv` from multiple tasks is safe |
 | Actor with bypass | `SocketDriver` owns mutable socket state. Common send/recv paths bypass it for non-REQ/REP sockets. |
-| Arena encoding | Small messages (< 4 KiB) pack into a `FrameBuffer` arena. Larger payloads use zero-copy gather-write. |
+| Arena encoding | Small messages (< 4 KiB by default) pack into a `FrameBuffer` arena. Larger payloads use zero-copy gather-write. Override with `Options::arena_threshold`. |
 | Bounded wakeups | Per-peer transmit slots and `yring` send pipes use `DataSignal` to coalesce wakeups without losing readiness. |
 
 <p align="center">

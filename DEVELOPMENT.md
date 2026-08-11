@@ -179,7 +179,8 @@ cargo bench -p omq-tokio --bench inproc_threads
 ```
 
 Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,
-`OMQ_BENCH_PEERS`, `OMQ_BENCH_ROUND_MS`, `OMQ_BENCH_ROUNDS`.
+`OMQ_BENCH_PEERS`, `OMQ_BENCH_ROUND_MS`, `OMQ_BENCH_ROUNDS`,
+`OMQ_BENCH_ARENA_THRESHOLD`.
 Results append to `$XDG_CACHE_HOME/omq/` (default `~/.cache/omq/`)
 unless `OMQ_BENCH_NO_WRITE=1`.
 

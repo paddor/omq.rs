@@ -83,30 +83,9 @@ jobs:
             echo 'lint_matrix={"include":[{"name":"Linux","kind":"rust","os":"ubuntu-latest"},{"name":"macOS Intel","kind":"rust","os":"macos-15-intel"},{"name":"macOS ARM64","kind":"rust","os":"macos-15"},{"name":"Windows","kind":"rust","os":"windows-latest"}]}' >> "$GITHUB_OUTPUT"
           fi
 
-  go-fmt:
-    name: go fmt
+  go-lint:
+    name: go fmt + vet
     needs: [changes]
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.25"
-          cache-dependency-path: bindings/go/go.mod
-      - name: gofmt
-        working-directory: bindings/go
-        run: |
-          files="$(gofmt -l .)"
-          if [[ -n "$files" ]]; then
-            printf '%s\n' "$files"
-            exit 1
-          fi
-
-  go-vet:
-    name: go vet
-    needs: [changes, go-fmt]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -122,6 +101,14 @@ jobs:
         with:
           go-version: "1.25"
           cache-dependency-path: bindings/go/go.mod
+      - name: gofmt
+        working-directory: bindings/go
+        run: |
+          files="$(gofmt -l .)"
+          if [[ -n "$files" ]]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
       - name: build native
         run: cargo build --release --manifest-path bindings/go/native/Cargo.toml
       - name: go vet
@@ -132,7 +119,7 @@ jobs:
 
   go-test:
     name: go test
-    needs: [changes, linux-gate, go-vet]
+    needs: [changes, linux-gate, go-lint]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -708,8 +695,7 @@ jobs:
         pyomq-test,
         java-lint,
         java-test,
-        go-fmt,
-        go-vet,
+        go-lint,
         go-test,
         lua-lint,
         lua-test,

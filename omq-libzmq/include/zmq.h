@@ -269,6 +269,9 @@ extern "C" {
 #define ZMQ_NORM_NUM_AUTOPARITY     123
 #define ZMQ_NORM_PUSH               124
 
+/*  OMQ extension socket options.                                            */
+#define OMQ_ARENA_THRESHOLD         10001
+
 /*  Deprecated options and aliases.                                          */
 #define ZMQ_CONNECT_RID ZMQ_CONNECT_ROUTING_ID
 #define ZMQ_TCP_ACCEPT_FILTER 38
@@ -314,6 +317,11 @@ extern "C" {
     Bound PUSH/DEALER/REQ/CLIENT/SCATTER sockets with no ready peer are muted:
     blocking zmq_send() waits for a route, while ZMQ_DONTWAIT or SNDTIMEO=0
     returns EAGAIN. omq-libzmq does not accept and drop these messages.
+
+    OMQ_ARENA_THRESHOLD is an int64_t byte threshold. Payloads smaller than
+    this are copied into OMQ's frame arena; payloads at or above this value
+    use gather-write from their Bytes payload. Set before first bind/connect.
+    -1 restores the OMQ default.
 */
 
 /*  Message options ---------------------------------------------------------- */

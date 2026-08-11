@@ -61,10 +61,12 @@ pub(crate) struct OmqSocket {
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
     pub bypass_send: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassSend>>,
+    pub bypass_send_installed: AtomicBool,
     pub pending_bypass_send: Mutex<Option<crate::inproc_bypass::BypassSend>>,
     pub pending_bypass_send_ready: AtomicBool,
     /// Lock-free inproc bypass (receiver half).
     pub bypass_recv: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassRecv>>,
+    pub bypass_recv_installed: AtomicBool,
     pub pending_bypass_recv: Mutex<Option<crate::inproc_bypass::BypassRecv>>,
     pub pending_bypass_recv_ready: AtomicBool,
     /// Leftover frames from a multipart recv (RCVMORE).
@@ -87,6 +89,9 @@ pub(crate) struct OmqSocket {
     pub notify: Arc<PlatformNotifyHandle>,
     pub bound_or_connected: AtomicBool,
     pub connect_count: AtomicUsize,
+    /// Frozen inverse of `ZMQ_IMMEDIATE`, captured at first bind/connect.
+    /// Read only from the app-facing socket thread after materialization.
+    pub queue_without_ready_peer: crate::local_cell::LocalCell<bool>,
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
 }
 
@@ -191,6 +196,9 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
 }
 
 pub(crate) fn adopt_pending_bypass_send(sock: &OmqSocket) {
+    if !sock.pending_bypass_send_ready.load(Ordering::Acquire) {
+        return;
+    }
     if !sock.pending_bypass_send_ready.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -204,9 +212,13 @@ pub(crate) fn adopt_pending_bypass_send(sock: &OmqSocket) {
     };
     // SAFETY: adoption happens on the app-facing send owner thread.
     *unsafe { sock.bypass_send.get() } = Some(bypass);
+    sock.bypass_send_installed.store(true, Ordering::Release);
 }
 
 pub(crate) fn adopt_pending_bypass_recv(sock: &OmqSocket) {
+    if !sock.pending_bypass_recv_ready.load(Ordering::Acquire) {
+        return;
+    }
     if !sock.pending_bypass_recv_ready.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -220,6 +232,7 @@ pub(crate) fn adopt_pending_bypass_recv(sock: &OmqSocket) {
     };
     // SAFETY: adoption happens on the app-facing recv owner thread.
     *unsafe { sock.bypass_recv.get() } = Some(bypass);
+    sock.bypass_recv_installed.store(true, Ordering::Release);
 }
 
 /// Register an inproc bind. If there are pending connectors, install
@@ -313,7 +326,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         },
         ..SocketOverlay::default()
     };
-
+    let queue_without_ready_peer = !overlay.immediate;
     let sock = Arc::new(OmqSocket {
         id,
         ctx: ctx.clone(),
@@ -323,9 +336,11 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: crate::local_cell::LocalCell::new(Vec::new()),
         bypass_send: crate::local_cell::LocalCell::new(None),
+        bypass_send_installed: AtomicBool::new(false),
         pending_bypass_send: Mutex::new(None),
         pending_bypass_send_ready: AtomicBool::new(false),
         bypass_recv: crate::local_cell::LocalCell::new(None),
+        bypass_recv_installed: AtomicBool::new(false),
         pending_bypass_recv: Mutex::new(None),
         pending_bypass_recv_ready: AtomicBool::new(false),
         recv_drain: Mutex::new(VecDeque::new()),
@@ -338,6 +353,7 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         notify,
         bound_or_connected: AtomicBool::new(false),
         connect_count: AtomicUsize::new(0),
+        queue_without_ready_peer: crate::local_cell::LocalCell::new(queue_without_ready_peer),
         recv_pump: std::sync::OnceLock::new(),
     });
     sock.ctx.socket_opened();
@@ -373,6 +389,9 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
         .to_options()
         .workload_profile(omq_tokio::options::WorkloadProfile::Throughput);
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
+    // SAFETY: materialization runs before hot-path send ownership and freezes
+    // bind/connect-scoped options for this socket.
+    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = !overlay.immediate;
     drop(overlay);
 
     let socket_type = sock.socket_type;
@@ -450,6 +469,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // SAFETY: `zmq_close` reclaims the socket pointer, so no later user access
     // can legally race this cleanup.
     *unsafe { arc.bypass_send.get_unchecked() } = None;
+    arc.bypass_send_installed.store(false, Ordering::Release);
     if let Ok(mut pending) = arc.pending_bypass_send.lock() {
         *pending = None;
     }
@@ -457,6 +477,7 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
         .store(false, Ordering::Release);
     // SAFETY: same close-time exclusive ownership as above.
     *unsafe { arc.bypass_recv.get_unchecked() } = None;
+    arc.bypass_recv_installed.store(false, Ordering::Release);
     if let Ok(mut pending) = arc.pending_bypass_recv.lock() {
         *pending = None;
     }

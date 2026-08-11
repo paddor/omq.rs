@@ -36,6 +36,10 @@ WSS TLS options (`ZMQ_WSS_KEY_PEM`, `ZMQ_WSS_CERT_PEM`, `ZMQ_WSS_TRUST_PEM`,
 `ZMQ_WSS_HOSTNAME`, `ZMQ_WSS_TRUST_SYSTEM`) are wired into `wss://` binds and
 connects.
 
+OMQ extension option `OMQ_ARENA_THRESHOLD` accepts an `int64_t` byte threshold
+for the outbound frame arena. Set it before first bind/connect; `-1` restores
+the 4 KiB native default.
+
 Detailed support notes live in [doc/compatibility.md](doc/compatibility.md).
 
 ## Build

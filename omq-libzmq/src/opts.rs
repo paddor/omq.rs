@@ -42,6 +42,7 @@ pub(crate) struct SocketOverlay {
     pub heartbeat_timeout: Option<Duration>,
     pub handshake_ivl: Option<Duration>,
     pub max_message_size: Option<usize>,
+    pub arena_threshold: Option<usize>,
     pub conflate: bool,
     pub tcp_keepalive: i32,
     pub tcp_keepalive_cnt: Option<u32>,
@@ -82,6 +83,7 @@ impl Default for SocketOverlay {
             heartbeat_timeout: None,
             handshake_ivl: None,
             max_message_size: None,
+            arena_threshold: None,
             conflate: false,
             tcp_keepalive: 0,
             tcp_keepalive_cnt: None,
@@ -206,6 +208,7 @@ impl SocketOverlay {
             linger: self.effective_linger(),
             identity: self.identity.clone(),
             max_message_size: self.max_message_size,
+            arena_threshold: self.arena_threshold,
             router_mandatory: self.router_mandatory,
             heartbeat_interval: self.heartbeat_ivl,
             heartbeat_ttl: self.heartbeat_ttl,
@@ -362,6 +365,7 @@ const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
 const DEFAULT_HANDSHAKE_IVL_MS: i32 = 30_000;
+const OMQ_ARENA_THRESHOLD: c_int = 10_001;
 
 #[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
@@ -495,6 +499,22 @@ pub extern "C" fn zmq_setsockopt(
                 return fail(libc::EINVAL);
             };
             lock_overlay!(sock_arc).max_message_size = if v < 0 { None } else { Some(v as usize) };
+        }
+        OMQ_ARENA_THRESHOLD => {
+            let Some(v) = read_i64(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            if v < -1 {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).arena_threshold = if v < 0 {
+                None
+            } else {
+                let Ok(v) = usize::try_from(v) else {
+                    return fail(libc::EINVAL);
+                };
+                Some(v)
+            };
         }
         ZMQ_ROUTER_MANDATORY => {
             let Some(v) = read_i32(optval, optvallen) else {
@@ -1020,6 +1040,14 @@ pub extern "C" fn zmq_getsockopt(
                 .map_or(-1i64, |n| n as i64);
             write_i64(optval, optvallen, v)
         }
+        OMQ_ARENA_THRESHOLD => {
+            let v = lock_overlay!(sock_arc)
+                .arena_threshold
+                .map_or(omq_tokio::options::DEFAULT_ARENA_THRESHOLD as i64, |n| {
+                    n as i64
+                });
+            write_i64(optval, optvallen, v)
+        }
         ZMQ_ROUTER_MANDATORY => {
             let v = lock_overlay!(sock_arc).router_mandatory;
             write_i32(optval, optvallen, i32::from(v))
@@ -1476,6 +1504,18 @@ mod tests {
         assert_eq!(overlay.linger_ms(), 0);
         assert_eq!(overlay.effective_linger(), Some(Duration::ZERO));
         assert_eq!(overlay.to_options().linger, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn arena_threshold_maps_to_backend_options() {
+        let default_overlay = SocketOverlay::default();
+        assert_eq!(default_overlay.to_options().arena_threshold, None);
+
+        let overlay = SocketOverlay {
+            arena_threshold: Some(2048),
+            ..Default::default()
+        };
+        assert_eq!(overlay.to_options().arena_threshold, Some(2048));
     }
 
     #[test]

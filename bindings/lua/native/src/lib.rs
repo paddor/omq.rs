@@ -1,5 +1,5 @@
-use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString, c_void};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
@@ -23,7 +23,6 @@ const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_SUBSCRIBE: i32 = 6;
 const ZMQ_UNSUBSCRIBE: i32 = 7;
-const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_LINGER: i32 = 17;
 const ZMQ_SNDHWM: i32 = 23;
 const ZMQ_RCVHWM: i32 = 24;
@@ -31,7 +30,7 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_LAST_ENDPOINT: i32 = 32;
 const OMQ_ARENA_THRESHOLD: i32 = 10_001;
-const DEFAULT_RECV_CAPACITY: usize = 64 * 1024;
+const LAST_ENDPOINT_CAPACITY: usize = 512;
 
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -80,17 +79,11 @@ struct NativeContext {
 
 #[derive(Debug)]
 struct SocketInner {
-    // OMQ/libzmq sockets stay single-threaded. Atomic keeps close/drop idempotent
-    // without a hot-path mutex.
+    // OMQ/libzmq sockets stay single-threaded. Atomic keeps close/drop
+    // idempotent without making the socket handle Send or Sync.
     raw: AtomicUsize,
-    recv_scratch: UnsafeCell<Vec<u8>>,
     _context: Arc<ContextInner>,
 }
-
-// SAFETY: Lua and ZMQ sockets are used from one owner thread. The atomic raw
-// slot keeps close/drop idempotent, and recv_scratch is only touched by that
-// owner thread during `recv`.
-unsafe impl Sync for SocketInner {}
 
 impl SocketInner {
     fn ptr(&self) -> LuaResult<*mut c_void> {
@@ -122,15 +115,22 @@ impl Drop for SocketInner {
 
 #[derive(Clone, Debug)]
 struct NativeSocket {
-    inner: Arc<SocketInner>,
+    inner: Rc<SocketInner>,
 }
 
-type NativeThreadResult = Result<Option<Vec<u8>>, String>;
+#[derive(Debug)]
+enum NativeThreadValue {
+    Payload(Vec<u8>),
+    Count(usize),
+}
+
+type NativeThreadResult = Result<NativeThreadValue, String>;
 
 #[derive(Debug)]
 struct NativeJoin {
     handle: Mutex<Option<JoinHandle<NativeThreadResult>>>,
     endpoint: Mutex<Option<String>>,
+    _context: Option<Arc<ContextInner>>,
 }
 
 impl UserData for NativeContext {
@@ -149,6 +149,18 @@ impl UserData for NativeContext {
         methods.add_method("spawn_inproc_pull", |_, this, endpoint: String| {
             this.spawn_inproc_pull(endpoint)
         });
+        methods.add_method(
+            "spawn_inproc_pull_count",
+            |_, this, (endpoint, messages): (String, usize)| {
+                this.spawn_inproc_pull_count(endpoint, messages)
+            },
+        );
+        methods.add_method(
+            "spawn_inproc_pull_until_stop",
+            |_, this, (endpoint, stop): (String, LuaString)| {
+                this.spawn_inproc_pull_until_stop(endpoint, stop.as_bytes().as_ref().to_vec())
+            },
+        );
     }
 }
 
@@ -160,9 +172,8 @@ impl NativeContext {
             return Err(last_error());
         }
         Ok(NativeSocket {
-            inner: Arc::new(SocketInner {
+            inner: Rc::new(SocketInner {
                 raw: AtomicUsize::new(raw as usize),
-                recv_scratch: UnsafeCell::new(Vec::new()),
                 _context: self.inner.clone(),
             }),
         })
@@ -180,6 +191,43 @@ impl NativeContext {
         Ok(NativeJoin {
             handle: Mutex::new(Some(handle)),
             endpoint: Mutex::new(None),
+            _context: Some(self.inner.clone()),
+        })
+    }
+
+    fn spawn_inproc_pull_count(&self, endpoint: String, messages: usize) -> LuaResult<NativeJoin> {
+        let ctx = self.inner.ptr()? as usize;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || rust_pull_count(ctx, endpoint, messages, ready_tx));
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(LuaError::external(err)),
+            Err(_) => return Err(LuaError::external("inproc pull thread exited before bind")),
+        }
+        Ok(NativeJoin {
+            handle: Mutex::new(Some(handle)),
+            endpoint: Mutex::new(None),
+            _context: Some(self.inner.clone()),
+        })
+    }
+
+    fn spawn_inproc_pull_until_stop(
+        &self,
+        endpoint: String,
+        stop: Vec<u8>,
+    ) -> LuaResult<NativeJoin> {
+        let ctx = self.inner.ptr()? as usize;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || rust_pull_until_stop(ctx, endpoint, stop, ready_tx));
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(LuaError::external(err)),
+            Err(_) => return Err(LuaError::external("inproc pull thread exited before bind")),
+        }
+        Ok(NativeJoin {
+            handle: Mutex::new(Some(handle)),
+            endpoint: Mutex::new(None),
+            _context: Some(self.inner.clone()),
         })
     }
 }
@@ -226,25 +274,17 @@ impl UserData for NativeSocket {
         );
         methods.add_method(
             "recv",
-            |lua, this, (capacity, flags): (Option<usize>, Option<i32>)| {
-                this.recv_lua_string(
-                    lua,
-                    capacity.unwrap_or(DEFAULT_RECV_CAPACITY),
-                    flags.unwrap_or(0),
-                )
+            |lua, this, (max_size, flags): (Option<usize>, Option<i32>)| {
+                this.recv_lua_string(lua, max_size, flags.unwrap_or(0))
             },
         );
-        methods.add_method("try_recv", |lua, this, capacity: Option<usize>| {
-            this.recv_lua_string(lua, capacity.unwrap_or(DEFAULT_RECV_CAPACITY), ZMQ_DONTWAIT)
+        methods.add_method("try_recv", |lua, this, max_size: Option<usize>| {
+            this.recv_lua_string(lua, max_size, ZMQ_DONTWAIT)
         });
         methods.add_method(
             "recv_parts",
-            |lua, this, (capacity, flags): (Option<usize>, Option<i32>)| {
-                let parts = this.recv_lua_parts(
-                    lua,
-                    capacity.unwrap_or(DEFAULT_RECV_CAPACITY),
-                    flags.unwrap_or(0),
-                )?;
+            |lua, this, (max_size, flags): (Option<usize>, Option<i32>)| {
+                let parts = this.recv_lua_parts(lua, max_size, flags.unwrap_or(0))?;
                 let table = lua.create_table_with_capacity(parts.len(), 0)?;
                 for (idx, part) in parts.into_iter().enumerate() {
                     table.raw_set(idx + 1, part)?;
@@ -336,69 +376,79 @@ impl NativeSocket {
     fn recv_lua_string(
         &self,
         lua: &Lua,
-        capacity: usize,
+        max_size: Option<usize>,
         flags: i32,
     ) -> LuaResult<Option<LuaString>> {
-        let sock = self.inner.ptr()?;
-        // SAFETY: Lua sockets follow the same single-owner-thread contract as
-        // libzmq sockets.
-        let scratch = unsafe { &mut *self.inner.recv_scratch.get() };
-        let current_capacity = scratch.capacity();
-        if current_capacity < capacity {
-            scratch
-                .try_reserve_exact(capacity - current_capacity)
-                .map_err(|err| {
-                    LuaError::external(format!("receive buffer allocation failed: {err}"))
-                })?;
-        }
-
-        let rc = omq_zmq::zmq_recv(sock, scratch.as_mut_ptr().cast(), capacity, flags);
-        if rc < 0 {
-            if omq_zmq::zmq_errno() == libc::EAGAIN && (flags & ZMQ_DONTWAIT) != 0 {
-                return Ok(None);
-            }
-            return Err(last_error());
-        }
-
-        let len = usize::try_from(rc).map_err(|_| LuaError::runtime("negative receive size"))?;
-        if len > capacity {
-            return Err(LuaError::runtime(
-                "received message exceeded Lua receive buffer",
-            ));
-        }
-
-        // SAFETY: zmq_recv initialized exactly len bytes when len <= capacity.
-        let bytes = unsafe { std::slice::from_raw_parts(scratch.as_ptr(), len) };
-        let out = lua.create_string(bytes);
-        scratch.clear();
-        Ok(Some(out?))
+        self.recv_lua_frame(lua, max_size, flags)
+            .map(|frame| frame.map(|(part, _)| part))
     }
 
-    fn recv_lua_parts(&self, lua: &Lua, capacity: usize, flags: i32) -> LuaResult<Vec<LuaString>> {
+    fn recv_lua_parts(
+        &self,
+        lua: &Lua,
+        max_size: Option<usize>,
+        flags: i32,
+    ) -> LuaResult<Vec<LuaString>> {
         let mut parts = Vec::new();
         loop {
-            let Some(part) = self.recv_lua_string(lua, capacity, flags)? else {
+            let Some((part, more)) = self.recv_lua_frame(lua, max_size, flags)? else {
                 break;
             };
             parts.push(part);
-            if !self.recv_more()? {
+            if !more {
                 break;
             }
         }
         Ok(parts)
     }
 
-    fn recv_more(&self) -> LuaResult<bool> {
-        let mut value = 0_i32;
-        let mut len = std::mem::size_of::<i32>();
-        let rc = omq_zmq::zmq_getsockopt(
-            self.inner.ptr()?,
-            ZMQ_RCVMORE,
-            (&mut value as *mut i32).cast(),
-            &mut len,
-        );
-        check_rc(rc)?;
-        Ok(value != 0)
+    fn recv_lua_frame(
+        &self,
+        lua: &Lua,
+        max_size: Option<usize>,
+        flags: i32,
+    ) -> LuaResult<Option<(LuaString, bool)>> {
+        let sock = self.inner.ptr()?;
+        let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
+        check_rc(omq_zmq::zmq_msg_init(msg.as_mut_ptr()))?;
+        let msg = msg.as_mut_ptr();
+
+        let rc = omq_zmq::zmq_msg_recv(msg, sock, flags);
+        if rc < 0 {
+            let errno = omq_zmq::zmq_errno();
+            let _ = omq_zmq::zmq_msg_close(msg);
+            if errno == libc::EAGAIN && (flags & ZMQ_DONTWAIT) != 0 {
+                return Ok(None);
+            }
+            return Err(LuaError::external(error_message(errno)));
+        }
+
+        let len = omq_zmq::zmq_msg_size(msg);
+        if let Some(max) = max_size
+            && len > max
+        {
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err(LuaError::runtime(format!(
+                "received message exceeded Lua receive limit: size={len} limit={}",
+                max
+            )));
+        }
+
+        let data = omq_zmq::zmq_msg_data(msg);
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            if data.is_null() {
+                let _ = omq_zmq::zmq_msg_close(msg);
+                return Err(LuaError::runtime("received message data was null"));
+            }
+            // SAFETY: zmq_msg_data returns a buffer valid until zmq_msg_close.
+            unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }
+        };
+        let more = omq_zmq::zmq_msg_more(msg) != 0;
+        let out = lua.create_string(bytes);
+        check_rc(omq_zmq::zmq_msg_close(msg))?;
+        Ok(Some((out?, more)))
     }
 
     fn set_i32(&self, option: i32, value: i32) -> LuaResult<()> {
@@ -445,7 +495,7 @@ impl NativeSocket {
     }
 
     fn last_endpoint(&self) -> Option<String> {
-        let mut buf = [0_u8; 256];
+        let mut buf = [0_u8; LAST_ENDPOINT_CAPACITY];
         let mut len = buf.len();
         let rc = omq_zmq::zmq_getsockopt(
             self.inner.ptr().ok()?,
@@ -483,8 +533,12 @@ impl UserData for NativeJoin {
                 return Ok(LuaValue::Boolean(true));
             };
             match handle.join() {
-                Ok(Ok(Some(bytes))) => Ok(LuaValue::String(lua.create_string(&bytes)?)),
-                Ok(Ok(None)) => Ok(LuaValue::Boolean(true)),
+                Ok(Ok(NativeThreadValue::Payload(bytes))) => {
+                    Ok(LuaValue::String(lua.create_string(&bytes)?))
+                }
+                Ok(Ok(NativeThreadValue::Count(count))) => Ok(LuaValue::Integer(
+                    i64::try_from(count).map_err(|_| LuaError::runtime("count overflow"))?,
+                )),
                 Ok(Err(err)) => Err(LuaError::external(err)),
                 Err(_) => Err(LuaError::external("inproc thread panicked")),
             }
@@ -503,12 +557,11 @@ fn spawn_tcp_pull() -> LuaResult<NativeJoin> {
     Ok(NativeJoin {
         handle: Mutex::new(Some(handle)),
         endpoint: Mutex::new(Some(endpoint)),
+        _context: None,
     })
 }
 
-fn rust_tcp_pull_once(
-    ready: mpsc::Sender<Result<String, String>>,
-) -> Result<Option<Vec<u8>>, String> {
+fn rust_tcp_pull_once(ready: mpsc::Sender<Result<String, String>>) -> NativeThreadResult {
     let ctx = omq_zmq::zmq_ctx_new();
     if ctx.is_null() {
         let err = last_error_message();
@@ -546,15 +599,7 @@ fn rust_tcp_pull_once(
     }
     let bound = last_endpoint(sock).unwrap_or_else(|| "tcp://127.0.0.1:*".to_owned());
     let _ = ready.send(Ok(bound));
-    let mut buf = vec![0_u8; DEFAULT_RECV_CAPACITY];
-    let rc = omq_zmq::zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
-    let result = if rc < 0 {
-        Err(last_error_message())
-    } else {
-        let len = usize::try_from(rc).map_err(|_| "negative receive size".to_owned())?;
-        buf.truncate(len);
-        Ok(Some(buf))
-    };
+    let result = recv_owned_frame(sock).map(NativeThreadValue::Payload);
     let _ = omq_zmq::zmq_close(sock);
     let _ = omq_zmq::zmq_ctx_term(ctx);
     result
@@ -564,8 +609,15 @@ fn rust_pull_once(
     ctx: usize,
     endpoint: String,
     ready: mpsc::Sender<Result<(), String>>,
-) -> Result<Option<Vec<u8>>, String> {
-    let c_endpoint = CString::new(endpoint).map_err(|_| "endpoint contains NUL".to_owned())?;
+) -> NativeThreadResult {
+    let c_endpoint = match CString::new(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            let err = "endpoint contains NUL".to_owned();
+            let _ = ready.send(Err(err.clone()));
+            return Err(err);
+        }
+    };
     let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
     if sock.is_null() {
         let err = last_error_message();
@@ -593,17 +645,145 @@ fn rust_pull_once(
         return Err(err);
     }
     let _ = ready.send(Ok(()));
-    let mut buf = vec![0_u8; DEFAULT_RECV_CAPACITY];
-    let rc = omq_zmq::zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
-    let result = if rc < 0 {
-        Err(last_error_message())
-    } else {
-        let len = usize::try_from(rc).map_err(|_| "negative receive size".to_owned())?;
-        buf.truncate(len);
-        Ok(Some(buf))
-    };
+    let result = recv_owned_frame(sock).map(NativeThreadValue::Payload);
     let _ = omq_zmq::zmq_close(sock);
     result
+}
+
+fn rust_pull_count(
+    ctx: usize,
+    endpoint: String,
+    messages: usize,
+    ready: mpsc::Sender<Result<(), String>>,
+) -> NativeThreadResult {
+    let c_endpoint = match CString::new(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            let err = "endpoint contains NUL".to_owned();
+            let _ = ready.send(Err(err.clone()));
+            return Err(err);
+        }
+    };
+    let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
+    if sock.is_null() {
+        let err = last_error_message();
+        let _ = ready.send(Err(err.clone()));
+        return Err(err);
+    }
+    let linger = 0_i32;
+    let timeout = 5_000_i32;
+    let _ = omq_zmq::zmq_setsockopt(
+        sock,
+        ZMQ_LINGER,
+        (&linger as *const i32).cast(),
+        std::mem::size_of::<i32>(),
+    );
+    let _ = omq_zmq::zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&timeout as *const i32).cast(),
+        std::mem::size_of::<i32>(),
+    );
+    if omq_zmq::zmq_bind(sock, c_endpoint.as_ptr()) != 0 {
+        let err = last_error_message();
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        return Err(err);
+    }
+    let _ = ready.send(Ok(()));
+    for _ in 0..messages {
+        if let Err(err) = recv_owned_frame(sock) {
+            let _ = omq_zmq::zmq_close(sock);
+            return Err(err);
+        }
+    }
+    let _ = omq_zmq::zmq_close(sock);
+    Ok(NativeThreadValue::Count(messages))
+}
+
+fn rust_pull_until_stop(
+    ctx: usize,
+    endpoint: String,
+    stop: Vec<u8>,
+    ready: mpsc::Sender<Result<(), String>>,
+) -> NativeThreadResult {
+    let c_endpoint = match CString::new(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            let err = "endpoint contains NUL".to_owned();
+            let _ = ready.send(Err(err.clone()));
+            return Err(err);
+        }
+    };
+    let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
+    if sock.is_null() {
+        let err = last_error_message();
+        let _ = ready.send(Err(err.clone()));
+        return Err(err);
+    }
+    let linger = 0_i32;
+    let timeout = 60_000_i32;
+    let _ = omq_zmq::zmq_setsockopt(
+        sock,
+        ZMQ_LINGER,
+        (&linger as *const i32).cast(),
+        std::mem::size_of::<i32>(),
+    );
+    let _ = omq_zmq::zmq_setsockopt(
+        sock,
+        ZMQ_RCVTIMEO,
+        (&timeout as *const i32).cast(),
+        std::mem::size_of::<i32>(),
+    );
+    if omq_zmq::zmq_bind(sock, c_endpoint.as_ptr()) != 0 {
+        let err = last_error_message();
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        return Err(err);
+    }
+    let _ = ready.send(Ok(()));
+    let mut count = 0_usize;
+    loop {
+        match recv_owned_frame(sock) {
+            Ok(frame) if frame == stop => break,
+            Ok(_) => count += 1,
+            Err(err) => {
+                let _ = omq_zmq::zmq_close(sock);
+                return Err(err);
+            }
+        }
+    }
+    let _ = omq_zmq::zmq_close(sock);
+    Ok(NativeThreadValue::Count(count))
+}
+
+fn recv_owned_frame(sock: *mut c_void) -> Result<Vec<u8>, String> {
+    let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
+    if omq_zmq::zmq_msg_init(msg.as_mut_ptr()) != 0 {
+        return Err(last_error_message());
+    }
+    let msg = msg.as_mut_ptr();
+    if omq_zmq::zmq_msg_recv(msg, sock, 0) < 0 {
+        let err = last_error_message();
+        let _ = omq_zmq::zmq_msg_close(msg);
+        return Err(err);
+    }
+    let len = omq_zmq::zmq_msg_size(msg);
+    let data = omq_zmq::zmq_msg_data(msg);
+    let out = if len == 0 {
+        Vec::new()
+    } else {
+        if data.is_null() {
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err("received message data was null".to_owned());
+        }
+        // SAFETY: zmq_msg_data returns a buffer valid until zmq_msg_close.
+        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }.to_vec()
+    };
+    if omq_zmq::zmq_msg_close(msg) != 0 {
+        return Err(last_error_message());
+    }
+    Ok(out)
 }
 
 fn context_new(io_threads: Option<i32>) -> LuaResult<NativeContext> {
@@ -643,7 +823,7 @@ fn error_message(errno: i32) -> String {
 }
 
 fn last_endpoint(sock: *mut c_void) -> Option<String> {
-    let mut buf = [0_u8; 256];
+    let mut buf = [0_u8; LAST_ENDPOINT_CAPACITY];
     let mut len = buf.len();
     let rc = omq_zmq::zmq_getsockopt(sock, ZMQ_LAST_ENDPOINT, buf.as_mut_ptr().cast(), &mut len);
     if rc != 0 || len == 0 {

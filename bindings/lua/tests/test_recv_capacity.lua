@@ -7,12 +7,16 @@ local push = ctx:socket("push", { linger = 0, send_timeout = 1000 })
 local endpoint = pull:bind("inproc://lua-recv-capacity")
 push:connect(endpoint)
 
+local large = string.rep("x", 128 * 1024)
+push:send(large)
+assert(pull:recv() == large)
+
 push:send("too-large-for-buffer")
 local ok, err = pcall(function()
   pull:recv(4)
 end)
 assert(not ok)
-assert(string.find(tostring(err), "received message exceeded Lua receive buffer", 1, true))
+assert(string.find(tostring(err), "received message exceeded Lua receive limit", 1, true))
 
 push:close()
 pull:close()

@@ -34,19 +34,8 @@ local function split_csv(value)
   return out
 end
 
-local function selected_scenarios()
-  local only = split_csv(os.getenv("OMQ_LUA_SOAK_SCENARIOS"))
-  local skip = split_csv(os.getenv("OMQ_LUA_SOAK_SKIP_SCENARIOS"))
-  local selected = {}
-  local any = false
-  for _, name in ipairs(all_scenarios) do
-    if (next(only) == nil or only[name]) and not skip[name] then
-      selected[name] = true
-      any = true
-    end
-  end
-  assert(any, "OMQ_LUA_SOAK_SCENARIOS selected no scenarios")
-  for name in pairs(only) do
+local function assert_known_scenarios(items)
+  for name in pairs(items) do
     local known = false
     for _, scenario in ipairs(all_scenarios) do
       if scenario == name then
@@ -56,6 +45,22 @@ local function selected_scenarios()
     end
     assert(known, "unknown soak scenario: " .. name)
   end
+end
+
+local function selected_scenarios()
+  local only = split_csv(os.getenv("OMQ_LUA_SOAK_SCENARIOS"))
+  local skip = split_csv(os.getenv("OMQ_LUA_SOAK_SKIP_SCENARIOS"))
+  assert_known_scenarios(only)
+  assert_known_scenarios(skip)
+  local selected = {}
+  local any = false
+  for _, name in ipairs(all_scenarios) do
+    if (next(only) == nil or only[name]) and not skip[name] then
+      selected[name] = true
+      any = true
+    end
+  end
+  assert(any, "OMQ_LUA_SOAK_SCENARIOS selected no scenarios")
   return selected
 end
 
@@ -290,17 +295,15 @@ local function run_tcp_cycle(shared, state, workers)
   if now() >= state.next_churn then
     for _ = 1, workers do
       local push = new_socket(shared, "tcp", "push", {
-        linger = 0,
-        send_timeout = 0,
+        linger = 1000,
+        send_timeout = 1000,
         send_hwm = 8192,
       })
       local ok, err = pcall(function()
         push:connect(state.endpoint)
         local body = payload("tcp-" .. state.worker, state.seq, 256)
         for i = 1, 32 do
-          checked(pcall(function()
-            push:send(string.char(i % 256) .. string.sub(body, 2), omq.DONTWAIT)
-          end))
+          push:send(string.char(i % 256) .. string.sub(body, 2))
           state.seq = state.seq + 1
         end
       end)
@@ -316,26 +319,58 @@ local function run_tcp_cycle(shared, state, workers)
 end
 
 local function make_inproc(shared)
-  local endpoint = "inproc://lua-soak-req-rep-" .. tostring(math.floor(now() * 1000000))
-  local rep = new_socket(shared, "inproc", "rep", { linger = 0, recv_timeout = 5000 })
-  local req = new_socket(shared, "inproc", "req", { linger = 0, send_timeout = 5000, recv_timeout = 5000 })
-  rep:bind(endpoint)
-  req:connect(endpoint)
-  return { req = req, rep = rep, seq = 0 }
+  local endpoint = "inproc://lua-soak-thread-" .. tostring(math.floor(now() * 1000000))
+  local stop = "stop:" .. endpoint
+  local handle = omq.testing.spawn_inproc_pull_until_stop(shared, endpoint, stop)
+  local push = new_socket(shared, "inproc", "push", {
+    linger = 0,
+    send_timeout = 5000,
+    send_hwm = 8192,
+  })
+  push:connect(endpoint)
+  return {
+    push = push,
+    handle = handle,
+    stop = stop,
+    seq = 0,
+    sent = 0,
+    batch = math.max(1, math.floor(env_number("OMQ_LUA_SOAK_INPROC_BATCH", 64))),
+  }
 end
 
 local function run_inproc_cycle(state)
-  for _ = 1, 64 do
-    local body = "req-" .. tostring(state.seq)
-    state.req:send(body)
-    local got = state.rep:recv(4096)
-    assert(got == body, "inproc request mismatch")
-    state.rep:send("ok")
-    local reply = state.req:recv(4096)
-    assert(reply == "ok", "inproc reply mismatch")
-    counters.inproc = counters.inproc + 1
+  for _ = 1, state.batch do
+    state.push:send(payload("inproc", state.seq, 128))
     state.seq = state.seq + 1
+    state.sent = state.sent + 1
+    counters.inproc = counters.inproc + 1
   end
+end
+
+local function run_inproc_cycles(state, workers)
+  for _ = 1, workers do
+    run_inproc_cycle(state)
+  end
+end
+
+local function close_inproc(state)
+  if state == nil then
+    return
+  end
+  local stop_ok, stop_err = pcall(function()
+    state.push:send(state.stop)
+  end)
+  close_socket(state.push, "inproc")
+  local join_ok, got = pcall(function()
+    return state.handle:join()
+  end)
+  assert(stop_ok, stop_err)
+  assert(join_ok, got)
+  assert(got == state.sent, string.format(
+    "inproc thread receive count mismatch: sent=%d got=%d",
+    state.sent,
+    got
+  ))
 end
 
 local function make_pubsub(shared)
@@ -475,7 +510,7 @@ local ok, err = pcall(function()
       run_tcp_cycle(shared, tcp_state, workers)
     end
     if inproc_state ~= nil then
-      run_inproc_cycle(inproc_state)
+      run_inproc_cycles(inproc_state, workers)
     end
     if pubsub_state ~= nil then
       run_pubsub_cycle(pubsub_state)
@@ -500,10 +535,7 @@ if pubsub_state ~= nil then
   pubsub_state.subs = {}
   close_socket(pubsub_state.pub, "pubsub")
 end
-if inproc_state ~= nil then
-  close_socket(inproc_state.req, "inproc")
-  close_socket(inproc_state.rep, "inproc")
-end
+close_inproc(inproc_state)
 if tcp_state ~= nil then
   close_socket(tcp_state.pull, "tcp")
 end

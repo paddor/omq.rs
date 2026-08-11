@@ -33,7 +33,9 @@ export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
   TCP ports when available.
 - `Socket:send("bytes")` sends a single-part message.
 - `Socket:send({ "part1", "part2" })` sends multipart.
-- `Socket:recv()` receives one part; `Socket:recv_parts()` receives all parts.
+- `Socket:recv()` receives one part; `Socket:recv(max_size)` receives one
+  part and errors if the frame exceeds `max_size`.
+- `Socket:recv_parts()` receives all parts.
 - `Socket:try_recv()` is nonblocking and returns `nil` when no message is
   ready.
 - Options cover linger, send/receive timeout, send/receive HWM, arena

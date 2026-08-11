@@ -45,8 +45,11 @@ Default durations are `600 1800 3600` seconds. Useful env:
 - `OMQ_LUA_SOAK_DURATIONS="600 1800 3600"`
 - `OMQ_LUA_SOAK_WORKERS=12`
 - `OMQ_LUA_SOAK_TIMEOUT_EXTRA_SECS=120`
+- `OMQ_LUA_SOAK_INPROC_BATCH=64`
 - `OMQ_LUA_SOAK_SCENARIOS=tcp,inproc,pubsub,context-churn`
 - `OMQ_LUA_SOAK_SKIP_SCENARIOS=pubsub`
+
+The `inproc` scenario uses a Rust backend thread sharing the Lua context.
 
 ## Benchmark Chart
 

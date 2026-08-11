@@ -35,7 +35,8 @@ export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
   benchmarks.
 - `omq.context({ io_threads = 1 })` creates a context.
 - `Context:socket("push", opts)` creates a socket by name or numeric constant.
-- `Context:term()` closes the context. Close sockets first.
+- `Context:term()` closes the context. It errors while sockets or helper peers
+  are still live.
 - `Context:close()` aliases `Context:term()`.
 - `Socket:bind(endpoint)` binds and returns the resolved endpoint, including
   wildcard TCP ports when available.

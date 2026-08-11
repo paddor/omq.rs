@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_void};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -36,36 +36,100 @@ static START: OnceLock<Instant> = OnceLock::new();
 
 #[derive(Debug)]
 struct ContextInner {
-    raw: Mutex<Option<usize>>,
+    state: Mutex<ContextState>,
+}
+
+#[derive(Debug)]
+struct ContextState {
+    raw: Option<usize>,
+    live_handles: usize,
+}
+
+#[derive(Debug)]
+struct ContextHandle {
+    context: Arc<ContextInner>,
+    raw: usize,
+    released: AtomicBool,
 }
 
 impl ContextInner {
-    fn ptr(&self) -> LuaResult<*mut c_void> {
-        self.raw
+    fn reserve_handle(self: &Arc<Self>) -> LuaResult<ContextHandle> {
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| LuaError::runtime("context lock poisoned"))?
-            .map(|raw| raw as *mut c_void)
-            .ok_or_else(|| LuaError::runtime("context closed"))
+            .map_err(|_| LuaError::runtime("context lock poisoned"))?;
+        let raw = state
+            .raw
+            .ok_or_else(|| LuaError::runtime("context closed"))?;
+        state.live_handles = state
+            .live_handles
+            .checked_add(1)
+            .ok_or_else(|| LuaError::runtime("context live handle count overflow"))?;
+        Ok(ContextHandle {
+            context: self.clone(),
+            raw,
+            released: AtomicBool::new(false),
+        })
+    }
+
+    fn release_handle(&self) -> LuaResult<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LuaError::runtime("context lock poisoned"))?;
+        if state.live_handles == 0 {
+            return Err(LuaError::runtime("context live handle count underflow"));
+        }
+        state.live_handles -= 1;
+        Ok(())
     }
 
     fn close(&self) -> LuaResult<()> {
-        let Some(raw) = self
-            .raw
-            .lock()
-            .map_err(|_| LuaError::runtime("context lock poisoned"))?
-            .take()
-        else {
-            return Ok(());
+        let raw = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LuaError::runtime("context lock poisoned"))?;
+            let Some(raw) = state.raw else {
+                return Ok(());
+            };
+            if state.live_handles > 0 {
+                return Err(LuaError::runtime(format!(
+                    "context has {} live sockets; close sockets before term()",
+                    state.live_handles
+                )));
+            }
+            state.raw = None;
+            raw
         };
         let rc = omq_zmq::zmq_ctx_term(raw as *mut c_void);
         check_rc(rc)
     }
 }
 
+impl ContextHandle {
+    fn context_ptr(&self) -> *mut c_void {
+        self.raw as *mut c_void
+    }
+
+    fn release(&self) -> LuaResult<()> {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        self.context.release_handle()
+    }
+}
+
+impl Drop for ContextHandle {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
 impl Drop for ContextInner {
     fn drop(&mut self) {
-        if let Ok(mut raw) = self.raw.lock()
-            && let Some(raw) = raw.take()
+        if let Ok(mut state) = self.state.lock()
+            && let Some(raw) = state.raw.take()
         {
             let _ = omq_zmq::zmq_ctx_term(raw as *mut c_void);
         }
@@ -82,7 +146,7 @@ struct SocketInner {
     // OMQ/libzmq sockets stay single-threaded. Atomic keeps close/drop
     // idempotent without making the socket handle Send or Sync.
     raw: AtomicUsize,
-    _context: Arc<ContextInner>,
+    context_handle: ContextHandle,
 }
 
 impl SocketInner {
@@ -100,6 +164,7 @@ impl SocketInner {
             return Ok(());
         };
         let rc = omq_zmq::zmq_close(raw as *mut c_void);
+        self.context_handle.release()?;
         check_rc(rc)
     }
 }
@@ -109,6 +174,7 @@ impl Drop for SocketInner {
         let raw = self.raw.swap(0, Ordering::AcqRel);
         if raw != 0 {
             let _ = omq_zmq::zmq_close(raw as *mut c_void);
+            let _ = self.context_handle.release();
         }
     }
 }
@@ -167,26 +233,28 @@ impl UserData for NativeContext {
 
 impl NativeContext {
     fn socket(&self, socket_type: i32) -> LuaResult<NativeSocket> {
-        let ctx = self.inner.ptr()?;
-        let raw = omq_zmq::zmq_socket(ctx, socket_type);
+        let context_handle = self.inner.reserve_handle()?;
+        let raw = omq_zmq::zmq_socket(context_handle.context_ptr(), socket_type);
         if raw.is_null() {
+            context_handle.release()?;
             return Err(last_error());
         }
         Ok(NativeSocket {
             inner: Rc::new(SocketInner {
                 raw: AtomicUsize::new(raw as usize),
-                _context: self.inner.clone(),
+                context_handle,
             }),
         })
     }
 
     fn spawn_inproc_pull(&self, endpoint: String) -> LuaResult<NativeJoin> {
-        let ctx = self.inner.ptr()? as usize;
+        let context_handle = self.inner.reserve_handle()?;
         let (ready_tx, ready_rx) = mpsc::channel();
         let received = Arc::new(AtomicUsize::new(0));
         let thread_received = received.clone();
-        let handle =
-            thread::spawn(move || rust_pull_once(ctx, endpoint, thread_received, ready_tx));
+        let handle = thread::spawn(move || {
+            rust_pull_once(context_handle, endpoint, thread_received, ready_tx)
+        });
         match ready_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(LuaError::external(err)),
@@ -201,12 +269,18 @@ impl NativeContext {
     }
 
     fn spawn_inproc_pull_count(&self, endpoint: String, messages: usize) -> LuaResult<NativeJoin> {
-        let ctx = self.inner.ptr()? as usize;
+        let context_handle = self.inner.reserve_handle()?;
         let (ready_tx, ready_rx) = mpsc::channel();
         let received = Arc::new(AtomicUsize::new(0));
         let thread_received = received.clone();
         let handle = thread::spawn(move || {
-            rust_pull_count(ctx, endpoint, messages, thread_received, ready_tx)
+            rust_pull_count(
+                context_handle,
+                endpoint,
+                messages,
+                thread_received,
+                ready_tx,
+            )
         });
         match ready_rx.recv() {
             Ok(Ok(())) => {}
@@ -226,12 +300,12 @@ impl NativeContext {
         endpoint: String,
         stop: Vec<u8>,
     ) -> LuaResult<NativeJoin> {
-        let ctx = self.inner.ptr()? as usize;
+        let context_handle = self.inner.reserve_handle()?;
         let (ready_tx, ready_rx) = mpsc::channel();
         let received = Arc::new(AtomicUsize::new(0));
         let thread_received = received.clone();
         let handle = thread::spawn(move || {
-            rust_pull_until_stop(ctx, endpoint, stop, thread_received, ready_tx)
+            rust_pull_until_stop(context_handle, endpoint, stop, thread_received, ready_tx)
         });
         match ready_rx.recv() {
             Ok(Ok(())) => {}
@@ -628,7 +702,7 @@ fn rust_tcp_pull_once(
 }
 
 fn rust_pull_once(
-    ctx: usize,
+    context_handle: ContextHandle,
     endpoint: String,
     received: Arc<AtomicUsize>,
     ready: mpsc::Sender<Result<(), String>>,
@@ -641,7 +715,7 @@ fn rust_pull_once(
             return Err(err);
         }
     };
-    let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
+    let sock = omq_zmq::zmq_socket(context_handle.context_ptr(), ZMQ_PULL);
     if sock.is_null() {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -670,7 +744,7 @@ fn rust_pull_once(
 }
 
 fn rust_pull_count(
-    ctx: usize,
+    context_handle: ContextHandle,
     endpoint: String,
     messages: usize,
     received: Arc<AtomicUsize>,
@@ -684,7 +758,7 @@ fn rust_pull_count(
             return Err(err);
         }
     };
-    let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
+    let sock = omq_zmq::zmq_socket(context_handle.context_ptr(), ZMQ_PULL);
     if sock.is_null() {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -716,7 +790,7 @@ fn rust_pull_count(
 }
 
 fn rust_pull_until_stop(
-    ctx: usize,
+    context_handle: ContextHandle,
     endpoint: String,
     stop: Vec<u8>,
     received: Arc<AtomicUsize>,
@@ -730,7 +804,7 @@ fn rust_pull_until_stop(
             return Err(err);
         }
     };
-    let sock = omq_zmq::zmq_socket(ctx as *mut c_void, ZMQ_PULL);
+    let sock = omq_zmq::zmq_socket(context_handle.context_ptr(), ZMQ_PULL);
     if sock.is_null() {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -829,7 +903,10 @@ fn context_new(io_threads: Option<i32>) -> LuaResult<NativeContext> {
     }
     Ok(NativeContext {
         inner: Arc::new(ContextInner {
-            raw: Mutex::new(Some(raw as usize)),
+            state: Mutex::new(ContextState {
+                raw: Some(raw as usize),
+                live_handles: 0,
+            }),
         }),
     })
 }

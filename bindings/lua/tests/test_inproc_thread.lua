@@ -37,6 +37,23 @@ push_stop:send(stop_payload)
 assert(stop_handle:join() == 2)
 assert(stop_handle:received() == 2)
 
+local term_ctx = omq.context({ io_threads = 1 })
+local term_endpoint = "inproc://lua-inproc-thread-term"
+local term_stop = "stop-term"
+local term_handle = omq.testing.spawn_inproc_pull_until_stop(term_ctx, term_endpoint, term_stop)
+ok, err = pcall(function()
+  term_ctx:term()
+end)
+assert(not ok)
+assert(string.find(tostring(err), "context has 1 live sockets", 1, true))
+
+local term_push = term_ctx:socket("push", { linger = 0, send_timeout = 1000 })
+term_push:connect(term_endpoint)
+term_push:send(term_stop)
+term_push:close()
+assert(term_handle:join() == 0)
+assert(term_ctx:term())
+
 push_stop:close()
 push_count:close()
 push:close()

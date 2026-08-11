@@ -15,6 +15,7 @@ import sys
 DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 SIZES = DEFAULT_SIZES.copy()
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "omq.node")
 JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
@@ -181,7 +182,7 @@ def _nice_ceil(value):
 
 def _read_chart_hw():
     config = {}
-    path = os.path.join(os.path.dirname(__file__), "..", ".chart_hw")
+    path = os.path.join(REPO_ROOT, ".chart_hw")
     try:
         with open(path) as f:
             for line in f:

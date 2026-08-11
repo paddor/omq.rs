@@ -85,14 +85,14 @@ Chart output:
 bindings/node/doc/charts/bindings.svg
 ```
 
-Hardware subtitle comes from `bindings/node/.chart_hw` when present:
+Hardware subtitle comes from the repo-root `.chart_hw` when present:
 
 ```text
 prefix=Ryzen 9 9950X
 postfix=turbo off, performance governor
 ```
 
-`bindings/node/.chart_hw` is local-only and gitignored.
+`.chart_hw` is local-only and gitignored.
 
 ## Static Checks
 

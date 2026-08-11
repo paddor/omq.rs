@@ -545,7 +545,7 @@ def fmt_y_us(value):
 
 def read_chart_hw():
     config = {}
-    path = ROOT / ".chart_hw"
+    path = REPO / ".chart_hw"
     try:
         with path.open() as file:
             for line in file:

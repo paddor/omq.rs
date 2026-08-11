@@ -200,7 +200,13 @@ pub(crate) fn detect_hardware() -> Option<String> {
 
 fn read_chart_hw() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    let Ok(content) = std::fs::read_to_string(".chart_hw") else {
+    let chart_hw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map_or_else(
+            || std::path::PathBuf::from(".chart_hw"),
+            |repo| repo.join(".chart_hw"),
+        );
+    let Ok(content) = std::fs::read_to_string(chart_hw) else {
         return map;
     };
     for line in content.lines() {

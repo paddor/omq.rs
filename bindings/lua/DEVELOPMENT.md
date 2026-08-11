@@ -33,8 +33,9 @@ cargo clippy --manifest-path bindings/lua/native/Cargo.toml --all-targets -- -D 
 
 ## Benchmark Chart
 
-The chart script runs two Lua processes over TCP PUSH/PULL, measures fixed time
-windows per message size, appends rows, and renders:
+The chart script follows the Go and Python binding benchmark shape. It runs two
+Lua processes over TCP, measures fixed PUSH/PULL windows per message size,
+measures REQ/REP latency, appends rows, and renders:
 
 ```text
 bindings/lua/doc/charts/bindings.svg
@@ -45,6 +46,11 @@ Rows append to:
 ```text
 ~/.cache/omq.lua/bindings.jsonl
 ```
+
+It benchmarks `omq.lua` by default. It also benchmarks `lzmq` when
+`require("lzmq")` works for the selected Lua binary. Missing `lzmq` is skipped
+without failing the `omq.lua` run. If `luarocks` is available, the script uses
+`luarocks path` so user-local rocks are visible.
 
 Quick local run:
 
@@ -61,9 +67,13 @@ bindings/lua/scripts/update_perf.py
 Useful flags:
 
 - `--sizes 16,128,1k,8k,32k`
+- `--impls omq.lua,lzmq`
+- `--latency-impls omq.lua,lzmq`
 - `--rounds N`
 - `--duration SECONDS`
 - `--warmup-duration SECONDS`
+- `--latency-iters N`
+- `--latency-warmup N`
 - `--chart-only`
 - `--no-save`
 - `--no-chart`

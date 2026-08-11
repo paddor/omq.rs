@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_poller_add,
-    zmq_poller_add_fd, zmq_poller_destroy, zmq_poller_fd, zmq_poller_modify, zmq_poller_modify_fd,
-    zmq_poller_new, zmq_poller_remove, zmq_poller_remove_fd, zmq_poller_size, zmq_poller_wait,
-    zmq_poller_wait_all, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_poller_destroy, zmq_poller_modify, zmq_poller_new, zmq_poller_remove, zmq_poller_size,
+    zmq_poller_wait, zmq_poller_wait_all, zmq_send, zmq_setsockopt, zmq_socket,
 };
+#[cfg(unix)]
+use omq_zmq::{zmq_poller_add_fd, zmq_poller_fd, zmq_poller_modify_fd, zmq_poller_remove_fd};
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;

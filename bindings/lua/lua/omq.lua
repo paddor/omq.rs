@@ -242,4 +242,13 @@ function M.testing.spawn_tcp_pull()
   return native.spawn_tcp_pull()
 end
 
+---Start a Rust backend thread that PULL-binds an inproc endpoint on an existing context.
+---The returned handle exposes `join()`, which returns the received payload.
+---@param context omq.Context context whose inproc namespace is shared with the thread.
+---@param endpoint string inproc endpoint to bind in the Rust thread.
+---@return userdata handle join handle whose `join()` returns the received payload.
+function M.testing.spawn_inproc_pull(context, endpoint)
+  return context._native:spawn_inproc_pull(endpoint)
+end
+
 return M

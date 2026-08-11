@@ -46,6 +46,8 @@ pub use context::{
 };
 pub use curve::{zmq_curve_keypair, zmq_curve_public, zmq_z85_decode, zmq_z85_encode};
 pub use error::{zmq_errno, zmq_strerror};
+#[doc(hidden)]
+pub use msg::OmqMsgRepr;
 pub use msg::{
     zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_get, zmq_msg_gets, zmq_msg_group,
     zmq_msg_init, zmq_msg_init_buffer, zmq_msg_init_data, zmq_msg_init_size, zmq_msg_more,

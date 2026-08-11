@@ -73,6 +73,39 @@ fn fd_not_readable_when_empty() {
 }
 
 #[test]
+fn fd_not_signaled_by_empty_inproc_bypass_install() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+
+    let addr = CString::new("inproc://test-fd-empty-bypass-install").unwrap();
+    zmq_bind(pull, addr.as_ptr());
+
+    let fd = get_fd(pull);
+    assert!(fd >= 0);
+    assert!(
+        !fd_readable(fd, 0),
+        "fd should not be readable before bypass install"
+    );
+
+    zmq_connect(push, addr.as_ptr());
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert!(
+        !fd_readable(fd, 0),
+        "empty inproc bypass install must not signal ZMQ_FD"
+    );
+
+    set_rcvtimeo(push, 1000);
+    zmq_send(push, b"x".as_ptr().cast(), 1, 0);
+    assert!(fd_readable(fd, 1000), "fd should be readable after data");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn fd_becomes_readable_after_send() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);

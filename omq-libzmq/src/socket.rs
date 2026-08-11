@@ -191,7 +191,6 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
         receiver
             .pending_bypass_recv_ready
             .store(true, Ordering::Release);
-        receiver.notify.signal_recv();
     }
 }
 

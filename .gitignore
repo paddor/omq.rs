@@ -18,6 +18,9 @@ benchmarks/*.jsonl
 **/.venv/
 **/node_modules/
 **/*.node
+/bindings/node/artifacts/
+/bindings/node/index.js
+/bindings/node/release-tarballs/
 __pycache__/
 *.egg-info/
 .pytest_cache/

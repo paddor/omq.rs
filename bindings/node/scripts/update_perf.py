@@ -512,7 +512,7 @@ def main():
         SIZES = args.sizes
 
     if not args.chart_only:
-        print("Only chart generation lives here. Run `node scripts/update_perf.js` for benchmarks.", file=sys.stderr)
+        print("Only chart generation lives here. Run `node scripts/omq-node-bench.js` for benchmarks.", file=sys.stderr)
         sys.exit(2)
 
     gen_combined_chart(chart_data_from_jsonl(), os.path.join(CHART_DIR, "bindings.svg"))

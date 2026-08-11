@@ -1,0 +1,34 @@
+{
+  "name": "@zeromq/omq-node-linux-arm64-musl",
+  "version": "0.1.0",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "omq_node.linux-arm64-musl.node",
+  "files": [
+    "omq_node.linux-arm64-musl.node"
+  ],
+  "description": "Native Node.js binding for OMQ.rs",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paddor/omq.rs.git",
+    "directory": "bindings/node"
+  },
+  "bugs": {
+    "url": "https://github.com/paddor/omq.rs/issues"
+  },
+  "homepage": "https://github.com/paddor/omq.rs/tree/main/bindings/node#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "musl"
+  ]
+}

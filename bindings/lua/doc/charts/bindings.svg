@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="520" viewBox="0 0 980 520">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="84" y="28" font-size="22" font-family="ui-sans-serif, system-ui" fill="#0f172a">OMQ.lua TCP PUSH/PULL throughput</text>
+<text x="84" y="50" font-size="12" font-family="ui-sans-serif, system-ui" fill="#64748b">latest append-only rows from /home/roadster/.cache/omq.lua/bindings.jsonl</text>
+<g font-family="ui-sans-serif, system-ui">
+<line x1="84" y1="434.0" x2="952" y2="434.0" stroke="#e5e7eb"/><text x="74" y="438.0" text-anchor="end" font-size="12" fill="#475569">0k</text><line x1="84" y1="356.0" x2="952" y2="356.0" stroke="#e5e7eb"/><text x="74" y="360.0" text-anchor="end" font-size="12" fill="#475569">100k</text><line x1="84" y1="278.0" x2="952" y2="278.0" stroke="#e5e7eb"/><text x="74" y="282.0" text-anchor="end" font-size="12" fill="#475569">200k</text><line x1="84" y1="200.0" x2="952" y2="200.0" stroke="#e5e7eb"/><text x="74" y="204.0" text-anchor="end" font-size="12" fill="#475569">300k</text><line x1="84" y1="122.0" x2="952" y2="122.0" stroke="#e5e7eb"/><text x="74" y="126.0" text-anchor="end" font-size="12" fill="#475569">400k</text><line x1="84" y1="44.0" x2="952" y2="44.0" stroke="#e5e7eb"/><text x="74" y="48.0" text-anchor="end" font-size="12" fill="#475569">500k</text>
+<line x1="84" y1="44" x2="84" y2="434" stroke="#94a3b8"/>
+<line x1="84" y1="434" x2="952" y2="434" stroke="#94a3b8"/>
+<polyline fill="none" stroke="#dc2626" stroke-width="3" points="84.0,181.4 301.0,273.6 518.0,304.9 735.0,349.8 952.0,429.6"/>
+<circle cx="84.0" cy="181.4" r="4" fill="#dc2626"><title>16 B: 323,897 msg/s</title></circle><circle cx="301.0" cy="273.6" r="4" fill="#dc2626"><title>128 B: 205,640 msg/s</title></circle><circle cx="518.0" cy="304.9" r="4" fill="#dc2626"><title>1 KiB: 165,540 msg/s</title></circle><circle cx="735.0" cy="349.8" r="4" fill="#dc2626"><title>4 KiB: 107,897 msg/s</title></circle><circle cx="952.0" cy="429.6" r="4" fill="#dc2626"><title>32 KiB: 5,597 msg/s</title></circle>
+<text x="84.0" y="478" text-anchor="middle" font-size="12" fill="#475569" transform="rotate(-35 84.0 478)">16 B</text><text x="301.0" y="478" text-anchor="middle" font-size="12" fill="#475569" transform="rotate(-35 301.0 478)">128 B</text><text x="518.0" y="478" text-anchor="middle" font-size="12" fill="#475569" transform="rotate(-35 518.0 478)">1 KiB</text><text x="735.0" y="478" text-anchor="middle" font-size="12" fill="#475569" transform="rotate(-35 735.0 478)">4 KiB</text><text x="952.0" y="478" text-anchor="middle" font-size="12" fill="#475569" transform="rotate(-35 952.0 478)">32 KiB</text>
+<text x="490.0" y="510" text-anchor="middle" font-size="13" fill="#334155">message size</text>
+<text x="20" y="239.0" text-anchor="middle" font-size="13" fill="#334155" transform="rotate(-90 20 239.0)">messages/s</text>
+</g>
+</svg>

@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 const PATTERN: &str = "push_pull";
 const PEER_COUNTS: &[usize] = &[1, 8];
@@ -37,12 +37,12 @@ fn main() {
 
 async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let ep = common::endpoint(transport, seq);
-    let pull = Socket::new(SocketType::Pull, Options::default());
+    let pull = Socket::new(SocketType::Pull, common::options(size));
     pull.bind(ep.clone()).await.expect("bind PULL");
 
     let mut pushes: Vec<Socket> = Vec::with_capacity(peers);
     for _ in 0..peers {
-        let p = Socket::new(SocketType::Push, Options::default());
+        let p = Socket::new(SocketType::Push, common::options(size));
         p.connect(ep.clone()).await.expect("connect PUSH");
         pushes.push(p);
     }

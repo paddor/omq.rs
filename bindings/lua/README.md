@@ -6,6 +6,8 @@ The binding is a Lua module loaded by `/usr/bin/lua`. Public Lua APIs live in
 `lua/omq.lua`; the native module is a Rust `cdylib` that calls the
 `omq-libzmq` C ABI directly.
 
+Architecture notes: [`doc/architecture.md`](doc/architecture.md).
+
 ## Build And Test
 
 Requires `/usr/bin/lua`, Python 3 for charts, and a Rust toolchain.
@@ -34,8 +36,9 @@ export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
 - `Socket:recv()` receives one part; `Socket:recv_parts()` receives all parts.
 - `Socket:try_recv()` is nonblocking and returns `nil` when no message is
   ready.
-- Options cover linger, send/receive timeout, send/receive HWM, and SUB
-  subscribe/unsubscribe.
+- Options cover linger, send/receive timeout, send/receive HWM, arena
+  threshold (`4 KiB` native default, `0` = gather-write for all payloads,
+  `-1` = restore default), and SUB subscribe/unsubscribe.
 
 Example:
 

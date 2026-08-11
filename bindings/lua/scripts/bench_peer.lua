@@ -9,7 +9,8 @@ local warmup = tonumber(arg[7])
 local hwm = 1000000
 local timeout_ms = 120000
 local max_time_check_messages = 1024
-local clock = require("omq").monotonic_seconds
+local native = require("omq_native")
+local clock = native.monotonic_seconds
 
 local function die(message)
   io.stderr:write(message .. "\n")
@@ -92,6 +93,10 @@ local function open_omq_socket(socket_type, sender)
   local omq = require("omq")
   local ctx = omq.context({ io_threads = 1 })
   local options = { linger = 1000 }
+  local arena_threshold = os.getenv("OMQ_BENCH_ARENA_THRESHOLD")
+  if arena_threshold ~= nil and arena_threshold ~= "" then
+    options.arena_threshold = checked(tonumber(arena_threshold), "invalid OMQ_BENCH_ARENA_THRESHOLD")
+  end
   if sender then
     options.send_timeout = timeout_ms
     options.send_hwm = hwm
@@ -121,8 +126,9 @@ local function recv_omq_for(socket, seconds)
   local messages = 0
   local check_every = time_check_every(size)
   local deadline = clock() + seconds
+  local recv = socket.recv
   while true do
-    local msg = socket:recv(size)
+    local msg = recv(socket)
     if #msg ~= size then
       die("bad message size")
     end
@@ -137,8 +143,9 @@ local function recv_lzmq_for(socket, seconds)
   local messages = 0
   local check_every = time_check_every(size)
   local deadline = clock() + seconds
+  local recv = socket.recv
   while true do
-    local msg = checked(socket:recv())
+    local msg = checked(recv(socket))
     if #msg ~= size then
       die("bad message size")
     end
@@ -170,8 +177,9 @@ local function run_omq_push()
   local ctx, push = open_omq_socket("push", true)
   push:connect(endpoint)
   local msg = payload(size)
+  local send = push.send
   while true do
-    push:send(msg)
+    send(push, msg)
   end
 end
 
@@ -196,8 +204,9 @@ local function run_lzmq_push()
   local ctx, push = open_lzmq_socket(require("lzmq").PUSH, true)
   checked(push:connect(endpoint))
   local msg = payload(size)
+  local send = push.send
   while true do
-    checked(push:send(msg))
+    checked(send(push, msg))
   end
 end
 

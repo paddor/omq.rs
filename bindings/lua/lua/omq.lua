@@ -8,21 +8,50 @@ local native = require("omq_native")
 
 local M = {}
 
+---Bidirectional exclusive socket type.
+---@type integer
 M.PAIR = native.PAIR
+---Publish socket type.
+---@type integer
 M.PUB = native.PUB
+---Subscribe socket type.
+---@type integer
 M.SUB = native.SUB
+---Synchronous request socket type.
+---@type integer
 M.REQ = native.REQ
+---Synchronous reply socket type.
+---@type integer
 M.REP = native.REP
+---Asynchronous request/reply socket type without strict alternation.
+---@type integer
 M.DEALER = native.DEALER
+---Routed asynchronous request/reply socket type.
+---@type integer
 M.ROUTER = native.ROUTER
+---Pipeline receiver socket type.
+---@type integer
 M.PULL = native.PULL
+---Pipeline sender socket type.
+---@type integer
 M.PUSH = native.PUSH
+---Raw publish socket type that exposes subscription messages.
+---@type integer
 M.XPUB = native.XPUB
+---Raw subscribe socket type.
+---@type integer
 M.XSUB = native.XSUB
+---Nonblocking send/receive flag.
+---@type integer
 M.DONTWAIT = native.DONTWAIT
+---Multipart send flag. Internal frames set this automatically via `send_parts`.
+---@type integer
 M.SNDMORE = native.SNDMORE
+---Native socket option id for outbound frame arena threshold.
+---@type integer
 M.OMQ_ARENA_THRESHOLD = native.OMQ_ARENA_THRESHOLD
 ---Default outbound frame arena threshold used by OMQ.lua sockets.
+---@type integer
 M.DEFAULT_ARENA_THRESHOLD = 4 * 1024
 
 local context_option_keys = {
@@ -67,27 +96,30 @@ local Context = {}
 Context.__index = Context
 
 ---@class omq.Socket
----@field bind fun(self: omq.Socket, endpoint: string): string
----@field connect fun(self: omq.Socket, endpoint: string): boolean
----@field close fun(self: omq.Socket): boolean
----@field send fun(self: omq.Socket, data: string|string[], flags?: integer): boolean
----@field send_parts fun(self: omq.Socket, parts: string[], flags?: integer): boolean
----@field recv fun(self: omq.Socket, max_size?: integer, flags?: integer): string
----@field try_recv fun(self: omq.Socket, max_size?: integer): string|nil
----@field recv_parts fun(self: omq.Socket, max_size?: integer, flags?: integer): string[]
----@field subscribe fun(self: omq.Socket, prefix: string): boolean
----@field unsubscribe fun(self: omq.Socket, prefix: string): boolean
----@field set_linger fun(self: omq.Socket, millis: integer): boolean
----@field set_send_timeout fun(self: omq.Socket, millis: integer): boolean
----@field set_recv_timeout fun(self: omq.Socket, millis: integer): boolean
----@field set_send_hwm fun(self: omq.Socket, value: integer): boolean
----@field set_recv_hwm fun(self: omq.Socket, value: integer): boolean
----@field set_arena_threshold fun(self: omq.Socket, bytes: integer): boolean
----@field get_arena_threshold fun(self: omq.Socket): integer
+---@field bind fun(self: omq.Socket, endpoint: string): string Bind endpoint and return resolved endpoint.
+---@field connect fun(self: omq.Socket, endpoint: string): boolean Connect endpoint.
+---@field close fun(self: omq.Socket): boolean Close socket. Idempotent.
+---@field send fun(self: omq.Socket, data: string|string[], flags?: integer): boolean Send one frame or multipart table.
+---@field send_parts fun(self: omq.Socket, parts: string[], flags?: integer): boolean Send multipart frames.
+---@field recv fun(self: omq.Socket, max_size?: integer, flags?: integer): string Receive one frame.
+---@field try_recv fun(self: omq.Socket, max_size?: integer): string|nil Nonblocking receive. Returns nil when not ready.
+---@field recv_parts fun(self: omq.Socket, max_size?: integer, flags?: integer): string[] Receive all frames in one message.
+---@field subscribe fun(self: omq.Socket, prefix: string): boolean Add SUB prefix.
+---@field unsubscribe fun(self: omq.Socket, prefix: string): boolean Remove SUB prefix.
+---@field set_linger fun(self: omq.Socket, millis: integer): boolean Set close linger in milliseconds.
+---@field set_send_timeout fun(self: omq.Socket, millis: integer): boolean Set send timeout in milliseconds.
+---@field set_recv_timeout fun(self: omq.Socket, millis: integer): boolean Set receive timeout in milliseconds.
+---@field set_send_hwm fun(self: omq.Socket, value: integer): boolean Set outbound high-water mark.
+---@field set_recv_hwm fun(self: omq.Socket, value: integer): boolean Set inbound high-water mark.
+---@field set_arena_threshold fun(self: omq.Socket, bytes: integer): boolean Set outbound frame arena threshold. `-1` restores native default.
+---@field get_arena_threshold fun(self: omq.Socket): integer Return outbound frame arena threshold.
 
 local function socket_type_id(socket_type)
   if type(socket_type) == "number" then
     return socket_type
+  end
+  if type(socket_type) ~= "string" then
+    error("socket type must be a string or numeric constant", 3)
   end
   local id = socket_types[string.lower(socket_type)]
   if id == nil then
@@ -185,10 +217,15 @@ end
 ---@class omq.testing
 M.testing = {}
 
+---@class omq.testing.Join
+---@field endpoint fun(self: omq.testing.Join): string Return bound endpoint for TCP helpers.
+---@field join fun(self: omq.testing.Join): string|integer Wait for helper thread and return payload or count.
+---@field received fun(self: omq.testing.Join): integer Return payload count received so far.
+
 ---Start a Rust backend thread that PULL-binds a random TCP endpoint and receives one payload.
 ---The returned handle exposes `endpoint()` and `join()`. This is a test helper
 ---for interop between OMQ.lua and an OMQ.rs thread using `omq-libzmq` directly.
----@return userdata handle join handle whose `endpoint()` returns the TCP
+---@return omq.testing.Join handle join handle whose `endpoint()` returns the TCP
 ---endpoint and `join()` returns the received payload.
 function M.testing.spawn_tcp_pull()
   return native.spawn_tcp_pull()
@@ -198,7 +235,7 @@ end
 ---The returned handle exposes `join()`, which returns the received payload.
 ---@param context omq.Context context whose inproc namespace is shared with the thread.
 ---@param endpoint string inproc endpoint to bind in the Rust thread.
----@return userdata handle join handle whose `join()` returns the received payload.
+---@return omq.testing.Join handle join handle whose `join()` returns the received payload.
 function M.testing.spawn_inproc_pull(context, endpoint)
   return context._native:spawn_inproc_pull(endpoint)
 end
@@ -208,7 +245,7 @@ end
 ---@param context omq.Context context whose inproc namespace is shared with the thread.
 ---@param endpoint string inproc endpoint to bind in the Rust thread.
 ---@param messages integer number of messages to receive before the thread exits.
----@return userdata handle join handle whose `join()` returns the received message count.
+---@return omq.testing.Join handle join handle whose `join()` returns the received message count.
 function M.testing.spawn_inproc_pull_count(context, endpoint, messages)
   return context._native:spawn_inproc_pull_count(endpoint, messages)
 end
@@ -219,7 +256,7 @@ end
 ---@param context omq.Context context whose inproc namespace is shared with the thread.
 ---@param endpoint string inproc endpoint to bind in the Rust thread.
 ---@param stop_payload string sentinel payload that stops the thread.
----@return userdata handle join handle whose `join()` returns the received message count.
+---@return omq.testing.Join handle join handle whose `join()` returns the received message count.
 function M.testing.spawn_inproc_pull_until_stop(context, endpoint, stop_payload)
   return context._native:spawn_inproc_pull_until_stop(endpoint, stop_payload)
 end

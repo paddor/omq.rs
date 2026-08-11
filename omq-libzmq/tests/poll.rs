@@ -28,9 +28,25 @@ const ZMQ_ENOTSUP: i32 = 156_384_713;
 #[repr(C)]
 struct PollItem {
     socket: *mut c_void,
-    fd: i32,
+    fd: ZmqFd,
     events: i16,
     revents: i16,
+}
+
+#[cfg(unix)]
+type ZmqFd = i32;
+#[cfg(windows)]
+type ZmqFd = usize;
+
+fn invalid_fd() -> ZmqFd {
+    #[cfg(unix)]
+    {
+        -1
+    }
+    #[cfg(windows)]
+    {
+        ZmqFd::MAX
+    }
 }
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
@@ -79,7 +95,7 @@ fn poll_timeout_no_events() {
 
     let mut items = [PollItem {
         socket: pull,
-        fd: -1,
+        fd: invalid_fd(),
         events: ZMQ_POLLIN,
         revents: 0,
     }];
@@ -110,7 +126,7 @@ fn poll_detects_readable() {
 
     let mut items = [PollItem {
         socket: pull,
-        fd: -1,
+        fd: invalid_fd(),
         events: ZMQ_POLLIN,
         revents: 0,
     }];
@@ -152,13 +168,13 @@ fn poll_multiple_sockets() {
     let mut items = [
         PollItem {
             socket: pull1,
-            fd: -1,
+            fd: invalid_fd(),
             events: ZMQ_POLLIN,
             revents: 0,
         },
         PollItem {
             socket: pull2,
-            fd: -1,
+            fd: invalid_fd(),
             events: ZMQ_POLLIN,
             revents: 0,
         },
@@ -193,7 +209,7 @@ fn poll_pollout_on_empty_socket() {
 
     let mut items = [PollItem {
         socket: push,
-        fd: -1,
+        fd: invalid_fd(),
         events: ZMQ_POLLOUT,
         revents: 0,
     }];
@@ -249,7 +265,7 @@ fn create_poll_items(pairs: &[(*mut c_void, *mut c_void)]) -> Vec<PollItem> {
         .iter()
         .map(|(_push, pull)| PollItem {
             socket: *pull,
-            fd: -1,
+            fd: invalid_fd(),
             events: ZMQ_POLLIN,
             revents: 0,
         })
@@ -314,7 +330,7 @@ fn poll_simple_two_socket_test() {
 
     let mut items = [PollItem {
         socket: pull1,
-        fd: -1,
+        fd: invalid_fd(),
         events: ZMQ_POLLIN,
         revents: 0,
     }];
@@ -583,7 +599,7 @@ fn poll_both_events_counts_as_one_item() {
 
     let mut items = [PollItem {
         socket: a,
-        fd: -1,
+        fd: invalid_fd(),
         events: ZMQ_POLLIN | ZMQ_POLLOUT,
         revents: 0,
     }];

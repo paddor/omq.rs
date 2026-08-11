@@ -1270,8 +1270,12 @@ impl SpscAwareRecv {
                 space: pair.space_notify.clone(),
             };
         }
-        let _ = pair.producer.push(RecvItem::new(msg));
-        pair.producer.flush();
+        if let Err(item) = pair.producer.push_flush(RecvItem::new(msg)) {
+            return SpscPush::Full {
+                msg: item.into_message(),
+                space: pair.space_notify.clone(),
+            };
+        }
         pair.recv_signal.mark();
         pair.blocking_recv_waker.wake();
         SpscPush::Sent

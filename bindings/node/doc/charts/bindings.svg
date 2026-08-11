@@ -1,0 +1,212 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 684" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="850" height="684" fill="white"/>
+  <text x="425.0" y="32" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>
+  <text x="425.0" y="46" text-anchor="middle" fill="#9ca3af" font-size="10">Linux VM on a 2018 Mac Mini, Intel Core i7-8700B @ 3.20GHz, 12 cores, performance governor, turbo off</text>
+  <line x1="90" y1="350.5" x2="760" y2="350.5" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="350.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">200k</text>
+  <text x="768" y="350.5" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">500 MB/s</text>
+  <line x1="90" y1="317.0" x2="760" y2="317.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="317.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">400k</text>
+  <text x="768" y="317.0" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">1 GB/s</text>
+  <line x1="90" y1="283.5" x2="760" y2="283.5" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="283.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">600k</text>
+  <text x="768" y="283.5" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">1.5 GB/s</text>
+  <line x1="90" y1="250.0" x2="760" y2="250.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="250.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">800k</text>
+  <text x="768" y="250.0" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">2 GB/s</text>
+  <line x1="90" y1="216.5" x2="760" y2="216.5" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="216.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">1M</text>
+  <text x="768" y="216.5" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">2.5 GB/s</text>
+  <line x1="90" y1="183.0" x2="760" y2="183.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="183.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">1.2M</text>
+  <text x="768" y="183.0" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">3 GB/s</text>
+  <line x1="90" y1="149.5" x2="760" y2="149.5" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="149.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">1.4M</text>
+  <text x="768" y="149.5" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">3.5 GB/s</text>
+  <line x1="90" y1="116.0" x2="760" y2="116.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="116.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">1.6M</text>
+  <text x="768" y="116.0" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">4 GB/s</text>
+  <line x1="90" y1="82.5" x2="760" y2="82.5" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="82.5" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">1.8M</text>
+  <text x="768" y="82.5" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">4.5 GB/s</text>
+  <line x1="90" y1="49.0" x2="760" y2="49.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="49.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">2M</text>
+  <text x="768" y="49.0" text-anchor="start" dominant-baseline="middle" fill="#6b7280" font-size="10">5 GB/s</text>
+  <line x1="90.0" y1="49" x2="90.0" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="145.8" y1="49" x2="145.8" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="201.7" y1="49" x2="201.7" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="257.5" y1="49" x2="257.5" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="313.3" y1="49" x2="313.3" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="369.2" y1="49" x2="369.2" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="425.0" y1="49" x2="425.0" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="480.8" y1="49" x2="480.8" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="536.7" y1="49" x2="536.7" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="592.5" y1="49" x2="592.5" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="648.3" y1="49" x2="648.3" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="704.2" y1="49" x2="704.2" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="760.0" y1="49" x2="760.0" y2="384" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="90" y1="49" x2="90" y2="384" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="760" y1="49" x2="760" y2="384" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="90" y1="384" x2="760" y2="384" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="40" y="216" text-anchor="middle" dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600" transform="rotate(-90,40,216)">msg/s</text>
+  <polyline points="90.0,71.3 145.8,75.0 201.7,86.7 257.5,126.8 313.3,187.2 369.2,206.4 425.0,196.7 480.8,221.0 536.7,268.5 592.5,303.5 648.3,329.0 704.2,352.1 760.0,367.5" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="90.0,153.9 145.8,137.6 201.7,169.1 257.5,179.7 313.3,213.0 369.2,196.9 425.0,200.9 480.8,224.4 536.7,272.5 592.5,304.5 648.3,330.3 704.2,354.2 760.0,367.9" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="6,4" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="90.0,345.5 145.8,347.3 201.7,345.7 257.5,352.0 313.3,350.9 369.2,351.4 425.0,352.3 480.8,352.2 536.7,353.3 592.5,356.5 648.3,362.3 704.2,373.0 760.0,374.6" fill="none" stroke="#2563eb" stroke-width="2" stroke-dasharray="6,4" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="90.0,383.0 145.8,382.0 201.7,380.2 257.5,377.4 313.3,373.9 369.2,365.8 425.0,345.6 480.8,317.2 536.7,289.4 592.5,252.1 648.3,203.8 704.2,175.1 760.0,167.7" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="383.0" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="382.0" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="380.2" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="377.4" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="373.9" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="365.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="345.6" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="317.2" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="289.4" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="252.1" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="203.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="175.1" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="167.7" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,383.3 145.8,382.4 201.7,381.2 257.5,378.8 313.3,375.2 369.2,364.8 425.0,346.5 480.8,318.6 536.7,292.6 592.5,253.7 648.3,208.0 704.2,188.8 760.0,172.7" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="383.3" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="382.4" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="381.2" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="378.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="375.2" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="364.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="346.5" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="318.6" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="292.6" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="253.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="208.0" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="188.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="172.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,383.9 145.8,383.8 201.7,383.5 257.5,383.2 313.3,382.3 369.2,380.7 425.0,377.5 480.8,371.0 536.7,358.8 592.5,339.0 648.3,312.9 704.2,311.6 760.0,261.3" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="383.9" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="383.8" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="383.5" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="383.2" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="382.3" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="380.7" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="377.5" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="371.0" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="358.8" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="339.0" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="312.9" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="311.6" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="261.3" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <text x="90.0" y="398" text-anchor="middle" fill="#374151" font-size="8.5">8 B</text>
+  <text x="145.8" y="398" text-anchor="middle" fill="#374151" font-size="8.5">16 B</text>
+  <text x="201.7" y="398" text-anchor="middle" fill="#374151" font-size="8.5">32 B</text>
+  <text x="257.5" y="398" text-anchor="middle" fill="#374151" font-size="8.5">64 B</text>
+  <text x="313.3" y="398" text-anchor="middle" fill="#374151" font-size="8.5">128 B</text>
+  <text x="369.2" y="398" text-anchor="middle" fill="#374151" font-size="8.5">256 B</text>
+  <text x="425.0" y="398" text-anchor="middle" fill="#374151" font-size="8.5">512 B</text>
+  <text x="480.8" y="398" text-anchor="middle" fill="#374151" font-size="8.5">1 KiB</text>
+  <text x="536.7" y="398" text-anchor="middle" fill="#374151" font-size="8.5">2 KiB</text>
+  <text x="592.5" y="398" text-anchor="middle" fill="#374151" font-size="8.5">4 KiB</text>
+  <text x="648.3" y="398" text-anchor="middle" fill="#374151" font-size="8.5">8 KiB</text>
+  <text x="704.2" y="398" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
+  <text x="760.0" y="398" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
+  <text x="425.0" y="447" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>
+  <line x1="90" y1="572.0" x2="760" y2="572.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="572.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">20 µs</text>
+  <line x1="90" y1="560.0" x2="760" y2="560.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="560.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">40 µs</text>
+  <line x1="90" y1="548.0" x2="760" y2="548.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="548.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">60 µs</text>
+  <line x1="90" y1="536.0" x2="760" y2="536.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="536.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">80 µs</text>
+  <line x1="90" y1="524.0" x2="760" y2="524.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="524.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">100 µs</text>
+  <line x1="90" y1="512.0" x2="760" y2="512.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="512.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">120 µs</text>
+  <line x1="90" y1="500.0" x2="760" y2="500.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="500.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">140 µs</text>
+  <line x1="90" y1="488.0" x2="760" y2="488.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="488.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">160 µs</text>
+  <line x1="90" y1="476.0" x2="760" y2="476.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="476.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">180 µs</text>
+  <line x1="90" y1="464.0" x2="760" y2="464.0" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="82" y="464.0" text-anchor="end" dominant-baseline="middle" fill="#374151" font-size="10">200 µs</text>
+  <line x1="90.0" y1="464" x2="90.0" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="145.8" y1="464" x2="145.8" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="201.7" y1="464" x2="201.7" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="257.5" y1="464" x2="257.5" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="313.3" y1="464" x2="313.3" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="369.2" y1="464" x2="369.2" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="425.0" y1="464" x2="425.0" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="480.8" y1="464" x2="480.8" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="536.7" y1="464" x2="536.7" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="592.5" y1="464" x2="592.5" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="648.3" y1="464" x2="648.3" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="704.2" y1="464" x2="704.2" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="760.0" y1="464" x2="760.0" y2="584" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="90" y1="464" x2="90" y2="584" stroke="#9ca3af" stroke-width="1.5"/>
+  <line x1="90" y1="584" x2="760" y2="584" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="40" y="524" text-anchor="middle" dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600" transform="rotate(-90,40,524)">p50 latency (µs)</text>
+  <polyline points="90.0,537.3 145.8,536.6 201.7,534.3 257.5,536.2 313.3,535.7 369.2,537.8 425.0,537.7 480.8,535.6 536.7,534.0 592.5,528.4 648.3,523.9 704.2,508.4 760.0,473.8" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="537.3" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="536.6" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="534.3" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="536.2" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="535.7" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="537.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="537.7" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="535.6" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="534.0" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="528.4" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="523.9" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="508.4" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="473.8" r="3" fill="#dc2626" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,549.7 145.8,551.5 201.7,549.8 257.5,551.0 313.3,550.7 369.2,549.5 425.0,550.1 480.8,549.9 536.7,548.2 592.5,544.7 648.3,540.8 704.2,530.1 760.0,515.4" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="549.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="551.5" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="549.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="551.0" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="550.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="549.5" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="550.1" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="549.9" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="548.2" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="544.7" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="540.8" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="530.1" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="515.4" r="3" fill="#f97316" stroke="white" stroke-width="1"/>
+  <polyline points="90.0,510.0 145.8,504.7 201.7,506.9 257.5,506.6 313.3,507.8 369.2,500.2 425.0,498.9 480.8,500.2 536.7,498.5 592.5,497.1 648.3,491.1 704.2,486.2 760.0,477.7" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90.0" cy="510.0" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="145.8" cy="504.7" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="201.7" cy="506.9" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="257.5" cy="506.6" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="313.3" cy="507.8" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="369.2" cy="500.2" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="425.0" cy="498.9" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="480.8" cy="500.2" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="536.7" cy="498.5" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="592.5" cy="497.1" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="648.3" cy="491.1" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="704.2" cy="486.2" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <circle cx="760.0" cy="477.7" r="3" fill="#2563eb" stroke="white" stroke-width="1"/>
+  <text x="90.0" y="598" text-anchor="middle" fill="#374151" font-size="8.5">8 B</text>
+  <text x="145.8" y="598" text-anchor="middle" fill="#374151" font-size="8.5">16 B</text>
+  <text x="201.7" y="598" text-anchor="middle" fill="#374151" font-size="8.5">32 B</text>
+  <text x="257.5" y="598" text-anchor="middle" fill="#374151" font-size="8.5">64 B</text>
+  <text x="313.3" y="598" text-anchor="middle" fill="#374151" font-size="8.5">128 B</text>
+  <text x="369.2" y="598" text-anchor="middle" fill="#374151" font-size="8.5">256 B</text>
+  <text x="425.0" y="598" text-anchor="middle" fill="#374151" font-size="8.5">512 B</text>
+  <text x="480.8" y="598" text-anchor="middle" fill="#374151" font-size="8.5">1 KiB</text>
+  <text x="536.7" y="598" text-anchor="middle" fill="#374151" font-size="8.5">2 KiB</text>
+  <text x="592.5" y="598" text-anchor="middle" fill="#374151" font-size="8.5">4 KiB</text>
+  <text x="648.3" y="598" text-anchor="middle" fill="#374151" font-size="8.5">8 KiB</text>
+  <text x="704.2" y="598" text-anchor="middle" fill="#374151" font-size="8.5">16 KiB</text>
+  <text x="760.0" y="598" text-anchor="middle" fill="#374151" font-size="8.5">32 KiB</text>
+  <line x1="155" y1="624" x2="169" y2="624" stroke="#dc2626" stroke-width="2.5"/>
+  <circle cx="162" cy="624" r="2.5" fill="#dc2626"/>
+  <text x="175" y="628" fill="#374151" font-size="11" font-weight="500">omq-node sync API</text>
+  <line x1="335" y1="624" x2="349" y2="624" stroke="#f97316" stroke-width="2.5"/>
+  <circle cx="342" cy="624" r="2.5" fill="#f97316"/>
+  <text x="355" y="628" fill="#374151" font-size="11" font-weight="500">omq-node async API</text>
+  <line x1="515" y1="624" x2="529" y2="624" stroke="#2563eb" stroke-width="2.5"/>
+  <circle cx="522" cy="624" r="2.5" fill="#2563eb"/>
+  <text x="535" y="628" fill="#374151" font-size="11" font-weight="500">zeromq.js async API</text>
+  <text x="425.0" y="642" text-anchor="middle" fill="#9ca3af" font-size="9">dashed = msg/s (left) · solid = throughput (right)</text>
+</svg>

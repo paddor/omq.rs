@@ -21,6 +21,7 @@ compile_error!("yring requires target_has_atomic = \"ptr\"");
 
 mod compat;
 
+use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::sync::OnceLock;
 
@@ -275,7 +276,7 @@ unsafe impl<T: Send> Send for Producer<T> {}
 /// from another thread panic.
 pub struct ProducerOwner<T> {
     producer: UnsafeCell<Producer<T>>,
-    owner: OnceLock<std::thread::ThreadId>,
+    owner: OnceLock<usize>,
 }
 
 // SAFETY: `with_producer` binds access to one thread before touching the
@@ -294,7 +295,7 @@ impl<T> ProducerOwner<T> {
 
     #[inline]
     fn with_producer<R>(&self, f: impl FnOnce(&mut Producer<T>) -> R) -> R {
-        let current = std::thread::current().id();
+        let current = current_thread_token();
         let owner = self.owner.get_or_init(|| current);
         assert_eq!(
             *owner, current,
@@ -308,6 +309,18 @@ impl<T> ProducerOwner<T> {
     #[inline]
     pub fn push(&self, value: T) -> Result<(), T> {
         self.with_producer(|producer| producer.push(value))
+    }
+
+    /// Push one value and publish pending values with one owner check.
+    #[inline]
+    pub fn push_flush(&self, value: T) -> Result<(), T> {
+        self.with_producer(|producer| {
+            let result = producer.push(value);
+            if result.is_ok() {
+                producer.flush();
+            }
+            result
+        })
     }
 
     /// Publish pending values.
@@ -327,6 +340,25 @@ impl<T> ProducerOwner<T> {
     pub fn is_consumer_dropped(&self) -> bool {
         self.with_producer(|producer| producer.is_consumer_dropped())
     }
+}
+
+static NEXT_THREAD_TOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+thread_local! {
+    static THREAD_TOKEN: Cell<usize> = const { Cell::new(0) };
+}
+
+#[inline]
+fn current_thread_token() -> usize {
+    THREAD_TOKEN.with(|token| {
+        let current = token.get();
+        if current != 0 {
+            return current;
+        }
+        let current = NEXT_THREAD_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        token.set(current);
+        current
+    })
 }
 
 impl<T> std::fmt::Debug for ProducerOwner<T> {

@@ -16,6 +16,8 @@ uv.lock
 **/benches/results*.jsonl
 benchmarks/*.jsonl
 **/.venv/
+**/node_modules/
+**/*.node
 __pycache__/
 *.egg-info/
 .pytest_cache/
@@ -31,4 +33,5 @@ perf.data*
 .chart_hw
 !bindings/pyomq/.chart_hw
 !bindings/java/.chart_hw
+!bindings/node/Cargo.lock
 .perf_hw

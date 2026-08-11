@@ -56,6 +56,120 @@ fn push_full_release_retry() {
 }
 
 #[test]
+fn prefetch_and_pop_with_full_reports_full_transition() {
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        let first = loop {
+            if let Some(item) = c.prefetch_and_pop_with_full() {
+                break item;
+            }
+            thread::yield_now();
+        };
+        assert_eq!(first, (10, true));
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, false)));
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
+fn prefetch_and_pop_with_full_observes_refilled_full_ring() {
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, Ordering};
+
+    loom::model(|| {
+        let (mut p, mut c) = yring::spsc::<u32>(2);
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        let released_one = Arc::new(AtomicBool::new(false));
+        let attempted_second_push = Arc::new(AtomicBool::new(false));
+        let released_one_for_producer = released_one.clone();
+        let attempted_second_push_for_producer = attempted_second_push.clone();
+
+        let h = thread::spawn(move || {
+            while !released_one_for_producer.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+
+            while p.push(30).is_err() {
+                thread::yield_now();
+            }
+            p.flush();
+
+            let mut value = match p.push(40) {
+                Ok(()) => panic!("released second slot before second pop"),
+                Err(value) => value,
+            };
+            attempted_second_push_for_producer.store(true, Ordering::Release);
+
+            while let Err(returned) = p.push(value) {
+                value = returned;
+                thread::yield_now();
+            }
+            p.flush();
+        });
+
+        assert_eq!(c.prefetch(), 2);
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
+        released_one.store(true, Ordering::Release);
+
+        while !attempted_second_push.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, true)));
+
+        let mut tail = Vec::new();
+        while tail.len() < 2 {
+            if let Some((value, _was_full)) = c.prefetch_and_pop_with_full() {
+                tail.push(value);
+            } else {
+                thread::yield_now();
+            }
+        }
+        assert_eq!(tail, [30, 40]);
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
+fn prefetch_and_pop_with_full_handles_cursor_wrap() {
+    loom::model(|| {
+        let base = usize::MAX - 1;
+        let (mut p, mut c) = yring::loom_spsc_with_cursors::<u32>(2, base);
+
+        let h = thread::spawn(move || {
+            p.push(10).unwrap();
+            p.push(20).unwrap();
+            p.flush();
+        });
+
+        let first = loop {
+            if let Some(item) = c.prefetch_and_pop_with_full() {
+                break item;
+            }
+            thread::yield_now();
+        };
+        assert_eq!(first, (10, true));
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, false)));
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
+
+        h.join().unwrap();
+    });
+}
+
+#[test]
 fn release_after_prefetch_releases_only_popped_items() {
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, Ordering};

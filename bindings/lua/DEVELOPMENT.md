@@ -14,6 +14,9 @@ Run commands from the repository root unless shown otherwise.
 ./scripts/test-lua.sh
 ```
 
+`test_pyzmq_interop.lua` runs when `python3 -c 'import zmq'` works and skips
+otherwise.
+
 The wrapper builds `bindings/lua/native` and sets:
 
 ```sh

@@ -546,6 +546,21 @@ impl<T> Consumer<T> {
         val
     }
 
+    /// Prefetch + pop + release, returning whether the ring was full before
+    /// the pop released one slot.
+    ///
+    /// This always prefetches before checking fullness. A producer may have
+    /// flushed more items behind the consumer's cached window, and a caller
+    /// using `was_full` for space wakeups must observe that state.
+    #[inline]
+    pub fn prefetch_and_pop_with_full(&mut self) -> Option<(T, bool)> {
+        self.prefetch();
+        let was_full = self.cached_tail.wrapping_sub(self.head) >= self.capacity();
+        let val = self.pop()?;
+        self.release();
+        Some((val, was_full))
+    }
+
     #[inline]
     /// Return whether the consumer has no visible items.
     pub fn is_empty(&self) -> bool {
@@ -635,6 +650,50 @@ mod tests {
         let (mut p, mut c) = spsc::<u32>(4);
         p.push_and_flush(42).unwrap();
         assert_eq!(c.prefetch_and_pop(), Some(42));
+    }
+
+    #[test]
+    fn prefetch_and_pop_with_full_reports_full_transition() {
+        let (mut p, mut c) = spsc::<u32>(2);
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, false)));
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
+    }
+
+    #[test]
+    fn prefetch_and_pop_with_full_prefetches_stale_tail_before_full_check() {
+        let (mut p, mut c) = spsc::<u32>(2);
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        assert_eq!(c.prefetch(), 2);
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
+
+        p.push(30).unwrap();
+        p.flush();
+        assert_eq!(p.push(40), Err(40));
+
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, true)));
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((30, false)));
+    }
+
+    #[cfg(all(loom, target_pointer_width = "64"))]
+    #[test]
+    fn prefetch_and_pop_with_full_handles_cursor_wrap() {
+        let base = usize::MAX - 1;
+        let (mut p, mut c) = loom_spsc_with_cursors::<u32>(2, base);
+        p.push(10).unwrap();
+        p.push(20).unwrap();
+        p.flush();
+
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((10, true)));
+        assert_eq!(c.prefetch_and_pop_with_full(), Some((20, false)));
+        assert_eq!(c.prefetch_and_pop_with_full(), None);
     }
 
     #[test]

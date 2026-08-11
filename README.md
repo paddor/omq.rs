@@ -16,6 +16,7 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
   - [OMQ.java](bindings/java/) Java 25, sync + async
   - [OMQ.go](bindings/go/) Go 1.25, goroutine-safe API
   - [@zeromq/omq-node](bindings/node/) Node.js 24.11, native addon
+  - [OMQ.lua](bindings/lua/) Lua 5.4, native module over `omq-libzmq`
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
@@ -143,6 +144,7 @@ Five Cargo workspace crates plus language bindings.
 | [`OMQ.java`](bindings/java/) | Java 25 binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
 | [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
 | [`@zeromq/omq-node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
+| [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
 
 ## Testing
 

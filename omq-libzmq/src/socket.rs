@@ -46,9 +46,9 @@ pub(crate) struct RecvConsumers {
     pub pump: yring::Consumer<omq_tokio::engine::RecvItem>,
 }
 
-#[expect(dead_code)]
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
+    #[expect(dead_code)]
     pub id: u64,
     pub ctx: Arc<OmqContext>,
     pub socket_type: SocketType,
@@ -61,8 +61,12 @@ pub(crate) struct OmqSocket {
     /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
     /// contract per socket).
     pub bypass_send: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassSend>>,
+    pub pending_bypass_send: Mutex<Option<crate::inproc_bypass::BypassSend>>,
+    pub pending_bypass_send_ready: AtomicBool,
     /// Lock-free inproc bypass (receiver half).
     pub bypass_recv: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassRecv>>,
+    pub pending_bypass_recv: Mutex<Option<crate::inproc_bypass::BypassRecv>>,
+    pub pending_bypass_recv_ready: AtomicBool,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -170,11 +174,52 @@ fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
     // average size. Rounded up to a power of two internally.
     let byte_ring_cap = capacity * 1024;
     let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_notify);
-    // SAFETY: bypass setup happens from bind/connect plumbing and must not
-    // bind either socket's later app-facing owner thread.
-    *unsafe { sender.bypass_send.get_unchecked() } = Some(bsend);
-    // SAFETY: same setup phase as above.
-    *unsafe { receiver.bypass_recv.get_unchecked() } = Some(brecv);
+    if let Ok(mut pending) = sender.pending_bypass_send.lock() {
+        *pending = Some(bsend);
+        sender
+            .pending_bypass_send_ready
+            .store(true, Ordering::Release);
+        sender.notify.signal_send();
+    }
+    if let Ok(mut pending) = receiver.pending_bypass_recv.lock() {
+        *pending = Some(brecv);
+        receiver
+            .pending_bypass_recv_ready
+            .store(true, Ordering::Release);
+        receiver.notify.signal_recv();
+    }
+}
+
+pub(crate) fn adopt_pending_bypass_send(sock: &OmqSocket) {
+    if !sock.pending_bypass_send_ready.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let Some(bypass) = sock
+        .pending_bypass_send
+        .lock()
+        .ok()
+        .and_then(|mut p| p.take())
+    else {
+        return;
+    };
+    // SAFETY: adoption happens on the app-facing send owner thread.
+    *unsafe { sock.bypass_send.get() } = Some(bypass);
+}
+
+pub(crate) fn adopt_pending_bypass_recv(sock: &OmqSocket) {
+    if !sock.pending_bypass_recv_ready.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let Some(bypass) = sock
+        .pending_bypass_recv
+        .lock()
+        .ok()
+        .and_then(|mut p| p.take())
+    else {
+        return;
+    };
+    // SAFETY: adoption happens on the app-facing recv owner thread.
+    *unsafe { sock.bypass_recv.get() } = Some(bypass);
 }
 
 /// Register an inproc bind. If there are pending connectors, install
@@ -278,7 +323,11 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: crate::local_cell::LocalCell::new(Vec::new()),
         bypass_send: crate::local_cell::LocalCell::new(None),
+        pending_bypass_send: Mutex::new(None),
+        pending_bypass_send_ready: AtomicBool::new(false),
         bypass_recv: crate::local_cell::LocalCell::new(None),
+        pending_bypass_recv: Mutex::new(None),
+        pending_bypass_recv_ready: AtomicBool::new(false),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
         recv_cons: crate::local_cell::LocalCell::new(None),
@@ -401,8 +450,18 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // SAFETY: `zmq_close` reclaims the socket pointer, so no later user access
     // can legally race this cleanup.
     *unsafe { arc.bypass_send.get_unchecked() } = None;
+    if let Ok(mut pending) = arc.pending_bypass_send.lock() {
+        *pending = None;
+    }
+    arc.pending_bypass_send_ready
+        .store(false, Ordering::Release);
     // SAFETY: same close-time exclusive ownership as above.
     *unsafe { arc.bypass_recv.get_unchecked() } = None;
+    if let Ok(mut pending) = arc.pending_bypass_recv.lock() {
+        *pending = None;
+    }
+    arc.pending_bypass_recv_ready
+        .store(false, Ordering::Release);
     let linger = arc
         .overlay
         .lock()

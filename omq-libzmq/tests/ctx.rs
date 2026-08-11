@@ -8,6 +8,8 @@ use omq_zmq::{
 use std::ffi::CString;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::sync::mpsc;
+use std::time::Duration;
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
@@ -17,6 +19,7 @@ const ZMQ_SOCKET_LIMIT: i32 = 3;
 const ZMQ_MAX_MSGSZ: i32 = 5;
 const ZMQ_MSG_T_SIZE: i32 = 6;
 const ZMQ_THREAD_NAME_PREFIX: i32 = 9;
+const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_IPV6: i32 = 42;
 const ZMQ_BLOCKY: i32 = 70;
 const ZMQ_LINGER: i32 = 17;
@@ -193,6 +196,50 @@ fn zero_io_threads_support_inproc_push_pull() {
 
     zmq_close(push);
     zmq_close(pull);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn zero_io_threads_support_cross_thread_inproc_push_pull() {
+    let ctx = zmq_init(0);
+    let ctx_addr = ctx as usize;
+    let endpoint = "inproc://zero-io-cross-thread".to_owned();
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    let receiver = std::thread::spawn(move || {
+        let ctx = ctx_addr as *mut c_void;
+        let pull = zmq_socket(ctx, ZMQ_PULL);
+        assert!(!pull.is_null());
+        let addr = CString::new(endpoint).unwrap();
+        let timeout = 1000_i32;
+        assert_eq!(
+            zmq_setsockopt(
+                pull,
+                ZMQ_RCVTIMEO,
+                (&raw const timeout).cast(),
+                size_of::<i32>(),
+            ),
+            0
+        );
+        assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+        ready_tx.send(()).unwrap();
+
+        let mut buf = [0u8; 8];
+        let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert_eq!(rc, 5);
+        assert_eq!(&buf[..5], b"hello");
+        zmq_close(pull);
+    });
+
+    ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!push.is_null());
+    let addr = CString::new("inproc://zero-io-cross-thread").unwrap();
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+    zmq_close(push);
+
+    receiver.join().unwrap();
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 

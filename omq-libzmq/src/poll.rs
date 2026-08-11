@@ -44,6 +44,7 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
+            crate::socket::adopt_pending_bypass_recv(sock);
             let drain_nonempty = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -80,6 +81,7 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
+            crate::socket::adopt_pending_bypass_recv(sock);
             let drain_nonempty = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);

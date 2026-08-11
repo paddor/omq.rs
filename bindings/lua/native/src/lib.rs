@@ -130,6 +130,7 @@ type NativeThreadResult = Result<NativeThreadValue, String>;
 struct NativeJoin {
     handle: Mutex<Option<JoinHandle<NativeThreadResult>>>,
     endpoint: Mutex<Option<String>>,
+    received: Arc<AtomicUsize>,
     _context: Option<Arc<ContextInner>>,
 }
 
@@ -182,7 +183,10 @@ impl NativeContext {
     fn spawn_inproc_pull(&self, endpoint: String) -> LuaResult<NativeJoin> {
         let ctx = self.inner.ptr()? as usize;
         let (ready_tx, ready_rx) = mpsc::channel();
-        let handle = thread::spawn(move || rust_pull_once(ctx, endpoint, ready_tx));
+        let received = Arc::new(AtomicUsize::new(0));
+        let thread_received = received.clone();
+        let handle =
+            thread::spawn(move || rust_pull_once(ctx, endpoint, thread_received, ready_tx));
         match ready_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(LuaError::external(err)),
@@ -191,6 +195,7 @@ impl NativeContext {
         Ok(NativeJoin {
             handle: Mutex::new(Some(handle)),
             endpoint: Mutex::new(None),
+            received,
             _context: Some(self.inner.clone()),
         })
     }
@@ -198,7 +203,11 @@ impl NativeContext {
     fn spawn_inproc_pull_count(&self, endpoint: String, messages: usize) -> LuaResult<NativeJoin> {
         let ctx = self.inner.ptr()? as usize;
         let (ready_tx, ready_rx) = mpsc::channel();
-        let handle = thread::spawn(move || rust_pull_count(ctx, endpoint, messages, ready_tx));
+        let received = Arc::new(AtomicUsize::new(0));
+        let thread_received = received.clone();
+        let handle = thread::spawn(move || {
+            rust_pull_count(ctx, endpoint, messages, thread_received, ready_tx)
+        });
         match ready_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(LuaError::external(err)),
@@ -207,6 +216,7 @@ impl NativeContext {
         Ok(NativeJoin {
             handle: Mutex::new(Some(handle)),
             endpoint: Mutex::new(None),
+            received,
             _context: Some(self.inner.clone()),
         })
     }
@@ -218,7 +228,11 @@ impl NativeContext {
     ) -> LuaResult<NativeJoin> {
         let ctx = self.inner.ptr()? as usize;
         let (ready_tx, ready_rx) = mpsc::channel();
-        let handle = thread::spawn(move || rust_pull_until_stop(ctx, endpoint, stop, ready_tx));
+        let received = Arc::new(AtomicUsize::new(0));
+        let thread_received = received.clone();
+        let handle = thread::spawn(move || {
+            rust_pull_until_stop(ctx, endpoint, stop, thread_received, ready_tx)
+        });
         match ready_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(LuaError::external(err)),
@@ -227,6 +241,7 @@ impl NativeContext {
         Ok(NativeJoin {
             handle: Mutex::new(Some(handle)),
             endpoint: Mutex::new(None),
+            received,
             _context: Some(self.inner.clone()),
         })
     }
@@ -530,7 +545,7 @@ impl UserData for NativeJoin {
                 .map_err(|_| LuaError::runtime("join handle lock poisoned"))?
                 .take()
             else {
-                return Ok(LuaValue::Boolean(true));
+                return Err(LuaError::runtime("join handle already joined"));
             };
             match handle.join() {
                 Ok(Ok(NativeThreadValue::Payload(bytes))) => {
@@ -543,12 +558,18 @@ impl UserData for NativeJoin {
                 Err(_) => Err(LuaError::external("inproc thread panicked")),
             }
         });
+        methods.add_method("received", |_, this, ()| {
+            i64::try_from(this.received.load(Ordering::Relaxed))
+                .map_err(|_| LuaError::runtime("count overflow"))
+        });
     }
 }
 
 fn spawn_tcp_pull() -> LuaResult<NativeJoin> {
     let (ready_tx, ready_rx) = mpsc::channel();
-    let handle = thread::spawn(move || rust_tcp_pull_once(ready_tx));
+    let received = Arc::new(AtomicUsize::new(0));
+    let thread_received = received.clone();
+    let handle = thread::spawn(move || rust_tcp_pull_once(thread_received, ready_tx));
     let endpoint = match ready_rx.recv() {
         Ok(Ok(endpoint)) => endpoint,
         Ok(Err(err)) => return Err(LuaError::external(err)),
@@ -557,11 +578,15 @@ fn spawn_tcp_pull() -> LuaResult<NativeJoin> {
     Ok(NativeJoin {
         handle: Mutex::new(Some(handle)),
         endpoint: Mutex::new(Some(endpoint)),
+        received,
         _context: None,
     })
 }
 
-fn rust_tcp_pull_once(ready: mpsc::Sender<Result<String, String>>) -> NativeThreadResult {
+fn rust_tcp_pull_once(
+    received: Arc<AtomicUsize>,
+    ready: mpsc::Sender<Result<String, String>>,
+) -> NativeThreadResult {
     let ctx = omq_zmq::zmq_ctx_new();
     if ctx.is_null() {
         let err = last_error_message();
@@ -577,18 +602,12 @@ fn rust_tcp_pull_once(ready: mpsc::Sender<Result<String, String>>) -> NativeThre
     }
     let linger = 1_000_i32;
     let timeout = 2_000_i32;
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_LINGER,
-        (&linger as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&timeout as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
+    if let Err(err) = configure_pull_helper(sock, linger, timeout) {
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        let _ = omq_zmq::zmq_ctx_term(ctx);
+        return Err(err);
+    }
     let endpoint = CString::new("tcp://127.0.0.1:*").expect("static endpoint");
     if omq_zmq::zmq_bind(sock, endpoint.as_ptr()) != 0 {
         let err = last_error_message();
@@ -599,7 +618,10 @@ fn rust_tcp_pull_once(ready: mpsc::Sender<Result<String, String>>) -> NativeThre
     }
     let bound = last_endpoint(sock).unwrap_or_else(|| "tcp://127.0.0.1:*".to_owned());
     let _ = ready.send(Ok(bound));
-    let result = recv_owned_frame(sock).map(NativeThreadValue::Payload);
+    let result = recv_owned_frame(sock).map(|payload| {
+        received.fetch_add(1, Ordering::Relaxed);
+        NativeThreadValue::Payload(payload)
+    });
     let _ = omq_zmq::zmq_close(sock);
     let _ = omq_zmq::zmq_ctx_term(ctx);
     result
@@ -608,6 +630,7 @@ fn rust_tcp_pull_once(ready: mpsc::Sender<Result<String, String>>) -> NativeThre
 fn rust_pull_once(
     ctx: usize,
     endpoint: String,
+    received: Arc<AtomicUsize>,
     ready: mpsc::Sender<Result<(), String>>,
 ) -> NativeThreadResult {
     let c_endpoint = match CString::new(endpoint) {
@@ -626,18 +649,11 @@ fn rust_pull_once(
     }
     let linger = 1_000_i32;
     let timeout = 2_000_i32;
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_LINGER,
-        (&linger as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&timeout as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
+    if let Err(err) = configure_pull_helper(sock, linger, timeout) {
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        return Err(err);
+    }
     if omq_zmq::zmq_bind(sock, c_endpoint.as_ptr()) != 0 {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -645,7 +661,10 @@ fn rust_pull_once(
         return Err(err);
     }
     let _ = ready.send(Ok(()));
-    let result = recv_owned_frame(sock).map(NativeThreadValue::Payload);
+    let result = recv_owned_frame(sock).map(|payload| {
+        received.fetch_add(1, Ordering::Relaxed);
+        NativeThreadValue::Payload(payload)
+    });
     let _ = omq_zmq::zmq_close(sock);
     result
 }
@@ -654,6 +673,7 @@ fn rust_pull_count(
     ctx: usize,
     endpoint: String,
     messages: usize,
+    received: Arc<AtomicUsize>,
     ready: mpsc::Sender<Result<(), String>>,
 ) -> NativeThreadResult {
     let c_endpoint = match CString::new(endpoint) {
@@ -672,18 +692,11 @@ fn rust_pull_count(
     }
     let linger = 0_i32;
     let timeout = 5_000_i32;
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_LINGER,
-        (&linger as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&timeout as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
+    if let Err(err) = configure_pull_helper(sock, linger, timeout) {
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        return Err(err);
+    }
     if omq_zmq::zmq_bind(sock, c_endpoint.as_ptr()) != 0 {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -696,6 +709,7 @@ fn rust_pull_count(
             let _ = omq_zmq::zmq_close(sock);
             return Err(err);
         }
+        received.fetch_add(1, Ordering::Relaxed);
     }
     let _ = omq_zmq::zmq_close(sock);
     Ok(NativeThreadValue::Count(messages))
@@ -705,6 +719,7 @@ fn rust_pull_until_stop(
     ctx: usize,
     endpoint: String,
     stop: Vec<u8>,
+    received: Arc<AtomicUsize>,
     ready: mpsc::Sender<Result<(), String>>,
 ) -> NativeThreadResult {
     let c_endpoint = match CString::new(endpoint) {
@@ -722,19 +737,12 @@ fn rust_pull_until_stop(
         return Err(err);
     }
     let linger = 0_i32;
-    let timeout = 60_000_i32;
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_LINGER,
-        (&linger as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
-    let _ = omq_zmq::zmq_setsockopt(
-        sock,
-        ZMQ_RCVTIMEO,
-        (&timeout as *const i32).cast(),
-        std::mem::size_of::<i32>(),
-    );
+    let timeout = 5_000_i32;
+    if let Err(err) = configure_pull_helper(sock, linger, timeout) {
+        let _ = ready.send(Err(err.clone()));
+        let _ = omq_zmq::zmq_close(sock);
+        return Err(err);
+    }
     if omq_zmq::zmq_bind(sock, c_endpoint.as_ptr()) != 0 {
         let err = last_error_message();
         let _ = ready.send(Err(err.clone()));
@@ -746,7 +754,10 @@ fn rust_pull_until_stop(
     loop {
         match recv_owned_frame(sock) {
             Ok(frame) if frame == stop => break,
-            Ok(_) => count += 1,
+            Ok(_) => {
+                count += 1;
+                received.fetch_add(1, Ordering::Relaxed);
+            }
             Err(err) => {
                 let _ = omq_zmq::zmq_close(sock);
                 return Err(err);
@@ -784,6 +795,28 @@ fn recv_owned_frame(sock: *mut c_void) -> Result<Vec<u8>, String> {
         return Err(last_error_message());
     }
     Ok(out)
+}
+
+fn configure_pull_helper(sock: *mut c_void, linger: i32, recv_timeout: i32) -> Result<(), String> {
+    set_sock_i32(sock, ZMQ_LINGER, linger)?;
+    set_sock_i32(sock, ZMQ_RCVTIMEO, recv_timeout)
+}
+
+fn set_sock_i32(sock: *mut c_void, option: i32, value: i32) -> Result<(), String> {
+    let rc = omq_zmq::zmq_setsockopt(
+        sock,
+        option,
+        (&value as *const i32).cast(),
+        std::mem::size_of::<i32>(),
+    );
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "zmq_setsockopt({option}) failed: {}",
+            last_error_message()
+        ))
+    }
 }
 
 fn context_new(io_threads: Option<i32>) -> LuaResult<NativeContext> {

@@ -9,6 +9,12 @@ push:connect(endpoint)
 push:send("from-lua-inproc-thread")
 
 assert(handle:join() == "from-lua-inproc-thread")
+assert(handle:received() == 1)
+local ok, err = pcall(function()
+  handle:join()
+end)
+assert(not ok)
+assert(string.find(tostring(err), "join handle already joined", 1, true))
 
 local count_endpoint = "inproc://lua-inproc-thread-count"
 local count_handle = omq.testing.spawn_inproc_pull_count(ctx, count_endpoint, 3)
@@ -18,6 +24,7 @@ push_count:send("one")
 push_count:send("two")
 push_count:send("three")
 assert(count_handle:join() == 3)
+assert(count_handle:received() == 3)
 
 local stop_endpoint = "inproc://lua-inproc-thread-stop"
 local stop_payload = "stop-payload"
@@ -28,6 +35,7 @@ push_stop:send("alpha")
 push_stop:send("beta")
 push_stop:send(stop_payload)
 assert(stop_handle:join() == 2)
+assert(stop_handle:received() == 2)
 
 push_stop:close()
 push_count:close()

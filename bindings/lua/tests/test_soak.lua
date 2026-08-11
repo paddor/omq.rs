@@ -20,6 +20,23 @@ local function env_number(name, default)
   return n
 end
 
+local resource_limits = {
+  warmup_secs = env_number("OMQ_LUA_SOAK_RESOURCE_WARMUP_SECS", 600),
+  window_secs = env_number("OMQ_LUA_SOAK_RESOURCE_WINDOW_SECS", 300),
+  min_samples = math.max(2, math.floor(env_number("OMQ_LUA_SOAK_RESOURCE_MIN_SAMPLES", 12))),
+  max_fd_growth = env_number("OMQ_LUA_SOAK_MAX_FD_GROWTH", 128),
+  max_final_fd_growth = env_number("OMQ_LUA_SOAK_MAX_FINAL_FD_GROWTH", 16),
+  heap_slope_limit_kib_s = env_number("OMQ_LUA_SOAK_HEAP_SLOPE_LIMIT_KIB_S", 512),
+  rss_slope_limit_kib_s = env_number("OMQ_LUA_SOAK_RSS_SLOPE_LIMIT_KIB_S", 1024),
+  fd_slope_limit_per_s = env_number("OMQ_LUA_SOAK_FD_SLOPE_LIMIT_PER_SEC", 0.05),
+  heap_slope_min_growth_kib = env_number("OMQ_LUA_SOAK_HEAP_SLOPE_MIN_GROWTH_MB", 16) * 1024,
+  rss_slope_min_growth_kib = env_number("OMQ_LUA_SOAK_RSS_SLOPE_MIN_GROWTH_MB", 128) * 1024,
+  fd_slope_min_growth = env_number("OMQ_LUA_SOAK_FD_SLOPE_MIN_GROWTH", 32),
+  heap_residual_floor_kib = env_number("OMQ_LUA_SOAK_HEAP_RESIDUAL_FLOOR_MB", 8) * 1024,
+  rss_tail_growth_percent = env_number("OMQ_LUA_SOAK_RSS_TAIL_GROWTH_PERCENT", 25),
+  rss_tail_growth_min_kib = env_number("OMQ_LUA_SOAK_RSS_TAIL_GROWTH_MIN_MB", 128) * 1024,
+}
+
 local function split_csv(value)
   local out = {}
   if value == nil or value == "" then
@@ -160,6 +177,10 @@ local function payload(kind, seq, size)
   return prefix .. string.rep("x", size - #prefix)
 end
 
+local function starts_with(value, prefix)
+  return string.sub(value, 1, #prefix) == prefix
+end
+
 local function read_number_file(path)
   local file = io.open(path, "r")
   if file == nil then
@@ -223,6 +244,148 @@ local function resources()
   }
 end
 
+local resource_samples = {
+  heap = {},
+  rss = {},
+  fds = {},
+}
+
+local function append_sample(samples, elapsed, value)
+  table.insert(samples, { elapsed = elapsed, value = value })
+end
+
+local function sample_resources(elapsed, res)
+  append_sample(resource_samples.heap, elapsed, res.lua_heap_kb)
+  append_sample(resource_samples.rss, elapsed, res.rss_kb)
+  append_sample(resource_samples.fds, elapsed, res.fd_count)
+end
+
+local function saturating_sub(a, b)
+  if a > b then
+    return a - b
+  end
+  return 0
+end
+
+local function max_sample_value(samples, fallback)
+  local max_value = fallback
+  for _, sample in ipairs(samples) do
+    if sample.value > max_value then
+      max_value = sample.value
+    end
+  end
+  return max_value
+end
+
+local function slope_per_second(samples)
+  local n = #samples
+  if n < 2 then
+    return nil
+  end
+  local sum_x = 0
+  local sum_y = 0
+  local sum_x2 = 0
+  local sum_xy = 0
+  local origin = samples[1].elapsed
+  for _, sample in ipairs(samples) do
+    local x = sample.elapsed - origin
+    local y = sample.value
+    sum_x = sum_x + x
+    sum_y = sum_y + y
+    sum_x2 = sum_x2 + x * x
+    sum_xy = sum_xy + x * y
+  end
+  local denom = n * sum_x2 - sum_x * sum_x
+  if denom == 0 then
+    return nil
+  end
+  return (n * sum_xy - sum_x * sum_y) / denom
+end
+
+local function live_growth_window(samples)
+  if #samples < resource_limits.min_samples then
+    return nil
+  end
+  local current_elapsed = samples[#samples].elapsed
+  if current_elapsed < resource_limits.warmup_secs + resource_limits.window_secs then
+    return nil
+  end
+  local window_start = current_elapsed - resource_limits.window_secs
+  local out = {}
+  for _, sample in ipairs(samples) do
+    if sample.elapsed >= window_start then
+      table.insert(out, sample)
+    end
+  end
+  if #out < resource_limits.min_samples then
+    return nil
+  end
+  return out
+end
+
+local function live_growth_error(name, samples, limit_per_sec, min_growth)
+  local window = live_growth_window(samples)
+  if window == nil then
+    return nil
+  end
+  local growth = saturating_sub(window[#window].value, window[1].value)
+  if growth < min_growth then
+    return nil
+  end
+  local slope = slope_per_second(window)
+  if slope ~= nil and slope > limit_per_sec then
+    return string.format(
+      "live %s growth detected: slope=%.1f/s growth=%.1fMB limit=%.1f/s",
+      name,
+      slope,
+      growth / 1024,
+      limit_per_sec
+    )
+  end
+  return nil
+end
+
+local function live_fd_growth_error(samples)
+  local window = live_growth_window(samples)
+  if window == nil then
+    return nil
+  end
+  local growth = saturating_sub(window[#window].value, window[1].value)
+  if growth < resource_limits.fd_slope_min_growth then
+    return nil
+  end
+  local slope = slope_per_second(window)
+  if slope ~= nil and slope > resource_limits.fd_slope_limit_per_s then
+    return string.format(
+      "live fd growth detected: slope=%.4f/s growth=%d limit=%.4f/s",
+      slope,
+      growth,
+      resource_limits.fd_slope_limit_per_s
+    )
+  end
+  return nil
+end
+
+local function percent_growth(growth, baseline)
+  if baseline <= 0 then
+    return 0
+  end
+  return growth / baseline * 100
+end
+
+local function tail_growth_window(samples)
+  local out = {}
+  for _, sample in ipairs(samples) do
+    if sample.elapsed >= resource_limits.warmup_secs then
+      table.insert(out, sample)
+    end
+  end
+  if #out < resource_limits.min_samples then
+    return nil, nil
+  end
+  return out[1].value, max_sample_value(out, out[1].value)
+end
+
 local function report(prefix, elapsed, res)
   io.stdout:write(string.format(
     "[lua-soak] %s%.0fs tcp=%d inproc=%d pubsub=%d contexts=%d heap=%.1fMB rss=%.1fMB fds=%d\n",
@@ -251,14 +414,76 @@ local function report(prefix, elapsed, res)
 end
 
 local function assert_live_resources(baseline, current)
-  local max_fd_growth = env_number("OMQ_LUA_SOAK_MAX_FD_GROWTH", 128)
-  if baseline.fd_count > 0 and current.fd_count > baseline.fd_count + max_fd_growth then
+  if baseline.fd_count > 0 and current.fd_count > baseline.fd_count + resource_limits.max_fd_growth then
     error(string.format(
       "fd growth too high: baseline=%d current=%d max_growth=%d",
       baseline.fd_count,
       current.fd_count,
-      max_fd_growth
+      resource_limits.max_fd_growth
     ))
+  end
+  local err = live_growth_error(
+    "heap",
+    resource_samples.heap,
+    resource_limits.heap_slope_limit_kib_s,
+    resource_limits.heap_slope_min_growth_kib
+  )
+  if err ~= nil then
+    error(err)
+  end
+  err = live_growth_error(
+    "RSS",
+    resource_samples.rss,
+    resource_limits.rss_slope_limit_kib_s,
+    resource_limits.rss_slope_min_growth_kib
+  )
+  if err ~= nil then
+    error(err)
+  end
+  err = live_fd_growth_error(resource_samples.fds)
+  if err ~= nil then
+    error(err)
+  end
+end
+
+local function assert_final_resources(baseline, final)
+  if baseline.fd_count > 0 and final.fd_count > baseline.fd_count + resource_limits.max_final_fd_growth then
+    error(string.format(
+      "final fd growth too high: baseline=%d final=%d max_growth=%d",
+      baseline.fd_count,
+      final.fd_count,
+      resource_limits.max_final_fd_growth
+    ))
+  end
+
+  local heap_peak = max_sample_value(resource_samples.heap, baseline.lua_heap_kb)
+  local heap_threshold = math.max(heap_peak / 20, resource_limits.heap_residual_floor_kib)
+  local heap_growth = saturating_sub(final.lua_heap_kb, baseline.lua_heap_kb)
+  if heap_growth > heap_threshold then
+    error(string.format(
+      "heap residual too high: baseline=%.1fMB final=%.1fMB growth=%.1fMB limit=%.1fMB",
+      baseline.lua_heap_kb / 1024,
+      final.lua_heap_kb / 1024,
+      heap_growth / 1024,
+      heap_threshold / 1024
+    ))
+  end
+
+  local rss_baseline, rss_tail_max = tail_growth_window(resource_samples.rss)
+  if rss_baseline ~= nil then
+    local tail_growth = saturating_sub(rss_tail_max, rss_baseline)
+    local final_growth = saturating_sub(final.rss_kb, rss_baseline)
+    if tail_growth >= resource_limits.rss_tail_growth_min_kib
+      and final_growth >= resource_limits.rss_tail_growth_min_kib
+      and percent_growth(tail_growth, rss_baseline) > resource_limits.rss_tail_growth_percent
+      and percent_growth(final_growth, rss_baseline) > resource_limits.rss_tail_growth_percent then
+      error(string.format(
+        "RSS residual too high: tail_growth=%.1fMB final_growth=%.1fMB limit=%.1f%%",
+        tail_growth / 1024,
+        final_growth / 1024,
+        resource_limits.rss_tail_growth_percent
+      ))
+    end
   end
 end
 
@@ -269,6 +494,23 @@ local function drain_pull(socket, max_messages)
     if msg == nil then
       break
     end
+    drained = drained + 1
+  end
+  return drained
+end
+
+local function drain_pubsub(sub, max_messages)
+  local drained = 0
+  for _ = 1, max_messages do
+    local msg = sub.socket:try_recv(4096)
+    if msg == nil then
+      break
+    end
+    assert(starts_with(msg, sub.topic), string.format(
+      "pubsub topic mismatch: topic=%s msg=%s",
+      sub.topic,
+      msg
+    ))
     drained = drained + 1
   end
   return drained
@@ -343,8 +585,8 @@ local function run_inproc_cycle(state)
     state.push:send(payload("inproc", state.seq, 128))
     state.seq = state.seq + 1
     state.sent = state.sent + 1
-    counters.inproc = counters.inproc + 1
   end
+  counters.inproc = state.handle:received()
 end
 
 local function run_inproc_cycles(state, workers)
@@ -371,11 +613,13 @@ local function close_inproc(state)
     state.sent,
     got
   ))
+  counters.inproc = got
 end
 
 local function make_pubsub(shared)
-  local pub = new_socket(shared, "pubsub", "pub", {
+  local pub = new_socket(shared, "pubsub", "xpub", {
     linger = 0,
+    recv_timeout = recv_timeout_ms,
     send_timeout = 0,
     send_hwm = 8192,
   })
@@ -386,7 +630,8 @@ local function make_pubsub(shared)
     endpoint = endpoint,
     seq = 0,
     subs = {},
-    topics = { "fast.", "slow.", "all.", "rare." },
+    max_subs = 4,
+    next_topic = 1,
     last_churn = 0,
   }
 end
@@ -395,12 +640,32 @@ local function close_first_sub(state)
   if #state.subs == 0 then
     return
   end
-  close_socket(state.subs[1], "pubsub")
+  close_socket(state.subs[1].socket, "pubsub")
   table.remove(state.subs, 1)
 end
 
+local function wait_subscribed(state, topic)
+  local deadline = now() + env_number("OMQ_LUA_SOAK_PUBSUB_READY_TIMEOUT_SECS", 5)
+  while now() < deadline do
+    local ok, event = pcall(function()
+      return state.pub:recv(1024)
+    end)
+    if ok then
+      local action = string.byte(event, 1)
+      local prefix = string.sub(event, 2)
+      if action == 1 and prefix == topic then
+        return
+      end
+    elseif not transient_error(event) then
+      error(event, 2)
+    end
+  end
+  error("pubsub subscription readiness timed out: " .. topic, 2)
+end
+
 local function add_sub(state)
-  local topic = state.topics[(#state.subs % #state.topics) + 1]
+  local topic = "topic." .. tostring(state.next_topic) .. "."
+  state.next_topic = state.next_topic + 1
   local sub = new_socket(state.shared, "pubsub", "sub", {
     linger = 0,
     recv_timeout = recv_timeout_ms,
@@ -408,24 +673,36 @@ local function add_sub(state)
     subscribe = topic,
   })
   sub:connect(state.endpoint)
-  table.insert(state.subs, sub)
+  local ok, err = pcall(function()
+    wait_subscribed(state, topic)
+  end)
+  if not ok then
+    close_socket(sub, "pubsub")
+    error(err, 2)
+  end
+  table.insert(state.subs, { socket = sub, topic = topic })
 end
 
 local function run_pubsub_cycle(state)
   for _ = 1, 128 do
-    local topic = state.topics[(state.seq % #state.topics) + 1]
+    local topic = "idle."
+    if #state.subs > 0 then
+      topic = state.subs[(state.seq % #state.subs) + 1].topic
+    end
     checked(pcall(function()
       state.pub:send(topic .. tostring(state.seq), omq.DONTWAIT)
     end))
     state.seq = state.seq + 1
   end
   for _, sub in ipairs(state.subs) do
-    counters.pubsub = counters.pubsub + drain_pull(sub, 256)
+    counters.pubsub = counters.pubsub + drain_pubsub(sub, 256)
   end
   if now() - state.last_churn >= 0.5 then
     state.last_churn = now()
-    close_first_sub(state)
-    if #state.subs < 10 then
+    if #state.subs >= state.max_subs then
+      close_first_sub(state)
+    end
+    if #state.subs < state.max_subs then
       add_sub(state)
     end
   end
@@ -482,13 +759,31 @@ local function assert_lifecycle_closed()
   end
 end
 
+local cleanup_errors = {}
+
+local function cleanup(label, fn)
+  local ok, err = pcall(fn)
+  if not ok then
+    table.insert(cleanup_errors, label .. ": " .. tostring(err))
+  end
+end
+
+local function cleanup_error()
+  if #cleanup_errors == 0 then
+    return nil
+  end
+  return table.concat(cleanup_errors, "\n")
+end
+
 local duration = env_number("OMQ_LUA_SOAK_DURATION_SECS", 60)
+assert(duration > 0, "OMQ_LUA_SOAK_DURATION_SECS must be > 0")
 local workers = math.max(1, math.floor(env_number("OMQ_LUA_SOAK_WORKERS", 4)))
 local selected = selected_scenarios()
+local started = now()
 local shared = omq.context({ io_threads = workers })
 local baseline = resources()
-local deadline = now() + duration
-local started = now()
+sample_resources(0, baseline)
+local deadline = started + duration
 local next_report = started + report_interval
 local tcp_state = nil
 local inproc_state = nil
@@ -521,34 +816,55 @@ local ok, err = pcall(function()
     local t = now()
     if t >= next_report then
       local current = resources()
-      report("", t - started, current)
+      local elapsed = t - started
+      sample_resources(elapsed, current)
+      report("", elapsed, current)
       assert_live_resources(baseline, current)
       next_report = t + report_interval
     end
   end
 end)
 
-if pubsub_state ~= nil then
+cleanup("pubsub", function()
+  if pubsub_state == nil then
+    return
+  end
   for _, sub in ipairs(pubsub_state.subs) do
-    close_socket(sub, "pubsub")
+    close_socket(sub.socket, "pubsub")
   end
   pubsub_state.subs = {}
   close_socket(pubsub_state.pub, "pubsub")
-end
-close_inproc(inproc_state)
-if tcp_state ~= nil then
-  close_socket(tcp_state.pull, "tcp")
-end
-shared:term()
+end)
+cleanup("inproc", function()
+  close_inproc(inproc_state)
+end)
+cleanup("tcp", function()
+  if tcp_state ~= nil then
+    close_socket(tcp_state.pull, "tcp")
+  end
+end)
+cleanup("shared context", function()
+  shared:term()
+end)
+
+local cleanup_err = cleanup_error()
 
 if not ok then
+  if cleanup_err ~= nil then
+    error(tostring(err) .. "\ncleanup errors:\n" .. cleanup_err, 0)
+  end
   error(err, 0)
+end
+if cleanup_err ~= nil then
+  error("cleanup errors:\n" .. cleanup_err, 0)
 end
 
 collectgarbage("collect")
 collectgarbage("collect")
 local final = resources()
+sample_resources(now() - started, final)
 report("final ", now() - started, final)
 assert_live_resources(baseline, final)
+assert_final_resources(baseline, final)
 assert_progress(selected)
 assert_lifecycle_closed()

@@ -51,6 +51,19 @@ Default durations are `600 1800 3600` seconds. Useful env:
 
 The `inproc` scenario uses a Rust backend thread sharing the Lua context.
 
+Soak logs include progress counters, Lua heap, RSS, FD count, and lifecycle
+counts. Useful leak-check knobs:
+
+- `OMQ_LUA_SOAK_MAX_FD_GROWTH`
+- `OMQ_LUA_SOAK_MAX_FINAL_FD_GROWTH`
+- `OMQ_LUA_SOAK_HEAP_SLOPE_LIMIT_KIB_S`
+- `OMQ_LUA_SOAK_RSS_SLOPE_LIMIT_KIB_S`
+- `OMQ_LUA_SOAK_FD_SLOPE_LIMIT_PER_SEC`
+- `OMQ_LUA_SOAK_RSS_TAIL_GROWTH_PERCENT`
+- `OMQ_LUA_SOAK_RESOURCE_WARMUP_SECS`
+- `OMQ_LUA_SOAK_RESOURCE_WINDOW_SECS`
+- `OMQ_LUA_SOAK_RESOURCE_MIN_SAMPLES`
+
 ## Benchmark Chart
 
 The chart script follows the Go and Python binding benchmark shape. It runs two

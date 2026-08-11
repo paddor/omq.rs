@@ -11,13 +11,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::consts;
-use crate::poll::{ZmqPollItem, zmq_poll};
+use crate::poll::{ZmqFd, ZmqPollItem, zmq_poll};
 use crate::send_recv::{SendMessageAttempt, try_recv_message, try_send_message, zmq_recv};
 use crate::socket::{OmqSocket, ensure_materialized};
 
 const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
 const ZMQ_DONTWAIT: i32 = consts::ZMQ_DONTWAIT;
 const DEFAULT_PROXY_BURST_SIZE: usize = omq_tokio::proxy::DEFAULT_PROXY_BURST_SIZE;
+
+fn invalid_fd() -> ZmqFd {
+    #[cfg(unix)]
+    {
+        -1
+    }
+    #[cfg(windows)]
+    {
+        ZmqFd::MAX
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
@@ -353,7 +364,7 @@ impl ProxyCtx {
         if state == ProxyState::Active && self.fe_to_be_enabled && fe_can_read {
             items.push(ZmqPollItem {
                 socket: self.frontend_ptr,
-                fd: -1,
+                fd: invalid_fd(),
                 events: ZMQ_POLLIN,
                 revents: 0,
             });
@@ -361,7 +372,7 @@ impl ProxyCtx {
         if state == ProxyState::Active && self.be_to_fe_enabled && be_can_read {
             items.push(ZmqPollItem {
                 socket: self.backend_ptr,
-                fd: -1,
+                fd: invalid_fd(),
                 events: ZMQ_POLLIN,
                 revents: 0,
             });
@@ -369,7 +380,7 @@ impl ProxyCtx {
         if self.control.is_some() {
             items.push(ZmqPollItem {
                 socket: self.control_ptr,
-                fd: -1,
+                fd: invalid_fd(),
                 events: ZMQ_POLLIN,
                 revents: 0,
             });

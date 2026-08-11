@@ -1,7 +1,6 @@
 {
   "name": "@zeromq/omq-node",
   "version": "0.1.0",
-  "private": true,
   "description": "Native Node.js binding for OMQ.rs",
   "license": "ISC",
   "type": "commonjs",
@@ -9,9 +8,20 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
-    "omq_node.node",
-    "npm"
+    "doc/charts/bindings.svg"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paddor/omq.rs.git",
+    "directory": "bindings/node"
+  },
+  "bugs": {
+    "url": "https://github.com/paddor/omq.rs/issues"
+  },
+  "homepage": "https://github.com/paddor/omq.rs/tree/main/bindings/node#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=24.11.0"
   },
@@ -19,9 +29,12 @@
     "build": "npm run build:native && npm run build:ts",
     "build:debug": "napi build",
     "build:native": "napi build --release",
+    "build:native:platform": "napi build --platform --release",
     "build:ts": "tsc -p tsconfig.json",
+    "artifacts": "napi artifacts --output-dir artifacts",
+    "release:prepare": "node scripts/prepare-release.js",
     "test": "node --test test/*.test.js",
-    "bench": "node scripts/update_perf.js",
+    "bench": "node scripts/omq-node-bench.js",
     "chart": "python3 scripts/update_perf.py --chart-only",
     "soak": "node --expose-gc --test --test-concurrency=1 test/soak/*.test.js"
   },

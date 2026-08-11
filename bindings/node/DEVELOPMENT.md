@@ -98,6 +98,40 @@ postfix=turbo off, performance governor
 
 ```sh
 npm run build:ts
-node --check scripts/update_perf.js
+node --check scripts/omq-node-bench.js
+node --check scripts/prepare-release.js
 git diff --check
 ```
+
+## CI Release Packaging
+
+npm packages are published only by `.github/workflows/release-node.yml`.
+Do not run `npm publish` locally.
+
+Trigger CI release with a tag:
+
+```sh
+git tag omq-node-v0.1.0
+```
+
+Or run `.github/workflows/release-node.yml` with `version=0.1.0`.
+
+Native jobs build platform addons named `omq_node.<platform>.node`.
+Package job copies them into `npm/<platform>/`, writes root
+`optionalDependencies`, packs platform tarballs first, then packs the root
+package. Publish job publishes platform tarballs before the root tarball.
+
+Local platform package dry run for the current host:
+
+```sh
+npm run build:ts
+npm run build:native:platform -- --target x86_64-unknown-linux-gnu
+cp omq_node.linux-x64-gnu.node npm/linux-x64-gnu/
+npm pack ./npm/linux-x64-gnu --dry-run
+```
+
+Use `npm run release:prepare -- 0.1.0 --dry-run` to validate metadata without
+rewriting manifests.
+
+`npm run artifacts` expects every configured platform addon under `artifacts/`.
+Use it only with the full release artifact set.

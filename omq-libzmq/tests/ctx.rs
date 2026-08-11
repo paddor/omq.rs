@@ -8,8 +8,9 @@ use omq_zmq::{
 use std::ffi::CString;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::process::Command;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
@@ -20,9 +21,23 @@ const ZMQ_MAX_MSGSZ: i32 = 5;
 const ZMQ_MSG_T_SIZE: i32 = 6;
 const ZMQ_THREAD_NAME_PREFIX: i32 = 9;
 const ZMQ_RCVTIMEO: i32 = 27;
+const ZMQ_SNDHWM: i32 = 23;
+const ZMQ_RCVHWM: i32 = 24;
 const ZMQ_IPV6: i32 = 42;
 const ZMQ_BLOCKY: i32 = 70;
 const ZMQ_LINGER: i32 = 17;
+
+fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
+    assert_eq!(
+        zmq_setsockopt(
+            sock,
+            opt,
+            std::ptr::from_ref(&value).cast(),
+            size_of::<i32>(),
+        ),
+        0
+    );
+}
 
 #[test]
 fn ctx_new_term() {
@@ -438,6 +453,64 @@ fn ctx_multiple_sockets_closed_before_term() {
     zmq_close(s1);
     zmq_close(s2);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn zero_linger_inproc_churn_term_does_not_hang() {
+    let exe = std::env::current_exe().expect("current test binary");
+    let mut child = Command::new(exe)
+        .arg("zero_linger_inproc_churn_child")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("OMQ_LIBZMQ_INPROC_CHURN_CHILD", "1")
+        .spawn()
+        .expect("spawn inproc churn child");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            assert!(status.success(), "child failed: {status}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("zero-linger inproc churn child hung");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn zero_linger_inproc_churn_child() {
+    if std::env::var_os("OMQ_LIBZMQ_INPROC_CHURN_CHILD").is_none() {
+        return;
+    }
+
+    for i in 0..2_000 {
+        let ctx = zmq_ctx_new();
+        let pull = zmq_socket(ctx, ZMQ_PULL);
+        let push = zmq_socket(ctx, ZMQ_PUSH);
+        assert!(!pull.is_null());
+        assert!(!push.is_null());
+        set_i32(pull, ZMQ_LINGER, 0);
+        set_i32(push, ZMQ_LINGER, 0);
+        set_i32(pull, ZMQ_RCVHWM, 4);
+        set_i32(push, ZMQ_SNDHWM, 4);
+
+        let addr = CString::new(format!("inproc://ctx-churn-{i}")).unwrap();
+        assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+        assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+        assert_eq!(zmq_send(push, b"x".as_ptr().cast(), 1, 0), 1);
+
+        let mut buf = [0_u8; 1];
+        assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+        assert_eq!(buf[0], b'x');
+
+        assert_eq!(zmq_close(push), 0);
+        assert_eq!(zmq_close(pull), 0);
+        assert_eq!(zmq_ctx_term(ctx), 0);
+    }
 }
 
 #[test]

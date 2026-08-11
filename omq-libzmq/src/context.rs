@@ -1,6 +1,8 @@
 //! Context: owns a tokio runtime on a background thread.
 
 use std::ffi::{c_int, c_void};
+#[cfg(unix)]
+use std::sync::Once;
 
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
@@ -33,6 +35,22 @@ pub(crate) struct OmqContext {
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(unix)]
+static PROCESS_GUARDS: Once = Once::new();
+
+#[cfg(unix)]
+fn install_process_guards() {
+    PROCESS_GUARDS.call_once(|| {
+        // Rust binaries ignore SIGPIPE during std startup. C/Lua hosts loading
+        // omq-libzmq as a cdylib do not get that guard.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_process_guards() {}
 
 pub(crate) fn next_socket_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -192,12 +210,14 @@ impl std::fmt::Debug for OmqContext {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
+    install_process_guards();
     let arc = OmqContext::new(1);
     Box::into_raw(Box::new(arc)).cast()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
+    install_process_guards();
     let n = io_threads.max(0) as usize;
     let arc = OmqContext::new(n);
     Box::into_raw(Box::new(arc)).cast()
@@ -279,6 +299,7 @@ pub extern "C" fn omq_ctx_share_key(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_ctx_from_share_key(key_hi: u64, key_lo: u64) -> *mut c_void {
+    install_process_guards();
     let key = (u128::from(key_hi) << 64) | u128::from(key_lo);
     let Some(ctx) = omq_tokio::Context::from_share_key(key) else {
         let _ = crate::error::fail(libc::EINVAL);

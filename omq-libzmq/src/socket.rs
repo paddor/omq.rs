@@ -501,12 +501,18 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
         return 0;
     };
     if let Some(socket) = close_socket {
-        let ctx = arc.ctx.clone();
-        ctx.linger_started();
-        handle.spawn(async move {
-            let _ = socket.close_with_linger(linger).await;
-            ctx.linger_finished();
-        });
+        if matches!(linger, Some(std::time::Duration::ZERO)) {
+            drop(handle.spawn(async move {
+                let _ = socket.close_with_linger(linger).await;
+            }));
+        } else {
+            let ctx = arc.ctx.clone();
+            ctx.linger_started();
+            drop(handle.spawn(async move {
+                let _ = socket.close_with_linger(linger).await;
+                ctx.linger_finished();
+            }));
+        }
     }
     let _guard = handle.enter();
 

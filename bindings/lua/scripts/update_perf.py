@@ -653,7 +653,7 @@ def gen_chart(data, path, sizes, impls, latency_impls):
         f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>',
         f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f"PUSH/PULL throughput: 2-process, TCP loopback</text>",
+        f"PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>",
     ]
     if hw_label:
         lines.append(
@@ -732,7 +732,7 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     lines.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
         f' font-size="13" font-weight="700">'
-        f"REQ/REP latency: 2-process, TCP loopback, p50 us</text>"
+        f"REQ/REP latency: 2-process, TCP loopback, p50 us (lower is better)</text>"
     )
 
     for i in range(1, 11):
@@ -795,11 +795,17 @@ def gen_chart(data, path, sizes, impls, latency_impls):
 
 
 def add_legend(lines, legend_items, mid_x, leg_y):
-    item_w = 150
-    total_w = len(legend_items) * item_w
+    marker_w = 14
+    marker_gap = 6
+    item_gap = 30
+    text_px = 6.2
+    item_widths = [
+        marker_w + marker_gap + len(label) * text_px for label, _ in legend_items
+    ]
+    total_w = sum(item_widths) + item_gap * max(0, len(legend_items) - 1)
     start_x = mid_x - total_w / 2
+    lx = start_x
     for index, (label, color) in enumerate(legend_items):
-        lx = start_x + index * item_w
         lines.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
             f' stroke="{color}" stroke-width="2.5"/>'
@@ -809,6 +815,7 @@ def add_legend(lines, legend_items, mid_x, leg_y):
             f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
             f' font-size="11" font-weight="500">{html.escape(label)}</text>'
         )
+        lx += item_widths[index] + item_gap
 
 
 def main():
@@ -889,6 +896,7 @@ def main():
         raise RuntimeError("no requested Lua benchmark implementations available")
 
     run_id = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    arena_threshold = os.environ.get("OMQ_BENCH_ARENA_THRESHOLD")
     rows = []
     print(f"run_id={run_id}")
     if throughput_impls:
@@ -899,6 +907,8 @@ def main():
                 row["run_id"] = run_id
                 row["kind"] = "pushpull_tcp"
                 row["transport"] = "tcp"
+                if impl == "omq.lua" and arena_threshold:
+                    row["arena_threshold"] = arena_threshold
                 rows.append(row)
     if latency_impls:
         print("REQ/REP TCP latency")
@@ -908,6 +918,8 @@ def main():
                 row["run_id"] = run_id
                 row["kind"] = "reqrep_tcp_latency"
                 row["transport"] = "tcp"
+                if impl == "omq.lua" and arena_threshold:
+                    row["arena_threshold"] = arena_threshold
                 rows.append(row)
 
     if not args.no_save:

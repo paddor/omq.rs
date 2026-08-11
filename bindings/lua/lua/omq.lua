@@ -202,7 +202,7 @@ function Context:socket(socket_type, options)
   return socket
 end
 
----Terminate the context. Close sockets first.
+---Terminate the context. Errors while sockets or helper peers are still live.
 ---@return boolean ok true when the context is closed.
 function Context:term()
   return self._native:term()

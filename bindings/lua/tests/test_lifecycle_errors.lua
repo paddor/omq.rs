@@ -26,8 +26,32 @@ assert(not ok)
 assert(string.find(err, "unknown socket option: recv_timo", 1, true))
 
 local pull = ctx:socket("pull", { linger = 0, recv_timeout = 10 })
-pull:bind("inproc://lua-lifecycle-errors")
+local endpoint = pull:bind("inproc://lua-lifecycle-errors")
 assert(pull:try_recv() == nil)
+
+ok, err = pcall(function()
+  ctx:term()
+end)
+assert(not ok)
+assert(string.find(tostring(err), "context has 1 live sockets", 1, true))
+
+local push = ctx:socket("push", { linger = 0, send_timeout = 1000 })
+ok, err = pcall(function()
+  ctx:term()
+end)
+assert(not ok)
+assert(string.find(tostring(err), "context has 2 live sockets", 1, true))
+
+push:connect(endpoint)
+push:send("still-open")
+assert(pull:recv() == "still-open")
+
+push:close()
+ok, err = pcall(function()
+  ctx:term()
+end)
+assert(not ok)
+assert(string.find(tostring(err), "context has 1 live sockets", 1, true))
 
 pull:close()
 assert(pull:close())
@@ -39,3 +63,14 @@ assert(not ok)
 
 ctx:term()
 assert(ctx:close())
+
+local function orphan_socket()
+  local orphan_ctx = omq.context()
+  return orphan_ctx:socket("pull", { linger = 0 })
+end
+
+local orphan = orphan_socket()
+collectgarbage("collect")
+orphan:close()
+orphan = nil
+collectgarbage("collect")

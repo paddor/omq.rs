@@ -172,6 +172,7 @@ covered by integration tests. The suite is layered:
 ./scripts/test-all.sh              # standard sweep with local perf gate
 OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
 OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
+OMQ_SKIP_LUA=1 ./scripts/test-all.sh
 OMQ_SKIP_PERF=1 ./scripts/test-all.sh
 ```
 

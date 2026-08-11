@@ -104,8 +104,8 @@ jobs:
             exit 1
           fi
 
-  go-test:
-    name: go test
+  go-vet:
+    name: go vet
     needs: [changes, go-fmt]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
     runs-on: ubuntu-latest
@@ -129,15 +129,61 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
         run: go vet ./...
+
+  go-test:
+    name: go test
+    needs: [changes, linux-gate, go-vet]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/go/native
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+          cache-dependency-path: bindings/go/go.mod
+      - name: build native
+        run: cargo build --release --manifest-path bindings/go/native/Cargo.toml
       - name: go test
         working-directory: bindings/go
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
         run: go test -count=1 ./...
 
+  lua-lint:
+    name: lua lint
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_lua == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/lua/native
+      - name: install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: cargo fmt
+        run: cargo fmt --manifest-path bindings/lua/native/Cargo.toml --check
+      - name: cargo clippy
+        run: cargo clippy --manifest-path bindings/lua/native/Cargo.toml --all-targets -- -D warnings
+      - name: lua syntax
+        run: luac5.4 -p bindings/lua/lua/omq.lua bindings/lua/scripts/*.lua bindings/lua/tests/test_*.lua
+
   lua-test:
     name: lua test
-    needs: [changes]
+    needs: [changes, linux-gate, lua-lint]
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_lua == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -663,7 +709,9 @@ jobs:
         java-lint,
         java-test,
         go-fmt,
+        go-vet,
         go-test,
+        lua-lint,
         lua-test,
       ]
     runs-on: ubuntu-latest

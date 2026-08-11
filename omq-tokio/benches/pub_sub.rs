@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::{Message, Options, Socket, SocketType};
+use omq_tokio::{Message, Socket, SocketType};
 
 const PATTERN: &str = "pub_sub";
 const PEER_COUNTS: &[usize] = &[3];
@@ -41,12 +41,12 @@ fn main() {
 
 async fn run_cell(transport: &str, peers: usize, size: usize, seq: usize) -> common::Cell {
     let ep = common::endpoint(transport, seq);
-    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let pub_ = Socket::new(SocketType::Pub, common::options(size));
     pub_.bind(ep.clone()).await.expect("bind PUB");
 
     let mut subs: Vec<Socket> = Vec::with_capacity(peers);
     for _ in 0..peers {
-        let s = Socket::new(SocketType::Sub, Options::default());
+        let s = Socket::new(SocketType::Sub, common::options(size));
         s.connect(ep.clone()).await.expect("connect SUB");
         s.subscribe(Bytes::new()).await.expect("subscribe");
         subs.push(s);

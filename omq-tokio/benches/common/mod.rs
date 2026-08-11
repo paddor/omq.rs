@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::Endpoint;
 #[cfg(unix)]
 use omq_tokio::IpcPath;
+use omq_tokio::{Endpoint, Options};
 
 /// Default size sweep: three points that cover the small/medium/large
 /// knee of the throughput curve. Pass `--all-sizes` to the bench binary
@@ -175,6 +175,14 @@ pub(crate) fn peers_override() -> Option<Vec<usize>> {
     std::env::var("OMQ_BENCH_PEERS")
         .ok()
         .map(|s| s.split(',').filter_map(|t| t.trim().parse().ok()).collect())
+}
+
+pub(crate) fn options(_msg_size: usize) -> Options {
+    let mut o = Options::default();
+    if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
+        o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
+    }
+    o
 }
 
 /// Build a fresh endpoint for cell `seq` on `transport`. For TCP we

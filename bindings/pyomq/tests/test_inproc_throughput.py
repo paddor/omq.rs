@@ -1,7 +1,10 @@
 """Smoke test: inproc PUSH/PULL throughput stays above 500k msg/s at 64B."""
 
+import os
 import threading
 import time
+
+import pytest
 
 import pyomq as zmq
 
@@ -37,6 +40,10 @@ def _measure_inproc_throughput():
     return n / elapsed
 
 
+@pytest.mark.skipif(
+    os.environ.get("OMQ_SKIP_PERF") == "1",
+    reason="OMQ_SKIP_PERF=1 skips local perf gates",
+)
 def test_inproc_throughput_above_500k():
     best = 0.0
     for _ in range(ATTEMPTS):

@@ -25,6 +25,7 @@ jobs:
       run_pyomq: ${{ steps.scope.outputs.pyomq }}
       run_java: ${{ steps.scope.outputs.java }}
       run_go: ${{ steps.scope.outputs.go }}
+      run_lua: ${{ steps.scope.outputs.lua }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -58,6 +59,16 @@ jobs:
               - 'bindings/go/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            lua:
+              - 'bindings/lua/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -123,6 +134,27 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
         run: go test -count=1 ./...
+
+  lua-test:
+    name: lua test
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_lua == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/lua/native
+      - name: install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: lua tests
+        env:
+          OMQ_LUA: /usr/bin/lua5.4
+        run: ./scripts/test-lua.sh
 
   linux-gate:
     name: linux gate
@@ -632,6 +664,7 @@ jobs:
         java-test,
         go-fmt,
         go-test,
+        lua-test,
       ]
     runs-on: ubuntu-latest
     if: always()

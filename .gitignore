@@ -8,6 +8,7 @@ Cargo.lock.bak
 !bindings/java/native/Cargo.lock
 !bindings/pyomq/Cargo.lock
 !examples/zguide/Cargo.lock
+!bindings/lua/native/Cargo.lock
 /bindings/pyomq/dist/*.whl
 !scripts/tmq_bench_peer/Cargo.lock
 uv.lock

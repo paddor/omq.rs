@@ -1,0 +1,16 @@
+[package]
+name = "omq-lua-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+publish = false
+
+[lib]
+name = "omq_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+mlua = { version = "0.11", features = ["lua54", "macros", "module"] }
+omq_zmq = { package = "omq-libzmq", path = "../../../omq-libzmq" }

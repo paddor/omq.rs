@@ -14,6 +14,12 @@ assert(not ok)
 assert(string.find(err, "unknown socket type", 1, true))
 
 ok, err = pcall(function()
+  ctx:socket({})
+end)
+assert(not ok)
+assert(string.find(err, "socket type must be a string or numeric constant", 1, true))
+
+ok, err = pcall(function()
   ctx:socket("pull", { recv_timo = 10 })
 end)
 assert(not ok)

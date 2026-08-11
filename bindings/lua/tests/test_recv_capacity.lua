@@ -18,6 +18,9 @@ end)
 assert(not ok)
 assert(string.find(tostring(err), "received message exceeded Lua receive limit", 1, true))
 
+push:send("after-limit-error")
+assert(pull:recv(64) == "after-limit-error")
+
 push:close()
 pull:close()
 ctx:term()

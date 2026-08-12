@@ -35,8 +35,7 @@ Send:
 
 ```text
 Lua Socket:send
-  -> mlua userdata method
-  -> omq_native::NativeSocket::send
+  -> raw Lua C userdata method
   -> zmq_send
   -> omq-libzmq send path
   -> omq-tokio socket/routing/send pipe
@@ -48,20 +47,20 @@ Receive:
 ```text
 IO thread reads and decodes transport
   -> omq-libzmq receive queue
-  -> zmq_msg_recv
-  -> Lua string
+  -> raw Lua C userdata method
+  -> zmq_recv / zmq_msg_recv
+  -> lua_pushlstring
 ```
 
-Single-part small messages stay inline in OMQ message storage. The Lua binding
-still allocates a Lua string for every received message, as lzmq does.
+Single-part messages up to OMQ's inline cutoff stay inline in OMQ message
+storage. The Lua binding still allocates a Lua string for every received
+message, as lzmq does.
 
 ## Small-Message Cost
 
-For 16 byte TCP PUSH/PULL, fixed overhead dominates. The current hot path pays:
+For 16 byte TCP PUSH/PULL, fixed overhead dominates. The hot path still pays:
 
 - Lua VM method dispatch.
-- mlua userdata type check and borrow.
-- Rust callback and error conversion.
 - `omq-libzmq` C ABI checks.
 - OMQ routing, HWM, timeout, and closed-peer checks.
 - Lua string allocation on receive.
@@ -75,16 +74,9 @@ Lua C function -> libzmq -> lua_pushlstring
 OMQ.lua is closer to:
 
 ```text
-Lua -> mlua callback -> Rust userdata -> omq-libzmq -> omq-tokio -> mlua string
+Lua C userdata method -> omq-libzmq -> omq-tokio -> lua_pushlstring
 ```
 
-The extra safety and integration layers cost little in absolute time, but at
-3M messages/s a 50 ns per-message delta is visible.
-
-OPTIMIZATION: If small-message throughput becomes a focused target, add raw
-Lua C API fast paths for `Socket:send(string[, flags])` and
-`Socket:recv([max_size, flags])`. They can store the raw socket pointer in Lua
-userdata, call `zmq_send`/`zmq_msg_recv` directly, and use `lua_pushlstring` for
-receive. Keep setup, options, multipart, docs, and tests in the current mlua
-layer. This narrows the gap to lzmq but adds unsafe Lua stack code and needs
-dedicated regression and perf tests.
+The raw userdata keeps the mlua layer out of per-message send/recv. Setup,
+socket options, helper peers, docs, and tests still live in the public Lua
+wrapper and Rust module.

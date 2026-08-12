@@ -1,13 +1,16 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
+use std::os::raw::{c_char, c_int};
+use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use mlua::ffi;
 use mlua::prelude::*;
-use mlua::{Table, UserData, UserDataMethods};
+use mlua::{AnyUserData, Table, UserData, UserDataMethods};
 
 const ZMQ_PAIR: i32 = 0;
 const ZMQ_PUB: i32 = 1;
@@ -32,6 +35,7 @@ const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_LAST_ENDPOINT: i32 = 32;
 const OMQ_ARENA_THRESHOLD: i32 = 10_001;
 const LAST_ENDPOINT_CAPACITY: usize = 512;
+const RAW_SOCKET_MT: &[u8] = b"omq.RawSocket\0";
 
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -198,6 +202,35 @@ struct NativeSocket {
 }
 
 #[derive(Debug)]
+struct RawSocket {
+    socket: Option<NativeSocket>,
+    recv_scratch: Vec<u8>,
+}
+
+impl RawSocket {
+    #[inline]
+    fn socket(&self) -> Result<&NativeSocket, String> {
+        self.socket
+            .as_ref()
+            .ok_or_else(|| "socket closed".to_owned())
+    }
+
+    #[inline]
+    fn inner(&self) -> Result<&SocketInner, String> {
+        Ok(&self.socket()?.inner)
+    }
+
+    fn close(&mut self) -> Result<(), String> {
+        self.recv_scratch.clear();
+        self.recv_scratch.shrink_to_fit();
+        let Some(socket) = self.socket.take() else {
+            return Ok(());
+        };
+        socket.inner.close().map_err(|err| err.to_string())
+    }
+}
+
+#[derive(Debug)]
 enum NativeThreadValue {
     Payload(Vec<u8>),
     Count(usize),
@@ -215,8 +248,8 @@ struct NativeJoin {
 
 impl UserData for NativeContext {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("socket", |_, this, socket_type: i32| {
-            this.socket(socket_type)
+        methods.add_method("socket", |lua, this, socket_type: i32| {
+            this.raw_socket(lua, socket_type)
         });
         methods.add_method("close", |_, this, ()| {
             this.inner.close()?;
@@ -245,6 +278,15 @@ impl UserData for NativeContext {
 }
 
 impl NativeContext {
+    fn raw_socket(&self, lua: &Lua, socket_type: i32) -> LuaResult<AnyUserData> {
+        let socket = self.socket(socket_type)?;
+        unsafe {
+            lua.exec_raw((), |state| {
+                push_raw_socket(state, socket);
+            })
+        }
+    }
+
     fn socket(&self, socket_type: i32) -> LuaResult<NativeSocket> {
         let context_handle = self.inner.reserve_handle()?;
         let raw = omq_zmq::zmq_socket(context_handle.context_ptr(), socket_type);
@@ -348,17 +390,23 @@ impl UserData for NativeSocket {
         });
         methods.add_method(
             "send",
-            |_, this, (payload, flags): (LuaEither<LuaString, Table>, Option<i32>)| {
+            |_, this, (payload, flags): (LuaValue, Option<i32>)| {
                 match payload {
-                    LuaEither::Left(payload) => {
+                    LuaValue::String(payload) => {
                         this.send(payload.as_bytes().as_ref(), flags.unwrap_or(0))?;
                     }
-                    LuaEither::Right(parts) => {
+                    LuaValue::Table(parts) => {
                         let mut out = Vec::new();
                         for value in parts.sequence_values::<LuaString>() {
                             out.push(value?.as_bytes().to_vec());
                         }
                         this.send_parts(&out, flags.unwrap_or(0))?;
+                    }
+                    value => {
+                        return Err(LuaError::external(format!(
+                            "send payload must be string or table, got {}",
+                            value.type_name()
+                        )));
                     }
                 }
                 Ok(true)
@@ -950,6 +998,572 @@ fn set_sock_i32(sock: *mut c_void, option: i32, value: i32) -> Result<(), String
             "zmq_setsockopt({option}) failed: {}",
             last_error_message()
         ))
+    }
+}
+
+fn cstr(bytes: &'static [u8]) -> *const c_char {
+    bytes.as_ptr().cast()
+}
+
+fn lua_fail(state: *mut ffi::lua_State, message: String) -> c_int {
+    unsafe {
+        ffi::lua_pushlstring(state, message.as_ptr().cast(), message.len());
+    }
+    drop(message);
+    unsafe { ffi::lua_error(state) }
+}
+
+#[inline]
+fn lua_bool(state: *mut ffi::lua_State, value: bool) -> c_int {
+    unsafe {
+        ffi::lua_pushboolean(state, i32::from(value));
+    }
+    1
+}
+
+#[inline]
+fn raw_finish(state: *mut ffi::lua_State, result: Result<c_int, String>) -> c_int {
+    match result {
+        Ok(count) => count,
+        Err(err) => lua_fail(state, err),
+    }
+}
+
+fn lua_type_name(state: *mut ffi::lua_State, index: c_int) -> String {
+    unsafe {
+        let type_id = ffi::lua_type(state, index);
+        let name = ffi::lua_typename(state, type_id);
+        if name.is_null() {
+            return "unknown".to_owned();
+        }
+        CStr::from_ptr(name).to_string_lossy().into_owned()
+    }
+}
+
+#[inline]
+fn raw_socket_mut(state: *mut ffi::lua_State) -> Result<&'static mut RawSocket, String> {
+    let ptr = unsafe { ffi::luaL_testudata(state, 1, cstr(RAW_SOCKET_MT)) as *mut RawSocket };
+    if ptr.is_null() {
+        return Err("bad socket userdata".to_owned());
+    }
+    Ok(unsafe { &mut *ptr })
+}
+
+#[inline]
+fn lua_optional_i32(state: *mut ffi::lua_State, index: c_int, default: i32) -> Result<i32, String> {
+    if unsafe { ffi::lua_isnoneornil(state, index) } != 0 {
+        return Ok(default);
+    }
+    let mut is_num = 0;
+    let value = unsafe { ffi::lua_tointegerx(state, index, &mut is_num) };
+    if is_num == 0 {
+        return Err(format!(
+            "argument {index} must be integer, got {}",
+            lua_type_name(state, index)
+        ));
+    }
+    i32::try_from(value).map_err(|_| format!("argument {index} out of i32 range"))
+}
+
+fn lua_required_i32(state: *mut ffi::lua_State, index: c_int) -> Result<i32, String> {
+    lua_optional_i32(state, index, i32::MIN).and_then(|value| {
+        if value == i32::MIN && unsafe { ffi::lua_isnoneornil(state, index) } != 0 {
+            Err(format!("missing argument {index}"))
+        } else {
+            Ok(value)
+        }
+    })
+}
+
+fn lua_required_i64(state: *mut ffi::lua_State, index: c_int) -> Result<i64, String> {
+    if unsafe { ffi::lua_isnoneornil(state, index) } != 0 {
+        return Err(format!("missing argument {index}"));
+    }
+    let mut is_num = 0;
+    let value = unsafe { ffi::lua_tointegerx(state, index, &mut is_num) };
+    if is_num == 0 {
+        return Err(format!(
+            "argument {index} must be integer, got {}",
+            lua_type_name(state, index)
+        ));
+    }
+    Ok(value)
+}
+
+#[inline]
+fn lua_optional_usize(state: *mut ffi::lua_State, index: c_int) -> Result<Option<usize>, String> {
+    if unsafe { ffi::lua_isnoneornil(state, index) } != 0 {
+        return Ok(None);
+    }
+    let mut is_num = 0;
+    let value = unsafe { ffi::lua_tointegerx(state, index, &mut is_num) };
+    if is_num == 0 {
+        return Err(format!(
+            "argument {index} must be integer, got {}",
+            lua_type_name(state, index)
+        ));
+    }
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| format!("argument {index} must be non-negative"))
+}
+
+#[inline]
+fn lua_string_bytes(state: *mut ffi::lua_State, index: c_int) -> Result<&'static [u8], String> {
+    if unsafe { ffi::lua_type(state, index) } != ffi::LUA_TSTRING {
+        return Err(format!(
+            "argument {index} must be string, got {}",
+            lua_type_name(state, index)
+        ));
+    }
+    let mut len = 0_usize;
+    let ptr = unsafe { ffi::lua_tolstring(state, index, &mut len) };
+    if ptr.is_null() {
+        return Err(format!("argument {index} string data was null"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) })
+}
+
+fn lua_endpoint_string(state: *mut ffi::lua_State, index: c_int) -> Result<String, String> {
+    let bytes = lua_string_bytes(state, index)?;
+    let endpoint = std::str::from_utf8(bytes)
+        .map_err(|_| format!("argument {index} endpoint must be UTF-8"))?;
+    Ok(endpoint.to_owned())
+}
+
+#[inline]
+fn raw_socket_send_bytes(socket: &NativeSocket, payload: &[u8], flags: i32) -> Result<(), String> {
+    socket.send(payload, flags).map_err(|err| err.to_string())
+}
+
+fn raw_socket_send_parts_at(
+    state: *mut ffi::lua_State,
+    socket: &NativeSocket,
+    table_index: c_int,
+    flags: i32,
+) -> Result<(), String> {
+    let len = unsafe { ffi::lua_rawlen(state, table_index) };
+    if len == 0 {
+        return Err("multipart send requires at least one part".to_owned());
+    }
+    let table_index = unsafe { ffi::lua_absindex(state, table_index) };
+    for idx in 1..=len {
+        unsafe {
+            ffi::lua_geti(
+                state,
+                table_index,
+                idx.try_into().map_err(|_| "multipart index overflow")?,
+            );
+        }
+        let payload = lua_string_bytes(state, -1);
+        let part_flags = if idx == len {
+            flags
+        } else {
+            flags | ZMQ_SNDMORE
+        };
+        let result = payload.and_then(|payload| raw_socket_send_bytes(socket, payload, part_flags));
+        unsafe {
+            ffi::lua_pop(state, 1);
+        }
+        result?;
+    }
+    Ok(())
+}
+
+fn raw_socket_recv_bounded(
+    state: *mut ffi::lua_State,
+    socket: &mut RawSocket,
+    max_size: usize,
+    flags: i32,
+) -> Result<c_int, String> {
+    let sock = socket
+        .socket()?
+        .inner
+        .ptr()
+        .map_err(|err| err.to_string())?;
+    let scratch = &mut socket.recv_scratch;
+    let current_capacity = scratch.capacity();
+    if current_capacity < max_size {
+        scratch
+            .try_reserve_exact(max_size - current_capacity)
+            .map_err(|err| format!("receive buffer allocation failed: {err}"))?;
+    }
+
+    let rc = omq_zmq::zmq_recv(sock, scratch.as_mut_ptr().cast(), max_size, flags);
+    if rc < 0 {
+        if omq_zmq::zmq_errno() == libc::EAGAIN && (flags & ZMQ_DONTWAIT) != 0 {
+            unsafe {
+                ffi::lua_pushnil(state);
+            }
+            return Ok(1);
+        }
+        return Err(last_error_message());
+    }
+
+    let len = usize::try_from(rc).map_err(|_| "negative receive size".to_owned())?;
+    if len > max_size {
+        return Err(format!(
+            "received message exceeded Lua receive limit: size={len} limit={max_size}",
+        ));
+    }
+
+    unsafe {
+        ffi::lua_pushlstring(state, scratch.as_ptr().cast(), len);
+    }
+    scratch.clear();
+    Ok(1)
+}
+
+fn raw_socket_recv_frame(
+    state: *mut ffi::lua_State,
+    sock: *mut c_void,
+    max_size: Option<usize>,
+    flags: i32,
+) -> Result<Option<bool>, String> {
+    let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
+    check_rc(omq_zmq::zmq_msg_init(msg.as_mut_ptr())).map_err(|err| err.to_string())?;
+    let msg = msg.as_mut_ptr();
+
+    let rc = omq_zmq::zmq_msg_recv(msg, sock, flags);
+    if rc < 0 {
+        let errno = omq_zmq::zmq_errno();
+        let _ = omq_zmq::zmq_msg_close(msg);
+        if errno == libc::EAGAIN && (flags & ZMQ_DONTWAIT) != 0 {
+            unsafe {
+                ffi::lua_pushnil(state);
+            }
+            return Ok(None);
+        }
+        return Err(error_message(errno));
+    }
+
+    let len = omq_zmq::zmq_msg_size(msg);
+    if let Some(max) = max_size
+        && len > max
+    {
+        let _ = omq_zmq::zmq_msg_close(msg);
+        return Err(format!(
+            "received message exceeded Lua receive limit: size={len} limit={max}",
+        ));
+    }
+
+    let data = omq_zmq::zmq_msg_data(msg);
+    if len == 0 {
+        unsafe {
+            ffi::lua_pushlstring(state, c"".as_ptr(), 0);
+        }
+    } else {
+        if data.is_null() {
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err("received message data was null".to_owned());
+        }
+        unsafe {
+            ffi::lua_pushlstring(state, data.cast::<c_char>(), len);
+        }
+    }
+    let more = omq_zmq::zmq_msg_more(msg) != 0;
+    check_rc(omq_zmq::zmq_msg_close(msg)).map_err(|err| err.to_string())?;
+    Ok(Some(more))
+}
+
+fn raw_socket_recv(
+    state: *mut ffi::lua_State,
+    max_size: Option<usize>,
+    flags: i32,
+) -> Result<c_int, String> {
+    let socket = raw_socket_mut(state)?;
+    if let Some(max_size) = max_size {
+        return raw_socket_recv_bounded(state, socket, max_size, flags);
+    }
+    let sock = socket.inner()?.ptr().map_err(|err| err.to_string())?;
+    raw_socket_recv_frame(state, sock, None, flags).map(|_| 1)
+}
+
+unsafe extern "C-unwind" fn raw_socket_gc(state: *mut ffi::lua_State) -> c_int {
+    let ptr = unsafe { ffi::lua_touserdata(state, 1) as *mut RawSocket };
+    if !ptr.is_null() {
+        unsafe {
+            ptr::drop_in_place(ptr);
+        }
+    }
+    0
+}
+
+unsafe extern "C-unwind" fn raw_socket_bind(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let endpoint = lua_endpoint_string(state, 2)?;
+            let bound = socket
+                .socket()?
+                .bind(endpoint)
+                .map_err(|err| err.to_string())?;
+            unsafe {
+                ffi::lua_pushlstring(state, bound.as_ptr().cast(), bound.len());
+            }
+            Ok(1)
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_connect(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let endpoint = lua_endpoint_string(state, 2)?;
+            socket
+                .socket()?
+                .connect(endpoint)
+                .map_err(|err| err.to_string())?;
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_close(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        raw_socket_mut(state)
+            .and_then(RawSocket::close)
+            .map(|()| lua_bool(state, true)),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_send(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let flags = lua_optional_i32(state, 3, 0)?;
+            match unsafe { ffi::lua_type(state, 2) } {
+                ffi::LUA_TSTRING => {
+                    let payload = lua_string_bytes(state, 2)?;
+                    raw_socket_send_bytes(socket.socket()?, payload, flags)?;
+                }
+                ffi::LUA_TTABLE => {
+                    raw_socket_send_parts_at(state, socket.socket()?, 2, flags)?;
+                }
+                _ => {
+                    return Err(format!(
+                        "send payload must be string or table, got {}",
+                        lua_type_name(state, 2)
+                    ));
+                }
+            }
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_send_parts(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            if unsafe { ffi::lua_type(state, 2) } != ffi::LUA_TTABLE {
+                return Err(format!(
+                    "argument 2 must be table, got {}",
+                    lua_type_name(state, 2)
+                ));
+            }
+            let flags = lua_optional_i32(state, 3, 0)?;
+            raw_socket_send_parts_at(state, socket.socket()?, 2, flags)?;
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_recv_method(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let max_size = lua_optional_usize(state, 2)?;
+            let flags = lua_optional_i32(state, 3, 0)?;
+            raw_socket_recv(state, max_size, flags)
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_try_recv(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let max_size = lua_optional_usize(state, 2)?;
+            raw_socket_recv(state, max_size, ZMQ_DONTWAIT)
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_recv_parts(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let inner = socket.inner()?;
+            let sock = inner.ptr().map_err(|err| err.to_string())?;
+            let max_size = lua_optional_usize(state, 2)?;
+            let flags = lua_optional_i32(state, 3, 0)?;
+            unsafe {
+                ffi::lua_createtable(state, 0, 0);
+            }
+            let mut idx = 1_i64;
+            loop {
+                let more = raw_socket_recv_frame(state, sock, max_size, flags)?;
+                if more.is_none() {
+                    break;
+                }
+                unsafe {
+                    ffi::lua_rawseti(state, -2, idx);
+                }
+                if !more.unwrap_or(false) {
+                    break;
+                }
+                idx += 1;
+            }
+            Ok(1)
+        })(),
+    )
+}
+
+fn raw_socket_set_i32(state: *mut ffi::lua_State, option: i32) -> Result<c_int, String> {
+    let socket = raw_socket_mut(state)?;
+    let value = lua_required_i32(state, 2)?;
+    socket
+        .socket()?
+        .set_i32(option, value)
+        .map_err(|err| err.to_string())?;
+    Ok(lua_bool(state, true))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_linger(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, ZMQ_LINGER))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_send_timeout(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, ZMQ_SNDTIMEO))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_recv_timeout(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, ZMQ_RCVTIMEO))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_send_hwm(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, ZMQ_SNDHWM))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_recv_hwm(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_i32(state, ZMQ_RCVHWM))
+}
+
+unsafe extern "C-unwind" fn raw_socket_set_arena_threshold(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let value = lua_required_i64(state, 2)?;
+            socket
+                .socket()?
+                .set_i64(OMQ_ARENA_THRESHOLD, value)
+                .map_err(|err| err.to_string())?;
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_get_arena_threshold(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let value = socket
+                .socket()?
+                .get_i64(OMQ_ARENA_THRESHOLD)
+                .map_err(|err| err.to_string())?;
+            unsafe {
+                ffi::lua_pushinteger(state, value);
+            }
+            Ok(1)
+        })(),
+    )
+}
+
+fn raw_socket_set_bytes(state: *mut ffi::lua_State, option: i32) -> Result<c_int, String> {
+    let socket = raw_socket_mut(state)?;
+    let value = lua_string_bytes(state, 2)?;
+    socket
+        .socket()?
+        .set_bytes(option, value)
+        .map_err(|err| err.to_string())?;
+    Ok(lua_bool(state, true))
+}
+
+unsafe extern "C-unwind" fn raw_socket_subscribe(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_bytes(state, ZMQ_SUBSCRIBE))
+}
+
+unsafe extern "C-unwind" fn raw_socket_unsubscribe(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_set_bytes(state, ZMQ_UNSUBSCRIBE))
+}
+
+fn raw_set_cfunc(state: *mut ffi::lua_State, name: &'static [u8], func: ffi::lua_CFunction) {
+    unsafe {
+        ffi::lua_pushcfunction(state, func);
+        ffi::lua_setfield(state, -2, cstr(name));
+    }
+}
+
+fn ensure_raw_socket_metatable(state: *mut ffi::lua_State) {
+    unsafe {
+        if ffi::luaL_newmetatable(state, cstr(RAW_SOCKET_MT)) != 0 {
+            ffi::lua_pushvalue(state, -1);
+            ffi::lua_setfield(state, -2, cstr(b"__index\0"));
+            raw_set_cfunc(state, b"__gc\0", raw_socket_gc);
+            raw_set_cfunc(state, b"bind\0", raw_socket_bind);
+            raw_set_cfunc(state, b"connect\0", raw_socket_connect);
+            raw_set_cfunc(state, b"close\0", raw_socket_close);
+            raw_set_cfunc(state, b"send\0", raw_socket_send);
+            raw_set_cfunc(state, b"send_parts\0", raw_socket_send_parts);
+            raw_set_cfunc(state, b"recv\0", raw_socket_recv_method);
+            raw_set_cfunc(state, b"try_recv\0", raw_socket_try_recv);
+            raw_set_cfunc(state, b"recv_parts\0", raw_socket_recv_parts);
+            raw_set_cfunc(state, b"set_linger\0", raw_socket_set_linger);
+            raw_set_cfunc(state, b"set_send_timeout\0", raw_socket_set_send_timeout);
+            raw_set_cfunc(state, b"set_recv_timeout\0", raw_socket_set_recv_timeout);
+            raw_set_cfunc(state, b"set_send_hwm\0", raw_socket_set_send_hwm);
+            raw_set_cfunc(state, b"set_recv_hwm\0", raw_socket_set_recv_hwm);
+            raw_set_cfunc(
+                state,
+                b"set_arena_threshold\0",
+                raw_socket_set_arena_threshold,
+            );
+            raw_set_cfunc(
+                state,
+                b"get_arena_threshold\0",
+                raw_socket_get_arena_threshold,
+            );
+            raw_set_cfunc(state, b"subscribe\0", raw_socket_subscribe);
+            raw_set_cfunc(state, b"unsubscribe\0", raw_socket_unsubscribe);
+        }
+    }
+}
+
+fn push_raw_socket(state: *mut ffi::lua_State, socket: NativeSocket) {
+    ensure_raw_socket_metatable(state);
+    unsafe {
+        let ud =
+            ffi::lua_newuserdatauv(state, std::mem::size_of::<RawSocket>(), 0) as *mut RawSocket;
+        ptr::write(
+            ud,
+            RawSocket {
+                socket: Some(socket),
+                recv_scratch: Vec::new(),
+            },
+        );
+        ffi::lua_pushvalue(state, -2);
+        ffi::lua_setmetatable(state, -2);
+        ffi::lua_remove(state, -2);
     }
 }
 

@@ -25,8 +25,9 @@ small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
 </p>
 
 2-process loopback PUSH/PULL throughput and REQ/REP p50 latency vs JeroMQ
-over TCP. Both panels warm the JVM before timed samples. Results are median
-local runs from `scripts/bench_pushpull_tcp.py`.
+over TCP. Throughput uses 3 median-selected 2.5 second rounds; latency uses
+3 median-selected 1.5 second rounds and measures sizes up to 4 KiB. Each round
+has a 0.5 second warmup window.
 
 ## Build, install, test
 

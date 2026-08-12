@@ -212,13 +212,10 @@ Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts
 
-Chart subtitles show hardware info auto-detected from `/proc/cpuinfo`
-and sysfs. On machines where sysfs is absent, create `.chart_hw` in the
-repo root:
+Chart subtitles come from `.chart_hw` in the repo root:
 
 ```text
-prefix=Linux VM on a 2018 Mac Mini
-postfix=performance governor, turbo off
+label=Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off
 ```
 
 `omq-bench` and binding chart scripts read the repo-root `.chart_hw`

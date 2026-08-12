@@ -14,15 +14,16 @@ import sys
 
 DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 SIZES = DEFAULT_SIZES.copy()
+LATENCY_MAX_SIZE = 4096
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "omq.node")
 JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
 # Colors: warm = omq-node, cool = zeromq.js
-C_OMQ_SYNC = "#dc2626"
-C_OMQ_ASYNC = "#f97316"
-C_ZMQ = "#2563eb"
+C_OMQ_SYNC = "#ef4444"
+C_OMQ_ASYNC = "#fb923c"
+C_ZMQ = "#60a5fa"
 
 
 def load_jsonl():
@@ -96,6 +97,7 @@ def _latest_complete_rows(rows):
         required = set()
         for size in SIZES:
             required.add(("throughput", "tcp", size))
+        for size in latency_sizes_from(SIZES):
             required.add(("latency", "tcp", size))
 
         complete = [
@@ -121,6 +123,7 @@ def _latest_rows(rows):
 
 def chart_data_from_jsonl():
     latest = _latest_rows(load_jsonl())
+    latency_sizes = latency_sizes_from(SIZES)
 
     def get_tp(impl, mode, transport, size):
         row = latest.get((impl, mode, "throughput", transport, size))
@@ -134,10 +137,14 @@ def chart_data_from_jsonl():
         "omq_sync_tp": [get_tp("omq-node", "sync", "tcp", size) for size in SIZES],
         "omq_async_tp": [get_tp("omq-node", "async", "tcp", size) for size in SIZES],
         "zmq_async_tp": [get_tp("zeromq.js", "async", "tcp", size) for size in SIZES],
-        "omq_sync_lat": [get_lat("omq-node", "sync", size) for size in SIZES],
-        "omq_async_lat": [get_lat("omq-node", "async", size) for size in SIZES],
-        "zmq_async_lat": [get_lat("zeromq.js", "async", size) for size in SIZES],
+        "omq_sync_lat": [get_lat("omq-node", "sync", size) for size in latency_sizes],
+        "omq_async_lat": [get_lat("omq-node", "async", size) for size in latency_sizes],
+        "zmq_async_lat": [get_lat("zeromq.js", "async", size) for size in latency_sizes],
     }
+
+
+def latency_sizes_from(sizes):
+    return [size for size in sizes if size <= LATENCY_MAX_SIZE]
 
 
 def fmt_size(size):
@@ -199,36 +206,24 @@ def _read_chart_hw():
 
 def _detect_hardware():
     hw_conf = _read_chart_hw()
-    try:
-        cpu = None
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if line.startswith("model name"):
-                    cpu = line.split(":", 1)[1].strip()
-                    cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                    break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
-            postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
-            extras = [e.strip() for e in postfix.split(",")] if postfix else []
-            hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-            if hw_extras:
-                extras.extend(hw_extras.split(","))
-            extras = [e.strip() for e in extras if e.strip()]
-            if extras:
-                label += ", " + ", ".join(extras)
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
+    label = os.environ.get("OMQ_HW_LABEL") or hw_conf.get("label")
+    if label:
+        return label
+    prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
+    postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
+    if prefix and postfix:
+        return f"{prefix}, {postfix}"
+    if prefix:
+        return prefix
+    if postfix:
+        return postfix
     return None
 
 
 def gen_combined_chart(data, path):
     n = len(SIZES)
+    latency_sizes = latency_sizes_from(SIZES)
+    lat_n = len(latency_sizes)
     hw_label = _detect_hardware()
     hw_offset = 14 if hw_label else 0
     svg_w = 850
@@ -244,6 +239,7 @@ def gen_combined_chart(data, path):
     t2_h = t2_bot - t2_top
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    lat_xs = [x_left + i * plot_w / max(lat_n - 1, 1) for i in range(lat_n)]
     mid_x = (x_left + x_right) / 2
 
     omq_sync_tp = data["omq_sync_tp"]
@@ -270,10 +266,10 @@ def gen_combined_chart(data, path):
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">'
     )
-    lines.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
+    lines.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>')
 
     lines.append(
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>"
     )
@@ -291,23 +287,23 @@ def gen_combined_chart(data, path):
         yy = t1_bot - frac * t1_h
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151"'
+            f' dominant-baseline="middle" fill="#e5e7eb"'
             f' font-size="10">{_fmt_y_rate(msg_val)}</text>'
         )
         lines.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280"'
+            f' dominant-baseline="middle" fill="#9ca3af"'
             f' font-size="10">{_fmt_mbps(mbps_val)}</text>'
         )
 
     for x in xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     lines.append(
@@ -326,7 +322,7 @@ def gen_combined_chart(data, path):
     t1_mid = (t1_top + t1_bot) / 2
     lines.append(
         f'  <text x="40" y="{t1_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
     )
 
@@ -348,17 +344,17 @@ def gen_combined_chart(data, path):
             yy = y_mbps(v)
             lines.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
     for i in range(n):
         lines.append(
             f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(SIZES[i])}</text>'
         )
 
     lines.append(
-        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
     )
@@ -368,18 +364,18 @@ def gen_combined_chart(data, path):
         yy = y_lat(v)
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{_fmt_y_us(v)}</text>"
         )
 
-    for x in xs:
+    for x in lat_xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t2_top}" x2="{x:.1f}" y2="{t2_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     lines.append(
@@ -394,7 +390,7 @@ def gen_combined_chart(data, path):
     t2_mid = (t2_top + t2_bot) / 2
     lines.append(
         f'  <text x="40" y="{t2_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t2_mid:.0f})">p50 latency (µs)</text>'
     )
 
@@ -405,20 +401,20 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in lat_series:
-        _draw_series(lines, xs, vals, y_lat, color, stroke_width="2.5")
+        _draw_series(lines, lat_xs, vals, y_lat, color, stroke_width="2.5")
         for i, v in enumerate(vals):
             if v <= 0:
                 continue
             yy = y_lat(v)
             lines.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
-    for i in range(n):
+    for i in range(lat_n):
         lines.append(
-            f'  <text x="{xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+            f'  <text x="{lat_xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(latency_sizes[i])}</text>'
         )
 
     leg_y = t2_bot + 40
@@ -439,7 +435,7 @@ def gen_combined_chart(data, path):
         )
         lines.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{color}"/>')
         lines.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#e5e7eb"'
             f' font-size="11" font-weight="500">{label}</text>'
         )
 

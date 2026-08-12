@@ -17,12 +17,14 @@ import time
 
 DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [8, 128, 1024, 4096, 32768]
+LATENCY_MAX_SIZE = 4096
 SIZES = DEFAULT_SIZES.copy()
-TARGET_RUNTIME_S = 0.4
+TARGET_RUNTIME_S = 2.5
+THROUGHPUT_WARMUP_S = 0.5
 N_ROUNDS = 3
-WARMUP_ROUNDS = 1
-LATENCY_WARMUP = 1000
-LATENCY_ITERS = 10000
+WARMUP_ROUNDS = 0
+LATENCY_WARMUP_S = 0.5
+LATENCY_RUNTIME_S = 1.5
 SUBPROCESS_TIMEOUT_S = 30.0
 LATENCY_TIMEOUT_S = 60.0
 SUBPROCESS_RETRIES = 2
@@ -62,6 +64,18 @@ def save_results(
     run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat, proxy_pp, proxy_rr
 ):
     rows = []
+    def latency_fields(values):
+        fields = {
+            "p50_us": values[0],
+            "p99_us": values[1],
+        }
+        if len(values) >= 4:
+            fields["messages"] = values[2]
+            fields["seconds"] = values[3]
+            fields["target_seconds"] = LATENCY_RUNTIME_S
+            fields["warmup_seconds"] = LATENCY_WARMUP_S
+        return fields
+
     for i, size in enumerate(SIZES):
         rows.append(
             {
@@ -96,6 +110,7 @@ def save_results(
                 "msgs_s": atp_tcp[i],
             }
         )
+    for i, size in enumerate(latency_sizes_from(SIZES)):
         rows.append(
             {
                 "run_id": run_id,
@@ -103,8 +118,7 @@ def save_results(
                 "kind": "latency",
                 "mode": "sync",
                 "msg_size": size,
-                "p50_us": lat[i][0],
-                "p99_us": lat[i][1],
+                **latency_fields(lat[i]),
             }
         )
         rows.append(
@@ -114,8 +128,7 @@ def save_results(
                 "kind": "latency",
                 "mode": "async",
                 "msg_size": size,
-                "p50_us": alat[i][0],
-                "p99_us": alat[i][1],
+                **latency_fields(alat[i]),
             }
         )
     rows.append(
@@ -163,6 +176,7 @@ def save_proxy_results(run_id, impl, proxy_pp, proxy_rr):
 
 def chart_data_from_jsonl():
     rows = load_jsonl()
+    latency_sizes = latency_sizes_from(SIZES)
 
     latest = {}
     for r in rows:
@@ -189,10 +203,10 @@ def chart_data_from_jsonl():
     sync_pz_tp = [get_tp("sync", "pyzmq", "tcp", s) for s in SIZES]
     async_omq_tp = [get_tp("async", "pyomq", "tcp", s) for s in SIZES]
     async_pz_tp = [get_tp("async", "pyzmq", "tcp", s) for s in SIZES]
-    sync_omq_lat = [get_lat("sync", "pyomq", s) for s in SIZES]
-    sync_pz_lat = [get_lat("sync", "pyzmq", s) for s in SIZES]
-    async_omq_lat = [get_lat("async", "pyomq", s) for s in SIZES]
-    async_pz_lat = [get_lat("async", "pyzmq", s) for s in SIZES]
+    sync_omq_lat = [get_lat("sync", "pyomq", s) for s in latency_sizes]
+    sync_pz_lat = [get_lat("sync", "pyzmq", s) for s in latency_sizes]
+    async_omq_lat = [get_lat("async", "pyomq", s) for s in latency_sizes]
+    async_pz_lat = [get_lat("async", "pyzmq", s) for s in latency_sizes]
 
     return {
         "sync_omq_tp": sync_omq_tp,
@@ -207,6 +221,15 @@ def chart_data_from_jsonl():
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+
+def latency_sizes_from(sizes):
+    return [size for size in sizes if size <= LATENCY_MAX_SIZE]
+
+
+def median(values, key=lambda value: value):
+    ordered = sorted(values, key=key)
+    return ordered[len(ordered) // 2]
 
 
 def free_tcp():
@@ -263,10 +286,11 @@ def parse_sizes(value):
 def configure_benchmark(args):
     global SIZES
     global TARGET_RUNTIME_S
+    global THROUGHPUT_WARMUP_S
     global N_ROUNDS
     global WARMUP_ROUNDS
-    global LATENCY_WARMUP
-    global LATENCY_ITERS
+    global LATENCY_WARMUP_S
+    global LATENCY_RUNTIME_S
     global SUBPROCESS_TIMEOUT_S
     global LATENCY_TIMEOUT_S
     global SUBPROCESS_RETRIES
@@ -277,11 +301,12 @@ def configure_benchmark(args):
 
     if args.quick:
         SIZES = QUICK_SIZES.copy()
-        TARGET_RUNTIME_S = 0.15
+        TARGET_RUNTIME_S = 0.5
+        THROUGHPUT_WARMUP_S = 0.1
         N_ROUNDS = 1
         WARMUP_ROUNDS = 0
-        LATENCY_WARMUP = 100
-        LATENCY_ITERS = 1000
+        LATENCY_WARMUP_S = 0.1
+        LATENCY_RUNTIME_S = 0.5
         SUBPROCESS_TIMEOUT_S = 15.0
         LATENCY_TIMEOUT_S = 20.0
         SUBPROCESS_RETRIES = 0
@@ -294,10 +319,16 @@ def configure_benchmark(args):
         N_ROUNDS = args.rounds
     if args.target_runtime is not None:
         TARGET_RUNTIME_S = args.target_runtime
-    if args.latency_warmup is not None:
-        LATENCY_WARMUP = args.latency_warmup
-    if args.latency_iters is not None:
-        LATENCY_ITERS = args.latency_iters
+        if args.latency_duration is None:
+            LATENCY_RUNTIME_S = min(TARGET_RUNTIME_S, LATENCY_RUNTIME_S)
+    if args.warmup_duration is not None:
+        THROUGHPUT_WARMUP_S = args.warmup_duration
+        if args.latency_warmup_duration is None:
+            LATENCY_WARMUP_S = THROUGHPUT_WARMUP_S
+    if args.latency_warmup_duration is not None:
+        LATENCY_WARMUP_S = args.latency_warmup_duration
+    if args.latency_duration is not None:
+        LATENCY_RUNTIME_S = args.latency_duration
     if args.timeout is not None:
         SUBPROCESS_TIMEOUT_S = args.timeout
         LATENCY_TIMEOUT_S = max(args.timeout, 1.0)
@@ -308,10 +339,12 @@ def configure_benchmark(args):
         raise argparse.ArgumentTypeError("--rounds must be at least 1")
     if TARGET_RUNTIME_S <= 0:
         raise argparse.ArgumentTypeError("--target-runtime must be positive")
-    if LATENCY_WARMUP < 0:
-        raise argparse.ArgumentTypeError("--latency-warmup cannot be negative")
-    if LATENCY_ITERS < 1:
-        raise argparse.ArgumentTypeError("--latency-iters must be at least 1")
+    if THROUGHPUT_WARMUP_S < 0:
+        raise argparse.ArgumentTypeError("--warmup-duration cannot be negative")
+    if LATENCY_WARMUP_S < 0:
+        raise argparse.ArgumentTypeError("--latency-warmup-duration cannot be negative")
+    if LATENCY_RUNTIME_S <= 0:
+        raise argparse.ArgumentTypeError("--latency-duration must be positive")
     if SUBPROCESS_TIMEOUT_S <= 0 or LATENCY_TIMEOUT_S <= 0:
         raise argparse.ArgumentTypeError("--timeout must be positive")
     if PROXY_DURATION_S <= 0:
@@ -323,51 +356,36 @@ def configure_benchmark(args):
 
 def _run_subprocess(code, label, timeout=None, retries=None):
     timeout = SUBPROCESS_TIMEOUT_S if timeout is None else timeout
-    retries = SUBPROCESS_RETRIES if retries is None else retries
-    for attempt in range(1 + retries):
-        try:
-            r = subprocess.run(
-                [sys.executable, "-c", code],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            sys.stderr.write(f"  [{label} timeout, attempt {attempt + 1}]\n")
-            continue
-        if r.returncode != 0:
-            sys.stderr.write(f"  [{label} failed, attempt {attempt + 1}]\n")
-            continue
-        return json.loads(r.stdout.strip())
-    return None
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"{label} timeout after {timeout}s") from error
+    if r.returncode != 0:
+        raise RuntimeError(f"{label} failed:\n{r.stdout}{r.stderr}")
+    return json.loads(r.stdout.strip())
 
 
-def _throughput_iters(size, n_target_per_s, *, max_messages=None):
-    n = max(int(n_target_per_s * TARGET_RUNTIME_S), 100)
-    if max_messages is not None:
-        n = min(n, max_messages)
-    if THROUGHPUT_MAX_BYTES is not None:
-        byte_limited = max(100, THROUGHPUT_MAX_BYTES // max(size, 1))
-        n = min(n, byte_limited)
-    return n
-
-
-def _measure_throughput_subprocess(lib_name, transport, size, n_target_per_s=200_000):
+def _measure_throughput_subprocess(lib_name, transport, size, duration=None):
     """Run a throughput measurement. TCP uses 2 separate processes (push +
     pull) so each gets its own runtime. Inproc must stay single-process."""
+    duration = TARGET_RUNTIME_S if duration is None else duration
     if lib_name == "pyzmq":
         lib_import = "import zmq as lib"
     else:
         lib_import = "import pyomq as lib"
 
-    n = _throughput_iters(size, n_target_per_s)
-
     if transport == "inproc":
         code = f"""
 import threading, time, json
 {lib_import}
-n = {n}
 payload = b'x' * {size}
+stop = b'__OMQ_BENCH_STOP__'
+duration = {duration}
 ep = f'inproc://bench-{{time.monotonic_ns()}}'
 ctx = lib.Context()
 pull = ctx.socket(lib.PULL)
@@ -377,17 +395,25 @@ push.linger = 0
 pull.bind(ep)
 push.connect(ep)
 def sender():
-    for _ in range(n):
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
         push.send(payload)
+    push.send(stop)
 t = threading.Thread(target=sender)
-start = time.monotonic()
 t.start()
-for _ in range(n):
-    pull.recv()
-elapsed = time.monotonic() - start
+start = None
+count = 0
+while True:
+    msg = pull.recv()
+    if msg == stop:
+        break
+    if start is None:
+        start = time.monotonic()
+    count += 1
+elapsed = time.monotonic() - start if start is not None else 0.0
 t.join()
 push.close(); pull.close()
-print(json.dumps(n / elapsed))
+print(json.dumps(count / elapsed if elapsed > 0 else 0.0))
 import sys; sys.stdout.flush(); import os; os._exit(0)
 """
         result = _run_subprocess(code, f"{lib_name} inproc {size}B")
@@ -396,8 +422,9 @@ import sys; sys.stdout.flush(); import os; os._exit(0)
     push_code = f"""
 import time, sys
 {lib_import}
-n = {n}
 payload = b'x' * {size}
+stop = b'__OMQ_BENCH_STOP__'
+duration = {duration}
 ctx = lib.Context()
 push = ctx.socket(lib.PUSH)
 push.linger = 0
@@ -406,8 +433,10 @@ ep = push.last_endpoint
 if isinstance(ep, bytes): ep = ep.decode()
 port = ep.rsplit(':', 1)[1]
 print(port, flush=True)
-for _ in range(n):
+deadline = time.monotonic() + duration
+while time.monotonic() < deadline:
     push.send(payload)
+push.send(stop)
 sys.stdin.readline()
 push.close()
 import os; os._exit(0)
@@ -415,18 +444,24 @@ import os; os._exit(0)
     pull_code = f"""
 import time, json, sys
 {lib_import}
-n = {n}
 port = sys.argv[1]
+stop = b'__OMQ_BENCH_STOP__'
 ctx = lib.Context()
 pull = ctx.socket(lib.PULL)
 pull.linger = 0
 pull.connect(f'tcp://127.0.0.1:{{port}}')
-start = time.monotonic()
-for _ in range(n):
-    pull.recv()
-elapsed = time.monotonic() - start
+start = None
+count = 0
+while True:
+    msg = pull.recv()
+    if msg == stop:
+        break
+    if start is None:
+        start = time.monotonic()
+    count += 1
+elapsed = time.monotonic() - start if start is not None else 0.0
 pull.close()
-print(json.dumps(n / elapsed))
+print(json.dumps(count / elapsed if elapsed > 0 else 0.0))
 sys.stdout.flush()
 import os; os._exit(0)
 """
@@ -490,18 +525,21 @@ def run_throughput(lib_name):
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        for _ in range(WARMUP_ROUNDS):
-            _measure_throughput_subprocess(lib_name, "inproc", size)
-            _measure_throughput_subprocess(lib_name, "tcp", size)
-
-        inproc = max(
-            _measure_throughput_subprocess(lib_name, "inproc", size)
-            for _ in range(N_ROUNDS)
-        )
-        tcp = max(
-            _measure_throughput_subprocess(lib_name, "tcp", size)
-            for _ in range(N_ROUNDS)
-        )
+        inproc_runs = []
+        tcp_runs = []
+        for _ in range(N_ROUNDS):
+            if THROUGHPUT_WARMUP_S > 0:
+                _measure_throughput_subprocess(
+                    lib_name, "inproc", size, duration=THROUGHPUT_WARMUP_S
+                )
+            inproc_runs.append(_measure_throughput_subprocess(lib_name, "inproc", size))
+            if THROUGHPUT_WARMUP_S > 0:
+                _measure_throughput_subprocess(
+                    lib_name, "tcp", size, duration=THROUGHPUT_WARMUP_S
+                )
+            tcp_runs.append(_measure_throughput_subprocess(lib_name, "tcp", size))
+        inproc = median(inproc_runs)
+        tcp = median(tcp_runs)
         inproc_results.append(inproc)
         tcp_results.append(tcp)
         print(f" inproc {fmt_rate(inproc):>10}  tcp {fmt_rate(tcp):>10}")
@@ -512,8 +550,9 @@ def run_throughput(lib_name):
 # ── async PUSH/PULL throughput ───────────────────────────────────────
 
 
-def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
+def _measure_async_subprocess(lib_name, size, duration=None):
     """Async throughput: push in one process, async pull in another."""
+    duration = TARGET_RUNTIME_S if duration is None else duration
     if lib_name == "pyzmq":
         lib_import = "import zmq as lib; import zmq.asyncio as alib"
         push_import = "import zmq as lib"
@@ -521,13 +560,12 @@ def _measure_async_subprocess(lib_name, size, n_target_per_s=200_000):
         lib_import = "import pyomq as lib; import pyomq.asyncio as alib"
         push_import = "import pyomq as lib"
 
-    n = _throughput_iters(size, n_target_per_s, max_messages=20_000)
-
     push_code = f"""
-import sys
+import sys, time
 {push_import}
-n = {n}
 payload = b'x' * {size}
+stop = b'__OMQ_BENCH_STOP__'
+duration = {duration}
 ctx = lib.Context()
 push = ctx.socket(lib.PUSH)
 push.linger = 0
@@ -536,8 +574,10 @@ ep = push.last_endpoint
 if isinstance(ep, bytes): ep = ep.decode()
 port = ep.rsplit(':', 1)[1]
 print(port, flush=True)
-for _ in range(n):
+deadline = time.monotonic() + duration
+while time.monotonic() < deadline:
     push.send(payload)
+push.send(stop)
 sys.stdin.readline()
 push.close()
 import os; os._exit(0)
@@ -547,20 +587,22 @@ import asyncio, time, json, sys
 {lib_import}
 async def run():
     port = sys.argv[1]
-    n = {n}
+    stop = b'__OMQ_BENCH_STOP__'
     ctx = alib.Context()
     pull = ctx.socket(lib.PULL)
     pull.linger = 0
     pull.connect(f'tcp://127.0.0.1:{{port}}')
     count = 0; start = None
-    for _ in range(n):
-        await pull.recv()
+    while True:
+        msg = await pull.recv()
+        if msg == stop:
+            break
         if start is None:
             start = time.monotonic()
         count += 1
-    elapsed = time.monotonic() - start
+    elapsed = time.monotonic() - start if start is not None else 0.0
     pull.close()
-    print(json.dumps(count / elapsed))
+    print(json.dumps(count / elapsed if elapsed > 0 else 0.0))
     sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
@@ -623,10 +665,12 @@ def run_async_throughput(lib_name):
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
-        for _ in range(WARMUP_ROUNDS):
-            _measure_async_subprocess(lib_name, size)
-
-        tcp = max(_measure_async_subprocess(lib_name, size) for _ in range(N_ROUNDS))
+        runs = []
+        for _ in range(N_ROUNDS):
+            if THROUGHPUT_WARMUP_S > 0:
+                _measure_async_subprocess(lib_name, size, duration=THROUGHPUT_WARMUP_S)
+            runs.append(_measure_async_subprocess(lib_name, size))
+        tcp = median(runs)
         results.append(tcp)
         print(f" {fmt_rate(tcp):>10}")
 
@@ -636,7 +680,7 @@ def run_async_throughput(lib_name):
 # ── sync REQ/REP latency ────────────────────────────────────────────
 
 
-def _measure_latency_subprocess(lib_name, size, warmup, iters):
+def _measure_latency_subprocess(lib_name, size, warmup_seconds, duration_seconds):
     code = f"""
 import time, threading, json, socket as sock
 def free_tcp():
@@ -661,27 +705,39 @@ req.connect(ep)
 time.sleep(0.05)
 def echo():
     try:
-        for _ in range({warmup} + {iters} + 100):
-            rep.send(rep.recv())
+        while True:
+            msg = rep.recv()
+            rep.send(msg)
+            if msg == b'__OMQ_BENCH_STOP__':
+                break
     except Exception:
         pass
 t = threading.Thread(target=echo, daemon=True)
 t.start()
-for _ in range({warmup}):
+warmup_deadline = time.monotonic() + {warmup_seconds}
+while time.monotonic() < warmup_deadline:
     req.send(payload)
     req.recv()
 rtts = []
-for _ in range({iters}):
+start = time.monotonic()
+deadline = start + {duration_seconds}
+while True:
     t0 = time.monotonic()
     req.send(payload)
     req.recv()
     rtts.append(time.monotonic() - t0)
+    if time.monotonic() >= deadline:
+        break
+elapsed = time.monotonic() - start
+req.send(b'__OMQ_BENCH_STOP__')
+req.recv()
 req.close()
 rep.close()
+t.join(timeout=1.0)
 rtts.sort()
 p50 = rtts[len(rtts)*50//100]*1e6
 p99 = rtts[len(rtts)*99//100]*1e6
-print(json.dumps([p50, p99]))
+print(json.dumps([p50, p99, len(rtts), elapsed]))
 import sys; sys.stdout.flush(); import os; os._exit(0)
 """
     result = _run_subprocess(
@@ -694,27 +750,38 @@ import sys; sys.stdout.flush(); import os; os._exit(0)
 
 def run_latency(lib_name):
     results = []
-    for size in SIZES:
+    for size in latency_sizes_from(SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
         warmup = (0.0, 0.0)
         for _ in range(WARMUP_ROUNDS):
-            warmup = _measure_latency_subprocess(lib_name, size, 200, 200)
+            warmup = _measure_latency_subprocess(
+                lib_name,
+                size,
+                min(LATENCY_WARMUP_S, 0.05),
+                min(LATENCY_RUNTIME_S, 0.05),
+            )
         if warmup == (999999.0, 999999.0):
             results.append(warmup)
             print(" timeout")
             continue
 
         runs = [
-            _measure_latency_subprocess(lib_name, size, LATENCY_WARMUP, LATENCY_ITERS)
+            _measure_latency_subprocess(
+                lib_name,
+                size,
+                LATENCY_WARMUP_S,
+                LATENCY_RUNTIME_S,
+            )
             for _ in range(N_ROUNDS)
         ]
-        p50 = min(r[0] for r in runs)
-        p99 = min(r[1] for r in runs)
-        results.append((p50, p99))
-        print(f" p50 {p50:.1f} µs  p99 {p99:.1f} µs")
+        selected = median(runs, key=lambda row: row[0])
+        results.append(selected)
+        print(
+            f" p50 {selected[0]:.1f} µs  p99 {selected[1]:.1f} µs  n={selected[2]}"
+        )
 
     return results
 
@@ -722,7 +789,7 @@ def run_latency(lib_name):
 # ── async REQ/REP latency ───────────────────────────────────────────
 
 
-def _measure_async_latency_subprocess(lib_name, size, warmup, iters):
+def _measure_async_latency_subprocess(lib_name, size, warmup_seconds, duration_seconds):
     if lib_name == "pyzmq":
         lib_import = "import zmq; import zmq.asyncio; lib = zmq; actx = zmq.asyncio"
     else:
@@ -749,30 +816,36 @@ async def run():
     await asyncio.sleep(0.05)
     async def echo():
         try:
-            for _ in range({warmup} + {iters} + 100):
+            while True:
                 msg = await rep.recv()
                 {send_await}rep.send(msg)
+                if msg == b'__OMQ_BENCH_STOP__':
+                    break
         except Exception:
             pass
     task = asyncio.create_task(echo())
-    for _ in range({warmup}):
+    warmup_deadline = time.monotonic() + {warmup_seconds}
+    while time.monotonic() < warmup_deadline:
         {send_await}req.send(payload)
         await req.recv()
     rtts = []
-    for _ in range({iters}):
+    start = time.monotonic()
+    deadline = start + {duration_seconds}
+    while True:
         t0 = time.monotonic()
         {send_await}req.send(payload)
         await req.recv()
         rtts.append(time.monotonic() - t0)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        if time.monotonic() >= deadline:
+            break
+    elapsed = time.monotonic() - start
+    {send_await}req.send(b'__OMQ_BENCH_STOP__')
+    await req.recv()
+    await task
     rtts.sort()
     p50 = rtts[len(rtts)*50//100]*1e6
     p99 = rtts[len(rtts)*99//100]*1e6
-    print(json.dumps([p50, p99]))
+    print(json.dumps([p50, p99, len(rtts), elapsed]))
     import sys; sys.stdout.flush(); import os; os._exit(0)
 asyncio.run(run())
 """
@@ -786,14 +859,19 @@ asyncio.run(run())
 
 def run_async_latency(lib_name):
     results = []
-    for size in SIZES:
+    for size in latency_sizes_from(SIZES):
         label = fmt_size(size)
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
 
         warmup = (0.0, 0.0)
         for _ in range(WARMUP_ROUNDS):
-            warmup = _measure_async_latency_subprocess(lib_name, size, 200, 200)
+            warmup = _measure_async_latency_subprocess(
+                lib_name,
+                size,
+                min(LATENCY_WARMUP_S, 0.05),
+                min(LATENCY_RUNTIME_S, 0.05),
+            )
         if warmup == (999999.0, 999999.0):
             results.append(warmup)
             print(" timeout")
@@ -801,14 +879,15 @@ def run_async_latency(lib_name):
 
         runs = [
             _measure_async_latency_subprocess(
-                lib_name, size, LATENCY_WARMUP, LATENCY_ITERS
+                lib_name, size, LATENCY_WARMUP_S, LATENCY_RUNTIME_S
             )
             for _ in range(N_ROUNDS)
         ]
-        p50 = min(r[0] for r in runs)
-        p99 = min(r[1] for r in runs)
-        results.append((p50, p99))
-        print(f" p50 {p50:.1f} µs  p99 {p99:.1f} µs")
+        selected = median(runs, key=lambda row: row[0])
+        results.append(selected)
+        print(
+            f" p50 {selected[0]:.1f} µs  p99 {selected[1]:.1f} µs  n={selected[2]}"
+        )
 
     return results
 
@@ -816,7 +895,7 @@ def run_async_latency(lib_name):
 # ── proxy forwarding (2-process) ─────────────────────────────────────
 
 
-def _measure_proxy_subprocess(lib_name, pattern, n):
+def _measure_proxy_subprocess(lib_name, pattern, duration):
     if lib_name == "pyzmq":
         lib_import = "import zmq as lib"
     else:
@@ -877,29 +956,37 @@ except Exception:
 import threading, time, json, sys, os
 {lib_import}
 payload = b'x' * 128
-n = {n}
+stop = b'__OMQ_BENCH_STOP__'
+duration = {duration}
 ctx = lib.Context()
 push = ctx.socket(lib.PUSH)
 pull = ctx.socket(lib.PULL)
 push.linger = 0
 push.connect('{fe_ep}')
 pull.connect('{be_ep}')
-for _ in range(200):
+warmup_deadline = time.monotonic() + min(duration, 0.05)
+while time.monotonic() < warmup_deadline:
     push.send(b'w')
     pull.recv()
 def sender():
-    for _ in range(n):
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
         push.send(payload)
+    push.send(stop)
 t = threading.Thread(target=sender)
 start = time.monotonic()
 t.start()
-for _ in range(n):
-    pull.recv()
+count = 0
+while True:
+    msg = pull.recv()
+    if msg == stop:
+        break
+    count += 1
 elapsed = time.monotonic() - start
 t.join()
 push.close()
 pull.close()
-print(json.dumps(n / elapsed))
+print(json.dumps(count / elapsed))
 sys.stdout.flush(); os._exit(0)
 """
     else:
@@ -907,7 +994,7 @@ sys.stdout.flush(); os._exit(0)
 import threading, time, json, sys, os
 {lib_import}
 payload = b'x' * 128
-n = {n}
+duration = {duration}
 ctx = lib.Context()
 client = ctx.socket(lib.REQ)
 worker = ctx.socket(lib.REP)
@@ -915,19 +1002,23 @@ client.linger = 0
 worker.linger = 0
 client.connect('{fe_ep}')
 worker.connect('{be_ep}')
-for _ in range(100):
+warmup_deadline = time.monotonic() + min(duration, 0.05)
+while time.monotonic() < warmup_deadline:
     client.send(b'w')
     worker.send(worker.recv())
     client.recv()
 start = time.monotonic()
-for _ in range(n):
+count = 0
+deadline = start + duration
+while time.monotonic() < deadline:
     client.send(payload)
     worker.send(worker.recv())
     client.recv()
+    count += 1
 elapsed = time.monotonic() - start
 client.close()
 worker.close()
-print(json.dumps(n / elapsed))
+print(json.dumps(count / elapsed))
 sys.stdout.flush(); os._exit(0)
 """
 
@@ -1033,27 +1124,35 @@ def run_proxy(lib_name):
     sys.stdout.write("  PUSH/PULL ...")
     sys.stdout.flush()
     if client is not None:
-        for _ in range(WARMUP_ROUNDS):
-            _measure_proxy_native(lib_name, client, min(PROXY_DURATION_S, 1.0))
-        pushpull_rate = max(
-            _measure_proxy_native(lib_name, client) for _ in range(N_ROUNDS)
-        )
+        runs = []
+        for _ in range(N_ROUNDS):
+            if THROUGHPUT_WARMUP_S > 0:
+                _measure_proxy_native(
+                    lib_name, client, min(PROXY_DURATION_S, THROUGHPUT_WARMUP_S)
+                )
+            runs.append(_measure_proxy_native(lib_name, client))
+        pushpull_rate = median(runs)
     else:
-        for _ in range(WARMUP_ROUNDS):
-            _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
-        pushpull_rate = max(
-            _measure_proxy_subprocess(lib_name, "pushpull", 200_000)
-            for _ in range(N_ROUNDS)
-        )
+        runs = []
+        for _ in range(N_ROUNDS):
+            if THROUGHPUT_WARMUP_S > 0:
+                _measure_proxy_subprocess(
+                    lib_name, "pushpull", min(PROXY_DURATION_S, THROUGHPUT_WARMUP_S)
+                )
+            runs.append(_measure_proxy_subprocess(lib_name, "pushpull", PROXY_DURATION_S))
+        pushpull_rate = median(runs)
     print(f" {fmt_rate(pushpull_rate)}")
 
     sys.stdout.write("  REQ/REP ...")
     sys.stdout.flush()
-    for _ in range(WARMUP_ROUNDS):
-        _measure_proxy_subprocess(lib_name, "reqrep", 10_000)
-    reqrep_rate = max(
-        _measure_proxy_subprocess(lib_name, "reqrep", 10_000) for _ in range(N_ROUNDS)
-    )
+    runs = []
+    for _ in range(N_ROUNDS):
+        if THROUGHPUT_WARMUP_S > 0:
+            _measure_proxy_subprocess(
+                lib_name, "reqrep", min(PROXY_DURATION_S, THROUGHPUT_WARMUP_S)
+            )
+        runs.append(_measure_proxy_subprocess(lib_name, "reqrep", PROXY_DURATION_S))
+    reqrep_rate = median(runs)
     print(f" {fmt_rate(reqrep_rate)}")
 
     return pushpull_rate, reqrep_rate
@@ -1062,10 +1161,10 @@ def run_proxy(lib_name):
 # ── SVG chart generation ────────────────────────────────────────────
 
 # Colors: warm = pyomq, cool = pyzmq
-C_PYOMQ = "#dc2626"
-C_PYOMQ_ASYNC = "#f97316"
-C_PYZMQ = "#2563eb"
-C_PYZMQ_ASYNC = "#8b5cf6"
+C_PYOMQ = "#ef4444"
+C_PYOMQ_ASYNC = "#fb923c"
+C_PYZMQ = "#60a5fa"
+C_PYZMQ_ASYNC = "#a855f7"
 
 
 def _nice_ceil(v):
@@ -1121,35 +1220,24 @@ def _read_chart_hw():
 
 def _detect_hardware():
     hw_conf = _read_chart_hw()
-    try:
-        cpu = None
-        for line in open("/proc/cpuinfo"):
-            if line.startswith("model name"):
-                cpu = line.split(":", 1)[1].strip()
-                cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
-            postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
-            extras = [e.strip() for e in postfix.split(",")] if postfix else []
-            hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-            if hw_extras:
-                extras.extend(hw_extras.split(","))
-            extras = [e.strip() for e in extras if e.strip()]
-            if extras:
-                label += ", " + ", ".join(extras)
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
+    label = os.environ.get("OMQ_HW_LABEL") or hw_conf.get("label")
+    if label:
+        return label
+    prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
+    postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
+    if prefix and postfix:
+        return f"{prefix}, {postfix}"
+    if prefix:
+        return prefix
+    if postfix:
+        return postfix
     return None
 
 
 def gen_combined_chart(data, path):
     n = len(SIZES)
+    latency_sizes = latency_sizes_from(SIZES)
+    lat_n = len(latency_sizes)
     hw_label = _detect_hardware()
     hw_offset = 14 if hw_label else 0
     svg_w = 850
@@ -1165,6 +1253,7 @@ def gen_combined_chart(data, path):
     t2_h = t2_bot - t2_top
 
     xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    lat_xs = [x_left + i * plot_w / max(lat_n - 1, 1) for i in range(lat_n)]
     mid_x = (x_left + x_right) / 2
 
     sync_omq_tp = data["sync_omq_tp"]
@@ -1194,12 +1283,12 @@ def gen_combined_chart(data, path):
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">'
     )
-    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>')
+    L.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>')
 
     # ── TOP PANEL: THROUGHPUT ──────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>"
     )
@@ -1217,23 +1306,23 @@ def gen_combined_chart(data, path):
         yy = t1_bot - frac * t1_h
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151"'
+            f' dominant-baseline="middle" fill="#e5e7eb"'
             f' font-size="10">{_fmt_y_rate(msg_val)}</text>'
         )
         L.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280"'
+            f' dominant-baseline="middle" fill="#9ca3af"'
             f' font-size="10">{_fmt_mbps(mbps_val)}</text>'
         )
 
     for x in xs:
         L.append(
             f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     L.append(
@@ -1252,7 +1341,7 @@ def gen_combined_chart(data, path):
     t1_mid = (t1_top + t1_bot) / 2
     L.append(
         f'  <text x="40" y="{t1_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
     )
 
@@ -1281,19 +1370,19 @@ def gen_combined_chart(data, path):
             yy = y_mbps(v)
             L.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
     for i in range(n):
         L.append(
             f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(SIZES[i])}</text>'
         )
 
     # ── BOTTOM PANEL: LATENCY ─────────────────────────────────────
 
     L.append(
-        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
     )
@@ -1307,18 +1396,18 @@ def gen_combined_chart(data, path):
         yy = y_lat(v)
         L.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         L.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{_fmt_y_us(v)}</text>"
         )
 
-    for x in xs:
+    for x in lat_xs:
         L.append(
             f'  <line x1="{x:.1f}" y1="{t2_top}" x2="{x:.1f}" y2="{t2_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     L.append(
@@ -1333,7 +1422,7 @@ def gen_combined_chart(data, path):
     t2_mid = (t2_top + t2_bot) / 2
     L.append(
         f'  <text x="40" y="{t2_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t2_mid:.0f})">p50 latency (µs)</text>'
     )
 
@@ -1345,7 +1434,7 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in lat_series:
-        pts = " ".join(f"{xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
+        pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
         L.append(
             f'  <polyline points="{pts}" fill="none" stroke="{color}"'
             f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
@@ -1353,14 +1442,14 @@ def gen_combined_chart(data, path):
         for i, v in enumerate(vals):
             yy = y_lat(v)
             L.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
-    for i in range(n):
+    for i in range(lat_n):
         L.append(
-            f'  <text x="{xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+            f'  <text x="{lat_xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(latency_sizes[i])}</text>'
         )
 
     # ── LEGEND ────────────────────────────────────────────────────
@@ -1384,7 +1473,7 @@ def gen_combined_chart(data, path):
         )
         L.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{color}"/>')
         L.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#e5e7eb"'
             f' font-size="11" font-weight="500">{label}</text>'
         )
 
@@ -1486,8 +1575,21 @@ def main():
         type=float,
         help="target throughput runtime per round in seconds",
     )
-    parser.add_argument("--latency-warmup", type=int, help="REQ/REP warmup iterations")
-    parser.add_argument("--latency-iters", type=int, help="REQ/REP measured iterations")
+    parser.add_argument(
+        "--warmup-duration",
+        type=float,
+        help="PUSH/PULL throughput warmup duration per round in seconds",
+    )
+    parser.add_argument(
+        "--latency-warmup-duration",
+        type=float,
+        help="REQ/REP latency warmup duration in seconds",
+    )
+    parser.add_argument(
+        "--latency-duration",
+        type=float,
+        help="REQ/REP latency measurement duration in seconds",
+    )
     parser.add_argument(
         "--timeout", type=float, help="subprocess timeout per attempt in seconds"
     )
@@ -1522,8 +1624,9 @@ def main():
             args.sizes,
             args.rounds,
             args.target_runtime,
-            args.latency_warmup,
-            args.latency_iters,
+            args.warmup_duration,
+            args.latency_warmup_duration,
+            args.latency_duration,
             args.timeout,
             args.proxy_duration,
         )
@@ -1551,8 +1654,9 @@ def main():
             args.sizes,
             args.rounds,
             args.target_runtime,
-            args.latency_warmup,
-            args.latency_iters,
+            args.warmup_duration,
+            args.latency_warmup_duration,
+            args.latency_duration,
             args.timeout,
             args.proxy_duration,
         )

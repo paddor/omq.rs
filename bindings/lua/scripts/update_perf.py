@@ -33,6 +33,7 @@ CHART_DIR = ROOT / "doc" / "charts"
 CHART = CHART_DIR / "bindings.svg"
 DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
+LATENCY_MAX_SIZE = 4096
 DEFAULT_IMPLS = ["omq.lua", "lzmq"]
 DEFAULT_LATENCY_IMPLS = ["omq.lua", "lzmq"]
 IMPL_LABELS = {
@@ -40,8 +41,8 @@ IMPL_LABELS = {
     "lzmq": "lzmq",
 }
 COLORS = {
-    "omq.lua": "#dc2626",
-    "lzmq": "#2563eb",
+    "omq.lua": "#ef4444",
+    "lzmq": "#60a5fa",
 }
 _LUAROCKS_ENV = None
 
@@ -73,6 +74,10 @@ def parse_csv_ints(value):
 
 def parse_csv_strings(value):
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def latency_sizes_from(sizes):
+    return [size for size in sizes if size <= LATENCY_MAX_SIZE]
 
 
 def luarocks_env():
@@ -310,7 +315,7 @@ def run_pair_once(
     receiver_role,
     sender_role,
     size,
-    messages,
+    duration,
     warmup,
     timeout,
     profile,
@@ -318,7 +323,7 @@ def run_pair_once(
     endpoint = free_endpoint()
     env = lua_env(profile)
     receiver = subprocess.Popen(
-        peer_cmd(lua_bin, bench, impl, receiver_role, endpoint, size, messages, warmup),
+        peer_cmd(lua_bin, bench, impl, receiver_role, endpoint, size, duration, warmup),
         cwd=REPO,
         env=env,
         text=True,
@@ -332,7 +337,7 @@ def run_pair_once(
             raise RuntimeError(f"receiver did not become ready:\n{ready or ''}{out}{err}")
 
         sender = subprocess.run(
-            peer_cmd(lua_bin, bench, impl, sender_role, endpoint, size, messages, warmup),
+            peer_cmd(lua_bin, bench, impl, sender_role, endpoint, size, duration, warmup),
             cwd=REPO,
             env=env,
             text=True,
@@ -345,13 +350,15 @@ def run_pair_once(
         if sender.returncode != 0:
             raise RuntimeError(f"sender failed:\n{sender.stdout}{sender.stderr}")
 
+        if bench == "reqrep":
+            out, err = kill(receiver)
+            fail_on_noise("receiver", ready + out, err)
+            return parse_result(sender.stdout)
         out, err = receiver.communicate(timeout=timeout)
         out = ready + out
         fail_on_noise("receiver", out, err)
         if receiver.returncode != 0:
             raise RuntimeError(f"receiver failed:\n{out}{err}")
-        if bench == "reqrep":
-            return parse_result(sender.stdout)
         return parse_result(out)
     except Exception:
         kill(receiver)
@@ -384,10 +391,9 @@ def run_throughput_cell(lua_bin, impl, size, args, profile):
 
 
 def run_latency_cell(lua_bin, impl, size, args, profile):
-    messages = args.latency_iters
-    warmup = args.latency_warmup
     runs = []
     total = args.warmup_rounds + args.rounds
+    timeout = args.timeout + args.latency_warmup_duration + args.latency_duration
     for round_index in range(total):
         row = run_pair_once(
             lua_bin,
@@ -396,16 +402,19 @@ def run_latency_cell(lua_bin, impl, size, args, profile):
             "rep",
             "req",
             size,
-            messages,
-            warmup,
-            args.timeout,
+            f"{args.latency_duration:.6f}",
+            f"{args.latency_warmup_duration:.6f}",
+            timeout,
             profile,
         )
+        row["target_seconds"] = args.latency_duration
+        row["warmup_seconds"] = args.latency_warmup_duration
         if round_index >= args.warmup_rounds:
             runs.append(row)
         print(
             f"  {impl:12s} size={size:6d} round={round_index + 1}/{total} "
-            f"p50 {row['p50_us']:8.1f} us p99 {row['p99_us']:8.1f} us",
+            f"p50 {row['p50_us']:8.1f} us p99 {row['p99_us']:8.1f} us "
+            f"n={row['messages']}",
             flush=True,
         )
     return sorted(runs, key=lambda row: row["p50_us"])[len(runs) // 2]
@@ -444,7 +453,7 @@ def fmt_size(size):
     return f"{size} B"
 
 
-def print_table(rows, sizes, impls, latency_impls):
+def print_table(rows, sizes, latency_sizes, impls, latency_impls):
     by_key = {(row["kind"], row["msg_size"], row["impl"]): row for row in rows}
     print()
     if impls:
@@ -466,7 +475,7 @@ def print_table(rows, sizes, impls, latency_impls):
     if latency_impls:
         print("REQ/REP TCP latency")
         print("size    impl             p50 us    p99 us   vs lzmq")
-        for size in sizes:
+        for size in latency_sizes:
             base = by_key.get(("reqrep_tcp_latency", size, "lzmq"))
             base_p50 = base["p50_us"] if base else 0.0
             for impl in latency_impls:
@@ -481,7 +490,7 @@ def print_table(rows, sizes, impls, latency_impls):
             print()
 
 
-def latest_chart_data(sizes, impls, latency_impls):
+def latest_chart_data(sizes, latency_sizes, impls, latency_impls):
     latest = {}
     for row in load_jsonl():
         kind = normalized_kind(row)
@@ -502,7 +511,7 @@ def latest_chart_data(sizes, impls, latency_impls):
     latency = {
         impl: [
             latest.get(("reqrep_tcp_latency", impl, size), {}).get("p50_us", 0.0)
-            for size in sizes
+            for size in latency_sizes
         ]
         for impl in latency_impls
     }
@@ -562,38 +571,29 @@ def read_chart_hw():
 
 def detect_hardware():
     config = read_chart_hw()
-    try:
-        cpu = None
-        with open("/proc/cpuinfo") as file:
-            for line in file:
-                if line.startswith("model name"):
-                    cpu = line.split(":", 1)[1].strip()
-                    cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                    break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            prefix = os.environ.get("OMQ_HW_PREFIX") or config.get("prefix")
-            postfix = os.environ.get("OMQ_HW_POSTFIX") or config.get("postfix")
-            extras = [part.strip() for part in postfix.split(",")] if postfix else []
-            env_extras = os.environ.get("OMQ_HW_EXTRAS")
-            if env_extras:
-                extras.extend(env_extras.split(","))
-            extras = [part for part in extras if part]
-            if extras:
-                label += ", " + ", ".join(extras)
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
+    label = os.environ.get("OMQ_HW_LABEL") or config.get("label")
+    if label:
+        return label
+    prefix = os.environ.get("OMQ_HW_PREFIX") or config.get("prefix")
+    postfix = os.environ.get("OMQ_HW_POSTFIX") or config.get("postfix")
+    if prefix and postfix:
+        return f"{prefix}, {postfix}"
+    if prefix:
+        return prefix
+    if postfix:
+        return postfix
     return None
 
 
 def chart_selection(args, sizes):
     if args.latency_only or args.throughput_only:
-        return DEFAULT_SIZES, DEFAULT_IMPLS, DEFAULT_LATENCY_IMPLS
-    return sizes, args.impls, args.latency_impls
+        return (
+            DEFAULT_SIZES,
+            latency_sizes_from(DEFAULT_SIZES),
+            DEFAULT_IMPLS,
+            DEFAULT_LATENCY_IMPLS,
+        )
+    return sizes, latency_sizes_from(sizes), args.impls, args.latency_impls
 
 
 def svg_line(points, color, dashed=False):
@@ -608,7 +608,7 @@ def visible_impls(data, key, impls):
     return [impl for impl in impls if any(data[key].get(impl, []))]
 
 
-def gen_chart(data, path, sizes, impls, latency_impls):
+def gen_chart(data, path, sizes, latency_sizes, impls, latency_impls):
     impls = visible_impls(data, "throughput", impls)
     latency_impls = visible_impls(data, "latency", latency_impls)
     hw_label = detect_hardware()
@@ -626,6 +626,10 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     t2_h = t2_bot - t2_top
     mid_x = (x_left + x_right) / 2
     xs = [x_left + i * plot_w / max(len(sizes) - 1, 1) for i in range(len(sizes))]
+    lat_xs = [
+        x_left + i * plot_w / max(len(latency_sizes) - 1, 1)
+        for i in range(len(latency_sizes))
+    ]
 
     all_rates = [rate for values in data["throughput"].values() for rate in values]
     all_mbps = [
@@ -650,8 +654,8 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">',
-        f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>',
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>',
+        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>",
     ]
@@ -666,23 +670,23 @@ def gen_chart(data, path, sizes, impls, latency_impls):
         yy = t1_bot - frac * t1_h
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{fmt_y_rate(msg_max * frac)}</text>"
         )
         lines.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
+            f' dominant-baseline="middle" fill="#9ca3af" font-size="10">'
             f"{fmt_y_mbps(mbps_max * frac)}</text>"
         )
 
     for x in xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
     lines.extend(
         [
@@ -697,7 +701,7 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     t1_mid = (t1_top + t1_bot) / 2
     lines.append(
         f'  <text x="40" y="{t1_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
     )
 
@@ -713,13 +717,13 @@ def gen_chart(data, path, sizes, impls, latency_impls):
         for i, value in enumerate(mbps):
             lines.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{y_mbps(value):.1f}" r="3"'
-                f' fill="{COLORS[impl]}" stroke="white" stroke-width="1"/>'
+                f' fill="{COLORS[impl]}" stroke="#000000" stroke-width="1"/>'
             )
 
     for i, size in enumerate(sizes):
         lines.append(
             f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(size)}</text>'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
 
     add_legend(lines, [(IMPL_LABELS[impl], COLORS[impl]) for impl in impls], mid_x, t1_leg_y)
@@ -730,7 +734,7 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     )
 
     lines.append(
-        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"REQ/REP latency: 2-process, TCP loopback, p50 us (lower is better)</text>"
     )
@@ -740,17 +744,17 @@ def gen_chart(data, path, sizes, impls, latency_impls):
         yy = y_lat(value)
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{fmt_y_us(value)}</text>"
         )
-    for x in xs:
+    for x in lat_xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t2_top}" x2="{x:.1f}" y2="{t2_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
     lines.extend(
         [
@@ -763,22 +767,24 @@ def gen_chart(data, path, sizes, impls, latency_impls):
     t2_mid = (t2_top + t2_bot) / 2
     lines.append(
         f'  <text x="40" y="{t2_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{t2_mid:.0f})">p50 latency (us)</text>'
     )
     for impl in latency_impls:
         values = data["latency"].get(impl, [])
-        points = " ".join(f"{xs[i]:.1f},{y_lat(value):.1f}" for i, value in enumerate(values))
+        points = " ".join(
+            f"{lat_xs[i]:.1f},{y_lat(value):.1f}" for i, value in enumerate(values)
+        )
         lines.append(svg_line(points, COLORS[impl]))
         for i, value in enumerate(values):
             lines.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{y_lat(value):.1f}" r="3"'
-                f' fill="{COLORS[impl]}" stroke="white" stroke-width="1"/>'
+                f'  <circle cx="{lat_xs[i]:.1f}" cy="{y_lat(value):.1f}" r="3"'
+                f' fill="{COLORS[impl]}" stroke="#000000" stroke-width="1"/>'
             )
-    for i, size in enumerate(sizes):
+    for i, size in enumerate(latency_sizes):
         lines.append(
-            f'  <text x="{xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(size)}</text>'
+            f'  <text x="{lat_xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
 
     add_legend(
@@ -812,7 +818,7 @@ def add_legend(lines, legend_items, mid_x, leg_y):
         )
         lines.append(f'  <circle cx="{lx + 7:.0f}" cy="{leg_y}" r="2.5" fill="{color}"/>')
         lines.append(
-            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#374151"'
+            f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#e5e7eb"'
             f' font-size="11" font-weight="500">{html.escape(label)}</text>'
         )
         lx += item_widths[index] + item_gap
@@ -825,11 +831,11 @@ def main():
     parser.add_argument("--impls", type=parse_csv_strings, default=DEFAULT_IMPLS)
     parser.add_argument("--latency-impls", type=parse_csv_strings, default=DEFAULT_LATENCY_IMPLS)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--warmup-rounds", type=int, default=1)
-    parser.add_argument("--duration", type=float, default=3.0)
+    parser.add_argument("--warmup-rounds", type=int, default=0)
+    parser.add_argument("--duration", type=float, default=2.5)
     parser.add_argument("--warmup-duration", type=float, default=0.5)
-    parser.add_argument("--latency-iters", type=int, default=10_000)
-    parser.add_argument("--latency-warmup", type=int, default=1_000)
+    parser.add_argument("--latency-duration", type=float, default=1.5)
+    parser.add_argument("--latency-warmup-duration", type=float)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--lua", default=os.environ.get("OMQ_LUA", "/usr/bin/lua"))
     parser.add_argument("--no-build", action="store_true")
@@ -848,10 +854,11 @@ def main():
     if args.quick:
         args.rounds = min(args.rounds, 1)
         args.warmup_rounds = 0
-        args.duration = min(args.duration, 1.5)
-        args.warmup_duration = min(args.warmup_duration, 0.2)
-        args.latency_iters = min(args.latency_iters, 1_000)
-        args.latency_warmup = min(args.latency_warmup, 100)
+        args.duration = min(args.duration, 0.5)
+        args.latency_duration = min(args.latency_duration, 0.5)
+        args.warmup_duration = min(args.warmup_duration, 0.1)
+    if args.latency_warmup_duration is None:
+        args.latency_warmup_duration = args.warmup_duration
     if args.rounds < 1:
         parser.error("--rounds must be at least 1")
     if args.warmup_rounds < 0:
@@ -860,18 +867,21 @@ def main():
         parser.error("--duration must be positive")
     if args.warmup_duration < 0:
         parser.error("--warmup-duration cannot be negative")
-    if args.latency_iters < 1 or args.latency_warmup < 0:
-        parser.error("invalid latency iteration counts")
+    if args.latency_duration <= 0:
+        parser.error("--latency-duration must be positive")
+    if args.latency_warmup_duration < 0:
+        parser.error("--latency-warmup-duration cannot be negative")
     for impl in args.impls:
         if impl not in IMPL_LABELS:
             parser.error(f"unknown throughput impl: {impl}")
     for impl in args.latency_impls:
         if impl not in IMPL_LABELS:
             parser.error(f"unknown latency impl: {impl}")
+    latency_sizes = latency_sizes_from(sizes)
 
     if args.chart_only:
-        data = latest_chart_data(sizes, args.impls, args.latency_impls)
-        gen_chart(data, CHART, sizes, args.impls, args.latency_impls)
+        data = latest_chart_data(sizes, latency_sizes, args.impls, args.latency_impls)
+        gen_chart(data, CHART, sizes, latency_sizes, args.impls, args.latency_impls)
         return
 
     if shutil.which(args.lua) is None and not Path(args.lua).exists():
@@ -912,7 +922,7 @@ def main():
                 rows.append(row)
     if latency_impls:
         print("REQ/REP TCP latency")
-        for size in sizes:
+        for size in latency_sizes:
             for impl in latency_impls:
                 row = run_latency_cell(args.lua, impl, size, args, profile)
                 row["run_id"] = run_id
@@ -925,12 +935,23 @@ def main():
     if not args.no_save:
         append_jsonl(rows)
         print(f"appended {len(rows)} rows to {JSONL}")
-    print_table(rows, sizes, throughput_impls, latency_impls)
+    print_table(rows, sizes, latency_sizes, throughput_impls, latency_impls)
 
     if not args.no_chart and not args.no_save:
-        chart_sizes, chart_impls, chart_latency_impls = chart_selection(args, sizes)
-        data = latest_chart_data(chart_sizes, chart_impls, chart_latency_impls)
-        gen_chart(data, CHART, chart_sizes, chart_impls, chart_latency_impls)
+        chart_sizes, chart_latency_sizes, chart_impls, chart_latency_impls = chart_selection(
+            args, sizes
+        )
+        data = latest_chart_data(
+            chart_sizes, chart_latency_sizes, chart_impls, chart_latency_impls
+        )
+        gen_chart(
+            data,
+            CHART,
+            chart_sizes,
+            chart_latency_sizes,
+            chart_impls,
+            chart_latency_impls,
+        )
 
 
 if __name__ == "__main__":

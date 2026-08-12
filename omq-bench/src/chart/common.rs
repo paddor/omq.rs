@@ -166,36 +166,30 @@ pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
 pub(crate) fn detect_hardware() -> Option<String> {
     let hw_conf = read_chart_hw();
 
-    let model = std::fs::read_to_string("/proc/cpuinfo")
-        .ok()?
-        .lines()
-        .find(|l| l.starts_with("model name"))?
-        .split(':')
-        .nth(1)?
-        .trim()
-        .to_string();
-    let cores = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
-    if cores == 0 {
-        return None;
+    if let Ok(label) = std::env::var("OMQ_HW_LABEL")
+        && !label.is_empty()
+    {
+        return Some(label);
     }
-
-    let mut label = format!("{model}, {cores} cores");
+    if let Some(label) = hw_conf.get("label")
+        && !label.is_empty()
+    {
+        return Some(label.clone());
+    }
 
     let postfix = std::env::var("OMQ_HW_POSTFIX")
         .ok()
         .or_else(|| hw_conf.get("postfix").cloned());
-    if let Some(pf) = postfix {
-        label = format!("{label}, {pf}");
-    }
-
     let prefix = std::env::var("OMQ_HW_PREFIX")
         .ok()
         .or_else(|| hw_conf.get("prefix").cloned());
-    if let Some(p) = prefix {
-        label = format!("{p}, {label}");
-    }
 
-    Some(label)
+    match (prefix, postfix) {
+        (Some(prefix), Some(postfix)) => Some(format!("{prefix}, {postfix}")),
+        (Some(prefix), None) => Some(prefix),
+        (None, Some(postfix)) => Some(postfix),
+        (None, None) => None,
+    }
 }
 
 fn read_chart_hw() -> BTreeMap<String, String> {

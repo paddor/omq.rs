@@ -24,47 +24,47 @@ public final class ReqRepTcpPeer {
         if (args.length != 6) {
             throw new IllegalArgumentException(
                     "usage: <omq|omq-into|jeromq|jeromq-into> "
-                            + "<req|rep> <endpoint> <size> <iterations> <warmup>");
+                            + "<req|rep> <endpoint> <size> <duration_secs> <warmup_secs>");
         }
 
         Impl impl = Impl.parse(args[0]);
         Role role = Role.parse(args[1]);
         String endpoint = args[2];
         int size = Integer.parseInt(args[3]);
-        int iterations = Integer.parseInt(args[4]);
-        int warmup = Integer.parseInt(args[5]);
-        if (size < 0 || iterations <= 0 || warmup < 0) {
-            throw new IllegalArgumentException("invalid size/iterations/warmup");
+        long durationNanos = parsePositiveSeconds(args[4], "duration_secs");
+        long warmupNanos = parseNonNegativeSeconds(args[5], "warmup_secs");
+        if (size < 0) {
+            throw new IllegalArgumentException("invalid size");
         }
 
         if (role == Role.REP) {
-            runRep(impl, endpoint, size, iterations + warmup);
+            runRep(impl, endpoint, size);
         } else {
-            runReq(impl, endpoint, size, iterations, warmup);
+            runReq(impl, endpoint, size, durationNanos, warmupNanos);
         }
     }
 
-    private static void runRep(Impl impl, String endpoint, int size, int exchanges) {
+    private static void runRep(Impl impl, String endpoint, int size) {
         switch (impl) {
-            case OMQ -> runOmqRep(endpoint, size, exchanges, false);
-            case OMQ_INTO -> runOmqRep(endpoint, size, exchanges, true);
-            case JEROMQ -> runJeroRep(endpoint, size, exchanges, false);
-            case JEROMQ_INTO -> runJeroRep(endpoint, size, exchanges, true);
+            case OMQ -> runOmqRep(endpoint, size, false);
+            case OMQ_INTO -> runOmqRep(endpoint, size, true);
+            case JEROMQ -> runJeroRep(endpoint, size, false);
+            case JEROMQ_INTO -> runJeroRep(endpoint, size, true);
         }
     }
 
     private static void runReq(
-            Impl impl, String endpoint, int size, int iterations, int warmup) {
+            Impl impl, String endpoint, int size, long durationNanos, long warmupNanos) {
         switch (impl) {
-            case OMQ -> runOmqReq(endpoint, size, iterations, warmup, false);
-            case OMQ_INTO -> runOmqReq(endpoint, size, iterations, warmup, true);
-            case JEROMQ -> runJeroReq(endpoint, size, iterations, warmup, false);
-            case JEROMQ_INTO -> runJeroReq(endpoint, size, iterations, warmup, true);
+            case OMQ -> runOmqReq(endpoint, size, durationNanos, warmupNanos, false);
+            case OMQ_INTO -> runOmqReq(endpoint, size, durationNanos, warmupNanos, true);
+            case JEROMQ -> runJeroReq(endpoint, size, durationNanos, warmupNanos, false);
+            case JEROMQ_INTO -> runJeroReq(endpoint, size, durationNanos, warmupNanos, true);
         }
     }
 
     private static void runOmqRep(
-            String endpoint, int size, int exchanges, boolean receiveInto) {
+            String endpoint, int size, boolean receiveInto) {
         byte[] payload = payload(size);
         try (Context context = OMQ.context();
              Socket rep = context.socket(SocketType.REP)
@@ -76,12 +76,12 @@ public final class ReqRepTcpPeer {
             ready(endpoint);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                for (int i = 0; i < exchanges; i++) {
+                while (true) {
                     receiveOmqInto(rep, buffer, size);
                     rep.send(payload);
                 }
             } else {
-                for (int i = 0; i < exchanges; i++) {
+                while (true) {
                     receiveOmq(rep, size);
                     rep.send(payload);
                 }
@@ -90,7 +90,7 @@ public final class ReqRepTcpPeer {
     }
 
     private static void runOmqReq(
-            String endpoint, int size, int iterations, int warmup, boolean receiveInto) {
+            String endpoint, int size, long durationNanos, long warmupNanos, boolean receiveInto) {
         byte[] payload = payload(size);
         try (Context context = OMQ.context();
              Socket req = context.socket(SocketType.REQ)
@@ -102,37 +102,41 @@ public final class ReqRepTcpPeer {
             req.waitConnected(1, CONNECT_TIMEOUT);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                for (int i = 0; i < warmup; i++) {
+                long warmupDeadline = System.nanoTime() + warmupNanos;
+                while (System.nanoTime() < warmupDeadline) {
                     req.send(payload);
                     receiveOmqInto(req, buffer, size);
                 }
-                long[] rtts = new long[iterations];
-                for (int i = 0; i < iterations; i++) {
+                LongArray rtts = new LongArray();
+                long deadline = System.nanoTime() + durationNanos;
+                do {
                     long started = System.nanoTime();
                     req.send(payload);
                     receiveOmqInto(req, buffer, size);
-                    rtts[i] = System.nanoTime() - started;
-                }
-                result(Impl.OMQ_INTO.name, endpoint, size, iterations, rtts);
+                    rtts.add(System.nanoTime() - started);
+                } while (System.nanoTime() < deadline);
+                result(Impl.OMQ_INTO.name, endpoint, size, rtts.toArray());
             } else {
-                for (int i = 0; i < warmup; i++) {
+                long warmupDeadline = System.nanoTime() + warmupNanos;
+                while (System.nanoTime() < warmupDeadline) {
                     req.send(payload);
                     receiveOmq(req, size);
                 }
-                long[] rtts = new long[iterations];
-                for (int i = 0; i < iterations; i++) {
+                LongArray rtts = new LongArray();
+                long deadline = System.nanoTime() + durationNanos;
+                do {
                     long started = System.nanoTime();
                     req.send(payload);
                     receiveOmq(req, size);
-                    rtts[i] = System.nanoTime() - started;
-                }
-                result(Impl.OMQ.name, endpoint, size, iterations, rtts);
+                    rtts.add(System.nanoTime() - started);
+                } while (System.nanoTime() < deadline);
+                result(Impl.OMQ.name, endpoint, size, rtts.toArray());
             }
         }
     }
 
     private static void runJeroRep(
-            String endpoint, int size, int exchanges, boolean receiveInto) {
+            String endpoint, int size, boolean receiveInto) {
         byte[] payload = payload(size);
         try (org.zeromq.ZContext context = new org.zeromq.ZContext();
              org.zeromq.ZMQ.Socket rep = context.createSocket(org.zeromq.SocketType.REP)) {
@@ -143,12 +147,12 @@ public final class ReqRepTcpPeer {
             ready(endpoint);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                for (int i = 0; i < exchanges; i++) {
+                while (true) {
                     receiveJeroInto(rep, buffer, size);
                     sendJero(rep, payload);
                 }
             } else {
-                for (int i = 0; i < exchanges; i++) {
+                while (true) {
                     receiveJero(rep, size);
                     sendJero(rep, payload);
                 }
@@ -157,7 +161,7 @@ public final class ReqRepTcpPeer {
     }
 
     private static void runJeroReq(
-            String endpoint, int size, int iterations, int warmup, boolean receiveInto) {
+            String endpoint, int size, long durationNanos, long warmupNanos, boolean receiveInto) {
         byte[] payload = payload(size);
         try (org.zeromq.ZContext context = new org.zeromq.ZContext();
              org.zeromq.ZMQ.Socket req = context.createSocket(org.zeromq.SocketType.REQ)) {
@@ -168,31 +172,35 @@ public final class ReqRepTcpPeer {
             sleep(100);
             if (receiveInto) {
                 ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                for (int i = 0; i < warmup; i++) {
+                long warmupDeadline = System.nanoTime() + warmupNanos;
+                while (System.nanoTime() < warmupDeadline) {
                     sendJero(req, payload);
                     receiveJeroInto(req, buffer, size);
                 }
-                long[] rtts = new long[iterations];
-                for (int i = 0; i < iterations; i++) {
+                LongArray rtts = new LongArray();
+                long deadline = System.nanoTime() + durationNanos;
+                do {
                     long started = System.nanoTime();
                     sendJero(req, payload);
                     receiveJeroInto(req, buffer, size);
-                    rtts[i] = System.nanoTime() - started;
-                }
-                result(Impl.JEROMQ_INTO.name, endpoint, size, iterations, rtts);
+                    rtts.add(System.nanoTime() - started);
+                } while (System.nanoTime() < deadline);
+                result(Impl.JEROMQ_INTO.name, endpoint, size, rtts.toArray());
             } else {
-                for (int i = 0; i < warmup; i++) {
+                long warmupDeadline = System.nanoTime() + warmupNanos;
+                while (System.nanoTime() < warmupDeadline) {
                     sendJero(req, payload);
                     receiveJero(req, size);
                 }
-                long[] rtts = new long[iterations];
-                for (int i = 0; i < iterations; i++) {
+                LongArray rtts = new LongArray();
+                long deadline = System.nanoTime() + durationNanos;
+                do {
                     long started = System.nanoTime();
                     sendJero(req, payload);
                     receiveJero(req, size);
-                    rtts[i] = System.nanoTime() - started;
-                }
-                result(Impl.JEROMQ.name, endpoint, size, iterations, rtts);
+                    rtts.add(System.nanoTime() - started);
+                } while (System.nanoTime() < deadline);
+                result(Impl.JEROMQ.name, endpoint, size, rtts.toArray());
             }
         }
     }
@@ -248,8 +256,9 @@ public final class ReqRepTcpPeer {
     }
 
     private static void result(
-            String impl, String endpoint, int size, int iterations, long[] rtts) {
+            String impl, String endpoint, int size, long[] rtts) {
         Arrays.sort(rtts);
+        int iterations = rtts.length;
         double p50 = rtts[iterations * 50 / 100] / 1_000.0;
         double p99 = rtts[Math.min(iterations - 1, iterations * 99 / 100)] / 1_000.0;
         System.out.printf(
@@ -258,6 +267,22 @@ public final class ReqRepTcpPeer {
                         + "\"iterations\":%d,\"p50_us\":%.3f,\"p99_us\":%.3f}%n",
                 impl, endpoint, size, iterations, p50, p99);
         System.out.flush();
+    }
+
+    private static long parsePositiveSeconds(String value, String name) {
+        long nanos = parseNonNegativeSeconds(value, name);
+        if (nanos <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return nanos;
+    }
+
+    private static long parseNonNegativeSeconds(String value, String name) {
+        double seconds = Double.parseDouble(value);
+        if (seconds < 0.0) {
+            throw new IllegalArgumentException(name + " must be non-negative");
+        }
+        return (long) (seconds * 1_000_000_000.0);
     }
 
     private static void sleep(long millis) {
@@ -301,6 +326,23 @@ public final class ReqRepTcpPeer {
                 case "rep" -> REP;
                 default -> throw new IllegalArgumentException("unknown role: " + value);
             };
+        }
+    }
+
+    private static final class LongArray {
+        private long[] values = new long[16_384];
+        private int len;
+
+        void add(long value) {
+            if (len == values.length) {
+                values = Arrays.copyOf(values, values.length * 2);
+            }
+            values[len] = value;
+            len++;
+        }
+
+        long[] toArray() {
+            return Arrays.copyOf(values, len);
         }
     }
 }

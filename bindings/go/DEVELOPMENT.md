@@ -128,8 +128,8 @@ binary. Do not set `OMQ_GO_BENCH_PEER` manually.
 
 ## Performance Chart
 
-The chart script runs two-process TCP PUSH/PULL throughput over fixed time
-windows and REQ/REP latency over fixed iteration counts, then appends rows to:
+The chart script runs two-process TCP PUSH/PULL throughput and REQ/REP latency
+over fixed time windows, then appends rows to:
 
 ```text
 ~/.cache/omq.go/bindings.jsonl
@@ -153,9 +153,10 @@ Full default run:
 bindings/go/scripts/update_perf.py
 ```
 
-Default throughput window is 3 seconds per size, implementation, and measured
-round, after a 0.5 second receiver warmup window. `--quick` uses 1.5 seconds
-and 0.2 seconds.
+Defaults are 3 measured rounds per size and implementation. Throughput uses
+2.5 second windows; latency uses 1.5 second windows and only measures sizes up
+to 4 KiB. Each round uses a 0.5 second warmup window, and the median round is
+kept. `--quick` uses one 0.5 second measured round and 0.1 second warmup.
 
 Default sizes are:
 
@@ -189,7 +190,8 @@ Useful chart script flags:
 - `--warmup-rounds N`
 - `--duration SECONDS`
 - `--warmup-duration SECONDS`
-- `--latency-iters N`
+- `--latency-duration SECONDS`
+- `--latency-warmup-duration SECONDS`
 - `--no-save`
 - `--no-chart`
 - `--no-build`

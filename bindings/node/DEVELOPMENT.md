@@ -63,11 +63,17 @@ OMQ_NODE_BENCH_QUICK=1 npm run bench
 OMQ_NODE_BENCH_IMPLS=omq-node npm run bench
 OMQ_NODE_BENCH_IMPLS=zeromq.js npm run bench
 OMQ_NODE_BENCH_SIZES=8,64,1k,32k npm run bench
-OMQ_NODE_BENCH_THROUGHPUT_DURATION_SECS=3 npm run bench
-OMQ_NODE_BENCH_WARMUP_DURATION_SECS=1 npm run bench
-OMQ_NODE_BENCH_LATENCY_MESSAGES=100000 npm run bench
+OMQ_NODE_BENCH_ROUNDS=1 npm run bench
+OMQ_NODE_BENCH_THROUGHPUT_DURATION_SECS=2.5 npm run bench
+OMQ_NODE_BENCH_WARMUP_DURATION_SECS=0.5 npm run bench
+OMQ_NODE_BENCH_LATENCY_DURATION_SECS=1.5 npm run bench
 OMQ_NODE_BENCH_NO_CHART=1 npm run bench
 ```
+
+Defaults are 3 measured rounds per implementation and size. Throughput keeps
+the median msg/s round over 2.5 second windows. Latency keeps the median p50
+round over 1.5 second windows and only measures sizes up to 4 KiB. Each round
+uses a 0.5 second warmup window.
 
 Do not run benchmarks or profilers in parallel with other CPU-heavy work.
 
@@ -85,11 +91,10 @@ Chart output:
 bindings/node/doc/charts/bindings.svg
 ```
 
-Hardware subtitle comes from the repo-root `.chart_hw` when present:
+Hardware subtitle comes from the repo-root `.chart_hw`:
 
 ```text
-prefix=Ryzen 9 9950X
-postfix=turbo off, performance governor
+label=Ryzen 9 9950X, 16 cores, turbo off, performance governor
 ```
 
 `.chart_hw` is local-only and gitignored.

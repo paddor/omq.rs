@@ -34,6 +34,7 @@ CHART = CHART_DIR / "bindings.svg"
 DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
 LATENCY_MAX_SIZE = 4096
+THROUGHPUT_MSG_MAX = 6_000_000
 DEFAULT_IMPLS = ["omq.lua", "lzmq"]
 DEFAULT_LATENCY_IMPLS = ["omq.lua", "lzmq"]
 IMPL_LABELS = {
@@ -637,7 +638,7 @@ def gen_chart(data, path, sizes, latency_sizes, impls, latency_impls):
         for values in data["throughput"].values()
         for index, rate in enumerate(values)
     ]
-    msg_max = max(5_000_000, nice_ceil(max(all_rates or [0]) * 1.05))
+    msg_max = THROUGHPUT_MSG_MAX
     mbps_max = max(5_000, nice_ceil(max(all_mbps or [0]) * 1.05))
     lat_values = [v for values in data["latency"].values() for v in values]
     lat_max = max(200, nice_ceil(max(lat_values or [0]) * 1.05))

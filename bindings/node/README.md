@@ -11,7 +11,7 @@ This package is for Node main/server processes. Browser code should use
 `@zeromq/omq`.
 
 <p align="center">
-  <img src="doc/charts/bindings.svg" alt="@zeromq/omq-node sync API vs zeromq.js TCP throughput and latency" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/node/doc/charts/bindings.svg" alt="@zeromq/omq-node sync API vs zeromq.js TCP throughput and latency" width="850">
 </p>
 
 2-process loopback PUSH/PULL throughput and REQ/REP p50 latency: per-message

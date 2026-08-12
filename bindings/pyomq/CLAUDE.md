@@ -46,6 +46,10 @@ python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 
 Results in `~/.cache/omq/bindings.jsonl` (latest `run_id` per impl wins).
 Regenerates `doc/charts/bindings.svg` and the proxy table in `README.md`.
+Defaults are 3 measured rounds per size and implementation. Throughput uses
+2.5 second windows; latency uses 1.5 second windows and only measures sizes up
+to 4 KiB. Each round uses a 0.5 second warmup window, and the median round is
+kept. `--quick` uses one 0.5 second measured round and 0.1 second warmup.
 
 The proxy PUSH/PULL benchmark uses a native omq-tokio client
 (`omq_bench_proxy_client`) to saturate the proxy without Python

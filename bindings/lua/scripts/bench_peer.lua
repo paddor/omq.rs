@@ -61,7 +61,8 @@ local function print_throughput(result_impl, messages, started, ended)
   }, { "impl", "endpoint", "msg_size", "messages", "seconds", "msgs_s", "gb_s" })
 end
 
-local function print_latency(result_impl, messages, samples)
+local function print_latency(result_impl, samples)
+  local messages = #samples
   table.sort(samples)
   local p50_index = math.min(messages, math.floor(messages * 50 / 100) + 1)
   local p99_index = math.min(messages, math.floor(messages * 99 / 100) + 1)
@@ -210,12 +211,12 @@ local function run_lzmq_push()
   end
 end
 
-local function run_omq_rep(count)
+local function run_omq_rep()
   local ctx, rep = open_omq_socket("rep", false)
   rep:bind(endpoint)
   print("READY " .. endpoint)
   io.stdout:flush()
-  for _ = 1, count do
+  while true do
     local msg = rep:recv(size)
     if #msg ~= size then
       die("bad message size")
@@ -226,12 +227,13 @@ local function run_omq_rep(count)
   ctx:term()
 end
 
-local function run_omq_req(messages, warmup_messages)
+local function run_omq_req(duration, warmup_seconds)
   local ctx, req = open_omq_socket("req", true)
   req:set_recv_timeout(timeout_ms)
   req:connect(endpoint)
   local msg = payload(size)
-  for _ = 1, warmup_messages do
+  local warmup_deadline = clock() + warmup_seconds
+  while clock() < warmup_deadline do
     req:send(msg)
     local reply = req:recv(size)
     if #reply ~= size then
@@ -239,26 +241,27 @@ local function run_omq_req(messages, warmup_messages)
     end
   end
   local samples = {}
-  for i = 1, messages do
+  local deadline = clock() + duration
+  repeat
     local started = clock()
     req:send(msg)
     local reply = req:recv(size)
     if #reply ~= size then
       die("bad reply size")
     end
-    samples[i] = (clock() - started) * 1000000.0
-  end
-  print_latency("omq.lua", messages, samples)
+    samples[#samples + 1] = (clock() - started) * 1000000.0
+  until clock() >= deadline
+  print_latency("omq.lua", samples)
   req:close()
   ctx:term()
 end
 
-local function run_lzmq_rep(count)
+local function run_lzmq_rep()
   local ctx, rep = open_lzmq_socket(require("lzmq").REP, false)
   checked(rep:bind(endpoint))
   print("READY " .. endpoint)
   io.stdout:flush()
-  for _ = 1, count do
+  while true do
     local msg = checked(rep:recv())
     if #msg ~= size then
       die("bad message size")
@@ -269,12 +272,13 @@ local function run_lzmq_rep(count)
   checked(ctx:term())
 end
 
-local function run_lzmq_req(messages, warmup_messages)
+local function run_lzmq_req(duration, warmup_seconds)
   local ctx, req = open_lzmq_socket(require("lzmq").REQ, true)
   checked(req:set_rcvtimeo(timeout_ms))
   checked(req:connect(endpoint))
   local msg = payload(size)
-  for _ = 1, warmup_messages do
+  local warmup_deadline = clock() + warmup_seconds
+  while clock() < warmup_deadline do
     checked(req:send(msg))
     local reply = checked(req:recv())
     if #reply ~= size then
@@ -282,16 +286,17 @@ local function run_lzmq_req(messages, warmup_messages)
     end
   end
   local samples = {}
-  for i = 1, messages do
+  local deadline = clock() + duration
+  repeat
     local started = clock()
     checked(req:send(msg))
     local reply = checked(req:recv())
     if #reply ~= size then
       die("bad reply size")
     end
-    samples[i] = (clock() - started) * 1000000.0
-  end
-  print_latency("lzmq", messages, samples)
+    samples[#samples + 1] = (clock() - started) * 1000000.0
+  until clock() >= deadline
+  print_latency("lzmq", samples)
   checked(req:close(1000))
   checked(ctx:term())
 end
@@ -305,16 +310,16 @@ elseif bench == "pushpull" and impl == "lzmq" and role == "pull" then
 elseif bench == "pushpull" and impl == "lzmq" and role == "push" then
   run_lzmq_push()
 elseif bench == "reqrep" and impl == "omq.lua" and role == "rep" then
-  run_omq_rep(amount + warmup)
+  run_omq_rep()
 elseif bench == "reqrep" and impl == "omq.lua" and role == "req" then
   run_omq_req(amount, warmup)
 elseif bench == "reqrep" and impl == "lzmq" and role == "rep" then
-  run_lzmq_rep(amount + warmup)
+  run_lzmq_rep()
 elseif bench == "reqrep" and impl == "lzmq" and role == "req" then
   run_lzmq_req(amount, warmup)
 else
   die(
     "usage: bench_peer.lua <pushpull|reqrep> <omq.lua|lzmq> "
-      .. "<pull|push|req|rep> <endpoint> <size> <duration|messages> <warmup>"
+      .. "<pull|push|req|rep> <endpoint> <size> <duration> <warmup>"
   )
 end

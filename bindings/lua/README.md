@@ -84,7 +84,7 @@ ctx:term()
 
 ## Performance Chart
 
-![OMQ.lua performance](doc/charts/bindings.svg)
+![OMQ.lua performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/lua/doc/charts/bindings.svg)
 
 Generate a quick local chart:
 

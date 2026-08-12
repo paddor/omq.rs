@@ -97,6 +97,11 @@ Full default run:
 bindings/lua/scripts/update_perf.py
 ```
 
+Defaults are 3 measured rounds per size and implementation. Throughput uses
+2.5 second windows; latency uses 1.5 second windows and only measures sizes up
+to 4 KiB. Each round uses a 0.5 second warmup window, and the median round is
+kept. `--quick` uses one 0.5 second measured round and 0.1 second warmup.
+
 Useful flags:
 
 - `--sizes 16,128,1k,8k,32k`
@@ -105,8 +110,8 @@ Useful flags:
 - `--rounds N`
 - `--duration SECONDS`
 - `--warmup-duration SECONDS`
-- `--latency-iters N`
-- `--latency-warmup N`
+- `--latency-duration SECONDS`
+- `--latency-warmup-duration SECONDS`
 - `--chart-only`
 - `--no-save`
 - `--no-chart`

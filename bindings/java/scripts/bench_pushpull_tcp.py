@@ -20,25 +20,26 @@ PUSHPULL_CLASS = "io.omq.perf.PushPullTcpPeer"
 REQREP_CLASS = "io.omq.perf.ReqRepTcpPeer"
 DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [8, 128, 1024, 4096, 32768]
+LATENCY_MAX_SIZE = 4096
 DEFAULT_IMPLS = ["omq", "omq-into", "jeromq", "jeromq-into"]
-DEFAULT_THROUGHPUT_DURATION = 2.0
+DEFAULT_THROUGHPUT_DURATION = 2.5
 QUICK_THROUGHPUT_DURATION = 0.5
 DEFAULT_THROUGHPUT_WARMUP = 0.5
 QUICK_THROUGHPUT_WARMUP = 0.1
-DEFAULT_LATENCY_WARMUP = 50_000
-DEFAULT_LATENCY_ITERS = 50_000
-QUICK_LATENCY_WARMUP = 5_000
-QUICK_LATENCY_ITERS = 5_000
+DEFAULT_LATENCY_DURATION = 1.5
+QUICK_LATENCY_DURATION = 0.5
+DEFAULT_LATENCY_WARMUP = 0.5
+QUICK_LATENCY_WARMUP = 0.1
 CHART_DIR = ROOT / "doc" / "charts"
 JSONL = (
     Path(os.environ.get("OMQ_JAVA_CACHE_DIR", Path.home() / ".cache" / "omq.java"))
     / "pushpull-tcp.jsonl"
 )
 
-C_OMQ = "#dc2626"
-C_OMQ_INTO = "#f97316"
-C_JEROMQ = "#2563eb"
-C_JEROMQ_INTO = "#8b5cf6"
+C_OMQ = "#ef4444"
+C_OMQ_INTO = "#fb923c"
+C_JEROMQ = "#60a5fa"
+C_JEROMQ_INTO = "#a855f7"
 LATENCY_MIN_US = 20.0
 LATENCY_MAX_US = 120.0
 
@@ -49,6 +50,10 @@ def parse_csv_ints(value):
 
 def parse_csv_strings(value):
     return [part for part in value.split(",") if part]
+
+
+def latency_sizes_from(sizes):
+    return [size for size in sizes if size <= LATENCY_MAX_SIZE]
 
 
 def load_jsonl():
@@ -271,10 +276,10 @@ def run_cell(cp, impl, size, args):
     return sorted(runs, key=lambda row: row["msgs_s"])[len(runs) // 2]
 
 
-def run_latency_cell_once(cp, impl, size, iterations, warmup, timeout):
+def run_latency_cell_once(cp, impl, size, duration, warmup, timeout):
     endpoint = free_endpoint()
     rep = subprocess.Popen(
-        java_cmd(REQREP_CLASS, cp, impl, "rep", endpoint, size, iterations, warmup),
+        java_cmd(REQREP_CLASS, cp, impl, "rep", endpoint, size, duration, warmup),
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -287,7 +292,7 @@ def run_latency_cell_once(cp, impl, size, iterations, warmup, timeout):
             raise RuntimeError(f"REP did not become ready:\n{ready or ''}{out}{err}")
 
         req = subprocess.run(
-            java_cmd(REQREP_CLASS, cp, impl, "req", endpoint, size, iterations, warmup),
+            java_cmd(REQREP_CLASS, cp, impl, "req", endpoint, size, duration, warmup),
             cwd=ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -299,11 +304,8 @@ def run_latency_cell_once(cp, impl, size, iterations, warmup, timeout):
         if req.returncode != 0:
             raise RuntimeError(f"REQ failed:\n{req.stdout}{req.stderr}")
 
-        out, err = rep.communicate(timeout=timeout)
-        out = ready + out
-        fail_on_noise("REP", out, err)
-        if rep.returncode != 0:
-            raise RuntimeError(f"REP failed:\n{out}{err}")
+        out, err = kill(rep)
+        fail_on_noise("REP", ready + out, err)
         return parse_result(req.stdout)
     except Exception:
         kill(rep)
@@ -318,16 +320,18 @@ def run_latency_cell(cp, impl, size, args):
             cp,
             impl,
             size,
-            args.latency_iterations,
-            args.latency_warmup_messages,
-            args.timeout,
+            args.latency_duration,
+            args.latency_warmup_duration,
+            args.timeout + args.latency_warmup_duration + args.latency_duration,
         )
-        result["warmup_messages"] = args.latency_warmup_messages
+        result["target_seconds"] = args.latency_duration
+        result["warmup_seconds"] = args.latency_warmup_duration
         if round_index >= args.warmup_rounds:
             runs.append(result)
         print(
             f"  {impl:8s} size={size:6d} round={round_index + 1}/{total} "
-            f"p50 {result['p50_us']:8.1f} µs p99 {result['p99_us']:8.1f} µs",
+            f"p50 {result['p50_us']:8.1f} µs p99 {result['p99_us']:8.1f} µs "
+            f"n={result['iterations']}",
             flush=True,
         )
     return sorted(runs, key=lambda row: row["p50_us"])[len(runs) // 2]
@@ -361,13 +365,16 @@ def latest_rows(kind, sizes, impls, fallback):
     }
 
 
-def chart_data_from_jsonl(sizes):
+def chart_data_from_jsonl(sizes, latency_sizes):
     return {
         "throughput": latest_rows(
             "pushpull_tcp", sizes, DEFAULT_IMPLS, {"msgs_s": 0.0, "gb_s": 0.0}
         ),
         "latency": latest_rows(
-            "reqrep_tcp_latency", sizes, DEFAULT_IMPLS, {"p50_us": 0.0, "p99_us": 0.0}
+            "reqrep_tcp_latency",
+            latency_sizes,
+            DEFAULT_IMPLS,
+            {"p50_us": 0.0, "p99_us": 0.0},
         ),
     }
 
@@ -438,36 +445,22 @@ def escape_svg(value):
 
 def detect_hardware():
     config = read_chart_hw()
-    try:
-        cpu = None
-        with open("/proc/cpuinfo") as file:
-            for line in file:
-                if line.startswith("model name"):
-                    cpu = line.split(":", 1)[1].strip()
-                    cpu = cpu.replace("(R)", "").replace("(TM)", "").replace("CPU ", "")
-                    break
-        cores = os.cpu_count()
-        if cpu and cores:
-            label = f"{cpu}, {cores} cores"
-            prefix = os.environ.get("OMQ_HW_PREFIX") or config.get("prefix")
-            postfix = os.environ.get("OMQ_HW_POSTFIX") or config.get("postfix")
-            extras = [item.strip() for item in postfix.split(",")] if postfix else []
-            hw_extras = os.environ.get("OMQ_HW_EXTRAS")
-            if hw_extras:
-                extras.extend(hw_extras.split(","))
-            extras = [item for item in (item.strip() for item in extras) if item]
-            if extras:
-                label += ", " + ", ".join(extras)
-            if prefix:
-                label = f"{prefix}, {label}"
-            return label
-    except OSError:
-        pass
+    label = os.environ.get("OMQ_HW_LABEL") or config.get("label")
+    if label:
+        return label
+    prefix = os.environ.get("OMQ_HW_PREFIX") or config.get("prefix")
+    postfix = os.environ.get("OMQ_HW_POSTFIX") or config.get("postfix")
+    if prefix and postfix:
+        return f"{prefix}, {postfix}"
+    if prefix:
+        return prefix
+    if postfix:
+        return postfix
     return None
 
 
-def gen_chart(sizes, path):
-    data = chart_data_from_jsonl(sizes)
+def gen_chart(sizes, latency_sizes, path):
+    data = chart_data_from_jsonl(sizes, latency_sizes)
     throughput = data["throughput"]
     latency = data["latency"]
     series = [
@@ -494,6 +487,10 @@ def gen_chart(sizes, path):
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
     xs = [x_left + i * plot_w / max(len(sizes) - 1, 1) for i in range(len(sizes))]
+    lat_xs = [
+        x_left + i * plot_w / max(len(latency_sizes) - 1, 1)
+        for i in range(len(latency_sizes))
+    ]
 
     def y_msg(value):
         return t1_bot - (value / msg_max) * t1_h
@@ -509,8 +506,8 @@ def gen_chart(sizes, path):
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">',
-        f'  <rect width="{svg_w}" height="{svg_h}" fill="white"/>',
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>',
+        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         "JIT-warmed PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>",
     ]
@@ -527,23 +524,23 @@ def gen_chart(sizes, path):
         gbs_val = gbs_max * frac
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{fmt_y_rate(msg_val)}</text>"
         )
         lines.append(
             f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#6b7280" font-size="10">'
+            f' dominant-baseline="middle" fill="#9ca3af" font-size="10">'
             f"{fmt_y_gbs(gbs_val)}</text>"
         )
 
     for x in xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     lines.extend(
@@ -560,7 +557,7 @@ def gen_chart(sizes, path):
     y_mid = (t1_top + t1_bot) / 2
     lines.append(
         f'  <text x="40" y="{y_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{y_mid:.0f})">msg/s</text>'
     )
 
@@ -587,17 +584,17 @@ def gen_chart(sizes, path):
             yy = y_gbs(row["gb_s"])
             lines.append(
                 f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
     for i, size in enumerate(sizes):
         lines.append(
             f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(size)}</text>'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
 
     lines.append(
-        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#111827"'
+        f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         "JIT-warmed REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
     )
@@ -606,18 +603,18 @@ def gen_chart(sizes, path):
         yy = y_lat(value)
         lines.append(
             f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
         lines.append(
             f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#374151" font-size="10">'
+            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
             f"{fmt_y_us(value)}</text>"
         )
 
-    for x in xs:
+    for x in lat_xs:
         lines.append(
             f'  <line x1="{x:.1f}" y1="{t2_top}" x2="{x:.1f}" y2="{t2_bot}"'
-            f' stroke="#e5e7eb" stroke-width="1"/>'
+            f' stroke="#374151" stroke-width="1"/>'
         )
 
     lines.extend(
@@ -632,14 +629,15 @@ def gen_chart(sizes, path):
     y_mid = (t2_top + t2_bot) / 2
     lines.append(
         f'  <text x="40" y="{y_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#374151" font-size="10" font-weight="600"'
+        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
         f' transform="rotate(-90,40,{y_mid:.0f})">p50 latency (µs)</text>'
     )
 
     for _, color, impl in series:
         rows = latency[impl]
         points = " ".join(
-            f"{xs[i]:.1f},{y_lat(row['p50_us']):.1f}" for i, row in enumerate(rows)
+            f"{lat_xs[i]:.1f},{y_lat(row['p50_us']):.1f}"
+            for i, row in enumerate(rows)
         )
         lines.append(
             f'  <polyline points="{points}" fill="none" stroke="{color}"'
@@ -648,14 +646,14 @@ def gen_chart(sizes, path):
         for i, row in enumerate(rows):
             yy = y_lat(row["p50_us"])
             lines.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
-                f' fill="{color}" stroke="white" stroke-width="1"/>'
+                f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
-    for i, size in enumerate(sizes):
+    for i, size in enumerate(latency_sizes):
         lines.append(
-            f'  <text x="{xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
-            f' fill="#374151" font-size="8.5">{fmt_size(size)}</text>'
+            f'  <text x="{lat_xs[i]:.1f}" y="{t2_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
 
     legend_y = t2_bot + 40
@@ -671,7 +669,7 @@ def gen_chart(sizes, path):
         )
         lines.append(f'  <circle cx="{lx + 7:.0f}" cy="{legend_y}" r="2.5" fill="{color}"/>')
         lines.append(
-            f'  <text x="{lx + 20:.0f}" y="{legend_y + 4}" fill="#374151"'
+            f'  <text x="{lx + 20:.0f}" y="{legend_y + 4}" fill="#e5e7eb"'
             f' font-size="11" font-weight="500">{escape_svg(label)}</text>'
         )
 
@@ -728,7 +726,7 @@ def main():
     parser.add_argument("--sizes", type=parse_csv_ints)
     parser.add_argument("--impls", type=parse_csv_strings, default=DEFAULT_IMPLS)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--warmup-rounds", type=int, default=1)
+    parser.add_argument("--warmup-rounds", type=int, default=0)
     parser.add_argument("--throughput-duration", type=float)
     parser.add_argument(
         "--throughput-warmup",
@@ -737,16 +735,14 @@ def main():
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument(
-        "--latency-warmup",
-        "--latency-warmup-messages",
-        dest="latency_warmup_messages",
-        type=int,
+        "--latency-warmup-duration",
+        dest="latency_warmup_duration",
+        type=float,
     )
     parser.add_argument(
-        "--latency-iters",
-        "--latency-iterations",
-        dest="latency_iterations",
-        type=int,
+        "--latency-duration",
+        dest="latency_duration",
+        type=float,
     )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--no-build", action="store_true")
@@ -760,6 +756,9 @@ def main():
         parser.error("--throughput-only and --latency-only are mutually exclusive")
     if args.chart_only and (args.throughput_only or args.latency_only):
         parser.error("--chart-only cannot be combined with benchmark selection")
+    if args.quick:
+        args.rounds = min(args.rounds, 1)
+        args.warmup_rounds = 0
     if args.rounds < 1:
         parser.error("--rounds must be at least 1")
     if args.warmup_rounds < 0:
@@ -776,21 +775,22 @@ def main():
         parser.error("--throughput-duration must be greater than zero")
     if args.throughput_warmup < 0:
         parser.error("--throughput-warmup cannot be negative")
-    if args.latency_warmup_messages is None:
-        args.latency_warmup_messages = (
+    if args.latency_warmup_duration is None:
+        args.latency_warmup_duration = (
             QUICK_LATENCY_WARMUP if args.quick else DEFAULT_LATENCY_WARMUP
         )
-    if args.latency_iterations is None:
-        args.latency_iterations = QUICK_LATENCY_ITERS if args.quick else DEFAULT_LATENCY_ITERS
-    if args.latency_warmup_messages < 0:
-        parser.error("--latency-warmup cannot be negative")
-    if args.latency_iterations < 1:
-        parser.error("--latency-iters must be at least 1")
+    if args.latency_duration is None:
+        args.latency_duration = QUICK_LATENCY_DURATION if args.quick else DEFAULT_LATENCY_DURATION
+    if args.latency_warmup_duration < 0:
+        parser.error("--latency-warmup-duration cannot be negative")
+    if args.latency_duration <= 0:
+        parser.error("--latency-duration must be greater than zero")
 
     sizes = args.sizes or (QUICK_SIZES if args.quick else DEFAULT_SIZES)
+    latency_sizes = latency_sizes_from(sizes)
     chart_path = CHART_DIR / "pushpull_tcp.svg"
     if args.chart_only:
-        gen_chart(sizes, chart_path)
+        gen_chart(sizes, latency_sizes, chart_path)
         return
 
     build(args)
@@ -813,7 +813,7 @@ def main():
 
     if not args.throughput_only:
         print("\nREQ/REP latency (TCP)...")
-        for size in sizes:
+        for size in latency_sizes:
             for impl in args.impls:
                 row = run_latency_cell(cp, impl, size, args)
                 row["run_id"] = run_id
@@ -825,10 +825,10 @@ def main():
     if throughput_rows:
         print_table(throughput_rows, sizes, args.impls)
     if latency_rows:
-        print_latency_table(latency_rows, sizes, args.impls)
+        print_latency_table(latency_rows, latency_sizes, args.impls)
     print(f"appended {len(rows)} rows to {JSONL}")
     if not args.no_chart:
-        gen_chart(sizes, chart_path)
+        gen_chart(sizes, latency_sizes, chart_path)
 
 
 if __name__ == "__main__":

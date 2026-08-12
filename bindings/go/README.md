@@ -7,7 +7,7 @@ thread(s), matching the normal libzmq architecture. Public socket calls are
 goroutine-safe and context-cancelable. Hot loops can bind directly to the
 socket owner goroutine.
 
-![OMQ.go performance](doc/charts/bindings.svg)
+![OMQ.go performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/go/doc/charts/bindings.svg)
 
 ## Build, install, test
 

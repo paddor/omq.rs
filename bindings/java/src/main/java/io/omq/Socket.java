@@ -914,10 +914,13 @@ public final class Socket implements AutoCloseable {
     }
 
     private <T> T withRecvRing(RecvRingAction<T> action) {
+        RecvRing ring;
+        long handle;
         synchronized (state) {
-            long handle = state.handle();
-            return action.apply(state.recvRing, handle);
+            handle = state.handle();
+            ring = state.recvRing;
         }
+        return action.apply(ring, handle);
     }
 
     private boolean drainSendRing(long timeoutMillis) {
@@ -1081,8 +1084,8 @@ public final class Socket implements AutoCloseable {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
                 sendRing.close();
-                recvRing.close();
                 Native.socketClose(handle);
+                recvRing.close();
             }
             owner.remove(this);
         }

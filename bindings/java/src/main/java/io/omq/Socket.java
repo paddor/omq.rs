@@ -1008,17 +1008,18 @@ public final class Socket implements AutoCloseable {
     }
 
     private Message receiveVirtual(long timeoutMillis) {
+        NativeFuture<Message> future;
         synchronized (state) {
             long handle = state.handle();
             Optional<Message> cached = state.recvRing.tryReceiveCachedMessage();
             if (cached.isPresent()) {
                 return cached.orElseThrow();
             }
-            NativeFuture<Message> future = new NativeFuture<>();
+            future = new NativeFuture<>();
             long task = Native.socketRecvAsync(handle, timeoutMillis, future);
             future.setNativeTask(task);
-            return await(future);
         }
+        return await(future);
     }
 
     private static int writeInto(Message message, ByteBuffer destination) {

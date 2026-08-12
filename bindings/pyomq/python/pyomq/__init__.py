@@ -1182,13 +1182,20 @@ class Poller:
     def poll(self, timeout: int | None = None) -> list[tuple[Socket, int]]:
         if not self._sockets:
             return []
+        ready: dict[int, int] = {
+            k: POLLOUT for k, (_, f) in self._sockets.items() if f & POLLOUT
+        }
         pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
         if not pollin_socks:
-            return []
+            return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
         t = None if (timeout is None or timeout < 0) else int(timeout)
+        if ready:
+            t = 0
         ready_ids = _native.wait_any(pollin_socks, t)
+        for rid in ready_ids:
+            ready[rid] = ready.get(rid, 0) | POLLIN
         return [
-            (self._sockets[rid][0], POLLIN) for rid in ready_ids if rid in self._sockets
+            (s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready
         ]
 
 

@@ -171,6 +171,17 @@ async def test_async_underlying():
         sock.close()
 
 
+async def test_async_poller_reports_pollout():
+    ctx = zmq_async.Context()
+    push = ctx.socket(zmq.PUSH)
+    try:
+        poller = zmq_async.Poller()
+        poller.register(push, zmq.POLLOUT)
+        assert await poller.poll(timeout=1000) == [(push, zmq.POLLOUT)]
+    finally:
+        push.close()
+
+
 async def test_async_attr_linger():
     ctx = zmq_async.Context()
     sock = ctx.socket(zmq.PUSH)

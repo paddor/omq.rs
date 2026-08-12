@@ -52,6 +52,19 @@ def test_poll_timeout_empty(tcp_endpoint):
         ctx.term()
 
 
+def test_pollout_ready_immediately():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    try:
+        poller = zmq.Poller()
+        poller.register(push, zmq.POLLOUT)
+        events = poller.poll(timeout=1000)
+        assert events == [(push, zmq.POLLOUT)]
+    finally:
+        push.close()
+        ctx.term()
+
+
 def test_poll_multiple_ready(tcp_endpoint):
     ctx = zmq.Context()
     push1 = ctx.socket(zmq.PUSH)

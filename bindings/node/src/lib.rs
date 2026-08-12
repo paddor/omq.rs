@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use napi::bindgen_prelude::{
-    BufferSlice, Env, FromNapiValue, TypedArrayType, Uint8Array, Uint32Array,
+    AbortSignal, AsyncTask, BufferSlice, Env, FromNapiValue, Task, TypedArrayType, Uint8Array,
+    Uint32Array,
 };
 use napi::{Either, Error as NapiError, Result, Status, sys};
 use napi_derive::napi;
@@ -111,6 +112,35 @@ pub struct NativePackedMessages {
     pub part_offsets: Uint32Array,
     pub part_lengths: Uint32Array,
     pub message_parts: Uint32Array,
+}
+
+pub struct RecvRawTask {
+    socket: omq_tokio::blocking::Socket,
+    cancel: Arc<omq_tokio::blocking::BlockingRecvCancel>,
+}
+
+impl Task for RecvRawTask {
+    type Output = Message;
+    type JsValue = Either<Uint8Array, Vec<Uint8Array>>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.cancel.register_current_thread_once();
+        let mut out = Vec::with_capacity(1);
+        match self
+            .socket
+            .recv_many_registered_cancelable_into(1, &self.cancel, &mut out)
+        {
+            Ok(Some(_)) => out
+                .pop()
+                .ok_or_else(|| napi_error("recv returned no message")),
+            Ok(None) => Err(NapiError::new(Status::Cancelled, "recv aborted")),
+            Err(error) => Err(map_omq_error(error)),
+        }
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        message_to_raw(&env, output)
+    }
 }
 
 #[napi]
@@ -284,6 +314,20 @@ impl NativeSocket {
         })
     }
 
+    #[napi(ts_return_type = "Promise<Uint8Array | Array<Uint8Array>>")]
+    pub fn recv_raw(&self, signal: Option<AbortSignal>) -> Result<AsyncTask<RecvRawTask>> {
+        let socket = self.socket_clone()?;
+        let cancel = Arc::new(omq_tokio::blocking::BlockingRecvCancel::new());
+        if let Some(signal) = signal.as_ref() {
+            let cancel = cancel.clone();
+            signal.on_abort(move || cancel.cancel());
+        }
+        Ok(AsyncTask::with_optional_signal(
+            RecvRawTask { socket, cancel },
+            signal,
+        ))
+    }
+
     #[napi]
     pub fn recv_timeout(&self, env: Env, timeout_ms: u32) -> Result<Option<Vec<Uint8Array>>> {
         self.with_socket_ref(|socket| {
@@ -448,14 +492,21 @@ impl NativeSocket {
         &self,
         f: impl FnOnce(&omq_tokio::blocking::Socket) -> Result<T>,
     ) -> Result<T> {
+        let socket = self.socket_clone()?;
+        f(&socket)
+    }
+
+    fn socket_clone(&self) -> Result<omq_tokio::blocking::Socket> {
         self.check_open()?;
         let guard = self
             .inner
             .socket
             .read()
             .map_err(|_| napi_error("socket lock poisoned"))?;
-        let socket = guard.as_ref().ok_or_else(|| napi_error("socket closed"))?;
-        f(socket)
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi_error("socket closed"))
     }
 
     fn take_socket(&self) -> Result<Option<omq_tokio::blocking::Socket>> {

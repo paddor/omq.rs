@@ -129,7 +129,7 @@ local function recv_omq_for(socket, seconds)
   local deadline = clock() + seconds
   local recv = socket.recv
   while true do
-    local msg = recv(socket)
+    local msg = recv(socket, size)
     if #msg ~= size then
       die("bad message size")
     end

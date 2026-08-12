@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -146,6 +147,7 @@ struct SocketInner {
     // OMQ/libzmq sockets stay single-threaded. Atomic keeps close/drop
     // idempotent without making the socket handle Send or Sync.
     raw: AtomicUsize,
+    recv_scratch: RefCell<Vec<u8>>,
     context_handle: ContextHandle,
 }
 
@@ -159,6 +161,7 @@ impl SocketInner {
     }
 
     fn close(&self) -> LuaResult<()> {
+        self.clear_recv_scratch()?;
         let raw = self.raw.swap(0, Ordering::AcqRel);
         if raw == 0 {
             return Ok(());
@@ -166,6 +169,16 @@ impl SocketInner {
         let rc = omq_zmq::zmq_close(raw as *mut c_void);
         self.context_handle.release()?;
         check_rc(rc)
+    }
+
+    fn clear_recv_scratch(&self) -> LuaResult<()> {
+        let mut scratch = self
+            .recv_scratch
+            .try_borrow_mut()
+            .map_err(|_| LuaError::runtime("socket receive buffer is busy"))?;
+        scratch.clear();
+        scratch.shrink_to_fit();
+        Ok(())
     }
 }
 
@@ -242,6 +255,7 @@ impl NativeContext {
         Ok(NativeSocket {
             inner: Rc::new(SocketInner {
                 raw: AtomicUsize::new(raw as usize),
+                recv_scratch: RefCell::new(Vec::new()),
                 context_handle,
             }),
         })
@@ -468,8 +482,54 @@ impl NativeSocket {
         max_size: Option<usize>,
         flags: i32,
     ) -> LuaResult<Option<LuaString>> {
+        if let Some(max_size) = max_size {
+            return self.recv_lua_string_bounded(lua, max_size, flags);
+        }
         self.recv_lua_frame(lua, max_size, flags)
             .map(|frame| frame.map(|(part, _)| part))
+    }
+
+    fn recv_lua_string_bounded(
+        &self,
+        lua: &Lua,
+        max_size: usize,
+        flags: i32,
+    ) -> LuaResult<Option<LuaString>> {
+        let sock = self.inner.ptr()?;
+        let mut scratch = self
+            .inner
+            .recv_scratch
+            .try_borrow_mut()
+            .map_err(|_| LuaError::runtime("socket receive buffer is busy"))?;
+        let current_capacity = scratch.capacity();
+        if current_capacity < max_size {
+            scratch
+                .try_reserve_exact(max_size - current_capacity)
+                .map_err(|err| {
+                    LuaError::external(format!("receive buffer allocation failed: {err}"))
+                })?;
+        }
+
+        let rc = omq_zmq::zmq_recv(sock, scratch.as_mut_ptr().cast(), max_size, flags);
+        if rc < 0 {
+            if omq_zmq::zmq_errno() == libc::EAGAIN && (flags & ZMQ_DONTWAIT) != 0 {
+                return Ok(None);
+            }
+            return Err(last_error());
+        }
+
+        let len = usize::try_from(rc).map_err(|_| LuaError::runtime("negative receive size"))?;
+        if len > max_size {
+            return Err(LuaError::runtime(format!(
+                "received message exceeded Lua receive limit: size={len} limit={max_size}",
+            )));
+        }
+
+        // SAFETY: zmq_recv initialized exactly len bytes when len <= max_size.
+        let bytes = unsafe { std::slice::from_raw_parts(scratch.as_ptr(), len) };
+        let out = lua.create_string(bytes);
+        scratch.clear();
+        Ok(Some(out?))
     }
 
     fn recv_lua_parts(

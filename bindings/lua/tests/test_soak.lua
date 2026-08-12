@@ -6,7 +6,6 @@ if os.getenv("OMQ_LUA_SOAK") ~= "1" then
 end
 
 local recv_timeout_ms = 200
-local report_interval = 10
 
 local all_scenarios = { "tcp", "inproc", "pubsub", "context-churn" }
 
@@ -20,12 +19,16 @@ local function env_number(name, default)
   return n
 end
 
+local report_interval = math.max(1, env_number("OMQ_LUA_SOAK_REPORT_INTERVAL_SECS", 10))
+
 local resource_limits = {
   warmup_secs = env_number("OMQ_LUA_SOAK_RESOURCE_WARMUP_SECS", 600),
   window_secs = env_number("OMQ_LUA_SOAK_RESOURCE_WINDOW_SECS", 300),
   min_samples = math.max(2, math.floor(env_number("OMQ_LUA_SOAK_RESOURCE_MIN_SAMPLES", 12))),
   max_fd_growth = env_number("OMQ_LUA_SOAK_MAX_FD_GROWTH", 128),
   max_final_fd_growth = env_number("OMQ_LUA_SOAK_MAX_FINAL_FD_GROWTH", 16),
+  max_thread_growth = env_number("OMQ_LUA_SOAK_MAX_THREAD_GROWTH", 128),
+  max_final_thread_growth = env_number("OMQ_LUA_SOAK_MAX_FINAL_THREAD_GROWTH", 16),
   heap_slope_limit_kib_s = env_number("OMQ_LUA_SOAK_HEAP_SLOPE_LIMIT_KIB_S", 512),
   rss_slope_limit_kib_s = env_number("OMQ_LUA_SOAK_RSS_SLOPE_LIMIT_KIB_S", 1024),
   fd_slope_limit_per_s = env_number("OMQ_LUA_SOAK_FD_SLOPE_LIMIT_PER_SEC", 0.05),
@@ -35,6 +38,11 @@ local resource_limits = {
   heap_residual_floor_kib = env_number("OMQ_LUA_SOAK_HEAP_RESIDUAL_FLOOR_MB", 8) * 1024,
   rss_tail_growth_percent = env_number("OMQ_LUA_SOAK_RSS_TAIL_GROWTH_PERCENT", 25),
   rss_tail_growth_min_kib = env_number("OMQ_LUA_SOAK_RSS_TAIL_GROWTH_MIN_MB", 128) * 1024,
+}
+
+local progress_limits = {
+  grace_secs = env_number("OMQ_LUA_SOAK_PROGRESS_GRACE_SECS", 30),
+  stall_secs = env_number("OMQ_LUA_SOAK_PROGRESS_STALL_SECS", 60),
 }
 
 local function split_csv(value)
@@ -106,6 +114,76 @@ local counters = {
   contexts = 0,
 }
 
+local function counter_value(name)
+  if name == "tcp" then
+    return counters.tcp
+  end
+  if name == "inproc" then
+    return counters.inproc
+  end
+  if name == "pubsub" then
+    return counters.pubsub
+  end
+  if name == "context-churn" then
+    return counters.contexts
+  end
+  error("unknown soak scenario: " .. tostring(name), 2)
+end
+
+local function scenario_list(selected)
+  local out = {}
+  for _, name in ipairs(all_scenarios) do
+    if selected[name] then
+      table.insert(out, name)
+    end
+  end
+  return table.concat(out, ",")
+end
+
+local function progress_tracker(selected)
+  local tracker = {}
+  for _, name in ipairs(all_scenarios) do
+    if selected[name] then
+      tracker[name] = {
+        last = counter_value(name),
+        last_change = 0,
+      }
+    end
+  end
+  return tracker
+end
+
+local function assert_progress_active(selected, tracker, elapsed)
+  if elapsed < progress_limits.grace_secs then
+    return
+  end
+  for _, name in ipairs(all_scenarios) do
+    if selected[name] then
+      local state = tracker[name]
+      local value = counter_value(name)
+      if value < state.last then
+        error(string.format(
+          "%s soak counter regressed: previous=%d current=%d",
+          name,
+          state.last,
+          value
+        ))
+      end
+      if value > state.last then
+        state.last = value
+        state.last_change = elapsed
+      elseif elapsed - state.last_change >= progress_limits.stall_secs then
+        error(string.format(
+          "%s soak stalled: counter=%d unchanged for %.0fs",
+          name,
+          value,
+          elapsed - state.last_change
+        ))
+      end
+    end
+  end
+end
+
 local lifecycle = {}
 
 local function life(name)
@@ -119,14 +197,13 @@ end
 
 local function new_socket(ctx, scenario, socket_type, options)
   local item = life(scenario)
-  item.sockets_created = item.sockets_created + 1
   local ok, socket_or_err = pcall(function()
     return ctx:socket(socket_type, options)
   end)
   if not ok then
-    item.sockets_closed = item.sockets_closed + 1
     error(socket_or_err, 2)
   end
+  item.sockets_created = item.sockets_created + 1
   return socket_or_err
 end
 
@@ -145,14 +222,13 @@ end
 
 local function new_context(scenario, io_threads)
   local item = life(scenario)
-  item.contexts_created = item.contexts_created + 1
   local ok, ctx_or_err = pcall(function()
     return omq.context({ io_threads = io_threads or 1 })
   end)
   if not ok then
-    item.contexts_closed = item.contexts_closed + 1
     error(ctx_or_err, 2)
   end
+  item.contexts_created = item.contexts_created + 1
   return ctx_or_err
 end
 
@@ -220,26 +296,28 @@ local function fd_count()
   return tonumber(text)
 end
 
-local function rss_kb()
+local function proc_status()
   local file = io.open("/proc/self/status", "r")
   if file == nil then
-    return nil
+    return { rss_kb = nil, vm_data_kb = nil, threads = nil }
   end
+  local out = { rss_kb = nil, vm_data_kb = nil, threads = nil }
   for line in file:lines() do
-    local value = string.match(line, "^VmRSS:%s+(%d+)%s+kB")
-    if value ~= nil then
-      file:close()
-      return tonumber(value)
-    end
+    out.rss_kb = out.rss_kb or tonumber(string.match(line, "^VmRSS:%s+(%d+)%s+kB"))
+    out.vm_data_kb = out.vm_data_kb or tonumber(string.match(line, "^VmData:%s+(%d+)%s+kB"))
+    out.threads = out.threads or tonumber(string.match(line, "^Threads:%s+(%d+)"))
   end
   file:close()
-  return nil
+  return out
 end
 
 local function resources()
+  local status = proc_status()
   return {
     lua_heap_kb = collectgarbage("count"),
-    rss_kb = rss_kb() or 0,
+    rss_kb = status.rss_kb or 0,
+    vm_data_kb = status.vm_data_kb or 0,
+    threads = status.threads or 0,
     fd_count = fd_count() or 0,
   }
 end
@@ -388,7 +466,7 @@ end
 
 local function report(prefix, elapsed, res)
   io.stdout:write(string.format(
-    "[lua-soak] %s%.0fs tcp=%d inproc=%d pubsub=%d contexts=%d heap=%.1fMB rss=%.1fMB fds=%d\n",
+    "[lua-soak] %s%.0fs tcp=%d inproc=%d pubsub=%d contexts=%d heap=%.1fMB rss=%.1fMB vmdata=%.1fMB fds=%d threads=%d\n",
     prefix or "",
     elapsed,
     counters.tcp,
@@ -397,7 +475,9 @@ local function report(prefix, elapsed, res)
     counters.contexts,
     res.lua_heap_kb / 1024,
     res.rss_kb / 1024,
-    res.fd_count
+    res.vm_data_kb / 1024,
+    res.fd_count,
+    res.threads
   ))
   for _, name in ipairs(all_scenarios) do
     local item = life(name)
@@ -420,6 +500,14 @@ local function assert_live_resources(baseline, current)
       baseline.fd_count,
       current.fd_count,
       resource_limits.max_fd_growth
+    ))
+  end
+  if baseline.threads > 0 and current.threads > baseline.threads + resource_limits.max_thread_growth then
+    error(string.format(
+      "thread growth too high: baseline=%d current=%d max_growth=%d",
+      baseline.threads,
+      current.threads,
+      resource_limits.max_thread_growth
     ))
   end
   local err = live_growth_error(
@@ -453,6 +541,14 @@ local function assert_final_resources(baseline, final)
       baseline.fd_count,
       final.fd_count,
       resource_limits.max_final_fd_growth
+    ))
+  end
+  if baseline.threads > 0 and final.threads > baseline.threads + resource_limits.max_final_thread_growth then
+    error(string.format(
+      "final thread growth too high: baseline=%d final=%d max_growth=%d",
+      baseline.threads,
+      final.threads,
+      resource_limits.max_final_thread_growth
     ))
   end
 
@@ -711,18 +807,60 @@ end
 local function run_context_churn_cycle()
   local scenario = "context-churn"
   local seq = counters.contexts
-  local ctx = new_context(scenario, 1)
-  local endpoint = "inproc://lua-soak-context-" .. tostring(seq)
-  local pull = new_socket(ctx, scenario, "pull", { linger = 0, recv_timeout = 1000 })
-  local push = new_socket(ctx, scenario, "push", { linger = 0, send_timeout = 1000 })
-  pull:bind(endpoint)
-  push:connect(endpoint)
-  push:send("x")
-  local msg = pull:recv(16)
-  assert(msg == "x", "context churn payload mismatch")
-  close_socket(push, scenario)
-  close_socket(pull, scenario)
-  close_context(ctx, scenario)
+  local ctx = nil
+  local pull = nil
+  local push = nil
+
+  local function close_push()
+    local socket = push
+    push = nil
+    close_socket(socket, scenario)
+  end
+
+  local function close_pull()
+    local socket = pull
+    pull = nil
+    close_socket(socket, scenario)
+  end
+
+  local function close_ctx()
+    local context = ctx
+    ctx = nil
+    close_context(context, scenario)
+  end
+
+  local ok, err = pcall(function()
+    ctx = new_context(scenario, 1)
+    local endpoint = "inproc://lua-soak-context-" .. tostring(seq)
+    pull = new_socket(ctx, scenario, "pull", { linger = 0, recv_timeout = 1000 })
+    push = new_socket(ctx, scenario, "push", { linger = 0, send_timeout = 1000 })
+    pull:bind(endpoint)
+    push:connect(endpoint)
+    push:send("x")
+    local msg = pull:recv(16)
+    assert(msg == "x", "context churn payload mismatch")
+    close_push()
+    close_pull()
+    close_ctx()
+  end)
+
+  if not ok then
+    local errors = {}
+    local function cleanup_local(label, fn)
+      local cleanup_ok, cleanup_err = pcall(fn)
+      if not cleanup_ok then
+        table.insert(errors, label .. ": " .. tostring(cleanup_err))
+      end
+    end
+    cleanup_local("context-churn push", close_push)
+    cleanup_local("context-churn pull", close_pull)
+    cleanup_local("context-churn context", close_ctx)
+    if #errors > 0 then
+      error(tostring(err) .. "\ncleanup errors:\n" .. table.concat(errors, "\n"), 2)
+    end
+    error(err, 2)
+  end
+
   counters.contexts = counters.contexts + 1
 end
 
@@ -779,10 +917,20 @@ local duration = env_number("OMQ_LUA_SOAK_DURATION_SECS", 60)
 assert(duration > 0, "OMQ_LUA_SOAK_DURATION_SECS must be > 0")
 local workers = math.max(1, math.floor(env_number("OMQ_LUA_SOAK_WORKERS", 4)))
 local selected = selected_scenarios()
+local progress = progress_tracker(selected)
 local started = now()
 local shared = omq.context({ io_threads = workers })
 local baseline = resources()
 sample_resources(0, baseline)
+io.stdout:write(string.format(
+  "[lua-soak] start duration=%.0fs workers=%d scenarios=%s report=%.0fs stall=%.0fs\n",
+  duration,
+  workers,
+  scenario_list(selected),
+  report_interval,
+  progress_limits.stall_secs
+))
+io.stdout:flush()
 local deadline = started + duration
 local next_report = started + report_interval
 local tcp_state = nil
@@ -820,6 +968,7 @@ local ok, err = pcall(function()
       sample_resources(elapsed, current)
       report("", elapsed, current)
       assert_live_resources(baseline, current)
+      assert_progress_active(selected, progress, elapsed)
       next_report = t + report_interval
     end
   end
@@ -865,6 +1014,7 @@ local final = resources()
 sample_resources(now() - started, final)
 report("final ", now() - started, final)
 assert_live_resources(baseline, final)
+assert_progress_active(selected, progress, now() - started)
 assert_final_resources(baseline, final)
 assert_progress(selected)
 assert_lifecycle_closed()

@@ -19,6 +19,19 @@ test("abort signal rejects pending recv", async () => {
   }
 });
 
+test("pending recv does not spin event loop", async () => {
+  const pull = new Pull();
+  try {
+    const started = process.cpuUsage();
+    await assert.rejects(pull.recv({ signal: AbortSignal.timeout(250) }), { name: "AbortError" });
+    const used = process.cpuUsage(started);
+    const cpuMs = (used.user + used.system) / 1000;
+    assert.ok(cpuMs < 60, `CPU time ${cpuMs.toFixed(1)}ms during idle recv`);
+  } finally {
+    pull.close();
+  }
+});
+
 test("dispose hooks close resources", () => {
   const context = new Context();
   const pull = new Pull({}, context);

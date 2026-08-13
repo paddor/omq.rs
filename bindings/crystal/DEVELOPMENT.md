@@ -9,6 +9,10 @@
 This builds `omq-libzmq`, checks Crystal formatting, and runs the Crystal
 specs with the correct native library path.
 
+The spec suite covers basic API behavior, pyzmq interop, socket-type parity,
+socket-option parity, draft sockets, poll/poller, monitor stubs, CURVE, Z85,
+and stream raw TCP behavior.
+
 ## Benchmarks
 
 Quick local chart:

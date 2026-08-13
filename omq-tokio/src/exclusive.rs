@@ -447,7 +447,8 @@ mod tests {
         assert!(dealer.recv().await.is_err());
         let (router2, rebound) = router().await;
         // A new ephemeral port is expected; exercise explicit reconnect state
-        // here, while restart-on-the-same-address is covered by the Wine test.
+        // here. Restart-on-the-same-address is covered by the external Wine
+        // reproduction procedure.
         dealer.address = rebound;
         dealer.reconnect_now().await.unwrap();
         let server = tokio::spawn(async move {

@@ -374,9 +374,23 @@ describe "OMQ.cr parity" do
     timers = OMQ::LibZMQ.timers_new
     timers.null?.should be_false
     OMQ::LibZMQ.timers_timeout(timers).should eq(-1)
+    timer_id = OMQ::LibZMQ.timers_add(timers, 0, ->(_id : LibC::Int, _arg : Void*) { }, Pointer(Void).null)
+    timer_id.should be >= 0
+    OMQ::LibZMQ.timers_execute(timers).should eq(0)
     timers_slot = timers
     OMQ::LibZMQ.timers_destroy(pointerof(timers_slot)).should eq(0)
     timers_slot.null?.should be_true
+
+    msg = Bytes.new(OMQ::ZMQ_MSG_T_SIZE)
+    bytes = "owned-by-crystal".to_slice
+    OMQ::LibZMQ.msg_init_data(
+      msg.to_unsafe.as(Void*),
+      bytes.to_unsafe.as(Void*),
+      bytes.size,
+      nil,
+      Pointer(Void).null
+    ).should eq(0)
+    OMQ::LibZMQ.msg_close(msg.to_unsafe.as(Void*)).should eq(0)
 
     watch = OMQ::LibZMQ.stopwatch_start
     watch.null?.should be_false

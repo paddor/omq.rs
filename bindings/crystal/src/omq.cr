@@ -285,6 +285,10 @@ module OMQ
 
   @[Link("omq_zmq")]
   lib LibZMQ
+    alias FreeFn = (Void*, Void* ->)
+    alias TimerFn = (LibC::Int, Void* ->)
+    alias ThreadFn = (Void* ->)
+
     struct PollItem
       socket : Void*
       fd : LibC::Int
@@ -362,7 +366,7 @@ module OMQ
     fun msg_init = zmq_msg_init(msg : Void*) : LibC::Int
     fun msg_init_size = zmq_msg_init_size(msg : Void*, size : LibC::SizeT) : LibC::Int
     fun msg_init_buffer = zmq_msg_init_buffer(msg : Void*, data : Void*, size : LibC::SizeT) : LibC::Int
-    fun msg_init_data = zmq_msg_init_data(msg : Void*, data : Void*, size : LibC::SizeT, ffn : Void*, hint : Void*) : LibC::Int
+    fun msg_init_data = zmq_msg_init_data(msg : Void*, data : Void*, size : LibC::SizeT, ffn : FreeFn, hint : Void*) : LibC::Int
     fun msg_recv = zmq_msg_recv(msg : Void*, socket : Void*, flags : LibC::Int) : LibC::Int
     fun msg_send = zmq_msg_send(msg : Void*, socket : Void*, flags : LibC::Int) : LibC::Int
     fun msg_close = zmq_msg_close(msg : Void*) : LibC::Int
@@ -393,7 +397,7 @@ module OMQ
 
     fun timers_new = zmq_timers_new : Void*
     fun timers_destroy = zmq_timers_destroy(timers : Void**) : LibC::Int
-    fun timers_add = zmq_timers_add(timers : Void*, interval : LibC::SizeT, handler : Void*, arg : Void*) : LibC::Int
+    fun timers_add = zmq_timers_add(timers : Void*, interval : LibC::SizeT, handler : TimerFn, arg : Void*) : LibC::Int
     fun timers_cancel = zmq_timers_cancel(timers : Void*, timer_id : LibC::Int) : LibC::Int
     fun timers_set_interval = zmq_timers_set_interval(timers : Void*, timer_id : LibC::Int, interval : LibC::SizeT) : LibC::Int
     fun timers_reset = zmq_timers_reset(timers : Void*, timer_id : LibC::Int) : LibC::Int
@@ -403,7 +407,7 @@ module OMQ
     fun stopwatch_start = zmq_stopwatch_start : Void*
     fun stopwatch_intermediate = zmq_stopwatch_intermediate(watch : Void*) : LibC::ULong
     fun stopwatch_stop = zmq_stopwatch_stop(watch : Void*) : LibC::ULong
-    fun threadstart = zmq_threadstart(func : Void*, arg : Void*) : Void*
+    fun threadstart = zmq_threadstart(func : ThreadFn, arg : Void*) : Void*
     fun threadclose = zmq_threadclose(thread : Void*) : Nil
 
     fun errno = zmq_errno : LibC::Int

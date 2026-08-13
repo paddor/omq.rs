@@ -273,11 +273,7 @@ pub extern "C" fn zmq_poller_wait_all(
     }
 
     if poll_items.is_empty() {
-        return if timeout < 0 {
-            fail(libc::EFAULT)
-        } else {
-            fail(libc::EAGAIN)
-        };
+        return fail(libc::EAGAIN);
     }
 
     let rc = crate::poll::zmq_poll(

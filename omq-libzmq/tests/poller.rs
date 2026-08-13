@@ -260,6 +260,12 @@ fn empty_poller_wait_maps_timeout_to_eagain() {
     );
     assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
 
+    assert_eq!(
+        zmq_poller_wait(poller, std::ptr::from_mut(&mut event).cast(), -1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+
     let mut poller_slot = poller;
     assert_eq!(zmq_poller_destroy(&mut poller_slot), 0);
 }

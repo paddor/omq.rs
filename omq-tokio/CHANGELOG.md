@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `exclusive::ExclusiveDealer`, a caller-owned direct-I/O DEALER for
+  latency-sensitive TCP workloads, with configurable timeouts, reconnects,
+  heartbeats, and lifecycle monitoring.
+
 ### Changed
 
 - Large direct receives now reuse bounded pooled buffers for medium-large

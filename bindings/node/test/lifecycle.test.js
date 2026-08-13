@@ -41,6 +41,24 @@ test("dispose hooks close resources", () => {
   assert.throws(() => context.shareKey(), /closed/);
 });
 
+test("context close closes live sockets", () => {
+  const context = new Context();
+  const pull = new Pull({}, context);
+  context.close();
+  assert.throws(() => pull.tryRecv(), /closed/);
+  assert.doesNotThrow(() => pull.close());
+});
+
+test("context close rejects pending recv", async () => {
+  const context = new Context();
+  const pull = new Pull({}, context);
+  const pending = pull.recv();
+  setTimeout(() => context.close(), 25);
+  await assert.rejects(pending, /closed/);
+  assert.throws(() => pull.tryRecv(), /closed/);
+  assert.doesNotThrow(() => pull.close());
+});
+
 test("async iterator exits on close", async () => {
   const pull = new Pull();
   const seen = [];

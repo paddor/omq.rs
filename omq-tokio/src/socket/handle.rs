@@ -1047,7 +1047,7 @@ impl Socket {
         min_peers: usize,
         timeout: std::time::Duration,
     ) -> Result<usize> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = super::deadline_after(timeout).map(tokio::time::Instant::from_std);
         loop {
             let conns = self.connections().await?;
             let ready = if self.inner.socket_type == SocketType::Stream {
@@ -1058,13 +1058,13 @@ impl Socket {
             if ready >= min_peers {
                 return Ok(ready);
             }
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 return Err(Error::Timeout);
             }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(5)),
-            )
-            .await;
+            let now = tokio::time::Instant::now();
+            let poll_deadline = now + std::time::Duration::from_millis(5);
+            tokio::time::sleep_until(deadline.map_or(poll_deadline, |d| d.min(poll_deadline)))
+                .await;
         }
     }
 
@@ -1081,19 +1081,19 @@ impl Socket {
         min_subscriptions: u64,
         timeout: std::time::Duration,
     ) -> Result<u64> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = super::deadline_after(timeout).map(tokio::time::Instant::from_std);
         loop {
             let count = self.inner.subscribe_count.load(Ordering::Acquire);
             if count >= min_subscriptions {
                 return Ok(count);
             }
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 return Err(Error::Timeout);
             }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(5)),
-            )
-            .await;
+            let now = tokio::time::Instant::now();
+            let poll_deadline = now + std::time::Duration::from_millis(5);
+            tokio::time::sleep_until(deadline.map_or(poll_deadline, |d| d.min(poll_deadline)))
+                .await;
         }
     }
 

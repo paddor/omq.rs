@@ -18,7 +18,7 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use omq_tokio::Socket as InnerSocket;
@@ -739,7 +739,7 @@ pub fn wait_any(
     }
 
     let recv_signal = global_recv_signal();
-    let deadline = timeout_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+    let deadline = timeout_ms.and_then(|ms| Instant::now().checked_add(Duration::from_millis(ms)));
 
     recv_signal.park_begin();
     let ready = poll_ready(&sockets);
@@ -751,7 +751,7 @@ pub fn wait_any(
     loop {
         let wait_dur = match deadline {
             Some(d) => {
-                let now = std::time::Instant::now();
+                let now = Instant::now();
                 if now >= d {
                     recv_signal.park_end();
                     return vec![];
@@ -771,7 +771,7 @@ pub fn wait_any(
             recv_signal.park_end();
             return ready;
         }
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             recv_signal.park_end();
             return vec![];
         }

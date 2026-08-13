@@ -15,6 +15,16 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 #[tokio::test]
+async fn wait_connected_accepts_huge_timeout() {
+    let pull = Socket::new(SocketType::Pull, Options::default());
+    let ready = pull
+        .wait_connected(0, Duration::MAX)
+        .await
+        .expect("huge wait_connected timeout panicked");
+    assert_eq!(ready, 0);
+}
+
+#[tokio::test]
 async fn monitor_listening_event_on_bind() {
     let ep = inproc_ep("mon-listen");
     let s = Socket::new(SocketType::Pull, Options::default());

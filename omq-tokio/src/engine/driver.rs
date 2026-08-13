@@ -876,8 +876,9 @@ where
         let mut arena_buf: Vec<u8> = Vec::new();
         let mut pipe_batch: Vec<Message> = Vec::new();
         let mut last_input = Instant::now();
-        let mut handshake_deadline: Option<Instant> =
-            config.handshake_timeout.map(|d| last_input + d);
+        let mut handshake_deadline: Option<Instant> = config
+            .handshake_timeout
+            .and_then(|d| last_input.checked_add(d));
         let hb_interval = config.heartbeat_interval;
         let hb_timeout = config
             .heartbeat_timeout
@@ -887,8 +888,7 @@ where
             .heartbeat_ttl
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
-        let hb_sleep = tokio::time::sleep(hb_interval.unwrap_or(Duration::MAX));
-        tokio::pin!(hb_sleep);
+        let mut hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
         let mut hb_ping_sent = false;
 
         loop {
@@ -985,7 +985,6 @@ where
             }
 
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
-            let hb_enabled = hb_interval.is_some();
 
             // Latency-routed REQ/REP sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
@@ -1120,7 +1119,7 @@ where
                 // been sent: on unidirectional sockets (PUSH, PUB) the
                 // peer has no data to send, so last_input stays at
                 // handshake time until the first PONG arrives.
-                () = &mut hb_sleep, if hb_enabled => {
+                () = sleep_until_opt(hb_deadline), if hb_deadline.is_some() => {
                     if hb_ping_sent && last_input.elapsed() > hb_timeout {
                         return Err(Error::Timeout);
                     }
@@ -1130,9 +1129,7 @@ where
                     };
                     let _ = connection.send_command(&ping);
                     hb_ping_sent = true;
-                    hb_sleep.as_mut().reset(
-                        tokio::time::Instant::now() + hb_interval.unwrap(),
-                    );
+                    hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
                 }
 
             }

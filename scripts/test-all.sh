@@ -8,6 +8,7 @@
 #   OMQ_SKIP_PYOMQ=1    skip the pyomq build + pytest pass
 #   OMQ_SKIP_GO=1       skip the Go binding build + test pass
 #   OMQ_SKIP_LUA=1      skip the Lua binding build + test pass
+#   OMQ_SKIP_CRYSTAL=1  skip the Crystal binding build + test pass
 #   OMQ_GO_RACE=1       run Go binding tests with the race detector too
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 2) -
 #                       a few timing-sensitive tests may need one
@@ -294,6 +295,13 @@ elif [[ -x /usr/bin/lua || -n "${OMQ_LUA:-}" ]]; then
     run "$_repo_root/scripts/test-lua.sh"
 else
     echo "skip: Lua binding tests require /usr/bin/lua"
+fi
+if [[ "${OMQ_SKIP_CRYSTAL:-}" == "1" ]]; then
+    echo "skip: OMQ_SKIP_CRYSTAL=1"
+elif command -v crystal >/dev/null 2>&1; then
+    run "$_repo_root/scripts/test-crystal.sh"
+else
+    echo "skip: Crystal binding tests require crystal"
 fi
 
 if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then

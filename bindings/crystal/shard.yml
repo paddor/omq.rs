@@ -1,0 +1,16 @@
+name: omq
+version: 0.1.0
+
+description: |
+  Crystal binding for OMQ backed by omq-libzmq.
+
+crystal: ">= 1.21.0"
+
+license: ISC
+
+authors:
+  - Patrik Wenger <paddor@gmail.com>
+
+development_dependencies:
+  zeromq:
+    github: crystal-community/zeromq-crystal

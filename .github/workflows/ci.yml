@@ -26,6 +26,7 @@ jobs:
       run_java: ${{ steps.scope.outputs.java }}
       run_go: ${{ steps.scope.outputs.go }}
       run_lua: ${{ steps.scope.outputs.lua }}
+      run_crystal: ${{ steps.scope.outputs.crystal }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -72,6 +73,17 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            crystal:
+              - 'bindings/crystal/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'yring/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'scripts/test-crystal.sh'
               - '.github/workflows/ci.yml'
       - id: matrix
         run: |
@@ -188,6 +200,50 @@ jobs:
         env:
           OMQ_LUA: /usr/bin/lua5.4
         run: ./scripts/test-lua.sh
+
+  crystal-lint:
+    name: crystal lint
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_crystal == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.21.0"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: crystal format
+        run: crystal tool format --check bindings/crystal/src bindings/crystal/spec bindings/crystal/scripts
+      - name: python syntax
+        run: python -m py_compile bindings/crystal/scripts/update_perf.py bindings/crystal/spec/pyzmq_pull_once.py
+
+  crystal-test:
+    name: crystal test
+    needs: [changes, linux-gate, crystal-lint]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_crystal == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.21.0"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: install Crystal linker deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgc-dev
+      - name: install pyzmq
+        run: python -m pip install --upgrade pip "pyzmq>=25"
+      - name: crystal tests
+        run: ./scripts/test-crystal.sh
 
   linux-gate:
     name: linux gate
@@ -699,6 +755,8 @@ jobs:
         go-test,
         lua-lint,
         lua-test,
+        crystal-lint,
+        crystal-test,
       ]
     runs-on: ubuntu-latest
     if: always()

@@ -4,7 +4,7 @@
 //! Recv: bypass ring -> yring consumers -> block on `RecvNotify`.
 use std::ffi::c_int;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
@@ -274,16 +274,21 @@ fn block_recv_result<T>(
     mut try_pop: impl FnMut() -> Result<Option<T>, c_int>,
 ) -> Result<T, c_int> {
     if rcvtimeo > 0 {
-        let deadline = std::time::Instant::now() + Duration::from_millis(rcvtimeo as u64);
+        let deadline = Instant::now().checked_add(Duration::from_millis(rcvtimeo as u64));
         loop {
             if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(libc::EAGAIN);
-            }
-            let ms = remaining.as_millis().min(i32::MAX as u128) as c_int;
+            let ms = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(libc::EAGAIN);
+                    }
+                    remaining.as_millis().min(i32::MAX as u128) as c_int
+                }
+                None => i32::MAX,
+            };
             let recv_notify = sock.notify.recv_notifier();
             let _ = recv_notify.wait_for_readable(ms);
             if sock.ctx.is_effectively_terminated() {
@@ -443,10 +448,19 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             let s = inner.clone();
             if sndtimeo > 0 {
                 let timeout = Duration::from_millis(sndtimeo as u64);
-                match handle.block_on(async { tokio::time::timeout(timeout, s.send(msg)).await }) {
-                    Ok(Ok(())) => ret_len,
-                    Ok(Err(_)) => fail(ETERM),
-                    Err(_elapsed) => fail(libc::EAGAIN),
+                if Instant::now().checked_add(timeout).is_some() {
+                    match handle
+                        .block_on(async { tokio::time::timeout(timeout, s.send(msg)).await })
+                    {
+                        Ok(Ok(())) => ret_len,
+                        Ok(Err(_)) => fail(ETERM),
+                        Err(_elapsed) => fail(libc::EAGAIN),
+                    }
+                } else {
+                    match handle.block_on(s.send(msg)) {
+                        Ok(()) => ret_len,
+                        Err(_) => fail(ETERM),
+                    }
                 }
             } else {
                 match handle.block_on(s.send(msg)) {

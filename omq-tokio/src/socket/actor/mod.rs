@@ -451,7 +451,7 @@ impl SocketDriver {
         // close() sets the closed flag; existing ring data can still be drained.
         // Non-zero linger keeps endpoints alive so late peers can take queued
         // sends before the deadline.
-        self.close_deadline = linger.map(|d| Instant::now() + d);
+        self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
         // If linger is zero, shut down the strategy now so in-flight
         // pumps bail immediately.
         if matches!(linger, Some(Duration::ZERO)) {

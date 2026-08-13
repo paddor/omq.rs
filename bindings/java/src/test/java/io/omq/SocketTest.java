@@ -383,6 +383,90 @@ final class SocketTest {
     }
 
     @Test
+    void virtualThreadReceiveUnblocksWhenSocketCloses() throws Exception {
+        Context context = OMQ.context();
+        Socket pull = context.socket(SocketType.PULL);
+        pull.bind("inproc://virtual-receive-close-" + UUID.randomUUID());
+
+        CompletableFuture<Throwable> received = new CompletableFuture<>();
+        Thread receiver = Thread.ofVirtual().start(() -> {
+            try {
+                pull.receive();
+                received.complete(null);
+            } catch (Throwable error) {
+                received.complete(error);
+            }
+        });
+
+        Thread.sleep(50);
+        CompletableFuture<Void> closed = new CompletableFuture<>();
+        Thread closer = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                pull.close();
+                closed.complete(null);
+            } catch (Throwable error) {
+                closed.completeExceptionally(error);
+            }
+        });
+
+        boolean closeCompleted = false;
+        try {
+            closed.get(1, TimeUnit.SECONDS);
+            closeCompleted = true;
+            Throwable error = received.get(1, TimeUnit.SECONDS);
+            assertTrue(error instanceof ClosedException, "receive should fail with ClosedException");
+            receiver.join(5_000);
+            closer.join(5_000);
+        } finally {
+            if (closeCompleted) {
+                context.close();
+            }
+        }
+    }
+
+    @Test
+    void platformThreadReceiveUnblocksWhenSocketCloses() throws Exception {
+        Context context = OMQ.context();
+        Socket pull = context.socket(SocketType.PULL);
+        pull.bind("inproc://platform-receive-close-" + UUID.randomUUID());
+
+        CompletableFuture<Throwable> received = new CompletableFuture<>();
+        Thread receiver = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                pull.receive();
+                received.complete(null);
+            } catch (Throwable error) {
+                received.complete(error);
+            }
+        });
+
+        Thread.sleep(50);
+        CompletableFuture<Void> closed = new CompletableFuture<>();
+        Thread closer = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                pull.close();
+                closed.complete(null);
+            } catch (Throwable error) {
+                closed.completeExceptionally(error);
+            }
+        });
+
+        boolean closeCompleted = false;
+        try {
+            closed.get(1, TimeUnit.SECONDS);
+            closeCompleted = true;
+            Throwable error = received.get(1, TimeUnit.SECONDS);
+            assertTrue(error instanceof ClosedException, "receive should fail with ClosedException");
+            receiver.join(5_000);
+            closer.join(5_000);
+        } finally {
+            if (closeCompleted) {
+                context.close();
+            }
+        }
+    }
+
+    @Test
     void timedSendSucceedsBeforeTimeout() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);

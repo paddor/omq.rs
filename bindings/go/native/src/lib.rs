@@ -1005,6 +1005,10 @@ fn duration_from_timeout_millis(timeout_millis: i64) -> Option<Duration> {
     }
 }
 
+fn deadline_after(timeout: Duration) -> Option<Instant> {
+    Instant::now().checked_add(timeout)
+}
+
 fn duration_from_millis(millis: i64) -> Result<Duration, Error> {
     if millis < 0 {
         return Err(Error::Config("duration must be non-negative".to_string()));
@@ -1302,12 +1306,12 @@ fn try_send_with_timeout(
         return status_from_result(native.send(message));
     }
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_millis as u64);
+    let deadline = deadline_after(Duration::from_millis(timeout_millis as u64));
     loop {
         match native.try_send(message) {
             Ok(()) => return OmqGoStatus::ok(),
             Err(TrySendError::Full(returned)) => {
-                if Instant::now() >= deadline {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
                     return OmqGoStatus::err(TIMEOUT, "operation timed out");
                 }
                 message = returned;
@@ -3201,5 +3205,20 @@ pub extern "C" fn omq_go_native_stats(out: *mut OmqGoNativeStats) {
             cancels_freed,
             cancels_live,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huge_deadline_overflow_is_effectively_forever() {
+        assert!(deadline_after(Duration::MAX).is_none());
+    }
+
+    #[test]
+    fn small_deadline_is_concrete() {
+        assert!(deadline_after(Duration::from_millis(1)).is_some());
     }
 }

@@ -560,6 +560,19 @@ def test_select_timeout():
         ctx.term()
 
 
+def test_select_wlist_reports_pollout():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    try:
+        rready, wready, xready = zmq.select([], [push], [], timeout=1.0)
+        assert rready == []
+        assert wready == [push]
+        assert xready == []
+    finally:
+        push.close()
+        ctx.term()
+
+
 def test_select_ready(tcp_endpoint):
     import time
 

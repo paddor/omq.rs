@@ -5,7 +5,6 @@ exports.curveKeypair = curveKeypair;
 exports.curvePublic = curvePublic;
 const node_buffer_1 = require("node:buffer");
 const node_module_1 = require("node:module");
-const promises_1 = require("node:timers/promises");
 const native = loadNative();
 const RECV_PREFETCH = 64;
 /** Immutable OMQ message wrapper with one or more frames. */
@@ -198,15 +197,20 @@ class Socket {
         this.#checkOpen();
         if (options.signal)
             throwIfAborted(options.signal);
-        while (true) {
-            const raw = this.#tryRecvRaw();
-            if (raw !== null) {
-                return raw;
-            }
-            if (options.signal)
-                throwIfAborted(options.signal);
-            this.#checkOpen();
-            await yieldToEventLoop(options.signal);
+        const raw = this.#tryRecvRaw();
+        if (raw !== null) {
+            return raw;
+        }
+        if (options.signal)
+            throwIfAborted(options.signal);
+        this.#checkOpen();
+        try {
+            return messageFromNative(await this.native.recvRaw(options.signal));
+        }
+        catch (error) {
+            if (options.signal?.aborted)
+                throwAbortError();
+            throw error;
         }
     }
     /** Synchronously receive one message. */
@@ -651,11 +655,11 @@ function throwIfAborted(signal) {
     }
     throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
+function throwAbortError() {
+    throw new DOMException("The operation was aborted", "AbortError");
+}
 function isClosedError(error) {
     return error instanceof Error && error.message.toLowerCase().includes("closed");
-}
-function yieldToEventLoop(signal) {
-    return signal === undefined ? (0, promises_1.setImmediate)() : (0, promises_1.setImmediate)(undefined, { signal });
 }
 function loadNative() {
     const require = (0, node_module_1.createRequire)(__filename);

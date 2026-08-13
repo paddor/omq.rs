@@ -3,14 +3,15 @@ use std::mem;
 use std::ptr;
 use std::slice;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
 use napi::bindgen_prelude::{
-    BufferSlice, Env, FromNapiValue, TypedArrayType, Uint8Array, Uint32Array,
+    AbortSignal, AsyncTask, BufferSlice, Env, FromNapiValue, Task, TypedArrayType, Uint8Array,
+    Uint32Array,
 };
 use napi::{Either, Error as NapiError, Result, Status, sys};
 use napi_derive::napi;
@@ -23,9 +24,67 @@ use omq_tokio::{
 #[derive(Debug)]
 struct ContextState {
     ctx: RwLock<Option<OmqContext>>,
+    sockets: Mutex<Vec<Weak<SocketState>>>,
     closed: AtomicBool,
     owns_runtime: bool,
     share_key: u128,
+}
+
+impl ContextState {
+    fn register_socket(&self, socket: &Arc<SocketState>) -> Result<()> {
+        self.sockets
+            .lock()
+            .map_err(|_| napi_error("context socket list poisoned"))?
+            .push(Arc::downgrade(socket));
+        Ok(())
+    }
+
+    fn close_live_sockets(&self) {
+        let sockets = match self.sockets.lock() {
+            Ok(mut guard) => mem::take(&mut *guard),
+            Err(_) => return,
+        };
+        for socket in sockets.into_iter().filter_map(|socket| socket.upgrade()) {
+            let _ = socket.close_socket();
+        }
+    }
+}
+
+impl SocketState {
+    fn socket_clone(&self) -> Result<omq_tokio::blocking::Socket> {
+        self.check_open()?;
+        let guard = self
+            .socket
+            .read()
+            .map_err(|_| napi_error("socket lock poisoned"))?;
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi_error("socket closed"))
+    }
+
+    fn take_socket(&self) -> Result<Option<omq_tokio::blocking::Socket>> {
+        self.socket
+            .write()
+            .map_err(|_| napi_error("socket lock poisoned"))
+            .map(|mut guard| guard.take())
+    }
+
+    fn close_socket(&self) -> Result<()> {
+        if !self.closed.swap(true, Ordering::AcqRel)
+            && let Some(socket) = self.take_socket()?
+        {
+            socket.close().map_err(map_omq_error)?;
+        }
+        Ok(())
+    }
+
+    fn check_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(napi_error("socket closed"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -113,6 +172,35 @@ pub struct NativePackedMessages {
     pub message_parts: Uint32Array,
 }
 
+pub struct RecvRawTask {
+    socket: omq_tokio::blocking::Socket,
+    cancel: Arc<omq_tokio::blocking::BlockingRecvCancel>,
+}
+
+impl Task for RecvRawTask {
+    type Output = Message;
+    type JsValue = Either<Uint8Array, Vec<Uint8Array>>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.cancel.register_current_thread_once();
+        let mut out = Vec::with_capacity(1);
+        match self
+            .socket
+            .recv_many_registered_cancelable_into(1, &self.cancel, &mut out)
+        {
+            Ok(Some(_)) => out
+                .pop()
+                .ok_or_else(|| napi_error("recv returned no message")),
+            Ok(None) => Err(NapiError::new(Status::Cancelled, "recv aborted")),
+            Err(error) => Err(map_omq_error(error)),
+        }
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        message_to_raw(&env, output)
+    }
+}
+
 #[napi]
 impl NativeContext {
     #[napi(constructor)]
@@ -126,6 +214,7 @@ impl NativeContext {
         Self {
             inner: Arc::new(ContextState {
                 ctx: RwLock::new(Some(ctx)),
+                sockets: Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
                 owns_runtime: true,
                 share_key,
@@ -156,23 +245,21 @@ impl NativeContext {
         let socket_type = parse_socket_type(&socket_type)?;
         let options = build_options(options)?;
         let socket = ctx.blocking_socket(socket_type, options);
-        Ok(NativeSocket {
-            inner: Arc::new(SocketState {
-                socket: RwLock::new(Some(socket)),
-                closed: AtomicBool::new(false),
-            }),
-        })
+        let inner = Arc::new(SocketState {
+            socket: RwLock::new(Some(socket)),
+            closed: AtomicBool::new(false),
+        });
+        self.inner.register_socket(&inner)?;
+        Ok(NativeSocket { inner })
     }
 
     #[napi]
     pub fn close(&self) {
         if !self.inner.closed.swap(true, Ordering::AcqRel) {
-            let ctx = self
-                .inner
-                .ctx
-                .write()
-                .ok()
-                .and_then(|mut guard| guard.take());
+            let ctx = self.inner.ctx.write().ok().and_then(|mut guard| {
+                self.inner.close_live_sockets();
+                guard.take()
+            });
             if let Some(ctx) = ctx
                 && self.inner.owns_runtime
             {
@@ -282,6 +369,20 @@ impl NativeSocket {
                 .map_err(map_omq_error)
                 .and_then(|message| message_to_raw(&env, message))
         })
+    }
+
+    #[napi(ts_return_type = "Promise<Uint8Array | Array<Uint8Array>>")]
+    pub fn recv_raw(&self, signal: Option<AbortSignal>) -> Result<AsyncTask<RecvRawTask>> {
+        let socket = self.socket_clone()?;
+        let cancel = Arc::new(omq_tokio::blocking::BlockingRecvCancel::new());
+        if let Some(signal) = signal.as_ref() {
+            let cancel = cancel.clone();
+            signal.on_abort(move || cancel.cancel());
+        }
+        Ok(AsyncTask::with_optional_signal(
+            RecvRawTask { socket, cancel },
+            signal,
+        ))
     }
 
     #[napi]
@@ -436,41 +537,19 @@ impl NativeSocket {
 
     #[napi]
     pub fn close(&self) -> Result<()> {
-        if !self.inner.closed.swap(true, Ordering::AcqRel)
-            && let Some(socket) = self.take_socket()?
-        {
-            socket.close().map_err(map_omq_error)?;
-        }
-        Ok(())
+        self.inner.close_socket()
     }
 
     fn with_socket_ref<T>(
         &self,
         f: impl FnOnce(&omq_tokio::blocking::Socket) -> Result<T>,
     ) -> Result<T> {
-        self.check_open()?;
-        let guard = self
-            .inner
-            .socket
-            .read()
-            .map_err(|_| napi_error("socket lock poisoned"))?;
-        let socket = guard.as_ref().ok_or_else(|| napi_error("socket closed"))?;
-        f(socket)
+        let socket = self.socket_clone()?;
+        f(&socket)
     }
 
-    fn take_socket(&self) -> Result<Option<omq_tokio::blocking::Socket>> {
-        self.inner
-            .socket
-            .write()
-            .map_err(|_| napi_error("socket lock poisoned"))
-            .map(|mut guard| guard.take())
-    }
-
-    fn check_open(&self) -> Result<()> {
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(napi_error("socket closed"));
-        }
-        Ok(())
+    fn socket_clone(&self) -> Result<omq_tokio::blocking::Socket> {
+        self.inner.socket_clone()
     }
 }
 
@@ -499,6 +578,7 @@ pub fn native_context_from_share_key(share_key: String) -> Result<NativeContext>
         inner: Arc::new(ContextState {
             share_key: ctx.share_key(),
             ctx: RwLock::new(Some(ctx)),
+            sockets: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             owns_runtime: false,
         }),
@@ -507,11 +587,7 @@ pub fn native_context_from_share_key(share_key: String) -> Result<NativeContext>
 
 impl Drop for NativeSocket {
     fn drop(&mut self) {
-        if !self.inner.closed.swap(true, Ordering::AcqRel)
-            && let Ok(Some(socket)) = self.take_socket()
-        {
-            let _ = socket.close();
-        }
+        let _ = self.inner.close_socket();
     }
 }
 

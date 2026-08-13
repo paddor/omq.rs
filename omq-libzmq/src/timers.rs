@@ -11,7 +11,7 @@ type TimerFn = unsafe extern "C" fn(c_int, *mut c_void);
 struct TimerEntry {
     id: c_int,
     interval: Duration,
-    next: Instant,
+    next: Option<Instant>,
     handler: TimerFn,
     arg: *mut c_void,
 }
@@ -45,6 +45,10 @@ fn find_timer(entries: &[TimerEntry], id: c_int) -> Option<usize> {
 
 fn interval_from_ms(interval: usize) -> Duration {
     Duration::from_millis(interval.try_into().unwrap_or(u64::MAX))
+}
+
+fn deadline_after(interval: Duration) -> Option<Instant> {
+    Instant::now().checked_add(interval)
 }
 
 #[unsafe(no_mangle)]
@@ -90,7 +94,7 @@ pub extern "C" fn zmq_timers_add(
     timers.entries.push(TimerEntry {
         id,
         interval,
-        next: Instant::now() + interval,
+        next: deadline_after(interval),
         handler,
         arg,
     });
@@ -125,7 +129,7 @@ pub extern "C" fn zmq_timers_set_interval(
     };
     let interval = interval_from_ms(interval);
     timers.entries[idx].interval = interval;
-    timers.entries[idx].next = Instant::now() + interval;
+    timers.entries[idx].next = deadline_after(interval);
     0
 }
 
@@ -138,7 +142,7 @@ pub extern "C" fn zmq_timers_reset(timers_ptr: *mut c_void, timer_id: c_int) -> 
     let Some(idx) = find_timer(&timers.entries, timer_id) else {
         return fail(libc::EINVAL);
     };
-    timers.entries[idx].next = Instant::now() + timers.entries[idx].interval;
+    timers.entries[idx].next = deadline_after(timers.entries[idx].interval);
     0
 }
 
@@ -148,8 +152,11 @@ pub extern "C" fn zmq_timers_timeout(timers_ptr: *mut c_void) -> c_long {
         Ok(t) => t,
         Err(e) => return c_long::from(fail(e)),
     };
-    let Some(next) = timers.entries.iter().map(|entry| entry.next).min() else {
+    if timers.entries.is_empty() {
         return -1;
+    }
+    let Some(next) = timers.entries.iter().filter_map(|entry| entry.next).min() else {
+        return c_long::MAX;
     };
     let now = Instant::now();
     if next <= now {
@@ -169,9 +176,9 @@ pub extern "C" fn zmq_timers_execute(timers_ptr: *mut c_void) -> c_int {
         let now = Instant::now();
         let mut callbacks = Vec::new();
         for entry in &mut timers.entries {
-            if entry.next <= now {
+            if entry.next.is_some_and(|next| next <= now) {
                 callbacks.push((entry.id, entry.handler, entry.arg));
-                entry.next = now + entry.interval;
+                entry.next = now.checked_add(entry.interval);
             }
         }
         callbacks
@@ -233,6 +240,31 @@ mod tests {
         assert_eq!(zmq_timers_timeout(timers), -1);
         assert_eq!(zmq_timers_cancel(timers, id), -1);
         assert_eq!(crate::zmq_errno(), libc::EINVAL);
+
+        let mut timers_slot = timers;
+        assert_eq!(zmq_timers_destroy(&raw mut timers_slot), 0);
+        assert!(timers_slot.is_null());
+    }
+
+    #[test]
+    fn huge_timer_interval_does_not_panic() {
+        let timers = zmq_timers_new();
+        assert!(!timers.is_null());
+
+        let fired = AtomicUsize::new(0);
+        let id = zmq_timers_add(
+            timers,
+            usize::MAX,
+            Some(count_timer),
+            std::ptr::from_ref(&fired).cast::<c_void>().cast_mut(),
+        );
+        assert!(id > 0);
+        assert_eq!(zmq_timers_timeout(timers), c_long::MAX);
+        assert_eq!(zmq_timers_execute(timers), 0);
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        assert_eq!(zmq_timers_set_interval(timers, id, usize::MAX), 0);
+        assert_eq!(zmq_timers_reset(timers, id), 0);
+        assert_eq!(zmq_timers_timeout(timers), c_long::MAX);
 
         let mut timers_slot = timers;
         assert_eq!(zmq_timers_destroy(&raw mut timers_slot), 0);

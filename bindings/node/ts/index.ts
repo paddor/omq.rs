@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { createRequire } from "node:module";
-import { setImmediate as setImmediatePromise } from "node:timers/promises";
 
 type NativeContextOptions = {
   ioThreads?: number;
@@ -57,6 +56,7 @@ type NativeSocket = {
   sendOneSync(payload: Uint8Array): void;
   recv(): Uint8Array[];
   recvRawSync(): Uint8Array | Uint8Array[];
+  recvRaw(signal?: AbortSignal): Promise<Uint8Array | Uint8Array[]>;
   recvSync(): Uint8Array[];
   recvTimeout(timeoutMs: number): Uint8Array[] | null;
   tryRecv(): Uint8Array[] | null;
@@ -404,14 +404,17 @@ export class Socket {
   async recv(options: RecvOptions = {}): Promise<Message> {
     this.#checkOpen();
     if (options.signal) throwIfAborted(options.signal);
-    while (true) {
-      const raw = this.#tryRecvRaw();
-      if (raw !== null) {
-        return raw;
-      }
-      if (options.signal) throwIfAborted(options.signal);
-      this.#checkOpen();
-      await yieldToEventLoop(options.signal);
+    const raw = this.#tryRecvRaw();
+    if (raw !== null) {
+      return raw;
+    }
+    if (options.signal) throwIfAborted(options.signal);
+    this.#checkOpen();
+    try {
+      return messageFromNative(await this.native.recvRaw(options.signal));
+    } catch (error) {
+      if (options.signal?.aborted) throwAbortError();
+      throw error;
     }
   }
 
@@ -890,12 +893,12 @@ function throwIfAborted(signal: AbortSignal): void {
   throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
-function isClosedError(error: unknown): boolean {
-  return error instanceof Error && error.message.toLowerCase().includes("closed");
+function throwAbortError(): never {
+  throw new DOMException("The operation was aborted", "AbortError");
 }
 
-function yieldToEventLoop(signal?: AbortSignal): Promise<void> {
-  return signal === undefined ? setImmediatePromise() : setImmediatePromise(undefined, { signal });
+function isClosedError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes("closed");
 }
 
 function loadNative(): NativeModule {

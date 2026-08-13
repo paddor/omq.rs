@@ -1,5 +1,6 @@
 """Poller tests."""
 
+import threading
 import time
 
 import pyomq as zmq
@@ -49,6 +50,44 @@ def test_poll_timeout_empty(tcp_endpoint):
         assert events == []
     finally:
         pull.close()
+        ctx.term()
+
+
+def test_poll_huge_timeout_receives_late_message():
+    ctx = zmq.Context()
+    pull = ctx.socket(zmq.PULL)
+    push = ctx.socket(zmq.PUSH)
+    endpoint = f"inproc://poll-huge-timeout-{id(pull)}"
+    try:
+        pull.bind(endpoint)
+        push.connect(endpoint)
+        poller = zmq.Poller()
+        poller.register(pull, zmq.POLLIN)
+
+        thread = threading.Thread(
+            target=lambda: (time.sleep(0.02), push.send(b"late")),
+            daemon=True,
+        )
+        thread.start()
+        assert poller.poll(timeout=2**64 - 1) == [(pull, zmq.POLLIN)]
+        assert pull.recv() == b"late"
+        thread.join(timeout=1)
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_pollout_ready_immediately():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    try:
+        poller = zmq.Poller()
+        poller.register(push, zmq.POLLOUT)
+        events = poller.poll(timeout=1000)
+        assert events == [(push, zmq.POLLOUT)]
+    finally:
+        push.close()
         ctx.term()
 
 

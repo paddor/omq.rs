@@ -39,6 +39,10 @@ static FORKED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
+fn deadline_after(timeout: Duration) -> Option<Instant> {
+    Instant::now().checked_add(timeout)
+}
+
 #[cfg(unix)]
 extern "C" fn atfork_child() {
     FORKED.store(true, Ordering::Relaxed);
@@ -902,7 +906,7 @@ impl Socket {
             Err(TrySendError::Full(msg)) => py.detach(|| match timeout {
                 None => sock.send(msg).map_err(map_err),
                 Some(timeout) => {
-                    let deadline = Instant::now() + timeout;
+                    let deadline = deadline_after(timeout);
                     let mut msg = msg;
                     loop {
                         match sock.try_send(msg) {
@@ -911,7 +915,7 @@ impl Socket {
                             Err(TrySendError::Closed) => return Err(map_err(PError::Closed)),
                             Err(TrySendError::Error(e)) => return Err(map_err(e)),
                         }
-                        if Instant::now() >= deadline {
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
                             return Err(timeout_err());
                         }
                         std::thread::sleep(Duration::from_millis(1));
@@ -977,14 +981,14 @@ impl Socket {
                 }
             },
             Some(timeout) => {
-                let deadline = Instant::now() + timeout;
+                let deadline = deadline_after(timeout);
                 loop {
                     match sock.try_recv() {
                         Ok(msg) => return Ok(msg),
                         Err(omq_proto::error::Error::Closed) => {
                             return Err(map_err(omq_proto::error::Error::Closed));
                         }
-                        Err(_) if Instant::now() < deadline => {
+                        Err(_) if deadline.is_none_or(|d| Instant::now() < d) => {
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(_) => return Err(timeout_err()),

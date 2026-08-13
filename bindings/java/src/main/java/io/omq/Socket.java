@@ -914,10 +914,13 @@ public final class Socket implements AutoCloseable {
     }
 
     private <T> T withRecvRing(RecvRingAction<T> action) {
+        RecvRing ring;
+        long handle;
         synchronized (state) {
-            long handle = state.handle();
-            return action.apply(state.recvRing, handle);
+            handle = state.handle();
+            ring = state.recvRing;
         }
+        return action.apply(ring, handle);
     }
 
     private boolean drainSendRing(long timeoutMillis) {
@@ -1008,17 +1011,18 @@ public final class Socket implements AutoCloseable {
     }
 
     private Message receiveVirtual(long timeoutMillis) {
+        NativeFuture<Message> future;
         synchronized (state) {
             long handle = state.handle();
             Optional<Message> cached = state.recvRing.tryReceiveCachedMessage();
             if (cached.isPresent()) {
                 return cached.orElseThrow();
             }
-            NativeFuture<Message> future = new NativeFuture<>();
+            future = new NativeFuture<>();
             long task = Native.socketRecvAsync(handle, timeoutMillis, future);
             future.setNativeTask(task);
-            return await(future);
         }
+        return await(future);
     }
 
     private static int writeInto(Message message, ByteBuffer destination) {
@@ -1080,8 +1084,8 @@ public final class Socket implements AutoCloseable {
             long handle = this.handle.getAndSet(0);
             if (handle != 0) {
                 sendRing.close();
-                recvRing.close();
                 Native.socketClose(handle);
+                recvRing.close();
             }
             owner.remove(this);
         }

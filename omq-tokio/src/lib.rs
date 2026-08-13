@@ -24,6 +24,7 @@ compile_error!("omq-tokio requires target_has_atomic = \"64\"");
 pub mod blocking;
 pub mod context;
 pub mod engine;
+pub mod exclusive;
 pub mod proxy;
 pub(crate) mod routing;
 pub mod socket;

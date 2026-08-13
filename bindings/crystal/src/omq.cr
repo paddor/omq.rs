@@ -679,6 +679,7 @@ module OMQ
 
   class Context
     @raw : Pointer(Void)?
+    @deferred_term_raw : Pointer(Void)?
     @live_sockets = 0
     @mutex = Mutex.new
 
@@ -702,7 +703,7 @@ module OMQ
       context = reserve_socket
       raw = LibZMQ.socket(context, OMQ.socket_type_id(socket_type))
       if raw.null?
-        release_socket
+        term_deferred_context(release_socket)
         raise OMQ.last_error
       end
 
@@ -802,10 +803,43 @@ module OMQ
     def finalize
       raw = @mutex.synchronize do
         current = @raw
-        @raw = nil
-        current
+        if current && @live_sockets > 0
+          @raw = nil
+          @deferred_term_raw = current
+          nil
+        else
+          @raw = nil
+          current
+        end
       end
+      term_deferred_context(raw)
+    end
+
+    protected def release_socket : Pointer(Void)?
+      @mutex.synchronize do
+        raise Error.new("context live socket count underflow") if @live_sockets <= 0
+        @live_sockets -= 1
+        take_deferred_term_raw
+      end
+    end
+
+    protected def release_socket_from_finalize : Pointer(Void)?
+      @mutex.synchronize do
+        @live_sockets -= 1 if @live_sockets > 0
+        take_deferred_term_raw
+      end
+    end
+
+    protected def term_deferred_context(raw : Pointer(Void)?) : Nil
       LibZMQ.ctx_term(raw) if raw
+    end
+
+    private def take_deferred_term_raw : Pointer(Void)?
+      return nil unless @live_sockets == 0
+
+      raw = @deferred_term_raw
+      @deferred_term_raw = nil
+      raw
     end
 
     protected def reserve_socket : Pointer(Void)
@@ -814,13 +848,6 @@ module OMQ
         raise ClosedError.new("context closed") unless raw
         @live_sockets += 1
         raw
-      end
-    end
-
-    protected def release_socket : Nil
-      @mutex.synchronize do
-        raise Error.new("context live socket count underflow") if @live_sockets <= 0
-        @live_sockets -= 1
       end
     end
 
@@ -1014,14 +1041,21 @@ module OMQ
       begin
         OMQ.check_rc(LibZMQ.close(raw))
       ensure
-        @context.release_socket
+        @context.term_deferred_context(@context.release_socket)
       end
       true
     end
 
     def finalize
-      close
-    rescue
+      raw = @mutex.synchronize do
+        current = @raw
+        @raw = nil
+        current
+      end
+      if raw
+        LibZMQ.close(raw)
+        @context.term_deferred_context(@context.release_socket_from_finalize)
+      end
     end
 
     def send(payload : String, flags : Int = 0) : Bool
@@ -1652,8 +1686,13 @@ module OMQ
     end
 
     def finalize
-      close
-    rescue
+      raw = @raw
+      return unless raw
+
+      poller_ptr = raw
+      @raw = nil
+      LibZMQ.poller_destroy(pointerof(poller_ptr))
+      @sockets.clear
     end
 
     private def raw_pointer : Pointer(Void)

@@ -109,6 +109,19 @@ describe OMQ do
     end
   end
 
+  it "lets socket cleanup finish after context finalization" do
+    ctx = OMQ.context
+    socket = ctx.socket("pull", linger: 0)
+
+    ctx.finalize
+    expect_raises(OMQ::ClosedError) do
+      ctx.socket("pull")
+    end
+
+    socket.close.should be_true
+    ctx.term.should be_true
+  end
+
   it "supports pub/sub prefixes" do
     ctx = OMQ.context
     pub = ctx.socket("pub", linger: 0, send_timeout: 1000)

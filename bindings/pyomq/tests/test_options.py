@@ -1,5 +1,6 @@
 """setsockopt / getsockopt round-trip + behaviour for Group A, B, C."""
 
+import threading
 import time
 
 import pytest
@@ -111,6 +112,29 @@ def test_rcvtimeo_raises_eagain():
         assert elapsed < 1.0
     finally:
         s.close()
+        ctx.term()
+
+
+def test_huge_rcvtimeo_receives_late_message():
+    ctx = zmq.Context()
+    pull = ctx.socket(zmq.PULL)
+    push = ctx.socket(zmq.PUSH)
+    endpoint = f"inproc://huge-timeout-{id(pull)}"
+    try:
+        pull.bind(endpoint)
+        push.connect(endpoint)
+        pull.setsockopt(zmq.RCVTIMEO, 2**63 - 1)
+
+        thread = threading.Thread(
+            target=lambda: (time.sleep(0.02), push.send(b"late")),
+            daemon=True,
+        )
+        thread.start()
+        assert pull.recv() == b"late"
+        thread.join(timeout=1)
+    finally:
+        push.close()
+        pull.close()
         ctx.term()
 
 

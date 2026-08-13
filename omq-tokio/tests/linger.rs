@@ -296,6 +296,18 @@ async fn close_with_linger_zero_overrides_configured_forever() {
 }
 
 #[tokio::test]
+async fn close_with_huge_linger_does_not_panic() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        push.close_with_linger(Some(Duration::MAX)),
+    )
+    .await
+    .expect("close with huge linger hung")
+    .expect("close with huge linger failed");
+}
+
+#[tokio::test]
 async fn linger_completes_within_timeout_after_peer_disconnect() {
     // Queued messages cannot be delivered after the peer disconnects.
     // close() with a finite linger must return within the linger window

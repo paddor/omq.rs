@@ -725,6 +725,16 @@ async fn wait_subscribed_times_out_with_no_subscribers() {
 }
 
 #[tokio::test]
+async fn wait_subscribed_accepts_huge_timeout() {
+    let pub_ = Socket::new(SocketType::Pub, Options::default());
+    let count = pub_
+        .wait_subscribed(0, Duration::MAX)
+        .await
+        .expect("huge wait_subscribed timeout panicked");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn wait_subscribed_cumulative_across_peers() {
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let port = test_support::bind_loopback(&pub_).await;

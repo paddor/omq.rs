@@ -8,6 +8,14 @@ owns only the public wrapper and Crystal object lifecycle.
 
 Architecture notes: [`doc/architecture.md`](doc/architecture.md).
 
+## Shard Packaging
+
+This shard currently lives under `bindings/crystal` in the OMQ.rs monorepo.
+Crystal Shards still assumes a `shard.yml` at the repository root for Git
+dependencies, so direct use from this repository depends on monorepo shard
+support. Track that discussion in
+[crystal-lang/shards#635](https://github.com/crystal-lang/shards/issues/635).
+
 ## Build And Test
 
 Requires Crystal 1.21 or newer and a Rust toolchain.

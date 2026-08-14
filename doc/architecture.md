@@ -137,6 +137,29 @@ Stateless sends bypass the actor through `SendSubmitter`. REQ/REP still check
 shared type state before submit. Plain recv paths bypass the actor when no
 identity, group, or subscription post-processing is needed.
 
+### Caller-driven exclusive sockets
+
+`omq_tokio::exclusive::Socket` is an opt-in alternative for latency-sensitive,
+single-peer workloads. It owns both the Tokio TCP stream and the sans-I/O
+`omq_proto::Connection`; the caller drives TCP, ZMTP, reconnects, and heartbeat
+timers through methods requiring `&mut self`.
+
+```text
+regular Socket:   caller -> routing/queue -> ConnectionDriver task -> TCP
+exclusive Socket: caller -> omq_proto::Connection                  -> TCP
+```
+
+The exclusive path removes the connection-driver task and userspace data relay,
+but deliberately gives up the regular socket's cloneable handles, multi-peer
+routing, background progress, and userspace outbound queue. A failed send is
+not replayed because it is ambiguous whether the peer received a partial or
+complete command. When no `send` or `recv` future is active, the application
+must call `maintain()` to drive idle heartbeat and reconnect work.
+
+The initial implementation supports one connected TCP DEALER using the NULL
+mechanism. Unsupported socket types and transports return explicit configuration
+errors; bind/accept and additional socket semantics can be added incrementally.
+
 ## Messages
 
 `Payload` and `Message` are small-value enums optimized for common single-part

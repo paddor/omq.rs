@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `exclusive::ExclusiveDealer`, a caller-owned direct-I/O DEALER for
-  latency-sensitive TCP workloads, with configurable timeouts, reconnects,
-  heartbeats, and lifecycle monitoring.
+- `exclusive::Socket`, a caller-owned direct-I/O socket for latency-sensitive
+  single-peer workloads, initially supporting connected TCP DEALER with
+  configurable timeouts, reconnects, heartbeats, and lifecycle monitoring.
 
 ### Changed
 

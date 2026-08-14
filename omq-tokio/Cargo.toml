@@ -75,13 +75,13 @@ path = "src/bin/bench_proxy_client.rs"
 name = "omq_perf_verify"
 path = "src/bin/perf_verify.rs"
 
-[[bin]]
-name = "omq_exclusive_dealer_latency"
-path = "src/bin/exclusive_dealer_latency.rs"
-
 [[example]]
 name = "pub_sub_lz4"
 required-features = ["lz4"]
+
+[[bench]]
+name = "exclusive_latency"
+harness = false
 
 [[bench]]
 name = "push_pull"

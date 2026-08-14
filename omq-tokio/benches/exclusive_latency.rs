@@ -3,16 +3,16 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use omq_tokio::exclusive::ExclusiveDealer;
+use omq_tokio::exclusive::{Options as ExclusiveOptions, Socket as ExclusiveSocket};
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn usage() -> ! {
     eprintln!(
         "usage:\n  \
-         omq_exclusive_dealer_latency server <bind-uri>\n  \
-         omq_exclusive_dealer_latency standard <connect-uri> <size> <iterations> <warmup>\n  \
-         omq_exclusive_dealer_latency exclusive <host:port> <size> <iterations> <warmup>"
+         exclusive_latency server <bind-uri>\n  \
+         exclusive_latency standard <connect-uri> <size> <iterations> <warmup>\n  \
+         exclusive_latency exclusive <connect-uri> <size> <iterations> <warmup>"
     );
     std::process::exit(2);
 }
@@ -80,10 +80,18 @@ async fn run_client(mode: &str, address: &str, size: usize, iterations: usize, w
             regular = Some(socket);
         }
         "exclusive" => {
+            let endpoint: Endpoint = address.parse().expect("valid exclusive TCP endpoint");
             exclusive = Some(
-                ExclusiveDealer::connect(address, identity)
-                    .await
-                    .expect("connect exclusive DEALER"),
+                ExclusiveSocket::connect(
+                    SocketType::Dealer,
+                    endpoint,
+                    ExclusiveOptions {
+                        identity,
+                        ..ExclusiveOptions::default()
+                    },
+                )
+                .await
+                .expect("connect exclusive DEALER"),
             );
         }
         _ => unreachable!(),
@@ -113,7 +121,7 @@ async fn run_client(mode: &str, address: &str, size: usize, iterations: usize, w
 
 async fn round_trip(
     regular: Option<&Socket>,
-    exclusive: Option<&mut ExclusiveDealer>,
+    exclusive: Option<&mut ExclusiveSocket>,
     message: &Message,
 ) {
     if let Some(socket) = regular {

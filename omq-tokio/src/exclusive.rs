@@ -7,42 +7,94 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use omq_proto::endpoint::Host;
 use omq_proto::proto::command::Command;
-use omq_proto::proto::{Connection, ConnectionConfig, Event, Role};
+use omq_proto::proto::{Connection, ConnectionConfig, Event as ProtoEvent, Role};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
-use crate::{Error, Message, ReconnectPolicy, Result, SocketType};
+use crate::{Endpoint, Error, Message, ReconnectPolicy, Result, SocketType};
 
-/// Reliability settings for [`ExclusiveDealer`].
-#[derive(Clone, Copy, Debug)]
-pub struct ExclusiveDealerOptions {
+/// Configuration for a caller-driven [`Socket`].
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// ZMTP routing identity presented to the peer.
+    pub identity: Bytes,
+    /// Maximum time allowed to establish the TCP connection.
     pub connect_timeout: Duration,
+    /// Maximum time allowed to complete the ZMTP handshake.
     pub handshake_timeout: Duration,
+    /// Optional deadline for each `send`, `recv`, or maintenance write.
     pub io_timeout: Option<Duration>,
+    /// Reconnection policy applied by the next operation after a disconnect.
     pub reconnect: ReconnectPolicy,
+    /// Interval between outbound ZMTP PING commands.
     pub heartbeat_interval: Option<Duration>,
+    /// TTL announced to the peer in outbound PING commands.
+    pub heartbeat_ttl: Option<Duration>,
+    /// Disconnect when no inbound traffic arrives within this duration.
     pub heartbeat_timeout: Option<Duration>,
 }
 
-impl Default for ExclusiveDealerOptions {
+impl Default for Options {
     fn default() -> Self {
         Self {
+            identity: Bytes::new(),
             connect_timeout: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
             io_timeout: None,
             reconnect: ReconnectPolicy::default(),
             heartbeat_interval: None,
+            heartbeat_ttl: None,
             heartbeat_timeout: None,
         }
+    }
+}
+
+impl Options {
+    fn validate(&self) -> Result<()> {
+        if self.identity.len() > 255 {
+            return Err(Error::Config(format!(
+                "exclusive socket identity length {} exceeds ZMTP limit of 255",
+                self.identity.len()
+            )));
+        }
+        if self.connect_timeout.is_zero() {
+            return Err(Error::Config(
+                "exclusive socket connect_timeout must be non-zero".into(),
+            ));
+        }
+        if self.handshake_timeout.is_zero() {
+            return Err(Error::Config(
+                "exclusive socket handshake_timeout must be non-zero".into(),
+            ));
+        }
+        if self.heartbeat_interval.is_some_and(|value| value.is_zero()) {
+            return Err(Error::Config(
+                "exclusive socket heartbeat_interval must be non-zero".into(),
+            ));
+        }
+        if self.heartbeat_timeout.is_some_and(|value| value.is_zero()) {
+            return Err(Error::Config(
+                "exclusive socket heartbeat_timeout must be non-zero".into(),
+            ));
+        }
+        if let Some(ttl) = self.heartbeat_ttl
+            && ttl > Duration::from_millis(6_553_500)
+        {
+            return Err(Error::Config(format!(
+                "exclusive socket heartbeat_ttl {ttl:?} exceeds ZMTP maximum of 6553.5s"
+            )));
+        }
+        Ok(())
     }
 }
 
 /// Lifecycle event for an exclusive socket.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum ExclusiveEvent {
+pub enum Event {
     Connected,
     HandshakeSucceeded,
     Disconnected { reason: String },
@@ -61,37 +113,39 @@ struct LiveConnection {
     ping_sequence: u64,
 }
 
-/// A single-peer DEALER whose caller owns the TCP data path.
+/// A single-peer socket whose caller owns the TCP data path.
+///
+/// The initial implementation supports only a connected TCP DEALER using the
+/// NULL mechanism. Unsupported socket types and transports return a
+/// configuration error.
 ///
 /// A failed `send` is never retried automatically: the peer may have received
 /// a partial or complete command. The next operation may restore the
 /// connection, but the application decides whether a command is safe to retry.
 #[derive(Debug)]
-pub struct ExclusiveDealer {
-    address: String,
-    identity: Bytes,
-    options: ExclusiveDealerOptions,
+pub struct Socket {
+    kind: SocketType,
+    endpoint: Endpoint,
+    options: Options,
     live: Option<LiveConnection>,
-    monitor: broadcast::Sender<ExclusiveEvent>,
+    monitor: broadcast::Sender<Event>,
     reconnect_attempt: u32,
     retry_at: Option<Instant>,
     closed: bool,
 }
 
-impl ExclusiveDealer {
-    pub async fn connect(address: impl Into<String>, identity: Bytes) -> Result<Self> {
-        Self::connect_with_options(address, identity, ExclusiveDealerOptions::default()).await
-    }
-
-    pub async fn connect_with_options(
-        address: impl Into<String>,
-        identity: Bytes,
-        options: ExclusiveDealerOptions,
+impl Socket {
+    /// Connect a caller-driven socket.
+    pub async fn connect(
+        socket_type: SocketType,
+        endpoint: Endpoint,
+        options: Options,
     ) -> Result<Self> {
+        validate_mode(socket_type, &endpoint, &options)?;
         let (monitor, _) = broadcast::channel(1024);
-        let mut dealer = Self {
-            address: address.into(),
-            identity,
+        let mut socket = Self {
+            kind: socket_type,
+            endpoint,
             options,
             live: None,
             monitor,
@@ -99,11 +153,11 @@ impl ExclusiveDealer {
             retry_at: None,
             closed: false,
         };
-        dealer.establish().await?;
-        Ok(dealer)
+        socket.establish().await?;
+        Ok(socket)
     }
 
-    pub fn monitor(&self) -> broadcast::Receiver<ExclusiveEvent> {
+    pub fn monitor(&self) -> broadcast::Receiver<Event> {
         self.monitor.subscribe()
     }
 
@@ -137,16 +191,31 @@ impl ExclusiveDealer {
     /// current peer; a later operation attempts reconnection.
     pub async fn recv(&mut self) -> Result<Message> {
         self.ensure_connected().await?;
-        let timeout = self.options.io_timeout;
-        let result = run_timeout(timeout, recv_live(self.live.as_mut().expect("connected"))).await;
+        let io_timeout = self.options.io_timeout;
+        let heartbeat_interval = self.options.heartbeat_interval;
+        let heartbeat_timeout = self.options.heartbeat_timeout;
+        let heartbeat_ttl = heartbeat_ttl_deciseconds(self.options.heartbeat_ttl);
+        let result = run_timeout(
+            io_timeout,
+            recv_live(
+                self.live.as_mut().expect("connected"),
+                heartbeat_interval,
+                heartbeat_timeout,
+                heartbeat_ttl,
+            ),
+        )
+        .await;
         if let Err(error) = &result {
             self.mark_disconnected(error);
         }
         result
     }
 
-    /// Drive heartbeat and reconnect work. Call this from the bridge timer
-    /// when no data operation is active; it never runs a background data task.
+    /// Drive heartbeat and reconnect work when no data operation is active.
+    ///
+    /// `recv` drives heartbeat timers while it waits. An otherwise idle
+    /// application must call this method from its own timer because exclusive
+    /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
         let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
@@ -168,30 +237,31 @@ impl ExclusiveDealer {
         if let Some(timeout) = self.options.heartbeat_timeout
             && now.duration_since(live.last_input) >= timeout
         {
-            let error = timed_out("exclusive DEALER heartbeat timeout");
+            let error = Error::Timeout;
             self.mark_disconnected(&error);
             return Err(error);
         }
         if let Some(interval) = self.options.heartbeat_interval
             && now.duration_since(live.last_ping) >= interval
         {
-            live.ping_sequence = live.ping_sequence.wrapping_add(1);
-            let context = Bytes::copy_from_slice(&live.ping_sequence.to_le_bytes());
-            live.connection.send_command(&Command::Ping {
-                ttl_deciseconds: 0,
-                context,
-            })?;
+            queue_ping(
+                live,
+                heartbeat_ttl_deciseconds(self.options.heartbeat_ttl),
+                now,
+            )?;
             let result = run_timeout(self.options.io_timeout, flush_live(live)).await;
             if let Err(error) = result {
                 self.mark_disconnected(&error);
                 return Err(error);
             }
-            live.last_ping = now;
         }
         Ok(())
     }
 
     pub async fn reconnect_now(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
         self.live = None;
         self.retry_at = None;
         self.establish().await
@@ -203,7 +273,7 @@ impl ExclusiveDealer {
         if let Some(mut live) = self.live.take() {
             live.stream.shutdown().await?;
         }
-        let _ = self.monitor.send(ExclusiveEvent::Closed);
+        let _ = self.monitor.send(Event::Closed);
         Ok(())
     }
 
@@ -225,8 +295,9 @@ impl ExclusiveDealer {
 
     async fn establish(&mut self) -> Result<()> {
         let result = establish_live(
-            &self.address,
-            self.identity.clone(),
+            self.kind,
+            &self.endpoint,
+            self.options.identity.clone(),
             self.options.connect_timeout,
             self.options.handshake_timeout,
         )
@@ -236,8 +307,8 @@ impl ExclusiveDealer {
                 self.live = Some(live);
                 self.reconnect_attempt = 0;
                 self.retry_at = None;
-                let _ = self.monitor.send(ExclusiveEvent::Connected);
-                let _ = self.monitor.send(ExclusiveEvent::HandshakeSucceeded);
+                let _ = self.monitor.send(Event::Connected);
+                let _ = self.monitor.send(Event::HandshakeSucceeded);
                 Ok(())
             }
             Err(error) => {
@@ -249,7 +320,7 @@ impl ExclusiveDealer {
 
     fn mark_disconnected(&mut self, error: &Error) {
         if self.live.take().is_some() {
-            let _ = self.monitor.send(ExclusiveEvent::Disconnected {
+            let _ = self.monitor.send(Event::Disconnected {
                 reason: error.to_string(),
             });
         }
@@ -263,7 +334,7 @@ impl ExclusiveDealer {
         };
         self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
         self.retry_at = Some(Instant::now() + delay);
-        let _ = self.monitor.send(ExclusiveEvent::ReconnectDelayed {
+        let _ = self.monitor.send(Event::ReconnectDelayed {
             retry_in: delay,
             attempt: self.reconnect_attempt,
         });
@@ -281,18 +352,50 @@ fn reconnect_delay(policy: ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
+fn validate_mode(socket_type: SocketType, endpoint: &Endpoint, options: &Options) -> Result<()> {
+    if socket_type != SocketType::Dealer {
+        return Err(Error::Config(format!(
+            "exclusive sockets currently support only DEALER, not {socket_type:?}"
+        )));
+    }
+    match endpoint {
+        Endpoint::Tcp {
+            host: Host::Wildcard,
+            ..
+        } => {
+            return Err(Error::Config(
+                "exclusive sockets cannot connect to a wildcard TCP host".into(),
+            ));
+        }
+        Endpoint::Tcp { .. } => {}
+        _ => {
+            return Err(Error::Config(format!(
+                "exclusive sockets currently support only tcp:// endpoints, not {endpoint}"
+            )));
+        }
+    }
+    options.validate()
+}
+
 async fn establish_live(
-    address: &str,
+    socket_type: SocketType,
+    endpoint: &Endpoint,
     identity: Bytes,
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> Result<LiveConnection> {
-    let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(address))
+    let Endpoint::Tcp { host, port } = endpoint else {
+        return Err(Error::Config(
+            "exclusive sockets currently support only tcp:// endpoints".into(),
+        ));
+    };
+    let host = host.to_string();
+    let stream = tokio::time::timeout(connect_timeout, TcpStream::connect((host.as_str(), *port)))
         .await
-        .map_err(|_| timed_out("exclusive DEALER connect timeout"))??;
+        .map_err(|_| timed_out("exclusive socket connect timeout"))??;
     stream.set_nodelay(true)?;
     let connection =
-        Connection::new(ConnectionConfig::new(Role::Client, SocketType::Dealer).identity(identity));
+        Connection::new(ConnectionConfig::new(Role::Client, socket_type).identity(identity));
     let now = Instant::now();
     let mut live = LiveConnection {
         stream,
@@ -305,7 +408,7 @@ async fn establish_live(
     };
     tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
         .await
-        .map_err(|_| timed_out("exclusive DEALER handshake timeout"))??;
+        .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
     Ok(live)
 }
 
@@ -317,7 +420,7 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
         }
         read_live_once(live).await?;
         while let Some(event) = live.connection.poll_event() {
-            if let Event::HandshakeSucceeded { .. } = event {
+            if let ProtoEvent::HandshakeSucceeded { .. } = event {
                 break;
             }
         }
@@ -325,14 +428,58 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
     flush_live(live).await
 }
 
-async fn recv_live(live: &mut LiveConnection) -> Result<Message> {
+async fn recv_live(
+    live: &mut LiveConnection,
+    heartbeat_interval: Option<Duration>,
+    heartbeat_timeout: Option<Duration>,
+    heartbeat_ttl_deciseconds: u16,
+) -> Result<Message> {
     loop {
         if let Some(message) = live.connection.poll_message() {
             return Ok(message);
         }
-        read_live_once(live).await?;
-        flush_live(live).await?;
+
+        let ping_deadline = heartbeat_interval.map(|interval| live.last_ping + interval);
+        let idle_deadline = heartbeat_timeout.map(|timeout| live.last_input + timeout);
+        tokio::select! {
+            biased;
+            result = read_live_once(live) => {
+                result?;
+                flush_live(live).await?;
+            }
+            () = sleep_until(idle_deadline), if idle_deadline.is_some() => {
+                return Err(Error::Timeout);
+            }
+            () = sleep_until(ping_deadline), if ping_deadline.is_some() => {
+                let now = Instant::now();
+                queue_ping(live, heartbeat_ttl_deciseconds, now)?;
+                flush_live(live).await?;
+            }
+        }
     }
+}
+
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn heartbeat_ttl_deciseconds(ttl: Option<Duration>) -> u16 {
+    ttl.and_then(|duration| u16::try_from(duration.as_millis() / 100).ok())
+        .unwrap_or(0)
+}
+
+fn queue_ping(live: &mut LiveConnection, ttl_deciseconds: u16, now: Instant) -> Result<()> {
+    live.ping_sequence = live.ping_sequence.wrapping_add(1);
+    let context = Bytes::copy_from_slice(&live.ping_sequence.to_le_bytes());
+    live.connection.send_command(&Command::Ping {
+        ttl_deciseconds,
+        context,
+    })?;
+    live.last_ping = now;
+    Ok(())
 }
 
 async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
@@ -367,7 +514,7 @@ async fn flush_live(live: &mut LiveConnection) -> Result<()> {
         if n == 0 {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::WriteZero,
-                "exclusive DEALER write returned zero",
+                "exclusive socket write returned zero",
             )));
         }
         live.connection.advance_transmit(n);
@@ -382,7 +529,7 @@ async fn run_timeout<T>(
     match timeout {
         Some(timeout) => tokio::time::timeout(timeout, future)
             .await
-            .map_err(|_| timed_out("exclusive DEALER I/O timeout"))?,
+            .map_err(|_| timed_out("exclusive socket I/O timeout"))?,
         None => future.await,
     }
 }
@@ -394,82 +541,153 @@ fn timed_out(message: &'static str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Endpoint, Options, Socket};
+    use crate::{Options as RegularOptions, Socket as RegularSocket};
 
-    async fn router() -> (Socket, String) {
-        let router = Socket::new(SocketType::Router, Options::default());
+    async fn router() -> (RegularSocket, Endpoint) {
+        let router = RegularSocket::new(SocketType::Router, RegularOptions::default());
         let bound = router
             .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
             .await
             .unwrap();
-        let Endpoint::Tcp { host, port } = bound else {
-            panic!()
-        };
-        (router, format!("{host}:{port}"))
+        (router, bound)
     }
 
     #[tokio::test]
     async fn dealer_round_trips_with_standard_router() {
-        let (router, address) = router().await;
+        let (router, endpoint) = router().await;
         let server = tokio::spawn(async move {
             for _ in 0..100 {
                 let message = router.recv().await.unwrap();
                 router.send(message).await.unwrap();
             }
         });
-        let mut dealer = ExclusiveDealer::connect(address, Bytes::from_static(b"exclusive-test"))
-            .await
-            .unwrap();
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                identity: Bytes::from_static(b"exclusive-test"),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
         for sequence in 0_u64..100 {
             let message = Message::single(Bytes::copy_from_slice(&sequence.to_le_bytes()));
-            dealer.send(&message).await.unwrap();
-            assert_eq!(dealer.recv().await.unwrap(), message);
+            socket.send(&message).await.unwrap();
+            assert_eq!(socket.recv().await.unwrap(), message);
         }
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn reconnect_preserves_identity_and_reports_events() {
-        let (router1, address) = router().await;
-        let mut dealer = ExclusiveDealer::connect_with_options(
-            address.clone(),
-            Bytes::from_static(b"stable-id"),
-            ExclusiveDealerOptions {
+        let (router1, endpoint) = router().await;
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                identity: Bytes::from_static(b"stable-id"),
                 reconnect: ReconnectPolicy::Fixed(Duration::from_millis(1)),
                 io_timeout: Some(Duration::from_millis(100)),
-                ..ExclusiveDealerOptions::default()
+                ..Options::default()
             },
         )
         .await
         .unwrap();
-        let mut monitor = dealer.monitor();
+        let mut monitor = socket.monitor();
         drop(router1);
-        assert!(dealer.recv().await.is_err());
+        assert!(socket.recv().await.is_err());
         let (router2, rebound) = router().await;
         // A new ephemeral port is expected; exercise explicit reconnect state
         // here. Restart-on-the-same-address is covered by the external Wine
         // reproduction procedure.
-        dealer.address = rebound;
-        dealer.reconnect_now().await.unwrap();
+        socket.endpoint = rebound;
+        socket.reconnect_now().await.unwrap();
         let server = tokio::spawn(async move {
             let message = router2.recv().await.unwrap();
             assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"stable-id");
             router2.send(message).await.unwrap();
         });
         let message = Message::single(Bytes::from_static(b"after-reconnect"));
-        dealer.send(&message).await.unwrap();
-        assert_eq!(dealer.recv().await.unwrap(), message);
+        socket.send(&message).await.unwrap();
+        assert_eq!(socket.recv().await.unwrap(), message);
         server.await.unwrap();
         let events: Vec<_> = std::iter::from_fn(|| monitor.try_recv().ok()).collect();
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, ExclusiveEvent::Disconnected { .. }))
+                .any(|e| matches!(e, Event::Disconnected { .. }))
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, ExclusiveEvent::HandshakeSucceeded))
+                .any(|e| matches!(e, Event::HandshakeSucceeded))
         );
+    }
+
+    #[tokio::test]
+    async fn recv_drives_heartbeat_while_waiting_for_reply() {
+        let (router, endpoint) = router().await;
+        let server = tokio::spawn(async move {
+            let message = router.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            router.send(message).await.unwrap();
+        });
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                heartbeat_interval: Some(Duration::from_millis(10)),
+                heartbeat_timeout: Some(Duration::from_millis(40)),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        let message = Message::single(Bytes::from_static(b"heartbeat"));
+        socket.send(&message).await.unwrap();
+        assert_eq!(socket.recv().await.unwrap(), message);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recv_enforces_idle_timeout_without_maintenance() {
+        let (router, endpoint) = router().await;
+        let server = tokio::spawn(async move {
+            let _message = router.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                heartbeat_timeout: Some(Duration::from_millis(20)),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        socket
+            .send(&Message::single(Bytes::from_static(b"timeout")))
+            .await
+            .unwrap();
+        assert!(matches!(socket.recv().await, Err(Error::Timeout)));
+        assert!(!socket.is_connected());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsupported_modes_fail_before_connecting() {
+        let endpoint: Endpoint = "tcp://127.0.0.1:1".parse().unwrap();
+        let error = Socket::connect(SocketType::Pair, endpoint, Options::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Config(message) if message.contains("only DEALER")));
+
+        let endpoint: Endpoint = "inproc://exclusive".parse().unwrap();
+        let error = Socket::connect(SocketType::Dealer, endpoint, Options::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Config(message) if message.contains("only tcp://")));
     }
 }

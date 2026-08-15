@@ -221,8 +221,7 @@ impl Socket {
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
         let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
-        let input_result =
-            drain_ready_input(self.live.as_mut().expect("connected"), heartbeat_timeout);
+        let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
         if let Err(error) = input_result {
             self.mark_disconnected(&error);
             return Err(error);
@@ -424,7 +423,7 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
         if live.connection.is_ready() {
             break;
         }
-        read_live_once(live, None).await?;
+        read_live_once(live).await?;
         while let Some(event) = live.connection.poll_event() {
             if let ProtoEvent::HandshakeSucceeded { .. } = event {
                 break;
@@ -449,7 +448,7 @@ async fn recv_live(
         let heartbeat_deadline = live.heartbeat_deadline;
         tokio::select! {
             biased;
-            result = read_live_once(live, heartbeat_timeout) => {
+            result = read_live_once(live) => {
                 result?;
                 flush_live(live).await?;
             }
@@ -507,31 +506,25 @@ fn queue_ping(
     Ok(())
 }
 
-fn note_inbound_traffic(live: &mut LiveConnection, heartbeat_timeout: Option<Duration>) {
-    if live.heartbeat_deadline.is_some() {
-        live.heartbeat_deadline =
-            heartbeat_timeout.and_then(|timeout| Instant::now().checked_add(timeout));
-    }
+fn note_inbound_traffic(live: &mut LiveConnection) {
+    live.heartbeat_deadline = None;
 }
 
-async fn read_live_once(
-    live: &mut LiveConnection,
-    heartbeat_timeout: Option<Duration>,
-) -> Result<()> {
+async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
     let n = live.stream.read_buf(&mut live.read_buf).await?;
     if n == 0 {
         return Err(Error::Closed);
     }
-    note_inbound_traffic(live, heartbeat_timeout);
+    note_inbound_traffic(live);
     live.connection.handle_input(live.read_buf.split().freeze())
 }
 
-fn drain_ready_input(live: &mut LiveConnection, heartbeat_timeout: Option<Duration>) -> Result<()> {
+fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
     loop {
         match live.stream.try_read_buf(&mut live.read_buf) {
             Ok(0) => return Err(Error::Closed),
             Ok(_) => {
-                note_inbound_traffic(live, heartbeat_timeout);
+                note_inbound_traffic(live);
                 live.connection
                     .handle_input(live.read_buf.split().freeze())?;
             }
@@ -609,6 +602,34 @@ mod tests {
                 ping_sequence: 0,
             };
             finish_handshake(&mut live).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        (endpoint, server)
+    }
+
+    async fn router_replies_to_one_ping() -> (Endpoint, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let now = Instant::now();
+            let mut live = LiveConnection {
+                stream,
+                connection: Connection::new(ConnectionConfig::new(
+                    Role::Server,
+                    SocketType::Router,
+                )),
+                read_buf: BytesMut::with_capacity(4 * 1024),
+                write_buf: BytesMut::with_capacity(4 * 1024),
+                last_ping: now,
+                heartbeat_deadline: None,
+                ping_sequence: 0,
+            };
+            finish_handshake(&mut live).await.unwrap();
+            read_live_once(&mut live).await.unwrap();
+            flush_live(&mut live).await.unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
         (endpoint, server)
@@ -755,6 +776,33 @@ mod tests {
         .unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_millis(200), socket.recv()).await,
+            Ok(Err(Error::Timeout))
+        ));
+        assert!(!socket.is_connected());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn inbound_pong_clears_heartbeat_deadline() {
+        let (endpoint, server) = router_replies_to_one_ping().await;
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                heartbeat_interval: Some(Duration::from_millis(50)),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(125), socket.recv())
+                .await
+                .is_err()
+        );
+        assert!(socket.is_connected());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), socket.recv()).await,
             Ok(Err(Error::Timeout))
         ));
         assert!(!socket.is_connected());

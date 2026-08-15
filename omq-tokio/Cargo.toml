@@ -285,6 +285,10 @@ name = "omq_soak_curve"
 path = "tests/omq_soak_curve.rs"
 
 [[test]]
+name = "omq_soak_exclusive"
+path = "tests/omq_soak_exclusive.rs"
+
+[[test]]
 name = "omq_soak_hwm_reconnect"
 path = "tests/omq_soak_hwm_reconnect.rs"
 

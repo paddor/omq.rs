@@ -27,6 +27,9 @@ const ZMQ_IPV6: i32 = 42;
 const ZMQ_BLOCKY: i32 = 70;
 const ZMQ_LINGER: i32 = 17;
 
+// Hang guard, not a performance target. Keep above debug runtime on busy hosts.
+const INPROC_CHURN_CHILD_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn set_i32(sock: *mut c_void, opt: i32, value: i32) {
     assert_eq!(
         zmq_setsockopt(
@@ -471,7 +474,7 @@ fn zero_linger_inproc_churn_term_does_not_hang() {
         .spawn()
         .expect("spawn inproc churn child");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + INPROC_CHURN_CHILD_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait().expect("poll child") {
             assert!(status.success(), "child failed: {status}");

@@ -132,6 +132,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[("OMQ_IO_THREADS", "1")],
     },
     ImplDef {
+        name: "omq-tokio-exclusive",
+        binary_from: Some("omq-tokio-ct"),
+        prefix: "E",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[],
+    },
+    ImplDef {
         name: "libzmq",
         binary_from: None,
         prefix: "z",
@@ -295,6 +311,30 @@ static IMPLS: &[ImplDef] = &[
 
 fn find_impl(name: &str) -> Option<&'static ImplDef> {
     IMPLS.iter().find(|i| i.name == name)
+}
+
+fn supports_pushpull(def: &ImplDef) -> bool {
+    def.name != "omq-tokio-exclusive"
+}
+
+fn supports_fanio(def: &ImplDef) -> bool {
+    !def.fanout_subcmd.is_empty()
+}
+
+fn latency_req_subcmd(def: &ImplDef) -> &'static str {
+    if def.name == "omq-tokio-exclusive" {
+        "req-exclusive"
+    } else {
+        "req"
+    }
+}
+
+fn latency_rep_subcmd(def: &ImplDef) -> &'static str {
+    if def.name == "omq-tokio-exclusive" {
+        "rep-exclusive"
+    } else {
+        "rep"
+    }
 }
 
 #[cfg(test)]
@@ -1326,7 +1366,7 @@ fn run_latency_cell(
     let rep_env: Vec<(&str, &str)> = def.env.to_vec();
     let req_env: Vec<(&str, &str)> = def.env.to_vec();
 
-    let mut rep_cmd = vec![peer_binary_str, "rep"];
+    let mut rep_cmd = vec![peer_binary_str, latency_rep_subcmd(def)];
     if transport == TransportKind::Tcp {
         rep_cmd.extend(["tcp://127.0.0.1:0", &size_str]);
     } else {
@@ -1353,7 +1393,7 @@ fn run_latency_cell(
     let req_output = process::capture(
         &[
             binary_str,
-            "req",
+            latency_req_subcmd(def),
             &connect_addr,
             &size_str,
             &iters_str,
@@ -1558,75 +1598,82 @@ pub(crate) fn run(args: ComparisonsArgs) {
 
         // Throughput
         if !args.no_throughput {
-            eprintln!("\n=== Throughput / {transport_str} ===");
-            print_throughput_header(&active_impls);
+            let throughput_impls: Vec<&str> = active_impls
+                .iter()
+                .filter(|&&name| supports_pushpull(find_impl(name).unwrap()))
+                .copied()
+                .collect();
+            if !throughput_impls.is_empty() {
+                eprintln!("\n=== Throughput / {transport_str} ===");
+                print_throughput_header(&throughput_impls);
 
-            for &size in &sizes {
-                let mut cells = Vec::with_capacity(active_impls.len());
-                for &impl_name in &active_impls {
-                    let def = find_impl(impl_name).unwrap();
-                    let binary = binaries[impl_name].as_path();
-                    let peer_binary = binary;
+                for &size in &sizes {
+                    let mut cells = Vec::with_capacity(throughput_impls.len());
+                    for &impl_name in &throughput_impls {
+                        let def = find_impl(impl_name).unwrap();
+                        let binary = binaries[impl_name].as_path();
+                        let peer_binary = binary;
 
-                    let result = run_throughput_cell(
-                        binary,
-                        peer_binary,
-                        def,
-                        transport,
-                        size,
-                        duration,
-                        rounds,
-                        base_port,
-                    );
+                        let result = run_throughput_cell(
+                            binary,
+                            peer_binary,
+                            def,
+                            transport,
+                            size,
+                            duration,
+                            rounds,
+                            base_port,
+                        );
 
-                    let cpu_time = match (result.push_cpu, result.pull_cpu) {
-                        (Some(pc), Some(rc)) => Some(pc + rc),
-                        (Some(pc), None) => Some(pc),
-                        _ => None,
-                    };
+                        let cpu_time = match (result.push_cpu, result.pull_cpu) {
+                            (Some(pc), Some(rc)) => Some(pc + rc),
+                            (Some(pc), None) => Some(pc),
+                            _ => None,
+                        };
 
-                    let row = ComparisonRow {
-                        run_id: run_id.clone(),
-                        impl_name: impl_name.to_string(),
-                        kind: "throughput".to_string(),
-                        transport: transport_str.to_string(),
-                        msg_size: size,
-                        peers: None,
-                        msgs_s: Some(result.msgs_s),
-                        mbps: Some(result.mbps),
-                        elapsed: Some(result.elapsed),
-                        cpu_time,
-                        push_cpu_time: result.push_cpu,
-                        pull_cpu_time: result.pull_cpu,
-                        pub_cpu_time: None,
-                        req_cpu_time: None,
-                        p50_us: None,
-                        p99_us: None,
-                        p999_us: None,
-                        max_us: None,
-                        iterations: None,
-                        peer_min: None,
-                        peer_max: None,
-                        peer_p10: None,
-                        peer_p25: None,
-                        peer_median: None,
-                        peer_p75: None,
-                        peer_p90: None,
-                        zero_transport: if result.msgs_s == 0.0 {
-                            Some(true)
+                        let row = ComparisonRow {
+                            run_id: run_id.clone(),
+                            impl_name: impl_name.to_string(),
+                            kind: "throughput".to_string(),
+                            transport: transport_str.to_string(),
+                            msg_size: size,
+                            peers: None,
+                            msgs_s: Some(result.msgs_s),
+                            mbps: Some(result.mbps),
+                            elapsed: Some(result.elapsed),
+                            cpu_time,
+                            push_cpu_time: result.push_cpu,
+                            pull_cpu_time: result.pull_cpu,
+                            pub_cpu_time: None,
+                            req_cpu_time: None,
+                            p50_us: None,
+                            p99_us: None,
+                            p999_us: None,
+                            max_us: None,
+                            iterations: None,
+                            peer_min: None,
+                            peer_max: None,
+                            peer_p10: None,
+                            peer_p25: None,
+                            peer_median: None,
+                            peer_p75: None,
+                            peer_p90: None,
+                            zero_transport: if result.msgs_s == 0.0 {
+                                Some(true)
+                            } else {
+                                None
+                            },
+                        };
+                        jsonl::append_jsonl(&jsonl_path, &row);
+
+                        if size >= 1024 {
+                            cells.push(fmt_gbps(result.mbps));
                         } else {
-                            None
-                        },
-                    };
-                    jsonl::append_jsonl(&jsonl_path, &row);
-
-                    if size >= 1024 {
-                        cells.push(fmt_gbps(result.mbps));
-                    } else {
-                        cells.push(fmt_rate(result.msgs_s));
+                            cells.push(fmt_rate(result.msgs_s));
+                        }
                     }
+                    print_table_row(&size_label(size), &cells, 14);
                 }
-                print_table_row(&size_label(size), &cells, 14);
             }
         }
 
@@ -1795,7 +1842,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 .iter()
                 .filter(|&&name| {
                     let def = find_impl(name).unwrap();
-                    def.class != Some(ImplClass::Curve)
+                    supports_fanio(def) && def.class != Some(ImplClass::Curve)
                 })
                 .copied()
                 .collect();
@@ -1881,7 +1928,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                 .iter()
                 .filter(|&&name| {
                     let def = find_impl(name).unwrap();
-                    def.class != Some(ImplClass::Curve)
+                    supports_fanio(def) && def.class != Some(ImplClass::Curve)
                 })
                 .copied()
                 .collect();
@@ -2161,5 +2208,13 @@ mod tests {
             latency_sizes_from(&[16, 1024, 4096, 8192, 16384]),
             vec![16, 1024, 4096]
         );
+    }
+
+    #[test]
+    fn exclusive_latency_uses_exclusive_req_and_rep() {
+        let def = find_impl("omq-tokio-exclusive").unwrap();
+
+        assert_eq!(latency_req_subcmd(def), "req-exclusive");
+        assert_eq!(latency_rep_subcmd(def), "rep-exclusive");
     }
 }

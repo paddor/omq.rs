@@ -33,7 +33,9 @@ pub struct Options {
     pub heartbeat_interval: Option<Duration>,
     /// TTL announced to the peer in outbound PING commands.
     pub heartbeat_ttl: Option<Duration>,
-    /// Disconnect when no inbound traffic arrives within this duration.
+    /// Time allowed for peer activity after an outbound heartbeat PING.
+    ///
+    /// Defaults to `heartbeat_interval` when heartbeats are enabled.
     pub heartbeat_timeout: Option<Duration>,
 }
 
@@ -108,8 +110,8 @@ struct LiveConnection {
     connection: Connection,
     read_buf: BytesMut,
     write_buf: BytesMut,
-    last_input: Instant,
     last_ping: Instant,
+    heartbeat_deadline: Option<Instant>,
     ping_sequence: u64,
 }
 
@@ -193,7 +195,7 @@ impl Socket {
         self.ensure_connected().await?;
         let io_timeout = self.options.io_timeout;
         let heartbeat_interval = self.options.heartbeat_interval;
-        let heartbeat_timeout = self.options.heartbeat_timeout;
+        let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
         let heartbeat_ttl = heartbeat_ttl_deciseconds(self.options.heartbeat_ttl);
         let result = run_timeout(
             io_timeout,
@@ -218,7 +220,9 @@ impl Socket {
     /// sockets never run a background task.
     pub async fn maintain(&mut self) -> Result<()> {
         self.ensure_connected().await?;
-        let input_result = drain_ready_input(self.live.as_mut().expect("connected"));
+        let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
+        let input_result =
+            drain_ready_input(self.live.as_mut().expect("connected"), heartbeat_timeout);
         if let Err(error) = input_result {
             self.mark_disconnected(&error);
             return Err(error);
@@ -234,8 +238,9 @@ impl Socket {
         }
         let now = Instant::now();
         let live = self.live.as_mut().expect("connected");
-        if let Some(timeout) = self.options.heartbeat_timeout
-            && now.duration_since(live.last_input) >= timeout
+        if live
+            .heartbeat_deadline
+            .is_some_and(|deadline| now >= deadline)
         {
             let error = Error::Timeout;
             self.mark_disconnected(&error);
@@ -247,6 +252,7 @@ impl Socket {
             queue_ping(
                 live,
                 heartbeat_ttl_deciseconds(self.options.heartbeat_ttl),
+                heartbeat_timeout.expect("heartbeat interval supplies timeout"),
                 now,
             )?;
             let result = run_timeout(self.options.io_timeout, flush_live(live)).await;
@@ -402,8 +408,8 @@ async fn establish_live(
         connection,
         read_buf: BytesMut::with_capacity(4 * 1024),
         write_buf: BytesMut::with_capacity(4 * 1024),
-        last_input: now,
         last_ping: now,
+        heartbeat_deadline: None,
         ping_sequence: 0,
     };
     tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
@@ -418,7 +424,7 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
         if live.connection.is_ready() {
             break;
         }
-        read_live_once(live).await?;
+        read_live_once(live, None).await?;
         while let Some(event) = live.connection.poll_event() {
             if let ProtoEvent::HandshakeSucceeded { .. } = event {
                 break;
@@ -440,19 +446,24 @@ async fn recv_live(
         }
 
         let ping_deadline = heartbeat_interval.map(|interval| live.last_ping + interval);
-        let idle_deadline = heartbeat_timeout.map(|timeout| live.last_input + timeout);
+        let heartbeat_deadline = live.heartbeat_deadline;
         tokio::select! {
             biased;
-            result = read_live_once(live) => {
+            result = read_live_once(live, heartbeat_timeout) => {
                 result?;
                 flush_live(live).await?;
             }
-            () = sleep_until(idle_deadline), if idle_deadline.is_some() => {
+            () = sleep_until(heartbeat_deadline), if heartbeat_deadline.is_some() => {
                 return Err(Error::Timeout);
             }
             () = sleep_until(ping_deadline), if ping_deadline.is_some() => {
                 let now = Instant::now();
-                queue_ping(live, heartbeat_ttl_deciseconds, now)?;
+                queue_ping(
+                    live,
+                    heartbeat_ttl_deciseconds,
+                    heartbeat_timeout.expect("heartbeat interval supplies timeout"),
+                    now,
+                )?;
                 flush_live(live).await?;
             }
         }
@@ -471,7 +482,18 @@ fn heartbeat_ttl_deciseconds(ttl: Option<Duration>) -> u16 {
         .unwrap_or(0)
 }
 
-fn queue_ping(live: &mut LiveConnection, ttl_deciseconds: u16, now: Instant) -> Result<()> {
+fn effective_heartbeat_timeout(options: &Options) -> Option<Duration> {
+    options
+        .heartbeat_interval
+        .map(|interval| options.heartbeat_timeout.unwrap_or(interval))
+}
+
+fn queue_ping(
+    live: &mut LiveConnection,
+    ttl_deciseconds: u16,
+    heartbeat_timeout: Duration,
+    now: Instant,
+) -> Result<()> {
     live.ping_sequence = live.ping_sequence.wrapping_add(1);
     let context = Bytes::copy_from_slice(&live.ping_sequence.to_le_bytes());
     live.connection.send_command(&Command::Ping {
@@ -479,24 +501,37 @@ fn queue_ping(live: &mut LiveConnection, ttl_deciseconds: u16, now: Instant) -> 
         context,
     })?;
     live.last_ping = now;
+    if live.heartbeat_deadline.is_none() {
+        live.heartbeat_deadline = now.checked_add(heartbeat_timeout);
+    }
     Ok(())
 }
 
-async fn read_live_once(live: &mut LiveConnection) -> Result<()> {
+fn note_inbound_traffic(live: &mut LiveConnection, heartbeat_timeout: Option<Duration>) {
+    if live.heartbeat_deadline.is_some() {
+        live.heartbeat_deadline =
+            heartbeat_timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    }
+}
+
+async fn read_live_once(
+    live: &mut LiveConnection,
+    heartbeat_timeout: Option<Duration>,
+) -> Result<()> {
     let n = live.stream.read_buf(&mut live.read_buf).await?;
     if n == 0 {
         return Err(Error::Closed);
     }
-    live.last_input = Instant::now();
+    note_inbound_traffic(live, heartbeat_timeout);
     live.connection.handle_input(live.read_buf.split().freeze())
 }
 
-fn drain_ready_input(live: &mut LiveConnection) -> Result<()> {
+fn drain_ready_input(live: &mut LiveConnection, heartbeat_timeout: Option<Duration>) -> Result<()> {
     loop {
         match live.stream.try_read_buf(&mut live.read_buf) {
             Ok(0) => return Err(Error::Closed),
             Ok(_) => {
-                live.last_input = Instant::now();
+                note_inbound_traffic(live, heartbeat_timeout);
                 live.connection
                     .handle_input(live.read_buf.split().freeze())?;
             }
@@ -542,6 +577,7 @@ fn timed_out(message: &'static str) -> Error {
 mod tests {
     use super::*;
     use crate::{Options as RegularOptions, Socket as RegularSocket};
+    use tokio::net::TcpListener;
 
     async fn router() -> (RegularSocket, Endpoint) {
         let router = RegularSocket::new(SocketType::Router, RegularOptions::default());
@@ -550,6 +586,32 @@ mod tests {
             .await
             .unwrap();
         (router, bound)
+    }
+
+    async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let now = Instant::now();
+            let mut live = LiveConnection {
+                stream,
+                connection: Connection::new(ConnectionConfig::new(
+                    Role::Server,
+                    SocketType::Router,
+                )),
+                read_buf: BytesMut::with_capacity(4 * 1024),
+                write_buf: BytesMut::with_capacity(4 * 1024),
+                last_ping: now,
+                heartbeat_deadline: None,
+                ping_sequence: 0,
+            };
+            finish_handshake(&mut live).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        (endpoint, server)
     }
 
     #[tokio::test]
@@ -651,29 +713,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recv_enforces_idle_timeout_without_maintenance() {
-        let (router, endpoint) = router().await;
-        let server = tokio::spawn(async move {
-            let _message = router.recv().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        });
+    async fn recv_does_not_time_out_before_first_ping() {
+        let (endpoint, server) = unresponsive_router().await;
         let mut socket = Socket::connect(
             SocketType::Dealer,
             endpoint,
             Options {
+                heartbeat_interval: Some(Duration::from_millis(100)),
                 heartbeat_timeout: Some(Duration::from_millis(20)),
                 ..Options::default()
             },
         )
         .await
         .unwrap();
-        socket
-            .send(&Message::single(Bytes::from_static(b"timeout")))
-            .await
-            .unwrap();
-        assert!(matches!(socket.recv().await, Err(Error::Timeout)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.recv())
+                .await
+                .is_err()
+        );
+        assert!(socket.is_connected());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(150), socket.recv()).await,
+            Ok(Err(Error::Timeout))
+        ));
         assert!(!socket.is_connected());
-        server.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_timeout_defaults_to_interval() {
+        let (endpoint, server) = unresponsive_router().await;
+        let mut socket = Socket::connect(
+            SocketType::Dealer,
+            endpoint,
+            Options {
+                heartbeat_interval: Some(Duration::from_millis(20)),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(200), socket.recv()).await,
+            Ok(Err(Error::Timeout))
+        ));
+        assert!(!socket.is_connected());
+        server.abort();
     }
 
     #[tokio::test]

@@ -61,7 +61,8 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
   [doc/libzmq/semantics.md](doc/libzmq/semantics.md).
 - The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
 - Latency-sensitive single-peer TCP flows can use `omq_tokio::exclusive::Socket`
-  to drive `DEALER`, `REQ`, or `REP` directly from the caller task.
+  to drive `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`, `CLIENT`, or `SERVER`
+  directly from the caller task.
 - The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are assigned to IO lanes automatically.
 - Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
 - Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.

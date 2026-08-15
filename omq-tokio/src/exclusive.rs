@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use omq_proto::endpoint::Host;
+use omq_proto::message::generated_identity;
 use omq_proto::proto::command::Command;
 use omq_proto::proto::{Connection, ConnectionConfig, Event as ProtoEvent, Role};
 use omq_proto::type_state::TypeState;
@@ -128,6 +129,7 @@ struct LiveConnection {
     last_ping: Instant,
     heartbeat_deadline: Option<Instant>,
     ping_sequence: u64,
+    peer_identity: Bytes,
 }
 
 #[derive(Debug)]
@@ -138,9 +140,9 @@ enum Mode {
 
 /// A single-peer socket whose caller owns the TCP data path.
 ///
-/// Supports connected or bound TCP `DEALER`, `REQ`, and `REP` sockets using the NULL
-/// mechanism. Unsupported socket types and transports return a configuration
-/// error.
+/// Supports connected or bound TCP `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`,
+/// `CLIENT`, and `SERVER` sockets using the NULL mechanism. Unsupported socket
+/// types and transports return a configuration error.
 ///
 /// A failed `send` is never retried automatically: the peer may have received
 /// a partial or complete command. The next operation may restore the
@@ -163,7 +165,8 @@ pub struct Socket {
 impl Socket {
     /// Connect a caller-driven TCP socket.
     ///
-    /// Currently supports `DEALER`, `REQ`, and `REP`.
+    /// Currently supports `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`,
+    /// `CLIENT`, and `SERVER`.
     pub async fn connect(
         socket_type: SocketType,
         endpoint: Endpoint,
@@ -193,7 +196,8 @@ impl Socket {
     /// The socket accepts one peer at a time. If the peer disconnects, the next
     /// operation waits for a new peer on the same listener.
     ///
-    /// Currently supports `DEALER`, `REQ`, and `REP`.
+    /// Currently supports `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`,
+    /// `CLIENT`, and `SERVER`.
     pub async fn bind(
         socket_type: SocketType,
         endpoint: Endpoint,
@@ -231,7 +235,11 @@ impl Socket {
     /// Encode and write one message. Failed writes are not replayed.
     pub async fn send(&mut self, message: &Message) -> Result<()> {
         self.ensure_connected().await?;
-        let wire_message = self.type_state.pre_send(self.kind, message.clone())?;
+        let mut wire_message = self.type_state.pre_send(self.kind, message.clone())?;
+        if is_identity_routed(self.kind) {
+            let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
+            wire_message = strip_single_peer_identity(self.kind, &peer_identity, wire_message)?;
+        }
         let timeout = self.options.io_timeout;
         let result = run_timeout(timeout, async {
             let live = self.live.as_mut().expect("connected");
@@ -284,6 +292,12 @@ impl Socket {
                     self.mark_disconnected(&error);
                     return Err(error);
                 }
+            };
+            let message = if is_identity_routed(self.kind) {
+                let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
+                Message::with_prefix(peer_identity, message)
+            } else {
+                message
             };
             if let Some(message) = self.type_state.post_recv(self.kind, message)? {
                 if self.kind == SocketType::Rep {
@@ -466,10 +480,16 @@ fn reconnect_delay(policy: ReconnectPolicy, attempt: u32) -> Option<Duration> {
 fn validate_socket_type(socket_type: SocketType) -> Result<()> {
     if !matches!(
         socket_type,
-        SocketType::Dealer | SocketType::Req | SocketType::Rep
+        SocketType::Dealer
+            | SocketType::Router
+            | SocketType::Req
+            | SocketType::Rep
+            | SocketType::Pair
+            | SocketType::Client
+            | SocketType::Server
     ) {
         return Err(Error::Config(format!(
-            "exclusive sockets currently support only DEALER, REQ, and REP, not {socket_type:?}"
+            "exclusive sockets currently support only PAIR, DEALER, ROUTER, REQ, REP, CLIENT, and SERVER, not {socket_type:?}"
         )));
     }
     Ok(())
@@ -575,8 +595,9 @@ async fn establish_connected_live(
         last_ping: now,
         heartbeat_deadline: None,
         ping_sequence: 0,
+        peer_identity: Bytes::new(),
     };
-    tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
+    live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
         .await
         .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
     Ok(live)
@@ -604,14 +625,16 @@ async fn establish_bound_live(
         last_ping: now,
         heartbeat_deadline: None,
         ping_sequence: 0,
+        peer_identity: Bytes::new(),
     };
-    tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
+    live.peer_identity = tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
         .await
         .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
     Ok(live)
 }
 
-async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
+async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes> {
+    let mut peer_identity = None;
     while !live.connection.is_ready() {
         flush_live(live).await?;
         if live.connection.is_ready() {
@@ -619,12 +642,42 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<()> {
         }
         read_live_once(live).await?;
         while let Some(event) = live.connection.poll_event() {
-            if let ProtoEvent::HandshakeSucceeded { .. } = event {
+            if let ProtoEvent::HandshakeSucceeded {
+                peer_properties, ..
+            } = event
+            {
+                peer_identity = Some(
+                    peer_properties
+                        .identity
+                        .clone()
+                        .unwrap_or_else(|| generated_identity(0)),
+                );
                 break;
             }
         }
     }
-    flush_live(live).await
+    flush_live(live).await?;
+    Ok(peer_identity.unwrap_or_else(|| generated_identity(0)))
+}
+
+fn is_identity_routed(socket_type: SocketType) -> bool {
+    matches!(socket_type, SocketType::Router | SocketType::Server)
+}
+
+fn strip_single_peer_identity(
+    socket_type: SocketType,
+    peer_identity: &Bytes,
+    mut message: Message,
+) -> Result<Message> {
+    let Some(identity) = message.pop_front() else {
+        return Err(Error::Protocol(format!(
+            "{socket_type:?} socket requires a routing identity frame"
+        )));
+    };
+    if identity != *peer_identity {
+        return Err(Error::Unroutable);
+    }
+    Ok(message)
 }
 
 async fn recv_live(
@@ -802,6 +855,18 @@ mod tests {
         (dealer, bound)
     }
 
+    async fn regular_dealer_with_identity(identity: &'static [u8]) -> (RegularSocket, Endpoint) {
+        let dealer = RegularSocket::new(
+            SocketType::Dealer,
+            RegularOptions::default().identity(Bytes::from_static(identity)),
+        );
+        let bound = dealer
+            .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
+            .await
+            .unwrap();
+        (dealer, bound)
+    }
+
     async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
@@ -821,6 +886,7 @@ mod tests {
                 last_ping: now,
                 heartbeat_deadline: None,
                 ping_sequence: 0,
+                peer_identity: generated_identity(0),
             };
             finish_handshake(&mut live).await.unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -847,6 +913,7 @@ mod tests {
                 last_ping: now,
                 heartbeat_deadline: None,
                 ping_sequence: 0,
+                peer_identity: generated_identity(0),
             };
             finish_handshake(&mut live).await.unwrap();
             read_live_once(&mut live).await.unwrap();
@@ -982,6 +1049,132 @@ mod tests {
             );
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn router_round_trips_with_standard_dealer() {
+        let (dealer, endpoint) = regular_dealer_with_identity(b"dealer-a").await;
+        let mut router = Socket::connect(SocketType::Router, endpoint, Options::default())
+            .await
+            .unwrap();
+
+        dealer.send(Message::single("ping")).await.unwrap();
+        let request = router.recv().await.unwrap();
+        assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"dealer-a");
+        assert_eq!(request.part_bytes(1).unwrap().as_ref(), b"ping");
+
+        router
+            .send(&Message::multipart([
+                Bytes::from_static(b"dealer-a"),
+                Bytes::from_static(b"pong"),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(dealer.recv().await.unwrap(), Message::single("pong"));
+    }
+
+    #[tokio::test]
+    async fn router_rejects_unknown_identity() {
+        let (_dealer, endpoint) = regular_dealer_with_identity(b"dealer-a").await;
+        let mut router = Socket::connect(SocketType::Router, endpoint, Options::default())
+            .await
+            .unwrap();
+
+        let error = router
+            .send(&Message::multipart([
+                Bytes::from_static(b"wrong"),
+                Bytes::from_static(b"body"),
+            ]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Unroutable));
+    }
+
+    #[tokio::test]
+    async fn client_server_round_trip() {
+        let (mut server, endpoint) = Socket::bind(
+            SocketType::Server,
+            "tcp://127.0.0.1:0".parse().unwrap(),
+            Options::default(),
+        )
+        .await
+        .unwrap();
+        let server_task = tokio::spawn(async move {
+            let request = server.recv().await.unwrap();
+            assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"client-a");
+            assert_eq!(request.part_bytes(1).unwrap().as_ref(), b"request");
+            server
+                .send(&Message::multipart(["client-a", "reply"]))
+                .await
+        });
+
+        let mut client = Socket::connect(
+            SocketType::Client,
+            endpoint,
+            Options {
+                identity: Bytes::from_static(b"client-a"),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        client.send(&Message::single("request")).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), Message::single("reply"));
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_rejects_multipart_send() {
+        let (mut server, endpoint) = Socket::bind(
+            SocketType::Server,
+            "tcp://127.0.0.1:0".parse().unwrap(),
+            Options::default(),
+        )
+        .await
+        .unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = server.recv().await;
+        });
+        let mut client = Socket::connect(SocketType::Client, endpoint, Options::default())
+            .await
+            .unwrap();
+
+        let error = client
+            .send(&Message::multipart(["a", "b"]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Protocol(message) if message.contains("single-part messages"))
+        );
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn pair_round_trips() {
+        let (mut bound, endpoint) = Socket::bind(
+            SocketType::Pair,
+            "tcp://127.0.0.1:0".parse().unwrap(),
+            Options::default(),
+        )
+        .await
+        .unwrap();
+        let server = tokio::spawn(async move {
+            assert_eq!(bound.recv().await.unwrap(), Message::single("from-client"));
+            bound.send(&Message::single("from-server")).await
+        });
+
+        let mut connected = Socket::connect(SocketType::Pair, endpoint, Options::default())
+            .await
+            .unwrap();
+        connected
+            .send(&Message::single("from-client"))
+            .await
+            .unwrap();
+        assert_eq!(
+            connected.recv().await.unwrap(),
+            Message::single("from-server")
+        );
+        server.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -1163,11 +1356,11 @@ mod tests {
     #[tokio::test]
     async fn unsupported_modes_fail_before_connecting() {
         let endpoint: Endpoint = "tcp://127.0.0.1:1".parse().unwrap();
-        let error = Socket::connect(SocketType::Pair, endpoint, Options::default())
+        let error = Socket::connect(SocketType::Push, endpoint, Options::default())
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Config(message) if message.contains("only DEALER, REQ, and REP"))
+            matches!(error, Error::Config(message) if message.contains("PAIR, DEALER, ROUTER"))
         );
 
         let endpoint: Endpoint = "inproc://exclusive".parse().unwrap();

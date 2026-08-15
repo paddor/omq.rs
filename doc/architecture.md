@@ -142,7 +142,8 @@ identity, group, or subscription post-processing is needed.
 `omq_tokio::exclusive::Socket` is an opt-in alternative for latency-sensitive,
 single-peer workloads. It owns both the Tokio TCP stream and the sans-I/O
 `omq_proto::Connection`; the caller drives TCP, ZMTP, reconnects, and heartbeat
-timers through methods requiring `&mut self`.
+timers through methods requiring `&mut self`. It supports TCP `PAIR`,
+`DEALER`, `ROUTER`, `REQ`, `REP`, `CLIENT`, and `SERVER`.
 
 ```text
 regular Socket:   caller -> routing/queue -> ConnectionDriver task -> TCP

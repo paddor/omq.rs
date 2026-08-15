@@ -156,9 +156,10 @@ not replayed because it is ambiguous whether the peer received a partial or
 complete command. When no `send` or `recv` future is active, the application
 must call `maintain()` to drive idle heartbeat and reconnect work.
 
-The initial implementation supports one connected TCP DEALER using the NULL
-mechanism. Unsupported socket types and transports return explicit configuration
-errors; bind/accept and additional socket semantics can be added incrementally.
+The initial implementation supports connected TCP DEALER, REQ, and REP sockets
+using the NULL mechanism. Unsupported socket types and transports return
+explicit configuration errors; bind/accept and additional socket semantics can
+be added incrementally.
 
 ## Messages
 

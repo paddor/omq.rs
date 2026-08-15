@@ -60,6 +60,8 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 - Documented libzmq compatibility edges for no-peer sends, linger, and HWM:
   [doc/libzmq/semantics.md](doc/libzmq/semantics.md).
 - The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
+- Latency-sensitive single-peer TCP flows can use `omq_tokio::exclusive::Socket`
+  to drive `DEALER`, `REQ`, or `REP` directly from the caller task.
 - The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are assigned to IO lanes automatically.
 - Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
 - Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.
@@ -78,6 +80,7 @@ inside an existing tokio runtime.
 | `Context::new().socket(...)` | Async socket, OMQ-owned IO threads | Linear IO-lane scaling; PUB peers are sharded across lanes |
 | `Context::current().socket(...)` | Async socket, caller's active tokio runtime | Tokio scheduler/work stealing; PUB fan-out stays on one OMQ lane |
 | `Context::new().blocking_socket(...)` | Sync socket, OMQ-owned IO threads | Linear IO-lane scaling; caller thread stays out of IO |
+| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Caller-driven async socket | Single TCP peer, no background driver task |
 
 Supported 32-bit Linux targets are `i686-unknown-linux-gnu` and
 `armv7-unknown-linux-gnueabihf`. They require native 64-bit atomics. ZMTP wire

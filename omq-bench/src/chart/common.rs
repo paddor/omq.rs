@@ -55,6 +55,7 @@ pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
+pub(crate) const C_OMQ_EXCLUSIVE: RGBColor = RGBColor(45, 212, 191);
 pub(crate) const C_OMQ_2T: RGBColor = RGBColor(185, 28, 28);
 pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);

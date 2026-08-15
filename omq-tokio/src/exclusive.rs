@@ -4,14 +4,16 @@
 //! ZMTP directly, without a connection-driver task or data relay ring.
 
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use omq_proto::endpoint::Host;
 use omq_proto::proto::command::Command;
 use omq_proto::proto::{Connection, ConnectionConfig, Event as ProtoEvent, Role};
+use omq_proto::type_state::TypeState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
 use crate::{Endpoint, Error, Message, ReconnectPolicy, Result, SocketType};
@@ -97,10 +99,23 @@ impl Options {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Event {
+    /// TCP connection established.
     Connected,
+    /// ZMTP greeting and mechanism handshake completed.
     HandshakeSucceeded,
-    Disconnected { reason: String },
-    ReconnectDelayed { retry_in: Duration, attempt: u32 },
+    /// Active peer disconnected or failed.
+    Disconnected {
+        /// Human-readable disconnect reason.
+        reason: String,
+    },
+    /// Reconnect attempt scheduled after a failure.
+    ReconnectDelayed {
+        /// Delay before the next reconnect attempt.
+        retry_in: Duration,
+        /// One-based reconnect attempt number.
+        attempt: u32,
+    },
+    /// Socket closed by the caller.
     Closed,
 }
 
@@ -115,11 +130,17 @@ struct LiveConnection {
     ping_sequence: u64,
 }
 
+#[derive(Debug)]
+enum Mode {
+    Connect,
+    Bind { listener: TcpListener },
+}
+
 /// A single-peer socket whose caller owns the TCP data path.
 ///
-/// The initial implementation supports only a connected TCP DEALER using the
-/// NULL mechanism. Unsupported socket types and transports return a
-/// configuration error.
+/// Supports connected or bound TCP `DEALER`, `REQ`, and `REP` sockets using the NULL
+/// mechanism. Unsupported socket types and transports return a configuration
+/// error.
 ///
 /// A failed `send` is never retried automatically: the peer may have received
 /// a partial or complete command. The next operation may restore the
@@ -129,40 +150,80 @@ pub struct Socket {
     kind: SocketType,
     endpoint: Endpoint,
     options: Options,
+    mode: Mode,
     live: Option<LiveConnection>,
     monitor: broadcast::Sender<Event>,
     reconnect_attempt: u32,
     retry_at: Option<Instant>,
+    type_state: TypeState,
+    rep_request_pending: bool,
     closed: bool,
 }
 
 impl Socket {
-    /// Connect a caller-driven socket.
+    /// Connect a caller-driven TCP socket.
+    ///
+    /// Currently supports `DEALER`, `REQ`, and `REP`.
     pub async fn connect(
         socket_type: SocketType,
         endpoint: Endpoint,
         options: Options,
     ) -> Result<Self> {
-        validate_mode(socket_type, &endpoint, &options)?;
+        validate_connect_mode(socket_type, &endpoint, &options)?;
         let (monitor, _) = broadcast::channel(1024);
         let mut socket = Self {
             kind: socket_type,
             endpoint,
             options,
+            mode: Mode::Connect,
             live: None,
             monitor,
             reconnect_attempt: 0,
             retry_at: None,
+            type_state: TypeState::new(),
+            rep_request_pending: false,
             closed: false,
         };
         socket.establish().await?;
         Ok(socket)
     }
 
+    /// Bind a caller-driven TCP socket and return its bound endpoint.
+    ///
+    /// The socket accepts one peer at a time. If the peer disconnects, the next
+    /// operation waits for a new peer on the same listener.
+    ///
+    /// Currently supports `DEALER`, `REQ`, and `REP`.
+    pub async fn bind(
+        socket_type: SocketType,
+        endpoint: Endpoint,
+        options: Options,
+    ) -> Result<(Self, Endpoint)> {
+        validate_bind_mode(socket_type, &endpoint, &options)?;
+        let (listener, bound) = bind_tcp_listener(&endpoint).await?;
+        let (monitor, _) = broadcast::channel(1024);
+        let socket = Self {
+            kind: socket_type,
+            endpoint: bound.clone(),
+            options,
+            mode: Mode::Bind { listener },
+            live: None,
+            monitor,
+            reconnect_attempt: 0,
+            retry_at: None,
+            type_state: TypeState::new(),
+            rep_request_pending: false,
+            closed: false,
+        };
+        Ok((socket, bound))
+    }
+
+    /// Subscribe to lifecycle events for this socket.
     pub fn monitor(&self) -> broadcast::Receiver<Event> {
         self.monitor.subscribe()
     }
 
+    /// Return true while a live TCP/ZMTP connection is active.
     pub fn is_connected(&self) -> bool {
         self.live.is_some()
     }
@@ -170,12 +231,13 @@ impl Socket {
     /// Encode and write one message. Failed writes are not replayed.
     pub async fn send(&mut self, message: &Message) -> Result<()> {
         self.ensure_connected().await?;
+        let wire_message = self.type_state.pre_send(self.kind, message.clone())?;
         let timeout = self.options.io_timeout;
         let result = run_timeout(timeout, async {
             let live = self.live.as_mut().expect("connected");
             live.write_buf.clear();
             live.connection
-                .send_message_flat(message, &mut live.write_buf);
+                .send_message_flat(&wire_message, &mut live.write_buf);
             live.stream
                 .write_all(&live.write_buf)
                 .await
@@ -186,31 +248,50 @@ impl Socket {
             self.mark_disconnected(&error);
             return Err(error);
         }
+        if self.kind == SocketType::Rep {
+            self.rep_request_pending = false;
+        }
         Ok(())
     }
 
     /// Receive one message. A timeout or transport error disconnects the
     /// current peer; a later operation attempts reconnection.
     pub async fn recv(&mut self) -> Result<Message> {
-        self.ensure_connected().await?;
-        let io_timeout = self.options.io_timeout;
-        let heartbeat_interval = self.options.heartbeat_interval;
-        let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
-        let heartbeat_ttl = heartbeat_ttl_deciseconds(self.options.heartbeat_ttl);
-        let result = run_timeout(
-            io_timeout,
-            recv_live(
-                self.live.as_mut().expect("connected"),
-                heartbeat_interval,
-                heartbeat_timeout,
-                heartbeat_ttl,
-            ),
-        )
-        .await;
-        if let Err(error) = &result {
-            self.mark_disconnected(error);
+        loop {
+            if self.kind == SocketType::Rep && self.rep_request_pending {
+                return Err(Error::Protocol(
+                    "REP socket must send a reply before receiving again".into(),
+                ));
+            }
+            self.ensure_connected().await?;
+            let io_timeout = self.options.io_timeout;
+            let heartbeat_interval = self.options.heartbeat_interval;
+            let heartbeat_timeout = effective_heartbeat_timeout(&self.options);
+            let heartbeat_ttl = heartbeat_ttl_deciseconds(self.options.heartbeat_ttl);
+            let result = run_timeout(
+                io_timeout,
+                recv_live(
+                    self.live.as_mut().expect("connected"),
+                    heartbeat_interval,
+                    heartbeat_timeout,
+                    heartbeat_ttl,
+                ),
+            )
+            .await;
+            let message = match result {
+                Ok(message) => message,
+                Err(error) => {
+                    self.mark_disconnected(&error);
+                    return Err(error);
+                }
+            };
+            if let Some(message) = self.type_state.post_recv(self.kind, message)? {
+                if self.kind == SocketType::Rep {
+                    self.rep_request_pending = true;
+                }
+                return Ok(message);
+            }
         }
-        result
     }
 
     /// Drive heartbeat and reconnect work when no data operation is active.
@@ -263,15 +344,19 @@ impl Socket {
         Ok(())
     }
 
+    /// Drop any current connection and reconnect immediately.
     pub async fn reconnect_now(&mut self) -> Result<()> {
         if self.closed {
             return Err(Error::Closed);
         }
         self.live = None;
         self.retry_at = None;
+        self.type_state.on_peer_disconnected();
+        self.rep_request_pending = false;
         self.establish().await
     }
 
+    /// Close the socket and shut down the active TCP stream.
     pub async fn close(&mut self) -> Result<()> {
         self.closed = true;
         self.retry_at = None;
@@ -299,14 +384,28 @@ impl Socket {
     }
 
     async fn establish(&mut self) -> Result<()> {
-        let result = establish_live(
-            self.kind,
-            &self.endpoint,
-            self.options.identity.clone(),
-            self.options.connect_timeout,
-            self.options.handshake_timeout,
-        )
-        .await;
+        let result = match &mut self.mode {
+            Mode::Connect => {
+                establish_connected_live(
+                    self.kind,
+                    &self.endpoint,
+                    self.options.identity.clone(),
+                    self.options.connect_timeout,
+                    self.options.handshake_timeout,
+                )
+                .await
+            }
+            Mode::Bind { listener } => {
+                establish_bound_live(
+                    self.kind,
+                    listener,
+                    self.options.identity.clone(),
+                    self.options.connect_timeout,
+                    self.options.handshake_timeout,
+                )
+                .await
+            }
+        };
         match result {
             Ok(live) => {
                 self.live = Some(live);
@@ -325,6 +424,8 @@ impl Socket {
 
     fn mark_disconnected(&mut self, error: &Error) {
         if self.live.take().is_some() {
+            self.type_state.on_peer_disconnected();
+            self.rep_request_pending = false;
             let _ = self.monitor.send(Event::Disconnected {
                 reason: error.to_string(),
             });
@@ -333,6 +434,11 @@ impl Socket {
     }
 
     fn schedule_reconnect(&mut self) {
+        if matches!(self.mode, Mode::Bind { .. }) {
+            self.reconnect_attempt = 0;
+            self.retry_at = None;
+            return;
+        }
         let Some(delay) = reconnect_delay(self.options.reconnect, self.reconnect_attempt) else {
             self.retry_at = None;
             return;
@@ -357,12 +463,24 @@ fn reconnect_delay(policy: ReconnectPolicy, attempt: u32) -> Option<Duration> {
     }
 }
 
-fn validate_mode(socket_type: SocketType, endpoint: &Endpoint, options: &Options) -> Result<()> {
-    if socket_type != SocketType::Dealer {
+fn validate_socket_type(socket_type: SocketType) -> Result<()> {
+    if !matches!(
+        socket_type,
+        SocketType::Dealer | SocketType::Req | SocketType::Rep
+    ) {
         return Err(Error::Config(format!(
-            "exclusive sockets currently support only DEALER, not {socket_type:?}"
+            "exclusive sockets currently support only DEALER, REQ, and REP, not {socket_type:?}"
         )));
     }
+    Ok(())
+}
+
+fn validate_connect_mode(
+    socket_type: SocketType,
+    endpoint: &Endpoint,
+    options: &Options,
+) -> Result<()> {
+    validate_socket_type(socket_type)?;
     match endpoint {
         Endpoint::Tcp {
             host: Host::Wildcard,
@@ -382,7 +500,54 @@ fn validate_mode(socket_type: SocketType, endpoint: &Endpoint, options: &Options
     options.validate()
 }
 
-async fn establish_live(
+fn validate_bind_mode(
+    socket_type: SocketType,
+    endpoint: &Endpoint,
+    options: &Options,
+) -> Result<()> {
+    validate_socket_type(socket_type)?;
+    match endpoint {
+        Endpoint::Tcp { .. } => {}
+        _ => {
+            return Err(Error::Config(format!(
+                "exclusive sockets currently support only tcp:// endpoints, not {endpoint}"
+            )));
+        }
+    }
+    options.validate()
+}
+
+async fn bind_tcp_listener(endpoint: &Endpoint) -> Result<(TcpListener, Endpoint)> {
+    let Endpoint::Tcp { host, port } = endpoint else {
+        return Err(Error::Config(
+            "exclusive sockets currently support only tcp:// endpoints".into(),
+        ));
+    };
+    let addr = resolve_bind_addr(host, *port).await?;
+    let listener = crate::transport::tcp::reuse_addr_bind(addr)?;
+    let local = listener.local_addr()?;
+    let bound = Endpoint::Tcp {
+        host: Host::Ip(local.ip()),
+        port: local.port(),
+    };
+    Ok((listener, bound))
+}
+
+async fn resolve_bind_addr(host: &Host, port: u16) -> Result<SocketAddr> {
+    match host {
+        Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
+        Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
+        Host::Name(name) => tokio::net::lookup_host((name.as_str(), port))
+            .await?
+            .next()
+            .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {name}:{port}")))),
+        _ => Err(Error::Config(
+            "exclusive sockets do not support this TCP host type".into(),
+        )),
+    }
+}
+
+async fn establish_connected_live(
     socket_type: SocketType,
     endpoint: &Endpoint,
     identity: Bytes,
@@ -401,6 +566,35 @@ async fn establish_live(
     stream.set_nodelay(true)?;
     let connection =
         Connection::new(ConnectionConfig::new(Role::Client, socket_type).identity(identity));
+    let now = Instant::now();
+    let mut live = LiveConnection {
+        stream,
+        connection,
+        read_buf: BytesMut::with_capacity(4 * 1024),
+        write_buf: BytesMut::with_capacity(4 * 1024),
+        last_ping: now,
+        heartbeat_deadline: None,
+        ping_sequence: 0,
+    };
+    tokio::time::timeout(handshake_timeout, finish_handshake(&mut live))
+        .await
+        .map_err(|_| timed_out("exclusive socket handshake timeout"))??;
+    Ok(live)
+}
+
+async fn establish_bound_live(
+    socket_type: SocketType,
+    listener: &TcpListener,
+    identity: Bytes,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> Result<LiveConnection> {
+    let (stream, _) = tokio::time::timeout(connect_timeout, listener.accept())
+        .await
+        .map_err(|_| timed_out("exclusive socket accept timeout"))??;
+    stream.set_nodelay(true)?;
+    let connection =
+        Connection::new(ConnectionConfig::new(Role::Server, socket_type).identity(identity));
     let now = Instant::now();
     let mut live = LiveConnection {
         stream,
@@ -581,6 +775,33 @@ mod tests {
         (router, bound)
     }
 
+    async fn regular_rep() -> (RegularSocket, Endpoint) {
+        let rep = RegularSocket::new(SocketType::Rep, RegularOptions::default());
+        let bound = rep
+            .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
+            .await
+            .unwrap();
+        (rep, bound)
+    }
+
+    async fn regular_req() -> (RegularSocket, Endpoint) {
+        let req = RegularSocket::new(SocketType::Req, RegularOptions::default());
+        let bound = req
+            .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
+            .await
+            .unwrap();
+        (req, bound)
+    }
+
+    async fn regular_dealer() -> (RegularSocket, Endpoint) {
+        let dealer = RegularSocket::new(SocketType::Dealer, RegularOptions::default());
+        let bound = dealer
+            .bind("tcp://127.0.0.1:0".parse::<Endpoint>().unwrap())
+            .await
+            .unwrap();
+        (dealer, bound)
+    }
+
     async fn unresponsive_router() -> (Endpoint, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
@@ -660,6 +881,136 @@ mod tests {
             assert_eq!(socket.recv().await.unwrap(), message);
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn req_round_trips_with_standard_rep() {
+        let (rep, endpoint) = regular_rep().await;
+        let server = tokio::spawn(async move {
+            for sequence in 0_u64..10 {
+                let request = rep.recv().await.unwrap();
+                assert_eq!(request, Message::single(sequence.to_le_bytes().to_vec()));
+                rep.send(Message::single((sequence + 1).to_le_bytes().to_vec()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut socket = Socket::connect(SocketType::Req, endpoint, Options::default())
+            .await
+            .unwrap();
+        for sequence in 0_u64..10 {
+            let request = Message::single(sequence.to_le_bytes().to_vec());
+            socket.send(&request).await.unwrap();
+            assert_eq!(
+                socket.recv().await.unwrap(),
+                Message::single((sequence + 1).to_le_bytes().to_vec())
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn req_rejects_second_send_before_reply() {
+        let (rep, endpoint) = regular_rep().await;
+        let server = tokio::spawn(async move {
+            let _ = rep.recv().await.unwrap();
+        });
+        let mut socket = Socket::connect(SocketType::Req, endpoint, Options::default())
+            .await
+            .unwrap();
+        socket.send(&Message::single("first")).await.unwrap();
+        let error = socket.send(&Message::single("second")).await.unwrap_err();
+        assert!(matches!(error, Error::Protocol(message) if message.contains("receive a reply")));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rep_round_trips_with_standard_req() {
+        let (req, endpoint) = regular_req().await;
+        let mut socket = Socket::connect(SocketType::Rep, endpoint, Options::default())
+            .await
+            .unwrap();
+        for sequence in 0_u64..10 {
+            req.send(Message::single(sequence.to_le_bytes().to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(
+                socket.recv().await.unwrap(),
+                Message::single(sequence.to_le_bytes().to_vec())
+            );
+            socket
+                .send(&Message::single((sequence + 1).to_le_bytes().to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(
+                req.recv().await.unwrap(),
+                Message::single((sequence + 1).to_le_bytes().to_vec())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_rep_round_trips_with_exclusive_req() {
+        let (mut rep, endpoint) = Socket::bind(
+            SocketType::Rep,
+            "tcp://127.0.0.1:0".parse().unwrap(),
+            Options::default(),
+        )
+        .await
+        .unwrap();
+        let server = tokio::spawn(async move {
+            for sequence in 0_u64..10 {
+                assert_eq!(
+                    rep.recv().await.unwrap(),
+                    Message::single(sequence.to_le_bytes().to_vec())
+                );
+                rep.send(&Message::single((sequence + 1).to_le_bytes().to_vec()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut req = Socket::connect(SocketType::Req, endpoint, Options::default())
+            .await
+            .unwrap();
+        for sequence in 0_u64..10 {
+            req.send(&Message::single(sequence.to_le_bytes().to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(
+                req.recv().await.unwrap(),
+                Message::single((sequence + 1).to_le_bytes().to_vec())
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rep_rejects_send_before_request() {
+        let (_req, endpoint) = regular_req().await;
+        let mut socket = Socket::connect(SocketType::Rep, endpoint, Options::default())
+            .await
+            .unwrap();
+        let error = socket.send(&Message::single("early")).await.unwrap_err();
+        assert!(matches!(error, Error::Protocol(message) if message.contains("receive a request")));
+    }
+
+    #[tokio::test]
+    async fn rep_rejects_second_recv_before_reply() {
+        let (dealer, endpoint) = regular_dealer().await;
+        let mut socket = Socket::connect(SocketType::Rep, endpoint, Options::default())
+            .await
+            .unwrap();
+        dealer
+            .send(Message::multipart(["", "first"]))
+            .await
+            .unwrap();
+        dealer
+            .send(Message::multipart(["", "second"]))
+            .await
+            .unwrap();
+        assert_eq!(socket.recv().await.unwrap(), Message::single("first"));
+        let error = socket.recv().await.unwrap_err();
+        assert!(matches!(error, Error::Protocol(message) if message.contains("send a reply")));
     }
 
     #[tokio::test]
@@ -815,7 +1166,9 @@ mod tests {
         let error = Socket::connect(SocketType::Pair, endpoint, Options::default())
             .await
             .unwrap_err();
-        assert!(matches!(error, Error::Config(message) if message.contains("only DEALER")));
+        assert!(
+            matches!(error, Error::Config(message) if message.contains("only DEALER, REQ, and REP"))
+        );
 
         let endpoint: Endpoint = "inproc://exclusive".parse().unwrap();
         let error = Socket::connect(SocketType::Dealer, endpoint, Options::default())

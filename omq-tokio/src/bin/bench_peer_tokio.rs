@@ -8,6 +8,8 @@
 //! Latency (REQ/REP):
 //!   `bench_peer_tokio` rep \<addr\> \<`msg_size`\>
 //!   `bench_peer_tokio` req \<addr\> \<`msg_size`\> \<iterations\> \<warmup\>
+//!   `bench_peer_tokio` rep-exclusive \<addr\> \<`msg_size`\>
+//!   `bench_peer_tokio` req-exclusive \<addr\> \<`msg_size`\> \<iterations\> \<warmup\>
 //!
 //! \<addr\>: a port number (`4000`), an `ip:port` pair (`0.0.0.0:4000`),
 //!   a full URI (`tcp://0.0.0.0:4000`), or an IPC path (`ipc:///tmp/foo.sock`).
@@ -32,7 +34,8 @@ fn quantile(sorted: &[f64], probability: f64) -> f64 {
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
+use omq_tokio::exclusive::{Options as ExclusiveOptions, Socket as ExclusiveSocket};
+use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
 fn parse_ep(s: &str) -> Endpoint {
@@ -161,12 +164,24 @@ async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
             let size: usize = args[3].parse().expect("msg_size");
             run_rep(&ctx, ep, size).await;
         }
+        Some("rep-exclusive") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            run_rep_exclusive(&ctx, ep, size).await;
+        }
         Some("req") => {
             let ep = parse_ep(&args[2]);
             let size: usize = args[3].parse().expect("msg_size");
             let iterations: usize = args[4].parse().expect("iterations");
             let warmup: usize = args[5].parse().expect("warmup");
             run_req(&ctx, ep, size, iterations, warmup).await;
+        }
+        Some("req-exclusive") => {
+            let ep = parse_ep(&args[2]);
+            let size: usize = args[3].parse().expect("msg_size");
+            let iterations: usize = args[4].parse().expect("iterations");
+            let warmup: usize = args[5].parse().expect("warmup");
+            run_req_exclusive(ep, size, iterations, warmup).await;
         }
         Some("pub") => {
             let ep = parse_ep(&args[2]);
@@ -256,6 +271,8 @@ async fn async_main(args: Vec<String>, ctx: omq_tokio::Context) {
             eprintln!("       bench_peer_tokio inproc <name> <size> <duration_secs>");
             eprintln!("       bench_peer_tokio rep <addr> <size>");
             eprintln!("       bench_peer_tokio req <addr> <size> <iterations> <warmup>");
+            eprintln!("       bench_peer_tokio rep-exclusive <addr> <size>");
+            eprintln!("       bench_peer_tokio req-exclusive <addr> <size> <iterations> <warmup>");
             eprintln!("       bench_peer_tokio inproc-latency <name> <size> <iterations> <warmup>");
             eprintln!("<addr>: port number or full endpoint (tcp:// ipc://)");
             std::process::exit(1);
@@ -1050,6 +1067,24 @@ async fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
     }
 }
 
+async fn run_rep_exclusive(ctx: &omq_tokio::Context, ep: Endpoint, _size: usize) {
+    let (mut rep, bound) = ExclusiveSocket::bind(SocketType::Rep, ep, ExclusiveOptions::default())
+        .await
+        .expect("exclusive rep bind");
+    report_bound_port(ctx, &bound).await;
+    loop {
+        let msg = match rep.recv().await {
+            Ok(msg) => msg,
+            Err(Error::Closed | Error::Io(_)) => continue,
+            Err(error) => panic!("{error}"),
+        };
+        match rep.send(&msg).await {
+            Ok(()) | Err(Error::Closed | Error::Io(_)) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 async fn run_req(
     ctx: &omq_tokio::Context,
     ep: Endpoint,
@@ -1075,6 +1110,39 @@ async fn run_req(
     for _ in 0..iterations {
         let t0 = Instant::now();
         req.send(Message::single(payload.clone())).await.unwrap();
+        req.recv().await.unwrap();
+        rtts.push(t0.elapsed().as_nanos() as u64);
+    }
+    let cpu = cpu_time_secs() - cpu_before;
+    let elapsed = t_wall.elapsed().as_secs_f64();
+
+    rtts.sort_unstable();
+    let p50 = percentile(&rtts, 50.0);
+    let p99 = percentile(&rtts, 99.0);
+    let p999 = percentile(&rtts, 99.9);
+    let max = percentile(&rtts, 100.0);
+    println!("{p50:.3} {p99:.3} {p999:.3} {max:.3} {iterations} {cpu:.6} {elapsed:.6}");
+}
+
+async fn run_req_exclusive(ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
+    let mut req = ExclusiveSocket::connect(SocketType::Req, ep, ExclusiveOptions::default())
+        .await
+        .expect("exclusive req connect");
+
+    let payload = Bytes::from(vec![b'x'; size]);
+    let message = Message::single(payload);
+
+    for _ in 0..warmup {
+        req.send(&message).await.unwrap();
+        req.recv().await.unwrap();
+    }
+
+    let t_wall = Instant::now();
+    let cpu_before = cpu_time_secs();
+    let mut rtts = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        req.send(&message).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.3.2]
+
+- Re-run the OMQ.java release through a Maven Central workflow that publishes
+  automatically after validation.
+
 ## [0.3.1]
 
 - Use timed PUSH/PULL throughput samples for the OMQ.java performance chart

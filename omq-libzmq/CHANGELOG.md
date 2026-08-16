@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-08-16
+
+### Added
+
+- Wider `zmq.h` compatibility surface for modern bindings, including exported
+  symbols, draft constants, message property names, poller and timer APIs, and
+  `zmq_fd_t`.
+- `omq_ctx_share_key()` and `omq_ctx_from_share_key()` for sharing one native
+  context core inside a process.
+- WSS TLS socket options: `ZMQ_WSS_TRUST_PEM`, `ZMQ_WSS_HOSTNAME`, and
+  `ZMQ_WSS_TRUST_SYSTEM`.
+- `OMQ_ARENA_THRESHOLD` for tuning the outbound frame arena threshold through
+  the C API.
+- Compatibility packaging files, C zguide examples, and cppzmq examples.
+- ABI, poller, message ownership, socket option torture, cppzmq, and zguide
+  compatibility tests.
+
+### Changed
+
+- Receive hot paths use the newer backend direct/yring paths and tighter host
+  teardown.
+- *(deps)* Bump `omq-tokio` to 0.21.2 and `yring` to 0.3.14.
+
+### Fixed
+
+- Context shutdown, inproc close, and cross-thread inproc bypass wakeups now
+  wake waiters reliably.
+- Poller and `zmq_poll` edge cases now match libzmq more closely, including
+  empty poll sets and platform-specific fd layout.
+- Deadline arithmetic now avoids overflow for long timeout values.
+- Windows poll constants and ARMv7 churn tests are guarded for their target
+  platforms.
+
 ## [0.5.12] - 2026-08-08
 
 ### Changed

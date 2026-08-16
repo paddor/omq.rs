@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-16
+
+### Added
+
+- `Message::part_slice()` for borrowing message parts without allocating
+  `Bytes` for inline payloads.
+- `Options::default_arena_threshold()` and `DEFAULT_ARENA_THRESHOLD` for
+  restoring the default frame arena threshold after an override.
+- WSS client trust configuration through `WssTls::trust_pem`,
+  `WssTls::hostname`, and `WssTls::trust_system`.
+
+### Changed
+
+- **Breaking:** `WssTls` public struct literals must now include
+  `trust_pem`, `hostname`, and `trust_system`. Prefer `WssTls::default()`
+  for forward-compatible construction.
+- WSS client TLS validation trusts the platform certificate store by default.
+- Large receive docs now describe pooled medium-large buffers and one-shot
+  owned buffers for larger frames.
+- *(deps)* Bump `zrip` to 0.8.6.
+
 ## [0.25.1] - 2026-08-08
 
 ### Changed

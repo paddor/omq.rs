@@ -7,16 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-08-16
+
 ### Added
 
 - `exclusive::Socket`, a caller-owned direct-I/O socket for latency-sensitive
-  single-peer workloads, initially supporting connected TCP DEALER with
-  configurable timeouts, reconnects, heartbeats, and lifecycle monitoring.
+  single-peer TCP workloads. It supports `PAIR`, `DEALER`, `ROUTER`, `REQ`,
+  `REP`, `CLIENT`, and `SERVER` with caller-driven `send`, `recv`,
+  `maintain`, reconnect, heartbeat, and lifecycle monitoring.
+- Exclusive socket soak coverage for supported types, peer churn,
+  `maintain()`-driven heartbeats, RSS, heap, and FD stability.
+- `exclusive::Socket` `REQ`/`REP` benchmark peers and main latency chart
+  coverage.
+- Shared `ContextCore` import/export support for bindings that need one
+  native context and `inproc://` namespace across language APIs.
+- Rust zguide examples under `examples/zguide`.
 
 ### Changed
 
 - Large direct receives now reuse bounded pooled buffers for medium-large
   frames and avoid zero-filling frames above the pool cap.
+- `wss://` connections honor explicit trust PEM data, hostname overrides, and
+  platform trust-store configuration.
+- *(deps)* Bump `omq-proto` to 0.26.0 and `yring` to 0.3.14.
 
 ## [0.21.1] - 2026-08-08
 

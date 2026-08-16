@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.21.1"
+version = "0.21.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "atomic-waker",
  "futures-core",

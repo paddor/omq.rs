@@ -280,7 +280,7 @@ jobs:
             if [[ "$package" == "$root" ]]; then
               continue
             fi
-            npm publish "$package" --access public --provenance
+            npm publish "./$package" --access public --provenance
           done
       - name: Publish root package
-        run: npm publish "dist/paddor-omq-node-${{ needs.package.outputs.version }}.tgz" --access public --provenance
+        run: npm publish "./dist/paddor-omq-node-${{ needs.package.outputs.version }}.tgz" --access public --provenance

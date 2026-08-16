@@ -10,6 +10,7 @@ mod test_support;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
     DisconnectReason, Endpoint, Error, Message, MonitorEvent, Options, ReconnectPolicy, Socket,
     SocketType,
@@ -57,6 +58,101 @@ async fn recv_dealer_body_string(dealer: &Socket) -> String {
         .unwrap();
     assert_eq!(msg.len(), 1);
     String::from_utf8(msg.part_bytes(0).unwrap().to_vec()).unwrap()
+}
+
+fn latency_dealer(identity: &'static [u8]) -> Socket {
+    Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(identity))
+            .workload_profile(WorkloadProfile::Latency),
+    )
+}
+
+#[tokio::test]
+async fn latency_dealer_preserves_multipart_and_large_fallback() {
+    let router = Socket::new(SocketType::Router, Options::default());
+    let port = test_support::bind_loopback(&router).await;
+    let dealer = latency_dealer(b"latency-dealer");
+    dealer
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let large = bytes::Bytes::from(vec![0x5a; 1024 * 1024]);
+    dealer
+        .send(Message::multipart([
+            bytes::Bytes::from_static(b"header"),
+            large.clone(),
+        ]))
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(2), router.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.len(), 3);
+    assert_eq!(received.part_bytes(0).unwrap().as_ref(), b"latency-dealer");
+    assert_eq!(received.part_bytes(1).unwrap().as_ref(), b"header");
+    assert_eq!(received.part_bytes(2).unwrap(), &large);
+}
+
+#[tokio::test]
+async fn latency_dealer_round_robins_tcp_peers() {
+    let router_a = Socket::new(SocketType::Router, Options::default());
+    let router_b = Socket::new(SocketType::Router, Options::default());
+    let port_a = test_support::bind_loopback(&router_a).await;
+    let port_b = test_support::bind_loopback(&router_b).await;
+    let dealer = latency_dealer(b"latency-rr");
+    dealer
+        .connect(test_support::tcp_loopback(port_a))
+        .await
+        .unwrap();
+    dealer
+        .connect(test_support::tcp_loopback(port_b))
+        .await
+        .unwrap();
+    dealer
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    for sequence in 0_u32..20 {
+        dealer
+            .send(Message::single(sequence.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+    let mut counts = [0_u32; 2];
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while counts.iter().sum::<u32>() < 20 {
+        counts[0] += drain_count(&router_a);
+        counts[1] += drain_count(&router_b);
+        assert!(
+            Instant::now() < deadline,
+            "latency DEALER messages timed out"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(counts, [10, 10]);
+}
+
+fn drain_count(router: &Socket) -> u32 {
+    let mut count = 0;
+    loop {
+        match router.try_recv() {
+            Ok(message) => {
+                assert_eq!(message.part_bytes(0).unwrap().as_ref(), b"latency-rr");
+                count += 1;
+            }
+            Err(Error::WouldBlock) => return count,
+            Err(error) => panic!("latency router receive failed: {error}"),
+        }
+    }
 }
 
 #[tokio::test]

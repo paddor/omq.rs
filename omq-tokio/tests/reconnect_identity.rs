@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
-use omq_tokio::options::ReconnectPolicy;
+use omq_tokio::options::{ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -47,7 +47,10 @@ async fn dealer_identity_survives_reconnect() {
     let router1 = Socket::new(SocketType::Router, Options::default());
     let ep = router1.bind(tcp_ep(0)).await.unwrap();
 
-    let dealer = Socket::new(SocketType::Dealer, fast_reconnect_with_id(b"d1"));
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        fast_reconnect_with_id(b"d1").workload_profile(WorkloadProfile::Latency),
+    );
     let mut dealer_mon = dealer.monitor();
     dealer.connect(ep.clone()).await.unwrap();
     test_support::wait_for_handshake_on(&mut dealer_mon).await;

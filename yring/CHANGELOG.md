@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-08-16
+
+### Added
+
+- `ProducerOwner::push_flush()` for a same-thread push plus flush with one
+  owner check.
+- `Consumer::prefetch_and_pop_with_full()` for receive paths that need to
+  know whether a pop released space from a full ring.
+- Loom coverage for full-to-nonfull transitions, refilled full rings, and
+  cursor wraparound.
+
+### Changed
+
+- `ProducerOwner` now uses compact thread-local ownership tokens instead of
+  storing `ThreadId` values.
+
 ## [0.3.13] - 2026-08-08
 
 ### Changed

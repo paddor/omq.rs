@@ -95,6 +95,7 @@ jobs:
           - test: omq_soak_compression_zstd
           - test: omq_soak_pub_sub_zstd_dict
           - test: omq_soak_large_throughput
+          - test: omq_soak_latency_profile
           - test: omq_soak_cancel_safety
           - test: omq_soak_inproc_cross_thread
           - test: omq_soak_multi_socket

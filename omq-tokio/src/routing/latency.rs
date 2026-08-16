@@ -1,8 +1,8 @@
-//! Low-latency send routing for request/reply ping-pong.
+//! Low-latency send routing for one-message-at-a-time TCP flows.
 //!
 //! This route encodes directly into each peer's transmit slot. It avoids the
 //! generic yring send pipe, which is the right tradeoff for one-message-at-a-
-//! time REQ/REP but not for throughput-oriented routing.
+//! time flows but not for throughput-oriented routing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

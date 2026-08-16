@@ -986,7 +986,7 @@ where
 
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
 
-            // Latency-routed REQ/REP sends are encoded into the wire slot by
+            // Latency-routed sends are encoded into the wire slot by
             // the caller. Drain that already-queued work before polling the
             // reader, avoiding an extra zero-time reactor roundtrip.
             if latency_profile && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty()) {

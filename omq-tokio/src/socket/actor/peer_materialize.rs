@@ -384,7 +384,13 @@ fn split_direct_tcp_writer(
 fn supports_direct_tcp_writer(socket_type: SocketType) -> bool {
     matches!(
         socket_type,
-        SocketType::Req | SocketType::Rep | SocketType::Dealer
+        SocketType::Req
+            | SocketType::Rep
+            | SocketType::Dealer
+            | SocketType::Router
+            | SocketType::Server
+            | SocketType::Client
+            | SocketType::Pair
     )
 }
 
@@ -642,9 +648,18 @@ mod tests {
 
     #[test]
     fn direct_tcp_writer_supports_latency_round_robin_types() {
-        assert!(supports_direct_tcp_writer(SocketType::Req));
-        assert!(supports_direct_tcp_writer(SocketType::Rep));
-        assert!(supports_direct_tcp_writer(SocketType::Dealer));
+        for socket_type in [
+            SocketType::Req,
+            SocketType::Rep,
+            SocketType::Dealer,
+            SocketType::Router,
+            SocketType::Server,
+            SocketType::Client,
+            SocketType::Pair,
+        ] {
+            assert!(supports_direct_tcp_writer(socket_type));
+        }
         assert!(!supports_direct_tcp_writer(SocketType::Push));
+        assert!(!supports_direct_tcp_writer(SocketType::Channel));
     }
 }

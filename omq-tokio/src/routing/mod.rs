@@ -225,6 +225,9 @@ impl SendStrategy {
             SendCategory::RoundRobin if uses_latency_round_robin(t, options) => {
                 Self::Latency(LatencySend::new(options))
             }
+            SendCategory::Exclusive if uses_latency_exclusive(t, options) => {
+                Self::Latency(LatencySend::new(options))
+            }
             SendCategory::RoundRobin
                 if t == SocketType::Rep
                     && !options.mechanism.has_frame_transform()
@@ -395,12 +398,21 @@ fn uses_latency_round_robin(t: SocketType, options: &Options) -> bool {
         return false;
     }
     match t {
-        // REQ keeps its historical latency default. DEALER opts in explicitly
-        // so existing throughput-oriented applications retain their queues.
+        // REQ keeps its historical latency default. Other round-robin
+        // socket types opt in explicitly so existing throughput-oriented
+        // applications retain their queues.
         SocketType::Req => options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput),
-        SocketType::Dealer => options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
+        SocketType::Dealer | SocketType::Client => {
+            options.workload_profile == Some(omq_proto::WorkloadProfile::Latency)
+        }
         _ => false,
     }
+}
+
+fn uses_latency_exclusive(t: SocketType, options: &Options) -> bool {
+    !options.mechanism.has_frame_transform()
+        && matches!(t, SocketType::Pair)
+        && options.workload_profile == Some(omq_proto::WorkloadProfile::Latency)
 }
 
 /// Recv-side policy.
@@ -500,5 +512,45 @@ mod tests {
             SendStrategy::for_socket_type(SocketType::Dealer, &Options::default(), &io_pool),
             SendStrategy::RoundRobin(_)
         ));
+    }
+
+    #[test]
+    fn latency_profile_extends_client_and_pair() {
+        let io_pool = crate::context::IoPoolHandle::none();
+        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
+
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Client, &latency, &io_pool),
+            SendStrategy::Latency(_)
+        ));
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Client, &Options::default(), &io_pool),
+            SendStrategy::RoundRobin(_)
+        ));
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Pair, &latency, &io_pool),
+            SendStrategy::Latency(_)
+        ));
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Pair, &Options::default(), &io_pool),
+            SendStrategy::Exclusive(_)
+        ));
+    }
+
+    #[test]
+    fn identity_types_use_transmit_slots_for_latency_profile() {
+        let io_pool = crate::context::IoPoolHandle::none();
+        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
+
+        for socket_type in [SocketType::Router, SocketType::Server] {
+            let latency_strategy = SendStrategy::for_socket_type(socket_type, &latency, &io_pool);
+            assert!(matches!(latency_strategy, SendStrategy::Identity(_)));
+            assert!(latency_strategy.needs_transmit_slot());
+
+            let throughput_strategy =
+                SendStrategy::for_socket_type(socket_type, &Options::default(), &io_pool);
+            assert!(matches!(throughput_strategy, SendStrategy::Identity(_)));
+            assert!(!throughput_strategy.needs_transmit_slot());
+        }
     }
 }

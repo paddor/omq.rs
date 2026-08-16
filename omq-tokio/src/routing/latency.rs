@@ -128,25 +128,7 @@ impl Submitter {
 
             let notified = {
                 let state = self.state.lock().expect("latency send state");
-                if state
-                    .peers
-                    .iter()
-                    .any(|peer| peer.target.has_direct_writer())
-                {
-                    None
-                } else {
-                    state
-                        .peers
-                        .iter()
-                        .find_map(|peer| peer.target.space_available())
-                        .or_else(|| {
-                            state
-                                .pending
-                                .iter()
-                                .map(|pipe| pipe.tx.space_available())
-                                .next()
-                        })
-                }
+                state.space_available()
             };
             let Some(notified) = notified else {
                 if self.closed.load(Ordering::Acquire) {
@@ -180,25 +162,7 @@ impl Submitter {
     pub(crate) async fn wait_send_progress(&self) {
         let notified = {
             let state = self.state.lock().expect("latency send state");
-            if state
-                .peers
-                .iter()
-                .any(|peer| peer.target.has_direct_writer())
-            {
-                None
-            } else {
-                state
-                    .peers
-                    .iter()
-                    .find_map(|peer| peer.target.space_available())
-                    .or_else(|| {
-                        state
-                            .pending
-                            .iter()
-                            .map(|pipe| pipe.tx.space_available())
-                            .next()
-                    })
-            }
+            state.space_available()
         };
         if let Some(notified) = notified {
             let seen = notified.generation();
@@ -240,6 +204,18 @@ impl Submitter {
 }
 
 impl State {
+    fn space_available(&self) -> Option<Arc<crate::engine::signal::StateSignal>> {
+        self.peers
+            .iter()
+            .find_map(|peer| peer.target.space_available())
+            .or_else(|| {
+                self.pending
+                    .iter()
+                    .map(|pipe| pipe.tx.space_available())
+                    .next()
+            })
+    }
+
     fn remove_peer(&mut self, route_id: u64) {
         self.peers.retain(|peer| peer.id != route_id);
         if self.peers.is_empty() {
@@ -284,5 +260,135 @@ impl State {
             }
         }
         Err(TrySendError::Full(msg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{LatencySend, Peer};
+    use crate::engine::transmit_slot::PeerTransmitSlot;
+    use crate::engine::{PeerDriverCommand, PeerDriverHandle};
+    use crate::routing::peer_outbound::PeerOutbound;
+    use omq_proto::frame_buffer::ARENA_THRESHOLD;
+    use omq_proto::message::Message;
+    use omq_proto::options::Options;
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn direct_peer_handle(slot: Arc<PeerTransmitSlot>) -> PeerDriverHandle {
+        let (tcp, _peer) = tcp_pair();
+        let direct = crate::socket::dispatch::DirectTcpWriter::new(tcp);
+        let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
+        PeerDriverHandle {
+            inbox,
+            cancel: CancellationToken::new(),
+            transmit_slot: Some(slot),
+            direct_tcp_writer: Some(Arc::new(direct)),
+            send_pipe: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_writer_full_slot_waits_for_space_signal() {
+        let mut send = LatencySend::new(&Options::default().send_hwm(1));
+        let submitter = send.submitter();
+        let slot = PeerTransmitSlot::new(
+            7,
+            false,
+            None,
+            None,
+            ARENA_THRESHOLD,
+            1024,
+            1024 * 1024,
+            1,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+        send.connection_added(7, &direct_peer_handle(slot.clone()));
+
+        submitter
+            .try_send(Message::single(Bytes::from(vec![
+                0x5a;
+                ARENA_THRESHOLD + 1
+            ])))
+            .unwrap();
+
+        let blocked = tokio::spawn({
+            let submitter = submitter.clone();
+            async move {
+                submitter
+                    .send(Message::single(Bytes::from_static(b"after-space")))
+                    .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            !blocked.is_finished(),
+            "send should wait while transmit slot is full"
+        );
+
+        let mut drained = Vec::new();
+        let drain = slot.drain(&mut drained, 1024);
+        assert!(!drained.is_empty());
+        if drain.space_available {
+            slot.space_available.notify_changed();
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), blocked)
+            .await
+            .expect("send did not wake after transmit slot space")
+            .expect("send task panicked")
+            .unwrap();
+    }
+
+    #[test]
+    fn state_prefers_peer_space_before_pending_space() {
+        let mut send = LatencySend::new(&Options::default().send_hwm(1));
+        let _pending = send.make_connect_pipe(1);
+        let slot = PeerTransmitSlot::new(
+            2,
+            false,
+            None,
+            None,
+            ARENA_THRESHOLD,
+            1024,
+            1024 * 1024,
+            1,
+            #[cfg(feature = "ws")]
+            false,
+            #[cfg(feature = "ws")]
+            false,
+        );
+        send.connection_added(2, &direct_peer_handle(slot.clone()));
+
+        let state = send.state.lock().expect("latency send state");
+        let peer_signal = match &state.peers[0] {
+            Peer {
+                target: PeerOutbound::Wire { slot, .. },
+                ..
+            } => slot.space_available.clone(),
+            _ => panic!("expected wire peer"),
+        };
+        assert!(Arc::ptr_eq(
+            &state.space_available().expect("space signal"),
+            &peer_signal
+        ));
     }
 }

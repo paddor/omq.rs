@@ -141,6 +141,42 @@ async fn latency_dealer_round_robins_tcp_peers() {
     assert_eq!(counts, [10, 10]);
 }
 
+#[tokio::test]
+async fn latency_router_can_reply_to_dealer() {
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().workload_profile(WorkloadProfile::Latency),
+    );
+    let port = test_support::bind_loopback(&router).await;
+
+    let dealer = latency_dealer(b"latency-router-peer");
+    dealer
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+    dealer
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    dealer.send(Message::single("ping")).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), router.recv())
+        .await
+        .expect("router did not receive latency DEALER message")
+        .unwrap();
+    assert_eq!(request, Message::multipart(["latency-router-peer", "ping"]));
+
+    router
+        .send(Message::multipart(["latency-router-peer", "pong"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .expect("dealer did not receive latency ROUTER reply")
+        .unwrap();
+    assert_eq!(reply, Message::single("pong"));
+}
+
 fn drain_count(router: &Socket) -> u32 {
     let mut count = 0;
     loop {

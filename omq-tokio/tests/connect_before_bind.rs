@@ -9,7 +9,7 @@ mod test_support;
 
 use bytes::Bytes;
 use omq_tokio::endpoint::Host;
-use omq_tokio::options::ReconnectPolicy;
+use omq_tokio::options::{ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn opts() -> Options {
@@ -188,6 +188,35 @@ async fn pair_connect_before_bind_tcp() {
     pair_connect_before_bind(tcp_ep(free_tcp_port())).await;
 }
 
+#[tokio::test]
+async fn latency_pair_connect_before_bind_tcp() {
+    let ep = tcp_ep(free_tcp_port());
+    let options = opts().workload_profile(WorkloadProfile::Latency);
+    let a = Socket::new(SocketType::Pair, options);
+    a.connect(ep.clone()).await.unwrap();
+
+    let b = Socket::new(
+        SocketType::Pair,
+        Options::default().workload_profile(WorkloadProfile::Latency),
+    );
+    b.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&b).await;
+
+    a.send(Message::single("from-latency-a")).await.unwrap();
+    let m = tokio::time::timeout(TIMEOUT, b.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::single("from-latency-a"));
+
+    b.send(Message::single("from-latency-b")).await.unwrap();
+    let m = tokio::time::timeout(TIMEOUT, a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::single("from-latency-b"));
+}
+
 // -- PUB/SUB -----------------------------------------------------------------
 
 async fn pub_sub_connect_before_bind(ep: Endpoint) {
@@ -337,6 +366,42 @@ async fn client_server_connect_before_bind_ipc() {
 #[tokio::test]
 async fn client_server_connect_before_bind_tcp() {
     client_server_connect_before_bind(tcp_ep(free_tcp_port())).await;
+}
+
+#[tokio::test]
+async fn latency_client_server_connect_before_bind_tcp() {
+    let ep = tcp_ep(free_tcp_port());
+    let client = Socket::new(
+        SocketType::Client,
+        opts()
+            .identity(Bytes::from_static(b"latency-c1"))
+            .workload_profile(WorkloadProfile::Latency),
+    );
+    client.connect(ep.clone()).await.unwrap();
+
+    let server = Socket::new(
+        SocketType::Server,
+        Options::default().workload_profile(WorkloadProfile::Latency),
+    );
+    server.bind(ep).await.unwrap();
+    test_support::wait_for_handshake(&server).await;
+
+    client.send(Message::single("ping")).await.unwrap();
+    let m = tokio::time::timeout(TIMEOUT, server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::multipart(["latency-c1", "ping"]));
+
+    server
+        .send(Message::multipart(["latency-c1", "pong"]))
+        .await
+        .unwrap();
+    let m = tokio::time::timeout(TIMEOUT, client.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m, Message::single("pong"));
 }
 
 // -- SCATTER/GATHER ----------------------------------------------------------

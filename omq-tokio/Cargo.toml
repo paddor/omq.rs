@@ -301,6 +301,10 @@ name = "omq_soak_large_throughput"
 path = "tests/omq_soak_large_throughput.rs"
 
 [[test]]
+name = "omq_soak_latency_profile"
+path = "tests/omq_soak_latency_profile.rs"
+
+[[test]]
 name = "omq_soak_mechanism_reconnect"
 path = "tests/omq_soak_mechanism_reconnect.rs"
 

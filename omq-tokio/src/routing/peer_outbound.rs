@@ -77,16 +77,6 @@ impl PeerOutbound {
             Self::Inbox(_) => None,
         }
     }
-
-    pub(crate) fn has_direct_writer(&self) -> bool {
-        matches!(
-            self,
-            Self::Wire {
-                direct: Some(_),
-                ..
-            }
-        )
-    }
 }
 
 fn try_send_inbox(

@@ -111,7 +111,20 @@ git diff --check
 ## CI Release Packaging
 
 npm packages are published only by `.github/workflows/release-node.yml`.
-Do not run `npm publish` locally.
+Do not run `npm publish` locally except for a one-time bootstrap publish when
+the npm packages do not exist yet and the release owner explicitly asks for it.
+
+The workflow uses npm trusted publishing with GitHub Actions OIDC. It must not
+set `NODE_AUTH_TOKEN`. Configure each npm package with these trusted publisher
+settings:
+
+```text
+GitHub owner: paddor
+GitHub repository: omq.rs
+Workflow filename: release-node.yml
+Environment name: npm
+Allowed action: npm publish
+```
 
 Trigger CI release with a tag:
 

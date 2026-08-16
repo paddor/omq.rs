@@ -1,3 +1,3 @@
-# `@zeromq/omq-node-linux-arm64-musl`
+# `@paddor/omq-node-linux-arm64-musl`
 
-This is the **aarch64-unknown-linux-musl** binary for `@zeromq/omq-node`
+This is the **aarch64-unknown-linux-musl** binary for `@paddor/omq-node`

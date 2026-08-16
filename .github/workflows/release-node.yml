@@ -215,8 +215,8 @@ jobs:
         run: |
           mkdir smoke
           cd smoke
-          root="../dist/zeromq-omq-node-${{ needs.package.outputs.version }}.tgz"
-          platform="../dist/zeromq-omq-node-${{ matrix.platform }}-${{ needs.package.outputs.version }}.tgz"
+          root="../dist/paddor-omq-node-${{ needs.package.outputs.version }}.tgz"
+          platform="../dist/paddor-omq-node-${{ matrix.platform }}-${{ needs.package.outputs.version }}.tgz"
           test -f "$root"
           test -f "$platform"
           npm install --omit=optional "$platform" "$root"
@@ -225,7 +225,7 @@ jobs:
         working-directory: smoke
         run: |
           node <<'NODE'
-          const { Context, Pull, Push } = require("@zeromq/omq-node");
+          const { Context, Pull, Push } = require("@paddor/omq-node");
 
           (async () => {
             const context = new Context();
@@ -257,7 +257,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@zeromq/omq-node
+      url: https://www.npmjs.com/package/@paddor/omq-node
     permissions:
       contents: read
       id-token: write
@@ -275,7 +275,7 @@ jobs:
       - name: Publish platform packages
         shell: bash
         run: |
-          root="dist/zeromq-omq-node-${{ needs.package.outputs.version }}.tgz"
+          root="dist/paddor-omq-node-${{ needs.package.outputs.version }}.tgz"
           for package in dist/*.tgz; do
             if [[ "$package" == "$root" ]]; then
               continue
@@ -283,4 +283,4 @@ jobs:
             npm publish "$package" --access public --provenance
           done
       - name: Publish root package
-        run: npm publish "dist/zeromq-omq-node-${{ needs.package.outputs.version }}.tgz" --access public --provenance
+        run: npm publish "dist/paddor-omq-node-${{ needs.package.outputs.version }}.tgz" --access public --provenance

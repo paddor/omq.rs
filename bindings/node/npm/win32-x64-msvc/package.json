@@ -1,5 +1,5 @@
 {
-  "name": "@zeromq/omq-node-win32-x64-msvc",
+  "name": "@paddor/omq-node-win32-x64-msvc",
   "version": "0.1.0",
   "cpu": [
     "x64"

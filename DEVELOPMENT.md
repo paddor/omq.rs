@@ -371,9 +371,68 @@ GitHub releases. Configuration lives in `release-plz.toml`.
 4. **Merge the release PR.** release-plz tags and publishes to
    crates.io automatically.
 
-5. **pyomq** if changed: bump `bindings/pyomq/Cargo.toml` and
-   `bindings/pyomq/pyproject.toml`, run `cargo update -p pyomq` inside
-   `bindings/pyomq`, add a changelog entry, then push a `pyomq-v*` tag.
+5. **Bindings** if changed: prepare the binding release on a PR, merge it,
+   then tag from the merged `main` commit. Do not tag before the release PR is
+   merged.
+
+### Binding Releases
+
+`pyomq` publishes to PyPI from `.github/workflows/release-pyomq.yml`.
+Prepare a release by bumping `bindings/pyomq/Cargo.toml` and
+`bindings/pyomq/pyproject.toml`, running `cargo update -p pyomq` inside
+`bindings/pyomq`, and adding a `bindings/pyomq/CHANGELOG.md` entry. After
+the PR is merged, push a tag:
+
+```sh
+git tag -a pyomq-v0.20.0 -m "pyomq 0.20.0"
+git push origin pyomq-v0.20.0
+gh run watch --repo paddor/omq.rs --exit-status
+```
+
+`OMQ.java` publishes to Maven Central from
+`.github/workflows/release-java.yml`. Prepare a release by adding a
+`bindings/java/CHANGELOG.md` entry. The workflow version comes from the tag
+or manual `workflow_dispatch` input; `pom.xml` normally stays at
+`${revision}`. Required repository secrets are `CENTRAL_USERNAME`,
+`CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, and `MAVEN_GPG_PASSPHRASE`.
+After the PR is merged, push a tag:
+
+```sh
+git tag -a omq-java-v0.3.1 -m "OMQ.java 0.3.1"
+git push origin omq-java-v0.3.1
+gh run watch --repo paddor/omq.rs --exit-status
+```
+
+The workflow uploads a validated Central deployment with
+`central.autoPublish=false`; publish the validated deployment in Central after
+the workflow passes.
+
+`OMQ.go` is a Go subdirectory module. It has no registry account or upload
+step; the Git tag is the release. After the PR is merged, push a subdirectory
+module tag from `main`:
+
+```sh
+git tag -a bindings/go/v0.1.0 -m "OMQ.go 0.1.0"
+git push origin bindings/go/v0.1.0
+go list -m github.com/paddor/omq.rs/bindings/go@v0.1.0
+```
+
+The public Go module proxy discovers the version from that tag.
+
+`OMQ.node` publishes to npm from `.github/workflows/release-node.yml`.
+Prepare a release by checking `bindings/node/package.json`,
+`bindings/node/npm/*/package.json`, and
+`bindings/node/scripts/prepare-release.js`. The workflow version comes from
+the tag or manual `workflow_dispatch` input, builds all platform native
+addons, packs platform packages, smoke-tests host tarballs, publishes
+platform packages first, then publishes the root package. Required repository
+secret: `NPM_TOKEN`. After the PR is merged, push a tag:
+
+```sh
+git tag -a omq-node-v0.1.0 -m "OMQ.node 0.1.0"
+git push origin omq-node-v0.1.0
+gh run watch --repo paddor/omq.rs --exit-status
+```
 
 ### Crates To Check
 

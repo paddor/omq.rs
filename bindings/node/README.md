@@ -1,4 +1,4 @@
-# @zeromq/omq-node
+# @paddor/omq-node
 
 Native Node.js binding for OMQ.rs.
 
@@ -11,11 +11,11 @@ This package is for Node main/server processes. Browser code should use
 `@zeromq/omq`.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/node/doc/charts/bindings.svg" alt="@zeromq/omq-node sync API vs zeromq.js TCP throughput and latency" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/node/doc/charts/bindings.svg" alt="@paddor/omq-node sync API vs zeromq.js TCP throughput and latency" width="850">
 </p>
 
 2-process loopback PUSH/PULL throughput and REQ/REP p50 latency: per-message
-`@zeromq/omq-node` sync API calls vs per-message `zeromq.js` calls over TCP.
+`@paddor/omq-node` sync API calls vs per-message `zeromq.js` calls over TCP.
 
 ## Highlights
 
@@ -55,13 +55,13 @@ local development. Published packages can load a matching platform prebuild.
 - Sockets are single-thread objects on the JavaScript side; create more
   sockets for more concurrent flows.
 
-`@zeromq/omq-node` is not a `zeromq.js` compatibility layer. It follows ZMQ
+`@paddor/omq-node` is not a `zeromq.js` compatibility layer. It follows ZMQ
 socket semantics, but exposes a Node API shaped around this binding.
 
 Example:
 
 ```js
-const { Pull, Push } = require("@zeromq/omq-node");
+const { Pull, Push } = require("@paddor/omq-node");
 
 async function main() {
   const pull = new Pull();
@@ -84,7 +84,7 @@ main();
 Shared `inproc://` context:
 
 ```js
-const { Context, Pull, Push } = require("@zeromq/omq-node");
+const { Context, Pull, Push } = require("@paddor/omq-node");
 
 async function main() {
   const owner = new Context();
@@ -111,7 +111,7 @@ main();
 Socket options:
 
 ```js
-const { Push } = require("@zeromq/omq-node");
+const { Push } = require("@paddor/omq-node");
 
 async function main() {
   const push = new Push({

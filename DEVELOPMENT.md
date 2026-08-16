@@ -424,9 +424,39 @@ Prepare a release by checking `bindings/node/package.json`,
 `bindings/node/scripts/prepare-release.js`. The workflow version comes from
 the tag or manual `workflow_dispatch` input, builds all platform native
 addons, packs platform packages, smoke-tests host tarballs, publishes
-platform packages first, then publishes the root package. Required repository
-secret: `NPM_TOKEN`; for CI publishing, use a publish-capable npm token that
-can bypass 2FA. After the PR is merged, push a tag:
+platform packages first, then publishes the root package.
+
+Publishing uses npm trusted publishing with GitHub Actions OIDC. No npm token
+secret is required by the workflow. In npm, configure a trusted publisher for
+each package before tagging:
+
+```text
+GitHub owner: paddor
+GitHub repository: omq.rs
+Workflow filename: release-node.yml
+Environment name: npm
+Allowed action: npm publish
+```
+
+Configure these packages:
+
+```text
+@paddor/omq-node
+@paddor/omq-node-darwin-arm64
+@paddor/omq-node-darwin-x64
+@paddor/omq-node-linux-arm64-gnu
+@paddor/omq-node-linux-arm64-musl
+@paddor/omq-node-linux-x64-gnu
+@paddor/omq-node-linux-x64-musl
+@paddor/omq-node-win32-arm64-msvc
+@paddor/omq-node-win32-x64-msvc
+```
+
+If the packages do not exist yet, npm trusted publishing cannot be configured
+for them. Bootstrap the first publish with a user-approved manual publish or a
+publish-capable npm token, then add the trusted publishers before the next CI
+release. After the PR is merged and trusted publishers are configured, push a
+tag:
 
 ```sh
 git tag -a omq-node-v0.1.2 -m "OMQ.node 0.1.2"

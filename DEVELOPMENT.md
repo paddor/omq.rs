@@ -429,8 +429,8 @@ platform packages first, then publishes the root package. Required repository
 secret: `NPM_TOKEN`. After the PR is merged, push a tag:
 
 ```sh
-git tag -a omq-node-v0.1.0 -m "OMQ.node 0.1.0"
-git push origin omq-node-v0.1.0
+git tag -a omq-node-v0.1.1 -m "OMQ.node 0.1.1"
+git push origin omq-node-v0.1.1
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 

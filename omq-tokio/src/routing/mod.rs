@@ -222,11 +222,7 @@ impl SendStrategy {
                 Self::FanOut(FanOutSend::new(t, options, FanOutMode::Group, io_pool))
             }
             SendCategory::IdentityRouted => Self::Identity(IdentitySend::new(t, options)),
-            SendCategory::RoundRobin
-                if t == SocketType::Req
-                    && !options.mechanism.has_frame_transform()
-                    && options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput) =>
-            {
+            SendCategory::RoundRobin if uses_latency_round_robin(t, options) => {
                 Self::Latency(LatencySend::new(options))
             }
             SendCategory::RoundRobin
@@ -394,6 +390,19 @@ impl SendStrategy {
     }
 }
 
+fn uses_latency_round_robin(t: SocketType, options: &Options) -> bool {
+    if options.mechanism.has_frame_transform() {
+        return false;
+    }
+    match t {
+        // REQ keeps its historical latency default. DEALER opts in explicitly
+        // so existing throughput-oriented applications retain their queues.
+        SocketType::Req => options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput),
+        SocketType::Dealer => options.workload_profile == Some(omq_proto::WorkloadProfile::Latency),
+        _ => false,
+    }
+}
+
 /// Recv-side policy.
 #[derive(Debug)]
 pub(crate) enum RecvStrategy {
@@ -472,3 +481,24 @@ pub(crate) fn supports_groups(t: SocketType) -> bool {
 }
 
 pub(crate) use omq_proto::routing::supports_conflate;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omq_proto::WorkloadProfile;
+
+    #[test]
+    fn dealer_uses_latency_route_only_when_explicitly_requested() {
+        let io_pool = crate::context::IoPoolHandle::none();
+        let latency = Options::default().workload_profile(WorkloadProfile::Latency);
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Dealer, &latency, &io_pool),
+            SendStrategy::Latency(_)
+        ));
+
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Dealer, &Options::default(), &io_pool),
+            SendStrategy::RoundRobin(_)
+        ));
+    }
+}

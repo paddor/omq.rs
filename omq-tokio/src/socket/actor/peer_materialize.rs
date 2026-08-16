@@ -360,7 +360,7 @@ fn split_direct_tcp_writer(
     (),
 > {
     if !latency_profile
-        || !matches!(socket.socket_type, SocketType::Req | SocketType::Rep)
+        || !supports_direct_tcp_writer(socket.socket_type)
         || !matches!(endpoint, Endpoint::Tcp { .. })
         || has_transforms
     {
@@ -379,6 +379,13 @@ fn split_direct_tcp_writer(
         #[cfg(feature = "ws")]
         AnyStream::Ws(ws) => Ok((AnyStream::Ws(ws), None)),
     }
+}
+
+fn supports_direct_tcp_writer(socket_type: SocketType) -> bool {
+    matches!(
+        socket_type,
+        SocketType::Req | SocketType::Rep | SocketType::Dealer
+    )
 }
 
 fn attach_transforms(
@@ -631,5 +638,13 @@ mod tests {
         assert!(can_use_yring_recv_bypass(SocketType::Req, true));
         assert!(!can_use_yring_recv_bypass(SocketType::Req, false));
         assert!(can_use_yring_recv_bypass(SocketType::Pull, false));
+    }
+
+    #[test]
+    fn direct_tcp_writer_supports_latency_round_robin_types() {
+        assert!(supports_direct_tcp_writer(SocketType::Req));
+        assert!(supports_direct_tcp_writer(SocketType::Rep));
+        assert!(supports_direct_tcp_writer(SocketType::Dealer));
+        assert!(!supports_direct_tcp_writer(SocketType::Push));
     }
 }

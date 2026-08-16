@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Explicit latency-profile `DEALER` sockets now use the existing direct TCP
+  writer and latency round-robin route. The default throughput-profile
+  `DEALER` path is unchanged.
+
 ## [0.21.2] - 2026-08-16
 
 ### Added

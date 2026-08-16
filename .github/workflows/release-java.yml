@@ -229,7 +229,7 @@ jobs:
           else
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
-      - name: Upload for validation
+      - name: Publish to Maven Central
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
@@ -238,5 +238,5 @@ jobs:
           mvn -B -ntp -f bindings/java/pom.xml -Prelease
           -Drevision=${{ steps.version.outputs.version }}
           -DskipNative=true -DskipTests
-          -Dcentral.autoPublish=false -Dcentral.waitUntil=validated
+          -Dcentral.autoPublish=true -Dcentral.waitUntil=published
           deploy

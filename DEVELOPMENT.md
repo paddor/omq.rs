@@ -398,14 +398,13 @@ or manual `workflow_dispatch` input; `pom.xml` normally stays at
 After the PR is merged, push a tag:
 
 ```sh
-git tag -a omq-java-v0.3.1 -m "OMQ.java 0.3.1"
-git push origin omq-java-v0.3.1
+git tag -a omq-java-v0.3.2 -m "OMQ.java 0.3.2"
+git push origin omq-java-v0.3.2
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 
-The workflow uploads a validated Central deployment with
-`central.autoPublish=false`; publish the validated deployment in Central after
-the workflow passes.
+The workflow publishes with `central.autoPublish=true` and waits until Central
+reports the deployment as published.
 
 `OMQ.go` is a Go subdirectory module. It has no registry account or upload
 step; the Git tag is the release. After the PR is merged, push a subdirectory
@@ -426,11 +425,12 @@ Prepare a release by checking `bindings/node/package.json`,
 the tag or manual `workflow_dispatch` input, builds all platform native
 addons, packs platform packages, smoke-tests host tarballs, publishes
 platform packages first, then publishes the root package. Required repository
-secret: `NPM_TOKEN`. After the PR is merged, push a tag:
+secret: `NPM_TOKEN`; for CI publishing, use a publish-capable npm token that
+can bypass 2FA. After the PR is merged, push a tag:
 
 ```sh
-git tag -a omq-node-v0.1.1 -m "OMQ.node 0.1.1"
-git push origin omq-node-v0.1.1
+git tag -a omq-node-v0.1.2 -m "OMQ.node 0.1.2"
+git push origin omq-node-v0.1.2
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 

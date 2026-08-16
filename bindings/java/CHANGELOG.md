@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+## [0.3.1]
+
 - Use timed PUSH/PULL throughput samples for the OMQ.java performance chart
   instead of fixed message-count runs.
+- Fix receive ring close races for both virtual-thread and platform-thread
+  receive paths.
+- Use ISC license metadata in Maven and native Cargo manifests.
+- Bundle native backend updates from `omq-tokio` 0.21.2 and related crates.
 
 ## [0.3.0]
 

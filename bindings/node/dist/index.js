@@ -676,7 +676,7 @@ function loadNative() {
                 // Fall through to source-build message below.
             }
         }
-        const message = "Cannot load @zeromq/omq-node native addon. Run `npm run build:native` in bindings/node or install a matching prebuild.";
+        const message = "Cannot load @paddor/omq-node native addon. Run `npm run build:native` in bindings/node or install a matching prebuild.";
         const error = new Error(message);
         error.cause = localError;
         throw error;
@@ -689,21 +689,21 @@ function platformPackageName() {
         const report = process.report?.getReport();
         const libc = report?.header?.glibcVersionRuntime ? "gnu" : "musl";
         if (arch === "x64")
-            return `@zeromq/omq-node-linux-x64-${libc}`;
+            return `@paddor/omq-node-linux-x64-${libc}`;
         if (arch === "arm64")
-            return `@zeromq/omq-node-linux-arm64-${libc}`;
+            return `@paddor/omq-node-linux-arm64-${libc}`;
     }
     if (platform === "darwin") {
         if (arch === "x64")
-            return "@zeromq/omq-node-darwin-x64";
+            return "@paddor/omq-node-darwin-x64";
         if (arch === "arm64")
-            return "@zeromq/omq-node-darwin-arm64";
+            return "@paddor/omq-node-darwin-arm64";
     }
     if (platform === "win32") {
         if (arch === "x64")
-            return "@zeromq/omq-node-win32-x64-msvc";
+            return "@paddor/omq-node-win32-x64-msvc";
         if (arch === "arm64")
-            return "@zeromq/omq-node-win32-arm64-msvc";
+            return "@paddor/omq-node-win32-arm64-msvc";
     }
     return undefined;
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@zeromq/omq-node-linux-x64-musl",
+  "name": "@paddor/omq-node-linux-x64-musl",
   "version": "0.1.0",
   "cpu": [
     "x64"

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-16
+
+### Added
+
+- `Context.share_key()` and `Context.from_share_key()` expose native context
+  core sharing for Python and Rust interop.
+- Python zguide examples now cover request/reply, pub/sub, and pipeline flows.
+
+### Fixed
+
+- `Poller` now reports `POLLOUT` readiness and avoids blocking when writable
+  sockets are already ready.
+- Deadline handling now avoids overflow near very large timeout values.
+
+### Changed
+
+- `inproc://` names now rely on the native per-context-core namespace instead
+  of Python-side endpoint rewriting.
+- *(deps)* Bump bundled `omq-tokio` to 0.21.2, `omq-proto` to 0.26.0, and
+  `yring` to 0.3.14.
+
 ## [0.19.2] - 2026-08-08
 
 ### Added

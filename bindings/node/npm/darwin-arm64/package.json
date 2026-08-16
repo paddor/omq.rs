@@ -1,5 +1,5 @@
 {
-  "name": "@zeromq/omq-node-darwin-arm64",
+  "name": "@paddor/omq-node-darwin-arm64",
   "version": "0.1.0",
   "cpu": [
     "arm64"

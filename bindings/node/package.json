@@ -1,5 +1,5 @@
 {
-  "name": "@zeromq/omq-node",
+  "name": "@paddor/omq-node",
   "version": "0.1.0",
   "description": "Native Node.js binding for OMQ.rs",
   "license": "ISC",

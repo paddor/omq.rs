@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.21.3] - 2026-08-17
 
-- Explicit latency-profile `DEALER` sockets now use the existing direct TCP
-  writer and latency round-robin route. The default throughput-profile
-  `DEALER` path is unchanged.
+### Added
+
+- Latency-profile routing now uses direct TCP writers for `DEALER`, `ROUTER`,
+  `CLIENT`, `SERVER`, and `PAIR` sockets. The default throughput profile is
+  unchanged.
+- Latency-profile coverage now includes all supported public socket types,
+  with connect-before-bind and long-running soak tests.
+
+### Fixed
+
+- Latency sends now wake when a direct transmit slot frees space, avoiding a
+  stalled send after the slot drains.
 
 ## [0.21.2] - 2026-08-16
 

@@ -52,7 +52,7 @@ export interface SocketOptions {
   reconnectInitialDelayMs?: number;
   /** Maximum reconnect delay in milliseconds. Defaults to 5000. */
   reconnectMaxDelayMs?: number;
-  /** Maximum queued inbound messages. New inbound messages drop when full. */
+  /** Maximum queued inbound messages. The affected connection closes when full. */
   receiveHighWaterMark?: number;
   /** Maximum sends waiting for a ready connection. New sends reject when full. */
   sendHighWaterMark?: number;
@@ -82,6 +82,7 @@ export abstract class Socket {
   /** @ignore */
   protected messageWaiters: Array<Waiter<Message>> = [];
 
+  private connectionReadyWaiters: Array<Waiter<void>> = [];
   private readyWaiters: Array<Waiter<Connection>> = [];
   private endpoints: Map<string, EndpointState> = new Map();
   private urlsByConnection: Map<Connection, string> = new Map();
@@ -207,6 +208,7 @@ export abstract class Socket {
     }
 
     this.rejectReadyWaiters(error);
+    this.rejectConnectionReadyWaiters(error);
     this.rejectMessageWaiters(error);
     this.onSocketClosed(error);
   }
@@ -226,6 +228,18 @@ export abstract class Socket {
     return this.readyConnections.length;
   }
 
+  /** Wait until at least one connection completes the ZMTP handshake. */
+  ready(): Promise<void> {
+    if (this.readyConnections.length > 0) return Promise.resolve();
+    if (this.closed) return Promise.reject(new Error("Socket closed"));
+    if (this.endpoints.size === 0) {
+      return Promise.reject(new Error("Socket has no connections"));
+    }
+    return new Promise((resolve, reject) => {
+      this.connectionReadyWaiters.push({ resolve, reject });
+    });
+  }
+
   /** @ignore */
   protected onConnectionReady(conn: Connection): void {
     if (this.closed) return;
@@ -238,6 +252,7 @@ export abstract class Socket {
       endpoint.reconnectDelayMs = this.reconnectInitialDelayMs;
     }
 
+    this.drainConnectionReadyWaiters();
     this.drainReadyWaiters();
   }
 
@@ -430,9 +445,22 @@ export abstract class Socket {
 
   private rejectWaitersIfNoEndpoints(error: Error): void {
     if (this.endpoints.size > 0) return;
+    this.rejectConnectionReadyWaiters(error);
     this.rejectReadyWaiters(error);
     this.rejectMessageWaiters(error);
     this.onSocketClosed(error);
+  }
+
+  private drainConnectionReadyWaiters(): void {
+    const waiters = this.connectionReadyWaiters;
+    this.connectionReadyWaiters = [];
+    for (const waiter of waiters) waiter.resolve(undefined);
+  }
+
+  private rejectConnectionReadyWaiters(error: Error): void {
+    const waiters = this.connectionReadyWaiters;
+    this.connectionReadyWaiters = [];
+    for (const waiter of waiters) waiter.reject(error);
   }
 
   private rejectReadyWaiters(error: Error): void {

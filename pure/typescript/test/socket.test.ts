@@ -1856,6 +1856,65 @@ describe("Socket connection management", () => {
     expect(push.readyCount).toBe(2);
   });
 
+  it("ready() waits for the first completed handshake", async () => {
+    const push = new Push();
+    push.connect("ws://localhost:8083");
+    const ws = createdSockets[0]!;
+
+    let resolved = false;
+    const pending = push.ready().then(() => {
+      resolved = true;
+    });
+
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    makeReady(ws, "PULL");
+    await pending;
+    expect(resolved).toBe(true);
+  });
+
+  it("ready() resolves immediately after a connection is ready", async () => {
+    const push = new Push();
+    push.connect("ws://localhost:8083");
+    makeReady(createdSockets[0]!, "PULL");
+
+    await expect(push.ready()).resolves.toBeUndefined();
+  });
+
+  it("ready() does not count against sendHighWaterMark", async () => {
+    const push = new Push({ sendHighWaterMark: 1 });
+    push.connect("ws://localhost:8083");
+    const ws = createdSockets[0]!;
+
+    const ready = push.ready();
+    const send = push.send(Message.from("queued"));
+
+    makeReady(ws, "PULL");
+    await ready;
+    await send;
+
+    const messages = dataFramesAfterReady(ws);
+    expect(messages.length).toBe(1);
+    expect(new TextDecoder().decode(messages[0]![0])).toBe("queued");
+  });
+
+  it("ready() rejects when no endpoint exists", async () => {
+    const push = new Push();
+
+    await expect(push.ready()).rejects.toThrow("Socket has no connections");
+  });
+
+  it("ready() rejects on close", async () => {
+    const push = new Push();
+    push.connect("ws://localhost:8083");
+
+    const pending = push.ready();
+    push.close();
+
+    await expect(pending).rejects.toThrow("Socket closed");
+  });
+
   it("uses valid ZWS subprotocol with PLAIN socket options", () => {
     const push = new Push({
       plain: { username: "alice", password: "secret" },

@@ -8,12 +8,23 @@ Supports connect-side WebSocket sockets for REQ/REP, PUB/SUB, XPUB/XSUB,
 PUSH/PULL, DEALER/ROUTER, PAIR, CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, PEER,
 and CHANNEL. Security mechanisms are NULL and PLAIN.
 
+This package is browser/client focused. It does not bind, open `tcp://`,
+`ipc://`, or `inproc://` endpoints, or load native code. Server-side JavaScript
+that needs native transports should use an OMQ.rs binding such as
+`@zeromq/omq-node`.
+
 ## Install
 
 Published on JSR as [`@zeromq/omq`](https://jsr.io/@zeromq/omq).
 
 ```sh
 deno add jsr:@zeromq/omq
+```
+
+For npm projects, use JSR's npm compatibility layer:
+
+```sh
+npx jsr add @zeromq/omq
 ```
 
 ## Usage
@@ -53,6 +64,7 @@ import { Message, Push } from "@zeromq/omq";
 
 const push = new Push();
 push.connect("wss://broker.example.com/push");
+await push.ready();
 
 await push.send(new Message("event", JSON.stringify({ ts: Date.now() })));
 ```
@@ -117,6 +129,15 @@ const sub = new Sub({
   onError: (error) => console.error(error),
 });
 ```
+
+Use `await socket.ready()` when application code needs to wait for at least one
+connection to complete the ZMTP handshake. It resolves immediately if a
+connection is already ready and remains pending across reconnect attempts.
+
+For PUB/RADIO sockets, `ready()` only means the peer connection completed its
+handshake. It does not prove the remote subscription or group command has
+arrived. Use XPUB subscription notifications or an application-level ack when
+the first published message must not be missed.
 
 Browser `WebSocket` does not expose inbound TCP backpressure. If
 `receiveHighWaterMark` is set and the receive queue is full, omq.ts calls

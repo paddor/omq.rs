@@ -61,6 +61,7 @@ pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
 pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
+pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
 
 // ── formatting ─────────────────────────────────────────────────
 

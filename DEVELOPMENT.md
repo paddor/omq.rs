@@ -199,6 +199,7 @@ when a measured cell looks bad, don't hand-wave it as noise.
 | `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
+| `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
 
 Each binary speaks a subcommand protocol:
 
@@ -207,6 +208,11 @@ Each binary speaks a subcommand protocol:
 - `pub <addr> <size>` / `sub <addr> <size> <duration>`: PUB/SUB throughput.
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
+
+The `grpc-rust` baseline uses plaintext gRPC over TCP between separate
+processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
+blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and
+application-level QoS are disabled.
 
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 

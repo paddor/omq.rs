@@ -129,7 +129,9 @@ binary. Do not set `OMQ_GO_BENCH_PEER` manually.
 ## Performance Chart
 
 The chart script runs two-process TCP PUSH/PULL throughput and REQ/REP latency
-over fixed time windows, then appends rows to:
+over fixed time windows. Implementations include OMQ.go, `zmq4`, and
+plaintext `grpc-go`. gRPC uses protobuf `bytes` blobs with TLS, compression,
+retries, and application QoS disabled. Results append to:
 
 ```text
 ~/.cache/omq.go/bindings.jsonl

@@ -244,6 +244,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[("RZMQ_IO_URING", "1")],
     },
     ImplDef {
+        name: "grpc-rust",
+        binary_from: None,
+        prefix: "g",
+        class: None,
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[],
+    },
+    ImplDef {
         name: "libzmq-curve-1t",
         binary_from: Some("libzmq"),
         prefix: "lc1",
@@ -529,6 +545,22 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                     PathBuf::from("scripts/rzmq_bench_peer/target/release/rzmq_bench_peer"),
                 );
             }
+            "grpc-rust" => {
+                run_build(&[
+                    "cargo",
+                    "build",
+                    "--release",
+                    "-p",
+                    "omq-bench",
+                    "--bin",
+                    "grpc_bench_peer",
+                    "-q",
+                ]);
+                binaries.insert(
+                    source.to_string(),
+                    PathBuf::from("target/release/grpc_bench_peer"),
+                );
+            }
             _ => panic!("unknown impl source: {source}"),
         }
     }
@@ -634,6 +666,31 @@ fn chrono_like_utc_now() -> String {
         .output()
         .expect("failed to run date");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn grpc_port_file() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "omq-bench-grpc-port-{}-{}",
+        std::process::id(),
+        next_addr_id()
+    ))
+}
+
+fn wait_grpc_port(path: &Path) -> u16 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(port) = text.trim().parse()
+        {
+            std::fs::remove_file(path).ok();
+            return port;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "gRPC: no port file from peer"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 // ---- Cell functions -------------------------------------------------------
@@ -762,16 +819,27 @@ fn run_throughput_once(
     let mut _coord_socket = None;
     match transport {
         TransportKind::Tcp => {
-            let coord = CoordSocket::bind_new();
-            push_cmd = vec![binary_str, "push", "tcp://127.0.0.1:0", &size_str];
-            let mut env = push_env.clone();
-            env.push(("OMQ_BENCH_COORD", coord.endpoint()));
-            push_proc = process::spawn(&push_cmd, &env, Some(process::MEASURED_CPU));
-            let port = coord
-                .recv_ready_port(Duration::from_secs(10))
-                .expect("coord: no READY from push peer");
+            let port = if def.name == "grpc-rust" {
+                let path = grpc_port_file();
+                let path_str = path.to_str().unwrap();
+                let mut env = push_env.clone();
+                env.push(("OMQ_BENCH_PORT_FILE", path_str));
+                push_cmd = vec![binary_str, "push", "tcp://127.0.0.1:0", &size_str];
+                push_proc = process::spawn(&push_cmd, &env, Some(process::MEASURED_CPU));
+                wait_grpc_port(&path)
+            } else {
+                let coord = CoordSocket::bind_new();
+                push_cmd = vec![binary_str, "push", "tcp://127.0.0.1:0", &size_str];
+                let mut env = push_env.clone();
+                env.push(("OMQ_BENCH_COORD", coord.endpoint()));
+                push_proc = process::spawn(&push_cmd, &env, Some(process::MEASURED_CPU));
+                let port = coord
+                    .recv_ready_port(Duration::from_secs(10))
+                    .expect("coord: no READY from push peer");
+                _coord_socket = Some(coord);
+                port
+            };
             connect_addr = format!("tcp://127.0.0.1:{port}");
-            _coord_socket = Some(coord);
         }
         TransportKind::Ws => {
             push_cmd = vec![binary_str, "push", &addr, &size_str];
@@ -787,12 +855,22 @@ fn run_throughput_once(
         }
     }
 
-    let pull_output = process::capture(
-        &[peer_binary_str, "pull", &connect_addr, &size_str, &dur_str],
-        &pull_env,
-        Some(process::OTHER_CPU),
-        Duration::from_secs(duration as u64 + 30),
-    );
+    let pull_result = if def.name == "grpc-rust" {
+        process::capture_with_cpu(
+            &[peer_binary_str, "pull", &connect_addr, &size_str, &dur_str],
+            &pull_env,
+            Some(process::OTHER_CPU),
+            Duration::from_secs(duration as u64 + 30),
+        )
+    } else {
+        process::capture(
+            &[peer_binary_str, "pull", &connect_addr, &size_str, &dur_str],
+            &pull_env,
+            Some(process::OTHER_CPU),
+            Duration::from_secs(duration as u64 + 30),
+        )
+        .map(|output| (output, 0.0))
+    };
 
     let push_cpu = process::read_proc_cpu(push_proc.pid());
     push_proc.kill();
@@ -801,7 +879,7 @@ fn run_throughput_once(
         cleanup_ipc_addr(&addr, def.name);
     }
 
-    let Some(output) = pull_output else {
+    let Some((output, measured_pull_cpu)) = pull_result else {
         return zero_result(duration);
     };
 
@@ -811,7 +889,11 @@ fn run_throughput_once(
             mbps: r.mbps,
             elapsed: r.elapsed,
             push_cpu: Some(push_cpu),
-            pull_cpu: r.pull_cpu,
+            pull_cpu: if def.name == "grpc-rust" {
+                Some(measured_pull_cpu)
+            } else {
+                r.pull_cpu
+            },
             peer_min: None,
             peer_max: None,
             peer_p10: None,
@@ -930,7 +1012,8 @@ fn run_pubsub_once(
         pub_cmd.push(&peers_str);
     }
 
-    let coord = (transport == TransportKind::Tcp).then(CoordSocket::bind_new);
+    let coord =
+        (transport == TransportKind::Tcp && def.name != "grpc-rust").then(CoordSocket::bind_new);
     let mut spawn_env = pub_env.clone();
     if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
@@ -1313,7 +1396,11 @@ struct LatencyResult {
 }
 
 #[expect(clippy::too_many_arguments)]
-#[allow(clippy::needless_late_init, clippy::similar_names)]
+#[allow(
+    clippy::needless_late_init,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
 fn run_latency_cell(
     binary: &Path,
     peer_binary: &Path,
@@ -1374,13 +1461,20 @@ fn run_latency_cell(
     }
 
     let coord = (transport == TransportKind::Tcp).then(CoordSocket::bind_new);
+    let grpc_path =
+        (def.name == "grpc-rust" && transport == TransportKind::Tcp).then(grpc_port_file);
     let mut spawn_env = rep_env.clone();
-    if let Some(ref c) = coord {
+    if let Some(ref path) = grpc_path {
+        spawn_env.push(("OMQ_BENCH_PORT_FILE", path.to_str().unwrap()));
+    } else if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
     }
     let mut rep_proc = process::spawn(&rep_cmd, &spawn_env, Some(process::OTHER_CPU));
 
-    if let Some(c) = coord {
+    if let Some(path) = grpc_path {
+        let port = wait_grpc_port(&path);
+        connect_addr = format!("tcp://127.0.0.1:{port}");
+    } else if let Some(c) = coord {
         let port = c
             .recv_ready_port(Duration::from_secs(10))
             .expect("coord: no READY from rep peer");
@@ -1390,19 +1484,36 @@ fn run_latency_cell(
         connect_addr = addr.clone();
     }
 
-    let req_output = process::capture(
-        &[
-            binary_str,
-            latency_req_subcmd(def),
-            &connect_addr,
-            &size_str,
-            &iters_str,
-            &warmup_str,
-        ],
-        &req_env,
-        Some(process::MEASURED_CPU),
-        Duration::from_secs(timeout + 30),
-    );
+    let req_result = if def.name == "grpc-rust" {
+        process::capture_with_cpu(
+            &[
+                binary_str,
+                latency_req_subcmd(def),
+                &connect_addr,
+                &size_str,
+                &iters_str,
+                &warmup_str,
+            ],
+            &req_env,
+            Some(process::MEASURED_CPU),
+            Duration::from_secs(timeout + 30),
+        )
+    } else {
+        process::capture(
+            &[
+                binary_str,
+                latency_req_subcmd(def),
+                &connect_addr,
+                &size_str,
+                &iters_str,
+                &warmup_str,
+            ],
+            &req_env,
+            Some(process::MEASURED_CPU),
+            Duration::from_secs(timeout + 30),
+        )
+        .map(|output| (output, 0.0))
+    };
 
     let rep_cpu = process::read_proc_cpu(rep_proc.pid());
     rep_proc.kill();
@@ -1411,10 +1522,14 @@ fn run_latency_cell(
         cleanup_ipc_addr(&addr, def.name);
     }
 
-    let output = req_output?;
+    let (output, measured_req_cpu) = req_result?;
     let r = parse::parse_latency(&output)?;
 
-    let req_cpu = r.req_cpu;
+    let req_cpu = if def.name == "grpc-rust" {
+        Some(measured_req_cpu)
+    } else {
+        r.req_cpu
+    };
     let cpu_time = match (req_cpu, rep_cpu) {
         (Some(rc), _) => Some(rc + rep_cpu),
         _ => None,

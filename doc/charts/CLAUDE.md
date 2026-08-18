@@ -101,9 +101,11 @@ Bench: `omq-bench run pushpull-lz4` (uses `bench_peer_blocking`, 1IO).
   socket I/O share that thread. No background I/O thread.
 - PUB uses the same current-thread runtime plus exactly one `pub-worker-0`
   background worker. SUB remains current-thread with no worker.
-- Throughput PUSH uses 16 KiB buffers and write coalescing. Throughput PULL
-  and SUB use 16 KiB buffers without coalescing. REQ/REP uses 4 KiB buffers
-  without coalescing.
+- Throughput PUSH uses the 64 KiB read slab, 64 KiB write buffer, and write
+  coalescing. Throughput PULL and SUB use the 64 KiB read slab, 8 KiB write
+  buffer, no coalescing, and `recv_into()` to reuse the receive frame vector.
+  REQ/REP leaves Monocoque's default buffers in place, disables coalescing, and
+  reuses the reply vector with `recv_into()` on the request side.
 
 ## Style
 

@@ -50,18 +50,23 @@ fn addr(s: &str) -> String {
     s.strip_prefix("tcp://").unwrap_or(s).to_owned()
 }
 
+// Monocoque clamps the read buffer to its 64 KiB read slab, and its own default
+// is 32 KiB. A 16 KiB read buffer is therefore below the untuned default and
+// halves the read batch. Bulk transfers want the full slab.
+const READ_SLAB: usize = 64 * 1024;
+
 fn throughput_options() -> SocketOptions {
     SocketOptions::default()
-        .with_buffer_sizes(16 * 1024, 16 * 1024)
+        .with_buffer_sizes(READ_SLAB, 64 * 1024)
         .with_write_coalescing(true)
 }
 
 fn latency_options() -> SocketOptions {
-    SocketOptions::default().with_buffer_sizes(4 * 1024, 4 * 1024)
+    SocketOptions::default().with_write_coalescing(false)
 }
 
 fn receive_options() -> SocketOptions {
-    SocketOptions::default().with_buffer_sizes(16 * 1024, 16 * 1024)
+    SocketOptions::default().with_buffer_sizes(READ_SLAB, 8 * 1024)
 }
 
 async fn listener(s: &str) -> (TcpListener, u16) {
@@ -93,8 +98,9 @@ async fn pull(s: &str, n: usize, d: f64) {
     let start_cpu = cpu();
     let start = Instant::now();
     let mut count = 0u64;
+    let mut buf: Vec<Bytes> = Vec::with_capacity(4);
     while start.elapsed() < Duration::from_secs_f64(d) {
-        p.recv().await.expect("pull recv");
+        p.recv_into(&mut buf).await.expect("pull recv");
         count += 1;
     }
     println!(
@@ -105,7 +111,14 @@ async fn pull(s: &str, n: usize, d: f64) {
 }
 
 async fn pub_run(s: &str, n: usize) {
-    let mut p = PubSocket::bind_with_workers(addr(s), 1)
+    // Default to 1 so the chart is reproducible. Set MONOCOQUE_PUB_WORKERS to
+    // compare against Monocoque's default, which picks CPU count clamped to
+    // [2, 16]. Monocoque 0.4.0 exposes no SocketOptions for PUB bind.
+    let workers: usize = std::env::var("MONOCOQUE_PUB_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut p = PubSocket::bind_with_workers(addr(s), workers)
         .await
         .expect("pub bind");
     report(p.local_addr().expect("local addr").port());
@@ -143,7 +156,8 @@ async fn sub(s: &str, n: usize, d: f64, peers: usize) {
     for mut x in sockets {
         let c = Arc::clone(&counts);
         tokio::task::spawn_local(async move {
-            while x.recv().await.ok().flatten().is_some() {
+            let mut buf: Vec<Bytes> = Vec::with_capacity(4);
+            while x.recv_into(&mut buf).await.unwrap_or(false) {
                 c.fetch_add(1, Ordering::Relaxed);
             }
         });
@@ -177,9 +191,10 @@ async fn req(s: &str, n: usize, iters: usize, warmup: usize) {
         .await
         .expect("req connect");
     let msg = vec![Bytes::from(vec![b'x'; n])];
+    let mut reply: Vec<Bytes> = Vec::with_capacity(4);
     for _ in 0..warmup {
         r.send(msg.clone()).await.expect("req send");
-        r.recv().await.expect("req recv");
+        r.recv_into(&mut reply).await.expect("req recv");
     }
     let before = cpu();
     let started = Instant::now();
@@ -187,7 +202,7 @@ async fn req(s: &str, n: usize, iters: usize, warmup: usize) {
     for _ in 0..iters {
         let t = Instant::now();
         r.send(msg.clone()).await.expect("req send");
-        r.recv().await.expect("req recv");
+        r.recv_into(&mut reply).await.expect("req recv");
         times.push(t.elapsed().as_nanos() as u64);
     }
     times.sort_unstable();

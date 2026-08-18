@@ -228,6 +228,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[],
     },
     ImplDef {
+        name: "monocoque-tokio-ct",
+        binary_from: None,
+        prefix: "o",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: true,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: true,
+        env: &[],
+    },
+    ImplDef {
         name: "zmq.rs",
         binary_from: None,
         prefix: "q",
@@ -565,6 +581,18 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 binaries.insert(
                     source.to_string(),
                     PathBuf::from("scripts/tmq_bench_peer/target/release/tmq_bench_peer"),
+                );
+            }
+            "monocoque-tokio-ct" => {
+                run_build_in_dir(
+                    &["cargo", "build", "--release", "-q"],
+                    "scripts/monocoque_bench_peer",
+                );
+                binaries.insert(
+                    source.to_string(),
+                    PathBuf::from(
+                        "scripts/monocoque_bench_peer/target/release/monocoque_bench_peer",
+                    ),
                 );
             }
             "rzmq" => {

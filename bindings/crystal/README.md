@@ -16,22 +16,12 @@ dependencies, so direct use from this repository depends on monorepo shard
 support. Track that discussion in
 [crystal-lang/shards#635](https://github.com/crystal-lang/shards/issues/635).
 
-## Build And Test
+## Performance
 
-Requires Crystal 1.21 or newer and a Rust toolchain.
+![OMQ.cr performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/crystal/doc/charts/bindings.svg)
 
-```sh
-./scripts/test-crystal.sh
-```
-
-Manual equivalent:
-
-```sh
-cargo build -p omq-libzmq
-export LIBRARY_PATH="$PWD/target/debug:$LIBRARY_PATH"
-export LD_LIBRARY_PATH="$PWD/target/debug:$LD_LIBRARY_PATH"
-crystal spec bindings/crystal/spec --link-flags "-L$PWD/target/debug -Wl,-rpath,$PWD/target/debug"
-```
+Benchmark and build details live in
+[`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ## API Shape
 
@@ -106,24 +96,4 @@ puts pull.recv
 push.close
 pull.close
 ctx.term
-```
-
-## Performance Chart
-
-![OMQ.cr performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/crystal/doc/charts/bindings.svg)
-
-The comparison line uses `zeromq-crystal`'s `LibZMQ` FFI layer. Its
-high-level `ZMQ::Socket` wrapper still references Crystal APIs removed before
-Crystal 1.21.
-
-Generate a quick local chart:
-
-```sh
-bindings/crystal/scripts/update_perf.py --quick
-```
-
-Benchmark rows append to:
-
-```text
-~/.cache/omq.cr/bindings.jsonl
 ```

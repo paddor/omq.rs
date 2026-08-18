@@ -1,5 +1,11 @@
 # OMQ.cr Development
 
+## Prerequisites
+
+- Crystal 1.21 or newer.
+- Rust toolchain with Cargo.
+- Python 3 for benchmark chart generation.
+
 ## Test
 
 ```sh
@@ -12,6 +18,15 @@ specs with the correct native library path.
 The spec suite covers basic API behavior, pyzmq interop, socket-type parity,
 socket-option parity, draft sockets, poll/poller, monitor stubs, CURVE, Z85,
 and stream raw TCP behavior.
+
+Manual equivalent:
+
+```sh
+cargo build -p omq-libzmq
+export LIBRARY_PATH="$PWD/target/debug:$LIBRARY_PATH"
+export LD_LIBRARY_PATH="$PWD/target/debug:$LD_LIBRARY_PATH"
+crystal spec bindings/crystal/spec --link-flags "-L$PWD/target/debug -Wl,-rpath,$PWD/target/debug"
+```
 
 ## Benchmarks
 
@@ -31,6 +46,9 @@ The benchmark runner builds separate OMQ and zeromq-crystal peer binaries, so
 `libomq_zmq` and system `libzmq` symbols cannot interpose on each other.
 `zeromq-crystal` is used through its `LibZMQ` FFI layer because the high-level
 socket wrapper does not compile on Crystal 1.21.
+
+The comparison line uses `zeromq-crystal`'s `LibZMQ` FFI layer. Its high-level
+`ZMQ::Socket` wrapper still references Crystal APIs removed before Crystal 1.21.
 
 Rows append to `~/.cache/omq.cr/bindings.jsonl`. The chart is written to
 `bindings/crystal/doc/charts/bindings.svg`.

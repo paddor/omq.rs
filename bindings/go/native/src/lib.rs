@@ -1213,6 +1213,40 @@ fn recv_one(socket: &OmqGoSocket, timeout_millis: i64) -> Result<Message, Error>
         .ok_or(Error::WouldBlock)
 }
 
+fn recv_one_wait(socket: &OmqGoSocket, wait: Duration) -> Result<Message, Error> {
+    if socket.closed.load(Ordering::Acquire) {
+        return Err(Error::Closed);
+    }
+
+    if let Some(message) = socket
+        .recv_cache
+        .lock()
+        .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?
+        .pop_front()
+    {
+        return Ok(message);
+    }
+
+    let native = socket.materialize()?;
+    let mut scratch = socket
+        .recv_scratch
+        .lock()
+        .map_err(|_| Error::Config("receive scratch lock poisoned".to_string()))?;
+    scratch.clear();
+    match native.recv_many_timeout_into(RECV_BATCH, wait, &mut scratch) {
+        Ok(0) | Err(Error::Timeout | Error::WouldBlock) => return Err(Error::WouldBlock),
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut cache = socket
+        .recv_cache
+        .lock()
+        .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?;
+    cache.extend(scratch.drain(..));
+    cache.pop_front().ok_or(Error::WouldBlock)
+}
+
 struct ReceiveAnyEntry<'a> {
     index: usize,
     socket: &'a OmqGoSocket,
@@ -2049,6 +2083,30 @@ pub extern "C" fn omq_go_socket_recv(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_recv_wait(
+    socket: *mut OmqGoSocket,
+    wait_micros: u64,
+    out: *mut OmqGoMessage,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if out.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive output pointer");
+    }
+    let socket = unsafe { &*socket };
+    match recv_one_wait(socket, Duration::from_micros(wait_micros)) {
+        Ok(message) => {
+            unsafe {
+                *out = message_to_c(message);
+            }
+            OmqGoStatus::ok()
+        }
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_recv_one_into(
     socket: *mut OmqGoSocket,
     timeout_millis: i64,
@@ -2069,6 +2127,36 @@ pub extern "C" fn omq_go_socket_recv_one_into(
     let result = (|| {
         let destination = bytes_from_c_mut(data, capacity)?;
         let message = recv_one(socket, timeout_millis)?;
+        let copied = copy_message_into(&message, destination)?;
+        unsafe {
+            *written = copied;
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_recv_one_into_wait(
+    socket: *mut OmqGoSocket,
+    wait_micros: u64,
+    data: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if written.is_null() {
+        return OmqGoStatus::err(CONFIG, "null receive length pointer");
+    }
+    unsafe {
+        *written = 0;
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let destination = bytes_from_c_mut(data, capacity)?;
+        let message = recv_one_wait(socket, Duration::from_micros(wait_micros))?;
         let copied = copy_message_into(&message, destination)?;
         unsafe {
             *written = copied;

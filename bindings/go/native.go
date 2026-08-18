@@ -25,6 +25,10 @@ type nativeSendRing = C.OmqGoSendRing
 type nativeRecvRing = C.OmqGoRecvRing
 type nativeCancel = C.OmqGoCancel
 
+// scalarRecvParkMicros bounds the wakeable native park used by blocking
+// scalar receives. It does not affect nonblocking TryRecv calls.
+const scalarRecvParkMicros = 10
+
 type nativeStats struct {
 	contextsCreated  uint64
 	contextsFreed    uint64
@@ -384,8 +388,42 @@ func socketMessageRecvNative(socket *nativeSocket) (Message, error) {
 	return messageFromC(out), nil
 }
 
+func socketMessageRecvWaitNative(socket *nativeSocket) (Message, error) {
+	var out C.OmqGoMessage
+	err := statusErr(C.omq_go_socket_recv_wait(
+		(*C.OmqGoSocket)(socket),
+		C.uint64_t(scalarRecvParkMicros),
+		&out,
+	))
+	if err != nil {
+		return Message{}, err
+	}
+	defer C.omq_go_message_free(out)
+	return messageFromC(out), nil
+}
+
 func socketMessageRecvIntoNative(socket *nativeSocket, dst []byte) (int, error) {
 	return socketMessageRecvIntoNativeTimeout(socket, dst, 0)
+}
+
+func socketMessageRecvIntoBriefWaitNative(socket *nativeSocket, dst []byte) (int, error) {
+	var written C.size_t
+	var data *C.uint8_t
+	if len(dst) > 0 {
+		data = (*C.uint8_t)(unsafe.Pointer(&dst[0]))
+	}
+	err := statusErr(C.omq_go_socket_recv_one_into_wait(
+		(*C.OmqGoSocket)(socket),
+		C.uint64_t(scalarRecvParkMicros),
+		data,
+		C.size_t(len(dst)),
+		&written,
+	))
+	runtime.KeepAlive(dst)
+	if err != nil {
+		return 0, err
+	}
+	return int(written), nil
 }
 
 func socketMessageRecvIntoWaitNative(socket *nativeSocket, dst []byte) (int, error) {

@@ -33,9 +33,18 @@ Timeout helpers are convenience wrappers around context-aware loops:
 - `timeout < 0`: wait forever
 - `timeout > 0`: deadline
 
-Go cancellation is handled before entering cgo and between nonblocking
-native attempts. User goroutines do not need to close a socket from another
+Go cancellation is handled before entering cgo and between bounded native
+receive attempts. User goroutines do not need to close a socket from another
 goroutine to interrupt a blocked receive.
+
+Most socket types serialize native calls through the pinned owner goroutine.
+Their inproc and round-robin fast paths contain thread-owned SPSC producers.
+`REQ` and `REP` use thread-neutral, mutex-backed send routes. Their scalar data
+calls therefore skip the owner-channel handoff and serialize directly with a
+per-socket native-call mutex. Their scalar blocking receives wait briefly in
+native code before retrying, which avoids repeated Go scheduler round trips
+when a reply is already in flight. `TryRecv` and `TryRecvInto` remain
+nonblocking.
 
 `Socket.Run(ctx, fn)` executes `fn` on the socket owner goroutine, pinned to
 one OS thread. It is the low-latency path for tight loops. `BoundSocket`
@@ -68,9 +77,10 @@ measure owned native send buffers that Go fills before transfer to OMQ, plus
 a direct native `RecvInto` path that decodes single-part messages into the
 caller buffer when batching would not be harmed.
 
-The general scalar API remains context-aware and goroutine-safe. It pays the
-owner-channel and cgo transition costs on each operation. Use `Socket.Run`
-when a socket is on a hot path.
+The general scalar API remains context-aware and goroutine-safe. SPSC-backed
+socket types pay the owner-channel and cgo transition costs on each operation.
+`REQ` and `REP` scalar data calls pay only the cgo transition. Use `Socket.Run`
+for other tight socket loops that need to amortize these costs.
 
 ## Channels
 

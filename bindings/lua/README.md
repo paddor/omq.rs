@@ -8,22 +8,12 @@ The binding is a Lua module loaded by `/usr/bin/lua`. Public Lua APIs live in
 
 Architecture notes: [`doc/architecture.md`](doc/architecture.md).
 
-## Build And Test
+## Performance
 
-Requires `/usr/bin/lua`, Python 3 for charts, and a Rust toolchain.
+![OMQ.lua performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/lua/doc/charts/bindings.svg)
 
-```sh
-./scripts/test-lua.sh
-```
-
-Manual equivalent:
-
-```sh
-cargo build --manifest-path bindings/lua/native/Cargo.toml
-export LUA_PATH="$PWD/bindings/lua/lua/?.lua;;"
-export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
-/usr/bin/lua bindings/lua/tests/test_basic.lua
-```
+Benchmark and build details live in
+[`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ## API Shape
 
@@ -82,31 +72,4 @@ print(pull:recv())
 push:close()
 pull:close()
 ctx:term()
-```
-
-## Performance Chart
-
-![OMQ.lua performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/lua/doc/charts/bindings.svg)
-
-Generate a quick local chart:
-
-```sh
-bindings/lua/scripts/update_perf.py --quick
-```
-
-The script uses the same append-only cache and SVG chart shape as the Go and
-Python bindings. It benchmarks `omq.lua` and, when `require("lzmq")` works for
-the selected Lua binary, `lzmq`. User-local rocks are visible when `luarocks`
-is available.
-
-Limit a run to one implementation:
-
-```sh
-bindings/lua/scripts/update_perf.py --quick --impls omq.lua --latency-impls omq.lua
-```
-
-Benchmark rows append to:
-
-```text
-~/.cache/omq.lua/bindings.jsonl
 ```

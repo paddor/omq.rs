@@ -24,6 +24,15 @@ LUA_PATH="$PWD/bindings/lua/lua/?.lua;;"
 LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
 ```
 
+Manual equivalent:
+
+```sh
+cargo build --manifest-path bindings/lua/native/Cargo.toml
+export LUA_PATH="$PWD/bindings/lua/lua/?.lua;;"
+export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
+/usr/bin/lua bindings/lua/tests/test_basic.lua
+```
+
 ## Native Checks
 
 ```sh

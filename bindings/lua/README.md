@@ -27,8 +27,8 @@ export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
 
 ## API Shape
 
-- Socket constants: `PAIR`, `PUB`, `SUB`, `REQ`, `REP`, `DEALER`, `ROUTER`,
-  `PULL`, `PUSH`, `XPUB`, `XSUB`.
+- Socket constants: all 20 ZMTP socket types, including `CLIENT`, `SERVER`,
+  `RADIO`, `DISH`, `SCATTER`, `GATHER`, `CHANNEL`, `PEER`, and `STREAM`.
 - Flags: `DONTWAIT`, `SNDMORE`.
 - Arena constants: `OMQ_ARENA_THRESHOLD`, `DEFAULT_ARENA_THRESHOLD`.
 - `omq.monotonic_seconds()` returns a monotonic timestamp for tests and
@@ -52,6 +52,8 @@ export LUA_CPATH="$PWD/bindings/lua/native/target/debug/lib?.so;;"
 - `Socket:recv_parts(max_size, flags)` receives all frames in one message.
 - `Socket:subscribe(prefix)` adds a SUB prefix.
 - `Socket:unsubscribe(prefix)` removes a SUB prefix.
+- `Socket:join(group)` and `Socket:leave(group)` manage DISH groups.
+- `Socket:send_group(group, "bytes", flags)` sends a RADIO message to a group.
 - `Socket:set_linger(ms)`, `Socket:set_send_timeout(ms)`,
   `Socket:set_recv_timeout(ms)`, `Socket:set_send_hwm(value)`,
   `Socket:set_recv_hwm(value)`, `Socket:set_arena_threshold(bytes)`, and

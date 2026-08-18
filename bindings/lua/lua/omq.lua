@@ -41,6 +41,33 @@ M.XPUB = native.XPUB
 ---Raw subscribe socket type.
 ---@type integer
 M.XSUB = native.XSUB
+---Raw TCP socket type.
+---@type integer
+M.STREAM = native.STREAM
+---Single-frame routed server socket type.
+---@type integer
+M.SERVER = native.SERVER
+---Single-frame client socket type.
+---@type integer
+M.CLIENT = native.CLIENT
+---Group-based publish socket type.
+---@type integer
+M.RADIO = native.RADIO
+---Group-based subscribe socket type.
+---@type integer
+M.DISH = native.DISH
+---Single-frame gather socket type.
+---@type integer
+M.GATHER = native.GATHER
+---Single-frame scatter socket type.
+---@type integer
+M.SCATTER = native.SCATTER
+---Identity-routed bidirectional socket type.
+---@type integer
+M.PEER = native.PEER
+---Single-frame bidirectional socket type.
+---@type integer
+M.CHANNEL = native.CHANNEL
 ---Nonblocking send/receive flag.
 ---@type integer
 M.DONTWAIT = native.DONTWAIT
@@ -88,6 +115,15 @@ local socket_types = {
   push = M.PUSH,
   xpub = M.XPUB,
   xsub = M.XSUB,
+  stream = M.STREAM,
+  server = M.SERVER,
+  client = M.CLIENT,
+  radio = M.RADIO,
+  dish = M.DISH,
+  gather = M.GATHER,
+  scatter = M.SCATTER,
+  peer = M.PEER,
+  channel = M.CHANNEL,
 }
 
 ---@class omq.Context
@@ -106,6 +142,9 @@ Context.__index = Context
 ---@field recv_parts fun(self: omq.Socket, max_size?: integer, flags?: integer): string[] Receive all frames in one message.
 ---@field subscribe fun(self: omq.Socket, prefix: string): boolean Add SUB prefix.
 ---@field unsubscribe fun(self: omq.Socket, prefix: string): boolean Remove SUB prefix.
+---@field join fun(self: omq.Socket, group: string): boolean Join a DISH group.
+---@field leave fun(self: omq.Socket, group: string): boolean Leave a DISH group.
+---@field send_group fun(self: omq.Socket, group: string, data: string, flags?: integer): boolean Send a RADIO message to a group.
 ---@field set_linger fun(self: omq.Socket, millis: integer): boolean Set close linger in milliseconds.
 ---@field set_send_timeout fun(self: omq.Socket, millis: integer): boolean Set send timeout in milliseconds.
 ---@field set_recv_timeout fun(self: omq.Socket, millis: integer): boolean Set receive timeout in milliseconds.
@@ -183,7 +222,8 @@ end
 
 ---Create a socket owned by this context.
 ---@param socket_type string|integer socket type name (`"push"`, `"pull"`,
----`"req"`, etc.) or numeric ZMQ constant.
+---`"req"`, etc.) or numeric ZMQ constant. All 20 ZMTP socket types are
+---supported.
 ---@param options? {linger?: integer, send_timeout?: integer, recv_timeout?: integer,
 ---send_hwm?: integer, recv_hwm?: integer, arena_threshold?: integer, subscribe?: string}
 ---socket options applied before bind/connect. `arena_threshold` overrides

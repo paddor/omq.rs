@@ -38,8 +38,10 @@ runs the Go tests with the right library path:
 - `Context` owns native IO threads and creates sockets.
 - `Context.ShareKey()` / `OpenShared(...)` explicitly share one native context
   core and `inproc://` namespace across Go handles.
-- `Socket` serializes native access through an owner goroutine, so public calls
-  are race-free across goroutines.
+- `Socket` serializes native access, so public calls are race-free across
+  goroutines. SPSC-backed socket types use the owner goroutine. `REQ` and `REP`
+  scalar data calls use thread-neutral native routes directly under a
+  per-socket mutex.
 - `Message` supports single-part and multipart payloads and copies input on
   construction.
 - `RecvInto` is the direct single-part receive path when the caller owns the

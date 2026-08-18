@@ -38,7 +38,8 @@ DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
 LATENCY_MAX_SIZE = 4096
 DEFAULT_IMPLS = ["omq-run-into", "zmq4", "grpc"]
-DEFAULT_LATENCY_IMPLS = ["omq", "omq-run", "zmq4", "grpc"]
+DEFAULT_LATENCY_IMPLS = ["omq", "zmq4", "grpc"]
+SUPPORTED_LATENCY_IMPLS = ["omq", "omq-run", "zmq4", "grpc"]
 IMPL_LABELS = {
     "omq": "OMQ.go scalar",
     "omq-run": "OMQ.go Socket.Run",
@@ -1654,7 +1655,7 @@ def main():
         if impl not in IMPL_LABELS:
             parser.error(f"unknown throughput impl: {impl}")
     for impl in args.latency_impls:
-        if impl not in DEFAULT_LATENCY_IMPLS:
+        if impl not in SUPPORTED_LATENCY_IMPLS:
             parser.error(f"unknown latency impl: {impl}")
     latency_sizes = latency_sizes_from(sizes)
 

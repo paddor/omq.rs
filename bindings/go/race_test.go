@@ -3,10 +3,102 @@ package omq
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestReqRepScalarCallsCanMoveBetweenThreads(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	rep := newTestSocket(t, ctx, Rep)
+	defer closeSocket(t, rep)
+	req := newTestSocket(t, ctx, Req)
+	defer closeSocket(t, req)
+
+	endpoint, err := rep.Bind("inproc://go-req-rep-thread-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := req.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := make(chan error, 1)
+	releaseThread := make(chan struct{})
+	defer close(releaseThread)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		sent <- req.SendTimeout(String("question"), time.Second)
+		<-releaseThread
+	}()
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+
+	query, err := rep.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := query.String(); got != "question" {
+		t.Fatalf("query = %q, want question", got)
+	}
+	if err := rep.SendTimeout(String("answer"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := req.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reply.String(); got != "answer" {
+		t.Fatalf("reply = %q, want answer", got)
+	}
+}
+
+func TestReqScalarReceiveCancellationAndClose(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+
+	rep := newTestSocket(t, ctx, Rep)
+	defer closeSocket(t, rep)
+	req := newTestSocket(t, ctx, Req)
+	defer closeSocket(t, req)
+
+	endpoint, err := rep.Bind("inproc://go-req-recv-cancel-close")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := req.Connect(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := req.SendTimeout(String("question"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := req.RecvTimeout(5 * time.Millisecond); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("RecvTimeout err = %v, want ErrTimeout", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := req.Recv(context.Background())
+		errCh <- err
+	}()
+	time.Sleep(time.Millisecond)
+	if err := req.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("Recv err = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receive did not unblock after close")
+	}
+}
 
 func TestConcurrentSendReceive(t *testing.T) {
 	ctx := openTestContext(t)

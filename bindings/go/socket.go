@@ -25,6 +25,7 @@ type socketState struct {
 	handle    *nativeSocket
 	owner     *contextState
 	handleMu  sync.RWMutex
+	nativeMu  sync.Mutex
 	closed    atomic.Bool
 	ops       chan socketOp
 	ownerDone chan struct{}
@@ -47,6 +48,8 @@ const (
 	socketOpSendBatch
 	socketOpRecv
 	socketOpRecvInto
+	socketOpRecvWait
+	socketOpRecvIntoWait
 	socketOpSubscribe
 	socketOpUnsubscribe
 	socketOpJoin
@@ -125,13 +128,18 @@ func (s *socketState) ownerLoop() {
 
 	handle := s.handle
 	for op := range s.ops {
-		op.call.resp <- runSocketOp(handle, op)
+		s.nativeMu.Lock()
+		result := runSocketOp(handle, op)
+		s.nativeMu.Unlock()
+		op.call.resp <- result
 	}
 	if handle != nil {
+		s.nativeMu.Lock()
 		s.handleMu.Lock()
 		socketFreeNative(handle)
 		s.handle = nil
 		s.handleMu.Unlock()
+		s.nativeMu.Unlock()
 	}
 }
 
@@ -162,6 +170,12 @@ func runSocketOp(handle *nativeSocket, op socketOp) socketResult {
 		return socketResult{message: msg, err: err}
 	case socketOpRecvInto:
 		count, err := socketMessageRecvIntoNative(handle, op.buffer)
+		return socketResult{count: count, err: err}
+	case socketOpRecvWait:
+		msg, err := socketMessageRecvWaitNative(handle)
+		return socketResult{message: msg, err: err}
+	case socketOpRecvIntoWait:
+		count, err := socketMessageRecvIntoBriefWaitNative(handle, op.buffer)
 		return socketResult{count: count, err: err}
 	case socketOpSubscribe:
 		return socketResult{err: socketSubscribeNative(handle, op.data)}
@@ -269,6 +283,43 @@ func (s *socketState) do(ctx context.Context, allowClosed bool, op socketOp) (re
 	}
 }
 
+func (s *socketState) doDirect(ctx context.Context, op socketOp) (socketResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s == nil {
+		return socketResult{}, ErrClosed
+	}
+	if op.ctx == nil {
+		op.ctx = ctx
+	}
+
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	if s.closed.Load() || s.handle == nil {
+		return socketResult{}, ErrClosed
+	}
+	result := runSocketOp(s.handle, op)
+	return result, result.err
+}
+
+func (s *Socket) doData(ctx context.Context, op socketOp) (socketResult, error) {
+	state := s.stateOrNil()
+	if state == nil {
+		return socketResult{}, ErrClosed
+	}
+	if s.hasThreadNeutralDataPath() {
+		return state.doDirect(ctx, op)
+	}
+	return state.do(ctx, false, op)
+}
+
+func (s *Socket) hasThreadNeutralDataPath() bool {
+	// REQ/REP routes do not use the caller-affine ProducerOwner path. Their
+	// native calls can move between OS threads as long as they stay serialized.
+	return s != nil && (s.socketType == Req || s.socketType == Rep)
+}
+
 // Bind binds this socket to an endpoint and returns the bound endpoint.
 func (s *Socket) Bind(endpoint string) (string, error) {
 	state := s.stateOrNil()
@@ -344,11 +395,7 @@ func (s *Socket) TrySend(msg Message) error {
 }
 
 func (s *Socket) trySend(ctx context.Context, msg Message) error {
-	state := s.stateOrNil()
-	if state == nil {
-		return ErrClosed
-	}
-	_, err := state.do(ctx, false, socketOp{kind: socketOpSend, msg: msg})
+	_, err := s.doData(ctx, socketOp{kind: socketOpSend, msg: msg})
 	keepAlive(s)
 	return err
 }
@@ -388,7 +435,7 @@ func (s *Socket) Recv(ctx context.Context) (Message, error) {
 		if err := errFromContext(ctx); err != nil {
 			return Message{}, err
 		}
-		msg, err := s.tryRecv(ctx)
+		msg, err := s.recvWait(ctx)
 		if err == nil {
 			return msg, nil
 		}
@@ -410,7 +457,7 @@ func (s *Socket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 		if err := errFromContext(ctx); err != nil {
 			return 0, err
 		}
-		n, err := s.tryRecvInto(ctx, dst)
+		n, err := s.recvIntoWait(ctx, dst)
 		if err == nil {
 			return n, nil
 		}
@@ -429,11 +476,20 @@ func (s *Socket) TryRecv() (Message, error) {
 }
 
 func (s *Socket) tryRecv(ctx context.Context) (Message, error) {
-	state := s.stateOrNil()
-	if state == nil {
-		return Message{}, ErrClosed
+	result, err := s.doData(ctx, socketOp{kind: socketOpRecv})
+	if err != nil {
+		return Message{}, err
 	}
-	result, err := state.do(ctx, false, socketOp{kind: socketOpRecv})
+	keepAlive(s)
+	return result.message, nil
+}
+
+func (s *Socket) recvWait(ctx context.Context) (Message, error) {
+	kind := socketOpRecv
+	if s.hasThreadNeutralDataPath() {
+		kind = socketOpRecvWait
+	}
+	result, err := s.doData(ctx, socketOp{kind: kind})
 	if err != nil {
 		return Message{}, err
 	}
@@ -447,11 +503,20 @@ func (s *Socket) TryRecvInto(dst []byte) (int, error) {
 }
 
 func (s *Socket) tryRecvInto(ctx context.Context, dst []byte) (int, error) {
-	state := s.stateOrNil()
-	if state == nil {
-		return 0, ErrClosed
+	result, err := s.doData(ctx, socketOp{kind: socketOpRecvInto, buffer: dst})
+	if err != nil {
+		return 0, err
 	}
-	result, err := state.do(ctx, false, socketOp{kind: socketOpRecvInto, buffer: dst})
+	keepAlive(s)
+	return result.count, nil
+}
+
+func (s *Socket) recvIntoWait(ctx context.Context, dst []byte) (int, error) {
+	kind := socketOpRecvInto
+	if s.hasThreadNeutralDataPath() {
+		kind = socketOpRecvIntoWait
+	}
+	result, err := s.doData(ctx, socketOp{kind: kind, buffer: dst})
 	if err != nil {
 		return 0, err
 	}

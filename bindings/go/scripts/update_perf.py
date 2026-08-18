@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure OMQ Go vs pebbe/zmq4 over 2-process TCP loopback.
+"""Measure OMQ Go, grpc-go, and pebbe/zmq4 over 2-process TCP loopback.
 
 Adapted from bindings/pyomq/scripts/update_perf.py. Benchmark rows are
 append-only in ~/.cache/omq.go/bindings.jsonl by default. The chart is
@@ -37,19 +37,21 @@ CHART = CHART_DIR / "bindings.svg"
 DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
 LATENCY_MAX_SIZE = 4096
-DEFAULT_IMPLS = ["omq-run-into", "zmq4"]
-DEFAULT_LATENCY_IMPLS = ["omq", "omq-run", "zmq4"]
+DEFAULT_IMPLS = ["omq-run-into", "zmq4", "grpc"]
+DEFAULT_LATENCY_IMPLS = ["omq", "omq-run", "zmq4", "grpc"]
 IMPL_LABELS = {
     "omq": "OMQ.go scalar",
     "omq-run": "OMQ.go Socket.Run",
     "omq-run-into": "OMQ.go hot path",
     "zmq4": "zmq4",
+    "grpc": "gRPC (grpc-go v1.75.0)",
 }
 COLORS = {
     "omq": "#ef4444",
     "omq-run": "#fb923c",
     "omq-run-into": "#ef4444",
     "zmq4": "#60a5fa",
+    "grpc": "#f472b6",
 }
 
 GO_PEER = r'''
@@ -59,11 +61,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/encoding"
 	omq "github.com/paddor/omq.rs/bindings/go"
 	zmq4 "github.com/pebbe/zmq4"
 )
@@ -73,6 +81,118 @@ const linger = 5 * time.Second
 const timeout = 120 * time.Second
 const maxTimeCheckMessages = 1024
 const latencySampleCapacity = 16384
+const grpcStreamMethod = "/bench.Blob/Stream"
+const grpcSinkMethod = "/bench.Blob/Sink"
+const grpcEchoMethod = "/bench.Blob/Echo"
+
+type rawCodec struct{}
+
+func (rawCodec) Name() string { return "raw" }
+func (rawCodec) Marshal(value any) ([]byte, error) {
+	switch value := value.(type) {
+	case []byte:
+		return value, nil
+	case *[]byte:
+		return *value, nil
+	default:
+		return nil, fmt.Errorf("raw codec: got %T", value)
+	}
+}
+func (rawCodec) Unmarshal(data []byte, value any) error {
+	output, ok := value.(*[]byte)
+	if !ok {
+		return fmt.Errorf("raw codec: got %T", value)
+	}
+	*output = append((*output)[:0], data...)
+	return nil
+}
+
+type grpcBlobService struct {
+	size     int
+	duration time.Duration
+	warmup   time.Duration
+	done     chan struct{}
+}
+type grpcBlobServiceServer interface {
+	stream(grpc.ServerStream) error
+	sink(grpc.ServerStream) error
+	echo(context.Context, []byte) ([]byte, error)
+}
+
+func (s *grpcBlobService) stream(stream grpc.ServerStream) error {
+	payload := make([]byte, s.size)
+	for {
+		if err := stream.SendMsg(&payload); err != nil {
+			return err
+		}
+	}
+}
+func (s *grpcBlobService) sink(stream grpc.ServerStream) error {
+	deadline := time.Now().Add(s.warmup)
+	for time.Now().Before(deadline) {
+		var payload []byte
+		if err := stream.RecvMsg(&payload); err != nil {
+			return err
+		}
+	}
+	started := time.Now()
+	deadline = started.Add(s.duration)
+	count := 0
+	var payload []byte
+	for {
+		if err := stream.RecvMsg(&payload); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		count++
+		if count%timeCheckEvery(s.size) == 0 && !time.Now().Before(deadline) {
+			break
+		}
+	}
+	ended := time.Now()
+	printThroughput("grpc", "", s.size, count, started, ended)
+	close(s.done)
+	return nil
+}
+func (s *grpcBlobService) echo(_ context.Context, input []byte) ([]byte, error) {
+	return input, nil
+}
+
+var grpcBlobServiceDesc = grpc.ServiceDesc{
+	ServiceName: "bench.Blob",
+	HandlerType: (*grpcBlobServiceServer)(nil),
+	Streams: []grpc.StreamDesc{{
+		StreamName:    "Stream",
+		ServerStreams: true,
+		Handler: func(server any, stream grpc.ServerStream) error {
+			return server.(grpcBlobServiceServer).stream(stream)
+		},
+	}, {
+		StreamName:    "Sink",
+		ClientStreams: true,
+		Handler: func(server any, stream grpc.ServerStream) error {
+			return server.(grpcBlobServiceServer).sink(stream)
+		},
+	}},
+	Methods: []grpc.MethodDesc{{
+		MethodName: "Echo",
+		Handler: func(server any, ctx context.Context, decode func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+			var input []byte
+			if err := decode(&input); err != nil {
+				return nil, err
+			}
+			handler := func(ctx context.Context, request any) (any, error) {
+				return server.(grpcBlobServiceServer).echo(ctx, *request.(*[]byte))
+			}
+			if interceptor == nil {
+				return handler(ctx, &input)
+			}
+			return interceptor(ctx, &input, &grpc.UnaryServerInfo{Server: server, FullMethod: grpcEchoMethod}, handler)
+		},
+	}},
+}
 
 type result struct {
 	Impl     string  `json:"impl"`
@@ -186,6 +306,8 @@ func runPull(impl string, endpoint string, size int, duration time.Duration, war
 		runOMQPull(endpoint, size, duration, warmup, true)
 	case "zmq4":
 		runZMQPull(endpoint, size, duration, warmup)
+	case "grpc":
+		runGRPCPull(endpoint, size, duration, warmup)
 	default:
 		die("bad impl: " + impl)
 	}
@@ -199,6 +321,8 @@ func runPush(impl string, endpoint string, size int) {
 		runOMQPush(endpoint, size, true)
 	case "zmq4":
 		runZMQPush(endpoint, size)
+	case "grpc":
+		runGRPCPush(endpoint, size)
 	default:
 		die("bad impl: " + impl)
 	}
@@ -451,6 +575,8 @@ func runRep(impl string, endpoint string, size int) {
 		runOMQRepRun(endpoint, size)
 	case "zmq4":
 		runZMQRep(endpoint)
+	case "grpc":
+		runGRPCRep(endpoint, size)
 	default:
 		die("latency unsupported for impl: " + impl)
 	}
@@ -464,6 +590,8 @@ func runReq(impl string, endpoint string, size int, duration time.Duration, warm
 		runOMQReqRun(endpoint, size, duration, warmup)
 	case "zmq4":
 		runZMQReq(endpoint, size, duration, warmup)
+	case "grpc":
+		runGRPCReq(endpoint, size, duration, warmup)
 	default:
 		die("latency unsupported for impl: " + impl)
 	}
@@ -660,6 +788,98 @@ func runZMQReq(endpoint string, size int, duration time.Duration, warmup time.Du
 	printLatency("zmq4", endpoint, size, durations)
 }
 
+func grpcAddr(endpoint string) string {
+	return strings.TrimPrefix(endpoint, "tcp://")
+}
+
+func grpcServer(endpoint string, size int, duration, warmup time.Duration, done chan struct{}) (*grpc.Server, net.Listener) {
+	encoding.RegisterCodec(rawCodec{})
+	listener, err := net.Listen("tcp", grpcAddr(endpoint))
+	if err != nil {
+		die(err.Error())
+	}
+	server := grpc.NewServer(grpc.ForceServerCodec(rawCodec{}))
+	server.RegisterService(&grpcBlobServiceDesc, &grpcBlobService{
+		size: size, duration: duration, warmup: warmup, done: done,
+	})
+	return server, listener
+}
+
+func grpcClient(endpoint string) *grpc.ClientConn {
+	conn, err := grpc.NewClient(
+		grpcAddr(endpoint),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(rawCodec{})),
+	)
+	if err != nil {
+		die(err.Error())
+	}
+	return conn
+}
+
+func runGRPCPull(endpoint string, size int, duration, warmup time.Duration) {
+	done := make(chan struct{})
+	server, listener := grpcServer(endpoint, size, duration, warmup, done)
+	ready(endpoint)
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			die(err.Error())
+		}
+	}()
+	<-done
+	server.Stop()
+}
+
+func runGRPCPush(endpoint string, size int) {
+	conn := grpcClient(endpoint)
+	defer conn.Close()
+	stream, err := conn.NewStream(context.Background(), &grpc.StreamDesc{ClientStreams: true}, grpcSinkMethod)
+	if err != nil {
+		die(err.Error())
+	}
+	payload := makePayload(size)
+	for {
+		if err := stream.SendMsg(&payload); err != nil {
+			return
+		}
+	}
+}
+
+func runGRPCRep(endpoint string, size int) {
+	done := make(chan struct{})
+	server, listener := grpcServer(endpoint, size, 0, 0, done)
+	ready(endpoint)
+	if err := server.Serve(listener); err != nil {
+		die(err.Error())
+	}
+}
+
+func runGRPCReq(endpoint string, size int, duration, warmup time.Duration) {
+	conn := grpcClient(endpoint)
+	defer conn.Close()
+	payload := makePayload(size)
+	warmupDeadline := time.Now().Add(warmup)
+	var reply []byte
+	for time.Now().Before(warmupDeadline) {
+		if err := conn.Invoke(context.Background(), grpcEchoMethod, &payload, &reply); err != nil {
+			die(err.Error())
+		}
+	}
+	deadline := time.Now().Add(duration)
+	durations := make([]float64, 0, latencySampleCapacity)
+	for {
+		started := time.Now()
+		if err := conn.Invoke(context.Background(), grpcEchoMethod, &payload, &reply); err != nil {
+			die(err.Error())
+		}
+		durations = append(durations, float64(time.Since(started).Nanoseconds())/1000.0)
+		if !time.Now().Before(deadline) {
+			break
+		}
+	}
+	printLatency("grpc", endpoint, size, durations)
+}
+
 func zmqRoundTrip(req *zmq4.Socket, payload []byte, size int) {
 	if _, err := req.SendBytes(payload, 0); err != nil {
 		die(err.Error())
@@ -776,6 +996,7 @@ def write_harness():
             require (
             \tgithub.com/paddor/omq.rs/bindings/go v0.0.0
             \tgithub.com/pebbe/zmq4 v1.4.0
+            \tgoogle.golang.org/grpc v1.75.0
             )
 
             replace github.com/paddor/omq.rs/bindings/go => {ROOT}

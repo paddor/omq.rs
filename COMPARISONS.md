@@ -1,6 +1,6 @@
 # Comparisons
 
-These charts compare OMQ with `libzmq`, `tmq`, `zmq.rs`, and `rzmq`. The
+These charts compare OMQ with `libzmq`, `tmq`, `zmq.rs`, `rzmq`, and gRPC. The
 benchmark runner records throughput, latency, CPU time, and peer
 fairness where the pattern has multiple peers.
 
@@ -11,6 +11,7 @@ fairness where the pattern has multiple peers.
 - `zeromq v0.6.0`
 - `rzmq v0.5.24` in its normal and io_uring modes
 - OMQ from this repository
+- Rust gRPC over plaintext TCP, with opaque blob payloads and no QoS
 
 ## Methodology
 

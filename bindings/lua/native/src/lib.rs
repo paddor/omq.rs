@@ -23,6 +23,15 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_XPUB: i32 = 9;
 const ZMQ_XSUB: i32 = 10;
+const ZMQ_STREAM: i32 = 11;
+const ZMQ_SERVER: i32 = 12;
+const ZMQ_CLIENT: i32 = 13;
+const ZMQ_RADIO: i32 = 14;
+const ZMQ_DISH: i32 = 15;
+const ZMQ_GATHER: i32 = 16;
+const ZMQ_SCATTER: i32 = 17;
+const ZMQ_PEER: i32 = 19;
+const ZMQ_CHANNEL: i32 = 20;
 const ZMQ_DONTWAIT: i32 = 1;
 const ZMQ_SNDMORE: i32 = 2;
 const ZMQ_SUBSCRIBE: i32 = 6;
@@ -478,6 +487,25 @@ impl UserData for NativeSocket {
             this.set_bytes(ZMQ_UNSUBSCRIBE, prefix.as_bytes().as_ref())?;
             Ok(true)
         });
+        methods.add_method("join", |_, this, group: LuaString| {
+            this.join(group.as_bytes().as_ref())?;
+            Ok(true)
+        });
+        methods.add_method("leave", |_, this, group: LuaString| {
+            this.leave(group.as_bytes().as_ref())?;
+            Ok(true)
+        });
+        methods.add_method(
+            "send_group",
+            |_, this, (group, payload, flags): (LuaString, LuaString, Option<i32>)| {
+                this.send_group(
+                    group.as_bytes().as_ref(),
+                    payload.as_bytes().as_ref(),
+                    flags.unwrap_or(0),
+                )?;
+                Ok(true)
+            },
+        );
     }
 }
 
@@ -689,6 +717,49 @@ impl NativeSocket {
             value.len(),
         );
         check_rc(rc)
+    }
+
+    fn join(&self, group: &[u8]) -> LuaResult<()> {
+        let group =
+            CString::new(group).map_err(|_| LuaError::external("group contains a NUL byte"))?;
+        check_rc(omq_zmq::zmq_join(self.inner.ptr()?, group.as_ptr()))
+    }
+
+    fn leave(&self, group: &[u8]) -> LuaResult<()> {
+        let group =
+            CString::new(group).map_err(|_| LuaError::external("group contains a NUL byte"))?;
+        check_rc(omq_zmq::zmq_leave(self.inner.ptr()?, group.as_ptr()))
+    }
+
+    fn send_group(&self, group: &[u8], payload: &[u8], flags: i32) -> LuaResult<()> {
+        let group =
+            CString::new(group).map_err(|_| LuaError::external("group contains a NUL byte"))?;
+        let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
+        let msg = msg.as_mut_ptr();
+        check_rc(omq_zmq::zmq_msg_init_size(msg, payload.len()))?;
+        if !payload.is_empty() {
+            let data = omq_zmq::zmq_msg_data(msg);
+            if data.is_null() {
+                let _ = omq_zmq::zmq_msg_close(msg);
+                return Err(LuaError::runtime("message data was null"));
+            }
+            // SAFETY: zmq_msg_init_size allocated exactly payload.len() bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), data.cast(), payload.len());
+            }
+        }
+        if omq_zmq::zmq_msg_set_group(msg, group.as_ptr()) != 0 {
+            let err = last_error();
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err(err);
+        }
+        let rc = omq_zmq::zmq_msg_send(msg, self.inner.ptr()?, flags);
+        if rc < 0 {
+            let err = last_error();
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn last_endpoint(&self) -> Option<String> {
@@ -1507,6 +1578,63 @@ unsafe extern "C-unwind" fn raw_socket_unsubscribe(state: *mut ffi::lua_State) -
     raw_finish(state, raw_socket_set_bytes(state, ZMQ_UNSUBSCRIBE))
 }
 
+fn raw_socket_group_action(state: *mut ffi::lua_State, join: bool) -> Result<c_int, String> {
+    let socket = raw_socket_mut(state)?;
+    let group = lua_string_bytes(state, 2)?;
+    if group.contains(&0) {
+        return Err("group contains a NUL byte".to_owned());
+    }
+    let group = CString::new(group).map_err(|_| "group contains a NUL byte".to_owned())?;
+    let rc = if join {
+        omq_zmq::zmq_join(
+            socket
+                .socket()?
+                .inner
+                .ptr()
+                .map_err(|err| err.to_string())?,
+            group.as_ptr(),
+        )
+    } else {
+        omq_zmq::zmq_leave(
+            socket
+                .socket()?
+                .inner
+                .ptr()
+                .map_err(|err| err.to_string())?,
+            group.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(last_error_message());
+    }
+    Ok(lua_bool(state, true))
+}
+
+unsafe extern "C-unwind" fn raw_socket_join(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_group_action(state, true))
+}
+
+unsafe extern "C-unwind" fn raw_socket_leave(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(state, raw_socket_group_action(state, false))
+}
+
+unsafe extern "C-unwind" fn raw_socket_send_group(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let group = lua_string_bytes(state, 2)?;
+            let payload = lua_string_bytes(state, 3)?;
+            let flags = lua_optional_i32(state, 4, 0)?;
+            socket
+                .socket()?
+                .send_group(group, payload, flags)
+                .map_err(|err| err.to_string())?;
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
 fn raw_set_cfunc(state: *mut ffi::lua_State, name: &'static [u8], func: ffi::lua_CFunction) {
     unsafe {
         ffi::lua_pushcfunction(state, func);
@@ -1545,6 +1673,9 @@ fn ensure_raw_socket_metatable(state: *mut ffi::lua_State) {
             );
             raw_set_cfunc(state, b"subscribe\0", raw_socket_subscribe);
             raw_set_cfunc(state, b"unsubscribe\0", raw_socket_unsubscribe);
+            raw_set_cfunc(state, b"join\0", raw_socket_join);
+            raw_set_cfunc(state, b"leave\0", raw_socket_leave);
+            raw_set_cfunc(state, b"send_group\0", raw_socket_send_group);
         }
     }
 }
@@ -1632,6 +1763,15 @@ fn set_constants(table: &Table) -> LuaResult<()> {
     table.set("PUSH", ZMQ_PUSH)?;
     table.set("XPUB", ZMQ_XPUB)?;
     table.set("XSUB", ZMQ_XSUB)?;
+    table.set("STREAM", ZMQ_STREAM)?;
+    table.set("SERVER", ZMQ_SERVER)?;
+    table.set("CLIENT", ZMQ_CLIENT)?;
+    table.set("RADIO", ZMQ_RADIO)?;
+    table.set("DISH", ZMQ_DISH)?;
+    table.set("GATHER", ZMQ_GATHER)?;
+    table.set("SCATTER", ZMQ_SCATTER)?;
+    table.set("PEER", ZMQ_PEER)?;
+    table.set("CHANNEL", ZMQ_CHANNEL)?;
     table.set("DONTWAIT", ZMQ_DONTWAIT)?;
     table.set("SNDMORE", ZMQ_SNDMORE)?;
     table.set("OMQ_ARENA_THRESHOLD", OMQ_ARENA_THRESHOLD)?;

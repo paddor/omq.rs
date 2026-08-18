@@ -3,6 +3,22 @@
 Python binding for [omq.rs](https://github.com/paddor/omq.rs), a Rust libzmq
 port. Drop-in pyzmq replacement on the common path.
 
+## Highlights
+
+- Sync and `asyncio` APIs with all 20 ZMTP socket types.
+- Standard sockets: PAIR, PUB, SUB, REQ, REP, DEALER, ROUTER, PULL, PUSH,
+  XPUB, XSUB, and STREAM.
+- Draft sockets: SERVER, CLIENT, RADIO, DISH, GATHER, SCATTER, PEER, and
+  CHANNEL.
+- `tcp://`, `ipc://`, `inproc://`, and `udp://` transports (RADIO/DISH only).
+- Optional `plain`, `curve`, `lz4`, and `zstd` features in the published
+  wheel.
+- Built on [`omq-tokio`](https://github.com/paddor/omq.rs/tree/main/omq-tokio);
+  runtime work runs on a dedicated background thread and Python calls release
+  the GIL across the runtime trip.
+- DISH groups use `socket.join()` / `socket.leave()` and multipart group
+  messages.
+
 ## Install
 
 ```sh
@@ -44,25 +60,6 @@ await sock.close()
 ```
 
 Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
-
-## Status
-
-Sync and `asyncio` APIs both ship in this release. All 20 ZMTP socket types are wired:
-
-- **Standard (RFC 28 + 47)**: PAIR, PUB, SUB, REQ, REP, DEALER, ROUTER, PULL, PUSH, XPUB, XSUB, STREAM.
-- **Draft**: SERVER, CLIENT (RFC 41), RADIO, DISH (RFC 48), GATHER, SCATTER (RFC 49), PEER, CHANNEL (RFC 51).
-
-Transports: `tcp://`, `ipc://`, `inproc://`, and `udp://` (RADIO/DISH only).
-Optional features built into the wheel: `plain`, `curve`, `lz4`, `zstd`.
-
-DISH groups: use `socket.join(b"group")` / `socket.leave(b"group")` to manage
-subscriptions; messages are sent as multipart `[group, body]`.
-
-## Backend
-
-pyomq is built on `omq-tokio` (multi-threaded tokio runtime). The runtime
-runs on a dedicated background thread; every Python call releases the GIL
-across the runtime trip.
 
 ## Performance
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, InprocConn, MessageEncoder,
     PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType,
-    ZmtpConnection, mpsc,
+    ZmtpConnection, mpsc, peer_ident_socket_addr,
 };
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
@@ -24,6 +24,7 @@ pub(super) struct ByteStreamConnection {
     pub(super) leftover: bytes::Bytes,
 }
 
+#[expect(clippy::too_many_lines)]
 pub(super) fn spawn_byte_stream_connection(
     socket: &mut SocketDriver,
     ByteStreamConnection {
@@ -89,6 +90,15 @@ pub(super) fn spawn_byte_stream_connection(
         ),
     );
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
+    let peer_driver = match (
+        socket.recv_ip_rate_limiter.as_ref(),
+        peer_ident_socket_addr(&peer_ident),
+    ) {
+        (Some(limiter), Some(address)) => {
+            peer_driver.with_ip_rate_limiter(limiter.clone(), address.ip())
+        }
+        _ => peer_driver,
+    };
 
     let arena = arena_config(&endpoint, latency_profile, socket);
     let transmit_slot = build_transmit_slot(
@@ -348,6 +358,7 @@ fn peer_driver_config(socket: &SocketDriver) -> PeerDriverConfig {
         heartbeat_timeout: socket.options.heartbeat_timeout,
         heartbeat_ttl: socket.options.heartbeat_ttl,
         large_message_threshold: socket.options.large_message_threshold.unwrap_or(0),
+        recv_rate_limit: socket.options.recv_rate_limit,
     }
 }
 

@@ -23,7 +23,7 @@ use omq_proto::message::Message;
 
 use crate::context::Context;
 use crate::socket::handle::Socket as AsyncSocket;
-use crate::socket::monitor::{ConnectionStatus, MonitorStream};
+use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
 pub use crate::socket::recv::BlockingRecvCancel;
 
 /// Blocking socket handle.
@@ -248,6 +248,12 @@ impl Socket {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.connection_info(connection_id).await })
+    }
+
+    pub fn peer_info(&self, routing_id: u32) -> Result<Option<PeerInfo>> {
+        let s = self.inner.clone();
+        self.ctx
+            .block_on(async move { s.peer_info(routing_id).await })
     }
 
     pub fn wait_connected(&self, min_peers: usize, timeout: Duration) -> Result<usize> {

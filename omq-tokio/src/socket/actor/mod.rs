@@ -47,6 +47,7 @@ use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
+use crate::engine::rate_limit::SharedIpRateLimiter;
 use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle};
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
@@ -92,6 +93,11 @@ pub(crate) enum SocketCommand {
     QueryConnection {
         connection_id: u64,
         ack: oneshot::Sender<Option<ConnectionStatus>>,
+    },
+    /// Snapshot one SERVER peer keyed by its message routing id.
+    QueryPeerInfo {
+        routing_id: u32,
+        ack: oneshot::Sender<Option<PeerInfo>>,
     },
     /// Snapshot every currently-connected peer.
     QueryConnections {
@@ -241,6 +247,7 @@ pub(crate) struct SocketDriver {
     ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
     inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
+    recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
 }
 
 impl SocketDriver {
@@ -266,6 +273,10 @@ impl SocketDriver {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
         let recv_strategy = RecvStrategy::for_socket_type(socket_type, recv_tx.clone());
+        let recv_ip_rate_limiter = options
+            .recv_ip_rate_limit
+            .map(SharedIpRateLimiter::new)
+            .map(Arc::new);
         Self {
             socket_type,
             options,
@@ -301,6 +312,7 @@ impl SocketDriver {
             ready_peer_count_shared,
             io_pool,
             inproc_registry,
+            recv_ip_rate_limiter,
         }
     }
 
@@ -417,6 +429,9 @@ impl SocketDriver {
             }
             SocketCommand::QueryConnection { connection_id, ack } => {
                 let _ = ack.send(self.peer_status(connection_id));
+            }
+            SocketCommand::QueryPeerInfo { routing_id, ack } => {
+                let _ = ack.send(self.server_peer_info(routing_id));
             }
             SocketCommand::QueryConnections { ack } => {
                 let snapshot: Vec<ConnectionStatus> = self

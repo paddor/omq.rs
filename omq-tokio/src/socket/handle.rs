@@ -17,7 +17,7 @@ use omq_proto::proto::SocketType;
 use omq_proto::type_state::TypeState;
 
 use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
-use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
+use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream, PeerInfo};
 use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles, SpscPush};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocRegistry;
@@ -1041,6 +1041,23 @@ impl Socket {
         self.inner
             .cmd_tx
             .send(SocketCommand::QueryConnection { connection_id, ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
+    }
+
+    /// Snapshot the peer addressed by a routing id received on a SERVER socket.
+    /// `Ok(None)` means the route is stale or unknown.
+    pub async fn peer_info(&self, routing_id: u32) -> Result<Option<PeerInfo>> {
+        if self.inner.socket_type != SocketType::Server {
+            return Err(Error::Protocol(
+                "peer_info is only valid on SERVER sockets".into(),
+            ));
+        }
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::QueryPeerInfo { routing_id, ack })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)

@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,13 +14,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use futures::stream::FuturesOrdered;
-use omq_proto::WorkloadProfile;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
+use omq_proto::{MessageRateLimit, WorkloadProfile};
 
 use super::compression_pool::CompressionPool;
+use super::rate_limit::{SharedIpRateLimiter, TokenBucket};
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
 use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
@@ -540,6 +542,8 @@ pub struct PeerDriverConfig {
     /// a pre-sized owned buffer, bypassing the fixed
     /// `read_buf` -> `Connection` buffering path. `0` disables.
     pub large_message_threshold: usize,
+    /// Hard per-connection receive message rate limit.
+    pub recv_rate_limit: Option<MessageRateLimit>,
 }
 
 /// Commands accepted by a running [`ConnectionDriver`].
@@ -729,6 +733,7 @@ where
     arena_threshold: usize,
     arena_cap: usize,
     receive_profile: ReceiveProfile,
+    recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -781,6 +786,7 @@ where
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             receive_profile: ReceiveProfile::Throughput,
+            recv_ip_rate_limiter: None,
         }
     }
 
@@ -866,6 +872,16 @@ where
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_ip_rate_limiter(
+        mut self,
+        limiter: Arc<SharedIpRateLimiter>,
+        ip: IpAddr,
+    ) -> Self {
+        self.recv_ip_rate_limiter = Some((limiter, ip));
+        self
+    }
+
     /// Re-register the stream with the current thread's reactor. Call
     /// at the top of a future spawned on the target IO thread so the
     /// fd is polled by that thread, not the one that accepted/connected.
@@ -914,7 +930,11 @@ where
             arena_threshold,
             arena_cap,
             receive_profile,
+            recv_ip_rate_limiter,
         } = self;
+        let mut recv_rate_limiter = config
+            .recv_rate_limit
+            .map(|limit| TokenBucket::new(limit, Instant::now()));
         let mut outbound = OutboundState::new(encoder, compression_pool, offload_threshold);
         let latency_profile = !matches!(receive_profile, ReceiveProfile::Throughput);
         let (mut reader, mut writer) = stream.split(latency_profile);
@@ -1028,6 +1048,10 @@ where
                 &mut recv_direct,
                 &peer_out,
                 peer_id,
+                ReceiveRateLimiters {
+                    connection: &mut recv_rate_limiter,
+                    ip: recv_ip_rate_limiter.as_ref(),
+                },
             )
             .await?
             {
@@ -1226,6 +1250,11 @@ async fn emit_connection_events_best_effort(
     }
 }
 
+struct ReceiveRateLimiters<'a> {
+    connection: &'a mut Option<TokenBucket>,
+    ip: Option<&'a (Arc<SharedIpRateLimiter>, IpAddr)>,
+}
+
 async fn drain_decoded_messages(
     connection: &mut Connection,
     decoder: &mut Option<MessageDecoder>,
@@ -1233,6 +1262,7 @@ async fn drain_decoded_messages(
     recv_direct: &mut Option<RecvSink>,
     peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
+    rate_limiters: ReceiveRateLimiters<'_>,
 ) -> Result<DriverStep> {
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
@@ -1249,6 +1279,17 @@ async fn drain_decoded_messages(
             },
             None => m,
         };
+        let rate_limited = rate_limiters
+            .connection
+            .as_mut()
+            .is_some_and(|limiter| !limiter.allow(recv_batch_start))
+            || rate_limiters
+                .ip
+                .is_some_and(|(limiter, ip)| !limiter.allow(*ip, recv_batch_start));
+        if rate_limited {
+            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+            return Err(Error::ReceiveRateLimitExceeded);
+        }
         let msg_bytes = m.byte_len();
         let budget = recv_budget.get_or_insert_with(|| {
             recv_batch_time = receive_profile.time(msg_bytes);

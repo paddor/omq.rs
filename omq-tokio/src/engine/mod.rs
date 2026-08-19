@@ -9,6 +9,7 @@
 
 pub mod compression_pool;
 pub mod driver;
+pub(crate) mod rate_limit;
 pub(crate) mod send_pipe;
 pub(crate) mod signal;
 pub(crate) mod transmit_slot;

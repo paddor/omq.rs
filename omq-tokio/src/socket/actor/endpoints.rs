@@ -2,10 +2,10 @@
 use super::WsConnectOptions;
 use super::{
     Canceled, ConnectionStatus, DialerEntry, DisconnectReason, Duration, Endpoint, Error,
-    InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, Result, SocketDriver, SocketType,
-    UdpDialerEntry, UdpListenerEntry, bind_any, connect_any, dial_with_backoff, fake_handle, mpsc,
-    reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender, supports_groups,
-    supports_subscribe,
+    InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, PeerInfo, Result, SocketDriver,
+    SocketType, UdpDialerEntry, UdpListenerEntry, bind_any, connect_any, dial_with_backoff,
+    fake_handle, mpsc, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
+    supports_groups, supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
@@ -224,6 +224,11 @@ impl SocketDriver {
             identity: peer.identity.clone(),
             peer_info: peer.info.clone(),
         })
+    }
+
+    pub(super) fn server_peer_info(&self, routing_id: u32) -> Option<PeerInfo> {
+        let connection_id = u64::from(routing_id.checked_sub(1)?);
+        self.peers.get(&connection_id)?.info.clone()
     }
 
     pub(super) async fn apply_join(&mut self, group: bytes::Bytes, joining: bool) -> Result<()> {

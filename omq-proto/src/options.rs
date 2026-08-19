@@ -28,6 +28,29 @@ pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
 /// Default per-`FrameBuffer` arena threshold.
 pub const DEFAULT_ARENA_THRESHOLD: usize = crate::frame_buffer::ARENA_THRESHOLD;
 
+/// Token-bucket message rate limit.
+///
+/// `messages_per_second` controls refill speed. `burst` is the maximum token
+/// capacity. Exceeding either receive limit closes the offending connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MessageRateLimit {
+    /// Sustained complete messages allowed per second.
+    pub messages_per_second: u32,
+    /// Maximum immediate message burst.
+    pub burst: u32,
+}
+
+impl MessageRateLimit {
+    /// Create a message rate limit.
+    #[must_use]
+    pub const fn new(messages_per_second: u32, burst: u32) -> Self {
+        Self {
+            messages_per_second,
+            burst,
+        }
+    }
+}
+
 /// Per-socket configuration.
 ///
 /// # Compatibility warnings
@@ -74,6 +97,20 @@ pub struct Options {
 
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
+
+    /// Per-connection receive token bucket. `None` disables it.
+    ///
+    /// The tokio byte-stream backend counts complete application messages
+    /// after decoding. Exceeding the burst closes that peer connection. Inproc
+    /// and UDP transports do not use this limit.
+    pub recv_rate_limit: Option<MessageRateLimit>,
+
+    /// Aggregate receive token bucket per remote IP. `None` disables it.
+    ///
+    /// Buckets are shared by every TCP/WS connection owned by this socket,
+    /// including connections on different endpoints. IPC, inproc, and UDP
+    /// peers have no remote TCP/WS IP and are not charged against this limit.
+    pub recv_ip_rate_limit: Option<MessageRateLimit>,
 
     /// Time to wait on close for the send queue to drain.
     ///
@@ -293,6 +330,8 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            recv_rate_limit: None,
+            recv_ip_rate_limit: None,
             linger: Some(Duration::ZERO),
             identity: Bytes::new(),
             reconnect: ReconnectPolicy::default(),
@@ -364,6 +403,18 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
+        for (name, limit) in [
+            ("recv_rate_limit", self.recv_rate_limit),
+            ("recv_ip_rate_limit", self.recv_ip_rate_limit),
+        ] {
+            if let Some(limit) = limit
+                && (limit.messages_per_second == 0 || limit.burst == 0)
+            {
+                return Err(crate::error::Error::Config(format!(
+                    "{name} rate and burst must be greater than zero"
+                )));
+            }
+        }
         if self.handshake_timeout.is_none() && self.mechanism.has_frame_transform() {
             return Err(crate::error::Error::Config(
                 "encrypted mechanisms require handshake_timeout".into(),
@@ -429,6 +480,20 @@ impl Options {
     #[must_use]
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Set the per-connection receive message rate and burst.
+    #[must_use]
+    pub fn recv_rate_limit(mut self, messages_per_second: u32, burst: u32) -> Self {
+        self.recv_rate_limit = Some(MessageRateLimit::new(messages_per_second, burst));
+        self
+    }
+
+    /// Set the aggregate receive message rate and burst per remote IP.
+    #[must_use]
+    pub fn recv_ip_rate_limit(mut self, messages_per_second: u32, burst: u32) -> Self {
+        self.recv_ip_rate_limit = Some(MessageRateLimit::new(messages_per_second, burst));
         self
     }
 
@@ -859,6 +924,8 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.send_hwm, 1000);
         assert_eq!(o.recv_hwm, 1000);
+        assert_eq!(o.recv_rate_limit, None);
+        assert_eq!(o.recv_ip_rate_limit, None);
         assert_eq!(o.linger, Some(Duration::ZERO));
         assert_eq!(o.handshake_timeout, Some(Duration::from_secs(30)));
         assert_eq!(o.max_pending_handshakes, DEFAULT_MAX_PENDING_HANDSHAKES);
@@ -886,6 +953,22 @@ mod tests {
             ..Options::default()
         };
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn validates_receive_rate_limits() {
+        let valid = Options::new()
+            .recv_rate_limit(1_000, 2_000)
+            .recv_ip_rate_limit(5_000, 10_000);
+        assert!(valid.validate().is_ok());
+        assert_eq!(
+            valid.recv_rate_limit,
+            Some(MessageRateLimit::new(1_000, 2_000))
+        );
+        assert!(Options::new().recv_rate_limit(0, 1).validate().is_err());
+        assert!(Options::new().recv_rate_limit(1, 0).validate().is_err());
+        assert!(Options::new().recv_ip_rate_limit(0, 1).validate().is_err());
+        assert!(Options::new().recv_ip_rate_limit(1, 0).validate().is_err());
     }
 
     #[test]

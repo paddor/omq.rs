@@ -372,6 +372,11 @@ impl Message {
         }
     }
 
+    /// Create the `[group, body]` message required by RADIO sockets.
+    pub fn with_group(group: impl Into<Bytes>, body: impl Into<Bytes>) -> Self {
+        Self::multipart([group.into(), body.into()])
+    }
+
     /// Number of parts.
     #[inline]
     pub fn len(&self) -> usize {

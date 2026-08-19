@@ -231,6 +231,103 @@ async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
     .expect("PUSH/PULL task")
 }
 
+async fn fanin(
+    size: usize,
+    io_threads: usize,
+    receiver_type: SocketType,
+    sender_type: SocketType,
+) -> f64 {
+    tokio::task::spawn_blocking(move || {
+        let receiver_ctx = Context::with_config(ContextConfig { io_threads });
+        let sender_ctx = Context::with_config(ContextConfig { io_threads });
+        let receiver = receiver_ctx.blocking_socket(receiver_type, Options::default());
+        let sender = sender_ctx.blocking_socket(
+            sender_type,
+            Options::default().identity(Bytes::from_static(b"perf-client")),
+        );
+        let endpoint = receiver.bind(tcp_zero()).expect("receiver bind");
+        sender.connect(endpoint).expect("sender connect");
+        receiver
+            .wait_connected(1, Duration::from_secs(1))
+            .expect("receiver connect timeout");
+
+        let done = Arc::new(AtomicBool::new(false));
+        let receiver_done = done.clone();
+        let receiver_thread = thread::spawn(move || {
+            thread::sleep(WARMUP);
+            let mut count = 0_u64;
+            loop {
+                match receiver.try_recv() {
+                    Ok(_) => {
+                        count += 1;
+                        while receiver.try_recv().is_ok() {
+                            count += 1;
+                        }
+                    }
+                    Err(_) if receiver_done.load(Ordering::Acquire) => break,
+                    Err(_) => thread::yield_now(),
+                }
+            }
+            count
+        });
+
+        thread::sleep(WARMUP);
+        let msg = payload(size);
+        let deadline = Instant::now() + MEASURE;
+        while Instant::now() < deadline {
+            let mut pending = msg.clone();
+            loop {
+                match sender.try_send(pending) {
+                    Ok(()) => break,
+                    Err(omq_tokio::TrySendError::Full(returned)) => {
+                        pending = returned;
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("sender failed: {error}"),
+                }
+            }
+        }
+        sender.send(msg).expect("wakeup send");
+        done.store(true, Ordering::Release);
+        let count = receiver_thread.join().expect("receiver thread");
+        sender_ctx.term();
+        receiver_ctx.term();
+        count as f64 / MEASURE.as_secs_f64()
+    })
+    .await
+    .expect("fan-in task")
+}
+
+async fn compare_fanin() {
+    for size in [16, 128, 1024] {
+        for round in 1..=3 {
+            let (pull, gather) = if round % 2 == 0 {
+                let gather = fanin(size, 1, SocketType::Gather, SocketType::Scatter).await;
+                let pull = fanin(size, 1, SocketType::Pull, SocketType::Push).await;
+                (pull, gather)
+            } else {
+                let pull = fanin(size, 1, SocketType::Pull, SocketType::Push).await;
+                let gather = fanin(size, 1, SocketType::Gather, SocketType::Scatter).await;
+                (pull, gather)
+            };
+            let (router, server) = if round % 2 == 0 {
+                let server = fanin(size, 1, SocketType::Server, SocketType::Client).await;
+                let router = fanin(size, 1, SocketType::Router, SocketType::Dealer).await;
+                (router, server)
+            } else {
+                let router = fanin(size, 1, SocketType::Router, SocketType::Dealer).await;
+                let server = fanin(size, 1, SocketType::Server, SocketType::Client).await;
+                (router, server)
+            };
+            println!(
+                "{size} B round {round}: PULL {pull:.0}, GATHER {gather:.0}, ROUTER {router:.0}, SERVER {server:.0} msg/s; GATHER/PULL {:.1}%, SERVER/ROUTER {:.1}%",
+                gather / pull * 100.0,
+                server / router * 100.0,
+            );
+        }
+    }
+}
+
 async fn pubsub(size: usize, io_threads: usize, peers: usize) -> f64 {
     let pub_ctx = Context::with_config(ContextConfig { io_threads });
     let sub_ctx = Context::with_config(ContextConfig { io_threads });
@@ -455,16 +552,33 @@ fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
+async fn run_mode(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
+        Some("--compare-fanin") => {
+            compare_fanin().await;
+            true
+        }
+        Some("--fanin-server") => {
+            let value = fanin(16, 1, SocketType::Server, SocketType::Client).await;
+            println!("SERVER {value:.0} msg/s");
+            true
+        }
+        Some("--fanin-router") => {
+            let value = fanin(16, 1, SocketType::Router, SocketType::Dealer).await;
+            println!("ROUTER {value:.0} msg/s");
+            true
+        }
+        Some("--fanin-pull") => {
+            let value = fanin(16, 1, SocketType::Pull, SocketType::Push).await;
+            println!("PULL {value:.0} msg/s");
+            true
+        }
         Some("--pubsub-pub-child") => {
             let size = args[2].parse().expect("size");
             let io_threads = args[3].parse().expect("io_threads");
             let peers = args[4].parse().expect("peers");
             run_pubsub_pub_child(size, io_threads, peers);
-            return;
+            true
         }
         Some("--pubsub-sub-child") => {
             let endpoint = args[2].parse().expect("endpoint");
@@ -472,9 +586,17 @@ async fn main() {
             let duration = Duration::from_secs_f64(args[4].parse().expect("duration"));
             let peers = args[5].parse().expect("peers");
             run_pubsub_sub_child(&endpoint, size, duration, peers);
-            return;
+            true
         }
-        _ => {}
+        _ => false,
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if run_mode(&args).await {
+        return;
     }
 
     let thresholds = read_thresholds();

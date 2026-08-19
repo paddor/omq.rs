@@ -88,6 +88,16 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Send one body to a RADIO group.
+    pub async fn send_group(&self, group: impl Into<Bytes>, body: impl Into<Bytes>) -> Result<()> {
+        if self.inner.socket_type != SocketType::Radio {
+            return Err(Error::Protocol(
+                "send_group is only valid on RADIO sockets".into(),
+            ));
+        }
+        self.send(Message::with_group(group, body)).await
+    }
+
     /// Create a new socket of the given type with the given options. Spawns
     /// the driver task on the current tokio runtime.
     ///

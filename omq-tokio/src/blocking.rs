@@ -46,6 +46,19 @@ pub struct Socket {
 }
 
 impl Socket {
+    /// Send one body to a RADIO group.
+    pub fn send_group(
+        &self,
+        group: impl Into<bytes::Bytes>,
+        body: impl Into<bytes::Bytes>,
+    ) -> Result<()> {
+        let socket = self.inner.clone();
+        let group = group.into();
+        let body = body.into();
+        self.ctx
+            .block_on(async move { socket.send_group(group, body).await })
+    }
+
     pub(crate) fn new(inner: AsyncSocket, ctx: Context) -> Self {
         Self { inner, ctx }
     }

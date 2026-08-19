@@ -1,4 +1,4 @@
-# ØMQ.rs
+<img src="doc/omq-logo.svg" alt="OMQ" width="350" />
 
 Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Socket-level messaging patterns that work the same way in-process, between processes, and over the network.
 

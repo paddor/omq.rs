@@ -667,10 +667,14 @@ impl Socket {
 
     #[pyo3(signature = (payload, flags = 0))]
     fn send(&self, py: Python<'_>, payload: &Bound<'_, PyAny>, flags: i32) -> PyResult<()> {
+        let routing_id = conversions::routing_id_from_pyany(payload);
         let bytes = conversions::bytes_from_pyany(payload)?;
-        let Some(msg) = self.inner.build_or_buffer(bytes, flags) else {
+        let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(());
         };
+        if routing_id != 0 {
+            msg = msg.with_routing_id(routing_id);
+        }
         self.send_message(py, msg)
     }
 
@@ -713,6 +717,7 @@ impl Socket {
         } else {
             self.recv_message(py)?
         };
+        let routing_id = msg.routing_id().unwrap_or(0);
         let mut parts: Vec<Bytes> = msg.iter().collect();
         let head = if parts.is_empty() {
             Bytes::new()
@@ -723,7 +728,7 @@ impl Socket {
         if more {
             self.inner.store_rxbuf(parts);
         }
-        Bound::new(py, Frame::from_bytes_more(head, more))
+        Bound::new(py, Frame::from_bytes_more_routing(head, more, routing_id))
     }
 
     #[pyo3(signature = (flags = 0))]

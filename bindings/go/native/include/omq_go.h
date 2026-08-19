@@ -28,11 +28,13 @@ typedef struct {
 typedef struct {
   OmqGoPart *parts;
   size_t part_count;
+  uint32_t routing_id;
 } OmqGoMessage;
 
 typedef struct {
   const OmqGoPart *parts;
   size_t part_count;
+  uint32_t routing_id;
 } OmqGoWireMessage;
 
 typedef struct {
@@ -135,8 +137,8 @@ OmqGoStatus omq_go_socket_bind(OmqGoSocket *socket, const char *endpoint, char *
 OmqGoStatus omq_go_socket_connect(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_unbind(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_disconnect(OmqGoSocket *socket, const char *endpoint);
-OmqGoStatus omq_go_socket_send(OmqGoSocket *socket, const OmqGoPart *parts, size_t part_count, int64_t timeout_millis);
-OmqGoStatus omq_go_socket_send_one(OmqGoSocket *socket, const uint8_t *data, size_t len, int64_t timeout_millis);
+OmqGoStatus omq_go_socket_send(OmqGoSocket *socket, const OmqGoPart *parts, size_t part_count, uint32_t routing_id, int64_t timeout_millis);
+OmqGoStatus omq_go_socket_send_one(OmqGoSocket *socket, const uint8_t *data, size_t len, uint32_t routing_id, int64_t timeout_millis);
 OmqGoStatus omq_go_socket_try_send_batch(OmqGoSocket *socket, const OmqGoWireMessage *messages, size_t message_count, size_t *sent);
 OmqGoStatus omq_go_receive_any(OmqGoSocket **sockets, size_t socket_count, int64_t timeout_millis, size_t *index, OmqGoMessage *out);
 OmqGoStatus omq_go_socket_recv(OmqGoSocket *socket, int64_t timeout_millis, OmqGoMessage *out);

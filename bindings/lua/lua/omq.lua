@@ -137,8 +137,10 @@ Context.__index = Context
 ---@field close fun(self: omq.Socket): boolean Close socket. Idempotent.
 ---@field send fun(self: omq.Socket, data: string|string[], flags?: integer): boolean Send one frame or multipart table.
 ---@field send_parts fun(self: omq.Socket, parts: string[], flags?: integer): boolean Send multipart frames.
+---@field send_routed fun(self: omq.Socket, routing_id: integer, data: string, flags?: integer): boolean Send a SERVER reply with routing metadata.
 ---@field recv fun(self: omq.Socket, max_size?: integer, flags?: integer): string Receive one frame.
 ---@field try_recv fun(self: omq.Socket, max_size?: integer): string|nil Nonblocking receive. Returns nil when not ready.
+---@field recv_routed fun(self: omq.Socket, max_size?: integer, flags?: integer): string, integer Receive a SERVER body and routing ID.
 ---@field recv_parts fun(self: omq.Socket, max_size?: integer, flags?: integer): string[] Receive all frames in one message.
 ---@field subscribe fun(self: omq.Socket, prefix: string): boolean Add SUB prefix.
 ---@field unsubscribe fun(self: omq.Socket, prefix: string): boolean Remove SUB prefix.

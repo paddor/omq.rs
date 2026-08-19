@@ -79,12 +79,14 @@ pub struct OmqGoPart {
 pub struct OmqGoMessage {
     parts: *mut OmqGoPart,
     part_count: usize,
+    routing_id: u32,
 }
 
 #[repr(C)]
 pub struct OmqGoWireMessage {
     parts: *const OmqGoPart,
     part_count: usize,
+    routing_id: u32,
 }
 
 #[repr(C)]
@@ -1049,24 +1051,34 @@ fn curve_keypair_from_z85(public_key: &str, secret_key: &str) -> Result<CurveKey
     Ok(CurveKeypair { public, secret })
 }
 
-fn message_from_c(parts: *const OmqGoPart, part_count: usize) -> Result<Message, Error> {
-    if part_count == 0 {
-        return Ok(Message::new());
-    }
-    if parts.is_null() {
-        return Err(Error::Config("null message parts pointer".to_string()));
-    }
-    let parts = unsafe { slice::from_raw_parts(parts, part_count) };
-    if part_count == 1 {
-        let part = &parts[0];
-        return Ok(Message::from_slice(bytes_from_c(part.data, part.len)?));
-    }
-
-    let mut copied = Vec::with_capacity(part_count);
-    for part in parts {
-        copied.push(Bytes::copy_from_slice(bytes_from_c(part.data, part.len)?));
-    }
-    Ok(Message::multipart(copied))
+fn message_from_c(
+    parts: *const OmqGoPart,
+    part_count: usize,
+    routing_id: u32,
+) -> Result<Message, Error> {
+    let message = if part_count == 0 {
+        Message::new()
+    } else {
+        if parts.is_null() {
+            return Err(Error::Config("null message parts pointer".to_string()));
+        }
+        let parts = unsafe { slice::from_raw_parts(parts, part_count) };
+        if part_count == 1 {
+            let part = &parts[0];
+            Message::from_slice(bytes_from_c(part.data, part.len)?)
+        } else {
+            let mut copied = Vec::with_capacity(part_count);
+            for part in parts {
+                copied.push(Bytes::copy_from_slice(bytes_from_c(part.data, part.len)?));
+            }
+            Message::multipart(copied)
+        }
+    };
+    Ok(if routing_id == 0 {
+        message
+    } else {
+        message.with_routing_id(routing_id)
+    })
 }
 
 fn messages_from_c(
@@ -1082,7 +1094,11 @@ fn messages_from_c(
     let messages = unsafe { slice::from_raw_parts(messages, message_count) };
     let mut out = VecDeque::with_capacity(message_count);
     for message in messages {
-        out.push_back(message_from_c(message.parts, message.part_count)?);
+        out.push_back(message_from_c(
+            message.parts,
+            message.part_count,
+            message.routing_id,
+        )?);
     }
     Ok(out)
 }
@@ -1131,11 +1147,13 @@ fn raw_bytes(bytes: &[u8]) -> (*mut u8, usize) {
 }
 
 fn message_to_c(message: Message) -> OmqGoMessage {
+    let routing_id = message.routing_id().unwrap_or(0);
     let part_count = message.len();
     if part_count == 0 {
         return OmqGoMessage {
             parts: ptr::null_mut(),
             part_count: 0,
+            routing_id,
         };
     }
 
@@ -1152,6 +1170,7 @@ fn message_to_c(message: Message) -> OmqGoMessage {
     OmqGoMessage {
         parts: ptr,
         part_count: len,
+        routing_id,
     }
 }
 
@@ -1915,6 +1934,7 @@ pub extern "C" fn omq_go_socket_send(
     socket: *mut OmqGoSocket,
     parts: *const OmqGoPart,
     part_count: usize,
+    routing_id: u32,
     timeout_millis: i64,
 ) -> OmqGoStatus {
     if socket.is_null() {
@@ -1926,7 +1946,7 @@ pub extern "C" fn omq_go_socket_send(
             return Err(Error::Closed);
         }
         let native = socket.materialize()?;
-        let message = message_from_c(parts, part_count)?;
+        let message = message_from_c(parts, part_count, routing_id)?;
         Ok((native, message))
     })();
     match result {
@@ -1940,6 +1960,7 @@ pub extern "C" fn omq_go_socket_send_one(
     socket: *mut OmqGoSocket,
     data: *const u8,
     len: usize,
+    routing_id: u32,
     timeout_millis: i64,
 ) -> OmqGoStatus {
     if socket.is_null() {
@@ -1951,7 +1972,10 @@ pub extern "C" fn omq_go_socket_send_one(
             return Err(Error::Closed);
         }
         let native = socket.materialize()?;
-        let message = Message::from_slice(bytes_from_c(data, len)?);
+        let mut message = Message::from_slice(bytes_from_c(data, len)?);
+        if routing_id != 0 {
+            message = message.with_routing_id(routing_id);
+        }
         Ok((native, message))
     })();
     match result {
@@ -2019,6 +2043,7 @@ pub extern "C" fn omq_go_receive_any(
         *out = OmqGoMessage {
             parts: ptr::null_mut(),
             part_count: 0,
+            routing_id: 0,
         };
     }
 

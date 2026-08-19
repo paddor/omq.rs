@@ -252,12 +252,13 @@ func socketMessageSendNativeTimeout(socket *nativeSocket, msg Message, timeoutMi
 	if parts := msg.partsView(); len(parts) == 1 {
 		part := parts[0]
 		if len(part) == 0 {
-			return statusErr(C.omq_go_socket_send_one((*C.OmqGoSocket)(socket), nil, 0, C.int64_t(timeoutMillis)))
+			return statusErr(C.omq_go_socket_send_one((*C.OmqGoSocket)(socket), nil, 0, C.uint32_t(msg.routingID), C.int64_t(timeoutMillis)))
 		}
 		status := C.omq_go_socket_send_one(
 			(*C.OmqGoSocket)(socket),
 			(*C.uint8_t)(unsafe.Pointer(&part[0])),
 			C.size_t(len(part)),
+			C.uint32_t(msg.routingID),
 			C.int64_t(timeoutMillis),
 		)
 		runtime.KeepAlive(part)
@@ -265,7 +266,7 @@ func socketMessageSendNativeTimeout(socket *nativeSocket, msg Message, timeoutMi
 	}
 	parts, count, free := messageToC(msg)
 	defer free()
-	return statusErr(C.omq_go_socket_send((*C.OmqGoSocket)(socket), parts, count, C.int64_t(timeoutMillis)))
+	return statusErr(C.omq_go_socket_send((*C.OmqGoSocket)(socket), parts, count, C.uint32_t(msg.routingID), C.int64_t(timeoutMillis)))
 }
 
 func socketMessagesTrySendNative(socket *nativeSocket, messages []Message) (int, error) {
@@ -281,6 +282,7 @@ func socketMessagesTrySendNative(socket *nativeSocket, messages []Message) (int,
 		freeFns = append(freeFns, free)
 		wire[i].parts = parts
 		wire[i].part_count = count
+		wire[i].routing_id = C.uint32_t(msg.routingID)
 	}
 	defer func() {
 		for _, free := range freeFns {
@@ -893,7 +895,7 @@ func messageToC(msg Message) (*C.OmqGoPart, C.size_t, func()) {
 
 func messageFromC(raw C.OmqGoMessage) Message {
 	if raw.parts == nil || raw.part_count == 0 {
-		return Message{}
+		return Message{routingID: uint32(raw.routing_id)}
 	}
 	parts := unsafe.Slice(raw.parts, int(raw.part_count))
 	out := make([][]byte, len(parts))
@@ -904,7 +906,7 @@ func messageFromC(raw C.OmqGoMessage) Message {
 		}
 		out[i] = copyFromCPtr(part.data, part.len)
 	}
-	return Message{parts: out}
+	return Message{parts: out, routingID: uint32(raw.routing_id)}
 }
 
 func eventFromC(raw C.OmqGoEvent) MonitorEvent {

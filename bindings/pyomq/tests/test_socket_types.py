@@ -176,9 +176,12 @@ def test_client_server():
     client.connect(ep)
     time.sleep(0.05)
     client.send(b"ping")
-    parts = server.recv_multipart()
-    assert parts == [b"cli-1", b"ping"]
-    server.send_multipart([b"cli-1", b"pong"])
+    request = server.recv(copy=False)
+    assert bytes(request) == b"ping"
+    assert request.routing_id > 0
+    reply = pyomq.Frame(b"pong")
+    reply.routing_id = request.routing_id
+    server.send(reply, copy=False)
     assert client.recv() == b"pong"
     client.close()
     server.close()

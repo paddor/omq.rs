@@ -6,7 +6,7 @@ end
 
 local ctx = omq.context()
 
--- CLIENT/SERVER carries the server routing id as an internal first frame.
+-- CLIENT/SERVER carries the server routing id as message metadata.
 do
   local server = ctx:socket("SERVER", options())
   local client = ctx:socket("CLIENT", options())
@@ -15,10 +15,10 @@ do
 
   for i = 1, 3 do
     client:send("request-" .. i)
-    local request = server:recv_parts()
-    assert(#request == 2)
-    assert(request[2] == "request-" .. i)
-    server:send_parts({ request[1], "reply-" .. i })
+    local request, routing_id = server:recv_routed()
+    assert(request == "request-" .. i)
+    assert(routing_id > 0)
+    server:send_routed(routing_id, "reply-" .. i)
     assert(client:recv() == "reply-" .. i)
   end
 

@@ -1213,7 +1213,10 @@ fn recv_one(socket: &OmqGoSocket, timeout_millis: i64) -> Result<Message, Error>
         .ok_or(Error::WouldBlock)
 }
 
-fn recv_one_wait(socket: &OmqGoSocket, wait: Duration) -> Result<Message, Error> {
+fn recv_one_cancelable(
+    socket: &OmqGoSocket,
+    cancel: &BlockingRecvCancel,
+) -> Result<Option<Message>, Error> {
     if socket.closed.load(Ordering::Acquire) {
         return Err(Error::Closed);
     }
@@ -1224,27 +1227,27 @@ fn recv_one_wait(socket: &OmqGoSocket, wait: Duration) -> Result<Message, Error>
         .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?
         .pop_front()
     {
-        return Ok(message);
+        return Ok(Some(message));
     }
 
     let native = socket.materialize()?;
+    cancel.register_current_thread_once();
     let mut scratch = socket
         .recv_scratch
         .lock()
         .map_err(|_| Error::Config("receive scratch lock poisoned".to_string()))?;
     scratch.clear();
-    match native.recv_many_timeout_into(RECV_BATCH, wait, &mut scratch) {
-        Ok(0) | Err(Error::Timeout | Error::WouldBlock) => return Err(Error::WouldBlock),
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
+    let Some(_) = native.recv_many_registered_cancelable_into(RECV_BATCH, cancel, &mut scratch)?
+    else {
+        return Ok(None);
+    };
 
     let mut cache = socket
         .recv_cache
         .lock()
         .map_err(|_| Error::Config("receive cache lock poisoned".to_string()))?;
     cache.extend(scratch.drain(..));
-    cache.pop_front().ok_or(Error::WouldBlock)
+    Ok(cache.pop_front())
 }
 
 struct ReceiveAnyEntry<'a> {
@@ -2083,9 +2086,9 @@ pub extern "C" fn omq_go_socket_recv(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn omq_go_socket_recv_wait(
+pub extern "C" fn omq_go_socket_recv_cancelable(
     socket: *mut OmqGoSocket,
-    wait_micros: u64,
+    cancel: *const OmqGoCancel,
     out: *mut OmqGoMessage,
 ) -> OmqGoStatus {
     if socket.is_null() {
@@ -2094,14 +2097,19 @@ pub extern "C" fn omq_go_socket_recv_wait(
     if out.is_null() {
         return OmqGoStatus::err(CONFIG, "null receive output pointer");
     }
+    if cancel.is_null() {
+        return OmqGoStatus::err(CONFIG, "receive cancel handle is null");
+    }
     let socket = unsafe { &*socket };
-    match recv_one_wait(socket, Duration::from_micros(wait_micros)) {
-        Ok(message) => {
+    let cancel = unsafe { &*cancel };
+    match recv_one_cancelable(socket, &cancel.inner) {
+        Ok(Some(message)) => {
             unsafe {
                 *out = message_to_c(message);
             }
             OmqGoStatus::ok()
         }
+        Ok(None) => OmqGoStatus::err(CANCELED, "operation canceled"),
         Err(error) => OmqGoStatus::from_error(error),
     }
 }
@@ -2137,9 +2145,9 @@ pub extern "C" fn omq_go_socket_recv_one_into(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn omq_go_socket_recv_one_into_wait(
+pub extern "C" fn omq_go_socket_recv_one_into_cancelable(
     socket: *mut OmqGoSocket,
-    wait_micros: u64,
+    cancel: *const OmqGoCancel,
     data: *mut u8,
     capacity: usize,
     written: *mut usize,
@@ -2150,20 +2158,32 @@ pub extern "C" fn omq_go_socket_recv_one_into_wait(
     if written.is_null() {
         return OmqGoStatus::err(CONFIG, "null receive length pointer");
     }
+    if cancel.is_null() {
+        return OmqGoStatus::err(CONFIG, "receive cancel handle is null");
+    }
     unsafe {
         *written = 0;
     }
     let socket = unsafe { &*socket };
-    let result = (|| {
+    let cancel = unsafe { &*cancel };
+    let result = (|| -> Result<Option<usize>, Error> {
         let destination = bytes_from_c_mut(data, capacity)?;
-        let message = recv_one_wait(socket, Duration::from_micros(wait_micros))?;
+        let Some(message) = recv_one_cancelable(socket, &cancel.inner)? else {
+            return Ok(None);
+        };
         let copied = copy_message_into(&message, destination)?;
-        unsafe {
-            *written = copied;
-        }
-        Ok(())
+        Ok(Some(copied))
     })();
-    status_from_result(result)
+    match result {
+        Ok(Some(copied)) => {
+            unsafe {
+                *written = copied;
+            }
+            OmqGoStatus::ok()
+        }
+        Ok(None) => OmqGoStatus::err(CANCELED, "operation canceled"),
+        Err(error) => OmqGoStatus::from_error(error),
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -140,9 +140,9 @@ OmqGoStatus omq_go_socket_send_one(OmqGoSocket *socket, const uint8_t *data, siz
 OmqGoStatus omq_go_socket_try_send_batch(OmqGoSocket *socket, const OmqGoWireMessage *messages, size_t message_count, size_t *sent);
 OmqGoStatus omq_go_receive_any(OmqGoSocket **sockets, size_t socket_count, int64_t timeout_millis, size_t *index, OmqGoMessage *out);
 OmqGoStatus omq_go_socket_recv(OmqGoSocket *socket, int64_t timeout_millis, OmqGoMessage *out);
-OmqGoStatus omq_go_socket_recv_wait(OmqGoSocket *socket, uint64_t wait_micros, OmqGoMessage *out);
+OmqGoStatus omq_go_socket_recv_cancelable(OmqGoSocket *socket, const OmqGoCancel *cancel, OmqGoMessage *out);
 OmqGoStatus omq_go_socket_recv_one_into(OmqGoSocket *socket, int64_t timeout_millis, uint8_t *data, size_t capacity, size_t *written);
-OmqGoStatus omq_go_socket_recv_one_into_wait(OmqGoSocket *socket, uint64_t wait_micros, uint8_t *data, size_t capacity, size_t *written);
+OmqGoStatus omq_go_socket_recv_one_into_cancelable(OmqGoSocket *socket, const OmqGoCancel *cancel, uint8_t *data, size_t capacity, size_t *written);
 OmqGoStatus omq_go_socket_subscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_unsubscribe(OmqGoSocket *socket, const uint8_t *data, size_t len);
 OmqGoStatus omq_go_socket_join(OmqGoSocket *socket, const uint8_t *data, size_t len);

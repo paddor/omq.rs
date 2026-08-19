@@ -45,7 +45,8 @@ runs the Go tests with the right library path:
 - `Message` supports single-part and multipart payloads and copies input on
   construction.
 - `RecvInto` is the direct single-part receive path when the caller owns the
-  destination buffer.
+  destination buffer. Blocking scalar receives wait natively and honor
+  context cancellation for every socket type.
 - `Socket.Run(ctx, fn)` executes `fn` on the socket owner goroutine. Its
   `BoundSocket` methods use private native send/receive rings to amortize cgo
   cost without exposing public batch APIs.

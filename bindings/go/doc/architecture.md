@@ -33,18 +33,16 @@ Timeout helpers are convenience wrappers around context-aware loops:
 - `timeout < 0`: wait forever
 - `timeout > 0`: deadline
 
-Go cancellation is handled before entering cgo and between bounded native
-receive attempts. User goroutines do not need to close a socket from another
-goroutine to interrupt a blocked receive.
+Go cancellation is handled before entering cgo and by a native cancel handle
+while a receive is blocked. User goroutines do not need to close a socket from
+another goroutine to interrupt a blocked receive.
 
 Most socket types serialize native calls through the pinned owner goroutine.
 Their inproc and round-robin fast paths contain thread-owned SPSC producers.
 `REQ` and `REP` use thread-neutral, mutex-backed send routes. Their scalar data
 calls therefore skip the owner-channel handoff and serialize directly with a
-per-socket native-call mutex. Their scalar blocking receives wait briefly in
-native code before retrying, which avoids repeated Go scheduler round trips
-when a reply is already in flight. `TryRecv` and `TryRecvInto` remain
-nonblocking.
+per-socket native-call mutex. All scalar blocking receives wait in native code
+with cancellation. `TryRecv` and `TryRecvInto` remain nonblocking.
 
 `Socket.Run(ctx, fn)` executes `fn` on the socket owner goroutine, pinned to
 one OS thread. It is the low-latency path for tight loops. `BoundSocket`

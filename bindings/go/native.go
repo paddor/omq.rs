@@ -25,10 +25,6 @@ type nativeSendRing = C.OmqGoSendRing
 type nativeRecvRing = C.OmqGoRecvRing
 type nativeCancel = C.OmqGoCancel
 
-// scalarRecvParkMicros bounds the wakeable native park used by blocking
-// scalar receives. It does not affect nonblocking TryRecv calls.
-const scalarRecvParkMicros = 10
-
 type nativeStats struct {
 	contextsCreated  uint64
 	contextsFreed    uint64
@@ -388,11 +384,11 @@ func socketMessageRecvNative(socket *nativeSocket) (Message, error) {
 	return messageFromC(out), nil
 }
 
-func socketMessageRecvWaitNative(socket *nativeSocket) (Message, error) {
+func socketMessageRecvCancelableNative(socket *nativeSocket, cancel *nativeCancel) (Message, error) {
 	var out C.OmqGoMessage
-	err := statusErr(C.omq_go_socket_recv_wait(
+	err := statusErr(C.omq_go_socket_recv_cancelable(
 		(*C.OmqGoSocket)(socket),
-		C.uint64_t(scalarRecvParkMicros),
+		(*C.OmqGoCancel)(cancel),
 		&out,
 	))
 	if err != nil {
@@ -406,15 +402,15 @@ func socketMessageRecvIntoNative(socket *nativeSocket, dst []byte) (int, error) 
 	return socketMessageRecvIntoNativeTimeout(socket, dst, 0)
 }
 
-func socketMessageRecvIntoBriefWaitNative(socket *nativeSocket, dst []byte) (int, error) {
+func socketMessageRecvIntoCancelableNative(socket *nativeSocket, cancel *nativeCancel, dst []byte) (int, error) {
 	var written C.size_t
 	var data *C.uint8_t
 	if len(dst) > 0 {
 		data = (*C.uint8_t)(unsafe.Pointer(&dst[0]))
 	}
-	err := statusErr(C.omq_go_socket_recv_one_into_wait(
+	err := statusErr(C.omq_go_socket_recv_one_into_cancelable(
 		(*C.OmqGoSocket)(socket),
-		C.uint64_t(scalarRecvParkMicros),
+		(*C.OmqGoCancel)(cancel),
 		data,
 		C.size_t(len(dst)),
 		&written,
@@ -424,10 +420,6 @@ func socketMessageRecvIntoBriefWaitNative(socket *nativeSocket, dst []byte) (int
 		return 0, err
 	}
 	return int(written), nil
-}
-
-func socketMessageRecvIntoWaitNative(socket *nativeSocket, dst []byte) (int, error) {
-	return socketMessageRecvIntoNativeTimeout(socket, dst, -1)
 }
 
 func socketMessageRecvIntoNativeTimeout(socket *nativeSocket, dst []byte, timeoutMillis int64) (int, error) {

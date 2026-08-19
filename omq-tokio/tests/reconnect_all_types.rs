@@ -292,13 +292,11 @@ async fn client_server_reconnect_after_server_restart() {
         .await
         .expect("initial recv timed out")
         .unwrap();
-    assert_eq!(got1, Message::multipart(["c1", "ping1"]));
+    assert_eq!(got1, Message::single("ping1"));
+    let routing_id = got1.routing_id().expect("SERVER routing id");
 
     server1
-        .send(Message::multipart([
-            Bytes::from_static(b"c1"),
-            Bytes::from_static(b"pong1"),
-        ]))
+        .send(Message::single("pong1").with_routing_id(routing_id))
         .await
         .unwrap();
     let reply1 = tokio::time::timeout(Duration::from_secs(2), client.recv())
@@ -313,7 +311,8 @@ async fn client_server_reconnect_after_server_restart() {
     test_support::wait_for_handshake_on(&mut client_mon).await;
     let got2 =
         send_single_until_received(&client, &server2, "ping2", "post-restart recv timed out").await;
-    assert_eq!(got2, Message::multipart(["c1", "ping2"]));
+    assert_eq!(got2, Message::single("ping2"));
+    assert!(got2.routing_id().is_some());
 }
 
 // ── SCATTER / GATHER ─────────────────────────────────────────────────────────

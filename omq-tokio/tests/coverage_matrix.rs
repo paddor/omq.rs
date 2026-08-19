@@ -116,9 +116,10 @@ async fn client_server_roundtrip(server: &Socket, client_ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m, Message::multipart(["c1", "ping"]));
+    assert_eq!(m, Message::single("ping"));
+    let routing_id = m.routing_id().expect("SERVER routing id");
     server
-        .send(Message::multipart(["c1", "pong"]))
+        .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
     let r = tokio::time::timeout(Duration::from_secs(2), client.recv())

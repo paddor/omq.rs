@@ -26,16 +26,18 @@ async fn client_server_basic_roundtrip() {
 
     client.send(Message::single("ping")).await.unwrap();
 
-    // Server receives [routing_id, body].
+    // Server receives one body with opaque routing metadata.
     let got = tokio::time::timeout(Duration::from_millis(500), server.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got, Message::multipart(["cli1", "ping"]));
+    assert_eq!(got, Message::single("ping"));
+    let routing_id = got.routing_id().expect("SERVER routing id");
+    assert_ne!(routing_id, 0);
 
-    // Server replies via [routing_id, body].
+    // Server replies using that routing metadata.
     server
-        .send(Message::multipart(["cli1", "pong"]))
+        .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
 
@@ -56,13 +58,22 @@ async fn client_rejects_multipart_send() {
 }
 
 #[tokio::test]
-async fn server_requires_routing_id_envelope() {
+async fn server_requires_routing_id_metadata() {
     let ep = inproc_ep("draft-server-noid");
     let server = Socket::new(SocketType::Server, Options::default());
     server.bind(ep).await.unwrap();
-    // Single-part send is invalid for SERVER; must be [id, body].
+    // A body without a routing ID cannot be sent by SERVER.
     let r = server.send(Message::single("nobody")).await;
     assert!(matches!(r, Err(Error::Protocol(_))), "got {r:?}");
+}
+
+#[tokio::test]
+async fn server_rejects_unknown_routing_id() {
+    let server = Socket::new(SocketType::Server, Options::default());
+    let result = server
+        .send(Message::single("nobody").with_routing_id(u32::MAX))
+        .await;
+    assert!(matches!(result, Err(Error::Unroutable)), "got {result:?}");
 }
 
 #[tokio::test]
@@ -184,22 +195,25 @@ async fn client_server_multiple_clients() {
         c.send(Message::single(format!("from-{i}"))).await.unwrap();
     }
 
-    let mut ids = Vec::new();
+    let mut routing_ids = Vec::new();
     for _ in 0..3 {
         let m = tokio::time::timeout(Duration::from_millis(500), server.recv())
             .await
             .unwrap()
             .unwrap();
-        let id = m.part_bytes(0).unwrap();
-        let body = m.part_bytes(1).unwrap();
+        let routing_id = m.routing_id().expect("SERVER routing id");
+        let body = m.part_bytes(0).unwrap();
         server
-            .send(Message::multipart([
-                id.clone(),
-                Bytes::from(format!("re:{}", String::from_utf8_lossy(&body))),
-            ]))
+            .send(
+                Message::single(Bytes::from(format!(
+                    "re:{}",
+                    String::from_utf8_lossy(&body)
+                )))
+                .with_routing_id(routing_id),
+            )
             .await
             .unwrap();
-        ids.push(id);
+        routing_ids.push(routing_id);
     }
 
     for c in &clients {
@@ -209,7 +223,9 @@ async fn client_server_multiple_clients() {
             .unwrap();
         assert!(reply.part_bytes(0).unwrap().starts_with(b"re:from-"));
     }
-    assert_eq!(ids.len(), 3);
+    routing_ids.sort_unstable();
+    routing_ids.dedup();
+    assert_eq!(routing_ids.len(), 3);
 }
 
 #[tokio::test]

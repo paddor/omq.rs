@@ -159,6 +159,7 @@ pub struct Socket {
     retry_at: Option<Instant>,
     type_state: TypeState,
     rep_request_pending: bool,
+    server_routing_id: u32,
     closed: bool,
 }
 
@@ -185,6 +186,7 @@ impl Socket {
             retry_at: None,
             type_state: TypeState::new(),
             rep_request_pending: false,
+            server_routing_id: 0,
             closed: false,
         };
         socket.establish().await?;
@@ -217,6 +219,7 @@ impl Socket {
             retry_at: None,
             type_state: TypeState::new(),
             rep_request_pending: false,
+            server_routing_id: 0,
             closed: false,
         };
         Ok((socket, bound))
@@ -236,7 +239,11 @@ impl Socket {
     pub async fn send(&mut self, message: &Message) -> Result<()> {
         self.ensure_connected().await?;
         let mut wire_message = self.type_state.pre_send(self.kind, message.clone())?;
-        if is_identity_routed(self.kind) {
+        if self.kind == SocketType::Server {
+            if wire_message.take_routing_id() != Some(self.server_routing_id) {
+                return Err(Error::Unroutable);
+            }
+        } else if is_identity_routed(self.kind) {
             let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
             wire_message = strip_single_peer_identity(self.kind, &peer_identity, wire_message)?;
         }
@@ -293,7 +300,9 @@ impl Socket {
                     return Err(error);
                 }
             };
-            let message = if is_identity_routed(self.kind) {
+            let message = if self.kind == SocketType::Server {
+                message.with_routing_id(self.server_routing_id)
+            } else if is_identity_routed(self.kind) {
                 let peer_identity = self.live.as_ref().expect("connected").peer_identity.clone();
                 Message::with_prefix(peer_identity, message)
             } else {
@@ -422,6 +431,12 @@ impl Socket {
         };
         match result {
             Ok(live) => {
+                if self.kind == SocketType::Server {
+                    let Some(routing_id) = self.server_routing_id.checked_add(1) else {
+                        return Err(Error::Config("SERVER routing IDs exhausted".into()));
+                    };
+                    self.server_routing_id = routing_id;
+                }
                 self.live = Some(live);
                 self.reconnect_attempt = 0;
                 self.retry_at = None;
@@ -661,7 +676,7 @@ async fn finish_handshake(live: &mut LiveConnection) -> Result<Bytes> {
 }
 
 fn is_identity_routed(socket_type: SocketType) -> bool {
-    matches!(socket_type, SocketType::Router | SocketType::Server)
+    socket_type == SocketType::Router
 }
 
 fn strip_single_peer_identity(
@@ -1101,10 +1116,10 @@ mod tests {
         .unwrap();
         let server_task = tokio::spawn(async move {
             let request = server.recv().await.unwrap();
-            assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"client-a");
-            assert_eq!(request.part_bytes(1).unwrap().as_ref(), b"request");
+            assert_eq!(request, Message::single("request"));
+            let routing_id = request.routing_id().expect("SERVER routing id");
             server
-                .send(&Message::multipart(["client-a", "reply"]))
+                .send(&Message::single("reply").with_routing_id(routing_id))
                 .await
         });
 
@@ -1121,6 +1136,57 @@ mod tests {
         client.send(&Message::single("request")).await.unwrap();
         assert_eq!(client.recv().await.unwrap(), Message::single("reply"));
         server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_rejects_stale_routing_id_after_reconnect() {
+        let (mut server, endpoint) = Socket::bind(
+            SocketType::Server,
+            "tcp://127.0.0.1:0".parse().unwrap(),
+            Options::default(),
+        )
+        .await
+        .unwrap();
+
+        let connect = Socket::connect(SocketType::Client, endpoint.clone(), Options::default());
+        let accept = server.maintain();
+        let (client, accepted) = tokio::join!(connect, accept);
+        accepted.unwrap();
+        let mut client = client.unwrap();
+        client.send(&Message::single("first")).await.unwrap();
+        let old_routing_id = server.recv().await.unwrap().routing_id().unwrap();
+        client.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if server.maintain().await.is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server did not observe disconnect");
+
+        let connect = Socket::connect(SocketType::Client, endpoint, Options::default());
+        let accept = server.maintain();
+        let (client, accepted) = tokio::join!(connect, accept);
+        accepted.unwrap();
+        let mut client = client.unwrap();
+        client.send(&Message::single("second")).await.unwrap();
+        let new_routing_id = server.recv().await.unwrap().routing_id().unwrap();
+
+        assert_ne!(new_routing_id, old_routing_id);
+        assert!(matches!(
+            server
+                .send(&Message::single("stale").with_routing_id(old_routing_id))
+                .await,
+            Err(Error::Unroutable)
+        ));
+        server
+            .send(&Message::single("fresh").with_routing_id(new_routing_id))
+            .await
+            .unwrap();
+        assert_eq!(client.recv().await.unwrap(), Message::single("fresh"));
     }
 
     #[tokio::test]

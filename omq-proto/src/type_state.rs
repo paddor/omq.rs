@@ -50,9 +50,8 @@ impl TypeState {
     /// transformed message or an alternation-violation error.
     pub fn pre_send(&mut self, t: SocketType, msg: Message) -> Result<Message> {
         // SingleFrame discipline (drafts). RFC 41 / 48 / 49 / 51 mandate
-        // single-frame application messages on these types. SERVER user
-        // messages are `[routing_id, body]` (2 parts) before the identity
-        // strip; we enforce body is single by allowing exactly 2 parts.
+        // single-frame application messages on these types. SERVER carries
+        // its route as message metadata rather than an application frame.
         match t {
             SocketType::Client | SocketType::Scatter | SocketType::Gather | SocketType::Channel
                 if msg.len() != 1 =>
@@ -62,7 +61,12 @@ impl TypeState {
                     msg.len()
                 )));
             }
-            SocketType::Server | SocketType::Stream if msg.len() != 2 => {
+            SocketType::Server if msg.len() != 1 || msg.routing_id().is_none() => {
+                return Err(Error::Protocol(
+                    "SERVER socket requires one part with a routing ID".into(),
+                ));
+            }
+            SocketType::Stream if msg.len() != 2 => {
                 return Err(Error::Protocol(format!(
                     "{t:?} socket requires [routing_id, body] (2 parts)",
                 )));
@@ -152,6 +156,32 @@ impl TypeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_requires_single_body_with_routing_metadata() {
+        let mut state = TypeState::new();
+        assert!(
+            state
+                .pre_send(SocketType::Server, Message::single("body"))
+                .is_err()
+        );
+        assert!(
+            state
+                .pre_send(
+                    SocketType::Server,
+                    Message::multipart(["a", "b"]).with_routing_id(1),
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .pre_send(
+                    SocketType::Server,
+                    Message::single("body").with_routing_id(1),
+                )
+                .is_ok()
+        );
+    }
 
     #[test]
     fn req_prepends_empty_delimiter() {

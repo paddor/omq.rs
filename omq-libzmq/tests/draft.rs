@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_connect_peer, zmq_ctx_new, zmq_ctx_term,
-    zmq_disconnect_peer, zmq_getsockopt, zmq_join, zmq_msg_close, zmq_msg_init_buffer,
-    zmq_msg_send, zmq_msg_set_group, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
+    zmq_disconnect_peer, zmq_getsockopt, zmq_join, zmq_msg_close, zmq_msg_data, zmq_msg_init,
+    zmq_msg_init_buffer, zmq_msg_recv, zmq_msg_routing_id, zmq_msg_send, zmq_msg_set_group,
+    zmq_msg_set_routing_id, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket,
 };
 
 const ZMQ_SERVER: i32 = 12;
@@ -96,7 +97,7 @@ fn peer_connect_peer_stubs_return_enotsup() {
     zmq_ctx_term(ctx);
 }
 
-/// SERVER/CLIENT: SERVER receives [`routing_id`, body], replies [`routing_id`, body].
+/// SERVER/CLIENT: SERVER receives and replies with routing metadata.
 #[test]
 fn server_client_roundtrip() {
     let ctx = zmq_ctx_new();
@@ -115,28 +116,34 @@ fn server_client_roundtrip() {
     let rc = zmq_send(client, b"request".as_ptr().cast(), 7, 0);
     assert_eq!(rc, 7);
 
-    // SERVER recv: identity frame first (like ROUTER).
-    let mut buf = [0u8; 64];
-    let rc = zmq_recv(server, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert!(
-        rc > 0,
-        "server recv identity failed (errno={})",
-        omq_zmq::zmq_errno()
+    // SERVER receives one body carrying a nonzero routing ID.
+    let mut request = ZmqMsg::zeroed();
+    assert_eq!(zmq_msg_init(request.0.as_mut_ptr().cast()), 0);
+    assert_eq!(zmq_msg_recv(request.0.as_mut_ptr().cast(), server, 0), 7);
+    let routing_id = zmq_msg_routing_id(request.0.as_ptr().cast());
+    assert_ne!(routing_id, 0);
+    assert_eq!(zmq_msg_size(request.0.as_ptr().cast()), 7);
+    let request_data = zmq_msg_data(request.0.as_mut_ptr().cast()).cast::<u8>();
+    // SAFETY: the message owns seven readable bytes until it is closed.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(request_data, 7) },
+        b"request"
     );
-    let id_len = rc as usize;
-    let id = buf[..id_len].to_vec();
-    assert!(rcvmore(server), "identity frame should have more");
+    zmq_msg_close(request.0.as_mut_ptr().cast());
 
-    // Payload frame.
-    let rc = zmq_recv(server, buf.as_mut_ptr().cast(), buf.len(), 0);
-    assert_eq!(rc, 7);
-    assert_eq!(&buf[..7], b"request");
+    // SERVER replies by setting the received routing ID on one body.
+    let mut reply = ZmqMsg::zeroed();
+    assert_eq!(
+        zmq_msg_init_buffer(reply.0.as_mut_ptr().cast(), b"reply".as_ptr().cast(), 5),
+        0
+    );
+    assert_eq!(
+        zmq_msg_set_routing_id(reply.0.as_mut_ptr().cast(), routing_id),
+        0
+    );
+    assert_eq!(zmq_msg_send(reply.0.as_mut_ptr().cast(), server, 0), 5);
 
-    // SERVER reply: [routing_id, reply_body].
-    zmq_send(server, id.as_ptr().cast(), id_len, ZMQ_SNDMORE);
-    zmq_send(server, b"reply".as_ptr().cast(), 5, 0);
-
-    // CLIENT receives reply.
+    let mut buf = [0u8; 64];
     let rc = zmq_recv(client, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert_eq!(rc, 5);
     assert_eq!(&buf[..5], b"reply");
@@ -359,21 +366,11 @@ fn server_multiple_clients_tcp() {
     let mut buf = [0u8; 64];
     // Server receives and echoes back.
     for _ in 0..3 {
-        // Identity frame.
-        let rc = zmq_recv(server, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert!(rc > 0);
-        let id_len = rc as usize;
-        let id = buf[..id_len].to_vec();
-        assert!(rcvmore(server));
-
-        // Payload.
-        let rc = zmq_recv(server, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert!(rc > 0);
-        let plen = rc as usize;
-
-        // Echo back: [id, payload].
-        zmq_send(server, id.as_ptr().cast(), id_len, ZMQ_SNDMORE);
-        zmq_send(server, buf[..plen].as_ptr().cast(), plen, 0);
+        let mut message = ZmqMsg::zeroed();
+        assert_eq!(zmq_msg_init(message.0.as_mut_ptr().cast()), 0);
+        assert!(zmq_msg_recv(message.0.as_mut_ptr().cast(), server, 0) > 0);
+        assert_ne!(zmq_msg_routing_id(message.0.as_ptr().cast()), 0);
+        assert!(zmq_msg_send(message.0.as_mut_ptr().cast(), server, 0) > 0);
     }
 
     // Each client receives its echo.

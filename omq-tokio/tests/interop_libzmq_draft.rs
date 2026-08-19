@@ -164,13 +164,10 @@ async fn libzmq_client_to_omq_server() {
     ]);
 
     let request = recv(&server, "libzmq CLIENT -> omq SERVER").await;
-    assert_eq!(request.part_bytes(1).unwrap(), &b"from-client"[..]);
-    let routing_id = request.part_bytes(0).unwrap();
+    assert_eq!(request, Message::single("from-client"));
+    let routing_id = request.routing_id().expect("SERVER routing id");
     server
-        .send(Message::multipart([
-            routing_id,
-            Bytes::from_static(b"from-server"),
-        ]))
+        .send(Message::single("from-server").with_routing_id(routing_id))
         .await
         .unwrap();
     wait_success(child, "libzmq CLIENT").await;

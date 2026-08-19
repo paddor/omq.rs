@@ -336,13 +336,11 @@ async fn client_server_connect_before_bind(ep: Endpoint) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m, Message::multipart(["c1", "ping"]));
+    assert_eq!(m, Message::single("ping"));
+    let routing_id = m.routing_id().expect("SERVER routing id");
 
     server
-        .send(Message::multipart([
-            Bytes::from_static(b"c1"),
-            Bytes::from_static(b"pong"),
-        ]))
+        .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
     let m = tokio::time::timeout(TIMEOUT, client.recv())
@@ -391,10 +389,11 @@ async fn latency_client_server_connect_before_bind_tcp() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m, Message::multipart(["latency-c1", "ping"]));
+    assert_eq!(m, Message::single("ping"));
+    let routing_id = m.routing_id().expect("SERVER routing id");
 
     server
-        .send(Message::multipart(["latency-c1", "pong"]))
+        .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
     let m = tokio::time::timeout(TIMEOUT, client.recv())

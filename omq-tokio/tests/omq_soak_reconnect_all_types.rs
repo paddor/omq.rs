@@ -393,7 +393,7 @@ async fn cycle_client_server(pair: &mut PairState) -> bool {
         return false;
     }
     let ok = match tokio::time::timeout(Duration::from_secs(5), server.recv()).await {
-        Ok(Ok(m)) => m.part_bytes(0).is_some_and(|id| id.as_ref() == b"c1"),
+        Ok(Ok(m)) => m.routing_id().is_some() && m.len() == 1,
         _ => false,
     };
     server.close().await.unwrap();

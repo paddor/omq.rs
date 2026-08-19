@@ -195,8 +195,8 @@ async fn client_server_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"ping");
+    assert_eq!(m, Message::single("ping"));
+    assert!(m.routing_id().is_some());
 
     client1.close().await.unwrap();
 
@@ -212,8 +212,8 @@ async fn client_server_reconnect_connect_side() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
-    assert_eq!(m.part_bytes(1).unwrap().as_ref(), b"pong");
+    assert_eq!(m, Message::single("pong"));
+    assert!(m.routing_id().is_some());
 }
 
 // ── SCATTER / GATHER ─────────────────────────────────────────────────────────

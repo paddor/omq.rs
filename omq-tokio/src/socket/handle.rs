@@ -367,7 +367,8 @@ impl Socket {
                     .pre_send(self.inner.socket_type, msg)?;
                 self.inner.send_submitter.send(msg).await
             }
-            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Stream => {
+            SocketType::Server => self.inner.send_submitter.send_server(msg).await,
+            SocketType::Router | SocketType::Peer | SocketType::Stream => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
                 self.inner.send_submitter.send(msg).await
             }
@@ -430,7 +431,8 @@ impl Socket {
                     .map_err(TrySendError::Error)?;
                 self.inner.send_submitter.try_send(msg)
             }
-            SocketType::Router | SocketType::Server => {
+            SocketType::Server => self.inner.send_submitter.try_send_server(msg),
+            SocketType::Router => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
                 self.inner.send_submitter.try_send(msg)
@@ -1261,9 +1263,6 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
                 msg.len()
             )))
         }
-        SocketType::Server if msg.len() != 2 => Err(Error::Protocol(
-            "SERVER socket requires [routing_id, body] (2 parts)".into(),
-        )),
         _ => Ok(()),
     }
 }

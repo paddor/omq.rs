@@ -133,6 +133,25 @@ impl SendSubmitter {
         }
     }
 
+    pub(crate) async fn send_server(&self, msg: Message) -> Result<()> {
+        match self {
+            Self::Identity(s) => s.send_server(msg).await,
+            _ => Err(Error::Protocol("SERVER route unavailable".into())),
+        }
+    }
+
+    pub(crate) fn try_send_server(
+        &self,
+        msg: Message,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        match self {
+            Self::Identity(s) => s.try_send_server(msg),
+            _ => Err(omq_proto::error::TrySendError::Error(Error::Protocol(
+                "SERVER route unavailable".into(),
+            ))),
+        }
+    }
+
     pub(crate) fn send_rep_try_to_peer(
         &self,
         peer_id: u64,

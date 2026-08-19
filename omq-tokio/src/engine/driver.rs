@@ -123,6 +123,7 @@ pub enum RecvSink {
     Yring(YringSink),
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     Rep(RepRecvSink),
+    Server(ServerRecvSink),
 }
 
 /// REP's latency receive path: perform identity/envelope handling in the
@@ -132,6 +133,14 @@ pub struct RepRecvSink {
     sink: Box<RecvSink>,
     pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
     peer_id: u64,
+}
+
+/// SERVER's direct receive path: attach the connection's opaque routing ID
+/// without constructing an identity frame or multipart message.
+#[derive(Debug)]
+pub struct ServerRecvSink {
+    sink: Box<RecvSink>,
+    routing_id: u32,
 }
 
 /// Yring-based recv sink. Pushes decoded messages directly into a
@@ -222,6 +231,10 @@ impl std::fmt::Debug for RecvSink {
                 .finish_non_exhaustive(),
             Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
             Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
+            Self::Server(server) => f
+                .debug_struct("Server")
+                .field("routing_id", &server.routing_id)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -299,9 +312,33 @@ impl RecvSink {
         })
     }
 
+    pub(crate) fn server(sink: RecvSink, routing_id: u32) -> Self {
+        Self::Server(ServerRecvSink {
+            sink: Box::new(sink),
+            routing_id,
+        })
+    }
+
+    fn is_yring(&self) -> bool {
+        match self {
+            Self::Yring(_) => true,
+            Self::Server(server) => server.sink.is_yring(),
+            _ => false,
+        }
+    }
+
     /// Non-blocking push. Returns the message back if the yring is full.
     /// Channel variant always succeeds (awaits space).
     pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
+        if let Self::Server(server) = self {
+            let routed = m.with_routing_id(server.routing_id);
+            let _ = server.sink.send_plain(routed).await;
+            return None;
+        }
+        self.try_send_plain(m).await
+    }
+
+    async fn try_send_plain(&mut self, m: Message) -> Option<Message> {
         match self {
             Self::Channel(pipe) => {
                 let _ = pipe.send(m).await;
@@ -319,6 +356,7 @@ impl RecvSink {
                 None
             }
             Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
+            Self::Server(_) => unreachable!("nested SERVER sink"),
         }
     }
 
@@ -357,7 +395,7 @@ impl RecvSink {
                 }
             }
             Self::Conflate(slot) => slot.send_latest(m),
-            Self::Rep(_) => unreachable!("plain send on REP sink"),
+            Self::Rep(_) | Self::Server(_) => unreachable!("wrapped sink uses routed send"),
         }
     }
 
@@ -372,6 +410,10 @@ impl RecvSink {
                 .push_back((rep.peer_id, envelope));
             return rep.sink.send_plain(body).await;
         }
+        if let Self::Server(server) = self {
+            let routed = m.with_routing_id(server.routing_id);
+            return server.sink.send_plain(routed).await;
+        }
         self.send_plain(m).await
     }
 
@@ -381,14 +423,27 @@ impl RecvSink {
         defer_yring_flush: bool,
         pending_yring_flush: &mut bool,
     ) -> bool {
-        if defer_yring_flush && let Self::Yring(sink) = self {
-            return sink.send_deferred(m, pending_yring_flush).await;
+        if defer_yring_flush {
+            if let Self::Yring(sink) = self {
+                return sink.send_deferred(m, pending_yring_flush).await;
+            }
+            if let Self::Server(server) = self {
+                let routed = m.with_routing_id(server.routing_id);
+                if let Self::Yring(sink) = server.sink.as_mut() {
+                    return sink.send_deferred(routed, pending_yring_flush).await;
+                }
+                return server.sink.send_plain(routed).await;
+            }
         }
         self.send(m).await
     }
 
     fn flush_deferred(&mut self, pending_yring_flush: &mut bool) {
         if let Self::Yring(sink) = self {
+            sink.flush_pending(pending_yring_flush);
+        } else if let Self::Server(server) = self
+            && let Self::Yring(sink) = server.sink.as_mut()
+        {
             sink.flush_pending(pending_yring_flush);
         }
     }
@@ -1184,7 +1239,7 @@ async fn drain_decoded_messages(
     let mut recv_batch_time = None;
     let defer_yring_flush = decoder.is_none()
         && matches!(receive_profile, ReceiveProfile::Throughput)
-        && matches!(recv_direct, Some(RecvSink::Yring(_)));
+        && recv_direct.as_ref().is_some_and(RecvSink::is_yring);
     let mut pending_yring_flush = false;
     while let Some(m) = connection.poll_message() {
         let m = match decoder.as_mut() {

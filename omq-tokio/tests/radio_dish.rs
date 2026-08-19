@@ -22,10 +22,7 @@ async fn radio_to_dish_with_matching_group() {
     dish.connect(ep).await.unwrap();
     dish.join("weather").await.unwrap();
 
-    radio
-        .send(Message::multipart(["weather", "sunny"]))
-        .await
-        .unwrap();
+    radio.send_group("weather", "sunny").await.unwrap();
     radio
         .send(Message::multipart(["news", "ignored"]))
         .await
@@ -49,6 +46,13 @@ async fn radio_to_dish_with_matching_group() {
     // The "news" message is not delivered.
     let third = tokio::time::timeout(Duration::from_millis(100), dish.recv()).await;
     assert!(third.is_err(), "non-joined group must not be delivered");
+}
+
+#[tokio::test]
+async fn send_group_rejects_non_radio_socket() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    let result = push.send_group("weather", "sunny").await;
+    assert!(matches!(result, Err(Error::Protocol(_))));
 }
 
 #[tokio::test]

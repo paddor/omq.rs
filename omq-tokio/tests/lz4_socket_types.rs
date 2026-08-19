@@ -230,12 +230,11 @@ async fn client_server_over_lz4() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got.len(), 2);
-    assert_eq!(got.part_bytes(0).unwrap(), &b"cli1"[..]);
-    assert_eq!(got.part_bytes(1).unwrap(), &b"ping"[..]);
+    assert_eq!(got, Message::single("ping"));
+    let routing_id = got.routing_id().expect("SERVER routing id");
 
     server
-        .send(Message::multipart(["cli1", "pong"]))
+        .send(Message::single("pong").with_routing_id(routing_id))
         .await
         .unwrap();
 
@@ -274,13 +273,16 @@ async fn client_server_multi_client() {
             .await
             .unwrap()
             .unwrap();
-        let id = m.part_bytes(0).unwrap();
-        let body = m.part_bytes(1).unwrap();
+        let routing_id = m.routing_id().expect("SERVER routing id");
+        let body = m.part_bytes(0).unwrap();
         server
-            .send(Message::multipart([
-                id.clone(),
-                Bytes::from(format!("re:{}", String::from_utf8_lossy(&body))),
-            ]))
+            .send(
+                Message::single(Bytes::from(format!(
+                    "re:{}",
+                    String::from_utf8_lossy(&body)
+                )))
+                .with_routing_id(routing_id),
+            )
             .await
             .unwrap();
     }

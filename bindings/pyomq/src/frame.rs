@@ -12,19 +12,40 @@ use std::ffi::{c_int, c_void};
 pub struct Frame {
     data: Bytes,
     more: bool,
+    routing_id: u32,
 }
 
 impl Frame {
     pub(crate) fn from_bytes(data: Bytes) -> Self {
-        Self { data, more: false }
+        Self {
+            data,
+            more: false,
+            routing_id: 0,
+        }
     }
 
     pub(crate) fn from_bytes_more(data: Bytes, more: bool) -> Self {
-        Self { data, more }
+        Self {
+            data,
+            more,
+            routing_id: 0,
+        }
+    }
+
+    pub(crate) fn from_bytes_more_routing(data: Bytes, more: bool, routing_id: u32) -> Self {
+        Self {
+            data,
+            more,
+            routing_id,
+        }
     }
 
     pub(crate) fn bytes_clone(&self) -> Bytes {
         self.data.clone()
+    }
+
+    pub(crate) fn routing_id_value(&self) -> u32 {
+        self.routing_id
     }
 }
 
@@ -60,6 +81,16 @@ impl Frame {
     #[getter]
     fn more(&self) -> bool {
         self.more
+    }
+
+    #[getter]
+    fn routing_id(&self) -> u32 {
+        self.routing_id
+    }
+
+    #[setter]
+    fn set_routing_id(&mut self, routing_id: u32) {
+        self.routing_id = routing_id;
     }
 
     #[getter]

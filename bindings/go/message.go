@@ -2,7 +2,8 @@ package omq
 
 // Message is an immutable OMQ message with zero or more parts.
 type Message struct {
-	parts [][]byte
+	parts     [][]byte
+	routingID uint32
 }
 
 // NewMessage copies parts into a message.
@@ -32,6 +33,17 @@ func Multipart(parts ...[]byte) Message {
 // Group creates a RADIO/DISH group message.
 func Group(group string, body []byte) Message {
 	return Multipart([]byte(group), body)
+}
+
+// WithRoutingID attaches the opaque routing ID supplied by a SERVER socket.
+func (m Message) WithRoutingID(routingID uint32) Message {
+	m.routingID = routingID
+	return m
+}
+
+// RoutingID returns the SERVER routing ID and whether it is present.
+func (m Message) RoutingID() (uint32, bool) {
+	return m.routingID, m.routingID != 0
 }
 
 // Route prefixes a message with a routing identity.
@@ -156,7 +168,7 @@ func (m Message) Body() Message {
 
 // Equal reports whether two messages have identical parts.
 func (m Message) Equal(other Message) bool {
-	if len(m.parts) != len(other.parts) {
+	if m.routingID != other.routingID || len(m.parts) != len(other.parts) {
 		return false
 	}
 	for i, part := range m.parts {

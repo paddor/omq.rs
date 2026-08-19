@@ -1,16 +1,17 @@
-//! Identity-based routing for ROUTER, REP, SERVER, PEER, STREAM.
+//! Identity-based routing for ROUTER, REP, PEER, STREAM, plus SERVER's
+//! opaque numeric routing IDs.
 //!
 //! Each peer is keyed by `(identity, connection_id)`; the identity-to-peer
 //! map holds the LATEST `peer_id` for a given identity, so a reconnect
 //! replaces the stale entry without leaking the old peer state.
 //!
-//! Send: first frame of the user message is the routing identity. Look up
-//! the matching peer; forward the rest. If no match:
+//! Identity send: the first user frame identifies a peer. SERVER instead
+//! looks up the peer directly from `Message::routing_id`. If no match:
 //! - `router_mandatory = true` -> `Error::Unroutable`.
 //! - otherwise silently drop (libzmq default).
 //!
-//! Recv: we prepend the peer's identity as the first frame of the message
-//! before delivering to the socket's recv channel.
+//! Identity recv prepends the peer identity. SERVER bypasses this path and
+//! attaches routing metadata in the connection driver.
 
 use std::sync::{Arc, Mutex};
 
@@ -151,6 +152,48 @@ impl Submitter {
         }
     }
 
+    pub(crate) async fn send_server(&self, mut msg: Message) -> Result<()> {
+        let routing_id = take_server_routing_id(&mut msg)?;
+        let peer_id = u64::from(routing_id - 1);
+        loop {
+            let retry = self.try_send_server_to(peer_id, msg)?;
+            match retry {
+                Ok(()) => return Ok(()),
+                Err(SendRetry::Full(returned, space)) => {
+                    msg = returned;
+                    let Some(space) = space else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    let seen = space.generation();
+                    let changed = space.changed_after(seen);
+                    tokio::pin!(changed);
+                    match self.try_send_server_to(peer_id, msg)? {
+                        Ok(()) => return Ok(()),
+                        Err(SendRetry::Full(returned, _)) => msg = returned,
+                    }
+                    changed.await;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn try_send_server(
+        &self,
+        mut msg: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        let retry = msg.clone();
+        let routing_id = take_server_routing_id(&mut msg).map_err(TrySendError::Error)?;
+        let peer_id = u64::from(routing_id - 1);
+        match self
+            .try_send_server_to(peer_id, msg)
+            .map_err(TrySendError::Error)?
+        {
+            Ok(()) => Ok(()),
+            Err(SendRetry::Full(_, _)) => Err(TrySendError::Full(retry)),
+        }
+    }
+
     pub(crate) async fn wait_send_progress(&self, msg: &Message) {
         let Some(identity) = msg.part_bytes(0) else {
             tokio::task::yield_now().await;
@@ -251,6 +294,37 @@ impl Submitter {
             }
         }
     }
+
+    fn try_send_server_to(
+        &self,
+        peer_id: u64,
+        msg: Message,
+    ) -> Result<core::result::Result<(), SendRetry>> {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        let Some(peer) = g.peers.get_mut(&peer_id) else {
+            return Err(Error::Unroutable);
+        };
+        match peer.target.try_send(msg) {
+            Ok(()) => Ok(Ok(())),
+            Err(SendPipeError::Closed(_)) => Err(Error::Unroutable),
+            Err(SendPipeError::Full(returned)) => {
+                let space = peer.target.space_available();
+                Ok(Err(SendRetry::Full(returned, space)))
+            }
+        }
+    }
+}
+
+fn take_server_routing_id(msg: &mut Message) -> Result<u32> {
+    if msg.len() != 1 {
+        return Err(Error::Protocol(format!(
+            "SERVER socket requires a single-part message (got {})",
+            msg.len()
+        )));
+    }
+    msg.take_routing_id()
+        .filter(|routing_id| *routing_id != 0)
+        .ok_or_else(|| Error::Protocol("SERVER socket requires a routing ID".into()))
 }
 
 #[derive(Debug)]

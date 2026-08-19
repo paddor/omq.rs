@@ -16,6 +16,7 @@ export declare class NativeSocket {
   sendSync(parts: Array<Uint8Array>): void
   sendOneSync(payload: Uint8Array): void
   sendBufferSync(payload: Buffer): void
+  sendGroupSync(group: Uint8Array, payload: Uint8Array): void
   recv(): Array<Uint8Array>
   recvSync(): Array<Uint8Array>
   recvRawSync(): Uint8Array | Array<Uint8Array>

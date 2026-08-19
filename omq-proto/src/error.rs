@@ -55,6 +55,10 @@ pub enum Error {
         max: usize,
     },
 
+    /// The peer exhausted a configured receive token bucket.
+    #[error("receive rate limit exceeded")]
+    ReceiveRateLimitExceeded,
+
     /// No connected peer can accept the message.
     #[error("no route to peer")]
     Unroutable,

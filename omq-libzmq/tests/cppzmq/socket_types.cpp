@@ -262,12 +262,17 @@ void server_client_tcp()
     settle();
 
     send_text(client, "request");
-    const std::vector<std::string> frames = recv_strings(server);
-    expect_size(frames.size(), 2);
-    expect(!frames[0].empty(), "SERVER routing id missing");
-    expect_payload(frames[1], "request");
+    zmq::message_t request;
+    const auto received = server.recv(request, zmq::recv_flags::none);
+    expect(received.has_value(), "SERVER recv timed out");
+    expect_payload(message_string(request), "request");
+    const uint32_t routing_id = request.routing_id();
+    expect(routing_id != 0, "SERVER routing id missing");
 
-    send_two(server, frames[0], "reply");
+    zmq::message_t reply("reply", 5);
+    reply.set_routing_id(routing_id);
+    const auto sent = server.send(reply, zmq::send_flags::none);
+    expect(sent && *sent == 5, "SERVER reply failed");
     expect_payload(recv_string(client), "reply");
 }
 

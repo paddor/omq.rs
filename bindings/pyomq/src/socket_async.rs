@@ -78,10 +78,14 @@ impl AsyncSocket {
 
     #[pyo3(signature = (payload, flags = 0))]
     fn send(&self, payload: &Bound<'_, PyAny>, flags: i32) -> PyResult<()> {
+        let routing_id = conversions::routing_id_from_pyany(payload);
         let bytes = conversions::bytes_from_pyany(payload)?;
-        let Some(msg) = self.inner.build_or_buffer(bytes, flags) else {
+        let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(());
         };
+        if routing_id != 0 {
+            msg = msg.with_routing_id(routing_id);
+        }
         self.inner.materialize()?;
         let materialized_guard = self.inner.materialized.read().unwrap();
         let materialized = materialized_guard.as_ref().unwrap();
@@ -149,6 +153,7 @@ impl AsyncSocket {
         let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
+            let routing_id = msg.routing_id().unwrap_or(0);
             let mut parts: Vec<Bytes> = msg.iter().collect();
             let head = if parts.is_empty() {
                 Bytes::new()
@@ -159,7 +164,7 @@ impl AsyncSocket {
             if more {
                 self.inner.store_rxbuf(parts);
             }
-            Ok(Bound::new(py, Frame::from_bytes_more(head, more))?.into_any())
+            Ok(Bound::new(py, Frame::from_bytes_more_routing(head, more, routing_id))?.into_any())
         } else {
             Ok(py.None().bind(py).clone())
         }

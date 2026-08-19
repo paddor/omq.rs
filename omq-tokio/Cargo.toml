@@ -397,6 +397,10 @@ name = "omq_random_sizes"
 path = "tests/random_sizes.rs"
 
 [[test]]
+name = "omq_receive_rate_limit"
+path = "tests/receive_rate_limit.rs"
+
+[[test]]
 name = "omq_resource_watch"
 path = "tests/resource_watch.rs"
 

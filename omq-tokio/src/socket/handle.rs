@@ -17,7 +17,7 @@ use omq_proto::proto::SocketType;
 use omq_proto::type_state::TypeState;
 
 use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
-use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream};
+use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream, PeerInfo};
 use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles, SpscPush};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocRegistry;
@@ -88,6 +88,16 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Send one body to a RADIO group.
+    pub async fn send_group(&self, group: impl Into<Bytes>, body: impl Into<Bytes>) -> Result<()> {
+        if self.inner.socket_type != SocketType::Radio {
+            return Err(Error::Protocol(
+                "send_group is only valid on RADIO sockets".into(),
+            ));
+        }
+        self.send(Message::with_group(group, body)).await
+    }
+
     /// Create a new socket of the given type with the given options. Spawns
     /// the driver task on the current tokio runtime.
     ///
@@ -357,7 +367,8 @@ impl Socket {
                     .pre_send(self.inner.socket_type, msg)?;
                 self.inner.send_submitter.send(msg).await
             }
-            SocketType::Router | SocketType::Server | SocketType::Peer | SocketType::Stream => {
+            SocketType::Server => self.inner.send_submitter.send_server(msg).await,
+            SocketType::Router | SocketType::Peer | SocketType::Stream => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
                 self.inner.send_submitter.send(msg).await
             }
@@ -420,7 +431,8 @@ impl Socket {
                     .map_err(TrySendError::Error)?;
                 self.inner.send_submitter.try_send(msg)
             }
-            SocketType::Router | SocketType::Server => {
+            SocketType::Server => self.inner.send_submitter.try_send_server(msg),
+            SocketType::Router => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
                 self.inner.send_submitter.try_send(msg)
@@ -1034,6 +1046,23 @@ impl Socket {
         rx.await.map_err(|_| Error::Closed)
     }
 
+    /// Snapshot the peer addressed by a routing id received on a SERVER socket.
+    /// `Ok(None)` means the route is stale or unknown.
+    pub async fn peer_info(&self, routing_id: u32) -> Result<Option<PeerInfo>> {
+        if self.inner.socket_type != SocketType::Server {
+            return Err(Error::Protocol(
+                "peer_info is only valid on SERVER sockets".into(),
+            ));
+        }
+        let (ack, rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::QueryPeerInfo { routing_id, ack })
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx.await.map_err(|_| Error::Closed)
+    }
+
     /// Wait until at least `min_peers` peers have completed the ZMTP
     /// handshake, or `timeout` expires. Returns the peer count at the
     /// time the threshold was met, or `Error::Timeout` if the deadline
@@ -1251,9 +1280,6 @@ fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
                 msg.len()
             )))
         }
-        SocketType::Server if msg.len() != 2 => Err(Error::Protocol(
-            "SERVER socket requires [routing_id, body] (2 parts)".into(),
-        )),
         _ => Ok(()),
     }
 }

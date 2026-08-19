@@ -433,6 +433,13 @@ impl UserData for NativeSocket {
             },
         );
         methods.add_method(
+            "send_routed",
+            |_, this, (routing_id, payload, flags): (u32, LuaString, Option<i32>)| {
+                this.send_routed(routing_id, payload.as_bytes().as_ref(), flags.unwrap_or(0))?;
+                Ok(true)
+            },
+        );
+        methods.add_method(
             "recv",
             |lua, this, (max_size, flags): (Option<usize>, Option<i32>)| {
                 this.recv_lua_string(lua, max_size, flags.unwrap_or(0))
@@ -441,6 +448,23 @@ impl UserData for NativeSocket {
         methods.add_method("try_recv", |lua, this, max_size: Option<usize>| {
             this.recv_lua_string(lua, max_size, ZMQ_DONTWAIT)
         });
+        methods.add_method(
+            "recv_routed",
+            |lua,
+             this,
+             (max_size, flags): (Option<usize>, Option<i32>)|
+             -> LuaResult<(Option<LuaString>, Option<u32>)> {
+                let Some((payload, _, routing_id)) =
+                    this.recv_lua_frame(lua, max_size, flags.unwrap_or(0))?
+                else {
+                    return Ok((None, None));
+                };
+                if routing_id == 0 {
+                    return Err(LuaError::runtime("received message has no routing id"));
+                }
+                Ok((Some(payload), Some(routing_id)))
+            },
+        );
         methods.add_method(
             "recv_parts",
             |lua, this, (max_size, flags): (Option<usize>, Option<i32>)| {
@@ -552,6 +576,35 @@ impl NativeSocket {
         Ok(())
     }
 
+    fn send_routed(&self, routing_id: u32, payload: &[u8], flags: i32) -> LuaResult<()> {
+        let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
+        let msg = msg.as_mut_ptr();
+        check_rc(omq_zmq::zmq_msg_init_size(msg, payload.len()))?;
+        if !payload.is_empty() {
+            let data = omq_zmq::zmq_msg_data(msg);
+            if data.is_null() {
+                let _ = omq_zmq::zmq_msg_close(msg);
+                return Err(LuaError::runtime("message data was null"));
+            }
+            // SAFETY: zmq_msg_init_size allocated exactly payload.len() bytes.
+            unsafe {
+                ptr::copy_nonoverlapping(payload.as_ptr(), data.cast(), payload.len());
+            }
+        }
+        if omq_zmq::zmq_msg_set_routing_id(msg, routing_id) != 0 {
+            let err = last_error();
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err(err);
+        }
+        let rc = omq_zmq::zmq_msg_send(msg, self.inner.ptr()?, flags);
+        if rc < 0 {
+            let err = last_error();
+            let _ = omq_zmq::zmq_msg_close(msg);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn recv_lua_string(
         &self,
         lua: &Lua,
@@ -562,7 +615,7 @@ impl NativeSocket {
             return self.recv_lua_string_bounded(lua, max_size, flags);
         }
         self.recv_lua_frame(lua, max_size, flags)
-            .map(|frame| frame.map(|(part, _)| part))
+            .map(|frame| frame.map(|(part, _, _)| part))
     }
 
     fn recv_lua_string_bounded(
@@ -616,7 +669,7 @@ impl NativeSocket {
     ) -> LuaResult<Vec<LuaString>> {
         let mut parts = Vec::new();
         loop {
-            let Some((part, more)) = self.recv_lua_frame(lua, max_size, flags)? else {
+            let Some((part, more, _)) = self.recv_lua_frame(lua, max_size, flags)? else {
                 break;
             };
             parts.push(part);
@@ -632,7 +685,7 @@ impl NativeSocket {
         lua: &Lua,
         max_size: Option<usize>,
         flags: i32,
-    ) -> LuaResult<Option<(LuaString, bool)>> {
+    ) -> LuaResult<Option<(LuaString, bool, u32)>> {
         let sock = self.inner.ptr()?;
         let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
         check_rc(omq_zmq::zmq_msg_init(msg.as_mut_ptr()))?;
@@ -671,9 +724,10 @@ impl NativeSocket {
             unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }
         };
         let more = omq_zmq::zmq_msg_more(msg) != 0;
+        let routing_id = omq_zmq::zmq_msg_routing_id(msg);
         let out = lua.create_string(bytes);
         check_rc(omq_zmq::zmq_msg_close(msg))?;
-        Ok(Some((out?, more)))
+        Ok(Some((out?, more, routing_id)))
     }
 
     fn set_i32(&self, option: i32, value: i32) -> LuaResult<()> {
@@ -1290,7 +1344,7 @@ fn raw_socket_recv_frame(
     sock: *mut c_void,
     max_size: Option<usize>,
     flags: i32,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<(bool, u32)>, String> {
     let mut msg = std::mem::MaybeUninit::<omq_zmq::OmqMsgRepr>::uninit();
     check_rc(omq_zmq::zmq_msg_init(msg.as_mut_ptr())).map_err(|err| err.to_string())?;
     let msg = msg.as_mut_ptr();
@@ -1333,8 +1387,9 @@ fn raw_socket_recv_frame(
         }
     }
     let more = omq_zmq::zmq_msg_more(msg) != 0;
+    let routing_id = omq_zmq::zmq_msg_routing_id(msg);
     check_rc(omq_zmq::zmq_msg_close(msg)).map_err(|err| err.to_string())?;
-    Ok(Some(more))
+    Ok(Some((more, routing_id)))
 }
 
 fn raw_socket_recv(
@@ -1446,6 +1501,25 @@ unsafe extern "C-unwind" fn raw_socket_send_parts(state: *mut ffi::lua_State) ->
     )
 }
 
+unsafe extern "C-unwind" fn raw_socket_send_routed(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let routing_id = lua_required_i64(state, 2)?;
+            let routing_id = u32::try_from(routing_id)
+                .map_err(|_| "routing id must fit in uint32".to_owned())?;
+            let payload = lua_string_bytes(state, 3)?;
+            let flags = lua_optional_i32(state, 4, 0)?;
+            socket
+                .socket()?
+                .send_routed(routing_id, payload, flags)
+                .map_err(|err| err.to_string())?;
+            Ok(lua_bool(state, true))
+        })(),
+    )
+}
+
 unsafe extern "C-unwind" fn raw_socket_recv_method(state: *mut ffi::lua_State) -> c_int {
     raw_finish(
         state,
@@ -1463,6 +1537,28 @@ unsafe extern "C-unwind" fn raw_socket_try_recv(state: *mut ffi::lua_State) -> c
         (|| -> Result<c_int, String> {
             let max_size = lua_optional_usize(state, 2)?;
             raw_socket_recv(state, max_size, ZMQ_DONTWAIT)
+        })(),
+    )
+}
+
+unsafe extern "C-unwind" fn raw_socket_recv_routed(state: *mut ffi::lua_State) -> c_int {
+    raw_finish(
+        state,
+        (|| -> Result<c_int, String> {
+            let socket = raw_socket_mut(state)?;
+            let sock = socket.inner()?.ptr().map_err(|err| err.to_string())?;
+            let max_size = lua_optional_usize(state, 2)?;
+            let flags = lua_optional_i32(state, 3, 0)?;
+            let Some((_, routing_id)) = raw_socket_recv_frame(state, sock, max_size, flags)? else {
+                return Ok(1);
+            };
+            if routing_id == 0 {
+                return Err("received message has no routing id".to_owned());
+            }
+            unsafe {
+                ffi::lua_pushinteger(state, i64::from(routing_id));
+            }
+            Ok(2)
         })(),
     )
 }
@@ -1488,7 +1584,7 @@ unsafe extern "C-unwind" fn raw_socket_recv_parts(state: *mut ffi::lua_State) ->
                 unsafe {
                     ffi::lua_rawseti(state, -2, idx);
                 }
-                if !more.unwrap_or(false) {
+                if !more.is_some_and(|(more, _)| more) {
                     break;
                 }
                 idx += 1;
@@ -1653,8 +1749,10 @@ fn ensure_raw_socket_metatable(state: *mut ffi::lua_State) {
             raw_set_cfunc(state, b"close\0", raw_socket_close);
             raw_set_cfunc(state, b"send\0", raw_socket_send);
             raw_set_cfunc(state, b"send_parts\0", raw_socket_send_parts);
+            raw_set_cfunc(state, b"send_routed\0", raw_socket_send_routed);
             raw_set_cfunc(state, b"recv\0", raw_socket_recv_method);
             raw_set_cfunc(state, b"try_recv\0", raw_socket_try_recv);
+            raw_set_cfunc(state, b"recv_routed\0", raw_socket_recv_routed);
             raw_set_cfunc(state, b"recv_parts\0", raw_socket_recv_parts);
             raw_set_cfunc(state, b"set_linger\0", raw_socket_set_linger);
             raw_set_cfunc(state, b"set_send_timeout\0", raw_socket_set_send_timeout);

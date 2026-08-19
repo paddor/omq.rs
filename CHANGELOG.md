@@ -6,6 +6,14 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- Tokio byte-stream sockets can enforce hard per-connection and aggregate
+  per-IP receive token buckets with `Options::recv_rate_limit()` and
+  `Options::recv_ip_rate_limit()`. Offending connections are disconnected.
+- SERVER sockets can resolve a received routing id to its live `PeerInfo`
+  with `Socket::peer_info()`.
+
 ## [pyomq 0.19.1] - 2026-08-02
 
 ### Fixed

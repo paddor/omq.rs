@@ -194,13 +194,11 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
+    assert_eq!(m, Message::single("ping1"));
+    let routing_id = m.routing_id().expect("SERVER routing id");
 
     server1
-        .send(Message::multipart([
-            Bytes::from_static(b"c1"),
-            Bytes::from_static(b"pong1"),
-        ]))
+        .send(Message::single("pong1").with_routing_id(routing_id))
         .await
         .unwrap();
     let r = tokio::time::timeout(TIMEOUT, client.recv())
@@ -218,13 +216,11 @@ async fn client_identity_survives_reconnect_to_server() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.part_bytes(0).unwrap().as_ref(), b"c1");
+    assert_eq!(m, Message::single("ping2"));
+    let routing_id = m.routing_id().expect("SERVER routing id");
 
     server2
-        .send(Message::multipart([
-            Bytes::from_static(b"c1"),
-            Bytes::from_static(b"pong2"),
-        ]))
+        .send(Message::single("pong2").with_routing_id(routing_id))
         .await
         .unwrap();
     let r = tokio::time::timeout(TIMEOUT, client.recv())

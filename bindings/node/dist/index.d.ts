@@ -163,6 +163,8 @@ export declare class Socket {
     protected joinNative(group: MessagePart): Promise<void>;
     /** Leave a RADIO/DISH group. */
     protected leaveNative(group: MessagePart): Promise<void>;
+    /** Send one body to a RADIO group without creating a parts array. */
+    protected sendGroupNative(group: MessagePart, body: MessagePart): Promise<void>;
 }
 /** Strict request socket. Send and receive must alternate. */
 export declare class Req extends Socket {
@@ -237,6 +239,8 @@ export declare class Server extends Socket {
 export declare class Radio extends Socket {
     /** Create a RADIO socket. */
     constructor(options?: SocketOptions, context?: Context);
+    /** Send one body to a group. */
+    sendGroup(group: MessagePart, body: MessagePart): Promise<void>;
 }
 /** DISH group subscriber socket. */
 export declare class Dish extends Socket {

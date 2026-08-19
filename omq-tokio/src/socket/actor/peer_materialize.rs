@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, InprocConn, MessageEncoder,
     PeerDriverConfig, PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType,
-    ZmtpConnection, mpsc,
+    ZmtpConnection, mpsc, peer_ident_socket_addr,
 };
 use crate::engine::send_pipe::SendPipeProducerHandle;
 use crate::engine::signal::StateSignal;
@@ -24,6 +24,7 @@ pub(super) struct ByteStreamConnection {
     pub(super) leftover: bytes::Bytes,
 }
 
+#[expect(clippy::too_many_lines)]
 pub(super) fn spawn_byte_stream_connection(
     socket: &mut SocketDriver,
     ByteStreamConnection {
@@ -41,7 +42,6 @@ pub(super) fn spawn_byte_stream_connection(
         drop(peer_ident);
         return;
     };
-
     #[cfg(feature = "ws")]
     let is_ws = matches!(&stream, AnyStream::Ws(_));
     #[cfg(feature = "ws")]
@@ -90,6 +90,15 @@ pub(super) fn spawn_byte_stream_connection(
         ),
     );
     let peer_driver = attach_transforms(socket, peer_driver, transforms);
+    let peer_driver = match (
+        socket.recv_ip_rate_limiter.as_ref(),
+        peer_ident_socket_addr(&peer_ident),
+    ) {
+        (Some(limiter), Some(address)) => {
+            peer_driver.with_ip_rate_limiter(limiter.clone(), address.ip())
+        }
+        _ => peer_driver,
+    };
 
     let arena = arena_config(&endpoint, latency_profile, socket);
     let transmit_slot = build_transmit_slot(
@@ -159,6 +168,9 @@ pub(super) fn spawn_inproc_peer(
         return;
     }
     let peer_id = next_peer_id(socket);
+    if socket.socket_type == SocketType::Server && server_routing_id(peer_id).is_none() {
+        return;
+    }
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
@@ -173,13 +185,22 @@ pub(super) fn spawn_inproc_peer(
         tx,
         rx,
     } = conn;
-    let recv_sink = take_inproc_recv_sink(socket).or_else(|| {
+    let mut recv_sink = take_inproc_recv_sink(socket).or_else(|| {
         socket
             .spsc
             .conflate_slot
             .as_ref()
             .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
     });
+    if socket.socket_type == SocketType::Server {
+        let sink = recv_sink
+            .take()
+            .unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
+        recv_sink = Some(crate::engine::RecvSink::server(
+            sink,
+            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+        ));
+    }
     let io_thread = socket.io_pool.assign_thread();
 
     socket.peers.insert(
@@ -274,7 +295,11 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
     if socket.closing && socket.send_strategy.is_drained() {
         return None;
     }
-    Some(next_peer_id(socket))
+    let peer_id = next_peer_id(socket);
+    if socket.socket_type == SocketType::Server && server_routing_id(peer_id).is_none() {
+        return None;
+    }
+    Some(peer_id)
 }
 
 fn next_peer_id(socket: &mut SocketDriver) -> u64 {
@@ -333,6 +358,7 @@ fn peer_driver_config(socket: &SocketDriver) -> PeerDriverConfig {
         heartbeat_timeout: socket.options.heartbeat_timeout,
         heartbeat_ttl: socket.options.heartbeat_ttl,
         large_message_threshold: socket.options.large_message_threshold.unwrap_or(0),
+        recv_rate_limit: socket.options.recv_rate_limit,
     }
 }
 
@@ -535,6 +561,11 @@ fn attach_recv_bypass(
             socket.rep_pending.clone(),
             peer_id,
         ))
+    } else if socket.socket_type == SocketType::Server {
+        peer_driver.with_recv_sink(crate::engine::RecvSink::server(
+            crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
+            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+        ))
     } else {
         peer_driver.with_recv_direct(socket.recv_tx.clone())
     }
@@ -577,6 +608,11 @@ fn attach_yring_recv_bypass(
             sink,
             socket.rep_pending.clone(),
             peer_id,
+        ))
+    } else if socket.socket_type == SocketType::Server {
+        peer_driver.with_recv_sink(crate::engine::RecvSink::server(
+            sink,
+            server_routing_id(peer_id).expect("SERVER peer ID checked"),
         ))
     } else {
         peer_driver.with_recv_sink(sink)
@@ -626,9 +662,14 @@ fn can_bypass_actor_recv(t: SocketType) -> bool {
             | SocketType::XSub
             | SocketType::Pair
             | SocketType::Client
+            | SocketType::Server
             | SocketType::Channel
             | SocketType::Gather
     )
+}
+
+fn server_routing_id(peer_id: u64) -> Option<u32> {
+    peer_id.checked_add(1).and_then(|id| u32::try_from(id).ok())
 }
 
 fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {

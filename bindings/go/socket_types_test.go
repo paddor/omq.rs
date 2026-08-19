@@ -76,10 +76,11 @@ func TestClientServerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Len() != 2 || string(request.Part(0)) != "client-1" || string(request.Part(1)) != "ping" {
+	routingID, ok := request.RoutingID()
+	if !ok || request.Len() != 1 || request.String() != "ping" {
 		t.Fatalf("request parts = %#v", request.Parts())
 	}
-	if err := server.SendTimeout(Route(request.Part(0), String("pong")), time.Second); err != nil {
+	if err := server.SendTimeout(String("pong").WithRoutingID(routingID), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	reply, err := client.RecvTimeout(time.Second)
@@ -206,10 +207,11 @@ func TestClientServerMultipleClients(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if request.Len() != 2 {
+		routingID, ok := request.RoutingID()
+		if !ok || request.Len() != 1 {
 			t.Fatalf("request parts = %#v", request.Parts())
 		}
-		reply := Route(request.Route(), String("re:"+string(request.Part(1))))
+		reply := String("re:" + request.String()).WithRoutingID(routingID)
 		if err := server.SendTimeout(reply, time.Second); err != nil {
 			t.Fatal(err)
 		}

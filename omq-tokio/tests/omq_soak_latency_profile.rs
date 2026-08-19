@@ -217,14 +217,11 @@ async fn client_server_round_trip(client: &Socket, server: &Socket, seq: u64) {
     let body = format!("client-server-{seq}");
     client.send(Message::single(body.clone())).await.unwrap();
     let request = recv("server request", server).await;
-    let identity = request.part_bytes(0).unwrap().clone();
-    assert_eq!(request.part_bytes(1).unwrap(), body.as_bytes());
+    let routing_id = request.routing_id().expect("SERVER routing id");
+    assert_eq!(request.part_bytes(0).unwrap(), body.as_bytes());
 
     server
-        .send(Message::multipart([
-            identity,
-            Bytes::from_static(b"client-server-reply"),
-        ]))
+        .send(Message::single("client-server-reply").with_routing_id(routing_id))
         .await
         .unwrap();
     assert_eq!(

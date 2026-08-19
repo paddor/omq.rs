@@ -318,7 +318,6 @@ fn block_recv_result<T>(
 /// on the hot path: single-part messages ≤55 bytes use `Message`'s inline
 /// storage (zero alloc). Only SNDMORE accumulation and XSUB subscription
 /// frames go through `Bytes::copy_from_slice`.
-#[expect(clippy::too_many_lines)]
 pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_int {
     let len = data.len();
     let Ok(ret_len) = checked_c_int_len(len) else {
@@ -418,6 +417,39 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         omq_tokio::Message::multipart(v)
     };
 
+    submit_message(sock, msg, ret_len, flags, sndtimeo)
+}
+
+pub(crate) fn send_message(
+    sock: &Arc<OmqSocket>,
+    msg: omq_tokio::Message,
+    ret_len: c_int,
+    flags: c_int,
+) -> c_int {
+    let max = sock
+        .ctx
+        .max_msg_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if max > 0 && msg.byte_len() > max as usize {
+        return fail(libc::EMSGSIZE);
+    }
+    let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+    if flags & ZMQ_SNDMORE != 0 {
+        return fail(libc::EINVAL);
+    }
+    if let Err(e) = ensure_libzmq_send_route(sock, flags, sndtimeo) {
+        return fail(e);
+    }
+    submit_message(sock, msg, ret_len, flags, sndtimeo)
+}
+
+fn submit_message(
+    sock: &Arc<OmqSocket>,
+    msg: omq_tokio::Message,
+    ret_len: c_int,
+    flags: c_int,
+    sndtimeo: i64,
+) -> c_int {
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
@@ -425,7 +457,8 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     match inner.try_send(msg) {
         Ok(()) => ret_len,
-        Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => fail(ETERM),
+        Err(omq_tokio::TrySendError::Closed) => fail(ETERM),
+        Err(omq_tokio::TrySendError::Error(ref error)) => fail(crate::error::map_omq_err(error)),
         Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
         Err(omq_tokio::TrySendError::Full(mut msg)) => {
             for i in 0..8 {
@@ -436,8 +469,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
                 }
                 match inner.try_send(msg) {
                     Ok(()) => return ret_len,
-                    Err(omq_tokio::TrySendError::Closed | omq_tokio::TrySendError::Error(_)) => {
-                        return fail(ETERM);
+                    Err(omq_tokio::TrySendError::Closed) => return fail(ETERM),
+                    Err(omq_tokio::TrySendError::Error(ref error)) => {
+                        return fail(crate::error::map_omq_err(error));
                     }
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
@@ -800,6 +834,36 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         };
         signal_recv_space_if_full(sock, popped.released_full_slot);
         decompose_message(sock, &popped.message).map(Some)
+    })
+}
+
+/// Pop one complete SERVER message so `zmq_msg_recv` can preserve routing ID
+/// metadata. SERVER messages are always single-part and never use bypass.
+pub(crate) fn pop_recv_server_message(
+    sock: &OmqSocket,
+    flags: c_int,
+) -> Result<omq_tokio::Message, c_int> {
+    use std::sync::atomic::Ordering;
+
+    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
+    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
+        return Err(ETERM);
+    };
+    if let Some(popped) = try_pop_dual(cons, sock) {
+        signal_recv_space_if_full(sock, popped.released_full_slot);
+        return Ok(popped.message);
+    }
+    if dontwait {
+        return Err(libc::EAGAIN);
+    }
+    block_recv_result(sock, rcvtimeo, || {
+        let Some(popped) = try_pop_dual(cons, sock) else {
+            return Ok(None);
+        };
+        signal_recv_space_if_full(sock, popped.released_full_slot);
+        Ok(Some(popped.message))
     })
 }
 

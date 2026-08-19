@@ -342,6 +342,18 @@ impl NativeSocket {
     }
 
     #[napi]
+    pub fn send_group_sync(&self, group: Uint8Array, payload: Uint8Array) -> Result<()> {
+        self.with_socket_ref(|socket| {
+            socket
+                .send_group(
+                    Bytes::copy_from_slice(group.as_ref()),
+                    Bytes::copy_from_slice(payload.as_ref()),
+                )
+                .map_err(map_omq_error)
+        })
+    }
+
+    #[napi]
     pub fn recv(&self, env: Env) -> Result<Vec<Uint8Array>> {
         self.with_socket_ref(|socket| {
             socket

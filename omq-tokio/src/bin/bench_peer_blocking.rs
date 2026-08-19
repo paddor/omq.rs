@@ -214,7 +214,28 @@ fn bench_options(msg_size: usize) -> Options {
     if let Ok(val) = std::env::var("OMQ_BENCH_ARENA_THRESHOLD") {
         o = o.arena_threshold(val.parse().expect("OMQ_BENCH_ARENA_THRESHOLD"));
     }
+    if let Ok(val) = std::env::var("OMQ_BENCH_RECV_RATE_LIMIT") {
+        let (rate, burst) = parse_rate_limit(&val, "OMQ_BENCH_RECV_RATE_LIMIT");
+        o = o.recv_rate_limit(rate, burst);
+    }
+    if let Ok(val) = std::env::var("OMQ_BENCH_RECV_IP_RATE_LIMIT") {
+        let (rate, burst) = parse_rate_limit(&val, "OMQ_BENCH_RECV_IP_RATE_LIMIT");
+        o = o.recv_ip_rate_limit(rate, burst);
+    }
     o
+}
+
+fn parse_rate_limit(value: &str, name: &str) -> (u32, u32) {
+    let (rate, burst) = value
+        .split_once(',')
+        .unwrap_or_else(|| panic!("{name} must be RATE,BURST"));
+    (
+        rate.parse()
+            .unwrap_or_else(|_| panic!("invalid {name} rate")),
+        burst
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid {name} burst")),
+    )
 }
 
 fn mechanism_env() -> Option<String> {

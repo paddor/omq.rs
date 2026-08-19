@@ -131,16 +131,11 @@ async fn latency_client_server_tcp_smoke() {
         .await
         .expect("server did not receive latency CLIENT message")
         .unwrap();
-    assert_eq!(
-        request,
-        Message::multipart(["latency-client", "latency-client"])
-    );
+    assert_eq!(request, Message::single("latency-client"));
+    let routing_id = request.routing_id().expect("SERVER routing id");
 
     server
-        .send(Message::multipart([
-            "latency-client",
-            "latency-server-reply",
-        ]))
+        .send(Message::single("latency-server-reply").with_routing_id(routing_id))
         .await
         .unwrap();
     let reply = tokio::time::timeout(Duration::from_secs(1), client.recv())

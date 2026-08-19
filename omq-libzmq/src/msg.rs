@@ -605,6 +605,7 @@ pub extern "C" fn zmq_msg_send(
     let sock_arc = unsafe { &*(sock.cast::<Arc<crate::socket::OmqSocket>>()) };
 
     let group = msg_group_bytes(msg);
+    let routing_id = zmq_msg_routing_id(msg);
 
     // For KIND_BYTES, clone the Bytes (a zero-copy Arc bump) rather than
     // copying the payload. We must NOT mutate `msg` here: libzmq leaves the
@@ -631,7 +632,15 @@ pub extern "C" fn zmq_msg_send(
         accum.push(group);
     }
 
-    let ret = crate::send_recv::send_bytes(sock_arc, &bytes, flags);
+    let ret = if sock_arc.socket_type == omq_tokio::SocketType::Server {
+        let Ok(ret_len) = c_int::try_from(r.size()) else {
+            return crate::error::fail(libc::EMSGSIZE);
+        };
+        let message = omq_tokio::Message::single(bytes).with_routing_id(routing_id);
+        crate::send_recv::send_message(sock_arc, message, ret_len, flags)
+    } else {
+        crate::send_recv::send_bytes(sock_arc, &bytes, flags)
+    };
     if ret >= 0 {
         zmq_msg_close(msg);
     }
@@ -697,10 +706,22 @@ pub extern "C" fn zmq_msg_recv(
         return crate::error::fail(crate::error::ETERM);
     }
 
-    match crate::send_recv::pop_recv_frame(sock, flags) {
-        Ok((frame, more)) => {
+    let received = if sock.socket_type == omq_tokio::SocketType::Server {
+        crate::send_recv::pop_recv_server_message(sock, flags).map(|message| {
+            let routing_id = message.routing_id().unwrap_or(0);
+            let frame = message.part_bytes(0).unwrap_or_default();
+            (frame, false, routing_id)
+        })
+    } else {
+        crate::send_recv::pop_recv_frame(sock, flags).map(|(frame, more)| (frame, more, 0))
+    };
+
+    match received {
+        Ok((frame, more, routing_id)) => {
             zmq_msg_close(msg);
             let sz = frame.len();
+            let mut reserved = [0; RESERVED_LEN];
+            reserved[..4].copy_from_slice(&routing_id.to_le_bytes());
             // SAFETY: msg was just closed above and is ready for reinitialization.
             if sz <= 128 {
                 // Small frame: malloc + memcpy (1 alloc) instead of
@@ -728,7 +749,7 @@ pub extern "C" fn zmq_msg_recv(
                     None,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    [0; RESERVED_LEN],
+                    reserved,
                 );
             } else {
                 let boxed = Box::new(frame);
@@ -742,7 +763,7 @@ pub extern "C" fn zmq_msg_recv(
                     None,
                     std::ptr::null_mut(),
                     Box::into_raw(boxed).cast::<libc::c_void>(),
-                    [0; RESERVED_LEN],
+                    reserved,
                 );
             }
             match c_int::try_from(sz) {

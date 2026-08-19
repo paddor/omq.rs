@@ -62,16 +62,31 @@ pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
     Ok(Bytes::copy_from_slice(view))
 }
 
+pub fn routing_id_from_pyany(b: &Bound<'_, PyAny>) -> u32 {
+    b.cast::<Frame>()
+        .map(|frame| frame.borrow().routing_id_value())
+        .unwrap_or(0)
+}
+
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
 pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
     let it = parts.try_iter()?;
-    let collected: Vec<Bytes> = it
-        .map(|part| bytes_from_pyany(&part?))
-        .collect::<PyResult<_>>()?;
-    Ok(match collected.len() {
+    let mut collected = Vec::new();
+    let mut routing_id = 0;
+    for part in it {
+        let part = part?;
+        routing_id = routing_id.max(routing_id_from_pyany(&part));
+        collected.push(bytes_from_pyany(&part)?);
+    }
+    let message = match collected.len() {
         0 => Message::new(),
         1 => Message::single(collected.into_iter().next().unwrap()),
         _ => Message::multipart(collected),
+    };
+    Ok(if routing_id == 0 {
+        message
+    } else {
+        message.with_routing_id(routing_id)
     })
 }
 
@@ -81,15 +96,33 @@ pub fn parts_to_pylist<'py>(py: Python<'py>, msg: Message) -> PyResult<Bound<'py
 }
 
 pub fn frames_to_pylist<'py>(py: Python<'py>, parts: Vec<Bytes>) -> PyResult<Bound<'py, PyList>> {
+    frames_to_pylist_routed(py, parts, 0)
+}
+
+fn frames_to_pylist_routed<'py>(
+    py: Python<'py>,
+    parts: Vec<Bytes>,
+    routing_id: u32,
+) -> PyResult<Bound<'py, PyList>> {
     let len = parts.len();
     let frames = parts
         .into_iter()
         .enumerate()
-        .map(|(idx, part)| Bound::new(py, Frame::from_bytes_more(part, idx + 1 < len)))
+        .map(|(idx, part)| {
+            Bound::new(
+                py,
+                Frame::from_bytes_more_routing(
+                    part,
+                    idx + 1 < len,
+                    if idx == 0 { routing_id } else { 0 },
+                ),
+            )
+        })
         .collect::<PyResult<Vec<_>>>()?;
     PyList::new(py, frames)
 }
 
 pub fn message_to_frame_list<'py>(py: Python<'py>, msg: Message) -> PyResult<Bound<'py, PyList>> {
-    frames_to_pylist(py, msg.iter().collect())
+    let routing_id = msg.routing_id().unwrap_or(0);
+    frames_to_pylist_routed(py, msg.iter().collect(), routing_id)
 }

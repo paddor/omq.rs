@@ -340,6 +340,11 @@ class Socket {
         this.#checkOpen();
         return callAsPromise(() => this.native.leave(toBytes(group)));
     }
+    /** Send one body to a RADIO group without creating a parts array. */
+    sendGroupNative(group, body) {
+        this.#checkOpen();
+        return callAsPromise(() => this.native.sendGroupSync(toBytes(group), toBytes(body)));
+    }
 }
 exports.Socket = Socket;
 /** Strict request socket. Send and receive must alternate. */
@@ -459,6 +464,10 @@ class Radio extends Socket {
     /** Create a RADIO socket. */
     constructor(options, context) {
         super("RADIO", options, context);
+    }
+    /** Send one body to a group. */
+    sendGroup(group, body) {
+        return this.sendGroupNative(group, body);
     }
 }
 exports.Radio = Radio;

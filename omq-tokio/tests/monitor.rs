@@ -314,6 +314,42 @@ async fn connection_info_returns_status_post_handshake() {
 }
 
 #[tokio::test]
+async fn server_peer_info_resolves_received_routing_id() {
+    let server = Socket::new(SocketType::Server, Options::default());
+    let port = test_support::bind_loopback(&server).await;
+    let client = Socket::new(
+        SocketType::Client,
+        Options::default().identity(bytes::Bytes::from_static(b"alice")),
+    );
+    client
+        .connect(test_support::tcp_loopback(port))
+        .await
+        .unwrap();
+
+    client.send(Message::single("hello")).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let routing_id = request.routing_id().unwrap();
+    let peer = server
+        .peer_info(routing_id)
+        .await
+        .unwrap()
+        .expect("live SERVER route");
+
+    assert_eq!(peer.peer_identity.as_deref(), Some(&b"alice"[..]));
+    assert!(
+        peer.peer_address
+            .is_some_and(|addr| addr.ip().is_loopback())
+    );
+    assert!(server.peer_info(u32::MAX).await.unwrap().is_none());
+
+    let pair = Socket::new(SocketType::Pair, Options::default());
+    assert!(pair.peer_info(1).await.is_err());
+}
+
+#[tokio::test]
 async fn wait_connected_ignores_pre_handshake_tcp_peers() {
     let server = Socket::new(SocketType::Pair, Options::default());
     let port = test_support::bind_loopback(&server).await;

@@ -874,7 +874,8 @@ async fn server_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got, Message::multipart(["cli", "ping"]));
+    assert_eq!(got, Message::single("ping"));
+    assert!(got.routing_id().is_some());
 
     let client_b = Socket::new(SocketType::Client, no_reconnect);
     client_b.connect(ep).await.unwrap();
@@ -903,5 +904,6 @@ async fn server_handover_evicts_old_peer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(got, Message::multipart(["cli", "pong"]));
+    assert_eq!(got, Message::single("pong"));
+    assert!(got.routing_id().is_some());
 }

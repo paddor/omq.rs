@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { Dealer, Pair, Pull, Push, Router } = require("../dist");
+const { Dealer, Dish, Pair, Pull, Push, Radio, Router } = require("../dist");
 
 test("PAIR sends both directions", async () => {
   const left = new Pair();
@@ -34,6 +34,23 @@ test("DEALER/ROUTER identity routing", async () => {
   } finally {
     dealer.close();
     router.close();
+  }
+});
+
+test("RADIO sendGroup sends to a joined DISH group", async () => {
+  const radio = new Radio();
+  const dish = new Dish();
+  try {
+    const endpoint = await radio.bind(`inproc://node-radio-${process.pid}`);
+    await dish.join("canvas");
+    await dish.connect(endpoint);
+    await radio.sendGroup("canvas", "delta");
+    const incoming = await dish.recv();
+    assert.equal(incoming.string(0), "canvas");
+    assert.equal(incoming.string(1), "delta");
+  } finally {
+    dish.close();
+    radio.close();
   }
 });
 

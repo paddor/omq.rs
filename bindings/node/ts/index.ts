@@ -54,6 +54,7 @@ type NativeSocket = {
   sendSync(parts: Uint8Array[]): void;
   sendBufferSync(payload: Buffer): void;
   sendOneSync(payload: Uint8Array): void;
+  sendGroupSync(group: Uint8Array, payload: Uint8Array): void;
   recv(): Uint8Array[];
   recvRawSync(): Uint8Array | Uint8Array[];
   recvRaw(signal?: AbortSignal): Promise<Uint8Array | Uint8Array[]>;
@@ -552,6 +553,12 @@ export class Socket {
     this.#checkOpen();
     return callAsPromise(() => this.native.leave(toBytes(group)));
   }
+
+  /** Send one body to a RADIO group without creating a parts array. */
+  protected sendGroupNative(group: MessagePart, body: MessagePart): Promise<void> {
+    this.#checkOpen();
+    return callAsPromise(() => this.native.sendGroupSync(toBytes(group), toBytes(body)));
+  }
 }
 
 /** Strict request socket. Send and receive must alternate. */
@@ -673,6 +680,11 @@ export class Radio extends Socket {
   /** Create a RADIO socket. */
   constructor(options?: SocketOptions, context?: Context) {
     super("RADIO", options, context);
+  }
+
+  /** Send one body to a group. */
+  sendGroup(group: MessagePart, body: MessagePart): Promise<void> {
+    return this.sendGroupNative(group, body);
   }
 }
 

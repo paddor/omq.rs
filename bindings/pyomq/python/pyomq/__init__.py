@@ -31,6 +31,7 @@ from typing import (
     Final,
     Iterable,
     Iterator,
+    Literal,
     Protocol,
     Self,
     overload,
@@ -657,6 +658,16 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
             return MessageTracker(_pending=True)
         return None
 
+    @overload
+    def recv(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> bytes: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, copy: Literal[False] = False, track: bool = False
+    ) -> Frame: ...
+
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame:
@@ -1194,9 +1205,7 @@ class Poller:
         ready_ids = _native.wait_any(pollin_socks, t)
         for rid in ready_ids:
             ready[rid] = ready.get(rid, 0) | POLLIN
-        return [
-            (s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready
-        ]
+        return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
 
 
 # ── select ──────────────────────────────────────────────────────────

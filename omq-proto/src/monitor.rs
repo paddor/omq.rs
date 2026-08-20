@@ -19,8 +19,11 @@ use crate::proto::PeerProperties;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerIdent {
+    /// TCP peer socket address.
     Socket(SocketAddr),
+    /// IPC peer path.
     Path(String),
+    /// Inproc peer name.
     Inproc(String),
 }
 
@@ -39,56 +42,94 @@ impl fmt::Display for PeerIdent {
 #[non_exhaustive]
 pub enum MonitorEvent {
     /// Bind succeeded and the listener is active.
-    Listening { endpoint: Endpoint },
+    Listening {
+        /// Bound endpoint.
+        endpoint: Endpoint,
+    },
     /// An incoming peer was accepted; handshake is starting.
     Accepted {
+        /// Bound endpoint that accepted this peer.
         endpoint: Endpoint,
+        /// Transport-level peer identity.
         peer_ident: PeerIdent,
+        /// Stable per-socket connection id.
         connection_id: u64,
     },
     /// An outbound dial succeeded; handshake is starting.
     Connected {
+        /// Connected endpoint.
         endpoint: Endpoint,
+        /// Transport-level peer identity.
         peer_ident: PeerIdent,
+        /// Stable per-socket connection id.
         connection_id: u64,
     },
     /// The ZMTP handshake completed; the peer is ready for data.
-    HandshakeSucceeded { endpoint: Endpoint, peer: PeerInfo },
+    HandshakeSucceeded {
+        /// Endpoint for this peer.
+        endpoint: Endpoint,
+        /// Peer metadata from the completed handshake.
+        peer: PeerInfo,
+    },
     /// The ZMTP handshake failed.
     HandshakeFailed {
+        /// Endpoint for this peer.
         endpoint: Endpoint,
+        /// Transport-level peer identity.
         peer_ident: PeerIdent,
+        /// Human-readable failure reason.
         reason: String,
     },
     /// A dial attempt will retry after `retry_in`.
     ConnectDelayed {
+        /// Endpoint that will be retried.
         endpoint: Endpoint,
+        /// Backoff duration before the next dial.
         retry_in: Duration,
+        /// One-based retry attempt count.
         attempt: u32,
     },
     /// A peer connection was torn down.
     Disconnected {
+        /// Endpoint for this peer.
         endpoint: Endpoint,
+        /// Peer metadata from the connection.
         peer: PeerInfo,
+        /// Close reason.
         reason: DisconnectReason,
     },
     /// A remote peer sent a SUBSCRIBE command. Emitted on PUB/XPUB
     /// sockets when the subscription is registered in the send-side
     /// prefix filter.
-    SubscribeReceived { prefix: Bytes },
+    SubscribeReceived {
+        /// Subscribed prefix.
+        prefix: Bytes,
+    },
     /// A remote peer sent a CANCEL command (unsubscribe).
-    UnsubscribeReceived { prefix: Bytes },
+    UnsubscribeReceived {
+        /// Unsubscribed prefix.
+        prefix: Bytes,
+    },
     /// A remote peer sent a JOIN command (RADIO/DISH group membership).
-    JoinReceived { group: Bytes },
+    JoinReceived {
+        /// Joined group name.
+        group: Bytes,
+    },
     /// A remote peer sent a LEAVE command.
-    LeaveReceived { group: Bytes },
+    LeaveReceived {
+        /// Left group name.
+        group: Bytes,
+    },
     /// A post-handshake ZMTP command from the peer that the routing
     /// layer doesn't consume itself: `ERROR` and any `Unknown` extension
     /// command. SUBSCRIBE / CANCEL / JOIN / LEAVE / PING / PONG are
     /// handled internally and never surface here.
     PeerCommand {
+        /// Endpoint for this peer.
         endpoint: Endpoint,
+        /// Peer metadata from the connection.
         peer: PeerInfo,
+        /// Peer-sent command.
         command: PeerCommandKind,
     },
     /// The socket driver finished teardown.
@@ -100,9 +141,17 @@ pub enum MonitorEvent {
 #[non_exhaustive]
 pub enum PeerCommandKind {
     /// The peer sent ZMTP `ERROR { reason }`.
-    Error { reason: String },
+    Error {
+        /// Peer-provided error reason.
+        reason: String,
+    },
     /// The peer sent an extension command we don't recognize.
-    Unknown { name: Bytes, body: Bytes },
+    Unknown {
+        /// Command name.
+        name: Bytes,
+        /// Raw command body.
+        body: Bytes,
+    },
 }
 
 /// Live status of a connected peer, returned by `Socket::connection_info`.
@@ -154,19 +203,25 @@ pub struct PeerInfo {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MonitorRecvError {
+    /// Monitor event stream closed.
     #[error("socket closed")]
     Closed,
+    /// Monitor receiver missed events due to bounded channel capacity.
     #[error("monitor lagged behind; missed {0} events")]
     Lagged(u64),
 }
 
+/// Error returned by nonblocking monitor receive.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MonitorTryRecvError {
+    /// No monitor events are ready.
     #[error("no events ready")]
     Empty,
+    /// Monitor event stream closed.
     #[error("socket closed")]
     Closed,
+    /// Monitor receiver missed events due to bounded channel capacity.
     #[error("monitor lagged behind; missed {0} events")]
     Lagged(u64),
 }

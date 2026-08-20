@@ -478,6 +478,10 @@ impl Options {
     }
 
     #[must_use]
+    /// Set receive-side HWM as a message count.
+    ///
+    /// This bounds complete messages queued for application receive. It is
+    /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
         self
@@ -519,36 +523,42 @@ impl Options {
     }
 
     #[must_use]
+    /// Set the ZMTP identity advertised during handshake.
     pub fn identity(mut self, id: impl Into<Bytes>) -> Self {
         self.identity = id.into();
         self
     }
 
     #[must_use]
+    /// Set reconnect behavior for connect-side peers.
     pub fn reconnect(mut self, policy: ReconnectPolicy) -> Self {
         self.reconnect = policy;
         self
     }
 
     #[must_use]
+    /// Stop reconnecting when the remote side refuses the connection.
     pub fn reconnect_stop_conn_refused(mut self, stop: bool) -> Self {
         self.reconnect_stop_conn_refused = stop;
         self
     }
 
     #[must_use]
+    /// Set interval between heartbeat PING commands.
     pub fn heartbeat_interval(mut self, d: Duration) -> Self {
         self.heartbeat_interval = Some(d);
         self
     }
 
     #[must_use]
+    /// Set heartbeat TTL advertised to peers.
     pub fn heartbeat_ttl(mut self, d: Duration) -> Self {
         self.heartbeat_ttl = Some(d);
         self
     }
 
     #[must_use]
+    /// Set max time to wait for peer heartbeat traffic before disconnecting.
     pub fn heartbeat_timeout(mut self, d: Duration) -> Self {
         self.heartbeat_timeout = Some(d);
         self
@@ -576,42 +586,49 @@ impl Options {
     }
 
     #[must_use]
+    /// Set max allowed size for one complete message.
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
         self
     }
 
     #[must_use]
+    /// Keep only the most recent inbound message.
     pub fn conflate(mut self, c: bool) -> Self {
         self.conflate = c;
         self
     }
 
     #[must_use]
+    /// Require ROUTER sends to target a known peer.
     pub fn router_mandatory(mut self, m: bool) -> Self {
         self.router_mandatory = m;
         self
     }
 
     #[must_use]
+    /// Set behavior when send HWM mutes the socket or peer.
     pub fn on_mute(mut self, m: OnMute) -> Self {
         self.on_mute = m;
         self
     }
 
     #[must_use]
+    /// Set TCP keepalive behavior.
     pub fn tcp_keepalive(mut self, k: KeepAlive) -> Self {
         self.tcp_keepalive = k;
         self
     }
 
     #[must_use]
+    /// Set OS receive buffer size for stream transports.
     pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
         self.recv_buffer_size = Some(bytes);
         self
     }
 
     #[must_use]
+    /// Set OS send buffer size for stream transports.
     pub fn send_buffer_size(mut self, bytes: usize) -> Self {
         self.send_buffer_size = Some(bytes);
         self
@@ -821,8 +838,13 @@ pub enum ReconnectPolicy {
     Disabled,
     /// Retry at a constant interval.
     Fixed(Duration),
-    /// Exponential backoff between `min` and `max`, doubling on each retry.
-    Exponential { min: Duration, max: Duration },
+    /// Exponential backoff, doubling on each retry.
+    Exponential {
+        /// Initial retry interval.
+        min: Duration,
+        /// Maximum retry interval.
+        max: Duration,
+    },
 }
 
 impl Default for ReconnectPolicy {

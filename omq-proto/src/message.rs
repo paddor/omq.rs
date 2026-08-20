@@ -337,6 +337,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Create an empty message.
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -344,6 +345,9 @@ impl Message {
         }
     }
 
+    /// Create a single-part message.
+    ///
+    /// Payloads up to [`MAX_INLINE_MESSAGE`] bytes are stored inline.
     #[inline]
     pub fn single(part: impl Into<Bytes>) -> Self {
         let b: Bytes = part.into();
@@ -1097,6 +1101,7 @@ impl std::fmt::Debug for Message {
 }
 
 impl Message {
+    /// Return one message part by index.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&[u8]> {
         match &self.inner {

@@ -88,6 +88,7 @@ enum ForwardAttempt {
 }
 
 impl Proxy {
+    /// Create a proxy that forwards between `frontend` and `backend`.
     pub fn new(frontend: Socket, backend: Socket) -> Self {
         Self {
             frontend,
@@ -98,6 +99,10 @@ impl Proxy {
         }
     }
 
+    /// Add a best-effort capture socket.
+    ///
+    /// Each forwarded message is cloned to this socket when it has capacity.
+    /// Capture backpressure never blocks the proxy data path.
     #[must_use]
     pub fn capture(mut self, socket: Socket) -> Self {
         self.capture = Some(socket);
@@ -122,6 +127,7 @@ impl Proxy {
         self
     }
 
+    /// Run the proxy until a control command terminates it or a socket closes.
     pub async fn run(self) -> Result<ProxyExit> {
         match self.run_loop().await {
             Err(Error::Closed) => Ok(ProxyExit::Closed),
@@ -388,6 +394,7 @@ impl Proxy {
     }
 }
 
+/// Run a non-steerable proxy between two sockets.
 pub async fn proxy(
     frontend: Socket,
     backend: Socket,
@@ -400,6 +407,9 @@ pub async fn proxy(
     proxy.run().await
 }
 
+/// Run a steerable proxy between two sockets.
+///
+/// Control messages are `PAUSE`, `RESUME`, `TERMINATE`, and `KILL`.
 pub async fn proxy_steerable(
     frontend: Socket,
     backend: Socket,

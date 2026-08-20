@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-08-20
+
+### Added
+
+- Async extension symbols to the ABI matrix for binding integration.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.21.4.
+
 ## [0.5.14] - 2026-08-17
 
 ### Changed

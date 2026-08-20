@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-08-20
+
+### Added
+
+- Receive message rate-limit options for per-connection and per-remote-IP
+  throttling.
+- SERVER routing metadata support in `Message` so bindings can round-trip
+  CLIENT/SERVER routing ids without synthetic identity frames.
+
 ## [0.26.0] - 2026-08-16
 
 ### Added

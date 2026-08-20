@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-08-20
+
+### Added
+
+- Receive message rate limiting, with per-connection and per-remote-IP
+  policies and soak coverage.
+- SERVER peer lookup and routing metadata propagation for native APIs and
+  language bindings.
+
+### Fixed
+
+- Windows Rust 1.98 Clippy lint in IPC transport code.
+
 ## [0.21.3] - 2026-08-17
 
 ### Added

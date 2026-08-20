@@ -71,25 +71,6 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
 
 ## Usage
 
-> [!NOTE]
-> The API is still evolving and may change between minor versions. Bug reports and testing in real workloads are welcome.
-
-The Rust backend is [`omq-tokio`](omq-tokio/): tokio + mio on Linux,
-macOS, and Windows. It can run socket IO on OMQ-owned runtime threads or
-inside an existing tokio runtime.
-
-| API | Runtime placement | Scaling model |
-|-----|-------------------|---------------|
-| `Context::new().socket(...)` | Async socket, OMQ-owned IO threads | Linear IO-lane scaling; PUB peers are sharded across lanes |
-| `Context::current().socket(...)` | Async socket, caller's active tokio runtime | Tokio scheduler/work stealing; PUB fan-out stays on one OMQ lane |
-| `Context::new().blocking_socket(...)` | Sync socket, OMQ-owned IO threads | Linear IO-lane scaling; caller thread stays out of IO |
-| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Caller-driven async socket | Single TCP peer, no background driver task |
-
-Supported 32-bit Linux targets are `i686-unknown-linux-gnu` and
-`armv7-unknown-linux-gnueabihf`. They require native 64-bit atomics. ZMTP wire
-length fields stay 64-bit, but practical frame/message size is bounded by
-platform allocation limits (below 4 GiB on 32-bit).
-
 If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
 
 ```rust
@@ -106,6 +87,15 @@ pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
 let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
+
+Runtime options:
+
+| API | Runtime placement | Scaling model |
+|-----|-------------------|---------------|
+| `Context::new().socket(...)` | Async socket, OMQ-owned IO threads | Classic/libzmq-like IO threads; PUB peers are sharded across lanes |
+| `Context::current().socket(...)` | Async socket, caller's active tokio runtime | Embedded tokio runtime |
+| `Context::new().blocking_socket(...)` | Sync socket, OMQ-owned IO threads | Classic/libzmq-like IO threads; caller thread stays out of IO |
+| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Caller-driven async socket | Single TCP peer, no background driver task |
 
 More examples in [examples/zguide/](examples/zguide/), a
 port of the ZeroMQ Guide patterns to OMQ.
@@ -212,26 +202,11 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 
 ## Platform and requirements
 
-**Linux is the primary development and benchmarking platform.** PR CI
-required checks cover Linux x86_64, macOS ARM64, and Windows Rust tests,
-plus 32-bit Linux cross-checks. Fmt and clippy also run on macOS Intel.
-Extended CI covers Ubuntu ARM64. macOS jobs run the Rust tests serially
-because socket/timer timing is more sensitive on hosted runners.
-
-**macOS** is covered in CI for both Intel and ARM64 runners.
-`omq-tokio` uses mio / kqueue. `omq-libzmq` uses a pipe-backed
-notification fd for `zmq_poll`/`ZMQ_FD` readiness.
-
-**Windows** is covered in CI. `omq-tokio` supports TCP, IPC named
-pipes, inproc, UDP, and WebSocket transports. `omq-libzmq` builds and
-tests on Windows for the supported C API surface.
-
-`pyomq` publishes Linux, macOS, and Windows wheels and an sdist.
-`omq-rs` installs as a native Ruby gem on Linux and macOS.
-
-Requirements:
-
 - Rust 1.93 or newer (edition 2024).
+- Linux, macOS, and Windows.
+- Linux is the primary development and benchmarking platform.
+- Supported 32-bit Linux targets: `i686-unknown-linux-gnu` and
+  `armv7-unknown-linux-gnueabihf`.
 
 ## Contributing
 

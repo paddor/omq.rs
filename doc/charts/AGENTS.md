@@ -93,6 +93,11 @@ Bench: `omq-bench run pushpull-lz4` (uses `bench_peer_blocking`, 1IO).
   App and IO share one current-thread runtime.
 - `omq-tokio-2t`: 2 dedicated current-thread IO runtimes.
 
+Legend thread labels:
+- `IO`: OMQ-owned background IO thread.
+- `CT`: current-thread runtime; app and IO share the caller runtime.
+- `UT`: user thread. Used for inproc peer threads, not OMQ-owned IO threads.
+
 ## Style
 
 Dual-panel throughput: msg/s left (dashed, sizes <= 1KiB), GB/s right

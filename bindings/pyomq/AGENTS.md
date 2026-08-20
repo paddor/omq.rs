@@ -1,4 +1,4 @@
-# CLAUDE.md: bindings/pyomq
+# AGENTS.md: bindings/pyomq
 
 ## Purpose
 

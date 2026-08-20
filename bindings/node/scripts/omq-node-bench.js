@@ -985,7 +985,7 @@ function printRecord(record) {
     );
   } else {
     console.log(
-      `${record.impl}${mode} ${record.transport} req/rep latency ${record.latencyUs.toFixed(1)} us ` +
+      `${record.impl}${mode} ${record.transport} req/rep latency ${record.latencyUs.toFixed(1)} μs ` +
         `p50 (${record.count} x ${record.size}B)`,
     );
   }

@@ -40,7 +40,7 @@ C_OMQ = "#ef4444"
 C_OMQ_INTO = "#fb923c"
 C_JEROMQ = "#60a5fa"
 C_JEROMQ_INTO = "#a855f7"
-LATENCY_MIN_US = 20.0
+LATENCY_MIN_US = 0.0
 LATENCY_MAX_US = 120.0
 
 
@@ -330,7 +330,7 @@ def run_latency_cell(cp, impl, size, args):
             runs.append(result)
         print(
             f"  {impl:8s} size={size:6d} round={round_index + 1}/{total} "
-            f"p50 {result['p50_us']:8.1f} µs p99 {result['p99_us']:8.1f} µs "
+            f"p50 {result['p50_us']:8.1f} μs p99 {result['p99_us']:8.1f} μs "
             f"n={result['iterations']}",
             flush=True,
         )
@@ -414,7 +414,7 @@ def fmt_y_gbs(value):
 def fmt_y_us(value):
     if value >= 1000:
         return f"{value / 1000:g} ms"
-    return f"{value:g} µs"
+    return f"{value:g} μs"
 
 
 def read_chart_hw():
@@ -469,28 +469,55 @@ def gen_chart(sizes, latency_sizes, path):
         ("JeroMQ", C_JEROMQ, "jeromq"),
         ("JeroMQ recvByteBuffer", C_JEROMQ_INTO, "jeromq-into"),
     ]
-    max_msgs = max((row["msgs_s"] for rows in throughput.values() for row in rows), default=0.0)
-    max_gbs = max((row["gb_s"] for rows in throughput.values() for row in rows), default=0.0)
-    msg_max = nice_ceil(max_msgs)
-    gbs_max = nice_ceil(max_gbs)
     hw_label = detect_hardware()
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = 670 + hw_offset
-    x_left, x_right = 90, 760
-    t1_top = 35 + hw_offset
-    t1_bot = 370 + hw_offset
+    svg_h = 810 + hw_offset
+    x_left, x_right = 60, 790
+    top_left, top_mid, top_right = 60, 395, 790
+    top_right_left = 455
+    t1_top = 95 + hw_offset
+    t1_bot = 430 + hw_offset
     t1_h = t1_bot - t1_top
-    t2_top = t1_bot + 80
-    t2_bot = t2_top + 120
+    t2_top = t1_bot + 105
+    t2_bot = t2_top + 200
     t2_h = t2_bot - t2_top
     plot_w = x_right - x_left
     mid_x = (x_left + x_right) / 2
-    xs = [x_left + i * plot_w / max(len(sizes) - 1, 1) for i in range(len(sizes))]
+    small_sizes = [size for size in sizes if size <= 1024]
+    large_sizes = [size for size in sizes if size >= 256]
+    small_indices = [sizes.index(size) for size in small_sizes]
+    large_indices = [sizes.index(size) for size in large_sizes]
+    small_xs = [
+        top_left + i * (top_mid - top_left) / max(len(small_sizes) - 1, 1)
+        for i in range(len(small_sizes))
+    ]
+    large_xs = [
+        top_right_left + i * (top_right - top_right_left) / max(len(large_sizes) - 1, 1)
+        for i in range(len(large_sizes))
+    ]
     lat_xs = [
         x_left + i * plot_w / max(len(latency_sizes) - 1, 1)
         for i in range(len(latency_sizes))
     ]
+    max_msgs = max(
+        (
+            rows[index]["msgs_s"]
+            for rows in throughput.values()
+            for index in small_indices
+        ),
+        default=0.0,
+    )
+    max_gbs = max(
+        (
+            rows[index]["gb_s"]
+            for rows in throughput.values()
+            for index in large_indices
+        ),
+        default=0.0,
+    )
+    msg_max = nice_ceil(max_msgs)
+    gbs_max = max(1, math.ceil(max_gbs))
 
     def y_msg(value):
         return t1_bot - (value / msg_max) * t1_h
@@ -507,64 +534,84 @@ def gen_chart(sizes, latency_sizes, path):
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}"'
         f' font-family="system-ui, -apple-system, sans-serif">',
         f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>',
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
+        f'  <text x="{mid_x}" y="{t1_top - 65}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         "JIT-warmed PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>",
     ]
     if hw_label:
         lines.append(
-            f'  <text x="{mid_x}" y="{t1_top - 3}" text-anchor="middle"'
+            f'  <text x="{mid_x}" y="{t1_top - 51}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="10">{escape_svg(hw_label)}</text>'
         )
 
-    for i in range(1, 11):
-        frac = i / 10
-        yy = t1_bot - frac * t1_h
-        msg_val = int(msg_max * frac)
-        gbs_val = gbs_max * frac
+    for panel_left, panel_right, panel_xs, ticks, panel_max, formatter, label_x in (
+        (
+            top_left,
+            top_mid,
+            small_xs,
+            [msg_max * i / 10 for i in range(1, 11)],
+            msg_max,
+            fmt_y_rate,
+            top_left - 8,
+        ),
+        (
+            top_right_left,
+            top_right,
+            large_xs,
+            [i / 2 for i in range(1, int(gbs_max * 2) + 1)],
+            gbs_max,
+            lambda value: f"{value:g} GB/s",
+            top_right + 8,
+        ),
+    ):
+        for tick in ticks:
+            yy = t1_bot - (tick / panel_max) * t1_h
+            lines.append(
+                f'  <line x1="{panel_left}" y1="{yy:.1f}" x2="{panel_right}"'
+                f' y2="{yy:.1f}" stroke="#374151" stroke-width="1"/>'
+            )
+            anchor = "end" if label_x < panel_left else "start"
+            lines.append(
+                f'  <text x="{label_x}" y="{yy:.1f}" text-anchor="{anchor}"'
+                f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
+                f"{formatter(tick)}</text>"
+            )
+        for x in panel_xs:
+            lines.append(
+                f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
+                f' stroke="#374151" stroke-width="1"/>'
+            )
+        if panel_left == top_left:
+            lines.append(
+                f'  <line x1="{panel_left}" y1="{t1_top}" x2="{panel_left}"'
+                f' y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
+            )
+        if panel_right == top_right:
+            lines.append(
+                f'  <line x1="{panel_right}" y1="{t1_top}" x2="{panel_right}"'
+                f' y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
+            )
         lines.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#374151" stroke-width="1"/>'
-        )
-        lines.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#e5e7eb" font-size="10">'
-            f"{fmt_y_rate(msg_val)}</text>"
-        )
-        lines.append(
-            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#9ca3af" font-size="10">'
-            f"{fmt_y_gbs(gbs_val)}</text>"
+            f'  <line x1="{panel_left}" y1="{t1_bot}" x2="{panel_right}"'
+            f' y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
         )
 
-    for x in xs:
-        lines.append(
-            f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#374151" stroke-width="1"/>'
-        )
-
-    lines.extend(
-        [
-            f'  <line x1="{x_left}" y1="{t1_top}" x2="{x_left}" y2="{t1_bot}"'
-            f' stroke="#9ca3af" stroke-width="1.5"/>',
-            f'  <line x1="{x_right}" y1="{t1_top}" x2="{x_right}" y2="{t1_bot}"'
-            f' stroke="#9ca3af" stroke-width="1.5"/>',
-            f'  <line x1="{x_left}" y1="{t1_bot}" x2="{x_right}" y2="{t1_bot}"'
-            f' stroke="#9ca3af" stroke-width="1.5"/>',
-        ]
-    )
-
-    y_mid = (t1_top + t1_bot) / 2
     lines.append(
-        f'  <text x="40" y="{y_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{y_mid:.0f})">msg/s</text>'
+        f'  <text x="{(top_left + top_mid) / 2:.1f}" y="{t1_top - 17}"'
+        f' text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">'
+        "small messages</text>"
+    )
+    lines.append(
+        f'  <text x="{(top_right_left + top_right) / 2:.1f}" y="{t1_top - 17}"'
+        f' text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">'
+        "medium/large messages</text>"
     )
 
     for _, color, impl in series:
         rows = throughput[impl]
         points = " ".join(
-            f"{xs[i]:.1f},{y_msg(row['msgs_s']):.1f}" for i, row in enumerate(rows)
+            f"{small_xs[j]:.1f},{y_msg(rows[index]['msgs_s']):.1f}"
+            for j, index in enumerate(small_indices)
         )
         lines.append(
             f'  <polyline points="{points}" fill="none" stroke="{color}"'
@@ -574,29 +621,39 @@ def gen_chart(sizes, latency_sizes, path):
     for _, color, impl in series:
         rows = throughput[impl]
         points = " ".join(
-            f"{xs[i]:.1f},{y_gbs(row['gb_s']):.1f}" for i, row in enumerate(rows)
+            f"{large_xs[j]:.1f},{y_gbs(rows[index]['gb_s']):.1f}"
+            for j, index in enumerate(large_indices)
         )
         lines.append(
             f'  <polyline points="{points}" fill="none" stroke="{color}"'
             f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
         )
-        for i, row in enumerate(rows):
-            yy = y_gbs(row["gb_s"])
+        for j, index in enumerate(large_indices):
+            yy = y_gbs(rows[index]["gb_s"])
             lines.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f'  <circle cx="{large_xs[j]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
-    for i, size in enumerate(sizes):
+    for i, size in enumerate(small_sizes):
         lines.append(
-            f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
+            f'  <text x="{small_xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
             f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
+    for i, size in enumerate(large_sizes):
+        lines.append(
+            f'  <text x="{large_xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
+        )
+    lines.append(
+        f'  <text x="{mid_x:.1f}" y="{t1_bot + 32}" text-anchor="middle"'
+        f' fill="#9ca3af" font-size="9">dashed = message rate · solid = bandwidth</text>'
+    )
 
     lines.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
-        "JIT-warmed REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
+        "JIT-warmed REQ/REP latency: 2-process, TCP loopback, p50 μs (lower is better)</text>"
     )
 
     for value in range(int(LATENCY_MIN_US), int(LATENCY_MAX_US) + 1, 20):
@@ -624,13 +681,6 @@ def gen_chart(sizes, latency_sizes, path):
             f'  <line x1="{x_left}" y1="{t2_bot}" x2="{x_right}" y2="{t2_bot}"'
             f' stroke="#9ca3af" stroke-width="1.5"/>',
         ]
-    )
-
-    y_mid = (t2_top + t2_bot) / 2
-    lines.append(
-        f'  <text x="40" y="{y_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{y_mid:.0f})">p50 latency (µs)</text>'
     )
 
     for _, color, impl in series:
@@ -706,7 +756,7 @@ def print_table(rows, sizes, impls):
 def print_latency_table(rows, sizes, impls):
     by_key = {(row["msg_size"], row["impl"]): row for row in rows}
     print()
-    print("size  impl          p50 us    p99 us   jeromq/impl")
+    print("size  impl          p50 μs    p99 μs   jeromq/impl")
     for size in sizes:
         base = by_key.get((size, "jeromq"))
         base_p50 = base["p50_us"] if base else 0.0
@@ -788,7 +838,7 @@ def main():
 
     sizes = args.sizes or (QUICK_SIZES if args.quick else DEFAULT_SIZES)
     latency_sizes = latency_sizes_from(sizes)
-    chart_path = CHART_DIR / "pushpull_tcp.svg"
+    chart_path = CHART_DIR / "bindings.svg"
     if args.chart_only:
         gen_chart(sizes, latency_sizes, chart_path)
         return

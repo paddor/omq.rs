@@ -781,7 +781,7 @@ def run_latency(lib_name):
         selected = median(runs, key=lambda row: row[0])
         results.append(selected)
         print(
-            f" p50 {selected[0]:.1f} µs  p99 {selected[1]:.1f} µs  n={selected[2]}"
+            f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}"
         )
 
     return results
@@ -887,7 +887,7 @@ def run_async_latency(lib_name):
         selected = median(runs, key=lambda row: row[0])
         results.append(selected)
         print(
-            f" p50 {selected[0]:.1f} µs  p99 {selected[1]:.1f} µs  n={selected[2]}"
+            f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}"
         )
 
     return results
@@ -1191,7 +1191,7 @@ def _fmt_y_rate(val):
 def _fmt_y_us(val):
     if val >= 1000:
         return f"{val / 1000:g} ms"
-    return f"{val:g} µs"
+    return f"{val:g} μs"
 
 
 def _fmt_mbps(val):
@@ -1271,7 +1271,7 @@ def gen_combined_chart(data, path):
     tp_values = [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
     small_indices = [SIZES.index(s) for s in small_sizes]
     large_indices = [SIZES.index(s) for s in large_sizes]
-    msg_max = 2_500_000
+    msg_max = 2_600_000
     gbs_values = [
         v * SIZES[i] / 1_000_000_000
         for values in tp_values
@@ -1381,7 +1381,7 @@ def gen_combined_chart(data, path):
     L.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
-        f"REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
+        f"REQ/REP latency: 2-process, TCP loopback, p50 μs (lower is better)</text>"
     )
 
     sync_omq_lat = data["sync_omq_lat"]

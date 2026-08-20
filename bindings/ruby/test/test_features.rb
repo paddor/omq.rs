@@ -275,6 +275,7 @@ class FeaturesTest < Minitest::Test
 
     assert_nil monitor.recv_nowait
     endpoint = tcp_endpoint(pull)
+    assert_instance_of Integer, pull.monitor_fd
     listening = monitor.recv(timeout: 2)
     assert_equal :listening, listening[:event]
     assert_equal endpoint, listening[:endpoint]
@@ -287,6 +288,20 @@ class FeaturesTest < Minitest::Test
     end
     refute_nil handshake
     assert_instance_of Integer, handshake[:connection_id]
+  end
+
+  def test_wake_recv_makes_wait_readable_return
+    pull = socket(:pull)
+    pull.bind("inproc://ruby-wake-recv")
+
+    waiter = Thread.new { pull.wait_readable(timeout: 2) }
+    sleep 0.01 until waiter.status == "sleep"
+    pull.wake_recv
+
+    assert_equal true, waiter.value
+    assert_nil pull.try_recv
+  ensure
+    pull&.close
   end
 
   private

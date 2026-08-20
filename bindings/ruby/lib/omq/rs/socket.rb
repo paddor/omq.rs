@@ -215,6 +215,27 @@ module OMQ
         message
       end
 
+      # Waits for receive notification.
+      #
+      # Notification may represent a message, close, or explicit {#wake_recv}.
+      #
+      # @param timeout [Numeric, nil] maximum wait in seconds
+      # @return [true]
+      # @raise [IO::TimeoutError] if timeout expires
+      def wait_readable(timeout: @recv_timeout)
+        ensure_materialized
+        wait_for(@recv_io, timeout, "receive timed out")
+        true
+      end
+
+      # Wakes a thread or fiber blocked in {#wait_readable}.
+      #
+      # @return [Socket] self
+      def wake_recv
+        @native.wake_recv if @materialized
+        self
+      end
+
       def each
         return enum_for(__method__) unless block_given?
 
@@ -266,6 +287,16 @@ module OMQ
       def monitor
         ensure_materialized
         @monitor ||= Monitor.new(self)
+      end
+
+      # Returns monitor notification file descriptor.
+      #
+      # Intended for event-loop adapters; use {#monitor} otherwise.
+      #
+      # @return [Integer]
+      def monitor_fd
+        ensure_materialized
+        @native.monitor_fd
       end
 
       def monitor_event(timeout: @recv_timeout)

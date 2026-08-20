@@ -841,15 +841,13 @@ fn run_throughput_once(
     }
 
     let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
-    let connect_addr;
-
     let push_env: Vec<(&str, &str)> = def.env.to_vec();
     let pull_env: Vec<(&str, &str)> = def.env.to_vec();
 
     let push_cmd: Vec<&str>;
     let mut push_proc;
     let mut _coord_socket = None;
-    match transport {
+    let connect_addr = match transport {
         TransportKind::Tcp => {
             let port = if def.name == "grpc-rust" {
                 let path = grpc_port_file();
@@ -871,21 +869,21 @@ fn run_throughput_once(
                 _coord_socket = Some(coord);
                 port
             };
-            connect_addr = format!("tcp://127.0.0.1:{port}");
+            format!("tcp://127.0.0.1:{port}")
         }
         TransportKind::Ws => {
             push_cmd = vec![binary_str, "push", &addr, &size_str];
             push_proc = process::spawn(&push_cmd, &push_env, Some(process::MEASURED_CPU));
             std::thread::sleep(Duration::from_millis(200));
-            connect_addr = addr.clone();
+            addr.clone()
         }
         _ => {
             push_cmd = vec![binary_str, "push", &addr, &size_str];
             push_proc = process::spawn(&push_cmd, &push_env, Some(process::MEASURED_CPU));
             std::thread::sleep(Duration::from_millis(100));
-            connect_addr = addr.clone();
+            addr.clone()
         }
-    }
+    };
 
     let pull_result = if def.name == "grpc-rust" {
         process::capture_with_cpu(

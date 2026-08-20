@@ -4,6 +4,7 @@ require_relative "rs/version"
 require_relative "rs/omq_rs_native"
 require_relative "rs/socket"
 
+# Brokerless messaging APIs and language backends.
 module OMQ
   class << self
     # Returns the OMQ.rs namespace or creates an OMQ.rs-backed socket.

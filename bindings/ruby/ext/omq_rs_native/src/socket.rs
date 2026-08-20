@@ -198,7 +198,8 @@ fn set_curve_authenticator(
     }
     drop(options_guard);
 
-    if let Some(previous) = rb_self.auth_worker.lock().unwrap().take() {
+    let previous = rb_self.auth_worker.lock().unwrap().take();
+    if let Some(previous) = previous {
         previous.stop();
     }
     *rb_self.auth_worker.lock().unwrap() = worker;
@@ -774,7 +775,8 @@ unsafe extern "C" fn rust_socket_leave(rb_self: VALUE, group: VALUE) -> VALUE {
 fn rust_socket_close_impl(rb_self: &RustSocket, wait_for_auth_worker: bool) {
     rb_self.closed.store(true, Ordering::Relaxed);
     #[cfg(feature = "curve")]
-    if let Some(worker) = rb_self.auth_worker.lock().unwrap().take() {
+    let worker = rb_self.auth_worker.lock().unwrap().take();
+    if let Some(worker) = worker {
         if wait_for_auth_worker {
             worker.stop();
         } else {

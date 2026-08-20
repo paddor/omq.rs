@@ -18,6 +18,69 @@ module OMQ
     # @api private
     SINGLE_FRAME_TYPES = %i[client server scatter gather channel].freeze
 
+    # @api private
+    SOCKET_OPTIONS = %w[
+      workload_profile
+      send_hwm
+      recv_hwm
+      recv_rate_limit
+      recv_ip_rate_limit
+
+      linger
+      identity
+      router_mandatory
+      conflate
+
+      heartbeat_interval
+      heartbeat_ttl
+      heartbeat_timeout
+      handshake_timeout
+      max_pending_handshakes
+
+      max_message_size
+      sndbuf
+      rcvbuf
+      large_message_threshold
+      arena_threshold
+      transmit_slot_cap
+
+      xpub_nodrop
+      reconnect_stop_conn_refused
+      on_mute
+      reconnect_interval
+      reconnect_interval_min
+      reconnect_interval_max
+
+      compression_dict
+      compression_auto_train
+      compression_threshold
+      compression_level
+      compression_dict_capacity
+      max_recv_dict_size
+      compression_offload_threshold
+
+      mechanism_type
+      mechanism_server
+      mechanism_public_key
+      mechanism_secret_key
+      mechanism_server_key
+      mechanism_username
+      mechanism_password
+
+      curve_server
+      curve_publickey
+      curve_public_key
+      curve_secretkey
+      curve_secret_key
+      curve_serverkey
+      curve_server_key
+
+      plain_server
+      plain_username
+      plain_password
+    ].freeze
+    private_constant :ROUTED_TYPES, :SINGLE_FRAME_TYPES, :SOCKET_OPTIONS
+
     # CURVE peer metadata passed to callable authenticators.
     #
     # @!attribute [r] public_key
@@ -34,11 +97,13 @@ module OMQ
         Native.io_threads
       end
 
-      # Sets number of OMQ.rs IO threads used by subsequently created sockets.
+      # Sets number of OMQ.rs IO threads before the shared runtime starts.
       #
       # @param count [Integer] positive IO thread count
       # @return [Integer] assigned count
       # @raise [ArgumentError] if +count+ is not positive
+      # @note Set this before materializing any socket. It does not resize a
+      #   running runtime.
       def io_threads=(count)
         count = Integer(count)
         raise ArgumentError, "io_threads must be positive" unless count.positive?
@@ -139,7 +204,9 @@ module OMQ
       def each
         return enum_for(__method__) unless block_given?
 
-        loop { yield recv }
+        while (event = recv)
+          yield event
+        end
       rescue IOError
         raise unless @socket.closed?
       end
@@ -156,8 +223,53 @@ module OMQ
       # @param send_timeout [Numeric, nil] send timeout in seconds
       # @param curve_auth [Array<String>, #call, nil] CURVE allowlist or authenticator
       # @param options [Hash] native OMQ.rs socket options
+      # @option options [Symbol] :workload_profile +:throughput+ or +:latency+
+      # @option options [Integer] :send_hwm outbound message capacity
+      # @option options [Integer] :recv_hwm inbound message capacity
+      # @option options [Hash] :recv_rate_limit per-connection
+      #   +:messages_per_second+ (or +:rate+) and +:burst+
+      # @option options [Hash] :recv_ip_rate_limit per-IP
+      #   +:messages_per_second+ (or +:rate+) and +:burst+
+      # @option options [Numeric] :linger close linger in seconds; positive
+      #   infinity waits forever
+      # @option options [String] :identity ZMTP socket identity
+      # @option options [Boolean] :router_mandatory reject unroutable sends
+      # @option options [Boolean] :conflate retain only latest received message
+      # @option options [Numeric] :heartbeat_interval heartbeat period in seconds
+      # @option options [Numeric] :heartbeat_ttl remote heartbeat TTL in seconds
+      # @option options [Numeric] :heartbeat_timeout peer timeout in seconds
+      # @option options [Numeric] :handshake_timeout handshake timeout in seconds
+      # @option options [Integer] :max_pending_handshakes inbound handshake limit
+      # @option options [Integer] :max_message_size maximum received message bytes
+      # @option options [Integer] :sndbuf kernel send buffer bytes
+      # @option options [Integer] :rcvbuf kernel receive buffer bytes
+      # @option options [Integer] :large_message_threshold receive buffer threshold
+      # @option options [Integer] :arena_threshold contiguous frame arena threshold
+      # @option options [Integer] :transmit_slot_cap per-peer transmit bytes
+      # @option options [Boolean] :xpub_nodrop block instead of dropping on mute
+      # @option options [Boolean] :reconnect_stop_conn_refused stop refused reconnects
+      # @option options [Symbol] :on_mute +:block+, +:drop_newest+, or +:drop_oldest+
+      # @option options [Numeric] :reconnect_interval fixed reconnect delay in seconds
+      # @option options [Numeric] :reconnect_interval_min minimum backoff in seconds
+      # @option options [Numeric] :reconnect_interval_max maximum backoff in seconds
+      # @option options [String] :compression_dict compression dictionary bytes
+      # @option options [Boolean] :compression_auto_train train a zstd dictionary
+      # @option options [Integer] :compression_threshold minimum bytes to compress
+      # @option options [Integer] :compression_level zstd compression level
+      # @option options [Integer] :compression_dict_capacity trained dictionary bytes
+      # @option options [Integer] :max_recv_dict_size received dictionary byte limit
+      # @option options [Integer] :compression_offload_threshold offload threshold;
+      #   negative disables offloading
+      # @option options [Symbol] :mechanism_type +:null+, +:plain+, or +:curve+
+      # @option options [Boolean] :plain_server enable PLAIN server mode
+      # @option options [String] :plain_username PLAIN client username
+      # @option options [String] :plain_password PLAIN client password
+      # @option options [Boolean] :curve_server enable CURVE server mode
+      # @option options [String] :curve_publickey local raw or Z85 public key
+      # @option options [String] :curve_secretkey local raw or Z85 secret key
+      # @option options [String] :curve_serverkey CURVE server raw or Z85 public key
       # @return [Socket]
-      # @raise [ArgumentError] if an option is invalid
+      # @raise [ArgumentError] if an option is unknown or invalid
       def initialize(recv_timeout: nil, send_timeout: nil, curve_auth: nil, **options)
         socket_type = self.class.const_get(:SOCKET_TYPE, false)
         @socket_type = socket_type.to_s.downcase.to_sym
@@ -176,6 +288,8 @@ module OMQ
         @materialized = false
         @recv_io = nil
         @send_io = nil
+        @peer_connected = false
+        @subscriber_joined = false
         set_curve_auth(curve_auth) unless curve_auth.nil?
       end
 
@@ -228,7 +342,7 @@ module OMQ
         @native.peer_info(routing_id)
       end
 
-      # Configures CURVE client authentication before socket materialization.
+      # Configures CURVE client authorization on a server before materialization.
       #
       # @param authenticator [Array<String>, #call, nil] public-key allowlist,
       #   callable receiving {MechanismPeerInfo}, or +nil+ to allow valid clients
@@ -430,9 +544,16 @@ module OMQ
       # @param timeout [Numeric, nil] maximum wait in seconds
       # @return [Socket] self
       # @raise [IO::TimeoutError] if timeout expires
+      # @raise [IOError] if socket closes first
       def wait_for_peer(timeout: nil)
+        raise IOError, "socket closed" if closed?
+        return self if @peer_connected
+
         ensure_materialized
         wait_for_native_fd(@native.peer_connected_fd, timeout, "peer connection timed out")
+        raise IOError, "socket closed" if closed?
+
+        @peer_connected = true
         self
       end
 
@@ -441,9 +562,16 @@ module OMQ
       # @param timeout [Numeric, nil] maximum wait in seconds
       # @return [Socket] self
       # @raise [IO::TimeoutError] if timeout expires
+      # @raise [IOError] if socket closes first
       def wait_for_subscriber(timeout: nil)
+        raise IOError, "socket closed" if closed?
+        return self if @subscriber_joined
+
         ensure_materialized
         wait_for_native_fd(@native.subscriber_joined_fd, timeout, "subscriber timed out")
+        raise IOError, "socket closed" if closed?
+
+        @subscriber_joined = true
         self
       end
 
@@ -471,6 +599,8 @@ module OMQ
       # @return [Hash, nil]
       # @raise [IO::TimeoutError] if timeout expires
       def monitor_event(timeout: @recv_timeout)
+        return if closed?
+
         ensure_materialized
         event = @native.try_recv_monitor
         return event if event
@@ -483,6 +613,8 @@ module OMQ
       #
       # @return [Hash, nil]
       def try_monitor_event
+        return if closed?
+
         ensure_materialized
         @native.try_recv_monitor
       end
@@ -532,11 +664,17 @@ module OMQ
       end
 
       def normalize_options(options)
-        options.to_h do |key, value|
+        normalized = options.to_h do |key, value|
           value = value.to_s if value.is_a?(Symbol)
           value = value.transform_keys(&:to_s) if value.is_a?(Hash)
           [key.to_s, value]
         end
+        unknown = normalized.keys - SOCKET_OPTIONS
+        unless unknown.empty?
+          raise ArgumentError, "unknown socket option#{"s" if unknown.length > 1}: #{unknown.sort.join(", ")}"
+        end
+
+        normalized
       end
 
       def validate_send_parts!(parts)

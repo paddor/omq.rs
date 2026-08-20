@@ -1,0 +1,167 @@
+name: Release OMQ.Net
+
+on:
+  push:
+    tags:
+      - 'omq-net-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: NuGet version to publish, for example 0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  native:
+    name: Native ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-latest
+            library: libomq_zmq.so
+          - rid: osx-x64
+            runner: macos-15-intel
+            library: libomq_zmq.dylib
+          - rid: osx-arm64
+            runner: macos-latest
+            library: libomq_zmq.dylib
+          - rid: win-x64
+            runner: windows-latest
+            library: omq_zmq.dll
+    steps:
+      - uses: actions/checkout@v7
+      - name: Disable local CPU rustflags
+        shell: bash
+        run: rm -f .cargo/config.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Build native library
+        run: cargo build --release -p omq-libzmq
+      - name: Stage native library
+        shell: bash
+        run: |
+          mkdir -p "native/${{ matrix.rid }}"
+          cp "target/release/${{ matrix.library }}" "native/${{ matrix.rid }}/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dotnet-native-${{ matrix.rid }}
+          path: native
+
+  package:
+    name: Package NuGet artifact
+    runs-on: ubuntu-latest
+    needs: [native]
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: dotnet-native-*
+          merge-multiple: true
+          path: bindings/dotnet/native
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#omq-net-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ -z "$version" ]]; then
+            echo "missing package version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore package project
+        run: dotnet restore bindings/dotnet/Omq.Net.csproj
+      - name: Pack NuGet package
+        env:
+          OMQ_NET_PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash bindings/dotnet/scripts/package.sh "$RUNNER_TEMP/omq-nuget" \
+            linux-x64="$GITHUB_WORKSPACE/bindings/dotnet/native/linux-x64/libomq_zmq.so" \
+            osx-x64="$GITHUB_WORKSPACE/bindings/dotnet/native/osx-x64/libomq_zmq.dylib" \
+            osx-arm64="$GITHUB_WORKSPACE/bindings/dotnet/native/osx-arm64/libomq_zmq.dylib" \
+            win-x64="$GITHUB_WORKSPACE/bindings/dotnet/native/win-x64/omq_zmq.dll"
+          unzip -l "$RUNNER_TEMP/omq-nuget/Omq.Net.${{ steps.version.outputs.version }}.nupkg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dotnet-nuget
+          path: ${{ runner.temp }}/omq-nuget/Omq.Net.${{ steps.version.outputs.version }}.nupkg
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: Smoke NuGet package
+    runs-on: ubuntu-latest
+    needs: [package]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: dotnet-nuget
+          path: nuget
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore package smoke test
+        run: |
+          dotnet restore bindings/dotnet/tests/Omq.Net.PackageSmoke.csproj \
+            -p:OmqNetVersion="${{ needs.package.outputs.version }}" \
+            --runtime linux-x64 \
+            --source "$GITHUB_WORKSPACE/nuget" \
+            --source https://api.nuget.org/v3/index.json
+      - name: Run package smoke test
+        run: dotnet run --project bindings/dotnet/tests/Omq.Net.PackageSmoke.csproj \
+          -p:OmqNetVersion="${{ needs.package.outputs.version }}" \
+          --runtime linux-x64 --no-restore
+
+  publish:
+    name: Publish to NuGet.org
+    runs-on: ubuntu-latest
+    needs: [package, smoke]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dotnet-nuget
+          path: nuget
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Log in to NuGet.org with OIDC
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: paddor
+      - name: Publish package
+        run: dotnet nuget push "nuget/Omq.Net.${{ needs.package.outputs.version }}.nupkg" \
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
+          --source https://api.nuget.org/v3/index.json \
+          --skip-duplicate

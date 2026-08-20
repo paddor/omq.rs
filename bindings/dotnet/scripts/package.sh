@@ -25,5 +25,9 @@ for asset in "$@"; do
 done
 
 mkdir -p "$output_dir"
+version_args=()
+if [[ -n "${OMQ_NET_PACKAGE_VERSION:-}" ]]; then
+    version_args+=("-p:PackageVersion=$OMQ_NET_PACKAGE_VERSION")
+fi
 dotnet pack "$project" --configuration Release --no-restore \
-    --output "$output_dir" -p:NativeAssetRoot="$stage"
+    --output "$output_dir" -p:NativeAssetRoot="$stage" "${version_args[@]}"

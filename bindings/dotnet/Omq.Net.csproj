@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
     <PackageId>Omq.Net</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.2</Version>
     <Authors>OMQ contributors</Authors>
     <Description>Fast .NET binding for OMQ.</Description>
     <PackageTags>zeromq;omq;networking;messaging</PackageTags>

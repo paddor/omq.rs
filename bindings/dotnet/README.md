@@ -46,4 +46,6 @@ layer.
 
 ## Development
 
-See [`DEVELOPMENT.md`](DEVELOPMENT.md).
+Architecture: [`doc/architecture.md`](doc/architecture.md).
+
+Build, test, benchmark, and packaging instructions: [`DEVELOPMENT.md`](DEVELOPMENT.md).

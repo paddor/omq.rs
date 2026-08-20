@@ -14,18 +14,8 @@ provide Ruby's `Fiber.scheduler` API, so waits block the calling thread there.
 The binding benchmark uses separate Ruby processes over TCP and compares
 `omq-rs` with [cztop](https://github.com/paddor/cztop), which calls CZMQ and
 libzmq through FFI, and [ffi-rzmq](https://github.com/chuckremes/ffi-rzmq),
-which calls libzmq directly through FFI. Install CZMQ and libzmq to include
-both baselines.
-
-```sh
-ruby -Ilib scripts/update_perf.rb
-ruby -Ilib scripts/update_perf.rb --quick
-ruby -Ilib scripts/update_perf.rb --chart-only
-```
-
-Rows append to `~/.cache/omq-rs/bindings.jsonl`. The generated chart is
-`doc/charts/bindings.svg`. `--quick` only runs a smoke benchmark and does not
-write results or a chart.
+which calls libzmq directly through FFI. See [DEVELOPMENT.md](DEVELOPMENT.md)
+for methodology and regeneration commands.
 
 ## Install
 
@@ -151,10 +141,7 @@ TCP endpoints; no preparation call is required.
 
 ## Development
 
-```sh
-bundle install
-bundle exec rake
-```
+Build, test, benchmark, and release instructions: [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## License
 

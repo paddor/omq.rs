@@ -83,6 +83,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - '.editorconfig'
               - '.github/workflows/ci.yml'
             ruby:
               - 'bindings/ruby/**'
@@ -136,6 +137,20 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/bindings/go/native/target/release:${{ github.workspace }}/bindings/go/native/target/debug
         run: go vet ./...
+
+  dotnet-lint:
+    name: dotnet format
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_dotnet == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: verify formatting
+        run: dotnet format bindings/dotnet/Omq.Net.csproj --verify-no-changes --verbosity minimal
 
   go-test:
     name: go test

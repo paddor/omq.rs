@@ -1,0 +1,50 @@
+[package]
+name = "omq_rs_native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+authors = ["Patrik Wenger <paddor@gmail.com>"]
+publish = false
+
+[lib]
+name = "omq_rs_native"
+crate-type = ["cdylib"]
+
+[features]
+default = ["plain", "curve", "lz4", "zstd", "ws"]
+plain = ["omq-tokio/plain"]
+curve = ["omq-tokio/curve"]
+lz4 = ["omq-tokio/lz4"]
+zstd = ["omq-tokio/zstd"]
+ws = ["omq-tokio/ws"]
+
+[dependencies]
+omq-proto = { version = ">=0.26.0, <0.28.0", default-features = false }
+omq-tokio = { version = ">=0.21.3, <0.23.0", default-features = false }
+yring = { version = "=0.3.14", features = ["async"] }
+
+bytes = "1.12.0"
+flume = { version = "0.12", default-features = false, features = ["async"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+libc = "0.2"
+rb-sys = "0.9"
+tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "net"] }
+
+[build-dependencies]
+rb-sys = "0.9"
+
+[lints.rust]
+missing_debug_implementations = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"

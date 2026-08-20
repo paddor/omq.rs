@@ -8,6 +8,7 @@
 #   OMQ_SKIP_PYOMQ=1    skip the pyomq build + pytest pass
 #   OMQ_SKIP_GO=1       skip the Go binding build + test pass
 #   OMQ_SKIP_LUA=1      skip the Lua binding build + test pass
+#   OMQ_SKIP_RUBY=1     skip the Ruby binding build + test pass
 #   OMQ_GO_RACE=1       run Go binding tests with the race detector too
 #   OMQ_TEST_RETRIES=N  retry each step up to N times (default 2) -
 #                       a few timing-sensitive tests may need one
@@ -294,6 +295,13 @@ elif [[ -x /usr/bin/lua || -n "${OMQ_LUA:-}" ]]; then
     run "$_repo_root/scripts/test-lua.sh"
 else
     echo "skip: Lua binding tests require /usr/bin/lua"
+fi
+if [[ "${OMQ_SKIP_RUBY:-}" == "1" ]]; then
+    echo "skip: OMQ_SKIP_RUBY=1"
+elif command -v "${OMQ_RUBY:-ruby}" >/dev/null 2>&1; then
+    run "$_repo_root/scripts/test-ruby.sh"
+else
+    echo "skip: Ruby binding tests require ruby"
 fi
 
 if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then

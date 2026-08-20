@@ -1,19 +1,27 @@
 namespace Omq;
 
+/// Events that a poller can report.
 [Flags]
 public enum PollEvents { None = 0, Readable = 1, Writable = 2, Error = 4 }
+/// A socket and the events currently ready on it.
 public readonly record struct PollResult(Socket Socket, PollEvents Events);
 
+/// Thread-safe collection of sockets polled through the native OMQ poller.
 public sealed class Poller : IDisposable
 {
     private readonly object gate = new();
     private readonly List<(Socket Socket, PollEvents Events)> entries = [];
+    /// Gets a snapshot of registered sockets.
     public IReadOnlyList<Socket> Sockets { get { lock (gate) return entries.Select(x => x.Socket).ToArray(); } }
+    /// Registers a socket and its interest mask.
     public void Add(Socket socket, PollEvents events = PollEvents.Readable) { lock (gate) entries.Add((socket, events)); }
+    /// Removes all registrations for a socket.
     public bool Remove(Socket socket) { lock (gate) return entries.RemoveAll(x => ReferenceEquals(x.Socket, socket)) != 0; }
 
+    /// Waits indefinitely for an event.
     public IReadOnlyList<PollResult> Wait() => Wait(Timeout.InfiniteTimeSpan);
 
+    /// Waits up to <paramref name="timeout"/> and returns ready sockets.
     public IReadOnlyList<PollResult> Wait(TimeSpan timeout)
     {
         (Socket Socket, PollEvents Events)[] snapshot;
@@ -38,6 +46,7 @@ public sealed class Poller : IDisposable
         return ready;
     }
 
+    /// Waits asynchronously and observes cancellation between native poll slices.
     public Task<IReadOnlyList<PollResult>> WaitAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         Task.Run(() => WaitCancellable(timeout, cancellationToken), cancellationToken);
 
@@ -54,6 +63,7 @@ public sealed class Poller : IDisposable
         }
     }
 
+    /// Removes all registrations.
     public void Dispose() { lock (gate) entries.Clear(); }
 
     private sealed class LeaseSet : IDisposable

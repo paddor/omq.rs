@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 
 namespace Omq;
 
+/// Native socket-monitor event flags.
 public enum MonitorEventType : ushort
 {
     Connected = 0x0001, ConnectDelayed = 0x0002, ConnectRetried = 0x0004,
@@ -11,8 +12,10 @@ public enum MonitorEventType : ushort
     HandshakeFailed = 0x0800, HandshakeSucceeded = 0x1000
 }
 
+/// One decoded socket-monitor event.
 public readonly record struct MonitorEvent(MonitorEventType Type, uint Value, string Endpoint);
 
+/// Receives lifecycle and connection events for a socket.
 public sealed class Monitor : IDisposable
 {
     private readonly Socket source;
@@ -29,6 +32,7 @@ public sealed class Monitor : IDisposable
         reader.Connect(endpoint);
     }
 
+    /// Receives the next monitor event; optionally throws immediately if none is ready.
     public MonitorEvent Receive(bool dontWait = false)
     {
         return Parse(reader.Receive(dontWait));
@@ -43,6 +47,7 @@ public sealed class Monitor : IDisposable
         return new MonitorEvent(type, value, System.Text.Encoding.UTF8.GetString(message.Parts[1]));
     }
 
+    /// Receives the next monitor event with cancellation.
     public async Task<MonitorEvent> ReceiveAsync(CancellationToken cancellationToken = default)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
@@ -56,6 +61,7 @@ public sealed class Monitor : IDisposable
         return Parse(message!);
     }
 
+    /// Stops monitoring and closes the monitor reader.
     public void Dispose()
     {
         if (stopped) return;

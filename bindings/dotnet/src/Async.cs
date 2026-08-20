@@ -3,14 +3,17 @@ namespace Omq;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
+/// Cancellation-aware asynchronous socket operations.
 public static class SocketAsyncExtensions
 {
+    /// Sends one frame, waiting for writability when the socket HWM is full.
     public static async Task SendAsync(this Socket socket, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
         var poller = new Poller(); poller.Add(socket, PollEvents.Writable);
         while (!socket.TrySend(data.Span)) { cancellationToken.ThrowIfCancellationRequested(); await poller.WaitAsync(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false); }
     }
 
+    /// Sends all frames in a message and completes when the native async send finishes.
     public static async Task SendAsync(this Socket socket, Message message, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -49,6 +52,7 @@ public static class SocketAsyncExtensions
         }
     }
 
+    /// Receives the next complete message, waiting asynchronously until available.
     public static Task<Message> ReceiveAsync(this Socket socket, CancellationToken cancellationToken = default)
     {
         return ReceiveAsyncCore(socket, cancellationToken);

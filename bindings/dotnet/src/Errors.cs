@@ -2,13 +2,17 @@ using System.Runtime.InteropServices;
 
 namespace Omq;
 
+/// Exception raised by an OMQ native operation.
 public class OmqException : Exception
 {
+    /// Gets the native errno value.
     public int Errno { get; }
     internal OmqException(string operation, int errno, string message) : base($"{operation}: {message} (errno {errno})") => Errno = errno;
 }
 
+/// Indicates that a non-blocking operation would block.
 public sealed class OmqAgainException : OmqException { internal OmqAgainException(string op, int e, string m) : base(op, e, m) { } }
+/// Indicates that an OMQ context or socket has already been closed.
 public sealed class OmqClosedException : ObjectDisposedException { internal OmqClosedException() : base("OMQ handle") { } }
 
 internal static class Errors

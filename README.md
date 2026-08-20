@@ -88,14 +88,14 @@ let msg = pull.recv().await?;
 assert_eq!(&msg[0], b"hello");
 ```
 
-Runtime options:
+Runtime flavors:
 
-| API | Runtime placement | Scaling model |
-|-----|-------------------|---------------|
-| `Context::new().socket(...)` | Async socket, OMQ-owned IO threads | Classic/libzmq-like IO threads; PUB peers are sharded across lanes |
-| `Context::current().socket(...)` | Async socket, caller's active tokio runtime | Embedded tokio runtime |
-| `Context::new().blocking_socket(...)` | Sync socket, OMQ-owned IO threads | Classic/libzmq-like IO threads; caller thread stays out of IO |
-| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Caller-driven async socket | Single TCP peer, no background driver task |
+| Flavor | Use when | IO placement |
+|--------|----------|--------------|
+| `Context::new().socket(...)` | Async API with OMQ-managed transport work | OMQ-owned background IO threads |
+| `Context::new().blocking_socket(...)` | Classic/libzmq-like synchronous API | OMQ-owned background IO threads |
+| `Context::current().socket(...)` | Embedding OMQ into an existing tokio app/runtime | Caller runtime, no OMQ-owned IO thread |
+| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Lowest latency for one TCP peer | Caller task, no socket driver task |
 
 More examples in [examples/zguide/](examples/zguide/), a
 port of the ZeroMQ Guide patterns to OMQ.

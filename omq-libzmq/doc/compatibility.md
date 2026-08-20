@@ -2,7 +2,9 @@
 
 `omq-libzmq` ships a libzmq 4.3.6-compatible `zmq.h` and exports every C
 symbol declared there. `tests/abi_matrix.rs` enforces that the header, Rust
-exports, and tracked socket option matrix stay in sync.
+exports, and tracked socket option matrix stay in sync. Compatibility means
+ABI and common behavior; it does not claim identical implementation details,
+performance, or support for every draft/platform feature.
 
 ## Supported Surface
 
@@ -21,7 +23,9 @@ exports, and tracked socket option matrix stay in sync.
 
 - `ZMQ_DGRAM` is declared for header compatibility but `zmq_socket()` rejects it
   with `EINVAL`.
-- `zmq_connect_peer()` and `zmq_disconnect_peer()` return `ENOTSUP`.
+- `zmq_connect_peer()` is a stub: it returns zero for the historical ABI
+  shape but sets `errno` to `ENOTSUP`; `zmq_disconnect_peer()` returns `-1`
+  with `ENOTSUP`.
 - `zmq_socket_monitor_versioned()` supports monitor version 1 only. Monitor v2
   and `ZMQ_EVENT_PIPES_STATS` are not implemented.
 - `zmq_socket_monitor_pipes_stats()` and `zmq_socket_get_peer_state()` return
@@ -54,3 +58,20 @@ currently wired into backend behavior.
 
 `ZMQ_THREAD_SAFE` returns 0. Match libzmq discipline: one application thread per
 socket.
+
+## OMQ-internal API
+
+`libomq_zmq.so` also exports a small `omq_*` extension surface. These symbols
+are not part of upstream libzmq and are not covered by the compatibility
+promise:
+
+- `omq_ctx_share_key()` / `omq_ctx_from_share_key()` share an OMQ context
+  between compatible binding instances;
+- `omq_socket_send_async()` submits an atomically encoded multipart message to
+  the OMQ Tokio runtime and invokes a caller-supplied C callback on completion;
+- `omq_async_task_cancel()` requests cancellation of that task;
+- `omq_async_task_free()` releases the returned task handle after completion.
+
+The async message encoding is an OMQ-specific length-table format. Bindings
+must use these functions only when linked against `omq-libzmq`; they must not
+assume they exist in upstream `libzmq`.

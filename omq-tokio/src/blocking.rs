@@ -68,28 +68,39 @@ impl Socket {
         self.inner
     }
 
+    /// Return this socket's type.
     pub fn socket_type(&self) -> omq_proto::proto::SocketType {
         self.inner.socket_type()
     }
 
+    /// Subscribe to connection-lifecycle events for this socket.
     pub fn monitor(&self) -> MonitorStream {
         self.inner.monitor()
     }
 
+    /// Return the most recent concrete endpoint produced by `bind()`.
+    ///
+    /// This is useful after binding to port `0`.
     pub fn last_bound_endpoint(&self) -> Option<Endpoint> {
         self.inner.last_bound_endpoint()
     }
 
+    /// Bind this socket to an endpoint.
+    ///
+    /// Returns the concrete endpoint. Wildcards such as `tcp://*:0` are
+    /// expanded to the address selected by the OS.
     pub fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         let s = self.inner.clone();
         self.ctx.block_on(async move { s.bind(endpoint).await })
     }
 
+    /// Connect this socket to an endpoint.
     pub fn connect(&self, endpoint: Endpoint) -> Result<()> {
         let s = self.inner.clone();
         self.ctx.block_on(async move { s.connect(endpoint).await })
     }
 
+    /// Send one complete message, blocking while the socket is muted.
     pub fn send(&self, msg: Message) -> Result<()> {
         match self.inner.try_send(msg) {
             Ok(()) => Ok(()),
@@ -110,6 +121,7 @@ impl Socket {
         }
     }
 
+    /// Try to send one complete message without blocking.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         self.inner.try_send(msg)
     }
@@ -127,14 +139,19 @@ impl Socket {
         self.inner.try_send_many(messages, max)
     }
 
+    /// Receive one complete message, blocking until one is available.
     pub fn recv(&self) -> Result<Message> {
         self.inner.blocking_recv()
     }
 
+    /// Receive one complete message, or return `WouldBlock` on timeout.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Message> {
         self.inner.blocking_recv_timeout(timeout)
     }
 
+    /// Receive up to `max` messages.
+    ///
+    /// Blocks until the first message arrives, then drains ready messages.
     pub fn recv_many(&self, max: usize) -> Result<Vec<Message>> {
         self.inner.blocking_recv_many(max)
     }
@@ -178,6 +195,7 @@ impl Socket {
             .blocking_recv_many_registered_cancelable_into(max, cancel, out)
     }
 
+    /// Receive up to `max` messages before `timeout`.
     pub fn recv_many_timeout(&self, max: usize, timeout: Duration) -> Result<Vec<Message>> {
         self.inner.blocking_recv_many_timeout(max, timeout)
     }
@@ -196,10 +214,12 @@ impl Socket {
             .blocking_recv_many_timeout_into(max, timeout, out)
     }
 
+    /// Try to receive one ready message without blocking.
     pub fn try_recv(&self) -> Result<Message> {
         self.inner.try_recv()
     }
 
+    /// Try to receive up to `max` ready messages without blocking.
     pub fn try_recv_many(&self, max: usize) -> Result<Vec<Message>> {
         self.inner.try_recv_many(max)
     }
@@ -209,75 +229,92 @@ impl Socket {
         self.inner.try_recv_many_into(max, out)
     }
 
+    /// Add a SUB prefix subscription.
     pub fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         let s = self.inner.clone();
         let p = prefix.into();
         self.ctx.block_on(async move { s.subscribe(p).await })
     }
 
+    /// Remove a SUB prefix subscription.
     pub fn unsubscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
         let s = self.inner.clone();
         let p = prefix.into();
         self.ctx.block_on(async move { s.unsubscribe(p).await })
     }
 
+    /// Join a DISH group.
     pub fn join(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
         let s = self.inner.clone();
         let g = group.into();
         self.ctx.block_on(async move { s.join(g).await })
     }
 
+    /// Leave a DISH group.
     pub fn leave(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
         let s = self.inner.clone();
         let g = group.into();
         self.ctx.block_on(async move { s.leave(g).await })
     }
 
+    /// Stop listening on a previously bound endpoint.
     pub fn unbind(&self, endpoint: Endpoint) -> Result<()> {
         let s = self.inner.clone();
         self.ctx.block_on(async move { s.unbind(endpoint).await })
     }
 
+    /// Stop dialing a previously connected endpoint.
     pub fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.disconnect(endpoint).await })
     }
 
+    /// Return status for one live connection id.
     pub fn connection_info(&self, connection_id: u64) -> Result<Option<ConnectionStatus>> {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.connection_info(connection_id).await })
     }
 
+    /// Return status for one routing id.
     pub fn peer_info(&self, routing_id: u32) -> Result<Option<PeerInfo>> {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.peer_info(routing_id).await })
     }
 
+    /// Wait until at least `min_peers` handshakes have completed.
+    ///
+    /// Returns the current ready-peer count.
     pub fn wait_connected(&self, min_peers: usize, timeout: Duration) -> Result<usize> {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.wait_connected(min_peers, timeout).await })
     }
 
+    /// Wait until at least `min_subscriptions` subscriptions are known.
+    ///
+    /// Returns the current subscription generation.
     pub fn wait_subscribed(&self, min_subscriptions: u64, timeout: Duration) -> Result<u64> {
         let s = self.inner.clone();
         self.ctx
             .block_on(async move { s.wait_subscribed(min_subscriptions, timeout).await })
     }
 
+    /// Return a snapshot of current connection statuses.
     pub fn connections(&self) -> Result<Vec<ConnectionStatus>> {
         let s = self.inner.clone();
         self.ctx.block_on(async move { s.connections().await })
     }
 
+    /// Close this socket with its configured linger setting.
     pub fn close(self) -> Result<()> {
         let s = self.inner;
         self.ctx.block_on(async move { s.close().await })
     }
 
+    /// Close this socket with an explicit linger override.
     pub fn close_with_linger(self, linger: Option<Duration>) -> Result<()> {
         let s = self.inner;
         self.ctx

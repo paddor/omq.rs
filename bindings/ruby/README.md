@@ -7,6 +7,26 @@ synchronous; its waits cooperate with an installed `Fiber.scheduler`.
 MRI 3.3+, MRI 4.0+, and TruffleRuby are supported. TruffleRuby 34 does not
 provide Ruby's `Fiber.scheduler` API, so waits block the calling thread there.
 
+## Performance
+
+![Ruby binding benchmark](doc/charts/bindings.svg)
+
+The binding benchmark uses separate Ruby processes over TCP and compares
+`omq-rs` with [cztop](https://github.com/paddor/cztop), which calls CZMQ and
+libzmq through FFI, and [ffi-rzmq](https://github.com/chuckremes/ffi-rzmq),
+which calls libzmq directly through FFI. Install CZMQ and libzmq to include
+both baselines.
+
+```sh
+ruby -Ilib scripts/update_perf.rb
+ruby -Ilib scripts/update_perf.rb --quick
+ruby -Ilib scripts/update_perf.rb --chart-only
+```
+
+Rows append to `~/.cache/omq-rs/bindings.jsonl`. The generated chart is
+`doc/charts/bindings.svg`. `--quick` only runs a smoke benchmark and does not
+write results or a chart.
+
 ## Install
 
 ```sh
@@ -135,26 +155,6 @@ TCP endpoints; no preparation call is required.
 bundle install
 bundle exec rake
 ```
-
-## Performance
-
-![Ruby binding benchmark](doc/charts/bindings.svg)
-
-The binding benchmark uses separate Ruby processes over TCP and compares
-`omq-rs` with [cztop](https://github.com/paddor/cztop), which calls CZMQ and
-libzmq through FFI, and [ffi-rzmq](https://github.com/chuckremes/ffi-rzmq),
-which calls libzmq directly through FFI. Install CZMQ and libzmq to include
-both baselines.
-
-```sh
-ruby -Ilib scripts/update_perf.rb
-ruby -Ilib scripts/update_perf.rb --quick
-ruby -Ilib scripts/update_perf.rb --chart-only
-```
-
-Rows append to `~/.cache/omq-rs/bindings.jsonl`. The generated chart is
-`doc/charts/bindings.svg`. `--quick` only runs a smoke benchmark and does not
-write results or a chart.
 
 ## License
 

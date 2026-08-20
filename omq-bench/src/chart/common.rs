@@ -49,7 +49,7 @@ enum LegendVersionMode {
     ShowOtherImpls,
 }
 
-// ── colors ─────────────────────────────────────────────────────
+// colors
 
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
@@ -65,7 +65,7 @@ pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
 
-// ── formatting ─────────────────────────────────────────────────
+// formatting
 
 pub(crate) fn fmt_size(b: u64) -> String {
     if b >= 1_048_576 {
@@ -108,7 +108,7 @@ pub(crate) fn fmt_gbps(v: f64) -> String {
 
 pub(crate) fn fmt_us(v: f64) -> String {
     if v > 0.0 {
-        format!("{v:.0} us")
+        format!("{v:.0} μs")
     } else {
         String::new()
     }
@@ -165,7 +165,7 @@ pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
     (MSG_AXIS_STEP * ticks as f64, ticks)
 }
 
-// ── hardware detection ─────────────────────────────────────────
+// hardware detection
 
 pub(crate) fn detect_hardware() -> Option<String> {
     let hw_conf = read_chart_hw();
@@ -219,7 +219,7 @@ fn read_chart_hw() -> BTreeMap<String, String> {
     map
 }
 
-// ── SVG post-processing ───────────────────────────────────────
+// SVG post-processing
 
 pub(crate) fn postprocess_svg(
     path: &Path,
@@ -270,7 +270,7 @@ pub(crate) fn postprocess_svg(
     Ok(())
 }
 
-// ── legend table ───────────────────────────────────────────────
+// legend table
 
 static IMPL_VERSIONS: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
 
@@ -441,7 +441,7 @@ fn draw_legend_table_with_versions(
     Ok(())
 }
 
-// ── data loading ───────────────────────────────────────────────
+// data loading
 
 #[derive(Default)]
 struct CpuAccum {
@@ -685,7 +685,7 @@ pub(crate) fn load_latency(
     (lat, cpu)
 }
 
-// ── fairness whiskers ─────────────────────────────────────────
+// fairness whiskers
 
 fn draw_whiskers<DB: DrawingBackend>(
     chart: &mut ChartContext<
@@ -747,7 +747,7 @@ fn draw_whiskers<DB: DrawingBackend>(
     }
 }
 
-// ── chart drawing helpers ──────────────────────────────────────
+// chart drawing helpers
 
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn draw_throughput_dual_panel(
@@ -1355,7 +1355,7 @@ pub(crate) fn auto_lat_range(lat: &ValMap) -> (f64, f64) {
 }
 
 /// Draw a multi-row throughput chart. Each row is a dual-panel (msg/s left,
-/// GB/s right) for a different peer count. Single legend table at the bottom.
+/// legend table
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn draw_multirow_throughput(
     out_path: &Path,

@@ -164,13 +164,13 @@ impl Transport for IpcTransport {
         "ipc"
     }
 
-    async fn bind(endpoint: &Endpoint) -> Result<Self::Listener> {
-        match endpoint {
+    fn bind(endpoint: &Endpoint) -> impl Future<Output = Result<Self::Listener>> + Send {
+        std::future::ready(match endpoint {
             Endpoint::Ipc(IpcPath::NamedPipe(name)) => bind_named_pipe_windows(endpoint, name),
             other => Err(Error::InvalidEndpoint(format!(
                 "ipc transport got non-ipc endpoint: {other}"
             ))),
-        }
+        })
     }
 
     async fn connect(endpoint: &Endpoint) -> Result<Self::Stream> {

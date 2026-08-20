@@ -12,7 +12,7 @@ jobs:
   publish:
     name: Publish to RubyGems
     runs-on: ubuntu-latest
-    environment: release
+    environment: rubygems
     permissions:
       contents: write
       id-token: write

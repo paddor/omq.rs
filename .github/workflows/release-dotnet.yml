@@ -144,6 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [package, smoke]
     timeout-minutes: 15
+    environment: nuget
     permissions:
       contents: read
       id-token: write

@@ -6,6 +6,14 @@ require_relative "rs/socket"
 
 module OMQ
   class << self
+    # Returns the OMQ.rs namespace or creates an OMQ.rs-backed socket.
+    #
+    # @param socket_type [Symbol, String, nil] socket pattern, such as +:push+
+    # @param options [Hash] socket options passed to {Rust.socket}
+    # @yield [socket] yields a newly created socket and closes it afterward
+    # @yieldparam socket [Rust::Socket]
+    # @return [Module, Rust::Socket, Object] the namespace, socket, or block result
+    # @raise [ArgumentError] if +socket_type+ is unknown or an option is invalid
     def rs(socket_type = nil, **options)
       return Rust if socket_type.nil?
 

@@ -3,7 +3,7 @@ name: Release OMQ.Net
 on:
   push:
     tags:
-      - 'omq-net-v*'
+      - 'omq-dotnet-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -85,7 +85,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#omq-net-v}"
+            version="${GITHUB_REF_NAME#omq-dotnet-v}"
           else
             version="$INPUT_VERSION"
           fi

@@ -70,6 +70,14 @@ class ApiTest < Minitest::Test
     assert_raises(ArgumentError) { OMQ.rs(:pull, send_hwm: -1) }
     assert_raises(ArgumentError) { OMQ.rs(:pull, workload_profile: :fast) }
     assert_raises(ArgumentError) { OMQ.rs(:pull, recv_rate_limit: {rate: 10}) }
+    error = assert_raises(ArgumentError) { OMQ.rs(:pull, send_hmw: 10) }
+    assert_match(/unknown socket option: send_hmw/, error.message)
+  end
+
+  def test_gemspec_links_api_documentation
+    spec = Gem::Specification.load(File.expand_path("../omq-rs.gemspec", __dir__))
+
+    assert_equal "https://www.rubydoc.info/gems/omq-rs", spec.metadata["documentation_uri"]
   end
 
   private

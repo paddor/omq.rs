@@ -8,6 +8,7 @@ class PatternsTest < Minitest::Test
     endpoint = tcp_endpoint(pull)
     push = socket(:push)
     push.connect(endpoint).wait_for_peer(timeout: 2)
+    assert_same push, push.wait_for_peer(timeout: 0)
 
     push << "one"
     push.send("two", "three")
@@ -43,6 +44,7 @@ class PatternsTest < Minitest::Test
     sub = socket(:sub, recv_timeout: 2)
     sub.subscribe("weather.").connect(endpoint)
     pub.wait_for_subscriber(timeout: 2)
+    assert_same pub, pub.wait_for_subscriber(timeout: 0)
 
     pub.send("news.world", "ignored")
     pub.send("weather.ch", "sunny")
@@ -168,5 +170,22 @@ class PatternsTest < Minitest::Test
     pull.close
 
     assert_instance_of IOError, result.value
+  end
+
+  def test_close_interrupts_peer_wait
+    push = socket(:push)
+    push.connect("tcp://127.0.0.1:1")
+
+    waiter = Thread.new do
+      push.wait_for_peer(timeout: 2)
+    rescue StandardError => error
+      error
+    end
+    sleep 0.01 until waiter.status == "sleep"
+    push.close
+
+    error = waiter.value
+    assert_instance_of IOError, error
+    assert_equal "socket closed", error.message
   end
 end

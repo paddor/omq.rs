@@ -290,6 +290,14 @@ class FeaturesTest < Minitest::Test
     assert_instance_of Integer, handshake[:connection_id]
   end
 
+  def test_monitor_each_stops_when_socket_closes
+    pull = socket(:pull)
+    events = pull.monitor.each
+    pull.close
+
+    assert_raises(StopIteration) { events.next }
+  end
+
   def test_wake_recv_makes_wait_readable_return
     pull = socket(:pull)
     pull.bind("inproc://ruby-wake-recv")

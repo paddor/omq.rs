@@ -30,9 +30,8 @@ workspace root lock file.
 
 ## Benchmarks
 
-Chart subtitle reads `bindings/pyomq/.chart_hw` plus detected CPU info.
-Use `OMQ_HW_PREFIX`/`OMQ_HW_POSTFIX` to override it for one run, or
-`OMQ_HW_EXTRAS` to append one-off details.
+Chart subtitle reads the repo-root `.chart_hw`. Use `OMQ_HW_PREFIX` and
+`OMQ_HW_POSTFIX` to override its `prefix` and `postfix` values for one run.
 
 Bench machine: i7-8700B, performance governor, turbo off.
 

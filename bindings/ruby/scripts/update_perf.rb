@@ -167,9 +167,6 @@ def hardware_label
     end
   end
 
-  label = ENV["OMQ_HW_LABEL"] || config["label"]
-  return label if label
-
   prefix = ENV["OMQ_HW_PREFIX"] || config["prefix"]
   postfix = ENV["OMQ_HW_POSTFIX"] || config["postfix"]
   combined = [prefix, postfix].compact.join(", ")

@@ -94,7 +94,8 @@ bindings/node/doc/charts/bindings.svg
 Hardware subtitle comes from the repo-root `.chart_hw`:
 
 ```text
-label=Ryzen 9 9950X, 16 cores, turbo off, performance governor
+prefix=Ryzen 9 9950X
+postfix=16 cores, turbo off, performance governor
 ```
 
 `.chart_hw` is local-only and gitignored.

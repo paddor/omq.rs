@@ -62,10 +62,3 @@ first disables the source and then closes the reader.
 
 `Proxy` delegates blocking proxy/device loops directly to the native ABI. Run
 these methods on a dedicated thread or task.
-
-## Packaging
-
-The managed assembly targets `net8.0` and `net10.0`. One NuGet package carries
-the generated XML documentation and native libraries under RID-specific
-`runtimes/<rid>/native/` paths. The .NET host resolves the matching native
-library through normal RID asset selection.

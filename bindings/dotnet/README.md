@@ -1,72 +1,25 @@
 # OMQ.Net
 
-Fast, boring .NET binding for OMQ. Native transport stays in `omq-libzmq`.
-Managed code owns lifetimes, copies message bytes at the boundary, and
-serializes each socket handle. No Mono needed.
+Fast .NET binding for OMQ, backed by the `omq-libzmq` C ABI. Managed handles
+own native lifetimes; socket calls are serialized and message bytes are copied
+at the boundary.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/dotnet/doc/charts/bindings.svg" alt="OMQ.Net performance" width="850">
 </p>
 
-## Status
+2-process loopback TCP comparison against NetMQ. Throughput covers 16 B–32 KiB;
+REQ/REP p50 latency covers 16 B–4 KiB. See [`DEVELOPMENT.md`](DEVELOPMENT.md)
+for benchmark and regeneration commands.
 
-Early implementation. The sync core is here: all OMQ socket types, context
-sharing, bind/connect, multipart messages, send/receive, subscriptions,
-RADIO/DISH groups, common options, deterministic disposal, and native errno
-exceptions. Async send/receive, cancellation polling, readiness polling,
-CURVE key generation, PLAIN/CURVE configuration, and socket monitor events are
-included.
-
-`Dgram` is present in the public enum but currently rejected by the shared
-`omq-libzmq` ABI. Native DGRAM support must land before claiming full parity.
-
-## Build and test
-
-Requires .NET SDK 10 and Rust:
+## Install
 
 ```sh
-cargo build --release -p omq-libzmq
-dotnet build bindings/dotnet/Omq.Net.csproj
-LD_LIBRARY_PATH="$PWD/target/release" dotnet run --project bindings/dotnet/tests/Omq.Net.Smoke.csproj
-
-# bounded lifecycle/race checks
-LD_LIBRARY_PATH="$PWD/target/release" dotnet run --project bindings/dotnet/tests/Omq.Net.Lifecycle.csproj
-
-# .NET <-> pyzmq protocol/security interop (NULL, CURVE, authenticated PLAIN)
-LD_LIBRARY_PATH="$PWD/target/release" python3 bindings/dotnet/tests/interop.py
+dotnet add package Omq.Net
 ```
 
-Run the real two-process TCP benchmark. It compares OMQ.Net with NetMQ, uses
-the full throughput sizes, and limits latency to 4 KiB:
-
-```sh
-LD_LIBRARY_PATH="$PWD/target/release" \
-  python3 bindings/dotnet/scripts/update_perf.py
-```
-
-Fast check:
-
-```sh
-LD_LIBRARY_PATH="$PWD/target/release" \
-  python3 bindings/dotnet/scripts/update_perf.py --quick
-```
-
-The native library can also be supplied through the normal loader paths. Keep
-`libomq_zmq.so` beside the test process or set `LD_LIBRARY_PATH`.
-
-## NuGet packaging
-
-One package carries managed assemblies plus native libraries under NuGet RID
-folders. Build native libraries for each supported RID, then pass them as
-`RID=PATH` arguments:
-
-```sh
-bash bindings/dotnet/scripts/package.sh /tmp/omq-nuget \
-  linux-x64=target/release/libomq_zmq.so
-```
-
-The package can contain several RIDs. Consumers install one `Omq.Net` package;
-NuGet selects the native asset matching their OS and CPU. No Mono needed.
+The package targets `net8.0` and `net10.0`, and includes RID-specific native
+assets for supported platforms.
 
 ## API
 
@@ -83,23 +36,14 @@ push.Send(Message.Text("hello"));
 Console.WriteLine(pull.Receive().ToString());
 ```
 
-Socket methods are safe across managed threads. A call holds the socket gate
-until its native operation completes. `Dispose` closes the native handle once;
-message frames are always closed in `finally` blocks. This is the baseline for
-race and leak tests before adding zero-copy or async APIs.
+The public API includes all OMQ socket types, multipart messages, options,
+polling, monitors, proxies, CURVE key helpers, synchronous operations, and
+cancellation-aware async operations. Generated XML documentation provides
+IntelliSense summaries for the public API.
 
-## Performance contract
+OMQ.Net follows OMQ/libzmq socket semantics; it is not a NetMQ compatibility
+layer.
 
-Benchmark charts compare sync and async OMQ.Net against sync and async NetMQ
-over two-process loopback TCP. PUSH/PULL throughput spans 16 B through 32 KiB;
-REQ/REP p50 latency spans 16 B through 4 KiB. Results append to:
-`~/.cache/omq.net/bindings.jsonl`. The cache is never rewritten; chart-only
-regeneration selects the newest row for each implementation, pattern, and size.
+## Development
 
-```sh
-python3 bindings/dotnet/scripts/update_perf.py --chart-only
-```
-
-Current quick-run result on this VM: OMQ.Net beats NetMQ at every sampled size.
-Treat that as a measurement, not a promise. Full runs need 3 rounds on a quiet
-machine before publishing a performance claim.
+See [`DEVELOPMENT.md`](DEVELOPMENT.md).

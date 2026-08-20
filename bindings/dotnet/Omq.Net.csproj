@@ -12,6 +12,7 @@
     <NativeAssetRoot Condition="'$(NativeAssetRoot)' == ''">$(MSBuildProjectDirectory)/native</NativeAssetRoot>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>1591</NoWarn>

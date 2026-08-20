@@ -1,5 +1,6 @@
 namespace Omq;
 
+/// OMQ socket patterns supported by the native ABI.
 public enum SocketType
 {
     Pair = 0, Pub = 1, Sub = 2, Req = 3, Rep = 4, Dealer = 5,

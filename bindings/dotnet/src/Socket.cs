@@ -4,13 +4,17 @@ using System.Text.Json;
 
 namespace Omq;
 
+/// Thread-safe managed wrapper around one native OMQ socket.
 public sealed class Socket : IDisposable
 {
     private readonly Context owner;
     private readonly object gate = new();
     private Context.SafeSocket? handle;
+    /// Gets the socket pattern.
     public SocketType Type { get; }
+    /// Gets whether the native socket has been closed.
     public bool Closed => handle is null;
+    /// Gets the native pollable file descriptor.
     public int FileDescriptor => GetInt32(SocketOption.FileDescriptor);
 
     internal Socket(Context owner, SocketType type, Context.SafeSocket handle) { this.owner = owner; Type = type; this.handle = handle; }
@@ -28,21 +32,28 @@ public sealed class Socket : IDisposable
         }
     }
 
+    /// Sets an integer socket option.
     public void SetOption(int option, int value) => SetOption(option, BitConverter.GetBytes(value));
+    /// Sets a 64-bit socket option.
     public void SetOption(int option, long value) => SetOption(option, BitConverter.GetBytes(value));
+    /// Sets a raw socket option value.
     public void SetOption(int option, ReadOnlySpan<byte> value)
     {
         lock (gate) { IntPtr socket = Require(); byte[] copy = value.ToArray(); unsafe { fixed (byte* p = copy) Errors.Check("setsockopt", Native.zmq_setsockopt(socket, option, (IntPtr)p, (nuint)copy.Length)); } }
     }
+    /// Sets a UTF-8 string socket option.
     public void SetOption(int option, string value) => SetOption(option, Encoding.UTF8.GetBytes(value));
+    /// Gets an integer socket option.
     public int GetInt32(int option)
     {
         lock (gate) { int value = 0; nuint length = sizeof(int); unsafe { Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)(&value), ref length)); } return value; }
     }
+    /// Gets a 64-bit socket option.
     public long GetInt64(int option)
     {
         lock (gate) { long value = 0; nuint length = sizeof(long); unsafe { Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)(&value), ref length)); } return value; }
     }
+    /// Gets a variable-length socket option as bytes.
     public byte[] GetBytes(int option, int capacity = 1024)
     {
         lock (gate)
@@ -52,6 +63,7 @@ public sealed class Socket : IDisposable
             return value[..checked((int)length)];
         }
     }
+    /// Gets a UTF-8 string socket option.
     public string GetString(int option, int capacity = 1024)
     {
         lock (gate)
@@ -61,24 +73,39 @@ public sealed class Socket : IDisposable
             return Encoding.UTF8.GetString(value, 0, checked((int)length)).TrimEnd('\0');
         }
     }
+    /// Adds a subscription prefix.
     public void Subscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Subscribe, prefix);
+    /// Adds a UTF-8 subscription prefix.
     public void Subscribe(string prefix) => Subscribe(Encoding.UTF8.GetBytes(prefix));
+    /// Removes a subscription prefix.
     public void Unsubscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Unsubscribe, prefix);
+    /// Removes a UTF-8 subscription prefix.
     public void Unsubscribe(string prefix) => Unsubscribe(Encoding.UTF8.GetBytes(prefix));
+    /// Enables PLAIN server mode.
     public void ConfigurePlainServer(string username = "", string password = "") { _ = username; _ = password; SetOption(SocketOption.PlainServer, 1); }
+    /// Configures PLAIN client credentials.
     public void ConfigurePlainClient(string username, string password) { SetOption(SocketOption.PlainUsername, username); SetOption(SocketOption.PlainPassword, password); }
+    /// Enables CURVE server mode with its secret key.
     public void ConfigureCurveServer(string publicKey, string secretKey) { _ = publicKey; SetOption(SocketOption.CurveServer, 1); SetOption(SocketOption.CurveSecretKey, secretKey); }
+    /// Configures CURVE client keys and the server key.
     public void ConfigureCurveClient(string publicKey, string secretKey, string serverPublicKey) { SetOption(SocketOption.CurvePublicKey, publicKey); SetOption(SocketOption.CurveSecretKey, secretKey); SetOption(SocketOption.CurveServerKey, serverPublicKey); }
+    /// Creates a monitor for this socket.
     public Monitor Monitor(int events = 0xFFFF) => new(owner, this, events);
+    /// Joins a RADIO/DISH group.
     public void Join(string group) => EndpointCall("join", group, NativeJoin);
+    /// Leaves a RADIO/DISH group.
     public void Leave(string group) => EndpointCall("leave", group, NativeLeave);
+    /// Binds and returns the effective endpoint.
     public string Bind(string endpoint)
     {
         EndpointCall("bind", endpoint, NativeBind);
         return endpoint.EndsWith(":0", StringComparison.Ordinal) ? GetString(SocketOption.LastEndpoint) : endpoint;
     }
+    /// Connects to an endpoint.
     public void Connect(string endpoint) => EndpointCall("connect", endpoint, NativeConnect);
+    /// Removes a binding.
     public void Unbind(string endpoint) => EndpointCall("unbind", endpoint, NativeUnbind);
+    /// Removes a connection.
     public void Disconnect(string endpoint) => EndpointCall("disconnect", endpoint, NativeDisconnect);
 
     private delegate int EndpointFn(IntPtr socket, IntPtr text);
@@ -95,11 +122,14 @@ public sealed class Socket : IDisposable
     [DllImport("omq_zmq", CallingConvention = CallingConvention.Cdecl, EntryPoint = "zmq_join")] private static extern int NativeJoinImpl(IntPtr s, IntPtr e);
     [DllImport("omq_zmq", CallingConvention = CallingConvention.Cdecl, EntryPoint = "zmq_leave")] private static extern int NativeLeaveImpl(IntPtr s, IntPtr e);
 
+    /// Sends one frame, optionally marking it as multipart and/or non-blocking.
     public void Send(ReadOnlySpan<byte> data, bool more = false, bool dontWait = false)
     {
         lock (gate) { byte[] copy = data.ToArray(); unsafe { fixed (byte* p = copy) Errors.Check("send", Native.zmq_send(Require(), (IntPtr)p, (nuint)copy.Length, Flags(more, dontWait))); } }
     }
+    /// Sends a UTF-8 frame.
     public void SendText(string text, bool more = false, bool dontWait = false) => Send(Encoding.UTF8.GetBytes(text), more, dontWait);
+    /// Sends all frames in a message.
     public void Send(Message message, bool dontWait = false)
     {
         lock (gate)
@@ -107,7 +137,9 @@ public sealed class Socket : IDisposable
             for (int i = 0; i < message.Parts.Count; i++) SendPart(message.Parts[i], i + 1 < message.Parts.Count, dontWait, i == 0 ? message.RoutingId : 0);
         }
     }
+    /// Sends copied multipart frames.
     public void SendMultipart(IEnumerable<ReadOnlyMemory<byte>> parts, bool dontWait = false) => Send(new Message(parts), dontWait);
+    /// Sends copied multipart byte arrays.
     public void SendMultipart(params byte[][] parts) => Send(new Message(parts.Select(x => (ReadOnlyMemory<byte>)x)), false);
     private void SendPart(byte[] data, bool more, bool dontWait, uint routingId = 0)
     {
@@ -117,6 +149,7 @@ public sealed class Socket : IDisposable
         finally { Native.zmq_msg_close(ref msg); }
     }
 
+    /// Receives one complete message, including all multipart frames.
     public Message Receive(bool dontWait = false)
     {
         lock (gate)
@@ -132,39 +165,51 @@ public sealed class Socket : IDisposable
             return new Message(parts.ToArray()) { RoutingId = routingId };
         }
     }
+    /// Receives a UTF-8 single-frame message.
     public string ReceiveText(bool dontWait = false) => Encoding.UTF8.GetString(Receive(dontWait).Data);
+    /// Sends a UTF-8 string.
     public void SendString(string text, bool dontWait = false) => SendText(text, dontWait: dontWait);
+    /// Receives a UTF-8 string.
     public string ReceiveString(bool dontWait = false) => ReceiveText(dontWait);
+    /// Serializes and sends a JSON frame.
     public void SendJson<T>(T value, bool dontWait = false, bool more = false) => Send(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)), more, dontWait);
+    /// Receives and deserializes a JSON frame.
     public T? ReceiveJson<T>(bool dontWait = false) => JsonSerializer.Deserialize<T>(Receive(dontWait).Data);
+    /// Polls this socket for readiness.
     public IReadOnlyList<PollResult> Poll(TimeSpan timeout, PollEvents events = PollEvents.Readable)
     {
         using var poller = new Poller();
         poller.Add(this, events);
         return poller.Wait(timeout);
     }
+    /// Attempts a non-blocking frame send.
     public bool TrySend(ReadOnlySpan<byte> data)
     {
         try { Send(data, dontWait: true); return true; }
         catch (OmqAgainException) { return false; }
     }
+    /// Attempts a non-blocking message send.
     public bool TrySend(Message message)
     {
         try { Send(message, dontWait: true); return true; }
         catch (OmqAgainException) { return false; }
     }
+    /// Receives all frames as byte arrays.
     public IReadOnlyList<byte[]> ReceiveMultipart(bool dontWait = false) => Receive(dontWait).Parts;
+    /// Attempts a non-blocking message receive.
     public bool TryReceive(out Message? message)
     {
         try { message = Receive(dontWait: true); return true; }
         catch (OmqAgainException) { message = null; return false; }
     }
+    /// Receives one frame into a caller-provided buffer.
     public byte[] ReceiveInto(Span<byte> buffer, bool dontWait = false)
     {
         lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); copy.AsSpan(0, n).CopyTo(buffer); return copy[..n]; } } }
     }
     private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
 
+    /// Closes the socket and releases its native handle.
     public void Dispose()
     {
         lock (gate) { if (handle is null) return; handle.Dispose(); handle = null; }

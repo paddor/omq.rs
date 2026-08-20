@@ -81,8 +81,8 @@ pub extern "C" fn omq_socket_send_async(
     let userdata = userdata as usize;
     let join = runtime.spawn(async move {
         let status = tokio::select! {
-            result = inner.send(message) => result.map(|_| 0).unwrap_or(ETERM),
-            _ = cancel_wait.notified() => { cancelled_wait.store(true, Ordering::Release); libc::ECANCELED }
+            result = inner.send(message) => result.map_or(ETERM, |()| 0),
+            () = cancel_wait.notified() => { cancelled_wait.store(true, Ordering::Release); libc::ECANCELED }
         };
         if let Some(callback) = callback {
             callback(userdata as *mut c_void, status);

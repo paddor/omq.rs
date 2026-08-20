@@ -19,7 +19,7 @@ CHART      = File.join(ROOT, "doc", "charts", "bindings.svg")
 SIZES      = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768].freeze
 QUICK_SIZE = [128, 1024].freeze
 LATENCY_MAX_SIZE = 4096
-LATENCY_MIN_US = 20.0
+LATENCY_MIN_US = 0.0
 LATENCY_MAX_US = 180.0
 LATENCY_STEP_US = 20
 COLORS     = {"omq-rs" => "#ef4444", "cztop" => "#60a5fa", "ffi-rzmq" => "#a855f7"}.freeze
@@ -295,7 +295,7 @@ def render_chart
     fraction = (value - LATENCY_MIN_US) / latency_span
     y = latency_bottom - fraction * (latency_bottom - latency_top)
     lines << %(  <line x1="#{left}" y1="#{y.round(1)}" x2="#{right}" y2="#{y.round(1)}" stroke="#374151" stroke-width="1"/>)
-    lines << %(  <text x="#{left - 8}" y="#{y.round(1)}" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">#{value} µs</text>)
+    lines << %(  <text x="#{left - 8}" y="#{y.round(1)}" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">#{value} μs</text>)
   end
   latency_sizes.each_with_index do |size, index|
     x = x_latency.call(index)
@@ -359,7 +359,7 @@ unless options[:chart_only]
         best = options[:rounds].times.map { run_cell(implementation, pattern, size, options[:quick]) }
           .min_by { |result| pattern == "pushpull" ? -result[:messages_per_second] : result[:microseconds_per_round_trip] }
         append_result(best.merge(rounds: options[:rounds])) if options[:record] && !options[:quick]
-        metric = pattern == "pushpull" ? "#{best[:messages_per_second].round} msg/s" : format("%.1f µs", best[:microseconds_per_round_trip])
+        metric = pattern == "pushpull" ? "#{best[:messages_per_second].round} msg/s" : format("%.1f μs", best[:microseconds_per_round_trip])
         puts "#{implementation.ljust(8)} #{pattern.ljust(8)} #{size.to_s.rjust(6)} B  #{metric}"
       end
     end

@@ -21,7 +21,7 @@ small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
 ## Performance
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/java/doc/charts/pushpull_tcp.svg" alt="OMQ.java vs JeroMQ TCP throughput and latency" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/java/doc/charts/bindings.svg" alt="OMQ.java vs JeroMQ TCP throughput and latency" width="850">
 </p>
 
 2-process loopback PUSH/PULL throughput and REQ/REP p50 latency vs JeroMQ

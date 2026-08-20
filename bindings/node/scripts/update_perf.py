@@ -164,7 +164,7 @@ def _fmt_y_rate(val):
 def _fmt_y_us(val):
     if val >= 1000:
         return f"{val / 1000:g} ms"
-    return f"{val:g} µs"
+    return f"{val:g} μs"
 
 
 def _fmt_mbps(val):
@@ -227,18 +227,31 @@ def gen_combined_chart(data, path):
     hw_label = _detect_hardware()
     hw_offset = 14 if hw_label else 0
     svg_w = 850
-    svg_h = 670 + hw_offset
-    x_left, x_right = 90, 760
+    svg_h = 810 + hw_offset
+    x_left, x_right = 60, 790
     plot_w = x_right - x_left
+    top_left, top_mid, top_right = 60, 395, 790
+    top_right_left = 455
 
-    t1_top = 35 + hw_offset
-    t1_bot = 370 + hw_offset
+    t1_top = 95 + hw_offset
+    t1_bot = 430 + hw_offset
     t1_h = t1_bot - t1_top
-    t2_top = t1_bot + 80
-    t2_bot = t2_top + 120
+    t2_top = t1_bot + 105
+    t2_bot = t2_top + 200
     t2_h = t2_bot - t2_top
 
-    xs = [x_left + i * plot_w / max(n - 1, 1) for i in range(n)]
+    small_sizes = [s for s in SIZES if s <= 1024]
+    large_sizes = [s for s in SIZES if s >= 256]
+    small_indices = [SIZES.index(s) for s in small_sizes]
+    large_indices = [SIZES.index(s) for s in large_sizes]
+    small_xs = [
+        top_left + i * (top_mid - top_left) / max(len(small_sizes) - 1, 1)
+        for i in range(len(small_sizes))
+    ]
+    large_xs = [
+        top_right_left + i * (top_right - top_right_left) / max(len(large_sizes) - 1, 1)
+        for i in range(len(large_sizes))
+    ]
     lat_xs = [x_left + i * plot_w / max(lat_n - 1, 1) for i in range(lat_n)]
     mid_x = (x_left + x_right) / 2
 
@@ -246,14 +259,20 @@ def gen_combined_chart(data, path):
     omq_async_tp = data["omq_async_tp"]
     zmq_async_tp = data["zmq_async_tp"]
 
+    tp_values = [omq_sync_tp, omq_async_tp, zmq_async_tp]
     msg_max = 2_000_000
-    mbps_max = 5_000
+    gbs_values = [
+        values[i] * SIZES[i] / 1_000_000_000
+        for values in tp_values
+        for i in large_indices
+    ]
+    gbs_max = max(1, math.ceil(max(gbs_values, default=0)))
 
     def y_msg(v):
         return t1_bot - (v / msg_max) * t1_h if msg_max > 0 else t1_bot
 
-    def y_mbps(v):
-        return t1_bot - (v / mbps_max) * t1_h if mbps_max > 0 else t1_bot
+    def y_gbs(v):
+        return t1_bot - (v / gbs_max) * t1_h if gbs_max > 0 else t1_bot
 
     lat_max = 200.0
     lat_step = 20
@@ -269,62 +288,51 @@ def gen_combined_chart(data, path):
     lines.append(f'  <rect width="{svg_w}" height="{svg_h}" fill="#000000"/>')
 
     lines.append(
-        f'  <text x="{mid_x}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb"'
+        f'  <text x="{mid_x}" y="{t1_top - 65}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
         f"PUSH/PULL throughput: 2-process, TCP loopback (higher is better)</text>"
     )
     if hw_label:
         lines.append(
-            f'  <text x="{mid_x}" y="{t1_top - 3}" text-anchor="middle"'
+            f'  <text x="{mid_x}" y="{t1_top - 51}" text-anchor="middle"'
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    tick_count = 10
-    for i in range(1, tick_count + 1):
-        frac = i / tick_count
-        msg_val = int(msg_max * frac)
-        mbps_val = mbps_max * frac
-        yy = t1_bot - frac * t1_h
-        lines.append(
-            f'  <line x1="{x_left}" y1="{yy:.1f}" x2="{x_right}" y2="{yy:.1f}"'
-            f' stroke="#374151" stroke-width="1"/>'
-        )
-        lines.append(
-            f'  <text x="{x_left - 8}" y="{yy:.1f}" text-anchor="end"'
-            f' dominant-baseline="middle" fill="#e5e7eb"'
-            f' font-size="10">{_fmt_y_rate(msg_val)}</text>'
-        )
-        lines.append(
-            f'  <text x="{x_right + 8}" y="{yy:.1f}" text-anchor="start"'
-            f' dominant-baseline="middle" fill="#9ca3af"'
-            f' font-size="10">{_fmt_mbps(mbps_val)}</text>'
-        )
+    for panel_left, panel_right, panel_xs, ticks, panel_max, formatter, label_x in (
+        (
+            top_left,
+            top_mid,
+            small_xs,
+            [msg_max * i / 10 for i in range(1, 11)],
+            msg_max,
+            _fmt_y_rate,
+            top_left - 8,
+        ),
+        (
+            top_right_left,
+            top_right,
+            large_xs,
+            [i / 2 for i in range(1, int(gbs_max * 2) + 1)],
+            gbs_max,
+            lambda value: f"{value:g} GB/s",
+            top_right + 8,
+        ),
+    ):
+        for tick in ticks:
+            yy = t1_bot - (tick / panel_max) * t1_h
+            lines.append(f'  <line x1="{panel_left}" y1="{yy:.1f}" x2="{panel_right}" y2="{yy:.1f}" stroke="#374151" stroke-width="1"/>')
+            anchor = "end" if label_x < panel_left else "start"
+            lines.append(f'  <text x="{label_x}" y="{yy:.1f}" text-anchor="{anchor}" dominant-baseline="middle" fill="#e5e7eb" font-size="10">{formatter(tick)}</text>')
+        for x in panel_xs:
+            lines.append(f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}" stroke="#374151" stroke-width="1"/>')
+        if panel_left == top_left:
+            lines.append(f'  <line x1="{panel_left}" y1="{t1_top}" x2="{panel_left}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
+        if panel_right == top_right:
+            lines.append(f'  <line x1="{panel_right}" y1="{t1_top}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
+        lines.append(f'  <line x1="{panel_left}" y1="{t1_bot}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
 
-    for x in xs:
-        lines.append(
-            f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}"'
-            f' stroke="#374151" stroke-width="1"/>'
-        )
-
-    lines.append(
-        f'  <line x1="{x_left}" y1="{t1_top}" x2="{x_left}" y2="{t1_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-    lines.append(
-        f'  <line x1="{x_right}" y1="{t1_top}" x2="{x_right}" y2="{t1_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-    lines.append(
-        f'  <line x1="{x_left}" y1="{t1_bot}" x2="{x_right}" y2="{t1_bot}"'
-        f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-
-    t1_mid = (t1_top + t1_bot) / 2
-    lines.append(
-        f'  <text x="40" y="{t1_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{t1_mid:.0f})">msg/s</text>'
-    )
+    lines.append(f'  <text x="{(top_left + top_mid) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">small messages</text>')
+    lines.append(f'  <text x="{(top_right_left + top_right) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">medium/large messages</text>')
 
     tp_series = [
         ("omq-node sync API", C_OMQ_SYNC, omq_sync_tp),
@@ -333,30 +341,37 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in tp_series:
-        _draw_series(lines, xs, vals, y_msg, color, stroke_width="2", dash=' stroke-dasharray="6,4"')
+        small_vals = [vals[i] for i in small_indices]
+        _draw_series(lines, small_xs, small_vals, y_msg, color, stroke_width="2", dash=' stroke-dasharray="6,4"')
 
     for _, color, vals in tp_series:
-        mbps = [v * SIZES[i] / 1e6 for i, v in enumerate(vals)]
-        _draw_series(lines, xs, mbps, y_mbps, color, stroke_width="2.5")
-        for i, v in enumerate(mbps):
+        gbs = [vals[i] * SIZES[i] / 1e9 for i in large_indices]
+        _draw_series(lines, large_xs, gbs, y_gbs, color, stroke_width="2.5")
+        for i, v in enumerate(gbs):
             if v <= 0:
                 continue
-            yy = y_mbps(v)
+            yy = y_gbs(v)
             lines.append(
-                f'  <circle cx="{xs[i]:.1f}" cy="{yy:.1f}" r="3"'
+                f'  <circle cx="{large_xs[i]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{color}" stroke="#000000" stroke-width="1"/>'
             )
 
-    for i in range(n):
+    for i, size in enumerate(small_sizes):
         lines.append(
-            f'  <text x="{xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
-            f' fill="#e5e7eb" font-size="8.5">{fmt_size(SIZES[i])}</text>'
+            f'  <text x="{small_xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
+    for i, size in enumerate(large_sizes):
+        lines.append(
+            f'  <text x="{large_xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
+            f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
+        )
+    lines.append(f'  <text x="{mid_x:.1f}" y="{t1_bot + 32}" text-anchor="middle" fill="#9ca3af" font-size="9">dashed = message rate · solid = bandwidth</text>')
 
     lines.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
-        f"REQ/REP latency: 2-process, TCP loopback, p50 µs (lower is better)</text>"
+        f"REQ/REP latency: 2-process, TCP loopback, p50 μs (lower is better)</text>"
     )
 
     for i in range(1, 11):
@@ -385,13 +400,6 @@ def gen_combined_chart(data, path):
     lines.append(
         f'  <line x1="{x_left}" y1="{t2_bot}" x2="{x_right}" y2="{t2_bot}"'
         f' stroke="#9ca3af" stroke-width="1.5"/>'
-    )
-
-    t2_mid = (t2_top + t2_bot) / 2
-    lines.append(
-        f'  <text x="40" y="{t2_mid:.0f}" text-anchor="middle"'
-        f' dominant-baseline="middle" fill="#e5e7eb" font-size="10" font-weight="600"'
-        f' transform="rotate(-90,40,{t2_mid:.0f})">p50 latency (µs)</text>'
     )
 
     lat_series = [

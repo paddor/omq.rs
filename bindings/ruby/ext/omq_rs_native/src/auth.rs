@@ -21,25 +21,15 @@ enum AuthRequest {
 pub struct AuthWorker {
     sender: flume::Sender<AuthRequest>,
     notify: Arc<PipeNotify>,
-    stopped: flume::Receiver<()>,
     callback: VALUE,
+    thread: VALUE,
 }
 
 impl AuthWorker {
     pub fn stop(self) {
         let _ = self.sender.send(AuthRequest::Stop);
         self.notify.notify();
-        let mut wait = StopWait {
-            stopped: self.stopped,
-        };
-        unsafe {
-            rb_sys::rb_thread_call_without_gvl(
-                Some(wait_for_stop),
-                (&raw mut wait).cast::<c_void>(),
-                None,
-                std::ptr::null_mut(),
-            );
-        }
+        let _ = rb::call_method_0(self.thread, c"join");
     }
 
     pub fn request_stop(self) {
@@ -50,23 +40,16 @@ impl AuthWorker {
     pub fn callback(&self) -> VALUE {
         self.callback
     }
+
+    pub fn thread(&self) -> VALUE {
+        self.thread
+    }
 }
 
 struct WorkerData {
     callback: VALUE,
     receiver: flume::Receiver<AuthRequest>,
     notify: Arc<PipeNotify>,
-    stopped: flume::Sender<()>,
-}
-
-struct StopWait {
-    stopped: flume::Receiver<()>,
-}
-
-unsafe extern "C" fn wait_for_stop(data: *mut c_void) -> *mut c_void {
-    let data = unsafe { &mut *data.cast::<StopWait>() };
-    let _ = data.stopped.recv();
-    std::ptr::null_mut()
 }
 
 fn wait_for_request(data: &WorkerData) -> Option<AuthRequest> {
@@ -108,7 +91,6 @@ unsafe extern "C" fn auth_worker_main(data: *mut c_void) -> VALUE {
             let _ = reply.send(accepted);
         }
     }));
-    let _ = data.stopped.send(());
     rb::qnil()
 }
 
@@ -155,22 +137,23 @@ pub fn allowed_keys(value: VALUE) -> RbResult<omq_proto::Authenticator> {
 
 pub fn callback(callback: VALUE) -> RbResult<(omq_proto::Authenticator, AuthWorker)> {
     let (sender, receiver) = flume::unbounded();
-    let (stopped_tx, stopped_rx) = flume::bounded(1);
     let notify = Arc::new(PipeNotify::new());
     let data = Box::new(WorkerData {
         callback,
         receiver,
         notify: Arc::clone(&notify),
-        stopped: stopped_tx,
     });
     let raw = Box::into_raw(data);
     let thread = rb::protect_value(|| unsafe {
         rb_sys::rb_thread_create(Some(auth_worker_main), raw.cast::<c_void>())
     });
-    if let Err(error) = thread {
-        unsafe { drop(Box::from_raw(raw)) };
-        return Err(error);
-    }
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            unsafe { drop(Box::from_raw(raw)) };
+            return Err(error);
+        }
+    };
 
     let auth_sender = sender.clone();
     let auth_notify = Arc::clone(&notify);
@@ -192,8 +175,8 @@ pub fn callback(callback: VALUE) -> RbResult<(omq_proto::Authenticator, AuthWork
         AuthWorker {
             sender,
             notify,
-            stopped: stopped_rx,
             callback,
+            thread,
         },
     ))
 }

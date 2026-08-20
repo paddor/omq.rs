@@ -410,6 +410,13 @@ pub fn call_method_1(receiver: VALUE, name: &CStr, argument: VALUE) -> RbResult<
     })
 }
 
+pub fn call_method_0(receiver: VALUE, name: &CStr) -> RbResult<VALUE> {
+    protect_value(|| unsafe {
+        let method = rb_sys::rb_intern(name.as_ptr());
+        rb_sys::rb_funcallv(receiver, method, 0, std::ptr::null())
+    })
+}
+
 pub unsafe fn define_singleton_method_1(
     object: VALUE,
     name: &CStr,

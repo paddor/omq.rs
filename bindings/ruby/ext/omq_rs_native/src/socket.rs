@@ -73,7 +73,10 @@ unsafe extern "C" fn rust_socket_mark(ptr: *mut c_void) {
         let socket = unsafe { &*ptr.cast::<RustSocket>() };
         #[cfg(feature = "curve")]
         if let Some(worker) = socket.auth_worker.lock().unwrap().as_ref() {
-            unsafe { rb_sys::rb_gc_mark(worker.callback()) };
+            unsafe {
+                rb_sys::rb_gc_mark(worker.callback());
+                rb_sys::rb_gc_mark(worker.thread());
+            }
         }
     }));
 }

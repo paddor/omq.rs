@@ -38,6 +38,34 @@ class LifecycleTest < Minitest::Test
     assert_operator Thread.list.length, :<=, baseline
   end
 
+  def test_curve_callback_workers_release_after_authentication
+    2.times do
+      server_public, server_secret = OMQ::Rust.curve_keypair
+      client_public, client_secret = OMQ::Rust.curve_keypair
+      server = socket(
+        :pull,
+        recv_timeout: 2,
+        curve_server: true,
+        curve_publickey: server_public,
+        curve_secretkey: server_secret,
+      )
+      client = socket(
+        :push,
+        curve_serverkey: server_public,
+        curve_publickey: client_public,
+        curve_secretkey: client_secret,
+      )
+      server.set_curve_auth { true }
+      endpoint = tcp_endpoint(server)
+      client.connect(endpoint).wait_for_peer(timeout: 2)
+
+      client << "authenticated"
+      assert_equal ["authenticated"], server.recv
+      client.close
+      server.close
+    end
+  end
+
   def test_curve_callback_workers_do_not_deadlock_gc
     baseline = Thread.list.length
     10.times { abandon_curve_callback_socket }

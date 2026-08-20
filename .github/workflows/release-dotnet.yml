@@ -161,7 +161,8 @@ jobs:
         with:
           user: paddor
       - name: Publish package
-        run: dotnet nuget push "nuget/Omq.Net.${{ needs.package.outputs.version }}.nupkg" \
-          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
-          --source https://api.nuget.org/v3/index.json \
-          --skip-duplicate
+        run: |
+          dotnet nuget push "nuget/Omq.Net.${{ needs.package.outputs.version }}.nupkg" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

@@ -54,6 +54,20 @@ LD_LIBRARY_PATH="$PWD/target/release" \
 The native library can also be supplied through the normal loader paths. Keep
 `libomq_zmq.so` beside the test process or set `LD_LIBRARY_PATH`.
 
+## NuGet packaging
+
+One package carries managed assemblies plus native libraries under NuGet RID
+folders. Build native libraries for each supported RID, then pass them as
+`RID=PATH` arguments:
+
+```sh
+bash bindings/dotnet/scripts/package.sh /tmp/omq-nuget \
+  linux-x64=target/release/libomq_zmq.so
+```
+
+The package can contain several RIDs. Consumers install one `Omq.Net` package;
+NuGet selects the native asset matching their OS and CPU. No Mono needed.
+
 ## API
 
 ```csharp

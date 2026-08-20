@@ -57,13 +57,14 @@ final class Native {
 
     static native void socketSend(long handle, byte[] data);
 
-    static native void socketSendMultipart(long handle, byte[][] parts);
+    static native void socketSendMultipart(long handle, byte[][] parts, int routingId);
 
-    static native int socketSendMultipartTimeout(long handle, byte[][] parts, long timeoutMillis);
+    static native int socketSendMultipartTimeout(
+            long handle, byte[][] parts, int routingId, long timeoutMillis);
 
-    static native int socketTrySendMultipart(long handle, byte[][] parts);
+    static native int socketTrySendMultipart(long handle, byte[][] parts, int routingId);
 
-    static native long socketSendAsync(long handle, byte[][] parts, Object future);
+    static native long socketSendAsync(long handle, byte[][] parts, int routingId, Object future);
 
     static native Object socketRecv(long handle, long timeoutMillis);
 

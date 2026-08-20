@@ -23,6 +23,7 @@
 #[cfg(not(target_has_atomic = "64"))]
 compile_error!("omq-libzmq requires target_has_atomic = \"64\"");
 
+mod async_api;
 mod consts;
 mod context;
 pub mod curve;
@@ -40,6 +41,7 @@ mod socket;
 mod timers;
 mod util;
 
+pub use async_api::{omq_async_task_cancel, omq_async_task_free, omq_socket_send_async};
 pub use context::{
     omq_ctx_from_share_key, omq_ctx_share_key, zmq_ctx_destroy, zmq_ctx_get, zmq_ctx_get_ext,
     zmq_ctx_new, zmq_ctx_set, zmq_ctx_set_ext, zmq_ctx_shutdown, zmq_ctx_term, zmq_init, zmq_term,

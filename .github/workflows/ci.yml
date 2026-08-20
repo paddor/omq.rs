@@ -26,6 +26,7 @@ jobs:
       run_java: ${{ steps.scope.outputs.java }}
       run_go: ${{ steps.scope.outputs.go }}
       run_lua: ${{ steps.scope.outputs.lua }}
+      run_dotnet: ${{ steps.scope.outputs.dotnet }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -69,6 +70,15 @@ jobs:
               - 'omq-proto/**'
               - 'omq-tokio/**'
               - 'yring/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            dotnet:
+              - 'bindings/dotnet/**'
+              - 'omq-libzmq/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -329,6 +339,46 @@ jobs:
         env:
           OMQ_PYTHON3: ${{ steps.python.outputs.python-path }}
         run: cargo nextest run --profile ci -p omq-tokio --features curve --test omq_interop_pyzmq_curve
+
+  dotnet:
+    name: .NET binding
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.run_dotnet == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: build native library
+        run: cargo build --release -p omq-libzmq
+      - name: build and run binding tests
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+        run: |
+          dotnet build bindings/dotnet/tests/Omq.Net.Smoke.csproj --configuration Release
+          dotnet run --project bindings/dotnet/tests/Omq.Net.Smoke.csproj --configuration Release --no-build
+          dotnet build bindings/dotnet/tests/Omq.Net.Lifecycle.csproj --configuration Release
+          dotnet run --project bindings/dotnet/tests/Omq.Net.Lifecycle.csproj --configuration Release --no-build
+      - name: pack NuGet package
+        run: |
+          dotnet restore bindings/dotnet/Omq.Net.csproj
+          bash bindings/dotnet/scripts/package.sh "$RUNNER_TEMP/omq-nuget" \
+            linux-x64="$GITHUB_WORKSPACE/target/release/libomq_zmq.so"
+          unzip -l "$RUNNER_TEMP/omq-nuget/Omq.Net.0.1.0.nupkg"
+      - name: install package and run package smoke test
+        run: |
+          dotnet restore bindings/dotnet/tests/Omq.Net.PackageSmoke.csproj \
+            --runtime linux-x64 \
+            --source "$RUNNER_TEMP/omq-nuget" \
+            --source https://api.nuget.org/v3/index.json
+          dotnet run --project bindings/dotnet/tests/Omq.Net.PackageSmoke.csproj \
+            --runtime linux-x64 --no-restore
+        env:
+          LD_LIBRARY_PATH: ''
 
   cppzmq:
     name: cppzmq (${{ matrix.header }})

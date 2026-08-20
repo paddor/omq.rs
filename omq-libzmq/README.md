@@ -42,6 +42,14 @@ the 4 KiB native default.
 
 Detailed support notes live in [doc/compatibility.md](doc/compatibility.md).
 
+For the rough supported C ABI surface, compatibility gaps, and option behavior,
+see [doc/compatibility.md](doc/compatibility.md). The bundled
+`include/zmq.h` is the authoritative symbol and constant list.
+
+`libomq_zmq.so` also exposes a small `omq_*` extension API for context sharing
+and native async multipart sends. It is OMQ-specific, outside the libzmq ABI,
+and documented in [doc/compatibility.md](doc/compatibility.md).
+
 ## Build
 
 Produces `libomq_zmq.so` / `libomq_zmq.a` / `libomq_zmq.dylib`.

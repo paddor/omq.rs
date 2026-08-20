@@ -106,7 +106,7 @@ public final class Socket implements AutoCloseable {
         synchronized (state) {
             long handle = state.handle();
             drainSendRingOrThrow(FOREVER);
-            Native.socketSendMultipart(handle, parts);
+            Native.socketSendMultipart(handle, parts, message.routingId().orElse(0));
         }
         return this;
     }
@@ -145,7 +145,8 @@ public final class Socket implements AutoCloseable {
             if (!drainSendRing(timeoutMillis)) {
                 return false;
             }
-            return Native.socketSendMultipartTimeout(handle, parts, timeoutMillis) != 0;
+            return Native.socketSendMultipartTimeout(
+                    handle, parts, message.routingId().orElse(0), timeoutMillis) != 0;
         }
     }
 
@@ -181,7 +182,7 @@ public final class Socket implements AutoCloseable {
             if (usesSendRing() && !state.sendRing.isDrained()) {
                 return false;
             }
-            return Native.socketTrySendMultipart(handle, parts) != 0;
+            return Native.socketTrySendMultipart(handle, parts, message.routingId().orElse(0)) != 0;
         }
     }
 
@@ -218,7 +219,7 @@ public final class Socket implements AutoCloseable {
             synchronized (state) {
                 long handle = state.handle();
                 drainSendRingOrThrow(FOREVER);
-                task = Native.socketSendAsync(handle, parts, future);
+                task = Native.socketSendAsync(handle, parts, message.routingId().orElse(0), future);
             }
             future.setNativeTask(task);
         } catch (OMQException error) {

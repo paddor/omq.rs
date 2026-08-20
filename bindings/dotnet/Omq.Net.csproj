@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+    <PackageId>Omq.Net</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>OMQ contributors</Authors>
+    <Description>Fast .NET binding for OMQ.</Description>
+    <PackageTags>zeromq;omq;networking;messaging</PackageTags>
+    <PackageLicenseExpression>ISC</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <NativeAssetRoot Condition="'$(NativeAssetRoot)' == ''">$(MSBuildProjectDirectory)/native</NativeAssetRoot>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>1591</NoWarn>
+    <RootNamespace>Omq</RootNamespace>
+    <AssemblyName>Omq.Net</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+    <None Include="README.md" Pack="true" PackagePath="README.md" />
+    <None Include="$(NativeAssetRoot)/**/*" Pack="true">
+      <PackagePath>runtimes/%(RecursiveDir)native/%(Filename)%(Extension)</PackagePath>
+    </None>
+  </ItemGroup>
+</Project>

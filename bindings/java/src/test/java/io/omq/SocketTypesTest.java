@@ -50,11 +50,11 @@ final class SocketTypesTest {
             client.send("ping");
 
             Message request = server.receive(Duration.ofSeconds(5)).orElseThrow();
-            assertEquals(2, request.partCount());
-            assertEquals("client-1", new String(request.part(0)));
-            assertEquals("ping", new String(request.part(1)));
+            assertEquals(1, request.partCount());
+            assertEquals("ping", request.text());
+            int routingId = request.routingId().orElseThrow();
 
-            server.send(Message.multipart(request.part(0), "pong".getBytes()));
+            server.send(Message.text("pong").withRoutingId(routingId));
             assertEquals("pong", client.receive(Duration.ofSeconds(5)).orElseThrow().text());
         }
     }
@@ -176,9 +176,9 @@ final class SocketTypesTest {
 
             for (int i = 0; i < 3; i++) {
                 Message request = server.receive(Duration.ofSeconds(5)).orElseThrow();
-                server.send(Message.multipart(request.part(0),
-                        ("re:" + new String(request.part(1), StandardCharsets.UTF_8))
-                                .getBytes(StandardCharsets.UTF_8)));
+                assertEquals(1, request.partCount());
+                server.send(Message.text("re:" + request.text())
+                        .withRoutingId(request.routingId().orElseThrow()));
             }
 
             assertTrue(client0.receive(Duration.ofSeconds(5)).orElseThrow().text().startsWith("re:from-"));

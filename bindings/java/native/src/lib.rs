@@ -381,7 +381,7 @@ impl JavaRecvRing {
                 part_count: part_count as u64,
                 flags,
                 payload_end: payload_end as u64,
-                _reserved0: 0,
+                _reserved0: message.routing_id().unwrap_or(0) as u64,
                 _reserved1: 0,
             };
         } else {
@@ -398,7 +398,7 @@ impl JavaRecvRing {
                 part_count: part_count as u64,
                 flags: flags | RECV_RING_FLAG_EXTERNAL,
                 payload_end: self.payload_cursor as u64,
-                _reserved0: 0,
+                _reserved0: message.routing_id().unwrap_or(0) as u64,
                 _reserved1: 0,
             };
         }
@@ -1748,6 +1748,18 @@ fn bytes_from_parts(env: &mut JNIEnv<'_>, parts: JObjectArray<'_>) -> Result<Vec
     Ok(out)
 }
 
+fn java_message(parts: Vec<Bytes>, routing_id: jint) -> Result<Message, Error> {
+    if routing_id < 0 {
+        return Err(Error::Config("routing ID must be non-negative".to_string()));
+    }
+    let message = Message::multipart(parts);
+    Ok(if routing_id == 0 {
+        message
+    } else {
+        message.with_routing_id(routing_id as u32)
+    })
+}
+
 fn java_try_send(
     socket: &BlockingSocket,
     message: Message,
@@ -1866,6 +1878,7 @@ fn message_to_java_object_ref<'local>(
     env: &mut JNIEnv<'local>,
     message: &Message,
 ) -> Result<JObject<'local>, Error> {
+    let routing_id = message.routing_id().unwrap_or(0);
     if message.len() == 1 {
         let part = message_part_to_java(env, message, 0)?;
         let part = JObject::from(part);
@@ -1873,8 +1886,8 @@ fn message_to_java_object_ref<'local>(
             .call_static_method(
                 "io/omq/Message",
                 "fromNative",
-                "([B)Lio/omq/Message;",
-                &[JValue::Object(&part)],
+                "([BI)Lio/omq/Message;",
+                &[JValue::Object(&part), JValue::Int(routing_id as jint)],
             )
             .and_then(|value| value.l())
             .map_err(jni_error);
@@ -1885,8 +1898,8 @@ fn message_to_java_object_ref<'local>(
     env.call_static_method(
         "io/omq/Message",
         "fromNative",
-        "([[B)Lio/omq/Message;",
-        &[JValue::Object(&parts)],
+        "([[BI)Lio/omq/Message;",
+        &[JValue::Object(&parts), JValue::Int(routing_id as jint)],
     )
     .and_then(|value| value.l())
     .map_err(jni_error)
@@ -1903,10 +1916,7 @@ fn message_to_java_native_ref<'local>(
     env: &mut JNIEnv<'local>,
     message: &Message,
 ) -> Result<JObject<'local>, Error> {
-    if message.len() == 1 {
-        return message_part_to_java(env, message, 0).map(JObject::from);
-    }
-    message_to_java_parts(env, message).map(JObject::from)
+    message_to_java_object_ref(env, message)
 }
 
 fn recv_with_timeout(socket: &BlockingSocket, timeout_millis: jlong) -> Result<Message, Error> {
@@ -2770,12 +2780,13 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipart(
     _class: JClass<'_>,
     handle: jlong,
     parts: JObjectArray<'_>,
+    routing_id: jint,
 ) {
     guard(&mut env, (), |env| {
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let parts = bytes_from_parts(env, parts)?;
-            java_send(&socket.materialize()?, Message::multipart(parts))
+            java_send(&socket.materialize()?, java_message(parts, routing_id)?)
         })();
 
         if let Err(error) = result {
@@ -2790,6 +2801,7 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipartTimeout(
     _class: JClass<'_>,
     handle: jlong,
     parts: JObjectArray<'_>,
+    routing_id: jint,
     timeout_millis: jlong,
 ) -> jint {
     guard(&mut env, 0, |env| {
@@ -2798,7 +2810,7 @@ pub extern "system" fn Java_io_omq_Native_socketSendMultipartTimeout(
             let parts = bytes_from_parts(env, parts)?;
             send_with_timeout(
                 &socket.materialize()?,
-                Message::multipart(parts),
+                java_message(parts, routing_id)?,
                 timeout_millis,
             )
             .map(i32::from)
@@ -2820,12 +2832,13 @@ pub extern "system" fn Java_io_omq_Native_socketTrySendMultipart(
     _class: JClass<'_>,
     handle: jlong,
     parts: JObjectArray<'_>,
+    routing_id: jint,
 ) -> jint {
     guard(&mut env, 0, |env| {
         let result = (|| {
             let socket = socket_from_handle(handle)?;
             let parts = bytes_from_parts(env, parts)?;
-            match java_try_send(&socket.materialize()?, Message::multipart(parts)) {
+            match java_try_send(&socket.materialize()?, java_message(parts, routing_id)?) {
                 Ok(()) => Ok(1),
                 Err(TrySendError::Full(_)) => Ok(0),
                 Err(TrySendError::Closed) => Err(Error::Closed),
@@ -2849,6 +2862,7 @@ pub extern "system" fn Java_io_omq_Native_socketSendAsync(
     _class: JClass<'_>,
     handle: jlong,
     parts: JObjectArray<'_>,
+    routing_id: jint,
     future: JObject<'_>,
 ) -> jlong {
     guard(&mut env, 0, |env| {
@@ -2857,10 +2871,11 @@ pub extern "system" fn Java_io_omq_Native_socketSendAsync(
             let jvm = env.get_java_vm().map_err(jni_error)?;
             let future = env.new_global_ref(&future).map_err(jni_error)?;
             let parts = bytes_from_parts(env, parts)?;
+            let message = java_message(parts, routing_id)?;
             let handle = socket.ctx.handle().clone();
             let socket = socket.materialize()?.into_async();
             let join = handle.spawn(async move {
-                let result = socket.send(Message::multipart(parts)).await;
+                let result = socket.send(message).await;
                 complete_future_void(jvm, future, result);
             });
             Ok(async_task_handle(join))

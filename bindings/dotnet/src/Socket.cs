@@ -1,0 +1,192 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+
+namespace Omq;
+
+public sealed class Socket : IDisposable
+{
+    private readonly Context owner;
+    private readonly object gate = new();
+    private Context.SafeSocket? handle;
+    public SocketType Type { get; }
+    public bool Closed => handle is null;
+    public int FileDescriptor => GetInt32(SocketOption.FileDescriptor);
+
+    internal Socket(Context owner, SocketType type, Context.SafeSocket handle) { this.owner = owner; Type = type; this.handle = handle; }
+    private IntPtr Require() => handle?.DangerousGetHandle() is { } ptr && ptr != IntPtr.Zero ? ptr : throw new OmqClosedException();
+    internal IntPtr NativeHandle { get { lock (gate) return Require(); } }
+    internal NativeLease AcquireNativeHandle()
+    {
+        lock (gate)
+        {
+            var current = handle ?? throw new OmqClosedException();
+            bool success = false;
+            current.DangerousAddRef(ref success);
+            if (!success) throw new OmqClosedException();
+            return new NativeLease(current, current.DangerousGetHandle());
+        }
+    }
+
+    public void SetOption(int option, int value) => SetOption(option, BitConverter.GetBytes(value));
+    public void SetOption(int option, long value) => SetOption(option, BitConverter.GetBytes(value));
+    public void SetOption(int option, ReadOnlySpan<byte> value)
+    {
+        lock (gate) { IntPtr socket = Require(); byte[] copy = value.ToArray(); unsafe { fixed (byte* p = copy) Errors.Check("setsockopt", Native.zmq_setsockopt(socket, option, (IntPtr)p, (nuint)copy.Length)); } }
+    }
+    public void SetOption(int option, string value) => SetOption(option, Encoding.UTF8.GetBytes(value));
+    public int GetInt32(int option)
+    {
+        lock (gate) { int value = 0; nuint length = sizeof(int); unsafe { Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)(&value), ref length)); } return value; }
+    }
+    public long GetInt64(int option)
+    {
+        lock (gate) { long value = 0; nuint length = sizeof(long); unsafe { Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)(&value), ref length)); } return value; }
+    }
+    public byte[] GetBytes(int option, int capacity = 1024)
+    {
+        lock (gate)
+        {
+            byte[] value = new byte[capacity]; nuint length = (nuint)value.Length;
+            unsafe { fixed (byte* p = value) Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)p, ref length)); }
+            return value[..checked((int)length)];
+        }
+    }
+    public string GetString(int option, int capacity = 1024)
+    {
+        lock (gate)
+        {
+            byte[] value = new byte[capacity]; nuint length = (nuint)value.Length;
+            unsafe { fixed (byte* p = value) Errors.Check("getsockopt", Native.zmq_getsockopt(Require(), option, (IntPtr)p, ref length)); }
+            return Encoding.UTF8.GetString(value, 0, checked((int)length)).TrimEnd('\0');
+        }
+    }
+    public void Subscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Subscribe, prefix);
+    public void Subscribe(string prefix) => Subscribe(Encoding.UTF8.GetBytes(prefix));
+    public void Unsubscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Unsubscribe, prefix);
+    public void Unsubscribe(string prefix) => Unsubscribe(Encoding.UTF8.GetBytes(prefix));
+    public void ConfigurePlainServer(string username = "", string password = "") { _ = username; _ = password; SetOption(SocketOption.PlainServer, 1); }
+    public void ConfigurePlainClient(string username, string password) { SetOption(SocketOption.PlainUsername, username); SetOption(SocketOption.PlainPassword, password); }
+    public void ConfigureCurveServer(string publicKey, string secretKey) { _ = publicKey; SetOption(SocketOption.CurveServer, 1); SetOption(SocketOption.CurveSecretKey, secretKey); }
+    public void ConfigureCurveClient(string publicKey, string secretKey, string serverPublicKey) { SetOption(SocketOption.CurvePublicKey, publicKey); SetOption(SocketOption.CurveSecretKey, secretKey); SetOption(SocketOption.CurveServerKey, serverPublicKey); }
+    public Monitor Monitor(int events = 0xFFFF) => new(owner, this, events);
+    public void Join(string group) => EndpointCall("join", group, NativeJoin);
+    public void Leave(string group) => EndpointCall("leave", group, NativeLeave);
+    public string Bind(string endpoint)
+    {
+        EndpointCall("bind", endpoint, NativeBind);
+        return endpoint.EndsWith(":0", StringComparison.Ordinal) ? GetString(SocketOption.LastEndpoint) : endpoint;
+    }
+    public void Connect(string endpoint) => EndpointCall("connect", endpoint, NativeConnect);
+    public void Unbind(string endpoint) => EndpointCall("unbind", endpoint, NativeUnbind);
+    public void Disconnect(string endpoint) => EndpointCall("disconnect", endpoint, NativeDisconnect);
+
+    private delegate int EndpointFn(IntPtr socket, IntPtr text);
+    private bool EndpointCall(string operation, string endpoint, EndpointFn fn)
+    {
+        lock (gate) { using var text = new Utf8(endpoint); Errors.Check(operation, fn(Require(), text.Pointer)); return true; }
+    }
+    private static int NativeBind(IntPtr s, IntPtr e) => Native.Bind(s, e);
+    private static int NativeConnect(IntPtr s, IntPtr e) => Native.Connect(s, e);
+    private static int NativeUnbind(IntPtr s, IntPtr e) => Native.Unbind(s, e);
+    private static int NativeDisconnect(IntPtr s, IntPtr e) => Native.Disconnect(s, e);
+    private static int NativeJoin(IntPtr s, IntPtr e) => NativeJoinImpl(s, e);
+    private static int NativeLeave(IntPtr s, IntPtr e) => NativeLeaveImpl(s, e);
+    [DllImport("omq_zmq", CallingConvention = CallingConvention.Cdecl, EntryPoint = "zmq_join")] private static extern int NativeJoinImpl(IntPtr s, IntPtr e);
+    [DllImport("omq_zmq", CallingConvention = CallingConvention.Cdecl, EntryPoint = "zmq_leave")] private static extern int NativeLeaveImpl(IntPtr s, IntPtr e);
+
+    public void Send(ReadOnlySpan<byte> data, bool more = false, bool dontWait = false)
+    {
+        lock (gate) { byte[] copy = data.ToArray(); unsafe { fixed (byte* p = copy) Errors.Check("send", Native.zmq_send(Require(), (IntPtr)p, (nuint)copy.Length, Flags(more, dontWait))); } }
+    }
+    public void SendText(string text, bool more = false, bool dontWait = false) => Send(Encoding.UTF8.GetBytes(text), more, dontWait);
+    public void Send(Message message, bool dontWait = false)
+    {
+        lock (gate)
+        {
+            for (int i = 0; i < message.Parts.Count; i++) SendPart(message.Parts[i], i + 1 < message.Parts.Count, dontWait, i == 0 ? message.RoutingId : 0);
+        }
+    }
+    public void SendMultipart(IEnumerable<ReadOnlyMemory<byte>> parts, bool dontWait = false) => Send(new Message(parts), dontWait);
+    public void SendMultipart(params byte[][] parts) => Send(new Message(parts.Select(x => (ReadOnlyMemory<byte>)x)), false);
+    private void SendPart(byte[] data, bool more, bool dontWait, uint routingId = 0)
+    {
+        Native.Message msg = new();
+        Errors.Check("msg_init_size", Native.zmq_msg_init_size(ref msg, (nuint)data.Length));
+        try { Marshal.Copy(data, 0, Native.zmq_msg_data(ref msg), data.Length); if (routingId != 0) Errors.Check("msg_set_routing_id", Native.zmq_msg_set_routing_id(ref msg, routingId)); Errors.Check("msg_send", Native.zmq_msg_send(ref msg, Require(), Flags(more, dontWait))); }
+        finally { Native.zmq_msg_close(ref msg); }
+    }
+
+    public Message Receive(bool dontWait = false)
+    {
+        lock (gate)
+        {
+            var parts = new List<byte[]>(); uint routingId = 0;
+            while (true)
+            {
+                Native.Message msg = new();
+                Errors.Check("msg_init", Native.zmq_msg_init(ref msg));
+                try { Errors.Check("msg_recv", Native.zmq_msg_recv(ref msg, Require(), dontWait ? 1 : 0)); int size = checked((int)Native.zmq_msg_size(ref msg)); byte[] data = new byte[size]; if (size != 0) Marshal.Copy(Native.zmq_msg_data(ref msg), data, 0, size); if (parts.Count == 0) routingId = Native.zmq_msg_routing_id(ref msg); parts.Add(data); if (Native.zmq_msg_more(ref msg) == 0) break; }
+                finally { Native.zmq_msg_close(ref msg); }
+            }
+            return new Message(parts.ToArray()) { RoutingId = routingId };
+        }
+    }
+    public string ReceiveText(bool dontWait = false) => Encoding.UTF8.GetString(Receive(dontWait).Data);
+    public void SendString(string text, bool dontWait = false) => SendText(text, dontWait: dontWait);
+    public string ReceiveString(bool dontWait = false) => ReceiveText(dontWait);
+    public void SendJson<T>(T value, bool dontWait = false, bool more = false) => Send(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)), more, dontWait);
+    public T? ReceiveJson<T>(bool dontWait = false) => JsonSerializer.Deserialize<T>(Receive(dontWait).Data);
+    public IReadOnlyList<PollResult> Poll(TimeSpan timeout, PollEvents events = PollEvents.Readable)
+    {
+        using var poller = new Poller();
+        poller.Add(this, events);
+        return poller.Wait(timeout);
+    }
+    public bool TrySend(ReadOnlySpan<byte> data)
+    {
+        try { Send(data, dontWait: true); return true; }
+        catch (OmqAgainException) { return false; }
+    }
+    public bool TrySend(Message message)
+    {
+        try { Send(message, dontWait: true); return true; }
+        catch (OmqAgainException) { return false; }
+    }
+    public IReadOnlyList<byte[]> ReceiveMultipart(bool dontWait = false) => Receive(dontWait).Parts;
+    public bool TryReceive(out Message? message)
+    {
+        try { message = Receive(dontWait: true); return true; }
+        catch (OmqAgainException) { message = null; return false; }
+    }
+    public byte[] ReceiveInto(Span<byte> buffer, bool dontWait = false)
+    {
+        lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); copy.AsSpan(0, n).CopyTo(buffer); return copy[..n]; } } }
+    }
+    private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
+
+    public void Dispose()
+    {
+        lock (gate) { if (handle is null) return; handle.Dispose(); handle = null; }
+        owner.Remove(this); GC.SuppressFinalize(this);
+    }
+
+    internal void EnableMonitor(string endpoint, int events)
+    {
+        lock (gate) { IntPtr text = Marshal.StringToCoTaskMemUTF8(endpoint); try { Errors.Check("socket_monitor", Native.zmq_socket_monitor(Require(), text, events)); } finally { Marshal.FreeCoTaskMem(text); } }
+    }
+    internal void DisableMonitor()
+    {
+        lock (gate) { Errors.Check("socket_monitor_stop", Native.zmq_socket_monitor(Require(), IntPtr.Zero, 0)); }
+    }
+
+    private sealed class Utf8 : IDisposable { public IntPtr Pointer { get; } public Utf8(string value) => Pointer = Marshal.StringToCoTaskMemUTF8(value); public void Dispose() => Marshal.FreeCoTaskMem(Pointer); }
+
+    internal sealed class NativeLease : IDisposable
+    {
+        private Context.SafeSocket? handle;
+        internal IntPtr Pointer { get; }
+        internal NativeLease(Context.SafeSocket handle, IntPtr pointer) { this.handle = handle; Pointer = pointer; }
+        public void Dispose() { var current = Interlocked.Exchange(ref handle, null); if (current is not null) current.DangerousRelease(); }
+    }
+}

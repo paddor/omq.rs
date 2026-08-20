@@ -5,6 +5,8 @@ require_relative "test_helper"
 class CZTopInteropTest < Minitest::Test
   def setup
     super
+    skip "cztop FFI is unsupported on TruffleRuby" if RUBY_ENGINE == "truffleruby"
+
     require "cztop"
     skip "cztop CURVE unavailable" unless CZTop::CURVE.available?
   rescue LoadError, StandardError => error

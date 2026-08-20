@@ -9,3 +9,4 @@
 - Add socket lifecycle monitoring with Fiber-aware waits.
 - Add receive wake and monitor-fd hooks for backend adapters.
 - Support Ractor-owned sockets and cross-Ractor inproc/TCP messaging on Ruby 4.
+- Support synchronous sockets on TruffleRuby and test them in CI.

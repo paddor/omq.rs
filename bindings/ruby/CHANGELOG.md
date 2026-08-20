@@ -7,4 +7,5 @@
   and pyzmq CURVE interoperability.
 - Add LZ4/zstd transports and compression options.
 - Add socket lifecycle monitoring with Fiber-aware waits.
+- Add receive wake and monitor-fd hooks for backend adapters.
 - Support Ractor-owned sockets and cross-Ractor inproc/TCP messaging on Ruby 4.

@@ -81,7 +81,6 @@ fn submit_job(io_threads: usize) -> flume::Sender<Job> {
     RUNTIME.lock().unwrap().as_ref().unwrap().submit.clone()
 }
 
-#[cfg(ruby_engine = "mri")]
 fn recv_blocking<T>(rx: flume::Receiver<T>, missing: &'static str) -> T {
     struct RecvBox<U> {
         rx: flume::Receiver<U>,
@@ -104,11 +103,6 @@ fn recv_blocking<T>(rx: flume::Receiver<T>, missing: &'static str) -> T {
         );
     }
     rd.result.expect(missing)
-}
-
-#[cfg(not(ruby_engine = "mri"))]
-fn recv_blocking<T>(rx: flume::Receiver<T>, missing: &'static str) -> T {
-    rx.recv().expect(missing)
 }
 
 pub fn spawn_blocking<F, T>(io_threads: usize, fut: F) -> T

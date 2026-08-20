@@ -445,9 +445,6 @@ def escape_svg(value):
 
 def detect_hardware():
     config = read_chart_hw()
-    label = os.environ.get("OMQ_HW_LABEL") or config.get("label")
-    if label:
-        return label
     prefix = os.environ.get("OMQ_HW_PREFIX") or config.get("prefix")
     postfix = os.environ.get("OMQ_HW_POSTFIX") or config.get("postfix")
     if prefix and postfix:

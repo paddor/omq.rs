@@ -237,7 +237,8 @@ Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 Chart subtitles come from `.chart_hw` in the repo root:
 
 ```text
-label=Linux VM on a 2018 Mac Mini, 6 cores, performance governor, turbo off
+prefix=Linux VM on a 2018 Mac Mini
+postfix=6 cores, performance governor, turbo off
 ```
 
 `omq-bench` and binding chart scripts read the repo-root `.chart_hw`
@@ -358,7 +359,6 @@ cargo run --release -p omq-bench -- chart compression
 
 ```sh
 cd bindings/pyomq
-export OMQ_HW_EXTRAS="performance governor, turbo off"
 maturin develop --release
 python scripts/update_perf.py --impl pyomq
 python scripts/update_perf.py --chart-only

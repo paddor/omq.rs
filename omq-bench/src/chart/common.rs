@@ -170,17 +170,6 @@ pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
 pub(crate) fn detect_hardware() -> Option<String> {
     let hw_conf = read_chart_hw();
 
-    if let Ok(label) = std::env::var("OMQ_HW_LABEL")
-        && !label.is_empty()
-    {
-        return Some(label);
-    }
-    if let Some(label) = hw_conf.get("label")
-        && !label.is_empty()
-    {
-        return Some(label.clone());
-    }
-
     let postfix = std::env::var("OMQ_HW_POSTFIX")
         .ok()
         .or_else(|| hw_conf.get("postfix").cloned());

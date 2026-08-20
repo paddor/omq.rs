@@ -206,9 +206,6 @@ def _read_chart_hw():
 
 def _detect_hardware():
     hw_conf = _read_chart_hw()
-    label = os.environ.get("OMQ_HW_LABEL") or hw_conf.get("label")
-    if label:
-        return label
     prefix = os.environ.get("OMQ_HW_PREFIX") or hw_conf.get("prefix")
     postfix = os.environ.get("OMQ_HW_POSTFIX") or hw_conf.get("postfix")
     if prefix and postfix:

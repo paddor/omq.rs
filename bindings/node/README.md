@@ -1,4 +1,4 @@
-# @paddor/omq-node
+# OMQ.node
 
 Native Node.js binding for OMQ.rs.
 
@@ -11,11 +11,11 @@ This package is for Node main/server processes. Browser code should use
 `@zeromq/omq`.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/node/doc/charts/bindings.svg" alt="@paddor/omq-node sync API vs zeromq.js TCP throughput and latency" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/node/doc/charts/bindings.svg" alt="OMQ.node sync API vs zeromq.js TCP throughput and latency" width="850">
 </p>
 
 2-process loopback PUSH/PULL throughput and REQ/REP p50 latency: per-message
-`@paddor/omq-node` sync API calls vs per-message `zeromq.js` calls over TCP.
+OMQ.node sync API calls vs per-message `zeromq.js` calls over TCP.
 
 ## Highlights
 
@@ -55,7 +55,7 @@ local development. Published packages can load a matching platform prebuild.
 - Sockets are single-thread objects on the JavaScript side; create more
   sockets for more concurrent flows.
 
-`@paddor/omq-node` is not a `zeromq.js` compatibility layer. It follows ZMQ
+OMQ.node is not a `zeromq.js` compatibility layer. It follows ZMQ
 socket semantics, but exposes a Node API shaped around this binding.
 
 Example:

@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <OmqNetVersion Condition="'$(OmqNetVersion)' == ''">0.1.0</OmqNetVersion>
+    <OmqNetVersion Condition="'$(OmqNetVersion)' == ''">0.1.2</OmqNetVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Omq.Net" Version="$(OmqNetVersion)" />

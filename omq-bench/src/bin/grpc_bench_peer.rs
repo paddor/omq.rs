@@ -9,6 +9,7 @@ use tonic::{Request, Status};
 #[allow(
     clippy::default_trait_access,
     clippy::doc_markdown,
+    clippy::result_large_err,
     clippy::too_many_lines
 )]
 pub mod bench {

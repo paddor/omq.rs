@@ -43,10 +43,9 @@ async fn wait_for_rate_limit_disconnect(monitor: &mut omq_tokio::MonitorStream) 
             reason: DisconnectReason::Error(reason),
             ..
         } = event
+            && reason.contains("receive rate limit exceeded")
         {
-            if reason.contains("receive rate limit exceeded") {
-                return;
-            }
+            return;
         }
     }
 }

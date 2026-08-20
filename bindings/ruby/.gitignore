@@ -1,0 +1,8 @@
+/.bundle/
+/.ruby-lsp/
+/pkg/
+/tmp/
+/target/
+/lib/omq/rs/*.bundle
+/lib/omq/rs/*.dylib
+/lib/omq/rs/*.so

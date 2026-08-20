@@ -1,0 +1,26 @@
+# frozen_string_literal: true
+
+require "bundler/gem_helper"
+require "minitest/test_task"
+require "rake/clean"
+require "rb_sys/extensiontask"
+
+gem_helper = Bundler::GemHelper.new
+gem_helper.tag_prefix = "ruby-"
+gem_helper.install
+
+gemspec = Gem::Specification.load("omq-rs.gemspec") || abort("Could not load omq-rs.gemspec")
+
+RbSys::ExtensionTask.new("omq_rs_native", gemspec) do |ext|
+  ext.lib_dir = "lib/omq/rs"
+end
+
+Minitest::TestTask.create(:test) do |task|
+  task.libs << "lib" << "test"
+  task.test_globs = ["test/test_*.rb"]
+end
+
+CLOBBER.include("pkg", "tmp", "lib/omq/rs/*.so", "lib/omq/rs/*.bundle", "lib/omq/rs/*.dylib")
+
+task test: :compile
+task default: :test

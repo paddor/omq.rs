@@ -165,6 +165,22 @@ OMQ_GO_SOAK_DURATIONS="300 600 1800 3600" OMQ_GO_SOAK_WORKERS=12 \
   bindings/go/scripts/soak.sh
 ```
 
+### omq-rs Tests
+
+```sh
+bundle install --gemfile bindings/ruby/Gemfile
+scripts/test-ruby.sh
+```
+
+Set `OMQ_RUBY=/path/to/ruby` when Ruby is not on `PATH`.
+
+Ruby binding comparison chart:
+
+```sh
+cd bindings/ruby
+ruby -Ilib scripts/update_perf.rb
+```
+
 ## Stress Tests
 
 ```sh
@@ -392,6 +408,19 @@ the PR is merged, push a tag:
 ```sh
 git tag -a pyomq-v0.20.0 -m "pyomq 0.20.0"
 git push origin pyomq-v0.20.0
+gh run watch --repo paddor/omq.rs --exit-status
+```
+
+`omq-rs` publishes to RubyGems from
+`.github/workflows/release-rubygems.yml`. Prepare a release by bumping
+`bindings/ruby/lib/omq/rs/version.rb`, updating
+`bindings/ruby/CHANGELOG.md`, and running `cargo update -p omq_rs_native`
+inside `bindings/ruby`. Publish the required `omq-proto` and `omq-tokio`
+versions before pushing the Ruby tag. After the PR is merged, push a tag:
+
+```sh
+git tag -a ruby-v0.1.0 -m "omq-rs 0.1.0"
+git push origin ruby-v0.1.0
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 

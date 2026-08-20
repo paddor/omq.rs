@@ -1,0 +1,12 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec
+
+gem "async"
+gem "cztop", "~> 2.0"
+gem "ffi-rzmq"
+gem "minitest"
+gem "rake"
+gem "rake-compiler"

@@ -12,7 +12,8 @@ Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distribut
 - Bindings and compatibility APIs:
   - [omq-libzmq](omq-libzmq/) C API, libzmq-compatible `libomq_zmq`
   - [pyomq](bindings/pyomq/) Python, sync + asyncio
-  - [OMQ.rb](https://github.com/zeromq/omq.rb) Ruby
+  - [omq-rs](bindings/ruby/) Ruby, scheduler-aware synchronous API
+  - [OMQ.rb](https://github.com/zeromq/omq.rb) pure Ruby implementation
   - [OMQ.java](bindings/java/) Java 25, sync + async
   - [OMQ.go](bindings/go/) Go 1.25, goroutine-safe API
   - [@zeromq/omq-node](bindings/node/) Node.js 24.11, native addon
@@ -145,6 +146,7 @@ Five Cargo workspace crates plus language bindings.
 | [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
+| [`omq-rs`](bindings/ruby/) | Ruby binding (rb-sys over omq-tokio, scheduler-aware synchronous API) | Ruby C API/native extension boundary |
 | [`OMQ.java`](bindings/java/) | Java 25 binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
 | [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
 | [`@zeromq/omq-node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
@@ -217,6 +219,7 @@ pipes, inproc, UDP, and WebSocket transports. `omq-libzmq` builds and
 tests on Windows for the supported C API surface.
 
 `pyomq` publishes Linux, macOS, and Windows wheels and an sdist.
+`omq-rs` installs as a native Ruby gem on Linux and macOS.
 
 Requirements:
 

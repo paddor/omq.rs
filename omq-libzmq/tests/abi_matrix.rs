@@ -30,6 +30,18 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Extension,
     },
     FunctionEntry {
+        name: "omq_async_task_cancel",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
+        name: "omq_async_task_free",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
+        name: "omq_socket_send_async",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
         name: "zmq_atomic_counter_dec",
         status: FunctionStatus::Implemented,
     },

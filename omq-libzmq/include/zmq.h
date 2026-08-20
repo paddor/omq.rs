@@ -482,6 +482,15 @@ ZMQ_EXPORT int   omq_ctx_share_key (void *context_, uint64_t *key_hi_,
                                     uint64_t *key_lo_);
 ZMQ_EXPORT void *omq_ctx_from_share_key (uint64_t key_hi_, uint64_t key_lo_);
 
+/*  OMQ async extension API ------------------------------------------------- */
+typedef struct omq_async_task omq_async_task_t;
+typedef void (*omq_async_callback_fn) (void *userdata_, int status_);
+ZMQ_EXPORT omq_async_task_t *omq_socket_send_async (
+    void *socket_, const uint8_t *encoded_, size_t encoded_size_,
+    omq_async_callback_fn callback_, void *userdata_);
+ZMQ_EXPORT void omq_async_task_cancel (omq_async_task_t *task_);
+ZMQ_EXPORT void omq_async_task_free (omq_async_task_t *task_);
+
 /*  Socket API --------------------------------------------------------------- */
 ZMQ_EXPORT void *zmq_socket     (void *context_, int type_);
 ZMQ_EXPORT int   zmq_close      (void *s_);

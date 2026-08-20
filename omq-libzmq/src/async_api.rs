@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use omq_tokio::Message;
-use tokio::sync::Notify;
+use omq_tokio::engine::StateSignal;
 
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
@@ -16,7 +16,7 @@ pub type OMQAsyncCallback = extern "C" fn(*mut c_void, i32);
 
 #[derive(Debug)]
 pub struct OmqAsyncTask {
-    cancel: Arc<Notify>,
+    cancel: Arc<StateSignal>,
     cancelled: Arc<AtomicBool>,
     _join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -74,15 +74,16 @@ pub extern "C" fn omq_socket_send_async(
         fail(ETERM);
         return std::ptr::null_mut();
     };
-    let cancel = Arc::new(Notify::new());
+    let cancel = Arc::new(StateSignal::new());
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_wait = cancel.clone();
     let cancelled_wait = cancelled.clone();
     let userdata = userdata as usize;
     let join = runtime.spawn(async move {
+        let cancel_seen = cancel_wait.generation();
         let status = tokio::select! {
             result = inner.send(message) => result.map_or(ETERM, |()| 0),
-            () = cancel_wait.notified() => { cancelled_wait.store(true, Ordering::Release); libc::ECANCELED }
+            () = cancel_wait.changed_after(cancel_seen) => { cancelled_wait.store(true, Ordering::Release); libc::ECANCELED }
         };
         if let Some(callback) = callback {
             callback(userdata as *mut c_void, status);
@@ -103,7 +104,7 @@ pub extern "C" fn omq_async_task_cancel(task: *mut OmqAsyncTask) {
     // SAFETY: caller retains ownership of the task handle until free.
     let task = unsafe { &*task };
     task.cancelled.store(true, Ordering::Release);
-    task.cancel.notify_one();
+    task.cancel.notify_changed();
 }
 
 #[unsafe(no_mangle)]

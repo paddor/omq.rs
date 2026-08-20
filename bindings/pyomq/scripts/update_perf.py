@@ -64,6 +64,7 @@ def save_results(
     run_id, impl, tp_inproc, tp_tcp, atp_tcp, lat, alat, proxy_pp, proxy_rr
 ):
     rows = []
+
     def latency_fields(values):
         fields = {
             "p50_us": values[0],
@@ -779,9 +780,7 @@ def run_latency(lib_name):
         ]
         selected = median(runs, key=lambda row: row[0])
         results.append(selected)
-        print(
-            f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}"
-        )
+        print(f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}")
 
     return results
 
@@ -885,9 +884,7 @@ def run_async_latency(lib_name):
         ]
         selected = median(runs, key=lambda row: row[0])
         results.append(selected)
-        print(
-            f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}"
-        )
+        print(f" p50 {selected[0]:.1f} μs  p99 {selected[1]:.1f} μs  n={selected[2]}")
 
     return results
 
@@ -1139,7 +1136,9 @@ def run_proxy(lib_name):
                 _measure_proxy_subprocess(
                     lib_name, "pushpull", min(PROXY_DURATION_S, THROUGHPUT_WARMUP_S)
                 )
-            runs.append(_measure_proxy_subprocess(lib_name, "pushpull", PROXY_DURATION_S))
+            runs.append(
+                _measure_proxy_subprocess(lib_name, "pushpull", PROXY_DURATION_S)
+            )
         pushpull_rate = median(runs)
     print(f" {fmt_rate(pushpull_rate)}")
 
@@ -1232,7 +1231,6 @@ def _detect_hardware():
 
 
 def gen_combined_chart(data, path):
-    n = len(SIZES)
     latency_sizes = latency_sizes_from(SIZES)
     lat_n = len(latency_sizes)
     hw_label = _detect_hardware()
@@ -1336,19 +1334,35 @@ def gen_combined_chart(data, path):
     ):
         for tick in ticks:
             yy = t1_bot - (tick / panel_max) * t1_h
-            L.append(f'  <line x1="{panel_left}" y1="{yy:.1f}" x2="{panel_right}" y2="{yy:.1f}" stroke="#374151" stroke-width="1"/>')
+            L.append(
+                f'  <line x1="{panel_left}" y1="{yy:.1f}" x2="{panel_right}" y2="{yy:.1f}" stroke="#374151" stroke-width="1"/>'
+            )
             anchor = "end" if label_x < panel_left else "start"
-            L.append(f'  <text x="{label_x}" y="{yy:.1f}" text-anchor="{anchor}" dominant-baseline="middle" fill="#e5e7eb" font-size="10">{formatter(tick)}</text>')
+            L.append(
+                f'  <text x="{label_x}" y="{yy:.1f}" text-anchor="{anchor}" dominant-baseline="middle" fill="#e5e7eb" font-size="10">{formatter(tick)}</text>'
+            )
         for x in panel_xs:
-            L.append(f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}" stroke="#374151" stroke-width="1"/>')
+            L.append(
+                f'  <line x1="{x:.1f}" y1="{t1_top}" x2="{x:.1f}" y2="{t1_bot}" stroke="#374151" stroke-width="1"/>'
+            )
         if panel_left == top_left:
-            L.append(f'  <line x1="{panel_left}" y1="{t1_top}" x2="{panel_left}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
+            L.append(
+                f'  <line x1="{panel_left}" y1="{t1_top}" x2="{panel_left}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
+            )
         if panel_right == top_right:
-            L.append(f'  <line x1="{panel_right}" y1="{t1_top}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
-        L.append(f'  <line x1="{panel_left}" y1="{t1_bot}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
+            L.append(
+                f'  <line x1="{panel_right}" y1="{t1_top}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
+            )
+        L.append(
+            f'  <line x1="{panel_left}" y1="{t1_bot}" x2="{panel_right}" y2="{t1_bot}" stroke="#9ca3af" stroke-width="1.5"/>'
+        )
 
-    L.append(f'  <text x="{(top_left + top_mid) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">small messages</text>')
-    L.append(f'  <text x="{(top_right_left + top_right) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">medium/large messages</text>')
+    L.append(
+        f'  <text x="{(top_left + top_mid) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">small messages</text>'
+    )
+    L.append(
+        f'  <text x="{(top_right_left + top_right) / 2:.1f}" y="{t1_top - 17}" text-anchor="middle" fill="#f9fafb" font-size="12" font-weight="700">medium/large messages</text>'
+    )
 
     tp_series = [
         ("pyomq", C_PYOMQ, sync_omq_tp),
@@ -1358,7 +1372,10 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in tp_series:
-        pts = " ".join(f"{small_xs[j]:.1f},{y_msg(vals[i]):.1f}" for j, i in enumerate(small_indices))
+        pts = " ".join(
+            f"{small_xs[j]:.1f},{y_msg(vals[i]):.1f}"
+            for j, i in enumerate(small_indices)
+        )
         L.append(
             f'  <polyline points="{pts}" fill="none" stroke="{color}"'
             f' stroke-width="2" stroke-dasharray="6,4"/>'
@@ -1388,7 +1405,9 @@ def gen_combined_chart(data, path):
             f'  <text x="{large_xs[i]:.1f}" y="{t1_bot + 14}" text-anchor="middle"'
             f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
-    L.append(f'  <text x="{mid_x:.1f}" y="{t1_bot + 32}" text-anchor="middle" fill="#9ca3af" font-size="9">dashed = message rate · solid = bandwidth</text>')
+    L.append(
+        f'  <text x="{mid_x:.1f}" y="{t1_bot + 32}" text-anchor="middle" fill="#9ca3af" font-size="9">dashed = message rate · solid = bandwidth</text>'
+    )
 
     # BOTTOM PANEL: LATENCY
 

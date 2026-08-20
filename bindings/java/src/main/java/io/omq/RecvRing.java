@@ -23,6 +23,7 @@ final class RecvRing implements AutoCloseable {
     private static final long DESC_PAYLOAD_LEN = 8;
     private static final long DESC_PART_COUNT = 24;
     private static final long DESC_FLAGS = 32;
+    private static final long DESC_ROUTING_ID = 48;
 
     private static final long FLAG_MULTIPART = 1;
     private static final long FLAG_EXTERNAL = 2;
@@ -150,14 +151,23 @@ final class RecvRing implements AutoCloseable {
                 descriptors.get(LONG, offset + DESC_PAYLOAD),
                 descriptors.get(LONG, offset + DESC_PAYLOAD_LEN),
                 descriptors.get(LONG, offset + DESC_PART_COUNT),
-                descriptors.get(LONG, offset + DESC_FLAGS));
+                descriptors.get(LONG, offset + DESC_FLAGS),
+                descriptors.get(LONG, offset + DESC_ROUTING_ID));
     }
 
     private Message readMessage(Desc desc) {
         if (desc.partCount() == 1) {
-            return Message.fromNative(readBytes(desc));
+            return Message.fromNative(readBytes(desc), routingId(desc));
         }
-        return Message.fromNative(readParts(desc));
+        return Message.fromNative(readParts(desc), routingId(desc));
+    }
+
+    private static int routingId(Desc desc) {
+        long routingId = desc.routingId();
+        if (routingId > Integer.MAX_VALUE) {
+            throw new OMQException("native receive ring routing ID overflow");
+        }
+        return (int) routingId;
     }
 
     private byte[] readBytes(Desc desc) {
@@ -314,6 +324,7 @@ final class RecvRing implements AutoCloseable {
             long payload,
             long payloadLen,
             long partCount,
-            long flags) {
+            long flags,
+            long routingId) {
     }
 }

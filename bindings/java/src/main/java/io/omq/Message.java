@@ -6,28 +6,40 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
 
 /** Immutable OMQ message with one or more byte-array parts. */
 public final class Message {
     private final byte[] body;
     private final byte[][] parts;
+    private final int routingId;
 
     private Message(byte[][] parts) {
-        this(parts, true);
+        this(parts, true, 0);
     }
 
     private Message(byte[][] parts, boolean copy) {
+        this(parts, copy, 0);
+    }
+
+    private Message(byte[][] parts, boolean copy, int routingId) {
         if (parts.length == 0) {
             throw new IllegalArgumentException("message must contain at least one part");
         }
         this.body = null;
         this.parts = copy ? copy(parts) : requireParts(parts);
+        this.routingId = requireRoutingId(routingId);
     }
 
     private Message(byte[] body, boolean copy) {
+        this(body, copy, 0);
+    }
+
+    private Message(byte[] body, boolean copy, int routingId) {
         Objects.requireNonNull(body, "body");
         this.body = copy ? Arrays.copyOf(body, body.length) : body;
         this.parts = null;
+        this.routingId = requireRoutingId(routingId);
     }
 
     /** Creates a single-part binary message by copying {@code body}. */
@@ -79,7 +91,18 @@ public final class Message {
         return new Message(body, false);
     }
 
+    static Message fromNative(byte[] body, int routingId) {
+        return new Message(body, false, routingId);
+    }
+
+    static Message fromNative(byte[][] parts, int routingId) {
+        return new Message(parts, false, routingId);
+    }
+
     static Message fromNative(Object nativeMessage) {
+        if (nativeMessage instanceof Message message) {
+            return message;
+        }
         if (nativeMessage instanceof byte[] body) {
             return fromNative(body);
         }
@@ -117,6 +140,19 @@ public final class Message {
     /** Returns whether this message has more than one part. */
     public boolean isMultipart() {
         return body == null && parts.length > 1;
+    }
+
+    /** Returns the native routing ID, if this message came from a routed socket. */
+    public OptionalInt routingId() {
+        return routingId == 0 ? OptionalInt.empty() : OptionalInt.of(routingId);
+    }
+
+    /** Returns a copy of this message carrying {@code routingId} metadata. */
+    public Message withRoutingId(int routingId) {
+        if (body != null) {
+            return new Message(body, true, routingId);
+        }
+        return new Message(parts, true, routingId);
     }
 
     /** Returns a copy of the part at {@code index}. */
@@ -240,5 +276,12 @@ public final class Message {
             total += partView(i).length;
         }
         return total;
+    }
+
+    private static int requireRoutingId(int routingId) {
+        if (routingId < 0) {
+            throw new IllegalArgumentException("routing ID must be non-negative");
+        }
+        return routingId;
     }
 }

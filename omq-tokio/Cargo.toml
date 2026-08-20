@@ -341,6 +341,10 @@ name = "omq_soak_pub_sub_realworld_churn_tcp"
 path = "tests/omq_soak_pub_sub_realworld_churn_tcp.rs"
 
 [[test]]
+name = "omq_soak_rate_limit"
+path = "tests/omq_soak_rate_limit.rs"
+
+[[test]]
 name = "omq_soak_reconnect_all_types"
 path = "tests/omq_soak_reconnect_all_types.rs"
 

@@ -1,0 +1,17 @@
+[package]
+name = "monocoque_bench_peer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "monocoque_bench_peer"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+bytes = "1"
+libc = "0.2"
+monocoque-rs = { version = "0.4.0", default-features = false, features = ["runtime-tokio", "zmq"] }
+tokio = { version = "1", features = ["time", "rt", "macros"] }
+zmq = "0.10"

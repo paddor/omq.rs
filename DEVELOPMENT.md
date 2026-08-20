@@ -197,6 +197,7 @@ when a measured cell looks bad, don't hand-wave it as noise.
 | `omq_bench_peer_blocking` | `omq-tokio/src/bin/bench_peer_blocking.rs` | omq-tokio-1t, omq-tokio-2t |
 | `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
 | `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
+| `monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 | `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |

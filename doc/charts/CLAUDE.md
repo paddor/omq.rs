@@ -22,9 +22,9 @@ Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
-| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
+| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, monocoque CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, monocoque CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
+| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, monocoque CT + 1 worker, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 64 peers). REQ/REP latency sizes: 16B..16KiB (6 points).
@@ -92,6 +92,20 @@ Bench: `omq-bench run pushpull-lz4` (uses `bench_peer_blocking`, 1IO).
 - `omq-tokio-ct`: `Context::current()`, no background IO thread.
   App and IO share one current-thread runtime.
 - `omq-tokio-2t`: 2 dedicated current-thread IO runtimes.
+
+## Monocoque runtime mode
+
+- `monocoque-tokio-ct`: `monocoque-rs` 0.4.0 with `runtime-tokio`.
+  `LocalRuntime` is a Tokio current-thread runtime wrapped in a `LocalSet`.
+- PUSH/PULL and REQ/REP use one OS thread per peer process. Application and
+  socket I/O share that thread. No background I/O thread.
+- PUB uses the same current-thread runtime plus exactly one `pub-worker-0`
+  background worker. SUB remains current-thread with no worker.
+- Throughput PUSH uses the 64 KiB read slab, 64 KiB write buffer, and write
+  coalescing. Throughput PULL and SUB use the 64 KiB read slab, 8 KiB write
+  buffer, no coalescing, and `recv_into()` to reuse the receive frame vector.
+  REQ/REP leaves Monocoque's default buffers in place, disables coalescing, and
+  reuses the reply vector with `recv_into()` on the request side.
 
 ## Style
 

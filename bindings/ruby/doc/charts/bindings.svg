@@ -107,23 +107,23 @@
   <text x="425.0" y="476" text-anchor="middle" fill="#9ca3af" font-size="9">dashed = message rate · solid = bandwidth</text>
   <text x="425.0" y="532" text-anchor="middle" fill="#f9fafb" font-size="13" font-weight="700">REQ/REP mean latency: 2-process, TCP loopback (lower is better)</text>
   <line x1="60" y1="749.0" x2="790" y2="749.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="749.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">20 us</text>
+  <text x="52" y="749.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">20 µs</text>
   <line x1="60" y1="724.0" x2="790" y2="724.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="724.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">40 us</text>
+  <text x="52" y="724.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">40 µs</text>
   <line x1="60" y1="699.0" x2="790" y2="699.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="699.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">60 us</text>
+  <text x="52" y="699.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">60 µs</text>
   <line x1="60" y1="674.0" x2="790" y2="674.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="674.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">80 us</text>
+  <text x="52" y="674.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">80 µs</text>
   <line x1="60" y1="649.0" x2="790" y2="649.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="649.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">100 us</text>
+  <text x="52" y="649.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">100 µs</text>
   <line x1="60" y1="624.0" x2="790" y2="624.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="624.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">120 us</text>
+  <text x="52" y="624.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">120 µs</text>
   <line x1="60" y1="599.0" x2="790" y2="599.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="599.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">140 us</text>
+  <text x="52" y="599.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">140 µs</text>
   <line x1="60" y1="574.0" x2="790" y2="574.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="574.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">160 us</text>
+  <text x="52" y="574.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">160 µs</text>
   <line x1="60" y1="549.0" x2="790" y2="549.0" stroke="#374151" stroke-width="1"/>
-  <text x="52" y="549.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">180 us</text>
+  <text x="52" y="549.0" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">180 µs</text>
   <line x1="60.0" y1="549" x2="60.0" y2="749" stroke="#374151" stroke-width="1"/>
   <line x1="151.3" y1="549" x2="151.3" y2="749" stroke="#374151" stroke-width="1"/>
   <line x1="242.5" y1="549" x2="242.5" y2="749" stroke="#374151" stroke-width="1"/>

@@ -295,7 +295,7 @@ def render_chart
     fraction = (value - LATENCY_MIN_US) / latency_span
     y = latency_bottom - fraction * (latency_bottom - latency_top)
     lines << %(  <line x1="#{left}" y1="#{y.round(1)}" x2="#{right}" y2="#{y.round(1)}" stroke="#374151" stroke-width="1"/>)
-    lines << %(  <text x="#{left - 8}" y="#{y.round(1)}" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">#{value} us</text>)
+    lines << %(  <text x="#{left - 8}" y="#{y.round(1)}" text-anchor="end" dominant-baseline="middle" fill="#e5e7eb" font-size="10">#{value} µs</text>)
   end
   latency_sizes.each_with_index do |size, index|
     x = x_latency.call(index)
@@ -359,7 +359,7 @@ unless options[:chart_only]
         best = options[:rounds].times.map { run_cell(implementation, pattern, size, options[:quick]) }
           .min_by { |result| pattern == "pushpull" ? -result[:messages_per_second] : result[:microseconds_per_round_trip] }
         append_result(best.merge(rounds: options[:rounds])) if options[:record] && !options[:quick]
-        metric = pattern == "pushpull" ? "#{best[:messages_per_second].round} msg/s" : format("%.1f us", best[:microseconds_per_round_trip])
+        metric = pattern == "pushpull" ? "#{best[:messages_per_second].round} msg/s" : format("%.1f µs", best[:microseconds_per_round_trip])
         puts "#{implementation.ljust(8)} #{pattern.ljust(8)} #{size.to_s.rjust(6)} B  #{metric}"
       end
     end

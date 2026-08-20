@@ -4,6 +4,9 @@ Fast Ruby binding for [OMQ.rs](https://github.com/paddor/omq.rs). No libzmq,
 FFI, or broker. Networking runs on OMQ-owned Tokio threads. The Ruby API is
 synchronous; its waits cooperate with an installed `Fiber.scheduler`.
 
+MRI 3.3+, MRI 4.0+, and TruffleRuby are supported. TruffleRuby 34 does not
+provide Ruby's `Fiber.scheduler` API, so waits block the calling thread there.
+
 ## Install
 
 ```sh
@@ -104,6 +107,9 @@ There is no separate async API and omq-rs does not install a scheduler.
 `#send`, `#recv`, and connection waits use Ruby IO readiness. When the caller
 installs a `Fiber.scheduler`, such as Async, waits suspend only the current
 fiber.
+
+TruffleRuby currently has no `Fiber.scheduler` API. Use threads when concurrent
+blocking waits are needed there.
 
 ```ruby
 require "async"

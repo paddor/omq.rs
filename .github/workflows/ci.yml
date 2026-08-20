@@ -254,6 +254,8 @@ jobs:
           - ruby: '4.0'
             os: ubuntu-latest
             cztop: true
+          - ruby: truffleruby
+            os: ubuntu-latest
           - ruby: '4.0'
             os: macos-15
     steps:

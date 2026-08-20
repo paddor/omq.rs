@@ -406,6 +406,10 @@ module OMQ
         raise IO::TimeoutError, message unless ready
 
         drain(io)
+      rescue Errno::EBADF
+        raise IOError, "socket closed" if closed?
+
+        raise
       end
 
       def wait_for_native_fd(fd, timeout, message)

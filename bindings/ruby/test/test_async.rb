@@ -4,6 +4,10 @@ require_relative "test_helper"
 require "async"
 
 class FiberSchedulerTest < Minitest::Test
+  def setup
+    skip "Fiber.scheduler unavailable" unless Fiber.respond_to?(:scheduler)
+  end
+
   def test_recv_yields_to_another_fiber
     Async do |task|
       pull = socket(:pull, recv_timeout: 2)

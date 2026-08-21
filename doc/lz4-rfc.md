@@ -86,8 +86,9 @@ encoder/decoder allocation footprint small.
   is sufficient; pluggable trainers are not a goal.
 - Streaming / context-takeover compression. Each part is
   independently decodable from its own LZ4B envelope.
-- Multiple dict rotation on one connection. A peer gets one dict per
-  direction per connection; to rotate, close and reopen.
+- Multiple dict rotation on one connection. A connection gets at most
+  one dict per direction; to rotate, close and reopen. The same dict
+  bytes MAY be reused across many connections.
 - `lz4+ipc://`, `lz4+inproc://`. No meaningful bandwidth win over
   plain `ipc://` or `inproc://`; inproc is zero-copy.
 
@@ -97,7 +98,7 @@ encoder/decoder allocation footprint small.
 | Term     | Meaning                                                                      |
 |----------|------------------------------------------------------------------------------|
 | Sentinel | First 4 bytes of each wire part, selecting which of three formats follows.   |
-| Dict     | User-supplied byte string, 1-8192 bytes, shipped from a peer to its counterpart exactly once per direction per connection. |
+| Dict     | User-supplied or trained byte string, 1-8192 bytes. Shipment and receive-side install are tracked per direction per connection; the same dict bytes MAY be shared by many connections. |
 | Envelope | The sentinel + any fixed header bytes that precede the payload or ciphertext. |
 | Budget   | The socket's `max_message_size`, enforced by the receiver as a cap on the total decompressed size summed across all parts of a single ZMTP message (MORE-flag-chained). |
 
@@ -177,8 +178,11 @@ Each block is a `(u32 LE compressed_block_len, LZ4 block bytes)` pair:
 
 ### 6.5 Sender rules
 
-1. Let `min_size` = 128 if a dictionary is installed on this
-   connection's send side, else 512.
+1. Choose a per-part `min_size`. The RECOMMENDED conservative value is
+   128 bytes if a dictionary is installed on this connection's send
+   side, else 512 bytes. Implementations MAY use a lower value when
+   their compressor, dictionary trainer, and workload measurements show
+   a net benefit.
 2. If `plaintext.size < min_size`: emit
    `00 00 00 00 | plaintext`.
 3. If `plaintext.size > LZ4M_BLOCK_SIZE`: use multi-block encoding
@@ -281,19 +285,36 @@ messages where the 12-byte envelope overhead dominates.)
 - Dictionary shipments are consumed by the transport layer; they
   MUST NOT be delivered to the application.
 
-### 7.3 Receiver handling
+### 7.3 Sender dictionary scope
+
+The dictionary is a byte string, not a streaming compression context.
+Implementations MAY choose its ownership scope. It can be configured per
+socket, trained per socket, trained per fan-out lane, or trained per
+connection.
+
+The wire requirement is narrower: before sending any LZ4B part that was
+compressed with dict `D` on a connection, the sender MUST have shipped
+`LZ4D | D` on that same direction of that same connection, and MUST NOT
+ship a second dictionary on that direction. If many connections use the
+same dict bytes, a sender may encode a payload once with that dict and
+reuse the resulting LZ4B bytes for every connection that has already
+received that dict.
+
+No-dictionary LZ4B/LZ4M is a valid subset of this transport.
+
+### 7.4 Receiver handling
 
 The receiver validates the shipment against Sec. 7.2 and installs the
 dict on the current connection's receive side. Subsequent LZ4B
 parts on that direction MUST be decoded against the installed dict.
 
-### 7.4 Size budget accounting
+### 7.5 Size budget accounting
 
 Dictionary shipments do NOT count against the receiver's
 `max_message_size` budget. They are transport overhead, not
 messages.
 
-### 7.5 Dict mismatch detection (not implemented)
+### 7.6 Dict mismatch detection (not implemented)
 
 LZ4 block format has no `Dict_ID` field and no built-in checksum.
 This specification does NOT define a dictionary-id carried in the
@@ -305,7 +326,7 @@ Applications that need mismatch detection MUST validate at the
 application layer (schema validation, payload checksum, etc.).
 This reflects LZ4's minimal-overhead design goal.
 
-### 7.6 Automatic dictionary training
+### 7.7 Automatic dictionary training
 
 A sender MAY train a dictionary automatically from early traffic.
 The training algorithm, trigger condition, and parameters are
@@ -445,8 +466,8 @@ an unbounded budget is not safe on untrusted peers.
 | Dictionary sentinel           | `4C 5A 34 44` (`LZ4D`)                   |
 | LZ4M block size               | 1,073,741,824 (1 GiB, `0x40000000`)      |
 | Max dictionary size           | 8192 bytes                               |
-| Min compress size, no dict    | 512 bytes                                |
-| Min compress size, with dict  | 128 bytes                                |
+| Min compress size, no dict    | 512 bytes (RECOMMENDED)                  |
+| Min compress size, with dict  | 128 bytes (conservative RECOMMENDED)     |
 | LZ4 acceleration              | 1 (default)                              |
 | LZ4B envelope size            | 12 bytes (4 sentinel + 8 size)           |
 | LZ4M envelope size            | 12 + 4*N bytes (N = number of blocks)    |

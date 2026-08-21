@@ -21,7 +21,7 @@ def test_req_rep_cycles():
     req = ctx.socket(zmq.REQ)
     ep = rep.bind(tcp_ep())
     req.connect(ep)
-    rep.setsockopt(zmq.RCVTIMEO, 5000)
+    rep.setsockopt(zmq.RCVTIMEO, 100)
     rep.setsockopt(zmq.SNDTIMEO, 5000)
     req.setsockopt(zmq.RCVTIMEO, 5000)
     req.setsockopt(zmq.SNDTIMEO, 5000)
@@ -61,6 +61,7 @@ def test_req_rep_cycles():
 
     stop = True
     t.join(timeout=5)
+    assert not t.is_alive(), "REP server thread did not stop"
 
     print(f"[req_rep] done: {cycles} cycles in {duration:.1f}s")
 

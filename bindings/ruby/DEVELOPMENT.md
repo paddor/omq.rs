@@ -50,6 +50,18 @@ compression, monitors, Fiber schedulers, Ractors, lifecycle behavior, and
 pyzmq interoperability. pyzmq tests skip when pyzmq is unavailable. cztop
 tests skip when CZMQ or cztop is unavailable. Ractor tests require Ruby 4.
 
+## Soak tests
+
+Run the mixed transport, security, compression, churn, and resource soak:
+
+```sh
+bindings/ruby/scripts/soak.sh 1h
+```
+
+The duration accepts `s`, `m`, `h`, or `d`. The test reports progress, RSS,
+file descriptors, and Ruby thread counts. It fails on message corruption,
+stalls, or sustained resource growth.
+
 `scripts/test-all.sh` includes the Ruby pass in the full repository test run.
 
 ## Static checks

@@ -22,6 +22,12 @@ LATENCY_MAX_SIZE = 4096
 LATENCY_MIN_US = 0.0
 LATENCY_MAX_US = 180.0
 LATENCY_STEP_US = 20
+THROUGHPUT_DURATION = 2.5
+THROUGHPUT_WARMUP_DURATION = 0.5
+LATENCY_DURATION = 1.5
+LATENCY_WARMUP_DURATION = 0.5
+QUICK_DURATION = 0.5
+QUICK_WARMUP_DURATION = 0.1
 COLORS     = {"omq-rs" => "#ef4444", "cztop" => "#60a5fa", "ffi-rzmq" => "#a855f7"}.freeze
 DRAW_ORDER = %w[cztop ffi-rzmq omq-rs].freeze
 LABELS     = {
@@ -39,6 +45,10 @@ def parse_options
     patterns: %w[pushpull reqrep],
     rounds: 3,
     sizes: nil,
+    throughput_duration: THROUGHPUT_DURATION,
+    throughput_warmup_duration: THROUGHPUT_WARMUP_DURATION,
+    latency_duration: LATENCY_DURATION,
+    latency_warmup_duration: LATENCY_WARMUP_DURATION,
   }
   OptionParser.new do |parser|
     parser.on("--quick") { options[:quick] = true }
@@ -48,8 +58,18 @@ def parse_options
     parser.on("--patterns NAMES") { |value| options[:patterns] = value.split(",") }
     parser.on("--rounds N", Integer) { |value| options[:rounds] = value }
     parser.on("--sizes BYTES") { |value| options[:sizes] = value.split(",").map { |size| Integer(size) } }
+    parser.on("--duration SECONDS", Float) { |value| options[:throughput_duration] = value }
+    parser.on("--warmup-duration SECONDS", Float) { |value| options[:throughput_warmup_duration] = value }
+    parser.on("--latency-duration SECONDS", Float) { |value| options[:latency_duration] = value }
+    parser.on("--latency-warmup-duration SECONDS", Float) { |value| options[:latency_warmup_duration] = value }
   end.parse!
-  options[:rounds] = 1 if options[:quick]
+  if options[:quick]
+    options[:rounds] = 1
+    options[:throughput_duration] = QUICK_DURATION
+    options[:throughput_warmup_duration] = QUICK_WARMUP_DURATION
+    options[:latency_duration] = QUICK_DURATION
+    options[:latency_warmup_duration] = QUICK_WARMUP_DURATION
+  end
   options
 end
 
@@ -61,16 +81,6 @@ def implementation_available?(name)
   library = {"omq-rs" => "omq/rs", "cztop" => "cztop", "ffi-rzmq" => "ffi-rzmq"}.fetch(name)
   system(RbConfig.ruby, "-I#{File.join(ROOT, "lib")}", "-e", "require #{library.dump}",
          out: File::NULL, err: File::NULL)
-end
-
-def counts(pattern, size, quick)
-  if pattern == "pushpull"
-    target_bytes = quick ? 16 * 1024 * 1024 : 256 * 1024 * 1024
-    count = [target_bytes / size, quick ? 20_000 : 100_000].max
-  else
-    count = quick ? 10_000 : 100_000
-  end
-  [count, [count / 10, 10_000].min]
 end
 
 def read_line(io, timeout: 10)
@@ -86,35 +96,44 @@ def stop_process(wait_thread)
 rescue Errno::ESRCH, Errno::ECHILD
 end
 
-def run_cell(backend, pattern, size, quick)
-  count, warmup = counts(pattern, size, quick)
+def run_cell(backend, pattern, size, duration, warmup_duration)
   server_role, client_role = pattern == "pushpull" ? %w[pull push] : %w[rep req]
   server = nil
+  client = nil
+  streams = []
 
-  Timeout.timeout(60) do
-    Open3.popen3(*peer_command(backend, pattern, server_role, "tcp://127.0.0.1:0", size, count, warmup)) do |_stdin, stdout, stderr, wait|
-      server = wait
-      endpoint_line = read_line(stdout)
-      endpoint = endpoint_line&.match(/\AENDPOINT (.+)\n?\z/)&.[](1)
-      raise "server failed: #{stderr.read}" unless endpoint
+  Timeout.timeout(30) do
+    server_stdin, server_stdout, server_stderr, server = Open3.popen3(
+      *peer_command(backend, pattern, server_role, "tcp://127.0.0.1:0", size, duration, warmup_duration),
+    )
+    streams.concat([server_stdin, server_stdout, server_stderr])
+    server_stdin.close
 
-      client_out, client_err, client_status = Open3.capture3(
-        *peer_command(backend, pattern, client_role, endpoint, size, count, warmup),
-      )
-      raise "client failed: #{client_err}" unless client_status.success?
+    endpoint_line = read_line(server_stdout)
+    endpoint = endpoint_line&.match(/\AENDPOINT (.+)\n?\z/)&.[](1)
+    raise "server did not publish an endpoint" unless endpoint
 
-      measured_output = pattern == "pushpull" ? read_line(stdout, timeout: 30) : client_out.lines.find { |line| line.start_with?("RESULT ") }
-      result_line = measured_output&.sub(/\ARESULT /, "")
-      raise "missing result for #{backend} #{pattern} #{size}" unless result_line
+    client_stdin, client_stdout, client_stderr, client = Open3.popen3(
+      *peer_command(backend, pattern, client_role, endpoint, size, duration, warmup_duration),
+    )
+    streams.concat([client_stdin, client_stdout, client_stderr])
+    client_stdin.close
 
-      status = wait.value
-      raise "server failed: #{stderr.read}" unless status.success?
+    measured_stdout = pattern == "pushpull" ? server_stdout : client_stdout
+    measured_wait = pattern == "pushpull" ? server : client
+    measured_stderr = pattern == "pushpull" ? server_stderr : client_stderr
+    result_line = read_line(measured_stdout, timeout: 15)&.sub(/\ARESULT /, "")
+    raise "missing result for #{backend} #{pattern} #{size}" unless result_line
 
-      JSON.parse(result_line, symbolize_names: true)
-    end
+    status = measured_wait.value
+    raise "measured peer failed: #{measured_stderr.read}" unless status.success?
+
+    JSON.parse(result_line, symbolize_names: true)
   end
 ensure
+  stop_process(client)
   stop_process(server)
+  streams.each { |stream| stream.close unless stream.closed? }
 end
 
 def append_result(result)
@@ -353,10 +372,15 @@ unless options[:chart_only]
     options[:patterns].each do |pattern|
       pattern_sizes = pattern == "reqrep" ? sizes.select { |size| size <= LATENCY_MAX_SIZE } : sizes
       pattern_sizes.each do |size|
-        best = options[:rounds].times.map { run_cell(implementation, pattern, size, options[:quick]) }
-          .min_by { |result| pattern == "pushpull" ? -result[:messages_per_second] : result[:microseconds_per_round_trip] }
-        append_result(best.merge(rounds: options[:rounds])) if options[:record] && !options[:quick]
-        metric = pattern == "pushpull" ? "#{best[:messages_per_second].round} msg/s" : format("%.1f μs", best[:microseconds_per_round_trip])
+        duration = pattern == "pushpull" ? options[:throughput_duration] : options[:latency_duration]
+        warmup_duration = pattern == "pushpull" ? options[:throughput_warmup_duration] : options[:latency_warmup_duration]
+        results = options[:rounds].times.map do
+          run_cell(implementation, pattern, size, duration, warmup_duration)
+        end
+        key = pattern == "pushpull" ? :messages_per_second : :microseconds_per_round_trip
+        median = results.sort_by { |result| result.fetch(key) }.fetch(results.length / 2)
+        append_result(median.merge(rounds: options[:rounds])) if options[:record] && !options[:quick]
+        metric = pattern == "pushpull" ? "#{median[:messages_per_second].round} msg/s" : format("%.1f μs", median[:microseconds_per_round_trip])
         puts "#{implementation.ljust(8)} #{pattern.ljust(8)} #{size.to_s.rjust(6)} B  #{metric}"
       end
     end

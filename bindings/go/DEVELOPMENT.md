@@ -82,6 +82,8 @@ Scenarios:
 - `inproc`: inproc REQ/REP loop.
 - `poller`: inproc fan-in through `Poller`.
 - `pubsub`: TCP PUB/SUB subscriber churn.
+- `protocol-mix`: IPC multipart and large messages, TCP REQ/REP, and
+  bidirectional PAIR traffic.
 - `context-churn`: repeated context/socket create, use, close cycles.
 
 Soak logs include progress counters, Go heap, RSS, smaps rollup, FD count,

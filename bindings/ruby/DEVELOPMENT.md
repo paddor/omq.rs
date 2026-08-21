@@ -50,6 +50,18 @@ compression, monitors, Fiber schedulers, Ractors, lifecycle behavior, and
 pyzmq interoperability. pyzmq tests skip when pyzmq is unavailable. cztop
 tests skip when CZMQ or cztop is unavailable. Ractor tests require Ruby 4.
 
+## Soak tests
+
+Run the mixed transport, security, compression, churn, and resource soak:
+
+```sh
+bindings/ruby/scripts/soak.sh 1h
+```
+
+The duration accepts `s`, `m`, `h`, or `d`. The test reports progress, RSS,
+file descriptors, and Ruby thread counts. It fails on message corruption,
+stalls, or sustained resource growth.
+
 `scripts/test-all.sh` includes the Ruby pass in the full repository test run.
 
 ## Static checks
@@ -82,8 +94,10 @@ yard stats --no-save --no-cache --list-undoc --no-private \
 
 Run benchmarks on an otherwise idle machine. The harness starts separate Ruby
 processes over TCP. PUSH/PULL throughput covers 16 B through 32 KiB. REQ/REP
-mean latency covers 16 B through 4 KiB. The default run keeps the best of three
-rounds for each implementation, pattern, and message size.
+mean latency covers 16 B through 4 KiB. The default run keeps the median of three
+rounds for each implementation, pattern, and message size. Throughput uses a
+0.5 second warmup and 2.5 second measurement window. Latency uses a 0.5 second
+warmup and 1.5 second measurement window.
 
 From the binding directory:
 
@@ -104,6 +118,8 @@ bundle exec ruby -Ilib scripts/update_perf.rb --impl omq-rs,cztop,ffi-rzmq
 bundle exec ruby -Ilib scripts/update_perf.rb --patterns pushpull,reqrep
 bundle exec ruby -Ilib scripts/update_perf.rb --sizes 16,128,1024,4096
 bundle exec ruby -Ilib scripts/update_perf.rb --rounds 5
+bundle exec ruby -Ilib scripts/update_perf.rb --duration 2.5 --warmup-duration 0.5
+bundle exec ruby -Ilib scripts/update_perf.rb --latency-duration 1.5 --latency-warmup-duration 0.5
 bundle exec ruby -Ilib scripts/update_perf.rb --no-record
 ```
 

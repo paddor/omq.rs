@@ -255,7 +255,21 @@ impl Drop for SendPipeProducer {
 
 impl SendPipeConsumer {
     pub(crate) async fn ready(&self) {
-        self.data_signal.ready().await;
+        loop {
+            if !self.is_empty() || self.is_disconnected() {
+                return;
+            }
+            self.data_signal.ready().await;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match &self.inner {
+            SendPipeConsumerInner::Queue(consumer) => consumer.is_empty(),
+            SendPipeConsumerInner::Conflate(state) => {
+                state.slot.lock().expect("conflate send pipe").is_none()
+            }
+        }
     }
 
     pub(crate) fn drain_into(
@@ -375,6 +389,18 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn ready_observes_nonempty_pipe_when_signal_is_idle() {
+        let (mut tx, rx) = send_pipe(4);
+        tx.try_send(Message::single("tail")).unwrap();
+        rx.data_signal.begin_drain();
+        assert!(!rx.data_signal.clear_after(true));
+
+        timeout(Duration::from_millis(10), rx.ready())
+            .await
+            .expect("nonempty pipe must be ready even without a pending signal");
     }
 
     #[test]

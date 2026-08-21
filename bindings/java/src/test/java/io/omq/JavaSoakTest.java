@@ -57,6 +57,7 @@ final class JavaSoakTest {
         LongAdder curveMessages = new LongAdder();
         LongAdder compressionMessages = new LongAdder();
         LongAdder inprocMessages = new LongAdder();
+        LongAdder protocolMessages = new LongAdder();
         CompletableFuture<String> tcpEndpoint = new CompletableFuture<>();
         CompletableFuture<String> curveEndpoint = new CompletableFuture<>();
         CurveKeypair curveServer = OMQ.curveKeypair();
@@ -66,7 +67,7 @@ final class JavaSoakTest {
         Instant started = Instant.now();
         long start = System.nanoTime();
         SoakResourceTracker resources = new SoakResourceTracker(started, baseline, limits);
-        int baseWorkloads = 5;
+        int baseWorkloads = 6;
         int churnWorkers = Math.max(1, workers - baseWorkloads);
         int poolSize = Math.max(workers, baseWorkloads + churnWorkers * 2);
 
@@ -81,6 +82,7 @@ final class JavaSoakTest {
             tasks.add(pool.submit(() -> compressionPair(
                     stop, failure, "zstd+tcp://127.0.0.1:0", ZSTD_DICT, compressionMessages)));
             tasks.add(pool.submit(() -> inprocReqRep(stop, failure, inprocMessages)));
+            tasks.add(pool.submit(() -> protocolMix(stop, failure, protocolMessages)));
 
             String tcp = tcpEndpoint.get(5, TimeUnit.SECONDS);
             String curve = curveEndpoint.get(5, TimeUnit.SECONDS);
@@ -100,12 +102,13 @@ final class JavaSoakTest {
                     Duration elapsed = Duration.ofNanos(now - start);
                     SoakResources current = resources.sample(elapsed);
                     System.out.printf(
-                            "[java-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d heap=%dMB rss=%dMB fds=%d%n",
+                            "[java-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d protocol=%d heap=%dMB rss=%dMB fds=%d%n",
                             elapsed.toMillis() / 1_000.0,
                             tcpMessages.sum(),
                             curveMessages.sum(),
                             compressionMessages.sum(),
                             inprocMessages.sum(),
+                            protocolMessages.sum(),
                             current.heapBytes() / BYTES_PER_MIB,
                             current.rssBytes() / BYTES_PER_MIB,
                             current.fdCount());
@@ -134,6 +137,7 @@ final class JavaSoakTest {
         assertTrue(curveMessages.sum() > 0, "CURVE churn made no progress");
         assertTrue(compressionMessages.sum() > 0, "compression loop made no progress");
         assertTrue(inprocMessages.sum() > 0, "inproc loop made no progress");
+        assertTrue(protocolMessages.sum() > 0, "protocol mix made no progress");
     }
 
     @Test
@@ -353,6 +357,65 @@ final class JavaSoakTest {
                         throw new AssertionError("inproc reply mismatch");
                     }
                     cycles.increment();
+                }
+            }
+        });
+    }
+
+    private static void protocolMix(
+            AtomicBoolean stop,
+            AtomicReference<Throwable> failure,
+            LongAdder messages) {
+        runWorker(stop, failure, () -> {
+            try (Context context = OMQ.context(2);
+                 Socket pull = context.socket(SocketType.PULL);
+                 Socket push = context.socket(SocketType.PUSH);
+                 Socket left = context.socket(SocketType.PAIR);
+                 Socket right = context.socket(SocketType.PAIR);
+                 Socket pub = context.socket(SocketType.PUB);
+                 Socket first = context.socket(SocketType.SUB);
+                 Socket second = context.socket(SocketType.SUB)) {
+                String ipc = pull.bind("ipc://@omq-java-soak-" + ProcessHandle.current().pid());
+                push.connect(ipc);
+                push.waitConnected(1, CONNECT_TIMEOUT);
+                String pairEndpoint = left.bind("tcp://127.0.0.1:0");
+                right.connect(pairEndpoint);
+                right.waitConnected(1, CONNECT_TIMEOUT);
+                String pubEndpoint = pub.bind("tcp://127.0.0.1:0");
+                first.subscribe("soak.").connect(pubEndpoint);
+                second.subscribe("soak.").connect(pubEndpoint);
+                pub.waitSubscribed(2, CONNECT_TIMEOUT);
+
+                int seq = 0;
+                byte[] large = new byte[256 * 1024];
+                while (!stop.get()) {
+                    byte[] sequence = Integer.toString(seq).getBytes(StandardCharsets.UTF_8);
+                    byte[] body = seq % 64 == 0 ? large : sequence;
+                    push.send(Message.multipart(sequence, body));
+                    Message multipart = pull.receive(Duration.ofSeconds(5)).orElseThrow();
+                    if (multipart.partCount() != 2
+                            || !java.util.Arrays.equals(multipart.part(0), sequence)
+                            || multipart.part(1).length != body.length) {
+                        throw new AssertionError("IPC multipart mismatch");
+                    }
+
+                    left.send("left-" + seq);
+                    if (!("left-" + seq).equals(right.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                        throw new AssertionError("PAIR forward mismatch");
+                    }
+                    right.send("right-" + seq);
+                    if (!("right-" + seq).equals(left.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                        throw new AssertionError("PAIR reverse mismatch");
+                    }
+
+                    String published = "soak." + seq;
+                    pub.send(published);
+                    if (!published.equals(first.receive(Duration.ofSeconds(5)).orElseThrow().text())
+                            || !published.equals(second.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                        throw new AssertionError("PUB/SUB fan-out mismatch");
+                    }
+                    messages.add(5);
+                    seq++;
                 }
             }
         });

@@ -32,15 +32,18 @@ Run one test file:
 node --test test/interop.test.js
 ```
 
-Run soak tests:
+Run soak tests directly or through the build wrapper:
 
 ```sh
 npm run soak
 OMQ_NODE_SOAK_DURATION_SECS=60 npm run soak
+bindings/node/scripts/soak.sh 1h
 ```
 
 Default soak duration is 15 minutes. The script runs Node with `--expose-gc`
-and serial test concurrency.
+and serial test concurrency. Coverage includes TCP, IPC, inproc, LZ4, CURVE,
+REQ/REP, PAIR, PUB/SUB fan-out, multipart and large messages, context churn,
+and resource growth.
 
 ## Benchmarks
 

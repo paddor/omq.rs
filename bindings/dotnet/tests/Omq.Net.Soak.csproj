@@ -4,10 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <BaseOutputPath>bin/Soak/</BaseOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Omq.Net.csproj" />
-    <PackageReference Include="NetMQ" Version="4.0.2.2" />
-    <PackageReference Include="System.Security.Cryptography.Xml" Version="8.0.4" />
+    <Compile Include="Soak.cs" />
   </ItemGroup>
 </Project>

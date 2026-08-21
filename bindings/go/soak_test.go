@@ -33,6 +33,7 @@ type soakCounters struct {
 	inprocMessages       atomic.Uint64
 	pollerMessages       atomic.Uint64
 	pubSubMessages       atomic.Uint64
+	protocolMessages     atomic.Uint64
 	contextCycles        atomic.Uint64
 	monitorEvents        atomic.Uint64
 	tcpLifecycle         soakLifecycleCounters
@@ -41,6 +42,7 @@ type soakCounters struct {
 	inprocLifecycle      soakLifecycleCounters
 	pollerLifecycle      soakLifecycleCounters
 	pubSubLifecycle      soakLifecycleCounters
+	protocolLifecycle    soakLifecycleCounters
 	contextLifecycle     soakLifecycleCounters
 }
 
@@ -76,6 +78,7 @@ var allSoakScenarios = []string{
 	"inproc",
 	"poller",
 	"pubsub",
+	"protocol-mix",
 	"context-churn",
 }
 
@@ -190,6 +193,11 @@ func TestSoakMixedWorkloads(t *testing.T) {
 			return soakPubSubChurn(ctx, omqCtx, counters)
 		})
 	}
+	if scenarios.enabled("protocol-mix") {
+		startWorker(&wg, state, "protocol-mix", func(ctx context.Context) error {
+			return soakProtocolMix(ctx, omqCtx, counters)
+		})
+	}
 	if scenarios.enabled("context-churn") {
 		startWorker(&wg, state, "context-churn", func(ctx context.Context) error {
 			return soakContextChurn(ctx, counters)
@@ -206,7 +214,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 			elapsed := time.Since(start)
 			current := resources.sample()
 			t.Logf(
-				"[go-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d poller=%d pubsub=%d contexts=%d monitor=%d heap=%dMB rss=%dMB fds=%d goroutines=%d threads=%d cgo=%d",
+				"[go-soak] %.0fs tcp=%d curve=%d compression=%d inproc=%d poller=%d pubsub=%d protocol=%d contexts=%d monitor=%d heap=%dMB rss=%dMB fds=%d goroutines=%d threads=%d cgo=%d",
 				elapsed.Seconds(),
 				counters.tcpMessages.Load(),
 				counters.curveMessages.Load(),
@@ -214,6 +222,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 				counters.inprocMessages.Load(),
 				counters.pollerMessages.Load(),
 				counters.pubSubMessages.Load(),
+				counters.protocolMessages.Load(),
 				counters.contextCycles.Load(),
 				counters.monitorEvents.Load(),
 				current.heapBytes/1_048_576,
@@ -333,11 +342,18 @@ func soakDrainMonitor(ctx context.Context, monitor *Monitor, counter *atomic.Uin
 		case err == nil:
 			counter.Add(1)
 		case errors.Is(err, ErrTimeout), errors.Is(err, ErrAgain):
+		case soakMonitorLagged(err):
 		default:
 			return err
 		}
 	}
 	return errFromContext(ctx)
+}
+
+func soakMonitorLagged(err error) bool {
+	var config *ConfigError
+	return errors.As(err, &config) &&
+		strings.HasPrefix(config.Err, "monitor lagged behind; missed ")
 }
 
 func soakChurnPush(
@@ -478,6 +494,116 @@ func soakInprocReqRep(ctx context.Context, shared *Context, counters *soakCounte
 			return fmt.Errorf("inproc reply mismatch: %q", reply.String())
 		}
 		counters.inprocMessages.Add(1)
+		seq++
+	}
+	return errFromContext(ctx)
+}
+
+func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounters) error {
+	newSocket := func(socketType SocketType) (*Socket, error) {
+		return soakNewSocket(shared, counters, "protocol-mix", socketType, Linger(0), SendHWM(128), RecvHWM(128))
+	}
+	pull, err := newSocket(Pull)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(pull, counters, "protocol-mix")
+	push, err := newSocket(Push)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(push, counters, "protocol-mix")
+	ipcEndpoint, err := pull.Bind(fmt.Sprintf("ipc://@go-soak-protocol-%d", os.Getpid()))
+	if err != nil {
+		return err
+	}
+	if err := push.Connect(ipcEndpoint); err != nil {
+		return err
+	}
+
+	rep, err := newSocket(Rep)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(rep, counters, "protocol-mix")
+	req, err := newSocket(Req)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(req, counters, "protocol-mix")
+	reqEndpoint, err := rep.Bind("tcp://127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	if err := req.Connect(reqEndpoint); err != nil {
+		return err
+	}
+
+	left, err := newSocket(Pair)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(left, counters, "protocol-mix")
+	right, err := newSocket(Pair)
+	if err != nil {
+		return err
+	}
+	defer closeSoakScenarioSocket(right, counters, "protocol-mix")
+	pairEndpoint, err := left.Bind("tcp://127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	if err := right.Connect(pairEndpoint); err != nil {
+		return err
+	}
+
+	large := bytes.Repeat([]byte{0xa5}, 256*1024)
+	var seq uint64
+	for ctx.Err() == nil {
+		sequence := []byte(strconv.FormatUint(seq, 10))
+		payload := sequence
+		if seq%64 == 0 {
+			payload = large
+		}
+		want := Multipart(sequence, payload)
+		if err := push.SendTimeout(want, 5*time.Second); err != nil {
+			return err
+		}
+		got, err := pull.RecvTimeout(5 * time.Second)
+		if err != nil {
+			return err
+		}
+		if !got.Equal(want) {
+			return fmt.Errorf("IPC multipart mismatch at %d", seq)
+		}
+
+		if err := req.SendTimeout(String("request"), 5*time.Second); err != nil {
+			return err
+		}
+		if _, err := rep.RecvTimeout(5 * time.Second); err != nil {
+			return err
+		}
+		if err := rep.SendTimeout(String("reply"), 5*time.Second); err != nil {
+			return err
+		}
+		if reply, err := req.RecvTimeout(5 * time.Second); err != nil || reply.String() != "reply" {
+			return fmt.Errorf("REQ/REP mismatch: %v", err)
+		}
+
+		pairMessage := Bytes(sequence)
+		if err := left.SendTimeout(pairMessage, 5*time.Second); err != nil {
+			return err
+		}
+		if got, err := right.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR forward mismatch: %v", err)
+		}
+		if err := right.SendTimeout(pairMessage, 5*time.Second); err != nil {
+			return err
+		}
+		if got, err := left.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR reverse mismatch: %v", err)
+		}
+		counters.protocolMessages.Add(4)
 		seq++
 	}
 	return errFromContext(ctx)
@@ -771,6 +897,12 @@ func assertSoakProgress(t *testing.T, scenarios soakScenarios, counters *soakCou
 			count uint64
 		}{"pubsub", counters.pubSubMessages.Load()})
 	}
+	if scenarios.enabled("protocol-mix") {
+		checks = append(checks, struct {
+			name  string
+			count uint64
+		}{"protocol-mix", counters.protocolMessages.Load()})
+	}
 	if scenarios.enabled("context-churn") {
 		checks = append(checks, struct {
 			name  string
@@ -955,6 +1087,8 @@ func (c *soakCounters) scenario(name string) *soakLifecycleCounters {
 		return &c.pollerLifecycle
 	case "pubsub":
 		return &c.pubSubLifecycle
+	case "protocol-mix":
+		return &c.protocolLifecycle
 	case "context-churn":
 		return &c.contextLifecycle
 	default:
@@ -1428,6 +1562,7 @@ func logSoakLifecycle(t *testing.T, counters *soakCounters) {
 		counters.lifecycleString("pubsub"),
 		counters.lifecycleString("context-churn"),
 	)
+	t.Logf("[go-soak-lifecycle] protocol-mix=%s", counters.lifecycleString("protocol-mix"))
 }
 
 func (r *soakResourceTracker) assertHeapResidual(t *testing.T, current soakResources) {

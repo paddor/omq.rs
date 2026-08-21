@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -462,6 +463,47 @@ final class SocketTest {
         } finally {
             if (closeCompleted) {
                 context.close();
+            }
+        }
+    }
+
+    @Test
+    void platformThreadReceiveCloseRace() throws Exception {
+        try (Context context = OMQ.context()) {
+            for (int i = 0; i < 100; i++) {
+                Socket pull = context.socket(SocketType.PULL);
+                pull.bind("inproc://platform-receive-close-race-" + UUID.randomUUID());
+                CountDownLatch start = new CountDownLatch(1);
+                CompletableFuture<Throwable> received = new CompletableFuture<>();
+                CompletableFuture<Void> closed = new CompletableFuture<>();
+
+                Thread receiver = Thread.ofPlatform().daemon().start(() -> {
+                    try {
+                        start.await();
+                        pull.receive();
+                        received.complete(null);
+                    } catch (Throwable error) {
+                        received.complete(error);
+                    }
+                });
+                Thread closer = Thread.ofPlatform().daemon().start(() -> {
+                    try {
+                        start.await();
+                        pull.close();
+                        closed.complete(null);
+                    } catch (Throwable error) {
+                        closed.completeExceptionally(error);
+                    }
+                });
+
+                start.countDown();
+                closed.get(1, TimeUnit.SECONDS);
+                Throwable error = received.get(1, TimeUnit.SECONDS);
+                assertTrue(
+                        error instanceof ClosedException,
+                        "receive should fail with ClosedException");
+                receiver.join(5_000);
+                closer.join(5_000);
             }
         }
     }

@@ -5,10 +5,10 @@ require "json"
 
 $stdout.sync = true
 
-backend, pattern, role, endpoint, size, count, warmup = ARGV
-size   = Integer(size)
-count  = Integer(count)
-warmup = Integer(warmup)
+backend, pattern, role, endpoint, size, duration, warmup_duration = ARGV
+size = Integer(size)
+duration = Float(duration)
+warmup_duration = Float(warmup_duration)
 payload = ("x" * size).b.freeze
 
 case backend
@@ -65,48 +65,62 @@ else
   abort "unknown backend: #{backend}"
 end
 
-started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+elapsed = nil
+count = 0
 
 case [pattern, role]
 when ["pushpull", "pull"]
   socket = build.call(:pull, true)
-  warmup.times { recv_message.call(socket) }
+  warmup_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + warmup_duration
+  loop do
+    64.times { recv_message.call(socket) }
+    break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= warmup_deadline
+  end
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  count.times { recv_message.call(socket) }
+  deadline = started + duration
+  loop do
+    64.times { recv_message.call(socket) }
+    count += 64
+    break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+  end
+  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 when ["pushpull", "push"]
   socket = build.call(:push, false)
-  (warmup + count).times { send_message.call(socket, payload) }
-  socket.close
-  exit
+  loop { send_message.call(socket, payload) }
 when ["reqrep", "rep"]
   socket = build.call(:rep, true)
-  (warmup + count).times do
+  loop do
     message = recv_message.call(socket)
     send_message.call(socket, message)
   end
-  socket.close
-  exit
 when ["reqrep", "req"]
   socket = build.call(:req, false)
-  warmup.times do
+  warmup_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + warmup_duration
+  loop do
     send_message.call(socket, payload)
     recv_message.call(socket)
+    break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= warmup_deadline
   end
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  count.times do
+  deadline = started + duration
+  loop do
     send_message.call(socket, payload)
     recv_message.call(socket)
+    count += 1
+    break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
   end
+  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 else
   abort "unknown benchmark role: #{pattern}/#{role}"
 end
 
-elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 result = {
   backend: backend,
   pattern: pattern,
   size: size,
   count: count,
+  target_duration: duration,
+  warmup_duration: warmup_duration,
   elapsed: elapsed,
   messages_per_second: count / elapsed,
   implementation_version: implementation_version,

@@ -7,7 +7,7 @@ end
 
 local recv_timeout_ms = 200
 
-local all_scenarios = { "tcp", "inproc", "pubsub", "context-churn" }
+local all_scenarios = { "tcp", "inproc", "pubsub", "protocol-mix", "context-churn" }
 
 local function env_number(name, default)
   local value = os.getenv(name)
@@ -111,6 +111,7 @@ local counters = {
   tcp = 0,
   inproc = 0,
   pubsub = 0,
+  protocol = 0,
   contexts = 0,
 }
 
@@ -123,6 +124,9 @@ local function counter_value(name)
   end
   if name == "pubsub" then
     return counters.pubsub
+  end
+  if name == "protocol-mix" then
+    return counters.protocol
   end
   if name == "context-churn" then
     return counters.contexts
@@ -466,12 +470,13 @@ end
 
 local function report(prefix, elapsed, res)
   io.stdout:write(string.format(
-    "[lua-soak] %s%.0fs tcp=%d inproc=%d pubsub=%d contexts=%d heap=%.1fMB rss=%.1fMB vmdata=%.1fMB fds=%d threads=%d\n",
+    "[lua-soak] %s%.0fs tcp=%d inproc=%d pubsub=%d protocol=%d contexts=%d heap=%.1fMB rss=%.1fMB vmdata=%.1fMB fds=%d threads=%d\n",
     prefix or "",
     elapsed,
     counters.tcp,
     counters.inproc,
     counters.pubsub,
+    counters.protocol,
     counters.contexts,
     res.lua_heap_kb / 1024,
     res.rss_kb / 1024,
@@ -864,6 +869,65 @@ local function run_context_churn_cycle()
   counters.contexts = counters.contexts + 1
 end
 
+local function make_protocol_mix(shared)
+  local scenario = "protocol-mix"
+  local pull = new_socket(shared, scenario, "pull", { linger = 0, recv_timeout = 5000 })
+  local push = new_socket(shared, scenario, "push", { linger = 0, send_timeout = 5000 })
+  local ipc = pull:bind("ipc://@omq-lua-soak-" .. tostring(pid()))
+  push:connect(ipc)
+
+  local rep = new_socket(shared, scenario, "rep", { linger = 0, recv_timeout = 5000 })
+  local req = new_socket(shared, scenario, "req", {
+    linger = 0,
+    recv_timeout = 5000,
+    send_timeout = 5000,
+  })
+  req:connect(rep:bind("tcp://127.0.0.1:0"))
+
+  local left = new_socket(shared, scenario, "pair", {
+    linger = 0,
+    recv_timeout = 5000,
+    send_timeout = 5000,
+  })
+  local right = new_socket(shared, scenario, "pair", {
+    linger = 0,
+    recv_timeout = 5000,
+    send_timeout = 5000,
+  })
+  right:connect(left:bind("tcp://127.0.0.1:0"))
+  return {
+    sockets = { pull, push, rep, req, left, right },
+    pull = pull,
+    push = push,
+    rep = rep,
+    req = req,
+    left = left,
+    right = right,
+    seq = 0,
+    large = string.rep("z", 256 * 1024),
+  }
+end
+
+local function run_protocol_mix_cycle(state)
+  local sequence = tostring(state.seq)
+  local body = state.seq % 64 == 0 and state.large or sequence
+  state.push:send({ sequence, body })
+  local parts = state.pull:recv_parts()
+  assert(#parts == 2 and parts[1] == sequence and #parts[2] == #body, "IPC multipart mismatch")
+
+  state.req:send("request-" .. sequence)
+  assert(state.rep:recv() == "request-" .. sequence, "REQ/REP request mismatch")
+  state.rep:send("reply-" .. sequence)
+  assert(state.req:recv() == "reply-" .. sequence, "REQ/REP reply mismatch")
+
+  state.left:send("left-" .. sequence)
+  assert(state.right:recv() == "left-" .. sequence, "PAIR forward mismatch")
+  state.right:send("right-" .. sequence)
+  assert(state.left:recv() == "right-" .. sequence, "PAIR reverse mismatch")
+  state.seq = state.seq + 1
+  counters.protocol = counters.protocol + 4
+end
+
 local function assert_progress(selected)
   if selected.tcp then
     assert(counters.tcp > 0, "tcp soak made no progress")
@@ -873,6 +937,9 @@ local function assert_progress(selected)
   end
   if selected.pubsub then
     assert(counters.pubsub > 0, "pubsub soak made no progress")
+  end
+  if selected["protocol-mix"] then
+    assert(counters.protocol > 0, "protocol mix made no progress")
   end
   if selected["context-churn"] then
     assert(counters.contexts > 0, "context-churn soak made no progress")
@@ -936,6 +1003,7 @@ local next_report = started + report_interval
 local tcp_state = nil
 local inproc_state = nil
 local pubsub_state = nil
+local protocol_state = nil
 
 if selected.tcp then
   tcp_state = make_tcp(shared)
@@ -945,6 +1013,9 @@ if selected.inproc then
 end
 if selected.pubsub then
   pubsub_state = make_pubsub(shared)
+end
+if selected["protocol-mix"] then
+  protocol_state = make_protocol_mix(shared)
 end
 
 local ok, err = pcall(function()
@@ -957,6 +1028,9 @@ local ok, err = pcall(function()
     end
     if pubsub_state ~= nil then
       run_pubsub_cycle(pubsub_state)
+    end
+    if protocol_state ~= nil then
+      run_protocol_mix_cycle(protocol_state)
     end
     if selected["context-churn"] then
       run_context_churn_cycle()
@@ -983,6 +1057,14 @@ cleanup("pubsub", function()
   end
   pubsub_state.subs = {}
   close_socket(pubsub_state.pub, "pubsub")
+end)
+cleanup("protocol-mix", function()
+  if protocol_state == nil then
+    return
+  end
+  for i = #protocol_state.sockets, 1, -1 do
+    close_socket(protocol_state.sockets[i], "protocol-mix")
+  end
 end)
 cleanup("inproc", function()
   close_inproc(inproc_state)

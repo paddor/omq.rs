@@ -27,6 +27,18 @@ shutdown, connect-before-bind, and repeated disposal.
 CI runs the managed binding checks on Linux. The release workflow builds
 native assets for Linux x64, macOS x64, macOS arm64, and Windows x64.
 
+## Soak tests
+
+Run the mixed transport, security, compression, churn, and resource soak:
+
+```sh
+bindings/dotnet/scripts/soak.sh 1h
+```
+
+The duration accepts `s`, `m`, `h`, or `d`. The test reports progress, managed
+heap, RSS, file descriptors, and thread counts. It fails on message corruption,
+stalls, or sustained resource growth.
+
 ## Benchmarks
 
 Run the full two-process TCP comparison against NetMQ:

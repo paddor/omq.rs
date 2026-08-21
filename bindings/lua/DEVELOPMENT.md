@@ -55,10 +55,12 @@ Default durations are `600 1800 3600` seconds. Useful env:
 - `OMQ_LUA_SOAK_WORKERS=12`
 - `OMQ_LUA_SOAK_TIMEOUT_EXTRA_SECS=120`
 - `OMQ_LUA_SOAK_INPROC_BATCH=64`
-- `OMQ_LUA_SOAK_SCENARIOS=tcp,inproc,pubsub,context-churn`
+- `OMQ_LUA_SOAK_SCENARIOS=tcp,inproc,pubsub,protocol-mix,context-churn`
 - `OMQ_LUA_SOAK_SKIP_SCENARIOS=pubsub`
 
 The `inproc` scenario uses a Rust backend thread sharing the Lua context.
+`protocol-mix` covers IPC multipart and large messages, TCP REQ/REP, and
+bidirectional PAIR traffic.
 
 Soak logs include progress counters, Lua heap, RSS, FD count, and lifecycle
 counts. Useful leak-check knobs:

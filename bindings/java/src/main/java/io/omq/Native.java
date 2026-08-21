@@ -45,6 +45,8 @@ final class Native {
 
     static native long socketCreate(long contextHandle, int socketType);
 
+    static native void socketShutdown(long handle);
+
     static native void socketClose(long handle);
 
     static native String socketBind(long handle, String endpoint);

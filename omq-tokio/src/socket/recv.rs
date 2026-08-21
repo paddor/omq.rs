@@ -1261,21 +1261,23 @@ impl SpscAwareRecv {
         {
             return SpscPush::Unavailable(msg);
         }
-        if pair.producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
+        let mut producer = pair.producer.lock();
+        if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
             return SpscPush::Unavailable(msg);
         }
-        if pair.producer.is_full() {
+        if producer.is_full() {
             return SpscPush::Full {
                 msg,
                 space: pair.space_notify.clone(),
             };
         }
-        if let Err(item) = pair.producer.push_flush(RecvItem::new(msg)) {
+        if let Err(item) = producer.push_and_flush(RecvItem::new(msg)) {
             return SpscPush::Full {
                 msg: item.into_message(),
                 space: pair.space_notify.clone(),
             };
         }
+        drop(producer);
         pair.recv_signal.mark();
         pair.blocking_recv_waker.wake();
         SpscPush::Sent
@@ -1293,7 +1295,7 @@ impl SpscAwareRecv {
             || pair
                 .max_message_size
                 .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.is_consumer_dropped()
+            || pair.producer.lock().is_consumer_dropped()
         {
             return false;
         }
@@ -1313,11 +1315,11 @@ impl SpscAwareRecv {
             || pair
                 .max_message_size
                 .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.is_consumer_dropped()
+            || pair.producer.lock().is_consumer_dropped()
         {
             return false;
         }
-        if !pair.producer.is_full() {
+        if !pair.producer.lock().is_full() {
             return true;
         }
 
@@ -1328,11 +1330,11 @@ impl SpscAwareRecv {
             || pair
                 .max_message_size
                 .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.is_consumer_dropped()
+            || pair.producer.lock().is_consumer_dropped()
         {
             return false;
         }
-        if pair.producer.is_full() {
+        if pair.producer.lock().is_full() {
             changed.await;
         }
         true

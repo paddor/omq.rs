@@ -1,11 +1,118 @@
 //! Verify SPSC inproc fast paths recover after peer churn.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::Duration;
 
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
 
 fn inproc(name: &str) -> Endpoint {
     Endpoint::Inproc { name: name.into() }
+}
+
+#[test]
+fn inproc_push_survives_sender_task_migration() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let endpoint = inproc("spsc-task-migration");
+    let (pull, push) = runtime.block_on(async {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        let push = Socket::new(SocketType::Push, Options::default());
+        pull.bind(endpoint.clone()).await.unwrap();
+        push.connect(endpoint).await.unwrap();
+        push.wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        (pull, push)
+    });
+
+    for payload in ["first", "second"] {
+        let handle = runtime.handle().clone();
+        let push = push.clone();
+        thread::spawn(move || {
+            handle
+                .block_on(push.send(Message::single(payload)))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    runtime.block_on(async {
+        for expected in ["first", "second"] {
+            let message = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.part_bytes(0).unwrap(), expected.as_bytes());
+        }
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    });
+}
+
+#[test]
+fn inproc_push_serializes_concurrent_senders() {
+    const SENDERS: usize = 4;
+    const MESSAGES: usize = 128;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let endpoint = inproc("spsc-concurrent-senders");
+    let (pull, push) = runtime.block_on(async {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        let push = Socket::new(SocketType::Push, Options::default());
+        pull.bind(endpoint.clone()).await.unwrap();
+        push.connect(endpoint).await.unwrap();
+        push.wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        (pull, push)
+    });
+
+    let barrier = Arc::new(Barrier::new(SENDERS));
+    let senders: Vec<_> = (0..SENDERS)
+        .map(|sender| {
+            let barrier = Arc::clone(&barrier);
+            let handle = runtime.handle().clone();
+            let push = push.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                handle.block_on(async {
+                    for sequence in 0..MESSAGES {
+                        push.send(Message::single(format!("{sender}:{sequence}")))
+                            .await
+                            .unwrap();
+                    }
+                });
+            })
+        })
+        .collect();
+    for sender in senders {
+        sender.join().unwrap();
+    }
+
+    runtime.block_on(async {
+        let mut received = HashSet::new();
+        for _ in 0..SENDERS * MESSAGES {
+            let message = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let body = message.part_bytes(0).unwrap();
+            received.insert(std::str::from_utf8(&body).unwrap().to_owned());
+        }
+        assert_eq!(received.len(), SENDERS * MESSAGES);
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    });
 }
 
 #[tokio::test]

@@ -14,6 +14,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 - SERVER sockets can resolve a received routing id to its live `PeerInfo`
   with `Socket::peer_info()`.
 
+### Fixed
+
+- Async inproc `PUSH` sends remain safe when a task moves between runtime
+  worker threads or cloned socket handles send concurrently.
+
 ## [pyomq 0.19.1] - 2026-08-02
 
 ### Fixed

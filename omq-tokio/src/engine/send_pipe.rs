@@ -255,10 +255,12 @@ impl Drop for SendPipeProducer {
 
 impl SendPipeConsumer {
     pub(crate) async fn ready(&self) {
-        if !self.is_empty() {
-            return;
+        loop {
+            if !self.is_empty() || self.is_disconnected() {
+                return;
+            }
+            self.data_signal.ready().await;
         }
-        self.data_signal.ready().await;
     }
 
     fn is_empty(&self) -> bool {

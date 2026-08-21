@@ -30,6 +30,8 @@ ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-t
 # `cargo test`. Run with `cargo test --features fuzz`.
 fuzz = []
 soak = []
+# Enables the comparison peer's Tokio multi-thread runtime variant.
+bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.26.0", default-features = false }

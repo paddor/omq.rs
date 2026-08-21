@@ -100,6 +100,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[],
     },
     ImplDef {
+        name: "omq-tokio-mt",
+        binary_from: Some("omq-tokio-ct"),
+        prefix: "m",
+        class: Some(ImplClass::Classic),
+        main: false,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: true,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[("OMQ_BENCH_MT_RUNTIME", "1")],
+    },
+    ImplDef {
         name: "omq-tokio-2t",
         binary_from: Some("omq-tokio-1t"),
         prefix: "u",
@@ -466,6 +482,7 @@ fn addr_for(
 fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMap<String, PathBuf> {
     let mut binaries: HashMap<String, PathBuf> = HashMap::new();
     let mut built: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let needs_mt_runtime = impl_names.contains(&"omq-tokio-mt");
     let sources: Vec<&str> = impl_names
         .iter()
         .map(|&name| {
@@ -487,6 +504,9 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 }
                 if needs_curve {
                     features.push("curve");
+                }
+                if needs_mt_runtime {
+                    features.push("bench-mt-runtime");
                 }
                 let mut cmd = vec![
                     "cargo",
@@ -2319,6 +2339,15 @@ mod tests {
         assert_eq!(ct.binary_from, None);
         assert_eq!(two_thread.binary_from, Some("omq-tokio-1t"));
         assert_eq!(curve_two_thread.binary_from, Some("omq-tokio-1t"));
+    }
+
+    #[test]
+    fn mt_runtime_omq_uses_tokio_peer_and_runtime_env() {
+        let def = find_impl("omq-tokio-mt").unwrap();
+
+        assert_eq!(def.binary_from, Some("omq-tokio-ct"));
+        assert_eq!(def.env, &[("OMQ_BENCH_MT_RUNTIME", "1")]);
+        assert!(matches!(def.transports, [Tcp]));
     }
 
     #[test]

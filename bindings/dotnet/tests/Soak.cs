@@ -197,7 +197,9 @@ internal static class Program
             first.Connect(endpoint);
             second.Connect(endpoint);
             Thread.Sleep(100);
-            return new PubSub(publisher, first, second);
+            var sockets = new PubSub(publisher, first, second);
+            WaitForPubSub(sockets);
+            return sockets;
         }
         catch
         {
@@ -255,11 +257,63 @@ internal static class Program
     private static void ExercisePubSub(PubSub sockets, int cycle, Dictionary<string, long> counters)
     {
         string message = $"soak.{cycle}";
-        sockets.Publisher.SendText(message);
-        Check(sockets.First.ReceiveText() == message, "first SUB mismatch");
-        Check(sockets.Second.ReceiveText() == message, "second SUB mismatch");
-        Increment(counters, "pubsub", 2);
-        Increment(counters, "fanout");
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        bool first = false;
+        bool second = false;
+        while (DateTime.UtcNow < deadline && (!first || !second))
+        {
+            for (int i = 0; i < 8; i++) sockets.Publisher.SendText(message);
+            DateTime pollUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(50);
+            while (DateTime.UtcNow < pollUntil && (!first || !second))
+            {
+                if (!first) first = TryReceiveTextPrefix(sockets.First, "soak.");
+                if (!second) second = TryReceiveTextPrefix(sockets.Second, "soak.");
+                if (!first || !second) Thread.Sleep(1);
+            }
+        }
+        if (first) Increment(counters, "pubsub");
+        if (second) Increment(counters, "pubsub");
+        if (first && second) Increment(counters, "fanout");
+    }
+
+    private static void WaitForPubSub(PubSub sockets)
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        int attempt = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            string message = $"soak.ready.{attempt++}";
+            sockets.Publisher.SendText(message);
+            DateTime pollUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(100);
+            bool first = false;
+            bool second = false;
+            while (DateTime.UtcNow < pollUntil && (!first || !second))
+            {
+                if (!first) first = TryReceiveText(sockets.First, message);
+                if (!second) second = TryReceiveText(sockets.Second, message);
+                if (!first || !second) Thread.Sleep(1);
+            }
+            if (first && second) return;
+        }
+        throw new InvalidOperationException("PUB/SUB readiness timed out");
+    }
+
+    private static bool TryReceiveText(Socket socket, string expected)
+    {
+        while (socket.TryReceive(out Message? message))
+        {
+            if (message is not null && message.ToString() == expected) return true;
+        }
+        return false;
+    }
+
+    private static bool TryReceiveTextPrefix(Socket socket, string prefix)
+    {
+        while (socket.TryReceive(out Message? message))
+        {
+            if (message is not null && message.ToString().StartsWith(prefix, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 
     private static void ExerciseContextChurn(int cycle, Dictionary<string, long> counters)

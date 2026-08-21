@@ -19,6 +19,7 @@ const (
 	soakRecvTimeout    = 200 * time.Millisecond
 	soakSendTimeout    = 500 * time.Millisecond
 	soakConnectTimeout = 5 * time.Second
+	soakCloseTimeout   = 5 * time.Second
 	soakReportInterval = 10 * time.Second
 
 	soakResourceWarmup     = 10 * time.Minute
@@ -251,7 +252,7 @@ done:
 	if curvePull != nil {
 		closeSoakScenarioSocket(curvePull, counters, "curve")
 	}
-	if err := omqCtx.CloseContext(context.Background()); err != nil {
+	if err := closeSoakContext(omqCtx); err != nil {
 		t.Fatal(err)
 	}
 	runtime.GC()
@@ -780,14 +781,14 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		counters.scenarioContextCreated("context-churn")
 		pull, err := soakNewSocket(churnCtx, counters, "context-churn", Pull, Linger(0))
 		if err != nil {
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		push, err := soakNewSocket(churnCtx, counters, "context-churn", Push, Linger(0))
 		if err != nil {
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
@@ -795,21 +796,21 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		if err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if err := push.Connect(endpoint); err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if err := push.SendTimeout(String("x"), time.Second); err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
@@ -817,21 +818,24 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		if err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if msg.String() != "x" {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return fmt.Errorf("context churn payload mismatch: %q", msg.String())
 		}
 		closeSoakScenarioSocket(push, counters, "context-churn")
 		closeSoakScenarioSocket(pull, counters, "context-churn")
-		if err := churnCtx.CloseContext(context.Background()); err != nil {
+		if err := closeSoakContext(churnCtx); err != nil {
 			counters.scenarioContextClosed("context-churn")
+			if ctx.Err() != nil && errors.Is(err, ErrTimeout) {
+				return errFromContext(ctx)
+			}
 			return err
 		}
 		counters.scenarioContextClosed("context-churn")
@@ -1990,7 +1994,9 @@ func soakNewSocket(
 
 func closeSoakSocket(socket *Socket) {
 	if socket != nil {
-		_ = socket.Close(context.Background())
+		closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+		defer cancel()
+		_ = socket.Close(closeCtx)
 	}
 }
 
@@ -2000,10 +2006,18 @@ func closeSoakScenarioSocket(socket *Socket, counters *soakCounters, scenario st
 	}
 	state := socket.stateOrNil()
 	wasClosed := state == nil || state.closed.Load()
-	_ = socket.Close(context.Background())
+	closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+	defer cancel()
+	_ = socket.Close(closeCtx)
 	if !wasClosed {
 		counters.scenarioSocketClosed(scenario)
 	}
+}
+
+func closeSoakContext(ctx *Context) error {
+	closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+	defer cancel()
+	return ctx.CloseContext(closeCtx)
 }
 
 func soakStopError(err error) bool {

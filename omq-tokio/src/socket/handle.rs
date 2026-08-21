@@ -58,6 +58,8 @@ pub struct Socket {
 struct Inner {
     socket_type: SocketType,
     cmd_tx: mpsc::Sender<SocketCommand>,
+    cancel: CancellationToken,
+    linger: Option<std::time::Duration>,
     recv_rx: SpscAwareRecv,
     monitor: MonitorPublisher,
     /// Pre-built submitter for socket types that bypass the actor on send.
@@ -179,6 +181,7 @@ impl Socket {
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
         let recv_hwm = options.recv_hwm.max(16) as usize;
+        let driver_linger = options.linger;
         let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
@@ -225,6 +228,8 @@ impl Socket {
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
+                cancel,
+                linger: driver_linger,
                 recv_rx: SpscAwareRecv::new(
                     recv_consumer,
                     recv_pipe_notify,
@@ -1162,19 +1167,42 @@ impl Socket {
 
     async fn close_inner(self, linger: CloseLinger) -> Result<()> {
         let (ack, rx) = oneshot::channel();
-        let _ = self
-            .inner
-            .cmd_tx
-            .send(SocketCommand::Close {
-                ack: Some(ack),
-                linger,
-            })
-            .await;
+        let effective_linger = match linger {
+            CloseLinger::Configured => self.inner.linger,
+            CloseLinger::Override(value) => value,
+        };
+        let close = SocketCommand::Close {
+            ack: Some(ack),
+            linger,
+        };
+        let zero_linger = matches!(effective_linger, Some(std::time::Duration::ZERO));
+        if zero_linger {
+            match self.inner.cmd_tx.try_send(close) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.inner.cancel.cancel();
+                }
+            }
+        } else {
+            let _ = self.inner.cmd_tx.send(close).await;
+        }
         // Even if the driver is already gone, the channel may be closed; we
         // treat that as "already closed" (success).
-        let res = match rx.await {
-            Ok(res) => res,
-            Err(_) => Ok(()),
+        let ack = if zero_linger {
+            tokio::select! {
+                biased;
+                res = rx => Some(res),
+                () = tokio::task::yield_now() => {
+                    self.inner.cancel.cancel();
+                    None
+                }
+            }
+        } else {
+            Some(rx.await)
+        };
+        let res = match ack {
+            Some(Ok(res)) => res,
+            Some(Err(_)) | None => Ok(()),
         };
         self.inner.send_submitter.shutdown();
         self.inner.recv_rx.shutdown();

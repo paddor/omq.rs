@@ -67,7 +67,7 @@ impl PeerOutbound {
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Wire { slot, .. } => slot.is_empty(),
-            Self::Inbox(_) => true,
+            Self::Inbox(tx) => tx.capacity() == tx.max_capacity(),
         }
     }
 
@@ -87,5 +87,28 @@ fn try_send_inbox(
         Ok(()) => TryFrameResult::Ok,
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerOutbound;
+    use crate::engine::PeerDriverCommand;
+    use omq_proto::message::Message;
+
+    #[test]
+    fn inbox_peer_outbound_reports_queued_messages() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let target = PeerOutbound::Inbox(tx.clone());
+
+        assert!(target.is_empty());
+        tx.try_send(PeerDriverCommand::SendMessage(Message::from_slice(
+            b"queued",
+        )))
+        .unwrap();
+        assert!(!target.is_empty());
+
+        assert!(rx.try_recv().is_ok());
+        assert!(target.is_empty());
     }
 }

@@ -6,6 +6,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- Tokio direct TCP receives reuse bounded buffers through 8 MiB without
+  zero-filling payload memory or extending pool lifetime past connection close.
+
 ### Added
 
 - Tokio byte-stream sockets can enforce hard per-connection and aggregate

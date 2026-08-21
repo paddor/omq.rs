@@ -234,9 +234,9 @@ async fn many_large_messages_preserve_pattern_under_hwm_backpressure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_large_messages_survive_recv_bypass_ring_pressure() {
-    const COUNT: u64 = 48;
-    const HOLD_COUNT: u64 = 8;
-    const SIZE: usize = 1024 * 1024;
+    const COUNT: u64 = 16;
+    const HOLD_COUNT: u64 = 4;
+    const SIZE: usize = 4 * 1024 * 1024;
 
     let opts = Options::default()
         .send_hwm(4)

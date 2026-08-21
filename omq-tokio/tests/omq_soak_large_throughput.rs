@@ -5,28 +5,21 @@ static GLOBAL: soak_common::alloc::TrackingAllocator = soak_common::alloc::Track
 
 mod soak_common;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use std::{fs, io::Write};
 
 use omq_tokio::{Message, Options, Socket, SocketType};
 
-const MSG_SIZE: usize = 1024 * 1024;
+const MIN_MSG_SIZE: usize = 128 * 1024;
+const MAX_MSG_SIZE: usize = 8 * 1024 * 1024;
+const PROBE_MSG_SIZE: usize = 128 * 1024 * 1024;
+const SIZE_STRIDE: usize = 1_000_003;
+const HEADER_SIZE: usize = 24;
 const CANARY_MAGIC: u64 = 0xDEAD_BEEF_CAFE_F00D;
 const SHIFT_SCAN: isize = 32;
 const SHIFT_WINDOW: usize = 128;
-
-fn payload_pattern() -> &'static [u8] {
-    static PATTERN: OnceLock<Vec<u8>> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        let mut pattern = vec![0u8; MSG_SIZE];
-        for (i, slot) in pattern.iter_mut().enumerate().skip(16) {
-            *slot = offset_payload_byte(i);
-        }
-        pattern
-    })
-}
 
 fn offset_payload_byte(offset: usize) -> u8 {
     let mut byte = (offset as u8).wrapping_mul(31);
@@ -39,21 +32,30 @@ fn seq_mask(seq: u64) -> u8 {
     (seq as u8).wrapping_mul(7) ^ ((seq >> 8) as u8).wrapping_mul(3)
 }
 
+fn message_size(seq: u64) -> usize {
+    if seq == 0 {
+        return PROBE_MSG_SIZE;
+    }
+    let span = MAX_MSG_SIZE - MIN_MSG_SIZE + 1;
+    MIN_MSG_SIZE + (seq as usize - 1).wrapping_mul(SIZE_STRIDE) % span
+}
+
 fn build_payload(seq: u64) -> Vec<u8> {
+    let size = message_size(seq);
     let mask = seq_mask(seq);
-    let mut buf = payload_pattern().to_vec();
+    let mut buf = vec![0; size];
     buf[..8].copy_from_slice(&CANARY_MAGIC.to_le_bytes());
     buf[8..16].copy_from_slice(&seq.to_le_bytes());
-    for slot in &mut buf[16..] {
-        *slot ^= mask;
+    buf[16..HEADER_SIZE].copy_from_slice(&(size as u64).to_le_bytes());
+    for (i, slot) in buf.iter_mut().enumerate().skip(HEADER_SIZE) {
+        *slot = offset_payload_byte(i) ^ mask;
     }
     buf
 }
 
 fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usize) {
-    let pattern = payload_pattern();
     let mask = seq_mask(seq);
-    let start = offset.saturating_sub(SHIFT_WINDOW / 2).max(16);
+    let start = offset.saturating_sub(SHIFT_WINDOW / 2).max(HEADER_SIZE);
     let end = offset.saturating_add(SHIFT_WINDOW / 2).min(data.len());
     let len = end - start;
     let mut best = (0, 0, len);
@@ -69,7 +71,10 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
             let Ok(source) = usize::try_from(source) else {
                 continue;
             };
-            if source >= 16 && source < data.len() && byte == (pattern[source] ^ mask) {
+            if source >= HEADER_SIZE
+                && source < data.len()
+                && byte == (offset_payload_byte(source) ^ mask)
+            {
                 matches += 1;
             }
         }
@@ -81,14 +86,15 @@ fn best_source_shift(data: &[u8], seq: u64, offset: usize) -> (isize, usize, usi
 }
 
 fn corruption_context(data: &[u8], seq: u64, offset: usize) -> String {
-    let pattern = payload_pattern();
     let mask = seq_mask(seq);
     let got = data[offset];
-    let expected_byte = pattern[offset] ^ mask;
+    let expected_byte = offset_payload_byte(offset) ^ mask;
     let xor = got ^ expected_byte;
-    let start = offset.saturating_sub(16).max(16);
+    let start = offset.saturating_sub(16).max(HEADER_SIZE);
     let end = offset.saturating_add(16).min(data.len());
-    let expected: Vec<u8> = (start..end).map(|pos| pattern[pos] ^ mask).collect();
+    let expected: Vec<u8> = (start..end)
+        .map(|pos| offset_payload_byte(pos) ^ mask)
+        .collect();
     let (delta, matches, window_len) = best_source_shift(data, seq, offset);
     format!(
         "xor=0x{xor:02x}, single_bit={}, best_source_delta={delta}, \
@@ -110,18 +116,18 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
     let expected_path = dir.join(format!("{stamp}.expected.bin"));
     let meta_path = dir.join(format!("{stamp}.meta.txt"));
 
-    let pattern = payload_pattern();
     let mask = seq_mask(seq);
-    let expected = pattern
-        .iter()
-        .enumerate()
-        .map(|(i, &byte)| {
+    let size = message_size(seq);
+    let expected = (0..size)
+        .map(|i| {
             if i < 8 {
                 CANARY_MAGIC.to_le_bytes()[i]
             } else if i < 16 {
                 seq.to_le_bytes()[i - 8]
+            } else if i < HEADER_SIZE {
+                (size as u64).to_le_bytes()[i - 16]
             } else {
-                byte ^ mask
+                offset_payload_byte(i) ^ mask
             }
         })
         .collect::<Vec<_>>();
@@ -130,7 +136,7 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
     fs::write(&expected_path, expected).ok()?;
     let mut meta = fs::File::create(&meta_path).ok()?;
     let got = data[offset];
-    let expected_byte = payload_pattern()[offset] ^ seq_mask(seq);
+    let expected_byte = offset_payload_byte(offset) ^ seq_mask(seq);
     let xor = got ^ expected_byte;
     writeln!(meta, "seq={seq}").ok()?;
     writeln!(meta, "offset={offset}").ok()?;
@@ -145,6 +151,7 @@ fn dump_corruption_artifact(data: &[u8], seq: u64, offset: usize) -> Option<Stri
 
 struct PayloadStats {
     max_seq: u64,
+    max_size: usize,
     count: u64,
     reorders: u64,
     max_reorder_distance: u64,
@@ -155,6 +162,7 @@ impl PayloadStats {
     fn new() -> Self {
         Self {
             max_seq: 0,
+            max_size: 0,
             count: 0,
             reorders: 0,
             max_reorder_distance: 0,
@@ -163,10 +171,12 @@ impl PayloadStats {
     }
 
     fn validate(&mut self, data: &[u8]) {
-        assert_eq!(data.len(), MSG_SIZE, "payload size mismatch");
+        assert!(data.len() >= HEADER_SIZE, "payload shorter than header");
 
         let magic = u64::from_le_bytes(data[..8].try_into().unwrap());
         let seq = u64::from_le_bytes(data[8..16].try_into().unwrap());
+        let claimed_size = u64::from_le_bytes(data[16..HEADER_SIZE].try_into().unwrap()) as usize;
+        let expected_size = message_size(seq);
 
         assert_eq!(
             magic,
@@ -175,11 +185,12 @@ impl PayloadStats {
              Receiver lost ZMTP frame sync: payload bytes parsed as frame headers.",
             &data[..32]
         );
+        assert_eq!(claimed_size, expected_size, "payload size header mismatch");
+        assert_eq!(data.len(), expected_size, "payload size mismatch");
 
-        let pattern = payload_pattern();
         let mask = seq_mask(seq);
-        for (i, &byte) in data.iter().enumerate().skip(16) {
-            let expected = pattern[i] ^ mask;
+        for (i, &byte) in data.iter().enumerate().skip(HEADER_SIZE) {
+            let expected = offset_payload_byte(i) ^ mask;
             if byte != expected {
                 let context = corruption_context(data, seq, i);
                 let artifact = dump_corruption_artifact(data, seq, i)
@@ -201,6 +212,7 @@ impl PayloadStats {
             self.max_reorder_distance = self.max_reorder_distance.max(distance);
         }
         self.max_seq = self.max_seq.max(seq);
+        self.max_size = self.max_size.max(data.len());
         self.count += 1;
     }
 
@@ -235,6 +247,8 @@ fn soak_large_message_throughput() {
 
     let sent = Arc::new(AtomicU64::new(0));
     let recvd = Arc::new(AtomicU64::new(0));
+    let sent_bytes = Arc::new(AtomicU64::new(0));
+    let recvd_bytes = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let report_sent = sent.clone();
     let report_stats = Arc::new(std::sync::Mutex::new(PayloadStats::new()));
@@ -251,12 +265,14 @@ fn soak_large_message_throughput() {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let send_sent = sent.clone();
+        let send_sent_bytes = sent_bytes.clone();
         let send_stop = stop.clone();
         let push_clone = push.clone();
         let mut send_task = tokio::spawn(async move {
             let mut seq = 0u64;
             while !send_stop.load(Ordering::Relaxed) {
                 let payload = build_payload(seq);
+                let payload_len = payload.len() as u64;
                 if let Ok(Ok(())) = tokio::time::timeout(
                     Duration::from_secs(2),
                     push_clone.send(Message::single(payload)),
@@ -265,11 +281,13 @@ fn soak_large_message_throughput() {
                 {
                     seq += 1;
                     send_sent.store(seq, Ordering::Relaxed);
+                    send_sent_bytes.fetch_add(payload_len, Ordering::Relaxed);
                 }
             }
         });
 
         let recv_recvd = recvd.clone();
+        let recv_recvd_bytes = recvd_bytes.clone();
         let recv_stop = stop.clone();
         let pull_clone = pull.clone();
         let recv_stats = stats.clone();
@@ -281,6 +299,7 @@ fn soak_large_message_throughput() {
                     let data = m.part_bytes(0).unwrap();
                     recv_stats.lock().unwrap().validate(&data);
                     recv_recvd.fetch_add(1, Ordering::Relaxed);
+                    recv_recvd_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                 }
             }
         });
@@ -327,10 +346,11 @@ fn soak_large_message_throughput() {
 
         let s = sent.load(Ordering::Relaxed);
         let r = recvd.load(Ordering::Relaxed);
+        let bytes = recvd_bytes.load(Ordering::Relaxed);
         eprintln!(
             "[large_throughput] done: sent {s}, recvd {r} in {:.1}s ({:.1} MiB/s)",
             duration.as_secs_f64(),
-            r as f64 * MSG_SIZE as f64 / duration.as_secs_f64() / 1_048_576.0,
+            bytes as f64 / duration.as_secs_f64() / 1_048_576.0,
         );
 
         push.close().await.unwrap();
@@ -344,8 +364,16 @@ fn soak_large_message_throughput() {
     let total_sent = report_sent.load(Ordering::Relaxed);
     st.finalize(total_sent);
     eprintln!(
-        "[large_throughput] reorders: {}, max distance: {}, dropped: {}/{}",
-        st.reorders, st.max_reorder_distance, st.dropped, total_sent,
+        "[large_throughput] max size: {} MiB, reorders: {}, max distance: {}, dropped: {}/{}",
+        st.max_size / 1024 / 1024,
+        st.reorders,
+        st.max_reorder_distance,
+        st.dropped,
+        total_sent,
+    );
+    assert_eq!(
+        st.max_size, PROBE_MSG_SIZE,
+        "128 MiB probe was not received"
     );
     assert!(
         st.max_reorder_distance <= 16,

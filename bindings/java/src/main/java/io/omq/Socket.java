@@ -37,7 +37,10 @@ public final class Socket implements AutoCloseable {
     Socket(Context context, long contextHandle, SocketType type, Set<State> owner) {
         this.context = context;
         this.type = type;
-        this.state = new State(Native.socketCreate(contextHandle, type.code()), owner);
+        this.state = new State(
+                Native.socketCreate(contextHandle, type.code()),
+                owner,
+                type == SocketType.PUSH || type == SocketType.SCATTER);
         owner.add(state);
         this.cleanable = CLEANER.register(this, state);
     }
@@ -915,13 +918,10 @@ public final class Socket implements AutoCloseable {
     }
 
     private <T> T withRecvRing(RecvRingAction<T> action) {
-        RecvRing ring;
-        long handle;
         synchronized (state) {
-            handle = state.handle();
-            ring = state.recvRing;
+            long handle = state.handle();
+            return action.apply(state.recvRing, handle);
         }
-        return action.apply(ring, handle);
     }
 
     private boolean drainSendRing(long timeoutMillis) {
@@ -1060,12 +1060,14 @@ public final class Socket implements AutoCloseable {
     static final class State implements Runnable {
         private final AtomicLong handle;
         private final Set<State> owner;
+        private final boolean usesSendRing;
         private final SendRing sendRing = new SendRing();
         private final RecvRing recvRing = new RecvRing();
 
-        private State(long handle, Set<State> owner) {
+        private State(long handle, Set<State> owner, boolean usesSendRing) {
             this.handle = new AtomicLong(handle);
             this.owner = owner;
+            this.usesSendRing = usesSendRing;
         }
 
         @Override
@@ -1081,12 +1083,26 @@ public final class Socket implements AutoCloseable {
             return handle;
         }
 
-        synchronized void close() {
-            long handle = this.handle.getAndSet(0);
-            if (handle != 0) {
-                sendRing.close();
-                Native.socketClose(handle);
-                recvRing.close();
+        void close() {
+            if (usesSendRing) {
+                synchronized (this) {
+                    long handle = this.handle.getAndSet(0);
+                    if (handle != 0) {
+                        sendRing.close();
+                        Native.socketClose(handle);
+                        recvRing.close();
+                    }
+                }
+            } else {
+                long handle = this.handle.getAndSet(0);
+                if (handle != 0) {
+                    Native.socketShutdown(handle);
+                    synchronized (this) {
+                        sendRing.close();
+                        recvRing.close();
+                        Native.socketClose(handle);
+                    }
+                }
             }
             owner.remove(this);
         }

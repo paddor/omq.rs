@@ -42,86 +42,66 @@ final class RecvRing implements AutoCloseable {
     private long head;
     private long releasedHead;
     private long cachedTail;
-    private int activeOps;
 
     Message receive(long socketHandle, long timeoutMillis) {
-        enter(socketHandle);
+        ensureOpen(socketHandle);
+        Desc desc = next(timeoutMillis);
         try {
-            Desc desc = next(timeoutMillis);
-            try {
-                return readMessage(desc);
-            } finally {
-                advance();
-            }
+            return readMessage(desc);
         } finally {
-            exit();
+            advance();
         }
     }
 
     byte[] receiveBytes(long socketHandle, long timeoutMillis) {
-        enter(socketHandle);
+        ensureOpen(socketHandle);
+        Desc desc = next(timeoutMillis);
         try {
-            Desc desc = next(timeoutMillis);
-            try {
-                if (desc.partCount() != 1) {
-                    throw new IllegalStateException("message has " + desc.partCount() + " parts");
-                }
-                return readBytes(desc);
-            } finally {
-                advance();
+            if (desc.partCount() != 1) {
+                throw new IllegalStateException("message has " + desc.partCount() + " parts");
             }
+            return readBytes(desc);
         } finally {
-            exit();
+            advance();
         }
     }
 
     int receiveInto(long socketHandle, ByteBuffer destination, long timeoutMillis) {
-        enter(socketHandle);
+        ensureOpen(socketHandle);
+        Desc desc = next(timeoutMillis);
         try {
-            Desc desc = next(timeoutMillis);
-            try {
-                if (desc.partCount() != 1) {
-                    throw new IllegalStateException("message has " + desc.partCount() + " parts");
-                }
-                if (destination.isReadOnly()) {
-                    throw new ReadOnlyBufferException();
-                }
-                int len = checkedIntLength(desc.payloadLen());
-                if (len > destination.remaining()) {
-                    throw new BufferOverflowException();
-                }
-                if (len > 0) {
-                    MemorySegment.copy(
-                            source(desc), sourceOffset(desc),
-                            MemorySegment.ofBuffer(destination), 0,
-                            len);
-                }
-                destination.position(destination.position() + len);
-                return len;
-            } finally {
-                advance();
+            if (desc.partCount() != 1) {
+                throw new IllegalStateException("message has " + desc.partCount() + " parts");
             }
+            if (destination.isReadOnly()) {
+                throw new ReadOnlyBufferException();
+            }
+            int len = checkedIntLength(desc.payloadLen());
+            if (len > destination.remaining()) {
+                throw new BufferOverflowException();
+            }
+            if (len > 0) {
+                MemorySegment.copy(
+                        source(desc), sourceOffset(desc),
+                        MemorySegment.ofBuffer(destination), 0,
+                        len);
+            }
+            destination.position(destination.position() + len);
+            return len;
         } finally {
-            exit();
+            advance();
         }
     }
 
     Optional<Message> tryReceiveCachedMessage() {
-        synchronized (this) {
-            if (handle == 0 || !hasCached()) {
-                return Optional.empty();
-            }
-            activeOps++;
+        if (handle == 0 || !hasCached()) {
+            return Optional.empty();
         }
+        Desc desc = current();
         try {
-            Desc desc = current();
-            try {
-                return Optional.of(readMessage(desc));
-            } finally {
-                advance();
-            }
+            return Optional.of(readMessage(desc));
         } finally {
-            exit();
+            advance();
         }
     }
 
@@ -237,20 +217,6 @@ final class RecvRing implements AutoCloseable {
         }
     }
 
-    private void enter(long socketHandle) {
-        synchronized (this) {
-            ensureOpen(socketHandle);
-            activeOps++;
-        }
-    }
-
-    private synchronized void exit() {
-        activeOps--;
-        if (activeOps == 0) {
-            notifyAll();
-        }
-    }
-
     @SuppressWarnings("restricted")
     private void ensureOpen(long socketHandle) {
         if (handle != 0) {
@@ -284,28 +250,14 @@ final class RecvRing implements AutoCloseable {
 
     @Override
     public void close() {
-        long current;
-        boolean interrupted = false;
-        synchronized (this) {
-            current = handle;
-            if (current == 0) {
-                return;
-            }
-            handle = 0;
-            while (activeOps != 0) {
-                try {
-                    wait();
-                } catch (InterruptedException error) {
-                    interrupted = true;
-                }
-            }
-            control = null;
-            descriptors = null;
-            payload = null;
+        long current = handle;
+        if (current == 0) {
+            return;
         }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
+        handle = 0;
+        control = null;
+        descriptors = null;
+        payload = null;
         NativeFfm.recvRingClose(current);
     }
 

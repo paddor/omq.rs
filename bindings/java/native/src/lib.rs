@@ -194,6 +194,9 @@ impl JavaSocket {
             .materialize_lock
             .lock()
             .map_err(|_| Error::Config("materialize lock poisoned".to_string()))?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
         if let Some(socket) = self.socket.get() {
             return Ok(socket.clone());
         }
@@ -210,6 +213,19 @@ impl JavaSocket {
             .set(created.clone())
             .map_err(|_| Error::Config("socket materialized concurrently".to_string()))?;
         Ok(created)
+    }
+
+    fn shutdown(&self) {
+        let _guard = self
+            .materialize_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(socket) = self.socket.get() {
+            let _ = socket.clone().close();
+        }
     }
 
     fn set_option<F>(&self, f: F) -> Result<(), Error>
@@ -2638,6 +2654,18 @@ pub extern "system" fn Java_io_omq_Native_socketCreate(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_io_omq_Native_socketShutdown(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    guard(&mut env, (), |env| match socket_from_handle(handle) {
+        Ok(socket) => socket.shutdown(),
+        Err(error) => throw_omq(env, error),
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_omq_Native_socketClose(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -2649,13 +2677,7 @@ pub extern "system" fn Java_io_omq_Native_socketClose(
         }
 
         let socket = unsafe { Box::from_raw(handle as *mut JavaSocket) };
-        if socket.closed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        if let Some(socket) = socket.socket.get() {
-            let _ = socket.clone().close();
-        }
+        socket.shutdown();
     });
 }
 

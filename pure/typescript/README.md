@@ -155,3 +155,13 @@ Run `npm run test:browser` for the headless Firefox browser interop test. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
 `wss://`.
+
+Run the opt-in mixed browser soak with:
+
+```sh
+OMQ_TS_SOAK_DURATION_SECS=3600 npm run soak
+```
+
+It sustains WS/WSS traffic across NULL, PLAIN, and LZ4 sockets while checking
+REQ/REP, PUSH/PULL, PUB/SUB, reconnect, connection churn, multipart messages,
+large payloads, sequence integrity, and browser errors.

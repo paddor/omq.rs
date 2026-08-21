@@ -5,6 +5,7 @@
     "test": "vitest run",
     "test:interop": "OMQ_TS_INTEROP=1 vitest run test/interop.test.ts --test-timeout 120000",
     "test:browser": "playwright test --config=playwright.config.mjs",
+    "soak": "OMQ_TS_SOAK=1 playwright test --config=playwright.config.mjs --grep 'browser soak'",
     "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
   },
   "dependencies": {

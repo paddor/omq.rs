@@ -327,3 +327,299 @@ test("Firefox browser interop with omq.rs WebSocket peer", async ({
     if (serverDir) await rm(serverDir, { recursive: true, force: true });
   }
 });
+
+test("Firefox browser soak with omq.rs WebSocket peer", async ({
+  page,
+  browserName,
+}, testInfo) => {
+  test.skip(
+    process.env.OMQ_TS_SOAK !== "1",
+    "set OMQ_TS_SOAK=1 to run browser soak",
+  );
+  test.skip(browserName !== "firefox", "browser soak runs on Firefox");
+  const durationSeconds = Number(
+    process.env.OMQ_TS_SOAK_DURATION_SECS ?? "900",
+  );
+  expect(durationSeconds).toBeGreaterThan(0);
+  testInfo.setTimeout((durationSeconds + 180) * 1000);
+
+  const consoleLines = [];
+  let serverDir;
+  let staticServer;
+  let peer;
+  page.on(
+    "console",
+    (msg) => consoleLines.push(`[${msg.type()}] ${msg.text()}`),
+  );
+  page.on(
+    "pageerror",
+    (error) => consoleLines.push(`[pageerror] ${error.message}`),
+  );
+
+  try {
+    serverDir = await prepareStaticSite();
+    staticServer = await startStaticServer(serverDir);
+    const basePort = await findFreePortRange(21);
+    peer = await startBrowserPeer(basePort);
+    await page.goto(staticServer.url, { waitUntil: "domcontentloaded" });
+
+    const result = await page.evaluate(
+      async ({ basePort, durationSeconds }) => {
+        const omq = await import("./omq.js");
+        await omq.initLz4();
+        const sockets = [];
+        const errors = [];
+        const counters = Object.create(null);
+        const endpoint = (offset, scheme = "ws") =>
+          `${scheme}://127.0.0.1:${basePort + offset}/`;
+        const count = (name, amount = 1) => {
+          counters[name] = (counters[name] ?? 0) + amount;
+        };
+        const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const within = async (promise, ms, label) => {
+          let timer;
+          try {
+            return await Promise.race([
+              promise,
+              new Promise((_, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error(`${label} timed out`)),
+                  ms,
+                );
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+        const track = (socket) => {
+          sockets.push(socket);
+          return socket;
+        };
+        const options = {
+          onError: (error) => errors.push(error.message),
+        };
+
+        const control = track(new omq.Req(options));
+        const req = track(new omq.Req(options));
+        const push = track(new omq.Push(options));
+        const pub = track(new omq.Pub(options));
+        const sub = track(new omq.Sub(options));
+        const plainPush = track(
+          new omq.Push({
+            ...options,
+            plain: { username: "alice", password: "secret" },
+          }),
+        );
+        const lz4Push = track(new omq.Push(options));
+        const restartPush = track(
+          new omq.Push({
+            reconnectInitialDelayMs: 25,
+            reconnectMaxDelayMs: 100,
+            sendHighWaterMark: 256,
+            onError: () => count("reconnect-errors"),
+          }),
+        );
+        const wssReq = track(new omq.Req(options));
+        const wssPush = track(new omq.Push(options));
+        const wssPlainPush = track(
+          new omq.Push({
+            ...options,
+            plain: { username: "alice", password: "secret" },
+          }),
+        );
+
+        control.connect(endpoint(0));
+        req.connect(endpoint(1));
+        push.connect(endpoint(2));
+        pub.connect(endpoint(4));
+        sub.subscribe("news.");
+        sub.connect(endpoint(5));
+        plainPush.connect(endpoint(6));
+        lz4Push.connect(endpoint(8, "lz4+ws"));
+        restartPush.connect(endpoint(10));
+        wssReq.connect(endpoint(11, "wss"));
+        wssPush.connect(endpoint(12, "wss"));
+        wssPlainPush.connect(endpoint(14, "wss"));
+
+        await Promise.all([
+          control.ready(),
+          req.ready(),
+          push.ready(),
+          pub.ready(),
+          sub.ready(),
+          plainPush.ready(),
+          lz4Push.ready(),
+          restartPush.ready(),
+          wssReq.ready(),
+          wssPush.ready(),
+          wssPlainPush.ready(),
+        ].map((ready) => within(ready, 10_000, "socket ready")));
+        await delay(100);
+
+        const command = async (text) =>
+          (await within(
+            control.send(new omq.Message(text)),
+            5_000,
+            `control ${text}`,
+          )).string(0);
+        const waitRecorded = async (key, expected) => {
+          const deadline = Date.now() + 5_000;
+          let actual = "";
+          while (Date.now() < deadline) {
+            actual = await command(`get:${key}`);
+            if (actual === expected) return;
+            await delay(20);
+          }
+          throw new Error(`${key} expected ${expected}, got ${actual}`);
+        };
+
+        const started = performance.now();
+        const deadline = started + durationSeconds * 1000;
+        let cycle = 0;
+        while (performance.now() < deadline) {
+          cycle++;
+          const sequence = `soak-${cycle}`;
+
+          const reply = await within(
+            req.send(new omq.Message(sequence, "multipart")),
+            5_000,
+            "REQ/REP",
+          );
+          if (reply.string(0) !== `reply:${sequence}`) {
+            throw new Error("REQ/REP sequence mismatch");
+          }
+          count("reqrep");
+          count("multipart");
+
+          await within(push.send(new omq.Message(sequence)), 5_000, "PUSH");
+          await waitRecorded("pull_ws", sequence);
+          count("pushpull");
+
+          await within(
+            pub.send(new omq.Message("news.ts", sequence)),
+            5_000,
+            "PUB",
+          );
+          await waitRecorded("sub_ws", `news.ts|${sequence}`);
+          const published = await within(sub.recv(), 5_000, "SUB");
+          if (published.string(0) !== "news.rust") {
+            throw new Error("SUB topic mismatch");
+          }
+          count("pubsub", 2);
+
+          await within(
+            plainPush.send(new omq.Message(sequence)),
+            5_000,
+            "PLAIN PUSH",
+          );
+          await waitRecorded("pull_plain", sequence);
+          count("plain");
+
+          await within(
+            lz4Push.send(new omq.Message(sequence)),
+            5_000,
+            "LZ4 PUSH",
+          );
+          await waitRecorded("pull_lz4", sequence);
+          count("lz4");
+
+          const secureReply = await within(
+            wssReq.send(new omq.Message(sequence)),
+            5_000,
+            "WSS REQ",
+          );
+          if (secureReply.string(0) !== `reply:${sequence}`) {
+            throw new Error("WSS sequence mismatch");
+          }
+          await within(
+            wssPush.send(new omq.Message(sequence)),
+            5_000,
+            "WSS PUSH",
+          );
+          await waitRecorded("wss_pull", sequence);
+          await within(
+            wssPlainPush.send(new omq.Message(sequence)),
+            5_000,
+            "WSS PLAIN PUSH",
+          );
+          await waitRecorded("wss_pull_plain", sequence);
+          count("wss", 3);
+
+          await restartPush.send(new omq.Message(sequence)).catch(() => {});
+          count("reconnect-attempt");
+
+          if (cycle % 25 === 0) {
+            const large = new Uint8Array(1024 * 1024);
+            large.fill(cycle & 0xff);
+            await within(
+              push.send(new omq.Message(sequence, large)),
+              5_000,
+              "large PUSH",
+            );
+            await waitRecorded("pull_ws", sequence);
+            count("large");
+          }
+
+          if (cycle % 10 === 0) {
+            const pull = new omq.Pull(options);
+            pull.connect(endpoint(3));
+            try {
+              const message = await within(
+                pull.recv(),
+                5_000,
+                "connection churn PULL",
+              );
+              if (message.string(0) !== "push-ws-from-rust") {
+                throw new Error("churn payload mismatch");
+              }
+              count("connection-churn");
+            } finally {
+              pull.close();
+            }
+          }
+        }
+
+        const restartFirst = await command("get:restart_first");
+        const restartSecond = await command("get:restart_second");
+        if (!restartFirst || !restartSecond) {
+          throw new Error("reconnect lane made no progress");
+        }
+        count("reconnect");
+        for (const socket of sockets.reverse()) socket.close();
+        return {
+          counters,
+          errors,
+          elapsedMs: performance.now() - started,
+          heapBytes: performance.memory?.usedJSHeapSize ?? null,
+        };
+      },
+      { basePort, durationSeconds },
+    );
+
+    for (
+      const name of [
+        "reqrep",
+        "multipart",
+        "pushpull",
+        "pubsub",
+        "plain",
+        "lz4",
+        "wss",
+        "reconnect",
+      ]
+    ) {
+      expect(result.counters[name] ?? 0, `${name} made no progress`)
+        .toBeGreaterThan(0);
+    }
+    expect(result.errors, result.errors.join("\n")).toEqual([]);
+    await testInfo.attach("soak-result", {
+      body: JSON.stringify(result, null, 2),
+      contentType: "application/json",
+    });
+  } finally {
+    if (peer) await stopPeer(peer);
+    if (staticServer) await closeServer(staticServer.server);
+    if (serverDir) await rm(serverDir, { recursive: true, force: true });
+  }
+});

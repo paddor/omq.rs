@@ -278,8 +278,8 @@ messages where the 12-byte envelope overhead dominates.)
   in a multi-part message.
 - `D` MUST satisfy `1 <= D <= 8192`. `D = 0` or `D > 8192`: close
   the connection.
-- A shipment MUST be sent BEFORE any LZ4B part that relies on the
-  dict.
+- A shipment MUST be sent BEFORE any LZ4B or LZ4M part that relies on
+  the dict.
 - A shipment MUST be sent AT MOST ONCE per direction per connection.
   A second LZ4D shipment on the same direction: close the connection.
 - Dictionary shipments are consumed by the transport layer; they
@@ -292,13 +292,22 @@ Implementations MAY choose its ownership scope. It can be configured per
 socket, trained per socket, trained per fan-out lane, or trained per
 connection.
 
-The wire requirement is narrower: before sending any LZ4B part that was
-compressed with dict `D` on a connection, the sender MUST have shipped
-`LZ4D | D` on that same direction of that same connection, and MUST NOT
-ship a second dictionary on that direction. If many connections use the
-same dict bytes, a sender may encode a payload once with that dict and
-reuse the resulting LZ4B bytes for every connection that has already
-received that dict.
+The wire requirement is narrower: before sending any LZ4B or LZ4M part
+that was compressed with dict `D` on a connection, the sender MUST have
+shipped `LZ4D | D` on that same direction of that same connection, and
+MUST NOT ship a second dictionary on that direction. If many connections
+use the same dict bytes, a sender may encode a payload once with that
+dict and reuse the resulting compressed bytes for every connection that
+has already received that dict.
+
+Senders that share an encoder across connections MUST still track
+dictionary shipment per direction per connection:
+
+- New connection after dict `D` exists: send `LZ4D | D` before that
+  connection's first dict-compressed payload.
+- Existing connection when dict `D` becomes available: send `LZ4D | D`
+  before that connection's next dict-compressed payload.
+- Connection that already received `D`: do not send `D` again.
 
 No-dictionary LZ4B/LZ4M is a valid subset of this transport.
 

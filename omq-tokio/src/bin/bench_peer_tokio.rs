@@ -103,6 +103,22 @@ fn main() {
             .build()
             .unwrap();
         rt.block_on(async_main(args, ctx));
+    } else if std::env::var("OMQ_BENCH_MT_RUNTIME").is_ok() {
+        #[cfg(feature = "bench-mt-runtime")]
+        {
+            let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+            eprintln!("runtime: multi_thread ({workers} workers)");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let ctx = omq_tokio::Context::current();
+                async_main(args, ctx).await;
+            });
+        }
+        #[cfg(not(feature = "bench-mt-runtime"))]
+        panic!("OMQ_BENCH_MT_RUNTIME requires the bench-mt-runtime feature");
     } else {
         eprintln!("runtime: current_thread");
         let rt = tokio::runtime::Builder::new_current_thread()

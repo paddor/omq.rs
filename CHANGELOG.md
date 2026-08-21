@@ -6,6 +6,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- Tokio direct TCP receives reuse bounded buffers through 8 MiB without
+  zero-filling payload memory or extending pool lifetime past connection close.
+
 ### Added
 
 - Tokio byte-stream sockets can enforce hard per-connection and aggregate
@@ -13,6 +18,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   `Options::recv_ip_rate_limit()`. Offending connections are disconnected.
 - SERVER sockets can resolve a received routing id to its live `PeerInfo`
   with `Socket::peer_info()`.
+
+### Fixed
+
+- Async inproc `PUSH` sends remain safe when a task moves between runtime
+  worker threads or cloned socket handles send concurrently.
 
 ## [pyomq 0.19.1] - 2026-08-02
 

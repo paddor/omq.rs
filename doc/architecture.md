@@ -187,6 +187,16 @@ to 55 B inline, avoiding heap allocation and refcount traffic for small
 messages. Larger single-part messages use `Bytes`; multipart messages use
 `Vec<Payload>`.
 
+### Receive buffers
+
+Plain TCP/IPC frames at or above the direct-read threshold bypass the rolling
+decoder buffer. Payloads through 8 MiB read into a per-connection `BytesMut`
+pool without zero-filling spare capacity. `Bytes::from_owner` returns the
+allocation only after the last payload clone or slice drops. The pool retains
+at most 64 MiB and payload owners hold only a weak pool reference, so closing a
+connection releases idle buffers even while the application holds messages.
+Payloads above 8 MiB use a fresh `BytesMut` and are never pooled.
+
 ## Encoding
 
 `FrameBuffer` is the outbound framing buffer: an arena (16 KiB for TCP/WS,

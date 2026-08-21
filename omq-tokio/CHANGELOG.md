@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Direct TCP receives reuse bounded buffers through 8 MiB without zero-filling
+  payload memory. Held messages keep exclusive buffer ownership, and idle pool
+  memory is released when its connection closes.
+
 ## [0.21.3] - 2026-08-17
 
 ### Added

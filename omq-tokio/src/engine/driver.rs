@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -38,7 +38,7 @@ const RECV_MEDIUM_BYTES: usize = 1024 * 1024;
 const RECV_LARGE_BYTES: usize = 1024 * 1024;
 const RECV_MEDIUM_TIME: Duration = Duration::from_micros(200);
 const RECV_LARGE_TIME: Duration = Duration::from_micros(200);
-const RECV_POOL_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const RECV_POOL_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1590,7 +1590,7 @@ struct RecvBufPool {
 
 #[derive(Debug, Default)]
 struct RecvBufPoolInner {
-    buffers: Vec<Vec<u8>>,
+    buffers: Vec<BytesMut>,
     retained_bytes: usize,
 }
 
@@ -1601,7 +1601,7 @@ impl RecvBufPool {
         })
     }
 
-    fn take(&self, capacity: usize) -> Vec<u8> {
+    fn take(&self, capacity: usize) -> BytesMut {
         let mut pool = self.inner.lock().expect("recv buf pool");
         if let Some(mut buf) = pool.buffers.pop() {
             pool.retained_bytes = pool.retained_bytes.saturating_sub(buf.capacity());
@@ -1611,10 +1611,10 @@ impl RecvBufPool {
             buf.clear();
             return buf;
         }
-        Vec::with_capacity(capacity)
+        BytesMut::with_capacity(capacity)
     }
 
-    fn give(&self, mut buf: Vec<u8>) {
+    fn give(&self, mut buf: BytesMut) {
         let capacity = buf.capacity();
         if capacity > RECV_POOL_MAX_BUFFER_BYTES {
             return;
@@ -1626,11 +1626,18 @@ impl RecvBufPool {
             pool.buffers.push(buf);
         }
     }
+
+    fn wrap(self: &Arc<Self>, buf: BytesMut) -> Bytes {
+        Bytes::from_owner(PooledRecvBuf {
+            buf,
+            pool: Arc::downgrade(self),
+        })
+    }
 }
 
 struct PooledRecvBuf {
-    buf: Vec<u8>,
-    pool: Arc<RecvBufPool>,
+    buf: BytesMut,
+    pool: Weak<RecvBufPool>,
 }
 
 impl AsRef<[u8]> for PooledRecvBuf {
@@ -1642,7 +1649,9 @@ impl AsRef<[u8]> for PooledRecvBuf {
 impl Drop for PooledRecvBuf {
     fn drop(&mut self) {
         let buf = std::mem::take(&mut self.buf);
-        self.pool.give(buf);
+        if let Some(pool) = self.pool.upgrade() {
+            pool.give(buf);
+        }
     }
 }
 
@@ -1673,15 +1682,10 @@ async fn handle_large_messages<R: AsyncRead + Unpin>(
             let mut buf = recv_pool.take(plen);
             buf.extend_from_slice(prefix.as_slice());
             if buf.len() < plen {
-                let filled = buf.len();
-                buf.resize(plen, 0);
-                reader.read_exact(&mut buf[filled..plen]).await?;
+                read_exact_buf(reader, &mut buf, plen).await?;
             }
             debug_assert_eq!(buf.len(), plen);
-            Bytes::from_owner(PooledRecvBuf {
-                buf,
-                pool: Arc::clone(recv_pool),
-            })
+            recv_pool.wrap(buf)
         } else {
             let mut buf = BytesMut::with_capacity(plen);
             buf.extend_from_slice(prefix.as_slice());
@@ -2187,7 +2191,7 @@ mod tests {
     #[test]
     fn recv_buf_pool_does_not_retain_huge_buffers() {
         let pool = RecvBufPool::new();
-        pool.give(Vec::with_capacity(RECV_POOL_MAX_BUFFER_BYTES + 1));
+        pool.give(BytesMut::with_capacity(RECV_POOL_MAX_BUFFER_BYTES + 1));
         let guard = pool.inner.lock().unwrap();
         assert_eq!(guard.buffers.len(), 0);
         assert_eq!(guard.retained_bytes, 0);
@@ -2195,17 +2199,69 @@ mod tests {
 
     #[test]
     fn recv_buf_pool_caps_total_retained_bytes() {
+        const BUFFER_BYTES: usize = 1024 * 1024;
+
         let pool = RecvBufPool::new();
-        let buffer_count = (RECV_POOL_MAX_RETAINED_BYTES / RECV_POOL_MAX_BUFFER_BYTES) + 2;
+        let buffer_count = (RECV_POOL_MAX_RETAINED_BYTES / BUFFER_BYTES) + 2;
         for _ in 0..buffer_count {
-            pool.give(Vec::with_capacity(RECV_POOL_MAX_BUFFER_BYTES));
+            pool.give(BytesMut::with_capacity(BUFFER_BYTES));
         }
         let guard = pool.inner.lock().unwrap();
         assert!(guard.retained_bytes <= RECV_POOL_MAX_RETAINED_BYTES);
         assert_eq!(
             guard.buffers.len(),
-            RECV_POOL_MAX_RETAINED_BYTES / RECV_POOL_MAX_BUFFER_BYTES
+            RECV_POOL_MAX_RETAINED_BYTES / BUFFER_BYTES
         );
+    }
+
+    #[test]
+    fn recv_buf_pool_waits_for_last_bytes_clone() {
+        let pool = RecvBufPool::new();
+        let mut buf = pool.take(4 * 1024 * 1024);
+        buf.extend_from_slice(b"payload");
+        let payload = pool.wrap(buf);
+        let clone = payload.clone();
+
+        drop(payload);
+        assert_eq!(pool.inner.lock().unwrap().buffers.len(), 0);
+
+        drop(clone);
+        let guard = pool.inner.lock().unwrap();
+        assert_eq!(guard.buffers.len(), 1);
+        assert!(guard.retained_bytes >= 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn recv_buf_pool_does_not_outlive_connection_owner() {
+        let pool = RecvBufPool::new();
+        let weak = Arc::downgrade(&pool);
+        let payload = pool.wrap(pool.take(4 * 1024 * 1024));
+
+        drop(pool);
+        assert!(weak.upgrade().is_none());
+
+        drop(payload);
+    }
+
+    #[test]
+    fn recv_buf_pool_accepts_concurrent_last_owner_drops() {
+        const BUFFER_COUNT: usize = 16;
+        const BUFFER_BYTES: usize = 1024 * 1024;
+
+        let pool = RecvBufPool::new();
+        let payloads = (0..BUFFER_COUNT)
+            .map(|_| pool.wrap(pool.take(BUFFER_BYTES)))
+            .collect::<Vec<_>>();
+
+        std::thread::scope(|scope| {
+            for payload in payloads {
+                scope.spawn(move || drop(payload));
+            }
+        });
+
+        let guard = pool.inner.lock().unwrap();
+        assert_eq!(guard.buffers.len(), BUFFER_COUNT);
+        assert_eq!(guard.retained_bytes, BUFFER_COUNT * BUFFER_BYTES);
     }
 
     #[derive(Debug)]

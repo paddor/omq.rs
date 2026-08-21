@@ -20,6 +20,7 @@ use std::sync::{Condvar, Mutex as StdMutex};
 use rustc_hash::FxHashMap;
 
 use futures::channel::oneshot;
+use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::mpsc;
 
 use omq_proto::error::{Error, Result};
@@ -70,7 +71,9 @@ impl BlockingSpace {
 #[allow(private_interfaces)]
 #[derive(Debug)]
 pub struct InprocTx {
-    pub producer: yring::ProducerOwner<RecvItem>,
+    // Async sockets may move between runtime worker threads. Serialize access
+    // while retaining the SPSC ring's single active producer.
+    pub(crate) producer: ParkingMutex<yring::Producer<RecvItem>>,
     pub(crate) recv_signal: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
@@ -81,7 +84,8 @@ pub struct InprocTx {
 
 impl InprocTx {
     pub(crate) fn wait_for_space(&self) {
-        self.blocking_space.wait_until(|| self.producer.is_full());
+        self.blocking_space
+            .wait_until(|| self.producer.lock().is_full());
     }
 }
 
@@ -344,7 +348,7 @@ impl InprocListener {
             let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let blocking_space = Arc::new(BlockingSpace::new());
             let tx = Arc::new(InprocTx {
-                producer: yring::ProducerOwner::new(p),
+                producer: ParkingMutex::new(p),
                 recv_signal: ring_recv_signal,
                 recv_ready: ready.clone(),
                 max_message_size: mms,

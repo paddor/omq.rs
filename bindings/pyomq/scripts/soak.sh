@@ -19,6 +19,11 @@ esac
 seconds=$((10#$value * multiplier))
 python="${OMQ_PYTHON:-${repo_root}/bindings/pyomq/.venv/bin/python}"
 maturin="${OMQ_MATURIN:-${repo_root}/bindings/pyomq/.venv/bin/maturin}"
+jobs="${OMQ_PYOMQ_SOAK_JOBS:-4}"
+if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: OMQ_PYOMQ_SOAK_JOBS must be a positive integer\n' >&2
+  exit 2
+fi
 
 cd "${repo_root}/bindings/pyomq"
 "$maturin" develop --release
@@ -40,7 +45,13 @@ if [[ ${#test_ids[@]} -eq 0 ]]; then
   printf 'error: no pyomq soak tests collected\n' >&2
   exit 1
 fi
+if (( jobs > ${#test_ids[@]} )); then
+  jobs="${#test_ids[@]}"
+fi
+printf '== pyomq soak: %ss, jobs=%s ==\n' "$seconds" "$jobs"
 
+active=0
+failed=0
 for test_id in "${test_ids[@]}"; do
   name="${test_id#tests/soak/}"
   name="${name//.py::/-}"
@@ -51,13 +62,19 @@ for test_id in "${test_ids[@]}"; do
   ) 2>&1 | sed -u "s/^/[${name}] /" &
   pids+=("$!")
   names+=("$name")
+  active=$((active + 1))
+  if (( active >= jobs )); then
+    if ! wait -n; then
+      failed=1
+    fi
+    active=$((active - 1))
+  fi
 done
 
-failed=0
-for i in "${!pids[@]}"; do
-  if ! wait "${pids[$i]}"; then
-    printf 'error: pyomq soak failed: %s\n' "${names[$i]}" >&2
+while (( active > 0 )); do
+  if ! wait -n; then
     failed=1
   fi
+  active=$((active - 1))
 done
 exit "$failed"

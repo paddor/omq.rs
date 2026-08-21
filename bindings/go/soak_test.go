@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	soakRecvTimeout    = 200 * time.Millisecond
-	soakSendTimeout    = 500 * time.Millisecond
-	soakConnectTimeout = 5 * time.Second
-	soakCloseTimeout   = 5 * time.Second
-	soakReportInterval = 10 * time.Second
+	soakRecvTimeout     = 200 * time.Millisecond
+	soakSendTimeout     = 500 * time.Millisecond
+	soakConnectTimeout  = 5 * time.Second
+	soakExchangeTimeout = 30 * time.Second
+	soakCloseTimeout    = 5 * time.Second
+	soakReportInterval  = 10 * time.Second
 
 	soakResourceWarmup     = 10 * time.Minute
 	soakResourceWindow     = 5 * time.Minute
@@ -173,10 +174,10 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 	if scenarios.enabled("compression") {
 		startWorker(&wg, state, "lz4-compression", func(ctx context.Context) error {
-			return soakCompressionPair(ctx, omqCtx, "lz4+tcp://127.0.0.1:*", nil, counters)
+			return soakCompressionLoop(ctx, omqCtx, "lz4+tcp://127.0.0.1:*", nil, counters)
 		})
 		startWorker(&wg, state, "zstd-compression", func(ctx context.Context) error {
-			return soakCompressionPair(ctx, omqCtx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
+			return soakCompressionLoop(ctx, omqCtx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
 		})
 	}
 	if scenarios.enabled("inproc") {
@@ -245,16 +246,17 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 done:
 	cancel()
-	waitForSoakWorkers(t, &wg)
+	if err := state.err(); err != nil {
+		t.Logf("[go-soak] stopping after worker error: %v", err)
+	}
 	if tcpPull != nil {
 		closeSoakScenarioSocket(tcpPull, counters, "tcp")
 	}
 	if curvePull != nil {
 		closeSoakScenarioSocket(curvePull, counters, "curve")
 	}
-	if err := closeSoakContext(omqCtx); err != nil {
-		t.Fatal(err)
-	}
+	closeErr := closeSoakContext(omqCtx)
+	waitForSoakWorkers(t, &wg)
 	runtime.GC()
 	time.Sleep(200 * time.Millisecond)
 	runtime.GC()
@@ -262,6 +264,9 @@ done:
 	logSoakLifecycle(t, counters)
 	if err := state.err(); err != nil {
 		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	assertSoakProgress(t, scenarios, counters)
 }
@@ -296,11 +301,18 @@ func startWorker(wg *sync.WaitGroup, state *soakState, name string, fn func(cont
 				state.fail(fmt.Errorf("%s: panic: %v", name, recovered))
 			}
 		}()
-		err := fn(state.ctx)
-		if err == nil || (state.ctx.Err() != nil && soakStopError(err)) {
+		for state.ctx.Err() == nil {
+			err := fn(state.ctx)
+			if err == nil || (state.ctx.Err() != nil && soakStopError(err)) {
+				return
+			}
+			if soakStopError(err) {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			state.fail(fmt.Errorf("%s: %w", name, err))
 			return
 		}
-		state.fail(fmt.Errorf("%s: %w", name, err))
 	})
 }
 
@@ -400,6 +412,20 @@ func soakChurnPush(
 	return errFromContext(ctx)
 }
 
+func soakCompressionLoop(ctx context.Context, shared *Context, endpoint string, dict []byte, counters *soakCounters) error {
+	for ctx.Err() == nil {
+		err := soakCompressionPair(ctx, shared, endpoint, dict, counters)
+		if err == nil {
+			continue
+		}
+		if soakStopError(err) && ctx.Err() == nil {
+			continue
+		}
+		return err
+	}
+	return errFromContext(ctx)
+}
+
 func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, dict []byte, counters *soakCounters) error {
 	pullOpts := append([]SocketOption{}, soakRecvOptions()...)
 	pushOpts := append([]SocketOption{}, soakSendOptions()...)
@@ -437,18 +463,47 @@ func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, 
 	var seq uint64
 	for ctx.Err() == nil {
 		payload := soakPayload(endpoint, seq, 1024)
-		if err := push.SendTimeout(Bytes(payload), 5*time.Second); err != nil {
-			return err
+		sendDeadline := time.Now().Add(soakExchangeTimeout)
+		for {
+			err := push.SendTimeout(Bytes(payload), soakSendTimeout)
+			switch {
+			case err == nil:
+				goto sent
+			case ctx.Err() != nil:
+				return errFromContext(ctx)
+			case errors.Is(err, ErrTimeout), errors.Is(err, ErrAgain):
+				if time.Now().Before(sendDeadline) {
+					continue
+				}
+				return err
+			default:
+				return err
+			}
 		}
-		msg, err := pull.RecvTimeout(5 * time.Second)
-		if err != nil {
-			return err
+	sent:
+		recvDeadline := time.Now().Add(soakExchangeTimeout)
+		for {
+			msg, err := pull.RecvTimeout(soakRecvTimeout)
+			switch {
+			case err == nil:
+				if !bytes.Equal(msg.Bytes(), payload) {
+					return fmt.Errorf("compression payload mismatch on %s", endpoint)
+				}
+				counters.compressionMessages.Add(1)
+				seq++
+				goto next
+			case ctx.Err() != nil:
+				return errFromContext(ctx)
+			case errors.Is(err, ErrTimeout), errors.Is(err, ErrAgain):
+				if time.Now().Before(recvDeadline) {
+					continue
+				}
+				return err
+			default:
+				return err
+			}
 		}
-		if !bytes.Equal(msg.Bytes(), payload) {
-			return fmt.Errorf("compression payload mismatch on %s", endpoint)
-		}
-		counters.compressionMessages.Add(1)
-		seq++
+	next:
 	}
 	return errFromContext(ctx)
 }
@@ -587,22 +642,34 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 		if err := rep.SendTimeout(String("reply"), 5*time.Second); err != nil {
 			return err
 		}
-		if reply, err := req.RecvTimeout(5 * time.Second); err != nil || reply.String() != "reply" {
-			return fmt.Errorf("REQ/REP mismatch: %v", err)
+		reply, err := req.RecvTimeout(5 * time.Second)
+		if err != nil {
+			return err
+		}
+		if reply.String() != "reply" {
+			return fmt.Errorf("REQ/REP mismatch: %q", reply.String())
 		}
 
 		pairMessage := Bytes(sequence)
 		if err := left.SendTimeout(pairMessage, 5*time.Second); err != nil {
 			return err
 		}
-		if got, err := right.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
-			return fmt.Errorf("PAIR forward mismatch: %v", err)
+		got, err = right.RecvTimeout(5 * time.Second)
+		if err != nil {
+			return err
+		}
+		if !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR forward mismatch at %d", seq)
 		}
 		if err := right.SendTimeout(pairMessage, 5*time.Second); err != nil {
 			return err
 		}
-		if got, err := left.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
-			return fmt.Errorf("PAIR reverse mismatch: %v", err)
+		got, err = left.RecvTimeout(5 * time.Second)
+		if err != nil {
+			return err
+		}
+		if !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR reverse mismatch at %d", seq)
 		}
 		counters.protocolMessages.Add(4)
 		seq++

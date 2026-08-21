@@ -27,6 +27,9 @@ duration_seconds=$((10#$duration_value * duration_multiplier))
 export SOAK_FEATURES="${SOAK_FEATURES:-soak plain curve lz4 zstd ws}"
 export OMQ_SOAK_DURATION_SECS="$duration_seconds"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+if [[ -z "${OMQ_RUBY:-}" ]] && ! command -v ruby >/dev/null 2>&1 && [[ -x /home/roadster/.rubies/ruby-4.0.6/bin/ruby ]]; then
+  export OMQ_RUBY=/home/roadster/.rubies/ruby-4.0.6/bin/ruby
+fi
 
 timeout_seconds="${SOAK_TIMEOUT_SECS:-$((duration_seconds + 900))}"
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then

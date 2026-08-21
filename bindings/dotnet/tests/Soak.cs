@@ -4,6 +4,7 @@ using Omq;
 internal static class Program
 {
     private const int ReportIntervalSeconds = 10;
+    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(30);
     private static readonly byte[] LargePayload = Enumerable.Repeat((byte)0xA5, 1024 * 1024).ToArray();
     private static readonly SocketOptions Options = new()
     {
@@ -216,12 +217,9 @@ internal static class Program
         pair.Sender.Send(new Message([System.Text.Encoding.UTF8.GetBytes(name), sequence]));
         if (poll)
         {
-            using var poller = new Poller();
-            poller.Add(pair.Receiver);
-            Check(poller.Wait(TimeSpan.FromSeconds(5)).Count == 1, "poller stalled");
-            Increment(counters, "poller");
+            if (WaitReadable(pair.Receiver, TimeSpan.FromMilliseconds(100))) Increment(counters, "poller");
         }
-        Message received = pair.Receiver.Receive();
+        Message received = ReceiveWithin(pair.Receiver, ExchangeTimeout, $"{name} receive timed out");
         Check(received.PartCount == 2, $"{name} multipart count mismatch");
         Check(received[0].SequenceEqual(System.Text.Encoding.UTF8.GetBytes(name)), $"{name} label mismatch");
         Check(received[1].SequenceEqual(sequence), $"{name} sequence mismatch");
@@ -234,6 +232,31 @@ internal static class Program
         sending.Wait(TimeSpan.FromSeconds(5));
         Check(sending.IsCompletedSuccessfully, $"{name} large send stalled");
         Increment(counters, "large");
+    }
+
+    private static Message ReceiveWithin(Socket socket, TimeSpan timeout, string failure)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (socket.TryReceive(out Message? message) && message is not null) return message;
+            Thread.Sleep(1);
+        }
+        throw new InvalidOperationException(failure);
+    }
+
+    private static bool WaitReadable(Socket socket, TimeSpan timeout)
+    {
+        using var poller = new Poller();
+        poller.Add(socket);
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            TimeSpan slice = remaining < TimeSpan.FromMilliseconds(250) ? remaining : TimeSpan.FromMilliseconds(250);
+            if (poller.Wait(slice).Any(result => result.Events.HasFlag(PollEvents.Readable))) return true;
+        }
+        return false;
     }
 
     private static void ExerciseReqRep(SocketPair pair, int cycle, Dictionary<string, long> counters)

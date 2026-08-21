@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="../Omq.Net.csproj" />
     <PackageReference Include="NetMQ" Version="4.0.2.2" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="8.0.4" />
   </ItemGroup>
 </Project>

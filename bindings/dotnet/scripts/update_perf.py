@@ -444,6 +444,8 @@ def _peer(impl, role, pattern, endpoint, size, duration, warmup):
         "dotnet",
         "run",
         "--no-build",
+        "--configuration",
+        "Release",
         "--project",
         project,
         "--",
@@ -549,7 +551,13 @@ def main():
         return
     if not args.no_build:
         subprocess.run(
-            ["dotnet", "build", "bindings/dotnet/bench/Omq.Net.Bench.csproj"],
+            [
+                "dotnet",
+                "build",
+                "--configuration",
+                "Release",
+                "bindings/dotnet/bench/Omq.Net.Bench.csproj",
+            ],
             cwd=REPO_ROOT,
             check=True,
         )
@@ -576,9 +584,14 @@ def main():
                         else r.get("messages_per_second", 0)
                     )
                 )
-                append_row(rows[len(rows) // 2])
-                print(impl, pattern, size, rows[-1], flush=True)
-    gen_combined_chart(chart_data_from_jsonl(), os.path.join(CHART_DIR, "bindings.svg"))
+                median = rows[len(rows) // 2]
+                if not args.quick:
+                    append_row(median)
+                print(impl, pattern, size, median, flush=True)
+    if not args.quick:
+        gen_combined_chart(
+            chart_data_from_jsonl(), os.path.join(CHART_DIR, "bindings.svg")
+        )
 
 
 if __name__ == "__main__":

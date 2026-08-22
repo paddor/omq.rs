@@ -180,6 +180,15 @@ struct PeerEntry {
     io_thread: usize,
 }
 
+const PEER_TASK_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+async fn stop_peer_task(task: JoinHandle<()>) {
+    if !task.is_finished() {
+        task.abort();
+    }
+    let _ = tokio::time::timeout(PEER_TASK_JOIN_TIMEOUT, task).await;
+}
+
 struct ListenerEntry {
     endpoint: Endpoint,
     cancel: CancellationToken,
@@ -534,10 +543,7 @@ impl SocketDriver {
             {
                 peer.handle.cancel.cancel();
                 if let Some(task) = peer.task.take() {
-                    if !task.is_finished() {
-                        task.abort();
-                    }
-                    let _ = task.await;
+                    stop_peer_task(task).await;
                 }
             }
         }
@@ -579,13 +585,8 @@ impl SocketDriver {
         if let Some(pool) = self.compression_pool.take() {
             pool.clear();
         }
-        for task in &peer_tasks {
-            if !task.is_finished() {
-                task.abort();
-            }
-        }
         for task in peer_tasks {
-            let _ = task.await;
+            stop_peer_task(task).await;
         }
         self.monitor.publish(MonitorEvent::Closed);
         if let Some(ack) = self.close_ack.take() {

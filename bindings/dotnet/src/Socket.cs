@@ -145,8 +145,18 @@ public sealed class Socket : IDisposable
     {
         Native.Message msg = new();
         Errors.Check("msg_init_size", Native.zmq_msg_init_size(ref msg, (nuint)data.Length));
-        try { Marshal.Copy(data, 0, Native.zmq_msg_data(ref msg), data.Length); if (routingId != 0) Errors.Check("msg_set_routing_id", Native.zmq_msg_set_routing_id(ref msg, routingId)); Errors.Check("msg_send", Native.zmq_msg_send(ref msg, Require(), Flags(more, dontWait))); }
-        finally { Native.zmq_msg_close(ref msg); }
+        bool sent = false;
+        try
+        {
+            Marshal.Copy(data, 0, Native.zmq_msg_data(ref msg), data.Length);
+            if (routingId != 0) Errors.Check("msg_set_routing_id", Native.zmq_msg_set_routing_id(ref msg, routingId));
+            Errors.Check("msg_send", Native.zmq_msg_send(ref msg, Require(), Flags(more, dontWait)));
+            sent = true;
+        }
+        finally
+        {
+            if (!sent) Native.zmq_msg_close(ref msg);
+        }
     }
 
     /// Receives one complete message, including all multipart frames.
@@ -155,14 +165,41 @@ public sealed class Socket : IDisposable
         lock (gate)
         {
             var parts = new List<byte[]>(); uint routingId = 0;
-            while (true)
+            int originalReceiveTimeout = 0;
+            bool restoreReceiveTimeout = false;
+            try
             {
-                Native.Message msg = new();
-                Errors.Check("msg_init", Native.zmq_msg_init(ref msg));
-                try { Errors.Check("msg_recv", Native.zmq_msg_recv(ref msg, Require(), dontWait ? 1 : 0)); int size = checked((int)Native.zmq_msg_size(ref msg)); byte[] data = new byte[size]; if (size != 0) Marshal.Copy(Native.zmq_msg_data(ref msg), data, 0, size); if (parts.Count == 0) routingId = Native.zmq_msg_routing_id(ref msg); parts.Add(data); if (Native.zmq_msg_more(ref msg) == 0) break; }
-                finally { Native.zmq_msg_close(ref msg); }
+                while (true)
+                {
+                    Native.Message msg = new();
+                    Errors.Check("msg_init", Native.zmq_msg_init(ref msg));
+                    try
+                    {
+                        Errors.Check("msg_recv", Native.zmq_msg_recv(ref msg, Require(), dontWait && parts.Count == 0 ? 1 : 0));
+                        int size = checked((int)Native.zmq_msg_size(ref msg));
+                        byte[] data = new byte[size];
+                        if (size != 0) Marshal.Copy(Native.zmq_msg_data(ref msg), data, 0, size);
+                        if (parts.Count == 0) routingId = Native.zmq_msg_routing_id(ref msg);
+                        parts.Add(data);
+                        if (Native.zmq_msg_more(ref msg) == 0) break;
+                        if (!restoreReceiveTimeout)
+                        {
+                            originalReceiveTimeout = GetInt32(SocketOption.ReceiveTimeout);
+                            if (originalReceiveTimeout != -1)
+                            {
+                                SetOption(SocketOption.ReceiveTimeout, -1);
+                                restoreReceiveTimeout = true;
+                            }
+                        }
+                    }
+                    finally { Native.zmq_msg_close(ref msg); }
+                }
+                return new Message(parts.ToArray()) { RoutingId = routingId };
             }
-            return new Message(parts.ToArray()) { RoutingId = routingId };
+            finally
+            {
+                if (restoreReceiveTimeout) SetOption(SocketOption.ReceiveTimeout, originalReceiveTimeout);
+            }
         }
     }
     /// Receives a UTF-8 single-frame message.

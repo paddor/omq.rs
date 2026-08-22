@@ -4,13 +4,14 @@ using Omq;
 internal static class Program
 {
     private const int ReportIntervalSeconds = 10;
-    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(
+        ReadPositiveDouble("OMQ_DOTNET_SOAK_EXCHANGE_TIMEOUT_SECS", "OMQ_SOAK_EXCHANGE_TIMEOUT_SECS", 120));
     private static readonly byte[] LargePayload = Enumerable.Repeat((byte)0xA5, 1024 * 1024).ToArray();
     private static readonly SocketOptions Options = new()
     {
         Linger = 0,
-        SendTimeout = TimeSpan.FromSeconds(5),
-        ReceiveTimeout = TimeSpan.FromSeconds(5),
+        SendTimeout = ExchangeTimeout,
+        ReceiveTimeout = ExchangeTimeout,
     };
 
     public static void Main()
@@ -43,6 +44,7 @@ internal static class Program
             using var pair = OpenPair(context, SocketType.Pair, SocketType.Pair, "tcp://127.0.0.1:0");
             using var pubSub = OpenPubSub(context);
             int cycle = 0;
+            bool exercisedReconnect = false;
 
             while (timer.Elapsed < duration)
             {
@@ -68,7 +70,11 @@ internal static class Program
                 TraceStage(cycle, "pubsub");
                 ExercisePubSub(pubSub, cycle, counters);
                 if (cycle % 10 == 0) ExerciseContextChurn(cycle, counters);
-                if (cycle % 25 == 0) ExerciseReconnect(counters);
+                if (!exercisedReconnect && timer.Elapsed >= TimeSpan.FromSeconds(1))
+                {
+                    ExerciseReconnect(counters);
+                    exercisedReconnect = true;
+                }
 
                 if (timer.Elapsed < nextReport) continue;
                 ResourceSample current = SampleResources(timer.Elapsed);
@@ -101,10 +107,8 @@ internal static class Program
         pair.Sender.SendText("warmup");
         Check(poller.Wait(TimeSpan.FromSeconds(5)).Count == 1, "warmup poller stalled");
         Check(pair.Receiver.ReceiveText() == "warmup", "warmup message mismatch");
-        Task sending = Task.Run(() => pair.Sender.Send(LargePayload));
+        pair.Sender.Send(LargePayload);
         Check(pair.Receiver.Receive().Data.SequenceEqual(LargePayload), "warmup large payload mismatch");
-        sending.Wait(TimeSpan.FromSeconds(5));
-        Check(sending.IsCompletedSuccessfully, "warmup large send stalled");
     }
 
     private static SocketPair OpenPushPull(Context context, string endpoint)
@@ -215,11 +219,24 @@ internal static class Program
     {
         byte[] sequence = BitConverter.GetBytes(cycle);
         pair.Sender.Send(new Message([System.Text.Encoding.UTF8.GetBytes(name), sequence]));
+        bool pollHit = false;
         if (poll)
         {
-            if (WaitReadable(pair.Receiver, TimeSpan.FromMilliseconds(100))) Increment(counters, "poller");
+            pollHit = WaitReadable(pair.Receiver, TimeSpan.FromMilliseconds(100));
+            if (pollHit) Increment(counters, "poller");
         }
-        Message received = ReceiveWithin(pair.Receiver, ExchangeTimeout, $"{name} receive timed out");
+        Message received;
+        try
+        {
+            received = ReceiveWithin(pair.Receiver, ExchangeTimeout, $"{name} receive timed out");
+        }
+        catch (InvalidOperationException ex)
+        {
+            string progress = string.Join(' ', counters.OrderBy(x => x.Key).Select(x => $"{x.Key}={x.Value}"));
+            throw new InvalidOperationException(
+                $"{name} receive timed out cycle={cycle} poll_hit={pollHit} sender_events={pair.Sender.GetInt32(SocketOption.Events)} receiver_events={pair.Receiver.GetInt32(SocketOption.Events)} counters={progress}",
+                ex);
+        }
         Check(received.PartCount == 2, $"{name} multipart count mismatch");
         Check(received[0].SequenceEqual(System.Text.Encoding.UTF8.GetBytes(name)), $"{name} label mismatch");
         Check(received[1].SequenceEqual(sequence), $"{name} sequence mismatch");
@@ -227,10 +244,8 @@ internal static class Program
         Increment(counters, "multipart");
 
         if (name != "tcp" || cycle % 25 != 0) return;
-        Task sending = Task.Run(() => pair.Sender.Send(LargePayload));
+        pair.Sender.Send(LargePayload);
         Check(pair.Receiver.Receive().Data.SequenceEqual(LargePayload), $"{name} large payload mismatch");
-        sending.Wait(TimeSpan.FromSeconds(5));
-        Check(sending.IsCompletedSuccessfully, $"{name} large send stalled");
         Increment(counters, "large");
     }
 

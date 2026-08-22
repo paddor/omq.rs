@@ -13,6 +13,7 @@ export declare class NativeSocket {
   unbind(endpoint: string): void
   disconnect(endpoint: string): void
   send(parts: Array<Uint8Array>): void
+  sendAsync(parts: Array<Uint8Array>): Promise<void>
   sendSync(parts: Array<Uint8Array>): void
   sendOneSync(payload: Uint8Array): void
   sendBufferSync(payload: Buffer): void
@@ -20,7 +21,8 @@ export declare class NativeSocket {
   recv(): Array<Uint8Array>
   recvSync(): Array<Uint8Array>
   recvRawSync(): Uint8Array | Array<Uint8Array>
-  recvRaw(signal?: AbortSignal | undefined | null): Promise<Uint8Array | Array<Uint8Array>>
+  recvRaw(cancelId?: number | undefined | null): Promise<Uint8Array | Array<Uint8Array>>
+  cancelRecv(cancelId: number): void
   recvTimeout(timeoutMs: number): Array<Uint8Array> | null
   tryRecv(): Array<Uint8Array> | null
   tryRecvRaw(): Uint8Array | Array<Uint8Array> | null

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::ptr;
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use napi::bindgen_prelude::{
-    AbortSignal, AsyncTask, BufferSlice, Env, FromNapiValue, Task, TypedArrayType, Uint8Array,
+    AsyncBlock, AsyncBlockBuilder, BufferSlice, Env, FromNapiValue, TypedArrayType, Uint8Array,
     Uint32Array,
 };
 use napi::{Either, Error as NapiError, Result, Status, sys};
@@ -20,6 +21,7 @@ use omq_tokio::{
     Context as OmqContext, ContextConfig, CurveKeypair, CurvePublicKey, CurveSecretKey, Endpoint,
     Message, OnMute, Options, ReconnectPolicy, SocketType,
 };
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 struct ContextState {
@@ -71,10 +73,55 @@ impl SocketState {
     }
 
     fn close_socket(&self) -> Result<()> {
+        self.cancel_all_recvs()?;
         if !self.closed.swap(true, Ordering::AcqRel)
             && let Some(socket) = self.take_socket()?
         {
             socket.close().map_err(map_omq_error)?;
+        }
+        Ok(())
+    }
+
+    fn register_recv(&self, id: u32, cancel: CancellationToken) -> Result<()> {
+        let mut recvs = self
+            .recv_cancels
+            .lock()
+            .map_err(|_| napi_error("receive cancellation map poisoned"))?;
+        if recvs.contains_key(&id) {
+            return Err(napi_error("duplicate receive cancellation id"));
+        }
+        recvs.insert(id, cancel);
+        Ok(())
+    }
+
+    fn finish_recv(&self, id: u32) {
+        if let Ok(mut recvs) = self.recv_cancels.lock() {
+            recvs.remove(&id);
+        }
+    }
+
+    fn cancel_recv(&self, id: u32) -> Result<()> {
+        let cancel = self
+            .recv_cancels
+            .lock()
+            .map_err(|_| napi_error("receive cancellation map poisoned"))?
+            .get(&id)
+            .cloned();
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+        }
+        Ok(())
+    }
+
+    fn cancel_all_recvs(&self) -> Result<()> {
+        let recvs = mem::take(
+            &mut *self
+                .recv_cancels
+                .lock()
+                .map_err(|_| napi_error("receive cancellation map poisoned"))?,
+        );
+        for cancel in recvs.into_values() {
+            cancel.cancel();
         }
         Ok(())
     }
@@ -90,6 +137,7 @@ impl SocketState {
 #[derive(Debug)]
 struct SocketState {
     socket: RwLock<Option<omq_tokio::blocking::Socket>>,
+    recv_cancels: Mutex<HashMap<u32, CancellationToken>>,
     closed: AtomicBool,
 }
 
@@ -172,35 +220,6 @@ pub struct NativePackedMessages {
     pub message_parts: Uint32Array,
 }
 
-pub struct RecvRawTask {
-    socket: omq_tokio::blocking::Socket,
-    cancel: Arc<omq_tokio::blocking::BlockingRecvCancel>,
-}
-
-impl Task for RecvRawTask {
-    type Output = Message;
-    type JsValue = Either<Uint8Array, Vec<Uint8Array>>;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.cancel.register_current_thread_once();
-        let mut out = Vec::with_capacity(1);
-        match self
-            .socket
-            .recv_many_registered_cancelable_into(1, &self.cancel, &mut out)
-        {
-            Ok(Some(_)) => out
-                .pop()
-                .ok_or_else(|| napi_error("recv returned no message")),
-            Ok(None) => Err(NapiError::new(Status::Cancelled, "recv aborted")),
-            Err(error) => Err(map_omq_error(error)),
-        }
-    }
-
-    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        message_to_raw(&env, output)
-    }
-}
-
 #[napi]
 impl NativeContext {
     #[napi(constructor)]
@@ -247,6 +266,7 @@ impl NativeContext {
         let socket = ctx.blocking_socket(socket_type, options);
         let inner = Arc::new(SocketState {
             socket: RwLock::new(Some(socket)),
+            recv_cancels: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
         });
         self.inner.register_socket(&inner)?;
@@ -312,6 +332,14 @@ impl NativeSocket {
                 .send(message_from_parts(parts))
                 .map_err(map_omq_error)
         })
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn send_async(&self, env: Env, parts: Vec<Uint8Array>) -> Result<AsyncBlock<()>> {
+        let socket = self.socket_clone()?.into_async();
+        let message = message_from_parts(parts);
+        AsyncBlockBuilder::new(async move { socket.send(message).await.map_err(map_omq_error) })
+            .build(&env)
     }
 
     #[napi]
@@ -384,17 +412,42 @@ impl NativeSocket {
     }
 
     #[napi(ts_return_type = "Promise<Uint8Array | Array<Uint8Array>>")]
-    pub fn recv_raw(&self, signal: Option<AbortSignal>) -> Result<AsyncTask<RecvRawTask>> {
-        let socket = self.socket_clone()?;
-        let cancel = Arc::new(omq_tokio::blocking::BlockingRecvCancel::new());
-        if let Some(signal) = signal.as_ref() {
-            let cancel = cancel.clone();
-            signal.on_abort(move || cancel.cancel());
+    pub fn recv_raw(
+        &self,
+        env: Env,
+        cancel_id: Option<u32>,
+    ) -> Result<AsyncBlock<Either<Uint8Array, Vec<Uint8Array>>>> {
+        let socket = self.socket_clone()?.into_async();
+        let cancel = CancellationToken::new();
+        if let Some(id) = cancel_id {
+            self.inner.register_recv(id, cancel.clone())?;
         }
-        Ok(AsyncTask::with_optional_signal(
-            RecvRawTask { socket, cancel },
-            signal,
-        ))
+        let state = self.inner.clone();
+        let block = AsyncBlockBuilder::build_with_map(
+            &env,
+            async move {
+                let result = match cancel.run_until_cancelled_owned(socket.recv()).await {
+                    Some(result) => result.map_err(map_omq_error),
+                    None => Err(NapiError::new(Status::Cancelled, "recv aborted")),
+                };
+                if let Some(id) = cancel_id {
+                    state.finish_recv(id);
+                }
+                result
+            },
+            |env, message| message_to_raw(&env, message),
+        );
+        if block.is_err()
+            && let Some(id) = cancel_id
+        {
+            self.inner.finish_recv(id);
+        }
+        block
+    }
+
+    #[napi]
+    pub fn cancel_recv(&self, cancel_id: u32) -> Result<()> {
+        self.inner.cancel_recv(cancel_id)
     }
 
     #[napi]

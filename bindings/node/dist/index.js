@@ -151,6 +151,7 @@ class Socket {
     #recvPrefetch;
     #recvQueue = [];
     #recvQueueOffset = 0;
+    #nextRecvCancelId = 1;
     #closed = false;
     /** Create a socket of the given type. Prefer concrete subclasses for normal use. */
     constructor(socketType, options = {}, context) {
@@ -184,8 +185,7 @@ class Socket {
     /** Send one message and resolve when accepted by the socket. */
     send(message) {
         this.#checkOpen();
-        sendNativeSync(this.native, message);
-        return Promise.resolve();
+        return this.native.sendAsync(messageParts(message));
     }
     /** Synchronously send one message. */
     sendSync(message) {
@@ -204,13 +204,25 @@ class Socket {
         if (options.signal)
             throwIfAborted(options.signal);
         this.#checkOpen();
+        const signal = options.signal;
+        const cancelId = signal === undefined ? undefined : this.#takeRecvCancelId();
+        const abort = cancelId === undefined ? undefined : () => this.native.cancelRecv(cancelId);
+        if (abort !== undefined)
+            signal?.addEventListener("abort", abort, { once: true });
         try {
-            return messageFromNative(await this.native.recvRaw(options.signal));
+            const pending = this.native.recvRaw(cancelId);
+            if (signal?.aborted && cancelId !== undefined)
+                this.native.cancelRecv(cancelId);
+            return messageFromNative(await pending);
         }
         catch (error) {
-            if (options.signal?.aborted)
+            if (signal?.aborted)
                 throwAbortError();
             throw error;
+        }
+        finally {
+            if (abort !== undefined)
+                signal?.removeEventListener("abort", abort);
         }
     }
     /** Synchronously receive one message. */
@@ -289,6 +301,11 @@ class Socket {
         if (this.#closed) {
             throw new Error("socket closed");
         }
+    }
+    #takeRecvCancelId() {
+        const id = this.#nextRecvCancelId;
+        this.#nextRecvCancelId = id === 0xffff_ffff ? 1 : id + 1;
+        return id;
     }
     #recvRawSync() {
         const queued = this.#takeQueuedRaw();
@@ -598,6 +615,13 @@ function sendNativeSync(socket, input) {
         return;
     }
     sendSingleNativeSync(socket, input);
+}
+function messageParts(input) {
+    if (input instanceof Message)
+        return input.parts;
+    if (Array.isArray(input))
+        return input.map(toBytes);
+    return [toBytes(input)];
 }
 function sendSingleNativeSync(socket, input) {
     if (node_buffer_1.Buffer.isBuffer(input)) {

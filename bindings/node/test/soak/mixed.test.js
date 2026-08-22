@@ -20,6 +20,8 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
   const ipc = await openPushPull(ipcEndpoint("node-soak"), BATCH);
   traceStage(0, "open-inproc");
   const inproc = await openPushPullInproc(BATCH);
+  traceStage(0, "open-abortable");
+  const abortable = await openAbortablePushPull(Math.max(16, Math.floor(BATCH / 4)));
   traceStage(0, "open-lz4");
   const lz4 = await openPushPull("lz4+tcp://127.0.0.1:0", BATCH);
   traceStage(0, "open-curve");
@@ -44,6 +46,8 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
       messages += await pushPullCycle(ipc, "ipc");
       traceStage(cycles, "inproc");
       messages += await pushPullCycle(inproc, "inproc");
+      traceStage(cycles, "abortable");
+      messages += await abortablePushPullCycle(abortable);
       traceStage(cycles, "lz4");
       messages += await pushPullCycle(lz4, "lz4");
       traceStage(cycles, "curve");
@@ -78,6 +82,7 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
     reqRep.close();
     curve.close();
     lz4.close();
+    abortable.close();
     inproc.close();
     ipc.close();
     tcp.close();
@@ -122,6 +127,19 @@ async function openPushPull(bindEndpoint, count, pullOptions = {}, pushOptions =
 
 async function openPushPullInproc(count) {
   return openPushPull(inprocEndpoint("node-soak"), count);
+}
+
+async function openAbortablePushPull(count) {
+  const pair = await openPushPull(inprocEndpoint("node-soak-abortable"), count);
+  const controller = new AbortController();
+  return {
+    ...pair,
+    signal: controller.signal,
+    close() {
+      controller.abort();
+      pair.close();
+    },
+  };
 }
 
 async function openCurvePushPull(count) {
@@ -233,6 +251,15 @@ async function pushPullCycle(pair, label) {
     sendBatch(pair.push, pair.payload, pair.count, label),
     recvBatch(pair.pull, pair.count, label),
   ]);
+  return pair.count;
+}
+
+async function abortablePushPullCycle(pair) {
+  for (let index = 0; index < pair.count; index++) {
+    const received = pair.pull.recv({ signal: pair.signal });
+    await pair.push.send(pair.payload);
+    await received;
+  }
   return pair.count;
 }
 

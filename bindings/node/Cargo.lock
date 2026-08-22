@@ -509,8 +509,6 @@ dependencies = [
 [[package]]
 name = "lz4rip-core"
 version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fc4edb61fcaf1cdad24ac2982eff7af4417ef463c33bcf5c42ba549abd8b96"
 
 [[package]]
 name = "lz4rip-decode"
@@ -524,8 +522,6 @@ dependencies = [
 [[package]]
 name = "lz4rip-encode"
 version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e92b7345788ec0d32b5e31051dc6a86730e17b01267e502e9ec2744b689d34"
 dependencies = [
  "lz4rip-core",
 ]
@@ -639,6 +635,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "omq-tokio",
+ "tokio-util",
 ]
 
 [[package]]

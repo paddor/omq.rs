@@ -259,6 +259,10 @@ fn assert_no_disconnect(monitor: &mut omq_tokio::MonitorStream, scenario: &str) 
             Ok(_) => {}
             Err(MonitorTryRecvError::Empty | MonitorTryRecvError::Closed) => return,
             Err(MonitorTryRecvError::Lagged(skipped)) => {
+                if std::env::var_os("OMQ_SOAK_ALLOW_MONITOR_LAG").is_some() {
+                    eprintln!("{scenario} monitor lagged during soak: skipped {skipped}");
+                    return;
+                }
                 panic!("{scenario} monitor lagged during soak: skipped {skipped}");
             }
             Err(error) => panic!("{scenario} unexpected monitor error during soak: {error:?}"),

@@ -102,7 +102,7 @@ public sealed class Socket : IDisposable
     public string Bind(string endpoint)
     {
         EndpointCall("bind", endpoint, NativeBind);
-        return endpoint.EndsWith(":0", StringComparison.Ordinal) ? GetString(SocketOption.LastEndpoint) : endpoint;
+        return GetString(SocketOption.LastEndpoint);
     }
     /// Connects to an endpoint.
     public void Connect(string endpoint) => EndpointCall("connect", endpoint, NativeConnect);

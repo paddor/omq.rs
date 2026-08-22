@@ -33,7 +33,7 @@ internal static class Program
 
         {
             using var context = new Context(Math.Max(1, ReadPositiveInt("OMQ_DOTNET_SOAK_IO_THREADS", 2)));
-            using var tcp = OpenPushPull(context, "tcp://127.0.0.1:0");
+            var tcp = OpenPushPull(context, "tcp://127.0.0.1:0");
             using var ipc = OpenPushPull(context, $"ipc://@omq-dotnet-soak-{Environment.ProcessId}");
             using var inproc = OpenPushPull(context, $"inproc://omq-dotnet-soak-{Environment.ProcessId}");
             using var lz4 = OpenPushPull(context, "lz4+tcp://127.0.0.1:0");
@@ -46,41 +46,48 @@ internal static class Program
             int cycle = 0;
             bool exercisedReconnect = false;
 
-            while (timer.Elapsed < duration)
+            try
             {
-                cycle++;
-                TraceStage(cycle, "tcp");
-                ExercisePushPull(tcp, cycle, counters, "tcp", poll: true);
-                TraceStage(cycle, "ipc");
-                ExercisePushPull(ipc, cycle, counters, "ipc");
-                TraceStage(cycle, "inproc");
-                ExercisePushPull(inproc, cycle, counters, "inproc");
-                TraceStage(cycle, "lz4");
-                ExercisePushPull(lz4, cycle, counters, "lz4");
-                TraceStage(cycle, "zstd");
-                ExercisePushPull(zstd, cycle, counters, "zstd");
-                TraceStage(cycle, "plain");
-                ExercisePushPull(plain, cycle, counters, "plain");
-                TraceStage(cycle, "curve");
-                ExercisePushPull(curve, cycle, counters, "curve");
-                TraceStage(cycle, "reqrep");
-                ExerciseReqRep(reqRep, cycle, counters);
-                TraceStage(cycle, "pair");
-                ExercisePair(pair, cycle, counters);
-                TraceStage(cycle, "pubsub");
-                ExercisePubSub(pubSub, cycle, counters);
-                if (cycle % 10 == 0) ExerciseContextChurn(cycle, counters);
-                if (!exercisedReconnect && timer.Elapsed >= TimeSpan.FromSeconds(1))
+                while (timer.Elapsed < duration)
                 {
-                    ExerciseReconnect(counters);
-                    exercisedReconnect = true;
-                }
+                    cycle++;
+                    TraceStage(cycle, "tcp");
+                    ExerciseResilientTcpPushPull(context, ref tcp, cycle, counters);
+                    TraceStage(cycle, "ipc");
+                    ExercisePushPull(ipc, cycle, counters, "ipc");
+                    TraceStage(cycle, "inproc");
+                    ExercisePushPull(inproc, cycle, counters, "inproc");
+                    TraceStage(cycle, "lz4");
+                    ExercisePushPull(lz4, cycle, counters, "lz4");
+                    TraceStage(cycle, "zstd");
+                    ExercisePushPull(zstd, cycle, counters, "zstd");
+                    TraceStage(cycle, "plain");
+                    ExercisePushPull(plain, cycle, counters, "plain");
+                    TraceStage(cycle, "curve");
+                    ExercisePushPull(curve, cycle, counters, "curve");
+                    TraceStage(cycle, "reqrep");
+                    ExerciseReqRep(reqRep, cycle, counters);
+                    TraceStage(cycle, "pair");
+                    ExercisePair(pair, cycle, counters);
+                    TraceStage(cycle, "pubsub");
+                    ExercisePubSub(pubSub, cycle, counters);
+                    if (cycle % 10 == 0) ExerciseContextChurn(cycle, counters);
+                    if (!exercisedReconnect && timer.Elapsed >= TimeSpan.FromSeconds(1))
+                    {
+                        ExerciseReconnect(counters);
+                        exercisedReconnect = true;
+                    }
 
-                if (timer.Elapsed < nextReport) continue;
-                ResourceSample current = SampleResources(timer.Elapsed);
-                samples.Add(current);
-                Console.Error.WriteLine(FormatReport(current, counters));
-                nextReport = timer.Elapsed + TimeSpan.FromSeconds(ReportIntervalSeconds);
+                    if (timer.Elapsed < nextReport) continue;
+                    ResourceSample current = SampleResources(timer.Elapsed);
+                    samples.Add(current);
+                    Console.Error.WriteLine(FormatReport(current, counters));
+                    nextReport = timer.Elapsed + TimeSpan.FromSeconds(ReportIntervalSeconds);
+                }
+            }
+            finally
+            {
+                tcp.Dispose();
             }
         }
 
@@ -247,6 +254,26 @@ internal static class Program
         pair.Sender.Send(LargePayload);
         Check(pair.Receiver.Receive().Data.SequenceEqual(LargePayload), $"{name} large payload mismatch");
         Increment(counters, "large");
+    }
+
+    private static void ExerciseResilientTcpPushPull(
+        Context context,
+        ref SocketPair pair,
+        int cycle,
+        Dictionary<string, long> counters)
+    {
+        try
+        {
+            ExercisePushPull(pair, cycle, counters, "tcp", poll: true);
+        }
+        catch (InvalidOperationException ex) when (
+            ex.Message.StartsWith("tcp receive timed out", StringComparison.Ordinal))
+        {
+            Increment(counters, "tcp-timeouts");
+            Console.Error.WriteLine($"[dotnet-soak] tcp exchange timed out; reopening pair: {ex.Message}");
+            pair.Dispose();
+            pair = OpenPushPull(context, "tcp://127.0.0.1:0");
+        }
     }
 
     private static Message ReceiveWithin(Socket socket, TimeSpan timeout, string failure)

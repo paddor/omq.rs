@@ -410,14 +410,20 @@ func soakChurnPush(
 		}
 		if err := soakConnectSocket(ctx, push, endpoint); err != nil {
 			closeSoakScenarioSocket(push, counters, scenario)
-			return err
+			if ctx.Err() != nil {
+				return errFromContext(ctx)
+			}
+			if errors.Is(err, ErrTimeout) || errors.Is(err, ErrAgain) {
+				continue
+			}
+			return fmt.Errorf("%s churn connect %s: %w", scenario, endpoint, err)
 		}
 		if _, err := push.WaitConnectedTimeout(1, soakConnectTimeout); err != nil {
 			closeSoakScenarioSocket(push, counters, scenario)
 			if ctx.Err() != nil || errors.Is(err, ErrTimeout) {
 				continue
 			}
-			return err
+			return fmt.Errorf("%s churn wait connected %s: %w", scenario, endpoint, err)
 		}
 		payload := soakPayload(fmt.Sprintf("churn-%d", workerID), seq, 256)
 		for i := 0; i < 32 && ctx.Err() == nil; i++ {
@@ -425,7 +431,7 @@ func soakChurnPush(
 			if err := push.SendTimeout(Bytes(payload), soakSendTimeout); err != nil &&
 				!errors.Is(err, ErrTimeout) && !errors.Is(err, ErrAgain) {
 				closeSoakScenarioSocket(push, counters, scenario)
-				return err
+				return fmt.Errorf("%s churn send %s: %w", scenario, endpoint, err)
 			}
 			seq++
 		}

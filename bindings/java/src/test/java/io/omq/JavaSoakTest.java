@@ -28,6 +28,9 @@ import org.junit.jupiter.api.Test;
 
 final class JavaSoakTest {
     private static final Duration RECV_TIMEOUT = Duration.ofMillis(200);
+    private static final Duration SEND_TIMEOUT = Duration.ofMillis(200);
+    private static final Duration CONTROL_SEND_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration EXCHANGE_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration REPORT_INTERVAL = Duration.ofSeconds(10);
     private static final Duration RESOURCE_CHECK_DELAY = Duration.ofSeconds(20);
@@ -120,11 +123,18 @@ final class JavaSoakTest {
             pool.shutdown();
             if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
                 pool.shutdownNow();
+                failure.compareAndSet(null,
+                        new AssertionError("Java soak workers did not stop within 30s"));
             }
         }
 
-        for (Future<?> task : tasks) {
-            task.get(1, TimeUnit.SECONDS);
+        for (int i = 0; i < tasks.size(); i++) {
+            Future<?> task = tasks.get(i);
+            if (!task.isDone()) {
+                dumpThreads("Java soak worker still running after shutdown: " + i);
+                fail("Java soak worker still running after shutdown: " + i);
+            }
+            task.get();
         }
         System.gc();
         Thread.sleep(200);
@@ -211,7 +221,7 @@ final class JavaSoakTest {
             LongAdder received) {
         runWorker(stop, failure, () -> {
             try (Context context = OMQ.context(1);
-                 Socket pull = context.socket(SocketType.PULL)) {
+                 Socket pull = soakSocket(context, SocketType.PULL)) {
                 endpoint.complete(pull.bind("tcp://127.0.0.1:0"));
                 while (!stop.get()) {
                     if (pull.receiveBytes(RECV_TIMEOUT).isPresent()) {
@@ -230,16 +240,16 @@ final class JavaSoakTest {
             LongAdder sent) {
         runWorker(stop, failure, () -> {
             byte[] payload = payload("tcp", workerId, 256);
-            try (Context context = OMQ.context(1)) {
+            try (Context context = OMQ.context(1);
+                 Socket push = soakSocket(context, SocketType.PUSH)) {
+                push.connect(endpoint);
+                while (!stop.get() && !waitConnectedOrRetry(push, stop)) {
+                    Thread.sleep(10);
+                }
                 while (!stop.get()) {
-                    try (Socket push = context.socket(SocketType.PUSH)) {
-                        push.connect(endpoint);
-                        if (!waitConnectedOrRetry(push, stop)) {
-                            continue;
-                        }
-                        for (int i = 0; i < 32 && !stop.get(); i++) {
-                            payload[0] = (byte) i;
-                            push.send(payload);
+                    for (int i = 0; i < 32 && !stop.get(); i++) {
+                        payload[0] = (byte) i;
+                        if (push.send(payload, SEND_TIMEOUT)) {
                             sent.increment();
                         }
                     }
@@ -257,7 +267,7 @@ final class JavaSoakTest {
             LongAdder received) {
         runWorker(stop, failure, () -> {
             try (Context context = OMQ.context(1);
-                 Socket pull = context.socket(SocketType.PULL).curveServer(
+                 Socket pull = soakSocket(context, SocketType.PULL).curveServer(
                          serverKeypair,
                          peer -> allowedClient.publicKey().equals(peer.publicKey().orElse("")))) {
                 endpoint.complete(pull.bind("tcp://127.0.0.1:0"));
@@ -279,18 +289,17 @@ final class JavaSoakTest {
             int workerId) {
         runWorker(stop, failure, () -> {
             byte[] payload = payload("curve", workerId, 192);
-            try (Context context = OMQ.context(1)) {
+            try (Context context = OMQ.context(1);
+                 Socket push = soakSocket(context, SocketType.PUSH)
+                         .curveClient(clientKeypair, serverPublicKey)) {
+                push.connect(endpoint);
+                while (!stop.get() && !waitConnectedOrRetry(push, stop)) {
+                    Thread.sleep(10);
+                }
                 while (!stop.get()) {
-                    try (Socket push = context.socket(SocketType.PUSH)
-                            .curveClient(clientKeypair, serverPublicKey)) {
-                        push.connect(endpoint);
-                        if (!waitConnectedOrRetry(push, stop)) {
-                            continue;
-                        }
-                        for (int i = 0; i < 8 && !stop.get(); i++) {
-                            payload[0] = (byte) i;
-                            push.send(payload);
-                        }
+                    for (int i = 0; i < 8 && !stop.get(); i++) {
+                        payload[0] = (byte) i;
+                        push.send(payload, SEND_TIMEOUT);
                     }
                 }
             }
@@ -305,16 +314,18 @@ final class JavaSoakTest {
             LongAdder received) {
         runWorker(stop, failure, () -> {
             try (Context context = OMQ.context(1);
-                 Socket pull = compressionSocket(context.socket(SocketType.PULL), dict);
-                 Socket push = compressionSocket(context.socket(SocketType.PUSH), dict)) {
+                 Socket pull = compressionSocket(soakSocket(context, SocketType.PULL), dict);
+                 Socket push = compressionSocket(soakSocket(context, SocketType.PUSH), dict)) {
                 String endpoint = pull.bind(bindEndpoint);
                 push.connect(endpoint);
                 push.waitConnected(1, CONNECT_TIMEOUT);
                 int seq = 0;
                 while (!stop.get()) {
                     byte[] payload = payload("compression-" + bindEndpoint, seq++, 1_024);
-                    push.send(payload);
-                    byte[] got = pull.receiveBytes(Duration.ofSeconds(5)).orElseThrow();
+                    if (!push.send(payload, SEND_TIMEOUT)) {
+                        continue;
+                    }
+                    byte[] got = pull.receiveBytes(EXCHANGE_TIMEOUT).orElseThrow();
                     if (got.length != payload.length || got[0] != payload[0]) {
                         throw new AssertionError("compression payload mismatch");
                     }
@@ -341,19 +352,23 @@ final class JavaSoakTest {
             LongAdder cycles) {
         runWorker(stop, failure, () -> {
             try (Context context = OMQ.context(1);
-                 Socket rep = context.socket(SocketType.REP);
-                 Socket req = context.socket(SocketType.REQ)) {
+                 Socket rep = soakSocket(context, SocketType.REP);
+                 Socket req = soakSocket(context, SocketType.REQ)) {
                 String endpoint = rep.bind(TestSupport.inprocEndpoint("java-soak-req-rep"));
                 req.connect(endpoint);
                 int seq = 0;
                 while (!stop.get()) {
                     String payload = "req-" + seq++;
-                    req.send(payload);
-                    if (!payload.equals(rep.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                    if (!sendControl(req, payload, stop)) {
+                        break;
+                    }
+                    if (!payload.equals(rep.receive(EXCHANGE_TIMEOUT).orElseThrow().text())) {
                         throw new AssertionError("inproc request mismatch");
                     }
-                    rep.send("ok");
-                    if (!"ok".equals(req.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                    if (!sendControl(rep, "ok", stop)) {
+                        break;
+                    }
+                    if (!"ok".equals(req.receive(EXCHANGE_TIMEOUT).orElseThrow().text())) {
                         throw new AssertionError("inproc reply mismatch");
                     }
                     cycles.increment();
@@ -368,13 +383,13 @@ final class JavaSoakTest {
             LongAdder messages) {
         runWorker(stop, failure, () -> {
             try (Context context = OMQ.context(2);
-                 Socket pull = context.socket(SocketType.PULL);
-                 Socket push = context.socket(SocketType.PUSH);
-                 Socket left = context.socket(SocketType.PAIR);
-                 Socket right = context.socket(SocketType.PAIR);
-                 Socket pub = context.socket(SocketType.PUB);
-                 Socket first = context.socket(SocketType.SUB);
-                 Socket second = context.socket(SocketType.SUB)) {
+                 Socket pull = soakSocket(context, SocketType.PULL);
+                 Socket push = soakSocket(context, SocketType.PUSH);
+                 Socket left = soakSocket(context, SocketType.PAIR);
+                 Socket right = soakSocket(context, SocketType.PAIR);
+                 Socket pub = soakSocket(context, SocketType.PUB);
+                 Socket first = soakSocket(context, SocketType.SUB);
+                 Socket second = soakSocket(context, SocketType.SUB)) {
                 String ipc = pull.bind("ipc://@omq-java-soak-" + ProcessHandle.current().pid());
                 push.connect(ipc);
                 push.waitConnected(1, CONNECT_TIMEOUT);
@@ -391,34 +406,81 @@ final class JavaSoakTest {
                 while (!stop.get()) {
                     byte[] sequence = Integer.toString(seq).getBytes(StandardCharsets.UTF_8);
                     byte[] body = seq % 64 == 0 ? large : sequence;
-                    push.send(Message.multipart(sequence, body));
-                    Message multipart = pull.receive(Duration.ofSeconds(5)).orElseThrow();
+                    if (!sendControl(push, Message.multipart(sequence, body), stop)) {
+                        break;
+                    }
+                    Message multipart = pull.receive(EXCHANGE_TIMEOUT).orElseThrow();
                     if (multipart.partCount() != 2
                             || !java.util.Arrays.equals(multipart.part(0), sequence)
                             || multipart.part(1).length != body.length) {
                         throw new AssertionError("IPC multipart mismatch");
                     }
 
-                    left.send("left-" + seq);
-                    if (!("left-" + seq).equals(right.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                    if (!sendControl(left, "left-" + seq, stop)) {
+                        break;
+                    }
+                    if (!("left-" + seq).equals(right.receive(EXCHANGE_TIMEOUT).orElseThrow().text())) {
                         throw new AssertionError("PAIR forward mismatch");
                     }
-                    right.send("right-" + seq);
-                    if (!("right-" + seq).equals(left.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
+                    if (!sendControl(right, "right-" + seq, stop)) {
+                        break;
+                    }
+                    if (!("right-" + seq).equals(left.receive(EXCHANGE_TIMEOUT).orElseThrow().text())) {
                         throw new AssertionError("PAIR reverse mismatch");
                     }
 
-                    String published = "soak." + seq;
-                    pub.send(published);
-                    if (!published.equals(first.receive(Duration.ofSeconds(5)).orElseThrow().text())
-                            || !published.equals(second.receive(Duration.ofSeconds(5)).orElseThrow().text())) {
-                        throw new AssertionError("PUB/SUB fan-out mismatch");
+                    if (!sendControl(pub, "soak." + seq, stop)) {
+                        break;
                     }
-                    messages.add(5);
+                    int delivered = verifyPubSubDelivery(first.receive(RECV_TIMEOUT), "first")
+                            + verifyPubSubDelivery(second.receive(RECV_TIMEOUT), "second");
+                    messages.add(3L + delivered);
                     seq++;
                 }
             }
         });
+    }
+
+    private static int verifyPubSubDelivery(Optional<Message> message, String subscriber) {
+        if (message.isEmpty()) {
+            return 0;
+        }
+        String text = message.orElseThrow().text();
+        if (!text.startsWith("soak.")) {
+            throw new AssertionError("PUB/SUB " + subscriber + " payload mismatch");
+        }
+        return 1;
+    }
+
+    private static Socket soakSocket(Context context, SocketType type) {
+        return context.socket(type).linger(Duration.ZERO);
+    }
+
+    private static boolean sendControl(Socket socket, String payload, AtomicBoolean stop) {
+        return sendControlResult(socket.send(payload, CONTROL_SEND_TIMEOUT), stop);
+    }
+
+    private static boolean sendControl(Socket socket, Message message, AtomicBoolean stop) {
+        return sendControlResult(socket.send(message, CONTROL_SEND_TIMEOUT), stop);
+    }
+
+    private static boolean sendControlResult(boolean sent, AtomicBoolean stop) {
+        if (sent || stop.get()) {
+            return sent;
+        }
+        throw new TimeoutException("Java soak control send timed out");
+    }
+
+    private static void dumpThreads(String reason) {
+        System.err.println("[java-soak-thread-dump] " + reason);
+        for (var entry : Thread.getAllStackTraces().entrySet()) {
+            Thread thread = entry.getKey();
+            System.err.printf("[java-soak-thread-dump] thread=%s state=%s daemon=%s%n",
+                    thread.getName(), thread.getState(), thread.isDaemon());
+            for (StackTraceElement frame : entry.getValue()) {
+                System.err.println("[java-soak-thread-dump]   at " + frame);
+            }
+        }
     }
 
     private static void runWorker(

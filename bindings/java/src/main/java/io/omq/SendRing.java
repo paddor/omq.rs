@@ -144,6 +144,13 @@ final class SendRing implements AutoCloseable {
         return true;
     }
 
+    void shutdown() {
+        if (handle == 0) {
+            return;
+        }
+        ATOMIC_LONG.setRelease(control, CONTROL_CLOSED, 1L);
+    }
+
     private long headAcquire() {
         return (long) ATOMIC_LONG.getAcquire(control, CONTROL_HEAD);
     }
@@ -202,6 +209,7 @@ final class SendRing implements AutoCloseable {
         if (current == 0) {
             return;
         }
+        shutdown();
         handle = 0;
         control = null;
         descriptors = null;

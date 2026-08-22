@@ -224,15 +224,7 @@ impl JavaSocket {
             return;
         }
         if let Some(socket) = self.socket.get() {
-            let socket = socket.clone();
-            let zero_linger = self
-                .options
-                .lock()
-                .map(|options| matches!(options.linger, Some(Duration::ZERO)))
-                .unwrap_or(true);
-            if !zero_linger {
-                let _ = socket.close();
-            }
+            let _ = socket.clone().close();
         }
     }
 

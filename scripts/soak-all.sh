@@ -156,14 +156,7 @@ fi
 
 soak_test_count="${#soak_tests[@]}"
 if [[ -z "${SOAK_TEST_THREADS:-}" ]]; then
-  default_soak_threads=$(((cpu_count + 2) / 3))
-  if (( default_soak_threads < 1 )); then
-    default_soak_threads=1
-  fi
-  if (( default_soak_threads > soak_test_count )); then
-    default_soak_threads="$soak_test_count"
-  fi
-  export SOAK_TEST_THREADS="$default_soak_threads"
+  export SOAK_TEST_THREADS="$soak_test_count"
 fi
 if [[ ! "$SOAK_TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: SOAK_TEST_THREADS must be a positive integer\n' >&2
@@ -171,7 +164,7 @@ if [[ ! "$SOAK_TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 rust_waves=$(((soak_test_count + SOAK_TEST_THREADS - 1) / SOAK_TEST_THREADS))
-rust_timeout_seconds="${SOAK_RUST_TIMEOUT_SECS:-$((duration_seconds * rust_waves + 900))}"
+rust_timeout_seconds="${SOAK_RUST_TIMEOUT_SECS:-$timeout_seconds}"
 if [[ ! "$rust_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: SOAK_RUST_TIMEOUT_SECS must be a positive integer\n' >&2
   exit 2
@@ -183,6 +176,7 @@ printf 'soak_target_list:\n'
 printf '  %s\n' "${soak_targets[@]}"
 printf 'soak_tests=%s\n' "$soak_test_count"
 printf 'soak_test_threads=%s\n' "$SOAK_TEST_THREADS"
+printf 'soak_test_waves=%s\n' "$rust_waves"
 printf 'soak_cpu_count=%s\n' "$cpu_count"
 printf 'rust_timeout=%ss\n' "$rust_timeout_seconds"
 

@@ -19,11 +19,7 @@ esac
 seconds=$((10#$value * multiplier))
 python="${OMQ_PYTHON:-${repo_root}/bindings/pyomq/.venv/bin/python}"
 maturin="${OMQ_MATURIN:-${repo_root}/bindings/pyomq/.venv/bin/maturin}"
-jobs="${OMQ_PYOMQ_SOAK_JOBS:-4}"
-if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
-  printf 'error: OMQ_PYOMQ_SOAK_JOBS must be a positive integer\n' >&2
-  exit 2
-fi
+jobs="${OMQ_PYOMQ_SOAK_JOBS:-}"
 
 cd "${repo_root}/bindings/pyomq"
 "$maturin" develop --release
@@ -50,6 +46,13 @@ mapfile -t test_ids < <(
 if [[ ${#test_ids[@]} -eq 0 ]]; then
   printf 'error: no pyomq soak tests collected\n' >&2
   exit 1
+fi
+if [[ -z "$jobs" ]]; then
+  jobs="${#test_ids[@]}"
+fi
+if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: OMQ_PYOMQ_SOAK_JOBS must be a positive integer\n' >&2
+  exit 2
 fi
 if (( jobs > ${#test_ids[@]} )); then
   jobs="${#test_ids[@]}"

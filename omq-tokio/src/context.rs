@@ -143,12 +143,19 @@ impl IoThreadPool {
     }
 
     fn assign_thread(&self) -> usize {
+        // Keep primary IO thread available for socket actors and binding
+        // control calls. Peer drivers can otherwise monopolize the same
+        // current-thread runtime that synchronous `zmq_bind()`/`zmq_connect()`
+        // calls use for request/response work.
+        let base = usize::from(self.threads.len() > 1);
         let best = self
             .threads
+            .get(base..)
+            .unwrap_or(&self.threads)
             .iter()
             .enumerate()
             .min_by_key(|(_, t)| t.load.load(Ordering::Relaxed))
-            .map_or(0, |(i, _)| i);
+            .map_or(base, |(i, _)| base + i);
         self.threads[best].load.fetch_add(1, Ordering::Relaxed);
         best
     }
@@ -634,4 +641,25 @@ fn build_current_thread_runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("omq: failed to build current_thread runtime")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IoThreadPool;
+
+    #[test]
+    fn single_io_thread_assigns_primary() {
+        let pool = IoThreadPool::new(1);
+        assert_eq!(pool.assign_thread(), 0);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn multi_io_thread_reserves_primary_for_control_work() {
+        let pool = IoThreadPool::new(3);
+        for _ in 0..8 {
+            assert_ne!(pool.assign_thread(), 0);
+        }
+        pool.shutdown();
+    }
 }

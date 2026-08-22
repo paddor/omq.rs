@@ -78,7 +78,8 @@ type socketOp struct {
 }
 
 type socketCall struct {
-	resp chan socketResult
+	resp    chan socketResult
+	started atomic.Bool
 }
 
 type socketResult struct {
@@ -130,6 +131,7 @@ func (s *socketState) ownerLoop() {
 
 	handle := s.handle
 	for op := range s.ops {
+		op.call.started.Store(true)
 		s.nativeMu.Lock()
 		result := runSocketOp(s, handle, op)
 		s.nativeMu.Unlock()
@@ -313,6 +315,7 @@ func (s *socketState) do(ctx context.Context, allowClosed bool, op socketOp) (re
 	}()
 
 	call := socketCallPool.Get().(*socketCall)
+	call.started.Store(false)
 	op.call = call
 	putCall := true
 	defer func() {
@@ -334,6 +337,16 @@ func (s *socketState) do(ctx context.Context, allowClosed bool, op socketOp) (re
 		putCall = false
 		return socketResult{}, ErrClosed
 	case <-ctx.Done():
+		if call.started.Load() &&
+			(op.kind == socketOpRecvWait || op.kind == socketOpRecvIntoWait) {
+			select {
+			case result := <-call.resp:
+				return result, result.err
+			case <-s.ownerDone:
+				putCall = false
+				return socketResult{}, ErrClosed
+			}
+		}
 		putCall = false
 		return socketResult{}, errFromContext(ctx)
 	}

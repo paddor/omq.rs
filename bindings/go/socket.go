@@ -154,9 +154,18 @@ func runSocketOp(state *socketState, handle *nativeSocket, op socketOp) socketRe
 		value, err := op.fn(handle)
 		return socketResult{value: value, err: err}
 	case socketOpBind:
-		text, err := socketBindNative(handle, op.endpoint)
+		var text string
+		var err error
+		if timeoutMillis, ok := socketOpTimeoutMillis(op); ok {
+			text, err = socketBindTimeoutNative(handle, op.endpoint, timeoutMillis)
+		} else {
+			text, err = socketBindNative(handle, op.endpoint)
+		}
 		return socketResult{text: text, err: err}
 	case socketOpConnect:
+		if timeoutMillis, ok := socketOpTimeoutMillis(op); ok {
+			return socketResult{err: socketConnectTimeoutNative(handle, op.endpoint, timeoutMillis)}
+		}
 		return socketResult{err: socketConnectNative(handle, op.endpoint)}
 	case socketOpUnbind:
 		return socketResult{err: socketUnbindNative(handle, op.endpoint)}
@@ -392,11 +401,19 @@ func (s *socketState) cancelActive() {
 
 // Bind binds this socket to an endpoint and returns the bound endpoint.
 func (s *Socket) Bind(endpoint string) (string, error) {
+	return s.BindContext(context.Background(), endpoint)
+}
+
+// BindContext binds this socket to an endpoint and returns the bound endpoint.
+func (s *Socket) BindContext(ctx context.Context, endpoint string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state := s.stateOrNil()
 	if state == nil {
 		return "", ErrClosed
 	}
-	result, err := state.do(context.Background(), false, socketOp{kind: socketOpBind, endpoint: endpoint})
+	result, err := state.do(ctx, false, socketOp{kind: socketOpBind, endpoint: endpoint})
 	if err != nil {
 		return "", err
 	}
@@ -406,11 +423,19 @@ func (s *Socket) Bind(endpoint string) (string, error) {
 
 // Connect connects this socket to an endpoint.
 func (s *Socket) Connect(endpoint string) error {
+	return s.ConnectContext(context.Background(), endpoint)
+}
+
+// ConnectContext connects this socket to an endpoint.
+func (s *Socket) ConnectContext(ctx context.Context, endpoint string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state := s.stateOrNil()
 	if state == nil {
 		return ErrClosed
 	}
-	_, err := state.do(context.Background(), false, socketOp{kind: socketOpConnect, endpoint: endpoint})
+	_, err := state.do(ctx, false, socketOp{kind: socketOpConnect, endpoint: endpoint})
 	keepAlive(s)
 	return err
 }
@@ -876,6 +901,25 @@ func socketOpContextErr(op socketOp) error {
 		return nil
 	}
 	return errFromContext(op.ctx)
+}
+
+func socketOpTimeoutMillis(op socketOp) (int64, bool) {
+	if op.ctx == nil {
+		return 0, false
+	}
+	deadline, ok := op.ctx.Deadline()
+	if !ok {
+		return 0, false
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, true
+	}
+	millis := remaining.Milliseconds()
+	if millis == 0 {
+		millis = 1
+	}
+	return millis, true
 }
 
 func (s *Socket) stateOrNil() *socketState {

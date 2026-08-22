@@ -222,10 +222,31 @@ func socketBindNative(socket *nativeSocket, endpoint string) (string, error) {
 	return C.GoString(bound), nil
 }
 
+func socketBindTimeoutNative(socket *nativeSocket, endpoint string, timeoutMillis int64) (string, error) {
+	cEndpoint := C.CString(endpoint)
+	defer C.free(unsafe.Pointer(cEndpoint))
+	var bound *C.char
+	err := statusErr(C.omq_go_socket_bind_timeout((*C.OmqGoSocket)(socket), cEndpoint, &bound, C.int64_t(timeoutMillis)))
+	if err != nil {
+		return "", err
+	}
+	if bound == nil {
+		return endpoint, nil
+	}
+	defer C.omq_go_string_free(bound)
+	return C.GoString(bound), nil
+}
+
 func socketConnectNative(socket *nativeSocket, endpoint string) error {
 	cEndpoint := C.CString(endpoint)
 	defer C.free(unsafe.Pointer(cEndpoint))
 	return statusErr(C.omq_go_socket_connect((*C.OmqGoSocket)(socket), cEndpoint))
+}
+
+func socketConnectTimeoutNative(socket *nativeSocket, endpoint string, timeoutMillis int64) error {
+	cEndpoint := C.CString(endpoint)
+	defer C.free(unsafe.Pointer(cEndpoint))
+	return statusErr(C.omq_go_socket_connect_timeout((*C.OmqGoSocket)(socket), cEndpoint, C.int64_t(timeoutMillis)))
 }
 
 func socketUnbindNative(socket *nativeSocket, endpoint string) error {

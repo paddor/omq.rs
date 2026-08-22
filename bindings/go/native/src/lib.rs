@@ -1044,6 +1044,13 @@ fn linger_from_millis(millis: i64) -> Option<Duration> {
     }
 }
 
+fn duration_from_nonnegative_millis(millis: i64) -> Result<Duration, Error> {
+    if millis < 0 {
+        return Err(Error::Config("timeout must be non-negative".to_string()));
+    }
+    Ok(Duration::from_millis(millis as u64))
+}
+
 #[cfg(feature = "curve")]
 fn curve_keypair_from_z85(public_key: &str, secret_key: &str) -> Result<CurveKeypair, Error> {
     let public = CurvePublicKey::from_z85(public_key)?;
@@ -1891,6 +1898,31 @@ pub extern "C" fn omq_go_socket_bind(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_bind_timeout(
+    socket: *mut OmqGoSocket,
+    endpoint: *const c_char,
+    bound_endpoint: *mut *mut c_char,
+    timeout_millis: i64,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        let endpoint = endpoint_from_c(endpoint)?;
+        let timeout = duration_from_nonnegative_millis(timeout_millis)?;
+        let bound = socket.materialize()?.bind_timeout(endpoint, timeout)?;
+        if !bound_endpoint.is_null() {
+            unsafe {
+                *bound_endpoint = string_to_raw(bound.to_string());
+            }
+        }
+        Ok(())
+    })();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn omq_go_socket_connect(
     socket: *mut OmqGoSocket,
     endpoint: *const c_char,
@@ -1900,6 +1932,25 @@ pub extern "C" fn omq_go_socket_connect(
     }
     let socket = unsafe { &*socket };
     let result = (|| socket.materialize()?.connect(endpoint_from_c(endpoint)?))();
+    status_from_result(result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_connect_timeout(
+    socket: *mut OmqGoSocket,
+    endpoint: *const c_char,
+    timeout_millis: i64,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    let socket = unsafe { &*socket };
+    let result = (|| {
+        socket.materialize()?.connect_timeout(
+            endpoint_from_c(endpoint)?,
+            duration_from_nonnegative_millis(timeout_millis)?,
+        )
+    })();
     status_from_result(result)
 }
 

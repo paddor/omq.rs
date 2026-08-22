@@ -673,7 +673,7 @@ fn server_routing_id(peer_id: u64) -> Option<u32> {
 }
 
 fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {
-    can_bypass_actor_recv(t) && (t != SocketType::Req || latency_profile)
+    can_bypass_actor_recv(t) && t != SocketType::Client && (t != SocketType::Req || latency_profile)
 }
 
 #[cfg(test)]
@@ -685,6 +685,7 @@ mod tests {
         assert!(can_use_yring_recv_bypass(SocketType::Req, true));
         assert!(!can_use_yring_recv_bypass(SocketType::Req, false));
         assert!(can_use_yring_recv_bypass(SocketType::Pull, false));
+        assert!(!can_use_yring_recv_bypass(SocketType::Client, false));
     }
 
     #[test]

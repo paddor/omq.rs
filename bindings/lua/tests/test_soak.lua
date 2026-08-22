@@ -155,15 +155,18 @@ local function recv_until_deadline(socket, seconds, ...)
   local last_err = nil
   while now() < deadline do
     local ok, value = pcall(function()
-      return socket:recv(table.unpack(args))
+      return socket:try_recv(table.unpack(args))
     end)
-    if ok then
+    if ok and value ~= nil then
       return value
     end
-    if not transient_error(value) then
+    if ok then
+      last_err = nil
+    elseif not transient_error(value) then
       error(value, 2)
+    else
+      last_err = value
     end
-    last_err = value
   end
   error(last_err or "recv deadline expired", 2)
 end
@@ -173,15 +176,18 @@ local function recv_parts_until_deadline(socket, seconds)
   local last_err = nil
   while now() < deadline do
     local ok, value = pcall(function()
-      return socket:recv_parts()
+      return socket:recv_parts(nil, omq.DONTWAIT)
     end)
-    if ok then
+    if ok and value ~= nil and #value > 0 then
       return value
     end
-    if not transient_error(value) then
+    if ok then
+      last_err = nil
+    elseif not transient_error(value) then
       error(value, 2)
+    else
+      last_err = value
     end
-    last_err = value
   end
   error(last_err or "recv_parts deadline expired", 2)
 end
@@ -957,7 +963,7 @@ local protocol_mix_instance = 0
 local function make_protocol_mix(shared)
   local scenario = "protocol-mix"
   protocol_mix_instance = protocol_mix_instance + 1
-  local send_timeout_ms = math.max(1000, math.floor(exchange_timeout_secs * 1000))
+  local send_timeout_ms = math.max(1000, math.floor(protocol_mix_timeout_secs * 1000))
   local pull = new_socket(shared, scenario, "pull", { linger = 0, recv_timeout = send_timeout_ms })
   local push = new_socket(shared, scenario, "push", { linger = 0, send_timeout = send_timeout_ms })
   local ipc = pull:bind("ipc://@omq-lua-soak-" .. tostring(pid()) .. "-" .. tostring(protocol_mix_instance))

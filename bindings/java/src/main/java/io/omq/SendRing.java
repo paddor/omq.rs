@@ -24,7 +24,8 @@ final class SendRing implements AutoCloseable {
             ValueLayout.JAVA_LONG.withOrder(ByteOrder.nativeOrder());
     private static final VarHandle ATOMIC_LONG = LONG.varHandle();
 
-    private long handle;
+    private volatile long handle;
+    private volatile boolean shutdownRequested;
     private MemorySegment control;
     private MemorySegment descriptors;
     private MemorySegment payload;
@@ -145,7 +146,9 @@ final class SendRing implements AutoCloseable {
     }
 
     void shutdown() {
-        if (handle == 0) {
+        shutdownRequested = true;
+        long current = handle;
+        if (current == 0) {
             return;
         }
         ATOMIC_LONG.setRelease(control, CONTROL_CLOSED, 1L);
@@ -160,8 +163,11 @@ final class SendRing implements AutoCloseable {
     }
 
     private void checkOpen() {
-        if (!closedAcquire()) {
+        if (!shutdownRequested && !closedAcquire()) {
             return;
+        }
+        if (handle == 0) {
+            throw new ClosedException("native send ring closed");
         }
         NativeFfm.throwSendRingError(handle);
         throw new ClosedException("native send ring closed");
@@ -169,6 +175,9 @@ final class SendRing implements AutoCloseable {
 
     @SuppressWarnings("restricted")
     private void ensure(long socketHandle) {
+        if (shutdownRequested) {
+            throw new ClosedException("native send ring closed");
+        }
         if (handle != 0) {
             return;
         }
@@ -187,7 +196,6 @@ final class SendRing implements AutoCloseable {
             NativeFfm.sendRingClose(created);
             throw new OMQException("native send ring returned invalid memory");
         }
-        handle = created;
         control = MemorySegment.ofAddress(controlAddress).reinterpret(CONTROL_BYTES);
         descriptors = MemorySegment.ofAddress(descAddress)
                 .reinterpret((long) descCapacity * DESC_BYTES);
@@ -201,6 +209,10 @@ final class SendRing implements AutoCloseable {
         reclaimedHead = 0;
         payloadTail = 0;
         payloadHead = 0;
+        handle = created;
+        if (shutdownRequested) {
+            ATOMIC_LONG.setRelease(control, CONTROL_CLOSED, 1L);
+        }
     }
 
     @Override

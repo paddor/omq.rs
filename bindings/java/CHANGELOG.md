@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Unblock concurrent socket close when a PUSH or SCATTER sender is waiting for
+  space in the native send ring.
+
 ## [0.3.2]
 
 - Re-run the OMQ.java release through a Maven Central workflow that publishes

@@ -1092,26 +1092,16 @@ public final class Socket implements AutoCloseable {
         }
 
         void close() {
-            if (usesSendRing) {
-                synchronized (this) {
-                    long handle = this.handle.getAndSet(0);
-                    if (handle != 0) {
-                        sendRing.shutdown();
-                        Native.socketShutdown(handle);
-                        sendRing.close();
-                        Native.socketClose(handle);
-                        recvRing.close();
-                    }
+            long handle = this.handle.getAndSet(0);
+            if (handle != 0) {
+                if (usesSendRing) {
+                    sendRing.shutdown();
                 }
-            } else {
-                long handle = this.handle.getAndSet(0);
-                if (handle != 0) {
-                    Native.socketShutdown(handle);
-                    synchronized (this) {
-                        sendRing.close();
-                        recvRing.close();
-                        Native.socketClose(handle);
-                    }
+                Native.socketShutdown(handle);
+                synchronized (this) {
+                    sendRing.close();
+                    recvRing.close();
+                    Native.socketClose(handle);
                 }
             }
             owner.remove(this);

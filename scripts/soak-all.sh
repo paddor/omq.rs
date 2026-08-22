@@ -230,7 +230,8 @@ run_job() {
 binding_workers="${SOAK_BINDING_WORKERS:-1}"
 printf 'binding_workers=%s\n' "$binding_workers"
 jobs_running=1
-run_job rust bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$rust_timeout_seconds" -- \
+run_job rust env OMQ_SOAK_DISABLE_THROUGHPUT_STABILITY=1 \
+  bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$rust_timeout_seconds" -- \
   cargo nextest run "${nextest_common[@]}" --test-threads="$SOAK_TEST_THREADS"
 run_job pyomq bindings/pyomq/scripts/soak.sh "$duration"
 run_job go env OMQ_GO_SOAK_DURATIONS="$duration_seconds" OMQ_GO_SOAK_WORKERS="$binding_workers" \

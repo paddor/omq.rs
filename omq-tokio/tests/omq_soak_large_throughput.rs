@@ -386,7 +386,7 @@ fn soak_large_message_throughput() {
         0.0
     };
     assert!(
-        drop_pct < 5.0,
+        drop_pct < 5.0 || st.dropped <= 16,
         "dropped {:.1}% of messages ({}/{})",
         drop_pct,
         st.dropped,

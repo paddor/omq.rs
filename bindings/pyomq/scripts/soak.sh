@@ -29,10 +29,16 @@ cd "${repo_root}/bindings/pyomq"
 "$maturin" develop --release
 
 pids=()
-names=()
+labels=()
 cleanup() {
   for pid in "${pids[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 0.2
+  for pid in "${pids[@]:-}"; do
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
 }
 trap 'cleanup; exit 130' INT TERM
@@ -55,13 +61,19 @@ failed=0
 for test_id in "${test_ids[@]}"; do
   name="${test_id#tests/soak/}"
   name="${name//.py::/-}"
-  (
+  bash -c '
+    set -o pipefail
+    name="$1"
+    seconds="$2"
+    python="$3"
+    test_id="$4"
     OMQ_SOAK_DURATION_SECS="$seconds" \
       timeout "$((seconds + 120))s" "$python" -m pytest -v --tb=short \
-        -o "timeout=$((seconds + 90))" "$test_id"
-  ) 2>&1 | sed -u "s/^/[${name}] /" &
+        -o "timeout=$((seconds + 90))" "$test_id" \
+      2>&1 | sed -u "s/^/[${name}] /"
+  ' bash "$name" "$seconds" "$python" "$test_id" &
   pids+=("$!")
-  names+=("$name")
+  labels+=("$name")
   active=$((active + 1))
   if (( active >= jobs )); then
     if ! wait -n; then

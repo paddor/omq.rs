@@ -998,7 +998,7 @@ fn rust_pull_count(
         return Err(err);
     }
     let linger = 0_i32;
-    let timeout = 5_000_i32;
+    let timeout = 30_000_i32;
     if let Err(err) = configure_pull_helper(sock, linger, timeout) {
         let _ = ready.send(Err(err.clone()));
         let _ = omq_zmq::zmq_close(sock);
@@ -1044,7 +1044,7 @@ fn rust_pull_until_stop(
         return Err(err);
     }
     let linger = 0_i32;
-    let timeout = 5_000_i32;
+    let timeout = 30_000_i32;
     if let Err(err) = configure_pull_helper(sock, linger, timeout) {
         let _ = ready.send(Err(err.clone()));
         let _ = omq_zmq::zmq_close(sock);

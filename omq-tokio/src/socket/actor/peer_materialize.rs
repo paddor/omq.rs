@@ -635,7 +635,7 @@ fn spawn_wire_task(
     io_thread: usize,
     peer_driver: ConnectionDriver<AnyStream>,
 ) {
-    let needs_migration = io_thread != 0;
+    let needs_migration = socket.io_pool.has_dedicated_io_threads();
     let task = socket.io_pool.spawn_on(io_thread, async move {
         let peer_driver = if needs_migration {
             match peer_driver.migrate_stream() {

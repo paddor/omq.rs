@@ -237,6 +237,9 @@ pub struct Connection {
     /// Whether we have sent a WS close frame.
     #[cfg(feature = "ws")]
     ws_close_sent: bool,
+    /// Partially assembled fragmented WebSocket binary message.
+    #[cfg(feature = "ws")]
+    ws_fragment: Option<BytesMut>,
 }
 
 impl Connection {
@@ -267,6 +270,8 @@ impl Connection {
             ws_role,
             #[cfg(feature = "ws")]
             ws_close_sent: false,
+            #[cfg(feature = "ws")]
+            ws_fragment: None,
             config,
         };
         #[cfg(feature = "ws")]
@@ -446,6 +451,121 @@ mod tests {
             frame::encode_frame(&f, &mut wire);
         }
         c.handle_input(wire.freeze())
+    }
+
+    #[cfg(feature = "ws")]
+    fn masked_ws_frame(fin: bool, opcode: u8, payload: &[u8], mask: [u8; 4]) -> Bytes {
+        let mut wire = BytesMut::new();
+        wire.put_u8((if fin { 0x80 } else { 0 }) | opcode);
+        if payload.len() <= 125 {
+            wire.put_u8(0x80 | payload.len() as u8);
+        } else if payload.len() <= 65_535 {
+            wire.put_u8(0x80 | 0x7e);
+            wire.put_u16(payload.len() as u16);
+        } else {
+            wire.put_u8(0x80 | 0x7f);
+            wire.put_u64(payload.len() as u64);
+        }
+        wire.put_slice(&mask);
+        let start = wire.len();
+        wire.put_slice(payload);
+        super::super::ws_codec::apply_mask(&mut wire[start..], mask);
+        wire.freeze()
+    }
+
+    #[cfg(feature = "ws")]
+    fn ready_ws_connection() -> Connection {
+        use super::super::ws_codec::{OP_BINARY_CODE, OP_CONTINUATION_CODE, WsRole};
+
+        let cfg = ConnectionConfig::new(Role::Server, SocketType::Pull).ws_role(WsRole::Server);
+        let mut connection = Connection::new(cfg);
+        let mut ready = BytesMut::new();
+        command::encode(
+            &Command::Ready(PeerProperties::default().with_socket_type(SocketType::Push)),
+            &mut ready,
+        );
+        let mut zws = vec![super::super::zws::FLAG_COMMAND];
+        zws.extend_from_slice(&ready);
+        let split = zws.len() / 2;
+        connection
+            .handle_input(masked_ws_frame(
+                false,
+                OP_BINARY_CODE,
+                &zws[..split],
+                [1, 2, 3, 4],
+            ))
+            .unwrap();
+        connection
+            .handle_input(masked_ws_frame(
+                true,
+                OP_CONTINUATION_CODE,
+                &zws[split..],
+                [5, 6, 7, 8],
+            ))
+            .unwrap();
+        assert!(connection.is_ready());
+        connection
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn assembles_masked_fragmented_ws_message_with_interleaved_ping() {
+        use super::super::ws_codec::{OP_BINARY_CODE, OP_CONTINUATION_CODE, OP_PING_CODE};
+
+        let mut connection = ready_ws_connection();
+        let payload = vec![0x5a; 64 * 1024];
+        let mut zws = vec![super::super::zws::FLAG_FINAL];
+        zws.extend_from_slice(&payload);
+        let split = 32 * 1024;
+        connection
+            .handle_input(masked_ws_frame(
+                false,
+                OP_BINARY_CODE,
+                &zws[..split],
+                [9, 10, 11, 12],
+            ))
+            .unwrap();
+        connection
+            .handle_input(masked_ws_frame(
+                true,
+                OP_PING_CODE,
+                b"still-alive",
+                [13, 14, 15, 16],
+            ))
+            .unwrap();
+        connection
+            .handle_input(masked_ws_frame(
+                true,
+                OP_CONTINUATION_CODE,
+                &zws[split..],
+                [17, 18, 19, 20],
+            ))
+            .unwrap();
+
+        let message = connection.poll_message().unwrap();
+        assert_eq!(message.part_bytes(0).unwrap(), payload);
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn echoes_empty_ws_close_without_reserved_status_code() {
+        use super::super::ws_codec::{OP_CLOSE_CODE, WsRole};
+
+        let mut connection = ready_ws_connection();
+        let pending = connection.pending_transmit_size();
+        connection.advance_transmit(pending);
+        connection
+            .handle_input(masked_ws_frame(true, OP_CLOSE_CODE, &[], [1, 2, 3, 4]))
+            .unwrap();
+
+        let response = connection.poll_transmit();
+        let mut input = super::super::chunked_buf::ChunkedInputBuf::new();
+        input.push(response);
+        let header = super::super::ws_codec::peek_ws_header(&input, WsRole::Server)
+            .unwrap()
+            .unwrap();
+        assert_eq!(header.opcode, OP_CLOSE_CODE);
+        assert_eq!(header.payload_len, 0);
     }
 
     #[test]

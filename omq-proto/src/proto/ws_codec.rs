@@ -1,7 +1,7 @@
 //! Sans-I/O WebSocket frame codec (RFC 6455).
 //!
 //! Implements the minimal subset needed by ZWS/2.0: binary frames, close,
-//! ping/pong. No continuation, no extensions, no text frames.
+//! ping/pong, and fragmented binary messages. No extensions or text frames.
 
 use bytes::{BufMut, BytesMut};
 
@@ -9,6 +9,7 @@ use super::chunked_buf::ChunkedInputBuf;
 use crate::error::{Error, Result};
 
 const OP_BINARY: u8 = 0x02;
+const OP_CONTINUATION: u8 = 0x00;
 const OP_CLOSE: u8 = 0x08;
 const OP_PING: u8 = 0x09;
 const OP_PONG: u8 = 0x0A;
@@ -30,6 +31,7 @@ pub enum WsRole {
 /// Parsed WebSocket frame header.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WsFrameHeader {
+    pub fin: bool,
     pub opcode: u8,
     pub payload_len: u64,
     pub header_len: usize,
@@ -39,7 +41,7 @@ pub(crate) struct WsFrameHeader {
 
 /// Peek a WebSocket frame header from the inbound buffer without consuming.
 ///
-/// Validates FIN=1, RSV=0, and rejects unsupported opcodes.
+/// Validates RSV=0 and rejects unsupported opcodes.
 /// `peer_role` is the role of the *peer* sending data: if the peer is a client,
 /// frames must be masked; if the peer is a server, frames must not be masked.
 pub(crate) fn peek_ws_header(
@@ -58,15 +60,10 @@ pub(crate) fn peek_ws_header(
             "WS RSV bits set but no extensions negotiated".into(),
         ));
     }
-    if b0 & FIN_BIT == 0 {
-        return Err(Error::Protocol(
-            "WS continuation frames not supported".into(),
-        ));
-    }
-
+    let fin = b0 & FIN_BIT != 0;
     let opcode = b0 & OPCODE_MASK;
     match opcode {
-        OP_BINARY | OP_CLOSE | OP_PING | OP_PONG => {}
+        OP_CONTINUATION | OP_BINARY | OP_CLOSE | OP_PING | OP_PONG => {}
         _ => {
             return Err(Error::Protocol(format!(
                 "unsupported WS opcode: 0x{opcode:02x}"
@@ -115,6 +112,14 @@ pub(crate) fn peek_ws_header(
             "WS control frame payload > 125 bytes".into(),
         ));
     }
+    if opcode >= OP_CLOSE && !fin {
+        return Err(Error::Protocol("fragmented WS control frame".into()));
+    }
+    if opcode == OP_CLOSE && payload_len == 1 {
+        return Err(Error::Protocol(
+            "WS close frame has one-byte payload".into(),
+        ));
+    }
 
     let mask_size = if masked { 4 } else { 0 };
     let header_len = len_header_size + mask_size;
@@ -132,6 +137,7 @@ pub(crate) fn peek_ws_header(
     }
 
     Ok(Some(WsFrameHeader {
+        fin,
         opcode,
         payload_len,
         header_len,
@@ -255,6 +261,7 @@ pub(crate) const OP_CLOSE_CODE: u8 = OP_CLOSE;
 pub(crate) const OP_PONG_CODE: u8 = OP_PONG;
 pub(crate) const OP_PING_CODE: u8 = OP_PING;
 pub(crate) const OP_BINARY_CODE: u8 = OP_BINARY;
+pub(crate) const OP_CONTINUATION_CODE: u8 = OP_CONTINUATION;
 
 #[cfg(test)]
 mod tests {
@@ -377,10 +384,21 @@ mod tests {
     }
 
     #[test]
-    fn peek_header_rejects_continuation() {
+    fn peek_header_accepts_continuation() {
         let mut buf = ChunkedInputBuf::new();
         buf.push(Bytes::from_static(&[FIN_BIT, 0])); // opcode 0 = continuation
-        assert!(peek_ws_header(&buf, WsRole::Server).is_err());
+        let hdr = peek_ws_header(&buf, WsRole::Server).unwrap().unwrap();
+        assert!(hdr.fin);
+        assert_eq!(hdr.opcode, OP_CONTINUATION);
+    }
+
+    #[test]
+    fn peek_header_accepts_nonfinal_binary() {
+        let mut buf = ChunkedInputBuf::new();
+        buf.push(Bytes::from_static(&[OP_BINARY, 0]));
+        let hdr = peek_ws_header(&buf, WsRole::Server).unwrap().unwrap();
+        assert!(!hdr.fin);
+        assert_eq!(hdr.opcode, OP_BINARY);
     }
 
     #[test]
@@ -430,6 +448,13 @@ mod tests {
         let hdr = peek_ws_header(&buf, WsRole::Server).unwrap().unwrap();
         assert_eq!(hdr.opcode, OP_CLOSE);
         assert_eq!(hdr.payload_len, 2);
+    }
+
+    #[test]
+    fn peek_header_rejects_one_byte_close_payload() {
+        let mut buf = ChunkedInputBuf::new();
+        buf.push(Bytes::from_static(&[FIN_BIT | OP_CLOSE, 1, 0]));
+        assert!(peek_ws_header(&buf, WsRole::Server).is_err());
     }
 
     #[test]

@@ -1216,4 +1216,15 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn reusable_compressor_survives_epoch_rollover() {
+        let input = vec![b'x'; 1024];
+        let mut output = vec![0u8; block::get_maximum_output_size(input.len())];
+        let mut compressor = Compressor::new();
+
+        for _ in 0..70_000 {
+            compressor.compress_into(&input, &mut output).unwrap();
+        }
+    }
 }

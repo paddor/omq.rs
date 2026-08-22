@@ -176,7 +176,6 @@ impl<'a> PeerLifecycle<'a> {
                     .lock()
                     .expect("type_state")
                     .on_peer_disconnected();
-                self.driver.rep_pending.lock().expect("rep pending").clear();
             }
             _ => {}
         }

@@ -1,5 +1,7 @@
 """REQ/REP envelope handling and DEALER/ROUTER identity routing."""
 
+import threading
+
 import pyomq as zmq
 
 
@@ -17,6 +19,43 @@ def test_req_rep_roundtrip(tcp_endpoint):
     finally:
         req.close()
         rep.close()
+        ctx.term()
+
+
+def test_rep_accepts_reply_while_client_closes(tcp_endpoint):
+    ctx = zmq.Context(io_threads=2)
+    rep = ctx.socket(zmq.REP)
+    rep.setsockopt(zmq.RCVTIMEO, 1_000)
+    rep.setsockopt(zmq.SNDTIMEO, 1_000)
+    rep.setsockopt(zmq.LINGER, 0)
+    endpoint = rep.bind(tcp_endpoint)
+    failure = []
+
+    def serve():
+        try:
+            for _ in range(21):
+                rep.send(rep.recv())
+        except Exception as error:  # noqa: BLE001 - preserve thread failure
+            failure.append(error)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    req = ctx.socket(zmq.REQ)
+    req.setsockopt(zmq.LINGER, 0)
+    try:
+        req.connect(endpoint)
+        for sequence in range(20):
+            request = f"request-{sequence}".encode()
+            req.send(request)
+            assert req.recv() == request
+        req.send(b"last")
+        req.close(linger=0)
+        server.join(timeout=2)
+        assert not server.is_alive()
+        assert not failure
+    finally:
+        req.close(linger=0)
+        rep.close(linger=0)
         ctx.term()
 
 

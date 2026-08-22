@@ -419,12 +419,17 @@ impl Socket {
             }
             SocketType::Rep => {
                 if self.inner.rep_latency {
-                    let identity = self.inner.rep_current.lock().expect("rep identity").take();
+                    let mut current = self.inner.rep_current.lock().expect("rep identity");
+                    let identity = current.take();
                     if let Some((peer_id, identity)) = identity {
-                        return self
+                        let result = self
                             .inner
                             .send_submitter
                             .send_rep_try_to_peer(peer_id, &identity, msg);
+                        if matches!(&result, Err(TrySendError::Full(_))) {
+                            *current = Some((peer_id, identity));
+                        }
+                        return result;
                     }
                 }
                 let msg = self

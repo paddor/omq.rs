@@ -100,8 +100,20 @@ impl IoThreadPool {
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
                         rt.block_on(async move {
-                            while let Some(fut) = job_rx.recv().await {
-                                fut.await;
+                            loop {
+                                let mut fut = tokio::select! {
+                                    biased;
+                                    () = cancel_i.cancelled() => break,
+                                    job = job_rx.recv() => match job {
+                                        Some(fut) => fut,
+                                        None => break,
+                                    },
+                                };
+                                tokio::select! {
+                                    biased;
+                                    () = cancel_i.cancelled() => break,
+                                    () = fut.as_mut() => {}
+                                }
                             }
                         });
                     })

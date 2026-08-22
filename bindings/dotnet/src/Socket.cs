@@ -7,6 +7,7 @@ namespace Omq;
 /// Thread-safe managed wrapper around one native OMQ socket.
 public sealed class Socket : IDisposable
 {
+    private static long nextLockOrder;
     private readonly Context owner;
     private readonly object gate = new();
     private Context.SafeSocket? handle;
@@ -14,22 +15,24 @@ public sealed class Socket : IDisposable
     public SocketType Type { get; }
     /// Gets whether the native socket has been closed.
     public bool Closed => handle is null;
+    internal long LockOrder { get; } = Interlocked.Increment(ref nextLockOrder);
     /// Gets the native pollable file descriptor.
     public int FileDescriptor => GetInt32(SocketOption.FileDescriptor);
 
     internal Socket(Context owner, SocketType type, Context.SafeSocket handle) { this.owner = owner; Type = type; this.handle = handle; }
     private IntPtr Require() => handle?.DangerousGetHandle() is { } ptr && ptr != IntPtr.Zero ? ptr : throw new OmqClosedException();
-    internal IntPtr NativeHandle { get { lock (gate) return Require(); } }
     internal NativeLease AcquireNativeHandle()
     {
-        lock (gate)
+        System.Threading.Monitor.Enter(gate);
+        try
         {
             var current = handle ?? throw new OmqClosedException();
             bool success = false;
             current.DangerousAddRef(ref success);
             if (!success) throw new OmqClosedException();
-            return new NativeLease(current, current.DangerousGetHandle());
+            return new NativeLease(current, current.DangerousGetHandle(), gate);
         }
+        catch { System.Threading.Monitor.Exit(gate); throw; }
     }
 
     /// Sets an integer socket option.
@@ -267,8 +270,48 @@ public sealed class Socket : IDisposable
     internal sealed class NativeLease : IDisposable
     {
         private Context.SafeSocket? handle;
+        private object? gate;
         internal IntPtr Pointer { get; }
-        internal NativeLease(Context.SafeSocket handle, IntPtr pointer) { this.handle = handle; Pointer = pointer; }
-        public void Dispose() { var current = Interlocked.Exchange(ref handle, null); if (current is not null) current.DangerousRelease(); }
+        internal NativeLease(Context.SafeSocket handle, IntPtr pointer, object gate) { this.handle = handle; this.gate = gate; Pointer = pointer; }
+        public void Dispose()
+        {
+            var current = Interlocked.Exchange(ref handle, null);
+            if (current is null) return;
+            current.DangerousRelease();
+            System.Threading.Monitor.Exit(Interlocked.Exchange(ref gate, null)!);
+        }
+    }
+
+    internal sealed class NativeLeaseSet : IDisposable
+    {
+        private readonly Dictionary<Socket, NativeLease> leases = [];
+
+        internal NativeLeaseSet(IEnumerable<Socket?> sockets)
+        {
+            var acquired = new List<NativeLease>();
+            try
+            {
+                foreach (var socket in sockets.OfType<Socket>().Distinct().OrderBy(socket => socket.LockOrder))
+                {
+                    NativeLease lease = socket.AcquireNativeHandle();
+                    acquired.Add(lease);
+                    leases.Add(socket, lease);
+                }
+            }
+            catch
+            {
+                foreach (var lease in acquired.AsEnumerable().Reverse()) lease.Dispose();
+                throw;
+            }
+        }
+
+        internal IntPtr this[Socket socket] => leases[socket].Pointer;
+        internal IntPtr Get(Socket? socket) => socket is null ? IntPtr.Zero : this[socket];
+
+        public void Dispose()
+        {
+            foreach (var lease in leases.OrderByDescending(item => item.Key.LockOrder))
+                lease.Value.Dispose();
+        }
     }
 }

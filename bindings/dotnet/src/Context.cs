@@ -54,6 +54,7 @@ public sealed class Context : IDisposable
             IntPtr ctx = Require();
             IntPtr raw = Native.zmq_socket(ctx, (int)type);
             if (raw == IntPtr.Zero) { int e = Native.zmq_errno(); throw new OmqException("socket", e, "socket creation failed"); }
+            Errors.Check("allow_thread_migration", Native.omq_socket_allow_thread_migration(raw));
             var socket = new Socket(this, type, new SafeSocket(raw));
             try { options.Apply(socket); sockets.Add(socket); return socket; }
             catch { socket.Dispose(); throw; }

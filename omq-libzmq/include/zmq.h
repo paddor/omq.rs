@@ -490,6 +490,8 @@ ZMQ_EXPORT omq_async_task_t *omq_socket_send_async (
     omq_async_callback_fn callback_, void *userdata_);
 ZMQ_EXPORT void omq_async_task_cancel (omq_async_task_t *task_);
 ZMQ_EXPORT void omq_async_task_free (omq_async_task_t *task_);
+/* Caller guarantees that socket operations are externally serialized. */
+ZMQ_EXPORT int omq_socket_allow_thread_migration (void *socket_);
 
 /*  Socket API --------------------------------------------------------------- */
 ZMQ_EXPORT void *zmq_socket     (void *context_, int type_);

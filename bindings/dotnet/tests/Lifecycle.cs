@@ -103,10 +103,36 @@ static void RepeatedCreateDispose()
     }
 }
 
+static void SerializedThreadMigration()
+{
+    using var context = new Context();
+    using var socket = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 });
+    Exception? failure = null;
+    for (int iteration = 0; iteration < 100; iteration++)
+    {
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                socket.SetOption(SocketOption.SendHwm, iteration + 1);
+                Check(socket.GetInt32(SocketOption.SendHwm) == iteration + 1, "migrated option mismatch");
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+        });
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw failure;
+    }
+}
+
 await AsyncSendUnderHwmIsBounded();
 await ShutdownAndCancellationBoundPoll();
 await MonitorStopWakesReceive();
 await ConnectBeforeBind();
 await TryReceivePreservesMultipartAtomicity();
 RepeatedCreateDispose();
+SerializedThreadMigration();
 Console.WriteLine("OMQ.Net lifecycle: PASS");

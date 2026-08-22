@@ -95,6 +95,16 @@ pub(crate) struct OmqSocket {
     pub recv_pump: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
 }
 
+impl OmqSocket {
+    fn allow_thread_migration(&self) {
+        self.send_accum.allow_thread_migration();
+        self.bypass_send.allow_thread_migration();
+        self.bypass_recv.allow_thread_migration();
+        self.recv_cons.allow_thread_migration();
+        self.queue_without_ready_peer.allow_thread_migration();
+    }
+}
+
 /// Map ZMQ socket-type integer to `SocketType`.
 fn map_socket_type(t: c_int) -> Option<SocketType> {
     match t {
@@ -359,6 +369,18 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
     sock.ctx.register_socket(&sock);
 
     Box::into_raw(Box::new(sock)).cast()
+}
+
+/// Opts a socket into externally serialized migration between application threads.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_int {
+    if sock_ptr.is_null() {
+        return fail(libc::EFAULT);
+    }
+    // SAFETY: caller must pass an active socket handle returned by zmq_socket.
+    let socket = unsafe { &*(sock_ptr.cast::<Arc<OmqSocket>>()) };
+    socket.allow_thread_migration();
+    0
 }
 
 /// Materialize the omq-tokio socket on the io thread with current overlay

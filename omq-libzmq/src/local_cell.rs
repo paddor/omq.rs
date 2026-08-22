@@ -1,20 +1,25 @@
 use std::cell::UnsafeCell;
 #[cfg(debug_assertions)]
-use std::sync::OnceLock;
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Single-threaded interior mutability.
 ///
-/// Debug builds wrap `UnsafeCell<T>` behind an owner-thread check. Release
-/// builds trust libzmq's one-thread-per-socket contract and avoid the check
-/// on the hot path.
+/// Debug builds wrap `UnsafeCell<T>` behind an owner-thread check unless an
+/// embedding explicitly promises externally serialized thread migration.
+/// Release builds trust the same caller invariant without a hot-path check.
 pub(crate) struct LocalCell<T> {
     value: UnsafeCell<T>,
     #[cfg(debug_assertions)]
     owner: OnceLock<std::thread::ThreadId>,
+    #[cfg(debug_assertions)]
+    allow_thread_migration: AtomicBool,
 }
 
-// SAFETY: ZMQ sockets are not thread-safe. Callers must access each socket
-// from one application thread at a time. Debug builds enforce this.
+// SAFETY: ZMQ sockets are not thread-safe. Callers must serialize all access.
+// Debug builds enforce one fixed thread unless migration is explicitly enabled.
 unsafe impl<T: Send> Sync for LocalCell<T> {}
 
 impl<T> LocalCell<T> {
@@ -23,7 +28,14 @@ impl<T> LocalCell<T> {
             value: UnsafeCell::new(val),
             #[cfg(debug_assertions)]
             owner: OnceLock::new(),
+            #[cfg(debug_assertions)]
+            allow_thread_migration: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn allow_thread_migration(&self) {
+        #[cfg(debug_assertions)]
+        self.allow_thread_migration.store(true, Ordering::Release);
     }
 
     #[inline]
@@ -31,14 +43,16 @@ impl<T> LocalCell<T> {
     pub(crate) unsafe fn get(&self) -> &mut T {
         #[cfg(debug_assertions)]
         {
-            let current = std::thread::current().id();
-            let owner = self.owner.get_or_init(|| current);
-            assert_eq!(
-                *owner, current,
-                "LocalCell accessed from multiple socket threads"
-            );
+            if !self.allow_thread_migration.load(Ordering::Acquire) {
+                let current = std::thread::current().id();
+                let owner = self.owner.get_or_init(|| current);
+                assert_eq!(
+                    *owner, current,
+                    "LocalCell accessed from multiple socket threads"
+                );
+            }
         }
-        // SAFETY: caller upholds the socket single-thread access invariant.
+        // SAFETY: caller upholds the socket access serialization invariant.
         unsafe { &mut *self.value.get() }
     }
 
@@ -90,5 +104,22 @@ mod tests {
         .join();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn permits_serialized_thread_migration_when_enabled() {
+        let cell = Arc::new(LocalCell::new(1usize));
+        cell.allow_thread_migration();
+        *unsafe { cell.get() } += 1;
+
+        let other = Arc::clone(&cell);
+        std::thread::spawn(move || {
+            *unsafe { other.get() } += 1;
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(*unsafe { cell.get() }, 3);
     }
 }

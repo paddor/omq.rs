@@ -1207,7 +1207,9 @@ impl Socket {
         self.inner.send_submitter.shutdown();
         self.inner.recv_rx.shutdown();
         let actor_task = self.inner.actor_task.lock().unwrap().take();
-        if let Some(task) = actor_task {
+        if let Some(task) = actor_task
+            && !zero_linger
+        {
             let _ = task.await;
         }
         res

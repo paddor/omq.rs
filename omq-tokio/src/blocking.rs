@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use omq_proto::TrySendError;
 use omq_proto::endpoint::Endpoint;
-use omq_proto::error::Result;
+use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
 use crate::context::Context;
@@ -94,10 +94,30 @@ impl Socket {
         self.ctx.block_on(async move { s.bind(endpoint).await })
     }
 
+    /// Bind this socket to an endpoint before `timeout` elapses.
+    pub fn bind_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<Endpoint> {
+        let s = self.inner.clone();
+        self.ctx.block_on(async move {
+            tokio::time::timeout(timeout, s.bind(endpoint))
+                .await
+                .map_err(|_| Error::Timeout)?
+        })
+    }
+
     /// Connect this socket to an endpoint.
     pub fn connect(&self, endpoint: Endpoint) -> Result<()> {
         let s = self.inner.clone();
         self.ctx.block_on(async move { s.connect(endpoint).await })
+    }
+
+    /// Connect this socket to an endpoint before `timeout` elapses.
+    pub fn connect_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<()> {
+        let s = self.inner.clone();
+        self.ctx.block_on(async move {
+            tokio::time::timeout(timeout, s.connect(endpoint))
+                .await
+                .map_err(|_| Error::Timeout)?
+        })
     }
 
     /// Send one complete message, blocking while the socket is muted.
@@ -397,6 +417,34 @@ mod tests {
             let mut messages = Vec::new();
             started_tx.send(()).unwrap();
             let result = pull.recv_many_cancelable_into(1, &worker_cancel, &mut messages);
+            done_tx.send((result, messages.len())).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        cancel.cancel();
+
+        let (result, len) = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn registered_cancelable_recv_wakes_parked_receiver() {
+        let ctx = Context::new();
+        let endpoint = endpoint("blocking-cancel-registered-parked");
+        let pull = blocking_pull(&ctx, &endpoint);
+        let cancel = Arc::new(BlockingRecvCancel::new());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_cancel = Arc::clone(&cancel);
+
+        std::thread::spawn(move || {
+            let mut messages = Vec::new();
+            worker_cancel.register_current_thread_once();
+            started_tx.send(()).unwrap();
+            let result =
+                pull.recv_many_registered_cancelable_into(1, &worker_cancel, &mut messages);
             done_tx.send((result, messages.len())).unwrap();
         });
 

@@ -813,6 +813,10 @@ impl SpscAwareRecv {
                         }
                         continue;
                     }
+                    if cancel.is_canceled() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        return Ok(None);
+                    }
                     std::thread::park();
                     woke_without_message = true;
                 }

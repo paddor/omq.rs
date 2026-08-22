@@ -15,7 +15,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
-use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
+use omq_tokio::{Context, ContextConfig, Endpoint, Error, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
     Endpoint::Tcp {
@@ -366,6 +366,43 @@ async fn rep_reply_to_disconnected_client_is_accepted() {
     rep.send(Message::single("dropped-reply"))
         .await
         .expect("REP reply to a disconnected peer must be accepted");
+}
+
+#[tokio::test]
+async fn multi_io_rep_finishes_reply_while_client_closes() {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let rep = context.socket(SocketType::Rep, Options::default().linger(Duration::ZERO));
+    let endpoint = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let server = tokio::spawn(async move {
+        for _ in 0..21 {
+            let request = tokio::time::timeout(Duration::from_secs(1), rep.recv())
+                .await
+                .expect("REP recv timed out")
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), rep.send(request))
+                .await
+                .expect("REP send timed out")
+                .expect("REP rejected reply");
+        }
+    });
+
+    let req = context.socket(SocketType::Req, Options::default().linger(Duration::ZERO));
+    req.connect(endpoint).await.unwrap();
+    test_support::wait_for_handshake(&req).await;
+    for sequence in 0..20 {
+        let request = Message::single(format!("request-{sequence}"));
+        req.send(request.clone()).await.unwrap();
+        assert_eq!(req.recv().await.unwrap(), request);
+    }
+    req.send(Message::single("last")).await.unwrap();
+    req.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("REP server did not finish")
+        .expect("REP server panicked");
+    context.term();
 }
 
 #[tokio::test]

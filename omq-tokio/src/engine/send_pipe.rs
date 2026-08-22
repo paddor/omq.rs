@@ -256,7 +256,7 @@ impl Drop for SendPipeProducer {
 impl SendPipeConsumer {
     pub(crate) async fn ready(&self) {
         loop {
-            if !self.is_empty() || self.is_disconnected() {
+            if !self.is_empty() || self.is_disconnected() || !self.data_signal.is_idle() {
                 return;
             }
             self.data_signal.ready().await;
@@ -401,6 +401,28 @@ mod tests {
         timeout(Duration::from_millis(10), rx.ready())
             .await
             .expect("nonempty pipe must be ready even without a pending signal");
+    }
+
+    #[tokio::test]
+    async fn stale_pending_signal_returns_to_drain_path() {
+        let (mut tx, mut rx) = send_pipe(4);
+        tx.try_send(Message::single("before-drain")).unwrap();
+        rx.data_signal.begin_drain();
+        tx.try_send(Message::single("during-drain")).unwrap();
+
+        let mut batch = Vec::new();
+        assert_eq!(rx.drain_into(&mut batch, 4, usize::MAX), 2);
+        assert!(rx.is_empty());
+
+        timeout(Duration::from_millis(10), rx.ready())
+            .await
+            .expect("stale pending signal must return to the drain path");
+        assert_eq!(rx.drain_into(&mut batch, 4, usize::MAX), 0);
+        assert!(
+            timeout(Duration::from_millis(10), rx.ready())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

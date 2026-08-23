@@ -214,6 +214,15 @@ else
   printf 'prebuild=0\n'
 fi
 
+if [[ "${SOAK_PREBUILD_ONLY:-0}" == "1" ]]; then
+  if [[ "${SOAK_SKIP_PREBUILD:-0}" == "1" ]]; then
+    printf 'error: SOAK_PREBUILD_ONLY and SOAK_SKIP_PREBUILD are incompatible\n' >&2
+    exit 2
+  fi
+  printf 'prebuild_only=1\n'
+  exit 0
+fi
+
 run_job() {
   local label="$1"
   shift

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-08-23
+
+### Added
+
+- Native asynchronous send, cancellation, and task-release extensions used by
+  managed bindings.
+- `omq_socket_allow_thread_migration()` for bindings that serialize socket
+  access while managed tasks move between OS threads.
+- SERVER routing metadata through `zmq_msg_routing_id()` and
+  `zmq_msg_set_routing_id()`.
+
+### Changed
+
+- *(deps)* Bump `omq-tokio` to 0.21.4 and `omq-proto` to 0.26.1.
+
 ## [0.5.14] - 2026-08-17
 
 ### Changed

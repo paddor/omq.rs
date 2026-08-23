@@ -45,10 +45,11 @@ platform="${os}-${arch}"
 native_dir="${repo_root}/bindings/java/native/target/release"
 resource_dir="${repo_root}/bindings/java/target/test-classes/io/omq/native/${platform}"
 
-"${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/java/native/Cargo.toml" \
-  --features plain,curve,lz4,zstd
-
-mvn -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -DskipTests test-compile
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  "${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/java/native/Cargo.toml" \
+    --features plain,curve,lz4,zstd
+  mvn -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -DskipTests test-compile
+fi
 mkdir -p "${resource_dir}"
 cp "${native_dir}/${library}" "${resource_dir}/"
 

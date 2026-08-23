@@ -227,6 +227,10 @@ run_job() {
   labels+=("$label")
 }
 
+# Prebuilds run serially above. Keep aggregate jobs runtime-only so language
+# toolchains do not contend for Cargo locks, disk space, and memory.
+export SOAK_SKIP_BUILD=1
+
 binding_workers="${SOAK_BINDING_WORKERS:-1}"
 printf 'binding_workers=%s\n' "$binding_workers"
 jobs_running=1

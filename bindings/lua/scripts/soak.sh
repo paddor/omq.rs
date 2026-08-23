@@ -8,7 +8,9 @@ timeout_extra="${OMQ_LUA_SOAK_TIMEOUT_EXTRA_SECS:-120}"
 cargo_cmd="${CARGO:-cargo}"
 lua_bin="${OMQ_LUA:-/usr/bin/lua}"
 
-"${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/lua/native/Cargo.toml"
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+    "${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/lua/native/Cargo.toml"
+fi
 
 case "$(uname -s)" in
     Darwin)

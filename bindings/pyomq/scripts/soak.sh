@@ -22,7 +22,9 @@ maturin="${OMQ_MATURIN:-${repo_root}/bindings/pyomq/.venv/bin/maturin}"
 jobs="${OMQ_PYOMQ_SOAK_JOBS:-}"
 
 cd "${repo_root}/bindings/pyomq"
-"$maturin" develop --release
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  "$maturin" develop --release
+fi
 
 pids=()
 labels=()

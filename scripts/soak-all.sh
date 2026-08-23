@@ -78,7 +78,8 @@ fi
 
 nextest_config="$(mktemp)"
 pids=()
-labels=()
+active_pids=()
+active_labels=()
 jobs_running=0
 stop_jobs() {
   for pid in "${pids[@]:-}"; do
@@ -233,7 +234,22 @@ run_job() {
     "$@" 2>&1 | sed -u "s/^/[${label}] /"
   ' bash "$label" "$@" &
   pids+=("$!")
-  labels+=("$label")
+  active_pids+=("$!")
+  active_labels+=("$label")
+  if (( ${#active_pids[@]} >= binding_jobs )); then
+    wait_oldest_job
+  fi
+}
+
+wait_oldest_job() {
+  local pid="${active_pids[0]}"
+  local label="${active_labels[0]}"
+  if ! wait "$pid"; then
+    printf 'error: soak job failed: %s\n' "$label" >&2
+    failed=1
+  fi
+  active_pids=("${active_pids[@]:1}")
+  active_labels=("${active_labels[@]:1}")
 }
 
 # Prebuilds run serially above. Keep aggregate jobs runtime-only so language
@@ -241,8 +257,15 @@ run_job() {
 export SOAK_SKIP_BUILD=1
 
 binding_workers="${SOAK_BINDING_WORKERS:-1}"
+binding_jobs="${SOAK_BINDING_JOBS:-9}"
+if [[ ! "$binding_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: SOAK_BINDING_JOBS must be a positive integer\n' >&2
+  exit 2
+fi
 printf 'binding_workers=%s\n' "$binding_workers"
+printf 'binding_jobs=%s\n' "$binding_jobs"
 jobs_running=1
+failed=0
 run_job rust env OMQ_SOAK_ALLOW_MONITOR_LAG=1 OMQ_SOAK_DISABLE_THROUGHPUT_STABILITY=1 \
   bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$rust_timeout_seconds" -- \
   cargo nextest run "${nextest_common[@]}" --test-threads="$SOAK_TEST_THREADS"
@@ -265,12 +288,8 @@ else
   printf 'warning: OMQ.ts checkout not found at %s; set OMQ_TS_DIR\n' "$omq_ts_dir" >&2
 fi
 
-failed=0
-for i in "${!pids[@]}"; do
-  if ! wait "${pids[$i]}"; then
-    printf 'error: soak job failed: %s\n' "${labels[$i]}" >&2
-    failed=1
-  fi
+while (( ${#active_pids[@]} > 0 )); do
+  wait_oldest_job
 done
 jobs_running=0
 exit "$failed"

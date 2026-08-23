@@ -19,6 +19,9 @@ function inprocEndpoint(prefix = "node") {
 }
 
 function ipcEndpoint(prefix = "node") {
+  if (process.platform === "linux") {
+    return `ipc://@${prefix}-${process.pid}-${randomUUID()}`;
+  }
   return `ipc://${join(tmpdir(), `${prefix}-${process.pid}-${randomUUID()}.sock`)}`;
 }
 

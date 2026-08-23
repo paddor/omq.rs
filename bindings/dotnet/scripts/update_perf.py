@@ -410,6 +410,13 @@ def gen_combined_chart(data, path):
         f' fill="#9ca3af" font-size="9">'
         f"solid = p50 latency</text>"
     )
+    L.append("</svg>")
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\n".join(L))
+        f.write("\n")
+    print(f"  wrote {path}")
 
 
 def chart_data_from_jsonl():

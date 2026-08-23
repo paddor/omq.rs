@@ -184,7 +184,7 @@ async function verifySelfSignedWssCertificate(host, port) {
   ].join("\n");
 }
 
-function startBrowserPeer(basePort) {
+function startBrowserPeerOnce(basePort) {
   const child = spawn("cargo", [
     "run",
     "--quiet",
@@ -243,6 +243,24 @@ function startBrowserPeer(basePort) {
   });
 }
 
+async function startBrowserPeer({ beforeAttempt } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const basePort = await findFreePortRange(21);
+    const cleanup = await beforeAttempt?.(basePort, attempt);
+    try {
+      const peer = await startBrowserPeerOnce(basePort);
+      return { ...peer, basePort, attempts: attempt + 1 };
+    } catch (error) {
+      lastError = error;
+      if (!/Address already in use|EADDRINUSE/.test(String(error))) throw error;
+    } finally {
+      await cleanup?.();
+    }
+  }
+  throw new Error(`could not start browser peer after port collisions: ${lastError}`);
+}
+
 async function stopPeer(peer) {
   if (peer.child.exitCode !== null) return;
   peer.child.kill("SIGTERM");
@@ -254,6 +272,22 @@ async function stopPeer(peer) {
 }
 
 test.setTimeout(180_000);
+
+test("browser peer retries a port claimed after probing", async () => {
+  let peer;
+  try {
+    peer = await startBrowserPeer({
+      beforeAttempt: async (basePort, attempt) => {
+        if (attempt !== 0) return undefined;
+        const blocker = await listenProbe(basePort);
+        return () => closeServer(blocker);
+      },
+    });
+    expect(peer.attempts).toBe(2);
+  } finally {
+    if (peer) await stopPeer(peer);
+  }
+});
 
 test("Firefox browser interop with omq.rs WebSocket peer", async ({
   page,
@@ -275,8 +309,8 @@ test("Firefox browser interop with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    const basePort = await findFreePortRange(21);
-    peer = await startBrowserPeer(basePort);
+    peer = await startBrowserPeer();
+    const { basePort } = peer;
     const certSummary = await verifySelfSignedWssCertificate(
       "127.0.0.1",
       basePort + 11,
@@ -359,8 +393,8 @@ test("Firefox browser soak with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    const basePort = await findFreePortRange(21);
-    peer = await startBrowserPeer(basePort);
+    peer = await startBrowserPeer();
+    const { basePort } = peer;
     await page.goto(staticServer.url, { waitUntil: "domcontentloaded" });
 
     const result = await page.evaluate(

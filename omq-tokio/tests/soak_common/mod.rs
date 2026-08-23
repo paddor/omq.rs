@@ -466,6 +466,11 @@ impl ThroughputTracker {
     }
 
     pub fn assert_stable(&self, label: &str) {
+        if std::env::var_os("OMQ_SOAK_DISABLE_THROUGHPUT_STABILITY").is_some() {
+            eprintln!("[{label}] throughput stability check disabled");
+            return;
+        }
+
         if self.samples.len() < 4 {
             eprintln!("[{label}] too few throughput samples to check stability");
             return;

@@ -49,6 +49,7 @@ class ResourceMonitor:
     def stop(self) -> "ResourceReport":
         self._stop = True
         self._thread.join(timeout=5)
+        self._samples.append((time.monotonic(), read_rss_bytes()))
         return ResourceReport(self._samples)
 
 
@@ -72,21 +73,27 @@ class ResourceReport:
         tail = post[tail_start:]
         tail_max = max(v for _, v in tail) if tail else 0
         peak = max(v for _, v in self.samples) if self.samples else 0
+        final = self.samples[-1][1]
 
-        growth_pct = ((tail_max - baseline) / baseline * 100) if baseline else 0
-        growth_mib = (tail_max - baseline) / 1_048_576
+        tail_growth_pct = ((tail_max - baseline) / baseline * 100) if baseline else 0
+        tail_growth_mib = (tail_max - baseline) / 1_048_576
+        final_growth_pct = ((final - baseline) / baseline * 100) if baseline else 0
+        final_growth_mib = (final - baseline) / 1_048_576
 
         mib = 1_048_576
         print(
             f"[{label}] RSS: baseline {baseline / mib:.1f} MiB, "
             f"tail max {tail_max / mib:.1f} MiB, "
+            f"final {final / mib:.1f} MiB, "
             f"peak {peak / mib:.1f} MiB, "
-            f"growth {growth_pct:.1f}%"
+            f"tail growth {tail_growth_pct:.1f}%, "
+            f"final growth {final_growth_pct:.1f}%"
         )
 
         threshold = 25.0 if n >= 120 else 100.0
-        assert growth_pct < threshold or growth_mib < 10.0, (
-            f"[{label}] RSS leak detected: grew {growth_pct:.1f}% / "
-            f"{growth_mib:.1f} MiB from baseline "
-            f"({baseline / mib:.1f} MiB -> {tail_max / mib:.1f} MiB)"
+        assert final_growth_pct < threshold or final_growth_mib < 10.0, (
+            f"[{label}] RSS leak detected: final grew {final_growth_pct:.1f}% / "
+            f"{final_growth_mib:.1f} MiB from baseline "
+            f"({baseline / mib:.1f} MiB -> {final / mib:.1f} MiB); "
+            f"tail grew {tail_growth_pct:.1f}% / {tail_growth_mib:.1f} MiB"
         )

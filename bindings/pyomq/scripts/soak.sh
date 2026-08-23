@@ -19,15 +19,24 @@ esac
 seconds=$((10#$value * multiplier))
 python="${OMQ_PYTHON:-${repo_root}/bindings/pyomq/.venv/bin/python}"
 maturin="${OMQ_MATURIN:-${repo_root}/bindings/pyomq/.venv/bin/maturin}"
+jobs="${OMQ_PYOMQ_SOAK_JOBS:-}"
 
 cd "${repo_root}/bindings/pyomq"
-"$maturin" develop --release
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  "$maturin" develop --release
+fi
 
 pids=()
-names=()
+labels=()
 cleanup() {
   for pid in "${pids[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 0.2
+  for pid in "${pids[@]:-}"; do
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
 }
 trap 'cleanup; exit 130' INT TERM
@@ -40,24 +49,49 @@ if [[ ${#test_ids[@]} -eq 0 ]]; then
   printf 'error: no pyomq soak tests collected\n' >&2
   exit 1
 fi
+if [[ -z "$jobs" ]]; then
+  jobs="${#test_ids[@]}"
+fi
+if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: OMQ_PYOMQ_SOAK_JOBS must be a positive integer\n' >&2
+  exit 2
+fi
+if (( jobs > ${#test_ids[@]} )); then
+  jobs="${#test_ids[@]}"
+fi
+printf '== pyomq soak: %ss, jobs=%s ==\n' "$seconds" "$jobs"
 
+active=0
+failed=0
 for test_id in "${test_ids[@]}"; do
   name="${test_id#tests/soak/}"
   name="${name//.py::/-}"
-  (
+  bash -c '
+    set -o pipefail
+    name="$1"
+    seconds="$2"
+    python="$3"
+    test_id="$4"
     OMQ_SOAK_DURATION_SECS="$seconds" \
       timeout "$((seconds + 120))s" "$python" -m pytest -v --tb=short \
-        -o "timeout=$((seconds + 90))" "$test_id"
-  ) 2>&1 | sed -u "s/^/[${name}] /" &
+        -o "timeout=$((seconds + 90))" "$test_id" \
+      2>&1 | sed -u "s/^/[${name}] /"
+  ' bash "$name" "$seconds" "$python" "$test_id" &
   pids+=("$!")
-  names+=("$name")
+  labels+=("$name")
+  active=$((active + 1))
+  if (( active >= jobs )); then
+    if ! wait -n; then
+      failed=1
+    fi
+    active=$((active - 1))
+  fi
 done
 
-failed=0
-for i in "${!pids[@]}"; do
-  if ! wait "${pids[$i]}"; then
-    printf 'error: pyomq soak failed: %s\n' "${names[$i]}" >&2
+while (( active > 0 )); do
+  if ! wait -n; then
     failed=1
   fi
+  active=$((active - 1))
 done
 exit "$failed"

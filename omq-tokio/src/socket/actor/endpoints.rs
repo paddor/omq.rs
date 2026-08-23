@@ -113,13 +113,8 @@ impl SocketDriver {
                 }
             }
         }
-        for task in &peer_tasks {
-            if !task.is_finished() {
-                task.abort();
-            }
-        }
         for task in peer_tasks {
-            let _ = task.await;
+            super::stop_peer_task(task).await;
         }
 
         if self.dialers.len() + self.udp_dialers.len() < before

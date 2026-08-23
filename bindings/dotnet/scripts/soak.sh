@@ -18,10 +18,15 @@ case "${BASH_REMATCH[2]:-s}" in
 esac
 seconds=$((10#$value * multiplier))
 
-cargo build --release -p omq-libzmq
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  cargo build --release -p omq-libzmq
+  dotnet build "${repo_root}/bindings/dotnet/tests/Omq.Net.Soak.csproj" \
+    --configuration Release
+fi
 export LD_LIBRARY_PATH="${repo_root}/target/release:${LD_LIBRARY_PATH:-}"
 
 OMQ_DOTNET_SOAK_DURATION_SECS="$seconds" \
   timeout "$((seconds + 120))s" \
   dotnet run --project "${repo_root}/bindings/dotnet/tests/Omq.Net.Soak.csproj" \
-    --configuration Release
+    --configuration Release \
+    --no-build

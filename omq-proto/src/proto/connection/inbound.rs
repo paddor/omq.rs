@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "ws")]
+use bytes::BytesMut;
 
 use crate::error::{Error, Result};
 use crate::message::{FrameFlags, Message, Payload};
@@ -580,11 +582,7 @@ impl Connection {
             // apply the user's data limit (`max_message_size`, unbounded when
             // unset, matching ZMQ). Before Ready the frames carry handshake
             // commands, so apply the absolute pre-auth ceiling regardless.
-            let cap = if matches!(self.state, State::Ready) {
-                self.config.max_message_size
-            } else {
-                Some(MAX_HANDSHAKE_COMMAND)
-            };
+            let cap = self.ws_payload_cap();
             if let Some(cap) = cap
                 && payload_len > cap
             {
@@ -599,8 +597,8 @@ impl Connection {
             self.in_buf.advance(ws_hdr.header_len);
 
             match ws_hdr.opcode {
-                ws_codec::OP_BINARY_CODE => {
-                    self.handle_ws_binary(payload_len, &ws_hdr)?;
+                ws_codec::OP_BINARY_CODE | ws_codec::OP_CONTINUATION_CODE => {
+                    self.handle_ws_data_frame(payload_len, &ws_hdr)?;
                 }
                 ws_codec::OP_CLOSE_CODE => {
                     self.handle_ws_close(payload_len, &ws_hdr);
@@ -614,6 +612,15 @@ impl Connection {
                 }
                 _ => unreachable!("peek_ws_header rejects unknown opcodes"),
             }
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    fn ws_payload_cap(&self) -> Option<usize> {
+        if matches!(self.state, State::Ready) {
+            self.config.max_message_size
+        } else {
+            Some(MAX_HANDSHAKE_COMMAND)
         }
     }
 
@@ -735,19 +742,76 @@ impl Connection {
     }
 
     #[cfg(feature = "ws")]
-    fn handle_ws_binary(
+    fn handle_ws_data_frame(
         &mut self,
         payload_len: usize,
         ws_hdr: &super::super::ws_codec::WsFrameHeader,
     ) -> Result<()> {
-        use super::super::zws;
-        if payload_len == 0 {
-            return Err(Error::Protocol("empty WS binary frame".into()));
+        use super::super::ws_codec;
+        let raw = self.take_ws_payload(payload_len, ws_hdr);
+        match ws_hdr.opcode {
+            ws_codec::OP_BINARY_CODE => {
+                if self.ws_fragment.is_some() {
+                    return Err(Error::Protocol(
+                        "new WS binary frame before fragmented message completed".into(),
+                    ));
+                }
+                if ws_hdr.fin {
+                    self.dispatch_ws_payload(raw)
+                } else {
+                    self.ws_fragment = Some(raw);
+                    Ok(())
+                }
+            }
+            ws_codec::OP_CONTINUATION_CODE => {
+                let Some(mut assembled) = self.ws_fragment.take() else {
+                    return Err(Error::Protocol(
+                        "WS continuation frame without initial binary frame".into(),
+                    ));
+                };
+                let total = assembled
+                    .len()
+                    .checked_add(raw.len())
+                    .ok_or_else(|| Error::Protocol("WS fragmented message size overflow".into()))?;
+                if let Some(cap) = self.ws_payload_cap()
+                    && total > cap
+                {
+                    return Err(Error::Protocol(format!(
+                        "WS fragmented message too large: {total} bytes (max {cap})"
+                    )));
+                }
+                assembled.extend_from_slice(&raw);
+                if ws_hdr.fin {
+                    self.dispatch_ws_payload(assembled)
+                } else {
+                    self.ws_fragment = Some(assembled);
+                    Ok(())
+                }
+            }
+            _ => unreachable!("caller dispatches only WS data frames"),
         }
+    }
+
+    #[cfg(feature = "ws")]
+    fn take_ws_payload(
+        &mut self,
+        payload_len: usize,
+        ws_hdr: &super::super::ws_codec::WsFrameHeader,
+    ) -> BytesMut {
+        use super::super::ws_codec;
         let payload = self.in_buf.split_to(payload_len);
-        let mut raw = bytes::BytesMut::from(payload.as_bytes().as_ref());
+        let mut raw = BytesMut::from(payload.as_bytes().as_ref());
         if ws_hdr.masked {
-            super::super::ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+            ws_codec::apply_mask(&mut raw, ws_hdr.mask_key);
+        }
+        raw
+    }
+
+    #[cfg(feature = "ws")]
+    fn dispatch_ws_payload(&mut self, mut raw: BytesMut) -> Result<()> {
+        use super::super::zws;
+        if raw.is_empty() {
+            return Err(Error::Protocol("empty WS binary frame".into()));
         }
         let flags = zws::zws_to_flags(raw[0])?;
         let zmtp_payload = if raw.len() > 1 {
@@ -764,20 +828,20 @@ impl Connection {
         payload_len: usize,
         ws_hdr: &super::super::ws_codec::WsFrameHeader,
     ) {
-        let mut code = 1005u16;
-        if payload_len >= 2 {
+        if payload_len == 0 {
+            if !self.ws_close_sent {
+                self.send_empty_ws_close();
+            }
+        } else {
             let raw = self.in_buf.split_to(payload_len);
             let b = raw.as_bytes();
             let mut code_bytes = [b[0], b[1]];
             if ws_hdr.masked {
                 super::super::ws_codec::apply_mask(&mut code_bytes, ws_hdr.mask_key);
             }
-            code = u16::from_be_bytes(code_bytes);
-        } else if payload_len > 0 {
-            self.in_buf.advance(payload_len);
-        }
-        if !self.ws_close_sent {
-            self.send_ws_close(code);
+            if !self.ws_close_sent {
+                self.send_ws_close(u16::from_be_bytes(code_bytes));
+            }
         }
         self.state = State::Closed;
     }

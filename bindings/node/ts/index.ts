@@ -51,13 +51,15 @@ type NativeSocket = {
   unbind(endpoint: string): void;
   disconnect(endpoint: string): void;
   send(parts: Uint8Array[]): void;
+  sendAsync(parts: Uint8Array[]): Promise<void>;
   sendSync(parts: Uint8Array[]): void;
   sendBufferSync(payload: Buffer): void;
   sendOneSync(payload: Uint8Array): void;
   sendGroupSync(group: Uint8Array, payload: Uint8Array): void;
   recv(): Uint8Array[];
   recvRawSync(): Uint8Array | Uint8Array[];
-  recvRaw(signal?: AbortSignal): Promise<Uint8Array | Uint8Array[]>;
+  recvRaw(cancelId?: number): Promise<Uint8Array | Uint8Array[]>;
+  cancelRecv(cancelId: number): void;
   recvSync(): Uint8Array[];
   recvTimeout(timeoutMs: number): Uint8Array[] | null;
   tryRecv(): Uint8Array[] | null;
@@ -352,6 +354,7 @@ export class Socket {
   readonly #recvPrefetch: number;
   #recvQueue: Message[] = [];
   #recvQueueOffset = 0;
+  #nextRecvCancelId = 1;
   #closed = false;
 
   /** Create a socket of the given type. Prefer concrete subclasses for normal use. */
@@ -391,8 +394,7 @@ export class Socket {
   /** Send one message and resolve when accepted by the socket. */
   send(message: Message | MessagePart | MessagePart[]): Promise<void> {
     this.#checkOpen();
-    sendNativeSync(this.native, message);
-    return Promise.resolve();
+    return this.native.sendAsync(messageParts(message));
   }
 
   /** Synchronously send one message. */
@@ -411,11 +413,19 @@ export class Socket {
     }
     if (options.signal) throwIfAborted(options.signal);
     this.#checkOpen();
+    const signal = options.signal;
+    const cancelId = signal === undefined ? undefined : this.#takeRecvCancelId();
+    const abort = cancelId === undefined ? undefined : () => this.native.cancelRecv(cancelId);
+    if (abort !== undefined) signal?.addEventListener("abort", abort, { once: true });
     try {
-      return messageFromNative(await this.native.recvRaw(options.signal));
+      const pending = this.native.recvRaw(cancelId);
+      if (signal?.aborted && cancelId !== undefined) this.native.cancelRecv(cancelId);
+      return messageFromNative(await pending);
     } catch (error) {
-      if (options.signal?.aborted) throwAbortError();
+      if (signal?.aborted) throwAbortError();
       throw error;
+    } finally {
+      if (abort !== undefined) signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -498,6 +508,12 @@ export class Socket {
     if (this.#closed) {
       throw new Error("socket closed");
     }
+  }
+
+  #takeRecvCancelId(): number {
+    const id = this.#nextRecvCancelId;
+    this.#nextRecvCancelId = id === 0xffff_ffff ? 1 : id + 1;
+    return id;
   }
 
   #recvRawSync(): Message {
@@ -828,6 +844,12 @@ function sendNativeSync(socket: NativeSocket, input: Message | MessagePart | Mes
   }
 
   sendSingleNativeSync(socket, input);
+}
+
+function messageParts(input: Message | MessagePart | MessagePart[]): Uint8Array[] {
+  if (input instanceof Message) return input.parts;
+  if (Array.isArray(input)) return input.map(toBytes);
+  return [toBytes(input)];
 }
 
 function sendSingleNativeSync(socket: NativeSocket, input: MessagePart): void {

@@ -2,6 +2,13 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { Pull, Push } = require("../dist");
+const { ipcEndpoint } = require("./support");
+
+test("linux IPC endpoint uses the abstract namespace", {
+  skip: process.platform !== "linux",
+}, () => {
+  assert.match(ipcEndpoint("node-test"), /^ipc:\/\/@node-test-/);
+});
 
 test("bind-before-connect with tcp wildcard endpoint", async () => {
   const pull = new Pull();

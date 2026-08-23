@@ -671,7 +671,9 @@ fn drain_yring(
         batch.push_back(item.message);
         drained += 1;
     }
-    consumer.release();
+    if *batch_remaining > 0 {
+        consumer.release();
+    }
     drained
 }
 
@@ -812,6 +814,10 @@ impl SpscAwareRecv {
                             return Ok(None);
                         }
                         continue;
+                    }
+                    if cancel.is_canceled() {
+                        self.blocking_recv_waker.cancel_sleep();
+                        return Ok(None);
                     }
                     std::thread::park();
                     woke_without_message = true;
@@ -1501,6 +1507,42 @@ mod tests {
 
         let next = consumer.prefetch_and_pop().unwrap();
         assert_eq!(next.message.part_bytes(0).unwrap(), &b"next"[..]);
+    }
+
+    #[test]
+    fn throughput_single_item_batches_do_not_skip_next_slot() {
+        let (mut producer, mut consumer) = yring::spsc(4);
+        let mut batch = std::collections::VecDeque::new();
+        let mut remaining = 0;
+
+        producer
+            .push(RecvItem::new(Message::from_slice(b"first")))
+            .unwrap();
+        producer.flush();
+        let mut budget = DrainBudget::new(256, usize::MAX);
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            1
+        );
+
+        producer
+            .push(RecvItem::new(Message::from_slice(b"second")))
+            .unwrap();
+        producer.flush();
+        let mut budget = DrainBudget::new(256, usize::MAX);
+        assert_eq!(
+            drain_yring(&mut consumer, &mut batch, &mut remaining, &mut budget),
+            1
+        );
+        assert_eq!(batch.len(), 2);
+        assert_eq!(
+            batch.pop_front().unwrap().part_bytes(0).unwrap(),
+            &b"first"[..]
+        );
+        assert_eq!(
+            batch.pop_front().unwrap().part_bytes(0).unwrap(),
+            &b"second"[..]
+        );
     }
 
     #[test]

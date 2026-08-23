@@ -19,6 +19,8 @@ esac
 seconds=$((10#$value * multiplier))
 
 cd "${repo_root}/bindings/node"
-npm run build
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  npm run build
+fi
 OMQ_NODE_SOAK_DURATION_SECS="$seconds" \
   timeout "$((seconds + 120))s" npm run soak

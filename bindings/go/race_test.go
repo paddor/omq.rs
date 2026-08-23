@@ -100,6 +100,52 @@ func TestReqScalarReceiveCancellationAndClose(t *testing.T) {
 	}
 }
 
+func TestCanceledRecvWaitObservesAcceptedResult(t *testing.T) {
+	state := &socketState{
+		ops:       make(chan socketOp),
+		ownerDone: make(chan struct{}),
+	}
+	accepted := make(chan socketOp)
+	release := make(chan struct{})
+	go func() {
+		op := <-state.ops
+		op.call.started.Store(true)
+		accepted <- op
+		<-release
+		op.call.resp <- socketResult{message: String("welcome")}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan socketResult, 1)
+	go func() {
+		result, err := state.do(ctx, false, socketOp{kind: socketOpRecvWait})
+		result.err = err
+		done <- result
+	}()
+
+	<-accepted
+	cancel()
+	select {
+	case result := <-done:
+		close(release)
+		t.Fatalf("receive returned before accepted result: %v", result.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if got := result.message.String(); got != "welcome" {
+			t.Fatalf("message = %q, want welcome", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receive did not return accepted result")
+	}
+}
+
 func TestConcurrentSendReceive(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

@@ -25,8 +25,10 @@ fi
 export PATH="$(dirname "$ruby"):$PATH"
 
 cd "${repo_root}/bindings/ruby"
-"$ruby" -S bundle check
-"$ruby" -S bundle exec rake compile
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+  "$ruby" -S bundle check
+  "$ruby" -S bundle exec rake compile
+fi
 OMQ_RUBY_SOAK=1 OMQ_RUBY_SOAK_DURATION_SECS="$seconds" \
   timeout "$((seconds + 120))s" \
   "$ruby" -Ilib:test test/test_soak.rb

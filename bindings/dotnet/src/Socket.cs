@@ -7,6 +7,7 @@ namespace Omq;
 /// Thread-safe managed wrapper around one native OMQ socket.
 public sealed class Socket : IDisposable
 {
+    private static long nextLockOrder;
     private readonly Context owner;
     private readonly object gate = new();
     private Context.SafeSocket? handle;
@@ -14,22 +15,24 @@ public sealed class Socket : IDisposable
     public SocketType Type { get; }
     /// Gets whether the native socket has been closed.
     public bool Closed => handle is null;
+    internal long LockOrder { get; } = Interlocked.Increment(ref nextLockOrder);
     /// Gets the native pollable file descriptor.
     public int FileDescriptor => GetInt32(SocketOption.FileDescriptor);
 
     internal Socket(Context owner, SocketType type, Context.SafeSocket handle) { this.owner = owner; Type = type; this.handle = handle; }
     private IntPtr Require() => handle?.DangerousGetHandle() is { } ptr && ptr != IntPtr.Zero ? ptr : throw new OmqClosedException();
-    internal IntPtr NativeHandle { get { lock (gate) return Require(); } }
     internal NativeLease AcquireNativeHandle()
     {
-        lock (gate)
+        System.Threading.Monitor.Enter(gate);
+        try
         {
             var current = handle ?? throw new OmqClosedException();
             bool success = false;
             current.DangerousAddRef(ref success);
             if (!success) throw new OmqClosedException();
-            return new NativeLease(current, current.DangerousGetHandle());
+            return new NativeLease(current, current.DangerousGetHandle(), gate);
         }
+        catch { System.Threading.Monitor.Exit(gate); throw; }
     }
 
     /// Sets an integer socket option.
@@ -99,7 +102,7 @@ public sealed class Socket : IDisposable
     public string Bind(string endpoint)
     {
         EndpointCall("bind", endpoint, NativeBind);
-        return endpoint.EndsWith(":0", StringComparison.Ordinal) ? GetString(SocketOption.LastEndpoint) : endpoint;
+        return GetString(SocketOption.LastEndpoint);
     }
     /// Connects to an endpoint.
     public void Connect(string endpoint) => EndpointCall("connect", endpoint, NativeConnect);
@@ -145,8 +148,18 @@ public sealed class Socket : IDisposable
     {
         Native.Message msg = new();
         Errors.Check("msg_init_size", Native.zmq_msg_init_size(ref msg, (nuint)data.Length));
-        try { Marshal.Copy(data, 0, Native.zmq_msg_data(ref msg), data.Length); if (routingId != 0) Errors.Check("msg_set_routing_id", Native.zmq_msg_set_routing_id(ref msg, routingId)); Errors.Check("msg_send", Native.zmq_msg_send(ref msg, Require(), Flags(more, dontWait))); }
-        finally { Native.zmq_msg_close(ref msg); }
+        bool sent = false;
+        try
+        {
+            Marshal.Copy(data, 0, Native.zmq_msg_data(ref msg), data.Length);
+            if (routingId != 0) Errors.Check("msg_set_routing_id", Native.zmq_msg_set_routing_id(ref msg, routingId));
+            Errors.Check("msg_send", Native.zmq_msg_send(ref msg, Require(), Flags(more, dontWait)));
+            sent = true;
+        }
+        finally
+        {
+            if (!sent) Native.zmq_msg_close(ref msg);
+        }
     }
 
     /// Receives one complete message, including all multipart frames.
@@ -155,14 +168,41 @@ public sealed class Socket : IDisposable
         lock (gate)
         {
             var parts = new List<byte[]>(); uint routingId = 0;
-            while (true)
+            int originalReceiveTimeout = 0;
+            bool restoreReceiveTimeout = false;
+            try
             {
-                Native.Message msg = new();
-                Errors.Check("msg_init", Native.zmq_msg_init(ref msg));
-                try { Errors.Check("msg_recv", Native.zmq_msg_recv(ref msg, Require(), dontWait ? 1 : 0)); int size = checked((int)Native.zmq_msg_size(ref msg)); byte[] data = new byte[size]; if (size != 0) Marshal.Copy(Native.zmq_msg_data(ref msg), data, 0, size); if (parts.Count == 0) routingId = Native.zmq_msg_routing_id(ref msg); parts.Add(data); if (Native.zmq_msg_more(ref msg) == 0) break; }
-                finally { Native.zmq_msg_close(ref msg); }
+                while (true)
+                {
+                    Native.Message msg = new();
+                    Errors.Check("msg_init", Native.zmq_msg_init(ref msg));
+                    try
+                    {
+                        Errors.Check("msg_recv", Native.zmq_msg_recv(ref msg, Require(), dontWait && parts.Count == 0 ? 1 : 0));
+                        int size = checked((int)Native.zmq_msg_size(ref msg));
+                        byte[] data = new byte[size];
+                        if (size != 0) Marshal.Copy(Native.zmq_msg_data(ref msg), data, 0, size);
+                        if (parts.Count == 0) routingId = Native.zmq_msg_routing_id(ref msg);
+                        parts.Add(data);
+                        if (Native.zmq_msg_more(ref msg) == 0) break;
+                        if (!restoreReceiveTimeout)
+                        {
+                            originalReceiveTimeout = GetInt32(SocketOption.ReceiveTimeout);
+                            if (originalReceiveTimeout != -1)
+                            {
+                                SetOption(SocketOption.ReceiveTimeout, -1);
+                                restoreReceiveTimeout = true;
+                            }
+                        }
+                    }
+                    finally { Native.zmq_msg_close(ref msg); }
+                }
+                return new Message(parts.ToArray()) { RoutingId = routingId };
             }
-            return new Message(parts.ToArray()) { RoutingId = routingId };
+            finally
+            {
+                if (restoreReceiveTimeout) SetOption(SocketOption.ReceiveTimeout, originalReceiveTimeout);
+            }
         }
     }
     /// Receives a UTF-8 single-frame message.
@@ -230,8 +270,48 @@ public sealed class Socket : IDisposable
     internal sealed class NativeLease : IDisposable
     {
         private Context.SafeSocket? handle;
+        private object? gate;
         internal IntPtr Pointer { get; }
-        internal NativeLease(Context.SafeSocket handle, IntPtr pointer) { this.handle = handle; Pointer = pointer; }
-        public void Dispose() { var current = Interlocked.Exchange(ref handle, null); if (current is not null) current.DangerousRelease(); }
+        internal NativeLease(Context.SafeSocket handle, IntPtr pointer, object gate) { this.handle = handle; this.gate = gate; Pointer = pointer; }
+        public void Dispose()
+        {
+            var current = Interlocked.Exchange(ref handle, null);
+            if (current is null) return;
+            current.DangerousRelease();
+            System.Threading.Monitor.Exit(Interlocked.Exchange(ref gate, null)!);
+        }
+    }
+
+    internal sealed class NativeLeaseSet : IDisposable
+    {
+        private readonly Dictionary<Socket, NativeLease> leases = [];
+
+        internal NativeLeaseSet(IEnumerable<Socket?> sockets)
+        {
+            var acquired = new List<NativeLease>();
+            try
+            {
+                foreach (var socket in sockets.OfType<Socket>().Distinct().OrderBy(socket => socket.LockOrder))
+                {
+                    NativeLease lease = socket.AcquireNativeHandle();
+                    acquired.Add(lease);
+                    leases.Add(socket, lease);
+                }
+            }
+            catch
+            {
+                foreach (var lease in acquired.AsEnumerable().Reverse()) lease.Dispose();
+                throw;
+            }
+        }
+
+        internal IntPtr this[Socket socket] => leases[socket].Pointer;
+        internal IntPtr Get(Socket? socket) => socket is null ? IntPtr.Zero : this[socket];
+
+        public void Dispose()
+        {
+            foreach (var lease in leases.OrderByDescending(item => item.Key.LockOrder))
+                lease.Value.Dispose();
+        }
     }
 }

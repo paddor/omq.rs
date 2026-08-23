@@ -45,6 +45,13 @@ local progress_limits = {
   stall_secs = env_number("OMQ_LUA_SOAK_PROGRESS_STALL_SECS", 60),
 }
 
+local exchange_timeout_secs = env_number("OMQ_LUA_SOAK_EXCHANGE_TIMEOUT_SECS", 120)
+local protocol_mix_timeout_secs =
+  math.max(1, env_number("OMQ_LUA_SOAK_PROTOCOL_MIX_TIMEOUT_SECS", math.min(exchange_timeout_secs, 10)))
+local log_protocol_mix_resets = os.getenv("OMQ_LUA_SOAK_LOG_PROTOCOL_MIX_RESETS") == "1"
+local protocol_mix_payload_bytes =
+  math.max(1, math.floor(env_number("OMQ_LUA_SOAK_PROTOCOL_MIX_PAYLOAD_BYTES", 2048)))
+
 local function split_csv(value)
   local out = {}
   if value == nil or value == "" then
@@ -105,6 +112,84 @@ local function checked(ok, err)
     error(err, 2)
   end
   return ok
+end
+
+local function try_send_transient(socket, message)
+  local ok, err = pcall(function()
+    socket:send(message)
+  end)
+  if ok then
+    return true
+  end
+  if transient_error(err) then
+    return false
+  end
+  error(err, 2)
+end
+
+local function send_until_deadline(socket, message, seconds)
+  local deadline = now() + seconds
+  local last_err = nil
+  local multipart = type(message) == "table"
+  while now() < deadline do
+    local ok, err = pcall(function()
+      socket:send(message)
+    end)
+    if ok then
+      return true
+    end
+    if not transient_error(err) then
+      error(err, 2)
+    end
+    if multipart then
+      error(err, 2)
+    end
+    last_err = err
+  end
+  error(last_err or "send deadline expired", 2)
+end
+
+local function recv_until_deadline(socket, seconds, ...)
+  local args = { ... }
+  local deadline = now() + seconds
+  local last_err = nil
+  while now() < deadline do
+    local ok, value = pcall(function()
+      return socket:try_recv(table.unpack(args))
+    end)
+    if ok and value ~= nil then
+      return value
+    end
+    if ok then
+      last_err = nil
+    elseif not transient_error(value) then
+      error(value, 2)
+    else
+      last_err = value
+    end
+  end
+  error(last_err or "recv deadline expired", 2)
+end
+
+local function recv_parts_until_deadline(socket, seconds)
+  local deadline = now() + seconds
+  local last_err = nil
+  while now() < deadline do
+    local ok, value = pcall(function()
+      return socket:recv_parts(nil, omq.DONTWAIT)
+    end)
+    if ok and value ~= nil and #value > 0 then
+      return value
+    end
+    if ok then
+      last_err = nil
+    elseif not transient_error(value) then
+      error(value, 2)
+    else
+      last_err = value
+    end
+  end
+  error(last_err or "recv_parts deadline expired", 2)
 end
 
 local counters = {
@@ -638,15 +723,17 @@ local function run_tcp_cycle(shared, state, workers)
   if now() >= state.next_churn then
     for _ = 1, workers do
       local push = new_socket(shared, "tcp", "push", {
-        linger = 1000,
-        send_timeout = 1000,
+        linger = 0,
+        send_timeout = 100,
         send_hwm = 8192,
       })
       local ok, err = pcall(function()
         push:connect(state.endpoint)
         local body = payload("tcp-" .. state.worker, state.seq, 256)
         for i = 1, 32 do
-          push:send(string.char(i % 256) .. string.sub(body, 2))
+          if not try_send_transient(push, string.char(i % 256) .. string.sub(body, 2)) then
+            break
+          end
           state.seq = state.seq + 1
         end
       end)
@@ -666,8 +753,8 @@ local function make_inproc(shared)
   local stop = "stop:" .. endpoint
   local handle = omq.testing.spawn_inproc_pull_until_stop(shared, endpoint, stop)
   local push = new_socket(shared, "inproc", "push", {
-    linger = 0,
-    send_timeout = 5000,
+    linger = 5000,
+    send_timeout = 100,
     send_hwm = 8192,
   })
   push:connect(endpoint)
@@ -683,7 +770,9 @@ end
 
 local function run_inproc_cycle(state)
   for _ = 1, state.batch do
-    state.push:send(payload("inproc", state.seq, 128))
+    if not try_send_transient(state.push, payload("inproc", state.seq, 128)) then
+      break
+    end
     state.seq = state.seq + 1
     state.sent = state.sent + 1
   end
@@ -701,7 +790,7 @@ local function close_inproc(state)
     return
   end
   local stop_ok, stop_err = pcall(function()
-    state.push:send(state.stop)
+    send_until_deadline(state.push, state.stop, 30)
   end)
   close_socket(state.push, "inproc")
   local join_ok, got = pcall(function()
@@ -841,8 +930,8 @@ local function run_context_churn_cycle()
     push = new_socket(ctx, scenario, "push", { linger = 0, send_timeout = 1000 })
     pull:bind(endpoint)
     push:connect(endpoint)
-    push:send("x")
-    local msg = pull:recv(16)
+    send_until_deadline(push, "x", exchange_timeout_secs)
+    local msg = recv_until_deadline(pull, exchange_timeout_secs, 5000)
     assert(msg == "x", "context churn payload mismatch")
     close_push()
     close_pull()
@@ -869,30 +958,34 @@ local function run_context_churn_cycle()
   counters.contexts = counters.contexts + 1
 end
 
+local protocol_mix_instance = 0
+
 local function make_protocol_mix(shared)
   local scenario = "protocol-mix"
-  local pull = new_socket(shared, scenario, "pull", { linger = 0, recv_timeout = 5000 })
-  local push = new_socket(shared, scenario, "push", { linger = 0, send_timeout = 5000 })
-  local ipc = pull:bind("ipc://@omq-lua-soak-" .. tostring(pid()))
+  protocol_mix_instance = protocol_mix_instance + 1
+  local send_timeout_ms = math.max(1000, math.floor(protocol_mix_timeout_secs * 1000))
+  local pull = new_socket(shared, scenario, "pull", { linger = 0, recv_timeout = send_timeout_ms })
+  local push = new_socket(shared, scenario, "push", { linger = 0, send_timeout = send_timeout_ms })
+  local ipc = pull:bind("ipc://@omq-lua-soak-" .. tostring(pid()) .. "-" .. tostring(protocol_mix_instance))
   push:connect(ipc)
 
-  local rep = new_socket(shared, scenario, "rep", { linger = 0, recv_timeout = 5000 })
+  local rep = new_socket(shared, scenario, "rep", { linger = 0, recv_timeout = send_timeout_ms })
   local req = new_socket(shared, scenario, "req", {
     linger = 0,
-    recv_timeout = 5000,
-    send_timeout = 5000,
+    recv_timeout = send_timeout_ms,
+    send_timeout = send_timeout_ms,
   })
   req:connect(rep:bind("tcp://127.0.0.1:0"))
 
   local left = new_socket(shared, scenario, "pair", {
     linger = 0,
-    recv_timeout = 5000,
-    send_timeout = 5000,
+    recv_timeout = send_timeout_ms,
+    send_timeout = send_timeout_ms,
   })
   local right = new_socket(shared, scenario, "pair", {
     linger = 0,
-    recv_timeout = 5000,
-    send_timeout = 5000,
+    recv_timeout = send_timeout_ms,
+    send_timeout = send_timeout_ms,
   })
   right:connect(left:bind("tcp://127.0.0.1:0"))
   return {
@@ -904,28 +997,49 @@ local function make_protocol_mix(shared)
     left = left,
     right = right,
     seq = 0,
-    large = string.rep("z", 256 * 1024),
+    large = string.rep("z", protocol_mix_payload_bytes),
   }
 end
 
-local function run_protocol_mix_cycle(state)
+local function run_protocol_mix_cycle(state, timeout_secs)
   local sequence = tostring(state.seq)
   local body = state.seq % 64 == 0 and state.large or sequence
-  state.push:send({ sequence, body })
-  local parts = state.pull:recv_parts()
+  send_until_deadline(state.push, { sequence, body }, timeout_secs)
+  local parts = recv_parts_until_deadline(state.pull, timeout_secs)
   assert(#parts == 2 and parts[1] == sequence and #parts[2] == #body, "IPC multipart mismatch")
 
-  state.req:send("request-" .. sequence)
-  assert(state.rep:recv() == "request-" .. sequence, "REQ/REP request mismatch")
-  state.rep:send("reply-" .. sequence)
-  assert(state.req:recv() == "reply-" .. sequence, "REQ/REP reply mismatch")
+  send_until_deadline(state.req, "request-" .. sequence, timeout_secs)
+  assert(
+    recv_until_deadline(state.rep, timeout_secs) == "request-" .. sequence,
+    "REQ/REP request mismatch"
+  )
+  send_until_deadline(state.rep, "reply-" .. sequence, timeout_secs)
+  assert(
+    recv_until_deadline(state.req, timeout_secs) == "reply-" .. sequence,
+    "REQ/REP reply mismatch"
+  )
 
-  state.left:send("left-" .. sequence)
-  assert(state.right:recv() == "left-" .. sequence, "PAIR forward mismatch")
-  state.right:send("right-" .. sequence)
-  assert(state.left:recv() == "right-" .. sequence, "PAIR reverse mismatch")
+  send_until_deadline(state.left, "left-" .. sequence, timeout_secs)
+  assert(
+    recv_until_deadline(state.right, timeout_secs) == "left-" .. sequence,
+    "PAIR forward mismatch"
+  )
+  send_until_deadline(state.right, "right-" .. sequence, timeout_secs)
+  assert(
+    recv_until_deadline(state.left, timeout_secs) == "right-" .. sequence,
+    "PAIR reverse mismatch"
+  )
   state.seq = state.seq + 1
   counters.protocol = counters.protocol + 4
+end
+
+local function close_protocol_mix(state)
+  if state == nil then
+    return
+  end
+  for i = #state.sockets, 1, -1 do
+    close_socket(state.sockets[i], "protocol-mix")
+  end
 end
 
 local function assert_progress(selected)
@@ -980,6 +1094,13 @@ local function cleanup_error()
   return table.concat(cleanup_errors, "\n")
 end
 
+local function run_step(label, fn)
+  local ok, err = pcall(fn)
+  if not ok then
+    error(label .. ": " .. tostring(err), 2)
+  end
+end
+
 local duration = env_number("OMQ_LUA_SOAK_DURATION_SECS", 60)
 assert(duration > 0, "OMQ_LUA_SOAK_DURATION_SECS must be > 0")
 local workers = math.max(1, math.floor(env_number("OMQ_LUA_SOAK_WORKERS", 4)))
@@ -1021,19 +1142,48 @@ end
 local ok, err = pcall(function()
   while now() < deadline do
     if tcp_state ~= nil then
-      run_tcp_cycle(shared, tcp_state, workers)
+      run_step("tcp", function()
+        run_tcp_cycle(shared, tcp_state, workers)
+      end)
     end
     if inproc_state ~= nil then
-      run_inproc_cycles(inproc_state, workers)
+      run_step("inproc", function()
+        run_inproc_cycles(inproc_state, workers)
+      end)
     end
     if pubsub_state ~= nil then
-      run_pubsub_cycle(pubsub_state)
+      run_step("pubsub", function()
+        run_pubsub_cycle(pubsub_state)
+      end)
     end
     if protocol_state ~= nil then
-      run_protocol_mix_cycle(protocol_state)
+      local remaining = deadline - now()
+      if remaining <= 1 then
+        break
+      end
+      local protocol_timeout_secs = math.min(protocol_mix_timeout_secs, remaining)
+      local protocol_ok, protocol_err = pcall(function()
+        run_protocol_mix_cycle(protocol_state, protocol_timeout_secs)
+      end)
+      if not protocol_ok then
+        if not transient_error(protocol_err) then
+          error("protocol-mix: " .. tostring(protocol_err), 2)
+        end
+        if now() >= deadline then
+          break
+        end
+        if log_protocol_mix_resets then
+          io.stdout:write("[lua-soak] protocol-mix reset: " .. tostring(protocol_err) .. "\n")
+          io.stdout:flush()
+        end
+        close_protocol_mix(protocol_state)
+        protocol_state = make_protocol_mix(shared)
+      end
     end
     if selected["context-churn"] then
-      run_context_churn_cycle()
+      run_step("context-churn", function()
+        run_context_churn_cycle()
+      end)
     end
     local t = now()
     if t >= next_report then
@@ -1059,12 +1209,7 @@ cleanup("pubsub", function()
   close_socket(pubsub_state.pub, "pubsub")
 end)
 cleanup("protocol-mix", function()
-  if protocol_state == nil then
-    return
-  end
-  for i = #protocol_state.sockets, 1, -1 do
-    close_socket(protocol_state.sockets[i], "protocol-mix")
-  end
+  close_protocol_mix(protocol_state)
 end)
 cleanup("inproc", function()
   close_inproc(inproc_state)

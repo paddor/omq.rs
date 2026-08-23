@@ -24,6 +24,7 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// use omq_tokio::ContextConfig;
 ///
 /// // 4 IO threads (4 independent `current_thread` runtimes).
+/// // Multi-IO contexts add an internal runtime for socket control work.
 /// let cfg = ContextConfig { io_threads: 4 };
 ///
 /// // Read from OMQ_IO_THREADS env var, default 1.
@@ -31,10 +32,11 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct ContextConfig {
-    /// Number of IO threads. Each IO thread runs an independent
-    /// `current_thread` tokio runtime on its own OS thread. Zero disables
-    /// owned IO threads and uses the caller's active runtime instead.
-    /// Default: 1.
+    /// Number of data-plane IO threads. Each IO thread runs an independent
+    /// `current_thread` tokio runtime on its own OS thread. Contexts with more
+    /// than one IO thread also use one uncounted runtime for socket control
+    /// work. Zero disables owned runtimes and uses the caller's active runtime
+    /// instead. Default: 1.
     pub io_threads: usize,
 }
 
@@ -83,11 +85,14 @@ impl IoThreadPool {
     fn new(n: usize) -> Arc<Self> {
         assert!(n >= 1);
         let cancel = CancellationToken::new();
-        let mut threads = Vec::with_capacity(n);
-        let mut joins = Vec::with_capacity(n);
+        // Multi-IO contexts reserve runtime 0 for socket actors and blocking
+        // control calls. The configured count applies to data runtimes.
+        let runtime_count = if n > 1 { n + 1 } else { 1 };
+        let mut threads = Vec::with_capacity(runtime_count);
+        let mut joins = Vec::with_capacity(runtime_count);
         let mut primary_job_tx = None;
 
-        for i in 0..n {
+        for i in 0..runtime_count {
             let (handle_tx, handle_rx) = mpsc::channel::<Handle>();
             let cancel_i = cancel.clone();
 
@@ -100,8 +105,20 @@ impl IoThreadPool {
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
                         rt.block_on(async move {
-                            while let Some(fut) = job_rx.recv().await {
-                                fut.await;
+                            loop {
+                                let mut fut = tokio::select! {
+                                    biased;
+                                    () = cancel_i.cancelled() => break,
+                                    job = job_rx.recv() => match job {
+                                        Some(fut) => fut,
+                                        None => break,
+                                    },
+                                };
+                                tokio::select! {
+                                    biased;
+                                    () = cancel_i.cancelled() => break,
+                                    () = fut.as_mut() => {}
+                                }
                             }
                         });
                     })
@@ -139,22 +156,35 @@ impl IoThreadPool {
     }
 
     fn thread_count(&self) -> usize {
-        self.threads.len()
+        self.threads.len() - self.data_thread_offset()
+    }
+
+    fn data_thread_offset(&self) -> usize {
+        usize::from(self.threads.len() > 1)
     }
 
     fn assign_thread(&self) -> usize {
+        // Return a logical data-thread index. Multi-IO runtime 0 stays
+        // reserved for socket actors and binding control calls.
+        let offset = self.data_thread_offset();
         let best = self
             .threads
+            .get(offset..)
+            .expect("data-thread offset is in bounds")
             .iter()
             .enumerate()
             .min_by_key(|(_, t)| t.load.load(Ordering::Relaxed))
             .map_or(0, |(i, _)| i);
-        self.threads[best].load.fetch_add(1, Ordering::Relaxed);
+        self.threads[best + offset]
+            .load
+            .fetch_add(1, Ordering::Relaxed);
         best
     }
 
     fn release_thread(&self, index: usize) {
-        self.threads[index].load.fetch_sub(1, Ordering::Relaxed);
+        self.threads[index + self.data_thread_offset()]
+            .load
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     fn shutdown(&self) {
@@ -172,7 +202,7 @@ impl IoThreadPool {
 impl std::fmt::Debug for IoThreadPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoThreadPool")
-            .field("thread_count", &self.threads.len())
+            .field("thread_count", &self.thread_count())
             .finish_non_exhaustive()
     }
 }
@@ -210,8 +240,18 @@ impl IoPoolHandle {
     {
         match &self.pool {
             None => tokio::spawn(fut),
-            Some(pool) => pool.threads[index].handle.spawn(fut),
+            Some(pool) => pool.threads[index + pool.data_thread_offset()]
+                .handle
+                .spawn(fut),
         }
+    }
+
+    /// Whether data-plane tasks run on owned runtimes separate from the
+    /// primary socket runtime.
+    pub(crate) fn has_dedicated_io_threads(&self) -> bool {
+        self.pool
+            .as_ref()
+            .is_some_and(|pool| pool.data_thread_offset() != 0)
     }
 
     /// Pick the least-loaded IO thread, increment its load, return
@@ -247,9 +287,9 @@ impl IoPoolHandle {
 ///
 /// `Context::new()` and `Context::with_config()` spawn dedicated OS
 /// threads, each running an independent `current_thread` tokio runtime.
-/// Sockets created via [`Context::socket()`] have their driver tasks on
-/// those runtimes. The user does not need tokio in their own
-/// `Cargo.toml` for OMQ IO work.
+/// The configured count controls data-plane runtimes. Multi-IO contexts add
+/// one internal runtime for socket actors and blocking control calls.
+/// The user does not need tokio in their own `Cargo.toml` for OMQ IO work.
 ///
 /// ```no_run
 /// use omq_tokio::{Context, SocketType, Options, Message};
@@ -371,10 +411,10 @@ impl ContextCore {
 
     fn io_pool_handle(&self) -> IoPoolHandle {
         match &self.ownership {
-            RuntimeOwnership::Owned { pool } if pool.thread_count() > 1 => IoPoolHandle {
+            RuntimeOwnership::Owned { pool } => IoPoolHandle {
                 pool: Some(pool.clone()),
             },
-            _ => IoPoolHandle::none(),
+            RuntimeOwnership::Borrowed { .. } => IoPoolHandle::none(),
         }
     }
 
@@ -386,19 +426,21 @@ impl ContextCore {
 }
 
 impl Context {
-    /// Create a context with 1 IO thread (`current_thread` runtime on a
-    /// dedicated OS thread). This is the libzmq-like default.
+    /// Create a context with 1 data-plane IO thread (`current_thread` runtime
+    /// on a dedicated OS thread). This is the libzmq-like default. Multi-IO
+    /// contexts use an additional internal control runtime.
     pub fn new() -> Self {
         Self::with_config(ContextConfig::default())
     }
 
     /// Create a context with custom configuration.
     ///
-    /// Each IO thread runs an independent `current_thread` tokio
-    /// runtime on its own OS thread. Connections are pinned to an
-    /// IO thread for life (least-loaded assignment at connect/accept
-    /// time). With zero IO threads, this is equivalent to
-    /// [`Context::current`] and requires an active tokio runtime.
+    /// Each data-plane IO thread runs an independent `current_thread` tokio
+    /// runtime on its own OS thread. Connections are pinned to an IO thread
+    /// for life (least-loaded assignment at connect/accept time). Contexts
+    /// with more than one IO thread add an internal control runtime. With zero
+    /// IO threads, this is equivalent to [`Context::current`] and requires an
+    /// active tokio runtime.
     pub fn with_config(config: ContextConfig) -> Self {
         if config.io_threads == 0 {
             return Self::current();
@@ -634,4 +676,29 @@ fn build_current_thread_runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("omq: failed to build current_thread runtime")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IoThreadPool;
+
+    #[test]
+    fn single_io_thread_shares_control_runtime() {
+        let pool = IoThreadPool::new(1);
+        assert_eq!(pool.threads.len(), 1);
+        assert_eq!(pool.thread_count(), 1);
+        assert_eq!(pool.assign_thread(), 0);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn configured_count_excludes_control_runtime() {
+        let pool = IoThreadPool::new(3);
+        assert_eq!(pool.threads.len(), 4);
+        assert_eq!(pool.thread_count(), 3);
+        assert_eq!(pool.assign_thread(), 0);
+        assert_eq!(pool.assign_thread(), 1);
+        assert_eq!(pool.assign_thread(), 2);
+        pool.shutdown();
+    }
 }

@@ -94,11 +94,18 @@ on every round trip (roughly 80 us vs 47 us p50 at 16 B).
 | large-msg throughput | 5.5 GB/s | 5.2 GB/s | wire-limited |
 | REQ/REP latency | 47 us | 80 us | cross-thread signaling |
 
-When N > 1, accepted or connected TCP/IPC streams migrate from the
-accepting thread's reactor to the assigned thread's reactor via
-`into_std()` / `from_std()` re-registration. This is necessary because
-each `current_thread` runtime owns its own epoll fd; a socket registered
-on one reactor cannot be polled from another.
+Owned contexts configured with more than one IO thread run one internal control
+runtime plus N data-plane runtimes, where N is `ContextConfig::io_threads`.
+The control runtime runs socket actors and blocking binding calls. It is not
+included in the configured IO thread count. Peer drivers and fan-out lanes run
+only on data-plane runtimes. A one-thread context shares control and data work
+on its single runtime.
+
+In multi-IO contexts, accepted or connected TCP/IPC streams migrate from the
+control runtime's reactor to the assigned data-plane runtime's reactor via
+`into_std()` / `from_std()` re-registration. This is necessary because each
+`current_thread` runtime owns its own epoll fd; a socket registered on one
+reactor cannot be polled from another.
 
 The `OMQ_IO_THREADS` environment variable sets the default IO thread
 count for `ContextConfig::from_env()`.

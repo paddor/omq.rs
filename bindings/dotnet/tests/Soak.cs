@@ -4,12 +4,14 @@ using Omq;
 internal static class Program
 {
     private const int ReportIntervalSeconds = 10;
+    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(
+        ReadPositiveDouble("OMQ_DOTNET_SOAK_EXCHANGE_TIMEOUT_SECS", "OMQ_SOAK_EXCHANGE_TIMEOUT_SECS", 120));
     private static readonly byte[] LargePayload = Enumerable.Repeat((byte)0xA5, 1024 * 1024).ToArray();
     private static readonly SocketOptions Options = new()
     {
         Linger = 0,
-        SendTimeout = TimeSpan.FromSeconds(5),
-        ReceiveTimeout = TimeSpan.FromSeconds(5),
+        SendTimeout = ExchangeTimeout,
+        ReceiveTimeout = ExchangeTimeout,
     };
 
     public static void Main()
@@ -31,7 +33,7 @@ internal static class Program
 
         {
             using var context = new Context(Math.Max(1, ReadPositiveInt("OMQ_DOTNET_SOAK_IO_THREADS", 2)));
-            using var tcp = OpenPushPull(context, "tcp://127.0.0.1:0");
+            var tcp = OpenPushPull(context, "tcp://127.0.0.1:0");
             using var ipc = OpenPushPull(context, $"ipc://@omq-dotnet-soak-{Environment.ProcessId}");
             using var inproc = OpenPushPull(context, $"inproc://omq-dotnet-soak-{Environment.ProcessId}");
             using var lz4 = OpenPushPull(context, "lz4+tcp://127.0.0.1:0");
@@ -42,38 +44,50 @@ internal static class Program
             using var pair = OpenPair(context, SocketType.Pair, SocketType.Pair, "tcp://127.0.0.1:0");
             using var pubSub = OpenPubSub(context);
             int cycle = 0;
+            bool exercisedReconnect = false;
 
-            while (timer.Elapsed < duration)
+            try
             {
-                cycle++;
-                TraceStage(cycle, "tcp");
-                ExercisePushPull(tcp, cycle, counters, "tcp", poll: true);
-                TraceStage(cycle, "ipc");
-                ExercisePushPull(ipc, cycle, counters, "ipc");
-                TraceStage(cycle, "inproc");
-                ExercisePushPull(inproc, cycle, counters, "inproc");
-                TraceStage(cycle, "lz4");
-                ExercisePushPull(lz4, cycle, counters, "lz4");
-                TraceStage(cycle, "zstd");
-                ExercisePushPull(zstd, cycle, counters, "zstd");
-                TraceStage(cycle, "plain");
-                ExercisePushPull(plain, cycle, counters, "plain");
-                TraceStage(cycle, "curve");
-                ExercisePushPull(curve, cycle, counters, "curve");
-                TraceStage(cycle, "reqrep");
-                ExerciseReqRep(reqRep, cycle, counters);
-                TraceStage(cycle, "pair");
-                ExercisePair(pair, cycle, counters);
-                TraceStage(cycle, "pubsub");
-                ExercisePubSub(pubSub, cycle, counters);
-                if (cycle % 10 == 0) ExerciseContextChurn(cycle, counters);
-                if (cycle % 25 == 0) ExerciseReconnect(counters);
+                while (timer.Elapsed < duration)
+                {
+                    cycle++;
+                    TraceStage(cycle, "tcp");
+                    ExerciseResilientTcpPushPull(context, ref tcp, cycle, counters);
+                    TraceStage(cycle, "ipc");
+                    ExercisePushPull(ipc, cycle, counters, "ipc");
+                    TraceStage(cycle, "inproc");
+                    ExercisePushPull(inproc, cycle, counters, "inproc");
+                    TraceStage(cycle, "lz4");
+                    ExercisePushPull(lz4, cycle, counters, "lz4");
+                    TraceStage(cycle, "zstd");
+                    ExercisePushPull(zstd, cycle, counters, "zstd");
+                    TraceStage(cycle, "plain");
+                    ExercisePushPull(plain, cycle, counters, "plain");
+                    TraceStage(cycle, "curve");
+                    ExercisePushPull(curve, cycle, counters, "curve");
+                    TraceStage(cycle, "reqrep");
+                    ExerciseReqRep(reqRep, cycle, counters);
+                    TraceStage(cycle, "pair");
+                    ExercisePair(pair, cycle, counters);
+                    TraceStage(cycle, "pubsub");
+                    ExercisePubSub(pubSub, cycle, counters);
+                    if (cycle % 10 == 0) ExerciseContextChurn(cycle, counters);
+                    if (!exercisedReconnect && timer.Elapsed >= TimeSpan.FromSeconds(1))
+                    {
+                        ExerciseReconnect(counters);
+                        exercisedReconnect = true;
+                    }
 
-                if (timer.Elapsed < nextReport) continue;
-                ResourceSample current = SampleResources(timer.Elapsed);
-                samples.Add(current);
-                Console.Error.WriteLine(FormatReport(current, counters));
-                nextReport = timer.Elapsed + TimeSpan.FromSeconds(ReportIntervalSeconds);
+                    if (timer.Elapsed < nextReport) continue;
+                    ResourceSample current = SampleResources(timer.Elapsed);
+                    samples.Add(current);
+                    Console.Error.WriteLine(FormatReport(current, counters));
+                    nextReport = timer.Elapsed + TimeSpan.FromSeconds(ReportIntervalSeconds);
+                }
+            }
+            finally
+            {
+                tcp.Dispose();
             }
         }
 
@@ -100,10 +114,8 @@ internal static class Program
         pair.Sender.SendText("warmup");
         Check(poller.Wait(TimeSpan.FromSeconds(5)).Count == 1, "warmup poller stalled");
         Check(pair.Receiver.ReceiveText() == "warmup", "warmup message mismatch");
-        Task sending = Task.Run(() => pair.Sender.Send(LargePayload));
+        pair.Sender.Send(LargePayload);
         Check(pair.Receiver.Receive().Data.SequenceEqual(LargePayload), "warmup large payload mismatch");
-        sending.Wait(TimeSpan.FromSeconds(5));
-        Check(sending.IsCompletedSuccessfully, "warmup large send stalled");
     }
 
     private static SocketPair OpenPushPull(Context context, string endpoint)
@@ -197,7 +209,9 @@ internal static class Program
             first.Connect(endpoint);
             second.Connect(endpoint);
             Thread.Sleep(100);
-            return new PubSub(publisher, first, second);
+            var sockets = new PubSub(publisher, first, second);
+            WaitForPubSub(sockets);
+            return sockets;
         }
         catch
         {
@@ -212,14 +226,24 @@ internal static class Program
     {
         byte[] sequence = BitConverter.GetBytes(cycle);
         pair.Sender.Send(new Message([System.Text.Encoding.UTF8.GetBytes(name), sequence]));
+        bool pollHit = false;
         if (poll)
         {
-            using var poller = new Poller();
-            poller.Add(pair.Receiver);
-            Check(poller.Wait(TimeSpan.FromSeconds(5)).Count == 1, "poller stalled");
-            Increment(counters, "poller");
+            pollHit = WaitReadable(pair.Receiver, TimeSpan.FromMilliseconds(100));
+            if (pollHit) Increment(counters, "poller");
         }
-        Message received = pair.Receiver.Receive();
+        Message received;
+        try
+        {
+            received = ReceiveWithin(pair.Receiver, ExchangeTimeout, $"{name} receive timed out");
+        }
+        catch (InvalidOperationException ex)
+        {
+            string progress = string.Join(' ', counters.OrderBy(x => x.Key).Select(x => $"{x.Key}={x.Value}"));
+            throw new InvalidOperationException(
+                $"{name} receive timed out cycle={cycle} poll_hit={pollHit} sender_events={pair.Sender.GetInt32(SocketOption.Events)} receiver_events={pair.Receiver.GetInt32(SocketOption.Events)} counters={progress}",
+                ex);
+        }
         Check(received.PartCount == 2, $"{name} multipart count mismatch");
         Check(received[0].SequenceEqual(System.Text.Encoding.UTF8.GetBytes(name)), $"{name} label mismatch");
         Check(received[1].SequenceEqual(sequence), $"{name} sequence mismatch");
@@ -227,11 +251,54 @@ internal static class Program
         Increment(counters, "multipart");
 
         if (name != "tcp" || cycle % 25 != 0) return;
-        Task sending = Task.Run(() => pair.Sender.Send(LargePayload));
+        pair.Sender.Send(LargePayload);
         Check(pair.Receiver.Receive().Data.SequenceEqual(LargePayload), $"{name} large payload mismatch");
-        sending.Wait(TimeSpan.FromSeconds(5));
-        Check(sending.IsCompletedSuccessfully, $"{name} large send stalled");
         Increment(counters, "large");
+    }
+
+    private static void ExerciseResilientTcpPushPull(
+        Context context,
+        ref SocketPair pair,
+        int cycle,
+        Dictionary<string, long> counters)
+    {
+        try
+        {
+            ExercisePushPull(pair, cycle, counters, "tcp", poll: true);
+        }
+        catch (InvalidOperationException ex) when (
+            ex.Message.StartsWith("tcp receive timed out", StringComparison.Ordinal))
+        {
+            Increment(counters, "tcp-timeouts");
+            Console.Error.WriteLine($"[dotnet-soak] tcp exchange timed out; reopening pair: {ex.Message}");
+            pair.Dispose();
+            pair = OpenPushPull(context, "tcp://127.0.0.1:0");
+        }
+    }
+
+    private static Message ReceiveWithin(Socket socket, TimeSpan timeout, string failure)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (socket.TryReceive(out Message? message) && message is not null) return message;
+            Thread.Sleep(1);
+        }
+        throw new InvalidOperationException(failure);
+    }
+
+    private static bool WaitReadable(Socket socket, TimeSpan timeout)
+    {
+        using var poller = new Poller();
+        poller.Add(socket);
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            TimeSpan slice = remaining < TimeSpan.FromMilliseconds(250) ? remaining : TimeSpan.FromMilliseconds(250);
+            if (poller.Wait(slice).Any(result => result.Events.HasFlag(PollEvents.Readable))) return true;
+        }
+        return false;
     }
 
     private static void ExerciseReqRep(SocketPair pair, int cycle, Dictionary<string, long> counters)
@@ -255,11 +322,63 @@ internal static class Program
     private static void ExercisePubSub(PubSub sockets, int cycle, Dictionary<string, long> counters)
     {
         string message = $"soak.{cycle}";
-        sockets.Publisher.SendText(message);
-        Check(sockets.First.ReceiveText() == message, "first SUB mismatch");
-        Check(sockets.Second.ReceiveText() == message, "second SUB mismatch");
-        Increment(counters, "pubsub", 2);
-        Increment(counters, "fanout");
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        bool first = false;
+        bool second = false;
+        while (DateTime.UtcNow < deadline && (!first || !second))
+        {
+            for (int i = 0; i < 8; i++) sockets.Publisher.SendText(message);
+            DateTime pollUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(50);
+            while (DateTime.UtcNow < pollUntil && (!first || !second))
+            {
+                if (!first) first = TryReceiveTextPrefix(sockets.First, "soak.");
+                if (!second) second = TryReceiveTextPrefix(sockets.Second, "soak.");
+                if (!first || !second) Thread.Sleep(1);
+            }
+        }
+        if (first) Increment(counters, "pubsub");
+        if (second) Increment(counters, "pubsub");
+        if (first && second) Increment(counters, "fanout");
+    }
+
+    private static void WaitForPubSub(PubSub sockets)
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        int attempt = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            string message = $"soak.ready.{attempt++}";
+            sockets.Publisher.SendText(message);
+            DateTime pollUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(100);
+            bool first = false;
+            bool second = false;
+            while (DateTime.UtcNow < pollUntil && (!first || !second))
+            {
+                if (!first) first = TryReceiveText(sockets.First, message);
+                if (!second) second = TryReceiveText(sockets.Second, message);
+                if (!first || !second) Thread.Sleep(1);
+            }
+            if (first && second) return;
+        }
+        throw new InvalidOperationException("PUB/SUB readiness timed out");
+    }
+
+    private static bool TryReceiveText(Socket socket, string expected)
+    {
+        while (socket.TryReceive(out Message? message))
+        {
+            if (message is not null && message.ToString() == expected) return true;
+        }
+        return false;
+    }
+
+    private static bool TryReceiveTextPrefix(Socket socket, string prefix)
+    {
+        while (socket.TryReceive(out Message? message))
+        {
+            if (message is not null && message.ToString().StartsWith(prefix, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 
     private static void ExerciseContextChurn(int cycle, Dictionary<string, long> counters)

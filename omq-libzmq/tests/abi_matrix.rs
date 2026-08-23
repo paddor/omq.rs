@@ -42,6 +42,10 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Extension,
     },
     FunctionEntry {
+        name: "omq_socket_allow_thread_migration",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
         name: "zmq_atomic_counter_dec",
         status: FunctionStatus::Implemented,
     },

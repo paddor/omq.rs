@@ -635,7 +635,7 @@ fn spawn_wire_task(
     io_thread: usize,
     peer_driver: ConnectionDriver<AnyStream>,
 ) {
-    let needs_migration = io_thread != 0;
+    let needs_migration = socket.io_pool.has_dedicated_io_threads();
     let task = socket.io_pool.spawn_on(io_thread, async move {
         let peer_driver = if needs_migration {
             match peer_driver.migrate_stream() {
@@ -673,7 +673,7 @@ fn server_routing_id(peer_id: u64) -> Option<u32> {
 }
 
 fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {
-    can_bypass_actor_recv(t) && (t != SocketType::Req || latency_profile)
+    can_bypass_actor_recv(t) && t != SocketType::Client && (t != SocketType::Req || latency_profile)
 }
 
 #[cfg(test)]
@@ -685,6 +685,7 @@ mod tests {
         assert!(can_use_yring_recv_bypass(SocketType::Req, true));
         assert!(!can_use_yring_recv_bypass(SocketType::Req, false));
         assert!(can_use_yring_recv_bypass(SocketType::Pull, false));
+        assert!(!can_use_yring_recv_bypass(SocketType::Client, false));
     }
 
     #[test]

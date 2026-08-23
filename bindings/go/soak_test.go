@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,10 +17,14 @@ import (
 )
 
 const (
-	soakRecvTimeout    = 200 * time.Millisecond
-	soakSendTimeout    = 500 * time.Millisecond
-	soakConnectTimeout = 5 * time.Second
-	soakReportInterval = 10 * time.Second
+	soakRecvTimeout            = 200 * time.Millisecond
+	soakSendTimeout            = 500 * time.Millisecond
+	soakConnectTimeout         = 5 * time.Second
+	soakExchangeTimeout        = 30 * time.Second
+	soakCloseTimeout           = 5 * time.Second
+	soakReportInterval         = 10 * time.Second
+	soakProgressTimeout        = 60 * time.Second
+	soakCompressionMaxInFlight = 512
 
 	soakResourceWarmup     = 10 * time.Minute
 	soakResourceWindow     = 5 * time.Minute
@@ -172,10 +177,10 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 	if scenarios.enabled("compression") {
 		startWorker(&wg, state, "lz4-compression", func(ctx context.Context) error {
-			return soakCompressionPair(ctx, omqCtx, "lz4+tcp://127.0.0.1:*", nil, counters)
+			return soakCompressionOwnedLoop(ctx, "lz4+tcp://127.0.0.1:*", lz4TestDict, counters)
 		})
 		startWorker(&wg, state, "zstd-compression", func(ctx context.Context) error {
-			return soakCompressionPair(ctx, omqCtx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
+			return soakCompressionOwnedLoop(ctx, "zstd+tcp://127.0.0.1:*", zstdTestDict, counters)
 		})
 	}
 	if scenarios.enabled("inproc") {
@@ -206,6 +211,7 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 	ticker := time.NewTicker(soakReportInterval)
 	defer ticker.Stop()
+	progress := newSoakProgressWatch(scenarios, counters, start)
 	for {
 		select {
 		case <-runCtx.Done():
@@ -236,6 +242,10 @@ func TestSoakMixedWorkloads(t *testing.T) {
 			logSoakNativeStats(t, current.native)
 			logSoakLifecycle(t, counters)
 			resources.assertLive(t, elapsed, current)
+			if err := progress.observe(elapsed); err != nil {
+				state.fail(err)
+				cancel()
+			}
 			if err := state.err(); err != nil {
 				cancel()
 			}
@@ -244,16 +254,17 @@ func TestSoakMixedWorkloads(t *testing.T) {
 
 done:
 	cancel()
-	waitForSoakWorkers(t, &wg)
+	if err := state.err(); err != nil {
+		t.Logf("[go-soak] stopping after worker error: %v", err)
+	}
 	if tcpPull != nil {
 		closeSoakScenarioSocket(tcpPull, counters, "tcp")
 	}
 	if curvePull != nil {
 		closeSoakScenarioSocket(curvePull, counters, "curve")
 	}
-	if err := omqCtx.CloseContext(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	closeErr := closeSoakContext(omqCtx)
+	waitForSoakWorkers(t, &wg)
 	runtime.GC()
 	time.Sleep(200 * time.Millisecond)
 	runtime.GC()
@@ -261,6 +272,9 @@ done:
 	logSoakLifecycle(t, counters)
 	if err := state.err(); err != nil {
 		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	assertSoakProgress(t, scenarios, counters)
 }
@@ -280,12 +294,30 @@ func startSoakPull(
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := pull.Bind(endpoint)
+	bound, err := soakBindSocket(context.Background(), pull, endpoint)
 	if err != nil {
 		closeSoakScenarioSocket(pull, counters, scenario)
 		t.Fatal(err)
 	}
 	return bound, pull
+}
+
+func soakBindSocket(ctx context.Context, socket *Socket, endpoint string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bindCtx, cancel := context.WithTimeout(ctx, soakConnectTimeout)
+	defer cancel()
+	return socket.BindContext(bindCtx, endpoint)
+}
+
+func soakConnectSocket(ctx context.Context, socket *Socket, endpoint string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, soakConnectTimeout)
+	defer cancel()
+	return socket.ConnectContext(connectCtx, endpoint)
 }
 
 func startWorker(wg *sync.WaitGroup, state *soakState, name string, fn func(context.Context) error) {
@@ -295,11 +327,14 @@ func startWorker(wg *sync.WaitGroup, state *soakState, name string, fn func(cont
 				state.fail(fmt.Errorf("%s: panic: %v", name, recovered))
 			}
 		}()
-		err := fn(state.ctx)
-		if err == nil || (state.ctx.Err() != nil && soakStopError(err)) {
+		for state.ctx.Err() == nil {
+			err := fn(state.ctx)
+			if err == nil || (state.ctx.Err() != nil && soakStopError(err)) {
+				return
+			}
+			state.fail(fmt.Errorf("%s: %w", name, err))
 			return
 		}
-		state.fail(fmt.Errorf("%s: %w", name, err))
 	})
 }
 
@@ -373,16 +408,22 @@ func soakChurnPush(
 		if err != nil {
 			return err
 		}
-		if err := push.Connect(endpoint); err != nil {
+		if err := soakConnectSocket(ctx, push, endpoint); err != nil {
 			closeSoakScenarioSocket(push, counters, scenario)
-			return err
+			if ctx.Err() != nil {
+				return errFromContext(ctx)
+			}
+			if errors.Is(err, ErrTimeout) || errors.Is(err, ErrAgain) {
+				continue
+			}
+			return fmt.Errorf("%s churn connect %s: %w", scenario, endpoint, err)
 		}
 		if _, err := push.WaitConnectedTimeout(1, soakConnectTimeout); err != nil {
 			closeSoakScenarioSocket(push, counters, scenario)
 			if ctx.Err() != nil || errors.Is(err, ErrTimeout) {
 				continue
 			}
-			return err
+			return fmt.Errorf("%s churn wait connected %s: %w", scenario, endpoint, err)
 		}
 		payload := soakPayload(fmt.Sprintf("churn-%d", workerID), seq, 256)
 		for i := 0; i < 32 && ctx.Err() == nil; i++ {
@@ -390,28 +431,56 @@ func soakChurnPush(
 			if err := push.SendTimeout(Bytes(payload), soakSendTimeout); err != nil &&
 				!errors.Is(err, ErrTimeout) && !errors.Is(err, ErrAgain) {
 				closeSoakScenarioSocket(push, counters, scenario)
-				return err
+				return fmt.Errorf("%s churn send %s: %w", scenario, endpoint, err)
 			}
 			seq++
 		}
 		closeSoakScenarioSocket(push, counters, scenario)
+		if err := waitSoakInterval(ctx, time.Second); err != nil {
+			return err
+		}
 	}
 	return errFromContext(ctx)
+}
+
+func soakCompressionLoop(ctx context.Context, shared *Context, endpoint string, dict []byte, counters *soakCounters) error {
+	for ctx.Err() == nil {
+		err := soakCompressionPair(ctx, shared, endpoint, dict, counters)
+		if err == nil {
+			continue
+		}
+		return err
+	}
+	return errFromContext(ctx)
+}
+
+func soakCompressionOwnedLoop(ctx context.Context, endpoint string, dict []byte, counters *soakCounters) error {
+	compressionCtx, err := Open(Config{IOThreads: 1, RingSize: 4096})
+	if err != nil {
+		return err
+	}
+	counters.scenarioContextCreated("compression")
+	defer func() {
+		if err := closeSoakContext(compressionCtx); err == nil {
+			counters.scenarioContextClosed("compression")
+		}
+	}()
+	return soakCompressionLoop(ctx, compressionCtx, endpoint, dict, counters)
 }
 
 func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, dict []byte, counters *soakCounters) error {
 	pullOpts := append([]SocketOption{}, soakRecvOptions()...)
 	pushOpts := append([]SocketOption{}, soakSendOptions()...)
-	pullOpts = append(pullOpts, CompressionAutoTrain(true), CompressionDictCapacity(4096))
 	pushOpts = append(pushOpts,
-		CompressionAutoTrain(true),
-		CompressionDictCapacity(4096),
 		CompressionThreshold(32),
 		CompressionLevel(1),
 	)
 	if dict != nil {
 		pullOpts = append(pullOpts, CompressionDict(dict))
 		pushOpts = append(pushOpts, CompressionDict(dict))
+	} else {
+		pullOpts = append(pullOpts, CompressionAutoTrain(true), CompressionDictCapacity(4096))
+		pushOpts = append(pushOpts, CompressionAutoTrain(true), CompressionDictCapacity(4096))
 	}
 	pull, err := soakNewSocket(shared, counters, "compression", Pull, pullOpts...)
 	if err != nil {
@@ -423,36 +492,86 @@ func soakCompressionPair(ctx context.Context, shared *Context, endpoint string, 
 		return err
 	}
 	defer closeSoakScenarioSocket(push, counters, "compression")
-	bound, err := pull.Bind(endpoint)
+	bound, err := soakBindSocket(ctx, pull, endpoint)
 	if err != nil {
-		return err
+		return fmt.Errorf("compression bind %s: %w", endpoint, err)
 	}
-	if err := push.Connect(bound); err != nil {
-		return err
+	if err := soakConnectSocket(ctx, push, bound); err != nil {
+		return fmt.Errorf("compression connect %s: %w", bound, err)
 	}
 	if _, err := push.WaitConnectedTimeout(1, soakConnectTimeout); err != nil {
-		return err
+		return fmt.Errorf("compression wait connected %s: %w", bound, err)
 	}
 	var seq uint64
+	inFlight := 0
+	lastReceive := time.Now()
 	for ctx.Err() == nil {
-		payload := soakPayload(endpoint, seq, 1024)
-		if err := push.SendTimeout(Bytes(payload), 5*time.Second); err != nil {
+		if inFlight < soakCompressionMaxInFlight {
+			payload := soakPayload(endpoint, seq, 1024)
+			if err := push.SendTimeout(Bytes(payload), soakSendTimeout); err != nil {
+				switch {
+				case ctx.Err() != nil:
+					return errFromContext(ctx)
+				case errors.Is(err, ErrTimeout), errors.Is(err, ErrAgain):
+				default:
+					return fmt.Errorf("compression send %s seq=%d: %w", endpoint, seq, err)
+				}
+			} else {
+				seq++
+				inFlight++
+			}
+		}
+
+		msg, err := pull.RecvTimeout(soakRecvTimeout)
+		switch {
+		case err == nil:
+			if len(msg.Bytes()) != 1024 {
+				return fmt.Errorf("compression payload length mismatch on %s: got %d", endpoint, len(msg.Bytes()))
+			}
+			if inFlight > 0 {
+				inFlight--
+			}
+			lastReceive = time.Now()
+			counters.compressionMessages.Add(1)
+		case ctx.Err() != nil:
+			return errFromContext(ctx)
+		case errors.Is(err, ErrTimeout), errors.Is(err, ErrAgain):
+			if inFlight >= soakCompressionMaxInFlight && time.Since(lastReceive) >= soakExchangeTimeout {
+				return fmt.Errorf("compression stalled %s: in_flight=%d seq=%d", endpoint, inFlight, seq)
+			}
+		default:
+			return fmt.Errorf("compression recv %s seq=%d: %w", endpoint, seq, err)
+		}
+
+		if err := waitSoakInterval(ctx, time.Millisecond); err != nil {
 			return err
 		}
-		msg, err := pull.RecvTimeout(5 * time.Second)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(msg.Bytes(), payload) {
-			return fmt.Errorf("compression payload mismatch on %s", endpoint)
-		}
-		counters.compressionMessages.Add(1)
-		seq++
 	}
 	return errFromContext(ctx)
 }
 
 func soakInprocReqRep(ctx context.Context, shared *Context, counters *soakCounters) error {
+	var generation uint64
+	for ctx.Err() == nil {
+		err := soakInprocReqRepOnce(ctx, shared, counters, generation)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil && soakStopError(err) {
+			return errFromContext(ctx)
+		}
+		if !soakTransientExchangeError(err) {
+			return err
+		}
+		generation++
+		if err := waitSoakInterval(ctx, time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return errFromContext(ctx)
+}
+
+func soakInprocReqRepOnce(ctx context.Context, shared *Context, counters *soakCounters, generation uint64) error {
 	rep, err := soakNewSocket(shared, counters, "inproc", Rep, soakRecvOptions()...)
 	if err != nil {
 		return err
@@ -463,30 +582,30 @@ func soakInprocReqRep(ctx context.Context, shared *Context, counters *soakCounte
 		return err
 	}
 	defer closeSoakScenarioSocket(req, counters, "inproc")
-	endpoint, err := rep.Bind(fmt.Sprintf("inproc://go-soak-req-rep-%d", os.Getpid()))
+	endpoint, err := soakBindSocket(ctx, rep, fmt.Sprintf("inproc://go-soak-req-rep-%d-%d", os.Getpid(), generation))
 	if err != nil {
 		return err
 	}
-	if err := req.Connect(endpoint); err != nil {
+	if err := soakConnectSocket(ctx, req, endpoint); err != nil {
 		return err
 	}
 	var seq uint64
 	for ctx.Err() == nil {
 		payload := fmt.Sprintf("req-%d", seq)
-		if err := req.SendTimeout(String(payload), 5*time.Second); err != nil {
+		if err := req.SendTimeout(String(payload), soakExchangeTimeout); err != nil {
 			return err
 		}
-		msg, err := rep.RecvTimeout(5 * time.Second)
+		msg, err := rep.RecvTimeout(soakExchangeTimeout)
 		if err != nil {
 			return err
 		}
 		if msg.String() != payload {
 			return fmt.Errorf("inproc request mismatch: %q", msg.String())
 		}
-		if err := rep.SendTimeout(String("ok"), 5*time.Second); err != nil {
+		if err := rep.SendTimeout(String("ok"), soakExchangeTimeout); err != nil {
 			return err
 		}
-		reply, err := req.RecvTimeout(5 * time.Second)
+		reply, err := req.RecvTimeout(soakExchangeTimeout)
 		if err != nil {
 			return err
 		}
@@ -500,6 +619,27 @@ func soakInprocReqRep(ctx context.Context, shared *Context, counters *soakCounte
 }
 
 func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounters) error {
+	var generation uint64
+	for ctx.Err() == nil {
+		err := soakProtocolMixOnce(ctx, shared, counters, generation)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil && soakStopError(err) {
+			return errFromContext(ctx)
+		}
+		if !soakTransientExchangeError(err) {
+			return err
+		}
+		generation++
+		if err := waitSoakInterval(ctx, time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return errFromContext(ctx)
+}
+
+func soakProtocolMixOnce(ctx context.Context, shared *Context, counters *soakCounters, generation uint64) error {
 	newSocket := func(socketType SocketType) (*Socket, error) {
 		return soakNewSocket(shared, counters, "protocol-mix", socketType, Linger(0), SendHWM(128), RecvHWM(128))
 	}
@@ -513,11 +653,11 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 		return err
 	}
 	defer closeSoakScenarioSocket(push, counters, "protocol-mix")
-	ipcEndpoint, err := pull.Bind(fmt.Sprintf("ipc://@go-soak-protocol-%d", os.Getpid()))
+	ipcEndpoint, err := soakBindSocket(ctx, pull, fmt.Sprintf("ipc://@go-soak-protocol-%d-%d", os.Getpid(), generation))
 	if err != nil {
 		return err
 	}
-	if err := push.Connect(ipcEndpoint); err != nil {
+	if err := soakConnectSocket(ctx, push, ipcEndpoint); err != nil {
 		return err
 	}
 
@@ -531,11 +671,11 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 		return err
 	}
 	defer closeSoakScenarioSocket(req, counters, "protocol-mix")
-	reqEndpoint, err := rep.Bind("tcp://127.0.0.1:0")
+	reqEndpoint, err := soakBindSocket(ctx, rep, "tcp://127.0.0.1:0")
 	if err != nil {
 		return err
 	}
-	if err := req.Connect(reqEndpoint); err != nil {
+	if err := soakConnectSocket(ctx, req, reqEndpoint); err != nil {
 		return err
 	}
 
@@ -549,11 +689,11 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 		return err
 	}
 	defer closeSoakScenarioSocket(right, counters, "protocol-mix")
-	pairEndpoint, err := left.Bind("tcp://127.0.0.1:0")
+	pairEndpoint, err := soakBindSocket(ctx, left, "tcp://127.0.0.1:0")
 	if err != nil {
 		return err
 	}
-	if err := right.Connect(pairEndpoint); err != nil {
+	if err := soakConnectSocket(ctx, right, pairEndpoint); err != nil {
 		return err
 	}
 
@@ -566,10 +706,10 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 			payload = large
 		}
 		want := Multipart(sequence, payload)
-		if err := push.SendTimeout(want, 5*time.Second); err != nil {
+		if err := push.SendTimeout(want, soakExchangeTimeout); err != nil {
 			return err
 		}
-		got, err := pull.RecvTimeout(5 * time.Second)
+		got, err := pull.RecvTimeout(soakExchangeTimeout)
 		if err != nil {
 			return err
 		}
@@ -577,36 +717,52 @@ func soakProtocolMix(ctx context.Context, shared *Context, counters *soakCounter
 			return fmt.Errorf("IPC multipart mismatch at %d", seq)
 		}
 
-		if err := req.SendTimeout(String("request"), 5*time.Second); err != nil {
+		if err := req.SendTimeout(String("request"), soakExchangeTimeout); err != nil {
 			return err
 		}
-		if _, err := rep.RecvTimeout(5 * time.Second); err != nil {
+		if _, err := rep.RecvTimeout(soakExchangeTimeout); err != nil {
 			return err
 		}
-		if err := rep.SendTimeout(String("reply"), 5*time.Second); err != nil {
+		if err := rep.SendTimeout(String("reply"), soakExchangeTimeout); err != nil {
 			return err
 		}
-		if reply, err := req.RecvTimeout(5 * time.Second); err != nil || reply.String() != "reply" {
-			return fmt.Errorf("REQ/REP mismatch: %v", err)
+		reply, err := req.RecvTimeout(soakExchangeTimeout)
+		if err != nil {
+			return err
+		}
+		if reply.String() != "reply" {
+			return fmt.Errorf("REQ/REP mismatch: %q", reply.String())
 		}
 
 		pairMessage := Bytes(sequence)
-		if err := left.SendTimeout(pairMessage, 5*time.Second); err != nil {
+		if err := left.SendTimeout(pairMessage, soakExchangeTimeout); err != nil {
 			return err
 		}
-		if got, err := right.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
-			return fmt.Errorf("PAIR forward mismatch: %v", err)
-		}
-		if err := right.SendTimeout(pairMessage, 5*time.Second); err != nil {
+		got, err = right.RecvTimeout(soakExchangeTimeout)
+		if err != nil {
 			return err
 		}
-		if got, err := left.RecvTimeout(5 * time.Second); err != nil || !got.Equal(pairMessage) {
-			return fmt.Errorf("PAIR reverse mismatch: %v", err)
+		if !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR forward mismatch at %d", seq)
+		}
+		if err := right.SendTimeout(pairMessage, soakExchangeTimeout); err != nil {
+			return err
+		}
+		got, err = left.RecvTimeout(soakExchangeTimeout)
+		if err != nil {
+			return err
+		}
+		if !got.Equal(pairMessage) {
+			return fmt.Errorf("PAIR reverse mismatch at %d", seq)
 		}
 		counters.protocolMessages.Add(4)
 		seq++
 	}
 	return errFromContext(ctx)
+}
+
+func soakTransientExchangeError(err error) bool {
+	return errors.Is(err, ErrTimeout) || errors.Is(err, ErrAgain)
 }
 
 func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counters *soakCounters) error {
@@ -622,13 +778,13 @@ func soakPollerFanIn(ctx context.Context, shared *Context, channels int, counter
 			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
 		}
-		endpoint, err := pull.Bind(fmt.Sprintf("inproc://go-soak-poller-%d-%d", os.Getpid(), i))
+		endpoint, err := soakBindSocket(ctx, pull, fmt.Sprintf("inproc://go-soak-poller-%d-%d", os.Getpid(), i))
 		if err != nil {
 			closeSoakScenarioSocket(push, counters, "poller")
 			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
 		}
-		if err := push.Connect(endpoint); err != nil {
+		if err := soakConnectSocket(ctx, push, endpoint); err != nil {
 			closeSoakScenarioSocket(push, counters, "poller")
 			closeSoakScenarioSocket(pull, counters, "poller")
 			return err
@@ -707,7 +863,7 @@ func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounter
 		return err
 	}
 	defer closeSoakScenarioSocket(pub, counters, "pubsub")
-	endpoint, err := pub.Bind("tcp://127.0.0.1:*")
+	endpoint, err := soakBindSocket(ctx, pub, "tcp://127.0.0.1:*")
 	if err != nil {
 		return err
 	}
@@ -755,7 +911,7 @@ func soakPubSubChurn(ctx context.Context, shared *Context, counters *soakCounter
 				if err != nil {
 					return err
 				}
-				if err := sub.Connect(endpoint); err != nil {
+				if err := soakConnectSocket(ctx, sub, endpoint); err != nil {
 					closeSoakScenarioSocket(sub, counters, "pubsub")
 					return err
 				}
@@ -780,36 +936,36 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		counters.scenarioContextCreated("context-churn")
 		pull, err := soakNewSocket(churnCtx, counters, "context-churn", Pull, Linger(0))
 		if err != nil {
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		push, err := soakNewSocket(churnCtx, counters, "context-churn", Push, Linger(0))
 		if err != nil {
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
-		endpoint, err := pull.Bind(fmt.Sprintf("inproc://go-soak-context-%d-%d", os.Getpid(), seq))
+		endpoint, err := soakBindSocket(ctx, pull, fmt.Sprintf("inproc://go-soak-context-%d-%d", os.Getpid(), seq))
 		if err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
-		if err := push.Connect(endpoint); err != nil {
+		if err := soakConnectSocket(ctx, push, endpoint); err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if err := push.SendTimeout(String("x"), time.Second); err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
@@ -817,28 +973,45 @@ func soakContextChurn(ctx context.Context, counters *soakCounters) error {
 		if err != nil {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return err
 		}
 		if msg.String() != "x" {
 			closeSoakScenarioSocket(push, counters, "context-churn")
 			closeSoakScenarioSocket(pull, counters, "context-churn")
-			_ = churnCtx.Close()
+			_ = closeSoakContext(churnCtx)
 			counters.scenarioContextClosed("context-churn")
 			return fmt.Errorf("context churn payload mismatch: %q", msg.String())
 		}
 		closeSoakScenarioSocket(push, counters, "context-churn")
 		closeSoakScenarioSocket(pull, counters, "context-churn")
-		if err := churnCtx.CloseContext(context.Background()); err != nil {
+		if err := closeSoakContext(churnCtx); err != nil {
 			counters.scenarioContextClosed("context-churn")
+			if ctx.Err() != nil && errors.Is(err, ErrTimeout) {
+				return errFromContext(ctx)
+			}
 			return err
 		}
 		counters.scenarioContextClosed("context-churn")
 		counters.contextCycles.Add(1)
 		seq++
+		if err := waitSoakInterval(ctx, time.Second); err != nil {
+			return err
+		}
 	}
 	return errFromContext(ctx)
+}
+
+func waitSoakInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return errFromContext(ctx)
+	case <-timer.C:
+		return nil
+	}
 }
 
 func waitForSoakWorkers(t *testing.T, wg *sync.WaitGroup) {
@@ -851,66 +1024,82 @@ func waitForSoakWorkers(t *testing.T, wg *sync.WaitGroup) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
+		_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
 		t.Fatal("soak workers did not stop within 30s")
 	}
 }
 
-func assertSoakProgress(t *testing.T, scenarios soakScenarios, counters *soakCounters) {
-	t.Helper()
-	checks := []struct {
-		name  string
-		count uint64
-	}{}
+type soakProgressCheck struct {
+	name  string
+	count func() uint64
+}
+
+type soakProgressWatch struct {
+	checks []soakProgressCheck
+	last   []uint64
+	at     []time.Time
+}
+
+func newSoakProgressWatch(scenarios soakScenarios, counters *soakCounters, start time.Time) *soakProgressWatch {
+	checks := soakProgressChecks(scenarios, counters)
+	last := make([]uint64, len(checks))
+	at := make([]time.Time, len(checks))
+	for i, check := range checks {
+		last[i] = check.count()
+		at[i] = start
+	}
+	return &soakProgressWatch{checks: checks, last: last, at: at}
+}
+
+func (w *soakProgressWatch) observe(elapsed time.Duration) error {
+	now := time.Now()
+	for i, check := range w.checks {
+		count := check.count()
+		if count != w.last[i] {
+			w.last[i] = count
+			w.at[i] = now
+			continue
+		}
+		if elapsed >= soakProgressTimeout && now.Sub(w.at[i]) >= soakProgressTimeout {
+			return fmt.Errorf("%s soak stalled for %s at count=%d", check.name, soakProgressTimeout, count)
+		}
+	}
+	return nil
+}
+
+func soakProgressChecks(scenarios soakScenarios, counters *soakCounters) []soakProgressCheck {
+	checks := []soakProgressCheck{}
 	if scenarios.enabled("tcp") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"tcp", counters.tcpMessages.Load()})
+		checks = append(checks, soakProgressCheck{"tcp", counters.tcpMessages.Load})
 	}
 	if scenarios.enabled("curve") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"curve", counters.curveMessages.Load()})
+		checks = append(checks, soakProgressCheck{"curve", counters.curveMessages.Load})
 	}
 	if scenarios.enabled("compression") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"compression", counters.compressionMessages.Load()})
+		checks = append(checks, soakProgressCheck{"compression", counters.compressionMessages.Load})
 	}
 	if scenarios.enabled("inproc") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"inproc", counters.inprocMessages.Load()})
+		checks = append(checks, soakProgressCheck{"inproc", counters.inprocMessages.Load})
 	}
 	if scenarios.enabled("poller") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"poller", counters.pollerMessages.Load()})
+		checks = append(checks, soakProgressCheck{"poller", counters.pollerMessages.Load})
 	}
 	if scenarios.enabled("pubsub") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"pubsub", counters.pubSubMessages.Load()})
+		checks = append(checks, soakProgressCheck{"pubsub", counters.pubSubMessages.Load})
 	}
 	if scenarios.enabled("protocol-mix") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"protocol-mix", counters.protocolMessages.Load()})
+		checks = append(checks, soakProgressCheck{"protocol-mix", counters.protocolMessages.Load})
 	}
 	if scenarios.enabled("context-churn") {
-		checks = append(checks, struct {
-			name  string
-			count uint64
-		}{"context-churn", counters.contextCycles.Load()})
+		checks = append(checks, soakProgressCheck{"context-churn", counters.contextCycles.Load})
 	}
-	for _, check := range checks {
-		if check.count == 0 {
+	return checks
+}
+
+func assertSoakProgress(t *testing.T, scenarios soakScenarios, counters *soakCounters) {
+	t.Helper()
+	for _, check := range soakProgressChecks(scenarios, counters) {
+		if check.count() == 0 {
 			t.Fatalf("%s soak made no progress", check.name)
 		}
 	}
@@ -1990,7 +2179,9 @@ func soakNewSocket(
 
 func closeSoakSocket(socket *Socket) {
 	if socket != nil {
-		_ = socket.Close(context.Background())
+		closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+		defer cancel()
+		_ = socket.CloseLinger(closeCtx, 0)
 	}
 }
 
@@ -2000,10 +2191,18 @@ func closeSoakScenarioSocket(socket *Socket, counters *soakCounters, scenario st
 	}
 	state := socket.stateOrNil()
 	wasClosed := state == nil || state.closed.Load()
-	_ = socket.Close(context.Background())
+	closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+	defer cancel()
+	_ = socket.CloseLinger(closeCtx, 0)
 	if !wasClosed {
 		counters.scenarioSocketClosed(scenario)
 	}
+}
+
+func closeSoakContext(ctx *Context) error {
+	closeCtx, cancel := context.WithTimeout(context.Background(), soakCloseTimeout)
+	defer cancel()
+	return ctx.CloseContext(closeCtx)
 }
 
 func soakStopError(err error) bool {

@@ -509,6 +509,55 @@ final class SocketTest {
     }
 
     @Test
+    void blockedSendUnblocksWhenSocketCloses() throws Exception {
+        Context context = OMQ.context();
+        Socket push = context.socket(SocketType.PUSH)
+                .sendHighWaterMark(1)
+                .transmitSlotCapacity(1_024);
+        push.bind("inproc://blocked-send-close-" + UUID.randomUUID());
+        byte[] body = new byte[64 * 1024];
+        CountDownLatch started = new CountDownLatch(1);
+        CompletableFuture<Throwable> sent = new CompletableFuture<>();
+        Thread sender = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                started.countDown();
+                while (true) {
+                    push.send(body);
+                }
+            } catch (Throwable error) {
+                sent.complete(error);
+            }
+        });
+
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        Thread.sleep(100);
+        assertFalse(sent.isDone(), "send should be blocked before close");
+        CompletableFuture<Void> closed = new CompletableFuture<>();
+        Thread closer = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                push.close();
+                closed.complete(null);
+            } catch (Throwable error) {
+                closed.completeExceptionally(error);
+            }
+        });
+
+        boolean closeCompleted = false;
+        try {
+            closed.get(1, TimeUnit.SECONDS);
+            closeCompleted = true;
+            Throwable error = sent.get(1, TimeUnit.SECONDS);
+            assertTrue(error instanceof ClosedException, "send should fail with ClosedException");
+            sender.join(5_000);
+            closer.join(5_000);
+        } finally {
+            if (closeCompleted) {
+                context.close();
+            }
+        }
+    }
+
+    @Test
     void timedSendSucceedsBeforeTimeout() {
         try (Context context = OMQ.context();
              Socket pull = context.socket(SocketType.PULL);

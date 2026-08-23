@@ -19,12 +19,22 @@ public static class SocketAsyncExtensions
         cancellationToken.ThrowIfCancellationRequested();
         byte[] encoded = Encode(message);
         var state = new AsyncState();
-        GCHandle root = GCHandle.Alloc(state);
+        GCHandle root = default;
         IntPtr task;
-        unsafe
+        try
         {
-            fixed (byte* p = encoded)
-                task = Native.omq_socket_send_async(socket.NativeHandle, (IntPtr)p, (nuint)encoded.Length, Complete, GCHandle.ToIntPtr(root));
+            using var lease = socket.AcquireNativeHandle();
+            root = GCHandle.Alloc(state);
+            unsafe
+            {
+                fixed (byte* p = encoded)
+                    task = Native.omq_socket_send_async(lease.Pointer, (IntPtr)p, (nuint)encoded.Length, Complete, GCHandle.ToIntPtr(root));
+            }
+        }
+        catch
+        {
+            if (root.IsAllocated) root.Free();
+            throw;
         }
         if (task == IntPtr.Zero)
         {

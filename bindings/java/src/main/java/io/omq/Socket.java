@@ -264,7 +264,7 @@ public final class Socket implements AutoCloseable {
             if (Thread.currentThread().isVirtual()) {
                 return Optional.of(receiveVirtual(timeoutMillis));
             }
-            return Optional.of(withRecvRing((ring, handle) -> ring.receive(handle, timeoutMillis)));
+            return Optional.of(receiveTimedDirect(timeoutMillis));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -278,8 +278,7 @@ public final class Socket implements AutoCloseable {
             if (Thread.currentThread().isVirtual()) {
                 return Optional.of(receiveVirtual(timeoutMillis).bytes());
             }
-            return Optional.of(withRecvRing(
-                    (ring, handle) -> ring.receiveBytes(handle, timeoutMillis)));
+            return Optional.of(receiveTimedDirect(timeoutMillis).bytes());
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -294,8 +293,7 @@ public final class Socket implements AutoCloseable {
             if (Thread.currentThread().isVirtual()) {
                 return OptionalInt.of(writeInto(receiveVirtual(timeoutMillis), destination));
             }
-            return OptionalInt.of(withRecvRing(
-                    (ring, handle) -> ring.receiveInto(handle, destination, timeoutMillis)));
+            return OptionalInt.of(writeInto(receiveTimedDirect(timeoutMillis), destination));
         } catch (TimeoutException timeoutError) {
             return OptionalInt.empty();
         }
@@ -304,7 +302,7 @@ public final class Socket implements AutoCloseable {
     /** Receives one message if already available, or returns empty. */
     public synchronized Optional<Message> tryReceive() {
         try {
-            return Optional.of(withRecvRing((ring, handle) -> ring.receive(handle, 0)));
+            return Optional.of(receiveTimedDirect(0));
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -313,7 +311,7 @@ public final class Socket implements AutoCloseable {
     /** Receives one single-part message body if already available, or returns empty. */
     public synchronized Optional<byte[]> tryReceiveBytes() {
         try {
-            return Optional.of(withRecvRing((ring, handle) -> ring.receiveBytes(handle, 0)));
+            return Optional.of(receiveTimedDirect(0).bytes());
         } catch (TimeoutException timeoutError) {
             return Optional.empty();
         }
@@ -323,8 +321,7 @@ public final class Socket implements AutoCloseable {
     public synchronized OptionalInt tryReceiveInto(ByteBuffer destination) {
         Objects.requireNonNull(destination, "destination");
         try {
-            return OptionalInt.of(withRecvRing(
-                    (ring, handle) -> ring.receiveInto(handle, destination, 0)));
+            return OptionalInt.of(writeInto(receiveTimedDirect(0), destination));
         } catch (TimeoutException timeoutError) {
             return OptionalInt.empty();
         }
@@ -1011,6 +1008,17 @@ public final class Socket implements AutoCloseable {
         }
     }
 
+    private Message receiveTimedDirect(long timeoutMillis) {
+        synchronized (state) {
+            long handle = state.handle();
+            Optional<Message> cached = state.recvRing.tryReceiveCachedMessage();
+            if (cached.isPresent()) {
+                return cached.orElseThrow();
+            }
+            return (Message) Native.socketRecv(handle, timeoutMillis);
+        }
+    }
+
     private Message receiveVirtual(long timeoutMillis) {
         NativeFuture<Message> future;
         synchronized (state) {
@@ -1084,24 +1092,16 @@ public final class Socket implements AutoCloseable {
         }
 
         void close() {
-            if (usesSendRing) {
-                synchronized (this) {
-                    long handle = this.handle.getAndSet(0);
-                    if (handle != 0) {
-                        sendRing.close();
-                        Native.socketClose(handle);
-                        recvRing.close();
-                    }
+            long handle = this.handle.getAndSet(0);
+            if (handle != 0) {
+                if (usesSendRing) {
+                    sendRing.shutdown();
                 }
-            } else {
-                long handle = this.handle.getAndSet(0);
-                if (handle != 0) {
-                    Native.socketShutdown(handle);
-                    synchronized (this) {
-                        sendRing.close();
-                        recvRing.close();
-                        Native.socketClose(handle);
-                    }
+                Native.socketShutdown(handle);
+                synchronized (this) {
+                    sendRing.close();
+                    recvRing.close();
+                    Native.socketClose(handle);
                 }
             }
             owner.remove(this);

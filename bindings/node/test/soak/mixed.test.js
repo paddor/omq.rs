@@ -20,6 +20,8 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
   const ipc = await openPushPull(ipcEndpoint("node-soak"), BATCH);
   traceStage(0, "open-inproc");
   const inproc = await openPushPullInproc(BATCH);
+  traceStage(0, "open-abortable");
+  const abortable = await openAbortablePushPull(Math.max(16, Math.floor(BATCH / 4)));
   traceStage(0, "open-lz4");
   const lz4 = await openPushPull("lz4+tcp://127.0.0.1:0", BATCH);
   traceStage(0, "open-curve");
@@ -44,6 +46,8 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
       messages += await pushPullCycle(ipc, "ipc");
       traceStage(cycles, "inproc");
       messages += await pushPullCycle(inproc, "inproc");
+      traceStage(cycles, "abortable");
+      messages += await abortablePushPullCycle(abortable);
       traceStage(cycles, "lz4");
       messages += await pushPullCycle(lz4, "lz4");
       traceStage(cycles, "curve");
@@ -78,6 +82,7 @@ test("mixed socket soak", { timeout: (DURATION_SECS + 30) * 1000 }, async () => 
     reqRep.close();
     curve.close();
     lz4.close();
+    abortable.close();
     inproc.close();
     ipc.close();
     tcp.close();
@@ -122,6 +127,19 @@ async function openPushPull(bindEndpoint, count, pullOptions = {}, pushOptions =
 
 async function openPushPullInproc(count) {
   return openPushPull(inprocEndpoint("node-soak"), count);
+}
+
+async function openAbortablePushPull(count) {
+  const pair = await openPushPull(inprocEndpoint("node-soak-abortable"), count);
+  const controller = new AbortController();
+  return {
+    ...pair,
+    signal: controller.signal,
+    close() {
+      controller.abort();
+      pair.close();
+    },
+  };
 }
 
 async function openCurvePushPull(count) {
@@ -173,9 +191,8 @@ async function contextChurnCycle() {
     await pull.bind(endpoint);
     await push.connect(endpoint);
     push.waitConnectedSync(1, 5000);
-    const received = recvWithin(pull, "context churn PULL");
     await sendWithin(push, "x", "context churn PUSH");
-    assert.equal((await received).string(), "x");
+    assert.equal((await recvWithin(pull, "context churn PULL")).string(), "x");
     return 1;
   } finally {
     push.close();
@@ -237,6 +254,15 @@ async function pushPullCycle(pair, label) {
   return pair.count;
 }
 
+async function abortablePushPullCycle(pair) {
+  for (let index = 0; index < pair.count; index++) {
+    const received = pair.pull.recv({ signal: pair.signal });
+    await pair.push.send(pair.payload);
+    await received;
+  }
+  return pair.count;
+}
+
 async function reqRepCycle(pair) {
   for (let i = 0; i < pair.count; i++) {
     const payload = Buffer.from(`soak-${i}`);
@@ -258,10 +284,9 @@ async function pairCycle(pair, cycle) {
 
 async function pubSubCycle(sockets, cycle) {
   const payload = `soak.${cycle}`;
-  const first = recvWithin(sockets.first, "first SUB");
-  const second = recvWithin(sockets.second, "second SUB");
   await sendWithin(sockets.pub, payload, "PUB send");
-  const [firstMessage, secondMessage] = await Promise.all([first, second]);
+  const firstMessage = await recvWithin(sockets.first, "first SUB");
+  const secondMessage = await recvWithin(sockets.second, "second SUB");
   assert.equal(firstMessage.string(), payload);
   assert.equal(secondMessage.string(), payload);
   return 2;
@@ -272,11 +297,12 @@ async function waitForPubSub(sockets) {
   let attempt = 0;
   while (Date.now() < deadline) {
     const payload = `soak.ready.${attempt++}`;
-    const first = recvWithin(sockets.first, "first SUB readiness", 500);
-    const second = recvWithin(sockets.second, "second SUB readiness", 500);
-    await sendWithin(sockets.pub, payload, "PUB readiness send", 500);
     try {
-      const received = await Promise.all([first, second]);
+      await sendWithin(sockets.pub, payload, "PUB readiness send", 500);
+      const received = [
+        await recvWithin(sockets.first, "first SUB readiness", 500),
+        await recvWithin(sockets.second, "second SUB readiness", 500),
+      ];
       if (received.every((message) => message.string() === payload)) return;
     } catch {
       // Subscription propagation can legitimately lose early PUB messages.
@@ -286,30 +312,26 @@ async function waitForPubSub(sockets) {
 }
 
 async function recvWithin(socket, label, timeoutMs = 5000) {
+  const messages = socket.recvManySync(1, timeoutMs);
+  if (messages.length === 1) {
+    return messages[0];
+  }
+  throw new Error(`${label} stalled`);
+}
+
+async function sendWithin(socket, message, label, timeoutMs = 5000) {
+  void timeoutMs;
   try {
-    return await socket.recv({ signal: AbortSignal.timeout(timeoutMs) });
+    socket.sendSync(message);
   } catch (error) {
     throw new Error(`${label} stalled`, { cause: error });
   }
 }
 
-async function sendWithin(socket, message, label, timeoutMs = 5000) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} stalled`)), timeoutMs);
-  });
-  try {
-    await Promise.race([socket.send(message), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function largeMultipartCycle(pair, cycle) {
   const payload = Buffer.alloc(1024 * 1024, cycle & 0xff);
-  const receiving = recvWithin(pair.pull, "large multipart receive");
-  const sending = sendWithin(pair.push, new Message([Buffer.from(String(cycle)), payload]), "large multipart send");
-  const [received] = await Promise.all([receiving, sending]);
+  await sendWithin(pair.push, new Message([Buffer.from(String(cycle)), payload]), "large multipart send");
+  const received = await recvWithin(pair.pull, "large multipart receive");
   assert.equal(received.parts.length, 2);
   assert.equal(received.string(0), String(cycle));
   assert.ok(Buffer.from(received.part(1)).equals(payload));

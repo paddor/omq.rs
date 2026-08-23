@@ -26,6 +26,7 @@ internal static partial class Native
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int zmq_ctx_term(IntPtr ctx);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int zmq_ctx_shutdown(IntPtr ctx);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern IntPtr zmq_socket(IntPtr ctx, int type);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int omq_socket_allow_thread_migration(IntPtr socket);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int zmq_close(IntPtr socket);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int zmq_setsockopt(IntPtr socket, int option, IntPtr value, nuint length);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] internal static extern int zmq_getsockopt(IntPtr socket, int option, IntPtr value, ref nuint length);

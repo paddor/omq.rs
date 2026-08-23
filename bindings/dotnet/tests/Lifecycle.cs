@@ -62,6 +62,33 @@ static async Task ConnectBeforeBind()
     Check(pull.ReceiveText() == "late-bind", "connect-before-bind mismatch");
 }
 
+static async Task TryReceivePreservesMultipartAtomicity()
+{
+    using var context = new Context();
+    using var pull = context.CreateSocket(SocketType.Pull, new SocketOptions { Linger = 0, ReceiveTimeout = TimeSpan.FromSeconds(2) });
+    using var push = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0, SendTimeout = TimeSpan.FromSeconds(2) });
+    string endpoint = pull.Bind("tcp://127.0.0.1:0");
+    push.Connect(endpoint);
+    await Task.Delay(50);
+
+    Task sender = Task.Run(async () =>
+    {
+        push.SendText("first", more: true);
+        await Task.Delay(100);
+        push.SendText("second");
+    });
+
+    Message? message = null;
+    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+    while (DateTime.UtcNow < deadline && !pull.TryReceive(out message)) await Task.Delay(1);
+    await sender.WaitAsync(TimeSpan.FromSeconds(2));
+
+    Message received = message ?? throw new Exception("multipart TryReceive timed out");
+    Check(received.PartCount == 2, "multipart TryReceive dropped a frame");
+    Check(received[0].SequenceEqual("first"u8.ToArray()), "multipart first frame mismatch");
+    Check(received[1].SequenceEqual("second"u8.ToArray()), "multipart second frame mismatch");
+}
+
 static void RepeatedCreateDispose()
 {
     for (int i = 0; i < 100; i++)
@@ -76,9 +103,36 @@ static void RepeatedCreateDispose()
     }
 }
 
+static void SerializedThreadMigration()
+{
+    using var context = new Context();
+    using var socket = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 });
+    Exception? failure = null;
+    for (int iteration = 0; iteration < 100; iteration++)
+    {
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                socket.SetOption(SocketOption.SendHwm, iteration + 1);
+                Check(socket.GetInt32(SocketOption.SendHwm) == iteration + 1, "migrated option mismatch");
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+        });
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw failure;
+    }
+}
+
 await AsyncSendUnderHwmIsBounded();
 await ShutdownAndCancellationBoundPoll();
 await MonitorStopWakesReceive();
 await ConnectBeforeBind();
+await TryReceivePreservesMultipartAtomicity();
 RepeatedCreateDispose();
+SerializedThreadMigration();
 Console.WriteLine("OMQ.Net lifecycle: PASS");

@@ -344,6 +344,28 @@ fn context_drop_cleanup() {
     // If we reach this line, cleanup did not deadlock.
 }
 
+#[test]
+fn context_term_cancels_inflight_block_on() {
+    let ctx = Context::new();
+    let worker_ctx = ctx.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker_ctx.block_on(async move {
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+        }))
+    });
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let started = std::time::Instant::now();
+    ctx.term();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(worker.join().unwrap().is_err());
+}
+
 // ---- Embedded-runtime tests (#[tokio::test]) ----------------------------
 
 #[tokio::test]

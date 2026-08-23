@@ -31,10 +31,10 @@ public sealed class Poller : IDisposable
             if (timeout > TimeSpan.Zero) Thread.Sleep(timeout);
             return [];
         }
-        using var leases = new LeaseSet(snapshot.Select(x => x.Socket));
+        using var leases = new Socket.NativeLeaseSet(snapshot.Select(x => x.Socket));
         var items = new Native.PollItem[snapshot.Length];
         for (int i = 0; i < items.Length; i++)
-            items[i] = new Native.PollItem { Socket = leases[i].Pointer, FileDescriptor = -1, Events = (short)snapshot[i].Events };
+            items[i] = new Native.PollItem { Socket = leases[snapshot[i].Socket], FileDescriptor = -1, Events = (short)snapshot[i].Events };
         int milliseconds = checked((int)Math.Clamp(timeout.TotalMilliseconds, -1, int.MaxValue));
         unsafe { fixed (Native.PollItem* p = items) Errors.Check("poll", Native.zmq_poll((IntPtr)p, items.Length, milliseconds)); }
         var ready = new List<PollResult>();
@@ -65,25 +65,4 @@ public sealed class Poller : IDisposable
 
     /// Removes all registrations.
     public void Dispose() { lock (gate) entries.Clear(); }
-
-    private sealed class LeaseSet : IDisposable
-    {
-        private readonly Socket.NativeLease[] leases;
-        internal LeaseSet(IEnumerable<Socket> sockets)
-        {
-            var acquired = new List<Socket.NativeLease>();
-            try
-            {
-                foreach (var socket in sockets) acquired.Add(socket.AcquireNativeHandle());
-                leases = acquired.ToArray();
-            }
-            catch
-            {
-                foreach (var lease in acquired) lease.Dispose();
-                throw;
-            }
-        }
-        internal Socket.NativeLease this[int index] => leases[index];
-        public void Dispose() { foreach (var lease in leases) lease.Dispose(); }
-    }
 }

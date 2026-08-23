@@ -55,7 +55,7 @@ impl SocketDriver {
                 }
                 if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
                     if let Some(task) = peer.task.take() {
-                        let _ = task.await;
+                        super::stop_peer_task(task).await;
                     }
                     if peer.is_client
                         && !self.closing

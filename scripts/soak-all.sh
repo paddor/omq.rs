@@ -27,6 +27,12 @@ duration_seconds=$((10#$duration_value * duration_multiplier))
 export SOAK_FEATURES="${SOAK_FEATURES:-soak plain curve lz4 zstd ws}"
 export OMQ_SOAK_DURATION_SECS="$duration_seconds"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+if [[ -z "${OMQ_RUBY:-}" ]] && ! command -v ruby >/dev/null 2>&1 && [[ -x /home/roadster/.rubies/ruby-4.0.6/bin/ruby ]]; then
+  export OMQ_RUBY=/home/roadster/.rubies/ruby-4.0.6/bin/ruby
+fi
+if [[ -n "${OMQ_RUBY:-}" && -z "${RUBY:-}" ]]; then
+  export RUBY="$OMQ_RUBY"
+fi
 
 timeout_seconds="${SOAK_TIMEOUT_SECS:-$((duration_seconds + 900))}"
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
@@ -71,10 +77,34 @@ if [[ -n "$missing_files" ]]; then
 fi
 
 nextest_config="$(mktemp)"
+pids=()
+active_pids=()
+active_labels=()
+jobs_running=0
+stop_jobs() {
+  for pid in "${pids[@]:-}"; do
+    pkill -TERM -s "$pid" 2>/dev/null || true
+    kill -- "-$pid" 2>/dev/null || true
+  done
+}
+kill_jobs() {
+  for pid in "${pids[@]:-}"; do
+    pkill -KILL -s "$pid" 2>/dev/null || true
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  done
+}
 cleanup() {
+  local status=$?
+  if (( jobs_running )); then
+    stop_jobs
+    sleep 0.2
+    kill_jobs
+  fi
   rm -f "$nextest_config"
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 cat >"$nextest_config" <<EOF
 [profile.default]
@@ -106,27 +136,94 @@ for target in "${soak_targets[@]}"; do
   nextest_common+=(--test "$target")
 done
 
-if [[ -z "${SOAK_TEST_THREADS:-}" ]]; then
-  mapfile -t soak_tests < <(
-    cargo nextest list "${nextest_common[@]}" -T oneline
-  )
-
-  if [[ ${#soak_tests[@]} -eq 0 ]]; then
-    printf 'error: no soak tests found\n' >&2
-    exit 1
+read_cpu_count() {
+  local count
+  count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1\n')"
+  count="${count%%$'\n'*}"
+  if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
+    count=1
   fi
+  printf '%s\n' "$count"
+}
 
-  export SOAK_TEST_THREADS="${#soak_tests[@]}"
+cpu_count="$(read_cpu_count)"
+mapfile -t soak_tests < <(
+  cargo nextest list "${nextest_common[@]}" -T oneline
+)
+if [[ ${#soak_tests[@]} -eq 0 ]]; then
+  printf 'error: no soak tests found\n' >&2
+  exit 1
+fi
+
+soak_test_count="${#soak_tests[@]}"
+if [[ -z "${SOAK_TEST_THREADS:-}" ]]; then
+  export SOAK_TEST_THREADS="$soak_test_count"
+fi
+if [[ ! "$SOAK_TEST_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: SOAK_TEST_THREADS must be a positive integer\n' >&2
+  exit 2
+fi
+
+rust_waves=$(((soak_test_count + SOAK_TEST_THREADS - 1) / SOAK_TEST_THREADS))
+rust_timeout_seconds="${SOAK_RUST_TIMEOUT_SECS:-$timeout_seconds}"
+if [[ ! "$rust_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: SOAK_RUST_TIMEOUT_SECS must be a positive integer\n' >&2
+  exit 2
 fi
 
 printf 'soak_duration=%s (%ss)\n' "$duration" "$duration_seconds"
 printf 'soak_targets=%s\n' "${#soak_targets[@]}"
 printf 'soak_target_list:\n'
 printf '  %s\n' "${soak_targets[@]}"
-printf 'soak_tests=%s\n' "$SOAK_TEST_THREADS"
+printf 'soak_tests=%s\n' "$soak_test_count"
+printf 'soak_test_threads=%s\n' "$SOAK_TEST_THREADS"
+printf 'soak_test_waves=%s\n' "$rust_waves"
+printf 'soak_cpu_count=%s\n' "$cpu_count"
+printf 'rust_timeout=%ss\n' "$rust_timeout_seconds"
 
-pids=()
-labels=()
+cargo_cmd="${CARGO:-cargo}"
+
+if [[ "${SOAK_SKIP_PREBUILD:-0}" != "1" ]]; then
+  printf 'prebuild=1\n'
+  "$cargo_cmd" build --release --workspace --features "$SOAK_FEATURES"
+  "$cargo_cmd" build --release -p omq-libzmq
+  "$cargo_cmd" build --release --manifest-path bindings/pyomq/Cargo.toml \
+    --features "plain curve lz4 zstd"
+  (
+    cd bindings/pyomq
+    "${OMQ_MATURIN:-./.venv/bin/maturin}" develop --release
+  )
+  "$cargo_cmd" build --release --manifest-path bindings/go/native/Cargo.toml
+  "$cargo_cmd" build --release --manifest-path bindings/java/native/Cargo.toml \
+    --features plain,curve,lz4,zstd
+  mvn -f bindings/java/pom.xml -DskipNative=true -DskipTests test-compile
+  "$cargo_cmd" build --release --manifest-path bindings/lua/native/Cargo.toml
+  "$cargo_cmd" build --release --manifest-path bindings/node/Cargo.toml
+  (
+    cd bindings/node
+    npm run build
+  )
+  "$cargo_cmd" build --release --manifest-path bindings/ruby/ext/omq_rs_native/Cargo.toml
+  (
+    cd bindings/ruby
+    export PATH="$(dirname "$RUBY"):$PATH"
+    "$RUBY" -S bundle check
+    "$RUBY" -S bundle exec rake compile
+  )
+  dotnet build bindings/dotnet/tests/Omq.Net.Soak.csproj --configuration Release
+else
+  printf 'prebuild=0\n'
+fi
+
+if [[ "${SOAK_PREBUILD_ONLY:-0}" == "1" ]]; then
+  if [[ "${SOAK_SKIP_PREBUILD:-0}" == "1" ]]; then
+    printf 'error: SOAK_PREBUILD_ONLY and SOAK_SKIP_PREBUILD are incompatible\n' >&2
+    exit 2
+  fi
+  printf 'prebuild_only=1\n'
+  exit 0
+fi
+
 run_job() {
   local label="$1"
   shift
@@ -137,18 +234,40 @@ run_job() {
     "$@" 2>&1 | sed -u "s/^/[${label}] /"
   ' bash "$label" "$@" &
   pids+=("$!")
-  labels+=("$label")
+  active_pids+=("$!")
+  active_labels+=("$label")
+  if (( ${#active_pids[@]} >= binding_jobs )); then
+    wait_oldest_job
+  fi
 }
 
-stop_jobs() {
-  for pid in "${pids[@]:-}"; do
-    kill -- "-$pid" 2>/dev/null || true
-  done
+wait_oldest_job() {
+  local pid="${active_pids[0]}"
+  local label="${active_labels[0]}"
+  if ! wait "$pid"; then
+    printf 'error: soak job failed: %s\n' "$label" >&2
+    failed=1
+  fi
+  active_pids=("${active_pids[@]:1}")
+  active_labels=("${active_labels[@]:1}")
 }
-trap 'stop_jobs; exit 130' INT TERM
 
-binding_workers="${SOAK_BINDING_WORKERS:-2}"
-run_job rust bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$timeout_seconds" -- \
+# Prebuilds run serially above. Keep aggregate jobs runtime-only so language
+# toolchains do not contend for Cargo locks, disk space, and memory.
+export SOAK_SKIP_BUILD=1
+
+binding_workers="${SOAK_BINDING_WORKERS:-1}"
+binding_jobs="${SOAK_BINDING_JOBS:-9}"
+if [[ ! "$binding_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'error: SOAK_BINDING_JOBS must be a positive integer\n' >&2
+  exit 2
+fi
+printf 'binding_workers=%s\n' "$binding_workers"
+printf 'binding_jobs=%s\n' "$binding_jobs"
+jobs_running=1
+failed=0
+run_job rust env OMQ_SOAK_ALLOW_MONITOR_LAG=1 OMQ_SOAK_DISABLE_THROUGHPUT_STABILITY=1 \
+  bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$rust_timeout_seconds" -- \
   cargo nextest run "${nextest_common[@]}" --test-threads="$SOAK_TEST_THREADS"
 run_job pyomq bindings/pyomq/scripts/soak.sh "$duration"
 run_job go env OMQ_GO_SOAK_DURATIONS="$duration_seconds" OMQ_GO_SOAK_WORKERS="$binding_workers" \
@@ -169,11 +288,8 @@ else
   printf 'warning: OMQ.ts checkout not found at %s; set OMQ_TS_DIR\n' "$omq_ts_dir" >&2
 fi
 
-failed=0
-for i in "${!pids[@]}"; do
-  if ! wait "${pids[$i]}"; then
-    printf 'error: soak job failed: %s\n' "${labels[$i]}" >&2
-    failed=1
-  fi
+while (( ${#active_pids[@]} > 0 )); do
+  wait_oldest_job
 done
+jobs_running=0
 exit "$failed"

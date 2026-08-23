@@ -160,10 +160,15 @@ impl DataSignal {
         let notified = self.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if self.state.load(Ordering::Acquire) != IDLE {
+        if !self.is_idle() {
             return;
         }
         notified.await;
+    }
+
+    #[inline]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.state.load(Ordering::Acquire) == IDLE
     }
 
     #[cfg(test)]

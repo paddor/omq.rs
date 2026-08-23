@@ -6,7 +6,9 @@ durations="${OMQ_GO_SOAK_DURATIONS:-300 600 1800 3600}"
 workers="${OMQ_GO_SOAK_WORKERS:-$(nproc)}"
 cargo_cmd="${CARGO:-cargo}"
 
-"${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/go/native/Cargo.toml"
+if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
+    "${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/go/native/Cargo.toml"
+fi
 
 case "$(uname -s)" in
     Darwin)

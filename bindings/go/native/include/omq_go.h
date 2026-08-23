@@ -134,7 +134,9 @@ OmqGoStatus omq_go_curve_public(const char *secret_key, char **public_key);
 
 OmqGoStatus omq_go_socket_new(OmqGoContext *ctx, int32_t socket_type, OmqGoSocket **out);
 OmqGoStatus omq_go_socket_bind(OmqGoSocket *socket, const char *endpoint, char **bound_endpoint);
+OmqGoStatus omq_go_socket_bind_timeout(OmqGoSocket *socket, const char *endpoint, char **bound_endpoint, int64_t timeout_millis);
 OmqGoStatus omq_go_socket_connect(OmqGoSocket *socket, const char *endpoint);
+OmqGoStatus omq_go_socket_connect_timeout(OmqGoSocket *socket, const char *endpoint, int64_t timeout_millis);
 OmqGoStatus omq_go_socket_unbind(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_disconnect(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_send(OmqGoSocket *socket, const OmqGoPart *parts, size_t part_count, uint32_t routing_id, int64_t timeout_millis);

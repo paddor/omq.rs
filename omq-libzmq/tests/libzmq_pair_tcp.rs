@@ -9,7 +9,7 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_recv, zmq_send,
+    zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_term, zmq_errno, zmq_recv, zmq_send,
     zmq_setsockopt, zmq_socket,
 };
 
@@ -23,6 +23,27 @@ fn set_timeo(sock: *mut std::ffi::c_void, opt: i32, ms: i32) {
     zmq_setsockopt(sock, opt, (&ms as *const i32).cast(), size_of::<i32>());
 }
 
+fn wait_one_way_ready(sender: *mut std::ffi::c_void, receiver: *mut std::ffi::c_void) {
+    let payload = b"READY";
+    let rc = zmq_send(sender, payload.as_ptr().cast(), payload.len(), 0);
+    assert_eq!(
+        rc as usize,
+        payload.len(),
+        "ready send failed (errno={})",
+        zmq_errno(),
+    );
+
+    let mut buf = [0u8; 16];
+    let rc = zmq_recv(receiver, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert_eq!(
+        rc as usize,
+        payload.len(),
+        "ready recv failed (errno={})",
+        zmq_errno(),
+    );
+    assert_eq!(&buf[..payload.len()], payload);
+}
+
 /// from `libzmq/tests/test_pair_tcp.cpp`
 #[test]
 fn pair_tcp_basic() {
@@ -34,13 +55,11 @@ fn pair_tcp_basic() {
     let addr = helpers::bind_random_tcp(sb);
     assert_eq!(zmq_connect(sc, addr.as_ptr()), 0, "connect failed");
 
-    // Allow handshake time.
-    std::thread::sleep(Duration::from_millis(100));
-
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sb, ZMQ_SNDTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    wait_one_way_ready(sc, sb);
 
     // sc -> sb
     let rc = zmq_send(sc, b"HELLO".as_ptr().cast(), 5, 0);
@@ -72,9 +91,10 @@ fn pair_tcp_multipart() {
 
     let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
 
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    set_timeo(sc, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    wait_one_way_ready(sc, sb);
 
     // 3-part message from sc to sb.
     zmq_send(sc, b"A".as_ptr().cast(), 1, ZMQ_SNDMORE);
@@ -109,31 +129,32 @@ fn pair_tcp_many_messages() {
 
     let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
 
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_RCVTIMEO, TIMEOUT_MS);
     set_timeo(sc, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    wait_one_way_ready(sc, sb);
     let payload = [0xABu8; 64];
-
-    let sender = std::thread::spawn({
-        let sc = sc as usize;
-        move || {
-            let sc = sc as *mut std::ffi::c_void;
-            for i in 0..N {
-                let rc = zmq_send(sc, payload.as_ptr().cast(), payload.len(), 0);
-                assert_eq!(rc as usize, payload.len(), "send {i} failed");
-            }
-        }
-    });
 
     let mut buf = [0u8; 128];
     for i in 0..N {
+        let rc = zmq_send(sc, payload.as_ptr().cast(), payload.len(), 0);
+        assert_eq!(
+            rc as usize,
+            payload.len(),
+            "send {i} failed (errno={})",
+            zmq_errno(),
+        );
+
         let rc = zmq_recv(sb, buf.as_mut_ptr().cast(), buf.len(), 0);
-        assert_eq!(rc as usize, payload.len(), "recv {i} failed");
+        assert_eq!(
+            rc as usize,
+            payload.len(),
+            "recv {i} failed (errno={})",
+            zmq_errno(),
+        );
         assert_eq!(&buf[..payload.len()], &payload[..], "recv {i} payload");
     }
-    sender.join().expect("sender thread panicked");
 
     zmq_close(sc);
     zmq_close(sb);
@@ -149,9 +170,10 @@ fn pair_tcp_truncation() {
 
     let addr = helpers::bind_random_tcp(sb);
     zmq_connect(sc, addr.as_ptr());
-    std::thread::sleep(Duration::from_millis(100));
 
     set_timeo(sb, ZMQ_RCVTIMEO, TIMEOUT_MS);
+    set_timeo(sc, ZMQ_SNDTIMEO, TIMEOUT_MS);
+    wait_one_way_ready(sc, sb);
 
     let payload = [0x55u8; 100];
     zmq_send(sc, payload.as_ptr().cast(), 100, 0);

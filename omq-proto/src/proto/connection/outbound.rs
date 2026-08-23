@@ -171,6 +171,16 @@ impl Connection {
     /// Queue a WebSocket close frame.
     #[cfg(feature = "ws")]
     pub fn send_ws_close(&mut self, code: u16) {
+        self.queue_ws_close(&code.to_be_bytes());
+    }
+
+    #[cfg(feature = "ws")]
+    pub(super) fn send_empty_ws_close(&mut self) {
+        self.queue_ws_close(&[]);
+    }
+
+    #[cfg(feature = "ws")]
+    fn queue_ws_close(&mut self, payload: &[u8]) {
         if self.ws_close_sent {
             return;
         }
@@ -182,7 +192,7 @@ impl Connection {
             &mut self.out_chunks,
             &mut self.out_bytes_total,
             ws_codec::OP_CLOSE_CODE,
-            &code.to_be_bytes(),
+            payload,
             role,
         );
     }

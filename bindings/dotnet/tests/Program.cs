@@ -49,6 +49,9 @@ Check(options.GetInt32(SocketOption.HeartbeatInterval) == 1000, "heartbeat optio
 options.SetOption(SocketOption.RoutingId, [1, 2, 3]);
 Check(options.GetBytes(SocketOption.RoutingId).SequenceEqual(new byte[] { 1, 2, 3 }), "routing id mismatch");
 Check(!pull.TryReceive(out _), "TryReceive should report empty socket");
+using var dynamicWs = context.CreateSocket(SocketType.Pull, new SocketOptions { Linger = 0 });
+string dynamicWsEndpoint = dynamicWs.Bind("ws://127.0.0.1:0/dotnet-dynamic");
+Check(new Uri(dynamicWsEndpoint).Port != 0, "dynamic WebSocket bind returned port zero");
 
 using var pub = context.CreateSocket(SocketType.Pub, new SocketOptions { Linger = 0 });
 using var sub = context.CreateSocket(SocketType.Sub, new SocketOptions { Linger = 0, ReceiveTimeout = TimeSpan.FromSeconds(1) });

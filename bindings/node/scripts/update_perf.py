@@ -12,7 +12,7 @@ import math
 import os
 import sys
 
-DEFAULT_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 SIZES = DEFAULT_SIZES.copy()
 LATENCY_MAX_SIZE = 4096
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")

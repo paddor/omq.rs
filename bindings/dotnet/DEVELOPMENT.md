@@ -16,6 +16,8 @@ LD_LIBRARY_PATH="$PWD/target/release" \
 LD_LIBRARY_PATH="$PWD/target/release" \
   dotnet run --project bindings/dotnet/tests/Omq.Net.Lifecycle.csproj
 
+dotnet build bindings/dotnet/tests/Omq.Net.Interop.csproj
+
 LD_LIBRARY_PATH="$PWD/target/release" \
   python3 bindings/dotnet/tests/interop.py
 ```

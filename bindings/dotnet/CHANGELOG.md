@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.1.3]
+
+### Fixed
+
+- Serialize managed socket migration and native handle leases across async
+  operations and disposal.
+- Return resolved endpoints from wildcard `bind()` calls.
+- Preserve multipart messages in mixed protocol soak exchanges.
+- Bound cancellation, churn, and shutdown paths under backpressure.
+
+### Changed
+
+- Add mixed transport, protocol, lifecycle, and resource soak coverage.
+- Bundle `omq-libzmq` 0.5.15.
+
 ## [0.1.2]
 
 ### Added

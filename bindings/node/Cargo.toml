@@ -13,6 +13,7 @@ bytes = "1.12.0"
 napi = { version = "3.12.1", features = ["async", "napi8"] }
 napi-derive = "3.6.3"
 omq-tokio = { path = "../../omq-tokio", default-features = false, features = ["plain", "curve", "lz4", "ws"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [build-dependencies]

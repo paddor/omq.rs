@@ -14,6 +14,9 @@ export declare class NativeSocket {
   disconnect(endpoint: string): void
   send(parts: Array<Uint8Array>): void
   sendAsync(parts: Array<Uint8Array>): Promise<void>
+  trySend(parts: Array<Uint8Array>): boolean
+  trySendOne(payload: Uint8Array): boolean
+  trySendBuffer(payload: Buffer): boolean
   sendSync(parts: Array<Uint8Array>): void
   sendOneSync(payload: Uint8Array): void
   sendBufferSync(payload: Buffer): void

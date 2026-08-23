@@ -19,9 +19,20 @@ use napi_derive::napi;
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
     Context as OmqContext, ContextConfig, CurveKeypair, CurvePublicKey, CurveSecretKey, Endpoint,
-    Message, OnMute, Options, ReconnectPolicy, SocketType,
+    Message, OnMute, Options, ReconnectPolicy, SocketType, TrySendError,
 };
 use tokio_util::sync::CancellationToken;
+
+#[napi_derive::module_init]
+fn init_async_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("omq-node-async")
+        .enable_all()
+        .build()
+        .expect("create omq-node async runtime");
+    napi::bindgen_prelude::create_custom_tokio_runtime(runtime);
+}
 
 #[derive(Debug)]
 struct ContextState {
@@ -340,6 +351,30 @@ impl NativeSocket {
         let message = message_from_parts(parts);
         AsyncBlockBuilder::new(async move { socket.send(message).await.map_err(map_omq_error) })
             .build(&env)
+    }
+
+    #[napi]
+    pub fn try_send(&self, parts: Vec<Uint8Array>) -> Result<bool> {
+        self.try_send_message(message_from_parts(parts))
+    }
+
+    #[napi]
+    pub fn try_send_one(&self, payload: Uint8Array) -> Result<bool> {
+        self.try_send_message(Message::from_slice(payload.as_ref()))
+    }
+
+    #[napi]
+    pub fn try_send_buffer(&self, payload: BufferSlice) -> Result<bool> {
+        self.try_send_message(Message::from_slice(payload.as_ref()))
+    }
+
+    fn try_send_message(&self, message: Message) -> Result<bool> {
+        self.with_socket_ref(|socket| match socket.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Closed) => Err(napi_error("socket closed")),
+            Err(TrySendError::Error(error)) => Err(map_omq_error(error)),
+        })
     }
 
     #[napi]

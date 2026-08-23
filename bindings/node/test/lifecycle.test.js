@@ -48,6 +48,28 @@ test("pending send does not block the event loop", async () => {
   await assert.rejects(pending, /closed/);
 });
 
+test("pending send resumes after a peer connects", async () => {
+  const push = new Push();
+  const pull = new Pull();
+  try {
+    const endpoint = await push.bind("tcp://127.0.0.1:0");
+    const pending = push.send("queued");
+    const winner = await Promise.race([
+      pending.then(() => "send"),
+      new Promise((resolve) => setTimeout(() => resolve("timer"), 25)),
+    ]);
+    assert.equal(winner, "timer");
+
+    await pull.connect(endpoint);
+    pull.waitConnectedSync(1, 2000);
+    await pending;
+    assert.equal((await pull.recv()).string(), "queued");
+  } finally {
+    pull.close();
+    push.close();
+  }
+});
+
 test("async recv does not exhaust the libuv worker pool", async () => {
   const dist = path.resolve(__dirname, "../dist");
   const script = `

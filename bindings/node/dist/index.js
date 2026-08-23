@@ -185,7 +185,11 @@ class Socket {
     /** Send one message and resolve when accepted by the socket. */
     send(message) {
         this.#checkOpen();
-        return this.native.sendAsync(messageParts(message));
+        const pending = trySendNative(this.native, message);
+        if (pending === null) {
+            return Promise.resolve();
+        }
+        return this.native.sendAsync(pending);
     }
     /** Synchronously send one message. */
     sendSync(message) {
@@ -616,12 +620,31 @@ function sendNativeSync(socket, input) {
     }
     sendSingleNativeSync(socket, input);
 }
-function messageParts(input) {
-    if (input instanceof Message)
-        return input.parts;
-    if (Array.isArray(input))
-        return input.map(toBytes);
-    return [toBytes(input)];
+function trySendNative(socket, input) {
+    if (input instanceof Message) {
+        if (input.length === 1) {
+            const part = input.part(0);
+            return trySendSingleNative(socket, part) ? null : [part];
+        }
+        const parts = input.parts;
+        return socket.trySend(parts) ? null : parts;
+    }
+    if (Array.isArray(input)) {
+        if (input.length === 1) {
+            const part = toBytes(input[0]);
+            return trySendSingleNative(socket, part) ? null : [part];
+        }
+        const parts = input.map(toBytes);
+        return socket.trySend(parts) ? null : parts;
+    }
+    const part = toBytes(input);
+    return trySendSingleNative(socket, part) ? null : [part];
+}
+function trySendSingleNative(socket, input) {
+    if (node_buffer_1.Buffer.isBuffer(input)) {
+        return socket.trySendBuffer(input);
+    }
+    return socket.trySendOne(input);
 }
 function sendSingleNativeSync(socket, input) {
     if (node_buffer_1.Buffer.isBuffer(input)) {

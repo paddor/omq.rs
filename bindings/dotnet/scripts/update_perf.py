@@ -171,7 +171,7 @@ def gen_combined_chart(data, path):
     tp_values = [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
     small_indices = [SIZES.index(s) for s in small_sizes]
     large_indices = [SIZES.index(s) for s in large_sizes]
-    msg_max = 2_600_000
+    msg_max = 3_200_000
     gbs_values = [
         v * SIZES[i] / 1_000_000_000
         for values in tp_values
@@ -222,7 +222,7 @@ def gen_combined_chart(data, path):
             top_mid,
             small_sizes,
             small_xs,
-            list(range(200_000, int(msg_max), 200_000)) + [msg_max],
+            list(range(400_000, int(msg_max), 400_000)) + [msg_max],
             _fmt_y_rate,
             top_left - 8,
         ),

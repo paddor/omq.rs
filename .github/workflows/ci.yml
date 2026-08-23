@@ -470,7 +470,9 @@ jobs:
           dotnet restore bindings/dotnet/Omq.Net.csproj
           bash bindings/dotnet/scripts/package.sh "$RUNNER_TEMP/omq-nuget" \
             linux-x64="$GITHUB_WORKSPACE/target/release/libomq_zmq.so"
-          unzip -l "$RUNNER_TEMP/omq-nuget/Omq.Net.0.1.2.nupkg"
+          package_version=$(dotnet msbuild bindings/dotnet/Omq.Net.csproj \
+            -getProperty:Version -nologo)
+          unzip -l "$RUNNER_TEMP/omq-nuget/Omq.Net.${package_version}.nupkg"
       - name: install package and run package smoke test
         run: |
           dotnet restore bindings/dotnet/tests/Omq.Net.PackageSmoke.csproj \

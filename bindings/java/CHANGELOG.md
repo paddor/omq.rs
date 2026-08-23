@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+## [0.3.3]
+
 - Unblock concurrent socket close when a PUSH or SCATTER sender is waiting for
   space in the native send ring.
+- Wake blocked receivers during close without racing native ring teardown.
+- Restore scalar receive throughput while preserving close synchronization.
+- Preserve `SERVER` routing IDs across native receive and send calls.
+- Add mixed transport, protocol, lifecycle, and resource soak coverage.
+- Bundle `omq-tokio` 0.21.4 and `omq-proto` 0.26.1.
 
 ## [0.3.2]
 

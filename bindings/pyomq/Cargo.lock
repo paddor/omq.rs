@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "pyomq"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "bytes",
  "flume",

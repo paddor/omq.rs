@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-08-23
+
+### Fixed
+
+- Preserve `routing_id` metadata on messages received by `SERVER` sockets.
+- Allow `inproc://` sends across OMQ runtime threads.
+- Preserve `REP` reply state when a latency-profile peer disconnects.
+- Bound socket shutdown paths under blocked sends and receives.
+- Handle LZ4 compressor epoch rollover without corrupting the stream.
+
+### Changed
+
+- Add mixed transport, protocol, lifecycle, and resource soak coverage.
+- *(deps)* Bump bundled `omq-tokio` to 0.21.4 and `omq-proto` to 0.26.1.
+
 ## [0.20.0] - 2026-08-16
 
 ### Added

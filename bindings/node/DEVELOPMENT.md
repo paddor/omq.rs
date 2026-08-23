@@ -65,7 +65,7 @@ Useful controls:
 OMQ_NODE_BENCH_QUICK=1 npm run bench
 OMQ_NODE_BENCH_IMPLS=omq-node npm run bench
 OMQ_NODE_BENCH_IMPLS=zeromq.js npm run bench
-OMQ_NODE_BENCH_SIZES=8,64,1k,32k npm run bench
+OMQ_NODE_BENCH_SIZES=16,64,1k,32k npm run bench
 OMQ_NODE_BENCH_ROUNDS=1 npm run bench
 OMQ_NODE_BENCH_THROUGHPUT_DURATION_SECS=2.5 npm run bench
 OMQ_NODE_BENCH_WARMUP_DURATION_SECS=0.5 npm run bench

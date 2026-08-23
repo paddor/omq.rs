@@ -52,6 +52,9 @@ type NativeSocket = {
   disconnect(endpoint: string): void;
   send(parts: Uint8Array[]): void;
   sendAsync(parts: Uint8Array[]): Promise<void>;
+  trySend(parts: Uint8Array[]): boolean;
+  trySendBuffer(payload: Buffer): boolean;
+  trySendOne(payload: Uint8Array): boolean;
   sendSync(parts: Uint8Array[]): void;
   sendBufferSync(payload: Buffer): void;
   sendOneSync(payload: Uint8Array): void;
@@ -394,7 +397,11 @@ export class Socket {
   /** Send one message and resolve when accepted by the socket. */
   send(message: Message | MessagePart | MessagePart[]): Promise<void> {
     this.#checkOpen();
-    return this.native.sendAsync(messageParts(message));
+    const pending = trySendNative(this.native, message);
+    if (pending === null) {
+      return Promise.resolve();
+    }
+    return this.native.sendAsync(pending);
   }
 
   /** Synchronously send one message. */
@@ -846,10 +853,37 @@ function sendNativeSync(socket: NativeSocket, input: Message | MessagePart | Mes
   sendSingleNativeSync(socket, input);
 }
 
-function messageParts(input: Message | MessagePart | MessagePart[]): Uint8Array[] {
-  if (input instanceof Message) return input.parts;
-  if (Array.isArray(input)) return input.map(toBytes);
-  return [toBytes(input)];
+function trySendNative(
+  socket: NativeSocket,
+  input: Message | MessagePart | MessagePart[],
+): Uint8Array[] | null {
+  if (input instanceof Message) {
+    if (input.length === 1) {
+      const part = input.part(0);
+      return trySendSingleNative(socket, part) ? null : [part];
+    }
+    const parts = input.parts;
+    return socket.trySend(parts) ? null : parts;
+  }
+
+  if (Array.isArray(input)) {
+    if (input.length === 1) {
+      const part = toBytes(input[0]);
+      return trySendSingleNative(socket, part) ? null : [part];
+    }
+    const parts = input.map(toBytes);
+    return socket.trySend(parts) ? null : parts;
+  }
+
+  const part = toBytes(input);
+  return trySendSingleNative(socket, part) ? null : [part];
+}
+
+function trySendSingleNative(socket: NativeSocket, input: Uint8Array): boolean {
+  if (Buffer.isBuffer(input)) {
+    return socket.trySendBuffer(input);
+  }
+  return socket.trySendOne(input);
 }
 
 function sendSingleNativeSync(socket: NativeSocket, input: MessagePart): void {

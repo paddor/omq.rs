@@ -104,6 +104,9 @@ impl Submitter {
         }
         let identity = msg.pop_front().unwrap();
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        if g.closed {
+            return Err(omq_proto::error::TrySendError::Closed);
+        }
         let Some(&id) = g.identity_to_peer.get(&identity) else {
             if self.router_mandatory {
                 return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
@@ -119,7 +122,14 @@ impl Submitter {
         match peer.target.try_send(msg) {
             Ok(()) => Ok(()),
             Err(SendPipeError::Full(_)) => Err(omq_proto::error::TrySendError::Full(retry)),
-            Err(SendPipeError::Closed(_)) => Err(omq_proto::error::TrySendError::Closed),
+            Err(SendPipeError::Closed(_)) => {
+                g.remove_peer(id);
+                if self.router_mandatory {
+                    Err(omq_proto::error::TrySendError::Error(Error::Unroutable))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -273,6 +283,9 @@ impl Submitter {
         msg: Message,
     ) -> Result<core::result::Result<(), SendRetry>> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        if g.closed {
+            return Err(Error::Closed);
+        }
         let Some(&id) = g.identity_to_peer.get(identity) else {
             if self.router_mandatory {
                 return Err(Error::Unroutable);
@@ -287,7 +300,14 @@ impl Submitter {
         };
         match peer.target.try_send(msg) {
             Ok(()) => Ok(Ok(())),
-            Err(SendPipeError::Closed(_)) => Err(Error::Closed),
+            Err(SendPipeError::Closed(_)) => {
+                g.remove_peer(id);
+                if self.router_mandatory {
+                    Err(Error::Unroutable)
+                } else {
+                    Ok(Ok(()))
+                }
+            }
             Err(SendPipeError::Full(returned)) => {
                 let space = peer.target.space_available();
                 Ok(Err(SendRetry::Full(returned, space)))
@@ -340,6 +360,16 @@ struct IdentityInner {
     peers: FxHashMap<u64, IdentityPeer>,
     identity_to_peer: FxHashMap<Bytes, u64>,
     closed: bool,
+}
+
+impl IdentityInner {
+    fn remove_peer(&mut self, peer_id: u64) {
+        if let Some(peer) = self.peers.remove(&peer_id)
+            && self.identity_to_peer.get(&peer.identity) == Some(&peer_id)
+        {
+            self.identity_to_peer.remove(&peer.identity);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -423,11 +453,7 @@ impl IdentitySend {
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.inner.lock().expect("identity inner poisoned");
-        if let Some(p) = g.peers.remove(&peer_id)
-            && g.identity_to_peer.get(&p.identity) == Some(&peer_id)
-        {
-            g.identity_to_peer.remove(&p.identity);
-        }
+        g.remove_peer(peer_id);
     }
 
     pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {
@@ -545,5 +571,57 @@ mod tests {
 
         assert_eq!(returned.part_bytes(0).unwrap(), &b"id"[..]);
         assert_eq!(returned.part_bytes(1).unwrap(), &b"two"[..]);
+    }
+
+    #[test]
+    fn closed_peer_pipe_is_not_a_closed_socket() {
+        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+        let mut send = IdentitySend::new(SocketType::Peer, &options);
+        let submitter = send.submitter();
+        let (pipe_tx, pipe_rx) = send_pipe(1);
+        drop(pipe_rx);
+        send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
+
+        submitter
+            .try_send(Message::multipart([
+                Bytes::from_static(b"id"),
+                Bytes::from_static(b"body"),
+            ]))
+            .unwrap();
+
+        assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_peer_pipe_is_unroutable_when_mandatory() {
+        let options = Options::default()
+            .workload_profile(omq_proto::WorkloadProfile::Throughput)
+            .router_mandatory(true);
+        let mut send = IdentitySend::new(SocketType::Router, &options);
+        let submitter = send.submitter();
+        let (pipe_tx, pipe_rx) = send_pipe(1);
+        drop(pipe_rx);
+        send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
+
+        let error = submitter
+            .send(Message::multipart([
+                Bytes::from_static(b"id"),
+                Bytes::from_static(b"body"),
+            ]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Unroutable));
+        assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
+    }
+
+    fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
+        PeerDriverHandle {
+            inbox: tokio::sync::mpsc::channel(1).0,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            transmit_slot: None,
+            direct_tcp_writer: None,
+            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
+        }
     }
 }

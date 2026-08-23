@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-08-23
+
+### Added
+
+- `Message::with_group()` for constructing RADIO messages without a temporary
+  multipart collection.
+- Routing metadata on `Message` through `with_routing_id()`, `routing_id()`,
+  and `take_routing_id()` for SERVER/CLIENT exchanges.
+- Optional per-connection and per-IP receive limits through
+  `Options::recv_rate_limit()` and `Options::recv_ip_rate_limit()`.
+
+### Fixed
+
+- WebSocket decoding now accepts fragmented binary messages, including control
+  frames interleaved between fragments.
+- Require `lz4rip` 0.11.5 to prevent compressor epoch rollover panics after
+  extended use.
+
 ## [0.26.0] - 2026-08-16
 
 ### Added

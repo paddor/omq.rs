@@ -7,11 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-08-23
+
+### Added
+
+- Async and blocking `Socket::send_group()` helpers for RADIO sockets.
+- Async and blocking SERVER `Socket::peer_info()` lookup for live routing IDs.
+- Optional per-connection and per-IP receive token buckets that disconnect
+  peers exceeding configured limits.
+
 ### Changed
 
 - Direct TCP receives reuse bounded buffers through 8 MiB without zero-filling
   payload memory. Held messages keep exclusive buffer ownership, and idle pool
   memory is released when its connection closes.
+- SERVER routing IDs use message metadata and bypass identity-frame allocation
+  and the socket actor on receive.
+- Multi-IO contexts reserve a separate internal runtime for control work, so
+  every configured IO thread remains available to data-plane tasks.
+
+### Fixed
+
+- Send-pipe signaling no longer misses queued messages or sleeps on stale
+  readiness notifications.
+- Inproc sends remain safe when tasks migrate between runtime threads or cloned
+  socket handles send concurrently.
+- Socket and context shutdown cancel blocked work and bound peer-driver joins,
+  including zero-linger close under saturated queues.
+- Receive drains preserve fairness and complete producer batches without
+  dropping the active ring slot.
+- CLIENT, REP, and identity-routed sockets preserve routing state across peer
+  disconnects and reply backpressure.
+- WebSocket transport accepts fragmented binary messages, and LZ4 transport no
+  longer panics after compressor epoch rollover.
 
 ## [0.21.3] - 2026-08-17
 

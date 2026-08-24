@@ -6,7 +6,7 @@ mod helpers;
 
 use std::ffi::{CString, c_void};
 use std::mem::size_of;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use omq_zmq::{
     zmq_bind, zmq_close, zmq_connect, zmq_ctx_new, zmq_ctx_shutdown, zmq_ctx_term, zmq_getsockopt,
@@ -52,6 +52,18 @@ fn set_sndtimeo(sock: *mut c_void, ms: i32) {
 
 fn caddr(s: &str) -> CString {
     CString::new(s).unwrap()
+}
+
+#[cfg(unix)]
+fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts points to writable memory and CLOCK_THREAD_CPUTIME_ID needs no extra invariants.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID)");
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
 #[test]
@@ -140,6 +152,49 @@ fn push_pull_inproc() {
     let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert_eq!(rc, msg.len() as i32);
     assert_eq!(&buf[..rc as usize], msg);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[cfg(unix)]
+#[test]
+fn recv_timeout_after_stale_signal_does_not_spin() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    assert!(!push.is_null() && !pull.is_null());
+
+    let addr = caddr("inproc://test-basic-recv-timeout-stale-signal");
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    std::thread::sleep(Duration::from_millis(20));
+
+    set_rcvtimeo(pull, 100);
+    set_sndtimeo(push, 1000);
+
+    let payload = b"x";
+    assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 1);
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+
+    let wall_start = Instant::now();
+    let cpu_start = thread_cpu_time();
+    let rc = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    let wall = wall_start.elapsed();
+    let cpu = thread_cpu_time().saturating_sub(cpu_start);
+
+    assert_eq!(rc, -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    assert!(
+        wall >= Duration::from_millis(50),
+        "recv timeout returned too early: {wall:?}",
+    );
+    assert!(
+        cpu < Duration::from_millis(25),
+        "recv timeout spun on CPU: {cpu:?}",
+    );
 
     zmq_close(push);
     zmq_close(pull);

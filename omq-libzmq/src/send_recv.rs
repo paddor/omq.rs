@@ -290,7 +290,9 @@ fn block_recv_result<T>(
                 None => i32::MAX,
             };
             let recv_notify = sock.notify.recv_notifier();
-            let _ = recv_notify.wait_for_readable(ms);
+            if recv_notify.wait_for_readable(ms) {
+                recv_notify.drain();
+            }
             if sock.ctx.is_effectively_terminated() {
                 return Err(ETERM);
             }
@@ -304,7 +306,9 @@ fn block_recv_result<T>(
             return Err(ETERM);
         }
         let recv_notify = sock.notify.recv_notifier();
-        let _ = recv_notify.wait_for_readable(100);
+        if recv_notify.wait_for_readable(100) {
+            recv_notify.drain();
+        }
         if sock.ctx.is_effectively_terminated() {
             return Err(ETERM);
         }

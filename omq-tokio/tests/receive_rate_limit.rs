@@ -58,6 +58,44 @@ fn push_options() -> Options {
     Options::default().reconnect(ReconnectPolicy::Disabled)
 }
 
+async fn server_client_roundtrip_with_options(options: Options) {
+    let server = Socket::new(SocketType::Server, options);
+    let mut monitor = server.monitor();
+    let port = bind_port(&server, &mut monitor).await;
+
+    let client = Socket::new(SocketType::Client, push_options());
+    client.connect(tcp_loopback(port)).await.unwrap();
+    wait_for_handshakes(&mut monitor, 1).await;
+
+    client.send(Message::single("ping")).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .expect("SERVER recv timeout")
+        .unwrap();
+    assert_eq!(request.part_bytes(0).unwrap().as_ref(), b"ping");
+    let routing_id = request.routing_id().expect("SERVER routing id");
+    server
+        .send(Message::single("pong").with_routing_id(routing_id))
+        .await
+        .unwrap();
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .expect("CLIENT recv timeout")
+        .unwrap();
+    assert_eq!(reply.part_bytes(0).unwrap().as_ref(), b"pong");
+}
+
+#[tokio::test]
+async fn server_client_roundtrip_survives_per_connection_rate_limit() {
+    server_client_roundtrip_with_options(Options::default().recv_rate_limit(50, 100)).await;
+}
+
+#[tokio::test]
+async fn server_client_roundtrip_survives_per_ip_rate_limit() {
+    server_client_roundtrip_with_options(Options::default().recv_ip_rate_limit(500, 1_000)).await;
+}
+
 #[tokio::test]
 async fn per_connection_burst_exhaustion_disconnects_peer() {
     let pull = Socket::new(SocketType::Pull, Options::default().recv_rate_limit(1, 2));

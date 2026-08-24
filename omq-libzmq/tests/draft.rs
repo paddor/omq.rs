@@ -186,6 +186,46 @@ fn scatter_gather_tcp() {
     zmq_ctx_term(ctx);
 }
 
+/// omq-libzmq SCATTER to native omq-tokio GATHER with a large single frame.
+#[test]
+fn scatter_to_tokio_gather_large_tcp() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let gather =
+            omq_tokio::Socket::new(omq_tokio::SocketType::Gather, omq_tokio::Options::default());
+        let endpoint = gather
+            .bind("tcp://127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let endpoint = CString::new(endpoint.to_string()).unwrap();
+        let payload = vec![0x5au8; 157_197];
+        let expected = payload.clone();
+
+        let sender = std::thread::spawn(move || {
+            let ctx = zmq_ctx_new();
+            let scatter = zmq_socket(ctx, ZMQ_SCATTER);
+            set_timeo(scatter, 2_000);
+            assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
+            std::thread::sleep(Duration::from_millis(100));
+            let rc = zmq_send(scatter, payload.as_ptr().cast(), payload.len(), 0);
+            assert_eq!(rc, payload.len() as i32, "scatter send failed");
+            zmq_close(scatter);
+            zmq_ctx_term(ctx);
+        });
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), gather.recv())
+            .await
+            .expect("GATHER receive timed out")
+            .expect("GATHER receive failed");
+        assert_eq!(msg.part_slice(0), Some(expected.as_slice()));
+        sender.join().unwrap();
+    });
+}
+
 /// RADIO/DISH with group membership.
 #[test]
 fn radio_dish_inproc() {

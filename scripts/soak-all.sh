@@ -27,11 +27,18 @@ duration_seconds=$((10#$duration_value * duration_multiplier))
 export SOAK_FEATURES="${SOAK_FEATURES:-soak plain curve lz4 zstd ws}"
 export OMQ_SOAK_DURATION_SECS="$duration_seconds"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-if [[ -z "${OMQ_RUBY:-}" ]] && ! command -v ruby >/dev/null 2>&1 && [[ -x /home/roadster/.rubies/ruby-4.0.6/bin/ruby ]]; then
-  export OMQ_RUBY=/home/roadster/.rubies/ruby-4.0.6/bin/ruby
+if [[ -z "${RUBY:-}" ]]; then
+  if [[ -n "${OMQ_RUBY:-}" ]]; then
+    export RUBY="$OMQ_RUBY"
+  elif command -v ruby >/dev/null 2>&1; then
+    export RUBY="$(command -v ruby)"
+  elif [[ -x /home/roadster/.rubies/ruby-4.0.6/bin/ruby ]]; then
+    export RUBY=/home/roadster/.rubies/ruby-4.0.6/bin/ruby
+  fi
 fi
-if [[ -n "${OMQ_RUBY:-}" && -z "${RUBY:-}" ]]; then
-  export RUBY="$OMQ_RUBY"
+if [[ -z "${RUBY:-}" ]]; then
+  printf 'error: Ruby not found; set RUBY or OMQ_RUBY\n' >&2
+  exit 2
 fi
 
 timeout_seconds="${SOAK_TIMEOUT_SECS:-$((duration_seconds + 900))}"
@@ -206,7 +213,9 @@ if [[ "${SOAK_SKIP_PREBUILD:-0}" != "1" ]]; then
   "$cargo_cmd" build --release --manifest-path bindings/ruby/ext/omq_rs_native/Cargo.toml
   (
     cd bindings/ruby
-    export PATH="$(dirname "$RUBY"):$PATH"
+    if [[ "${RUBY:-}" == */* ]]; then
+      export PATH="$(dirname "$RUBY"):$PATH"
+    fi
     "$RUBY" -S bundle check
     "$RUBY" -S bundle exec rake compile
   )

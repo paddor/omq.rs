@@ -104,47 +104,60 @@
     forwarder/0, queue/0, streamer/0, null/0, plain/0, curve/0
 ]).
 
+%% @doc Create a context. `context/0` uses one IO thread.
 context() ->
     context(1).
 
 context(IoThreads) ->
     omq_nif:context_new(IoThreads).
 
+%% @doc Terminate a context.
 term(Context) ->
     omq_nif:context_term(Context).
 
+%% @doc Terminate a context. Alias for `term/1`.
 destroy(Context) ->
     term(Context).
 
+%% @doc Return opaque native context share key.
 context_share_key(Context) ->
     omq_nif:context_share_key(Context).
 
+%% @doc Import native context by share key.
 context_from_share_key(ShareKey) ->
     omq_nif:context_from_share_key(ShareKey).
 
+%% @doc Return whether context wrapper or native core is closed.
 context_closed(Context) ->
     omq_nif:context_closed(Context).
 
+%% @doc Return native backend name.
 backend_name() ->
     omq_nif:backend_name().
 
+%% @doc Return native binding version.
 version() ->
     omq_nif:version().
 
+%% @doc Return opaque native context share key.
 share_key(Context) ->
     context_share_key(Context).
 
+%% @doc Import native context by share key.
 from_share_key(ShareKey) ->
     context_from_share_key(ShareKey).
 
+%% @doc Create socket from context and socket type atom or constant.
 socket(Context, Type) when is_atom(Type) ->
     socket(Context, socket_type_code(Type));
 socket(Context, Type) when is_integer(Type) ->
     omq_nif:socket_new(Context, Type).
 
+%% @doc Bind socket to endpoint and return bound endpoint.
 bind(Socket, Endpoint) ->
     omq_nif:bind(Socket, iolist_to_binary(Endpoint)).
 
+%% @doc Bind socket to random port in range.
 bind_to_random_port(Socket, Addr) ->
     bind_to_random_port(Socket, Addr, 49152, 65536).
 
@@ -152,33 +165,42 @@ bind_to_random_port(Socket, Addr, MinPort, MaxPort)
         when is_integer(MinPort), is_integer(MaxPort), MinPort =< MaxPort ->
     bind_to_random_port_try(Socket, iolist_to_binary(Addr), MinPort, MaxPort).
 
+%% @doc Connect socket to endpoint.
 connect(Socket, Endpoint) ->
     omq_nif:connect(Socket, iolist_to_binary(Endpoint)).
 
+%% @doc Unbind socket from endpoint.
 unbind(Socket, Endpoint) ->
     omq_nif:unbind(Socket, iolist_to_binary(Endpoint)).
 
+%% @doc Disconnect socket from endpoint.
 disconnect(Socket, Endpoint) ->
     omq_nif:disconnect(Socket, iolist_to_binary(Endpoint)).
 
+%% @doc Create monitor stream for socket lifecycle events.
 monitor(Socket) ->
     omq_nif:monitor(Socket).
 
+%% @doc Receive next monitor event, optionally with timeout.
 monitor_recv(Monitor) ->
     monitor_recv(Monitor, infinity).
 
 monitor_recv(Monitor, Timeout) ->
     omq_nif:monitor_recv(Monitor, timeout_ms(Timeout)).
 
+%% @doc Try to receive one monitor event without blocking.
 monitor_try_recv(Monitor) ->
     omq_nif:monitor_try_recv(Monitor).
 
+%% @doc Return current connection snapshots for socket.
 connections(Socket) ->
     omq_nif:connections(Socket).
 
+%% @doc Return one connection snapshot by ID.
 connection_info(Socket, ConnectionId) ->
     omq_nif:connection_info(Socket, ConnectionId).
 
+%% @doc Send one message. Options may include flags and routing_id.
 send(Socket, Data) ->
     send(Socket, Data, []).
 
@@ -186,6 +208,7 @@ send(Socket, Data, Opts) ->
     {RoutingId, Flags} = send_options(Opts),
     send_parts(Socket, [iolist_to_binary(Data)], RoutingId, Flags).
 
+%% @doc Send one string message with optional encoding and options.
 send_string(Socket, Text) ->
     send_string(Socket, Text, []).
 
@@ -197,6 +220,7 @@ send_string(Socket, Text, Opts) ->
 send_string(Socket, Text, Encoding, Opts) ->
     send(Socket, unicode:characters_to_binary(Text, utf8, Encoding), Opts).
 
+%% @doc Send one multipart message.
 send_multipart(Socket, Parts) ->
     send_multipart(Socket, Parts, []).
 
@@ -204,6 +228,7 @@ send_multipart(Socket, Parts, Opts) ->
     {RoutingId, Flags} = send_options(Opts),
     send_parts(Socket, [iolist_to_binary(Part) || Part <- Parts], RoutingId, Flags).
 
+%% @doc Try to send one message without blocking.
 try_send(Socket, Data) ->
     try_send(Socket, Data, []).
 
@@ -211,6 +236,7 @@ try_send(Socket, Data, Opts) ->
     {RoutingId, Flags} = send_options(Opts),
     try_send_parts(Socket, [iolist_to_binary(Data)], RoutingId, Flags).
 
+%% @doc Receive one message. Returns routing metadata when present.
 recv(Socket) ->
     case omq_nif:recv(Socket, -2) of
         {ok, [Part], 0} -> {ok, Part};
@@ -227,6 +253,7 @@ recv(Socket, Timeout) ->
         Error -> Error
     end.
 
+%% @doc Receive one string message with optional timeout and encoding.
 recv_string(Socket) ->
     recv_string(Socket, infinity).
 
@@ -245,6 +272,7 @@ recv_string(Socket, Timeout, Encoding) ->
             Other
     end.
 
+%% @doc Receive next frame and update RCVMORE wrapper state.
 recv_frame(Socket) ->
     recv_frame(Socket, infinity).
 
@@ -260,6 +288,7 @@ recv_frame(Socket, Timeout) ->
             end
     end.
 
+%% @doc Try to receive one message without blocking.
 try_recv(Socket) ->
     case omq_nif:try_recv(Socket) of
         {ok, [Part], 0} -> {ok, Part};
@@ -268,6 +297,7 @@ try_recv(Socket) ->
         Error -> Error
     end.
 
+%% @doc Try to receive one string without blocking.
 try_recv_string(Socket) ->
     try_recv_string(Socket, utf8).
 
@@ -279,6 +309,7 @@ try_recv_string(Socket, Encoding) ->
             Other
     end.
 
+%% @doc Receive one multipart message.
 recv_multipart(Socket) ->
     case omq_nif:recv(Socket, -2) of
         {ok, Parts, 0} -> {ok, Parts};
@@ -286,6 +317,7 @@ recv_multipart(Socket) ->
         Error -> Error
     end.
 
+%% @doc Try to receive one multipart message without blocking.
 try_recv_multipart(Socket) ->
     case omq_nif:try_recv(Socket) of
         {ok, Parts, 0} -> {ok, Parts};
@@ -300,6 +332,7 @@ recv_multipart(Socket, Timeout) ->
         Error -> Error
     end.
 
+%% @doc Poll socket readiness entries with timeout.
 poll(Entries, Timeout) ->
     Normalized = [normalize_poll_entry(Entry) || Entry <- Entries],
     ReadyOut = [{Socket, pollout()} || {Socket, Flags} <- Normalized, (Flags band pollout()) =/= 0],
@@ -316,6 +349,7 @@ poll(Entries, Timeout) ->
             Error
     end.
 
+%% @doc Return ready read, write, and exception socket lists.
 select(RList, WList, _XList, Timeout) ->
     Entries = [{Socket, pollin()} || Socket <- RList] ++ [{Socket, pollout()} || Socket <- WList],
     case poll(Entries, Timeout) of
@@ -327,18 +361,22 @@ select(RList, WList, _XList, Timeout) ->
             Error
     end.
 
+%% @doc Run bidirectional proxy between sockets.
 proxy(Frontend, Backend) ->
     proxy(Frontend, Backend, undefined).
 
 proxy(Frontend, Backend, Capture) ->
     proxy_loop(Frontend, Backend, Capture).
 
+%% @doc Run steerable proxy with PAUSE, RESUME, and TERMINATE control.
 proxy_steerable(Frontend, Backend, Capture, Control) ->
     proxy_steerable_loop(Frontend, Backend, Capture, Control, active).
 
+%% @doc Run libzmq-compatible device. Device type is accepted for parity.
 device(_DeviceType, Frontend, Backend) ->
     proxy(Frontend, Backend).
 
+%% @doc Return whether native feature or transport is available.
 has(Capability) when is_atom(Capability) ->
     has(atom_to_binary(Capability, utf8));
 has(Capability) when is_list(Capability) ->
@@ -346,45 +384,58 @@ has(Capability) when is_list(Capability) ->
 has(Capability) when is_binary(Capability) ->
     omq_nif:has_feature(string:lowercase(Capability)).
 
+%% @doc Generate CURVE public/secret keypair.
 curve_keypair() ->
     omq_nif:curve_keypair().
 
+%% @doc Derive CURVE public key from secret key.
 curve_public(Secret) ->
     omq_nif:curve_public(iolist_to_binary(Secret)).
 
+%% @doc Subscribe SUB or XSUB socket to prefix.
 subscribe(Socket, Prefix) ->
     omq_nif:subscribe(Socket, iolist_to_binary(Prefix)).
 
+%% @doc Remove SUB or XSUB prefix subscription.
 unsubscribe(Socket, Prefix) ->
     omq_nif:unsubscribe(Socket, iolist_to_binary(Prefix)).
 
+%% @doc Join RADIO/DISH group.
 join(Socket, Group) ->
     omq_nif:join(Socket, iolist_to_binary(Group)).
 
+%% @doc Leave RADIO/DISH group.
 leave(Socket, Group) ->
     omq_nif:leave(Socket, iolist_to_binary(Group)).
 
+%% @doc Send RADIO message to group.
 send_group(Socket, Group, Body) ->
     omq_nif:send_group(Socket, iolist_to_binary(Group), iolist_to_binary(Body)).
 
+%% @doc Close socket, optionally with linger in milliseconds.
 close(Socket) ->
     close(Socket, 0).
 
 close(Socket, Linger) ->
     omq_nif:close(Socket, timeout_ms(Linger)).
 
+%% @doc Wait until minimum peer count is connected.
 wait_connected(Socket, MinPeers, Timeout) ->
     omq_nif:wait_connected(Socket, MinPeers, timeout_ms(Timeout)).
 
+%% @doc Wait until minimum subscription generation is visible.
 wait_subscribed(Socket, MinSubscriptions, Timeout) ->
     omq_nif:wait_subscribed(Socket, MinSubscriptions, timeout_ms(Timeout)).
 
+%% @doc Set socket option. Alias for `setsockopt/3`.
 set(Socket, Option, Value) ->
     setsockopt(Socket, Option, Value).
 
+%% @doc Get socket option. Alias for `getsockopt/2`.
 get(Socket, Option) ->
     getsockopt(Socket, Option).
 
+%% @doc Set socket option by atom or integer option ID.
 setsockopt(Socket, hwm, Value) when is_integer(Value) ->
     case setsockopt(Socket, sndhwm, Value) of
         ok -> setsockopt(Socket, rcvhwm, Value);
@@ -401,6 +452,7 @@ setsockopt(Socket, Option, Value) when is_boolean(Value) ->
 setsockopt(Socket, Option, Value) when is_integer(Value) ->
     omq_nif:setsockopt(Socket, option_code(Option), Value, <<>>).
 
+%% @doc Get socket option by atom or integer option ID.
 getsockopt(Socket, hwm) ->
     getsockopt(Socket, sndhwm);
 getsockopt(Socket, Option) ->
@@ -409,15 +461,19 @@ getsockopt(Socket, Option) ->
         Code -> omq_nif:getsockopt(Socket, Code)
     end.
 
+%% @doc Set both SNDHWM and RCVHWM.
 set_hwm(Socket, Value) ->
     setsockopt(Socket, hwm, Value).
 
+%% @doc Return SNDHWM as compatibility HWM value.
 get_hwm(Socket) ->
     getsockopt(Socket, hwm).
 
+%% @doc Set binary socket option from UTF-8 text.
 setsockopt_string(Socket, Option, Text) ->
     setsockopt(Socket, Option, unicode:characters_to_binary(Text)).
 
+%% @doc Get binary socket option as UTF-8 text.
 getsockopt_string(Socket, Option) ->
     case getsockopt(Socket, Option) of
         {ok, Data} when is_binary(Data) ->
@@ -426,21 +482,25 @@ getsockopt_string(Socket, Option) ->
             Other
     end.
 
+%% @doc Return socket type atom.
 socket_type(Socket) ->
     case omq_nif:socket_type(Socket) of
         {ok, Code} -> {ok, socket_type_atom(Code)};
         Error -> Error
     end.
 
+%% @doc Return wrapper socket ID.
 socket_id(Socket) ->
     omq_nif:socket_id(Socket).
 
+%% @doc Return whether socket wrapper is closed.
 closed(Socket) ->
     omq_nif:closed(Socket).
 
 timeout_ms(infinity) -> -1;
 timeout_ms(Value) when is_integer(Value), Value >= 0 -> Value.
 
+%% @doc Return ROUTING_ID constant.
 routing_id(0) -> undefined;
 routing_id(Value) -> Value.
 
@@ -638,105 +698,201 @@ proxy_steerable_forward(Frontend, Backend, Capture, Ready, active) ->
         false -> ok
     end.
 
+%% @doc Return POLLIN constant.
 pollin() -> 1.
+%% @doc Return POLLOUT constant.
 pollout() -> 2.
+%% @doc Return POLLERR constant.
 pollerr() -> 4.
+%% @doc Return POLLPRI constant.
 pollpri() -> 32.
+%% @doc Return SNDMORE constant.
 sndmore() -> 2.
+%% @doc Return NOBLOCK constant.
 noblock() -> 1.
+%% @doc Return DONTWAIT constant.
 dontwait() -> noblock().
 
+%% @doc Return HWM constant.
 hwm() -> 1.
 
+%% @doc Return PAIR constant.
 pair() -> 0.
+%% @doc Return PUB socket type constant.
 pub() -> 1.
+%% @doc Return SUB socket type constant.
 sub() -> 2.
+%% @doc Return REQ socket type constant.
 req() -> 3.
+%% @doc Return REP socket type constant.
 rep() -> 4.
+%% @doc Return DEALER constant.
 dealer() -> 5.
+%% @doc Return ROUTER constant.
 router() -> 6.
+%% @doc Return PULL constant.
 pull() -> 7.
+%% @doc Return PUSH constant.
 push() -> 8.
+%% @doc Return XPUB constant.
 xpub() -> 9.
+%% @doc Return XSUB constant.
 xsub() -> 10.
+%% @doc Return STREAM constant.
 stream() -> 11.
+%% @doc Return SERVER constant.
 server() -> 12.
+%% @doc Return CLIENT constant.
 client() -> 13.
+%% @doc Return RADIO constant.
 radio() -> 14.
+%% @doc Return DISH constant.
 dish() -> 15.
+%% @doc Return GATHER constant.
 gather() -> 16.
+%% @doc Return SCATTER constant.
 scatter() -> 17.
+%% @doc Return PEER constant.
 peer() -> 19.
+%% @doc Return CHANNEL constant.
 channel() -> 20.
 
+%% @doc Return AFFINITY constant.
 affinity() -> 4.
+%% @doc Return IDENTITY constant.
 identity() -> 5.
 routing_id() -> 5.
+%% @doc Return SUBSCRIBE_OPT constant.
 subscribe_opt() -> 6.
+%% @doc Return UNSUBSCRIBE_OPT constant.
 unsubscribe_opt() -> 7.
+%% @doc Return RCVMORE constant.
 rcvmore() -> 13.
+%% @doc Return FD constant.
 fd() -> 14.
+%% @doc Return EVENTS constant.
 events() -> 15.
+%% @doc Return TYPE constant.
 type() -> 16.
+%% @doc Return LINGER constant.
 linger() -> 17.
+%% @doc Return RECONNECT_IVL constant.
 reconnect_ivl() -> 18.
+%% @doc Return BACKLOG constant.
 backlog() -> 19.
+%% @doc Return RECONNECT_IVL_MAX constant.
 reconnect_ivl_max() -> 21.
+%% @doc Return MAXMSGSIZE constant.
 maxmsgsize() -> 22.
+%% @doc Return SNDHWM constant.
 sndhwm() -> 23.
+%% @doc Return RCVHWM constant.
 rcvhwm() -> 24.
+%% @doc Return RCVTIMEO constant.
 rcvtimeo() -> 27.
+%% @doc Return SNDTIMEO constant.
 sndtimeo() -> 28.
+%% @doc Return ROUTER_MANDATORY constant.
 router_mandatory() -> 33.
+%% @doc Return TCP_KEEPALIVE constant.
 tcp_keepalive() -> 34.
+%% @doc Return TCP_KEEPALIVE_CNT constant.
 tcp_keepalive_cnt() -> 35.
+%% @doc Return TCP_KEEPALIVE_IDLE constant.
 tcp_keepalive_idle() -> 36.
+%% @doc Return TCP_KEEPALIVE_INTVL constant.
 tcp_keepalive_intvl() -> 37.
+%% @doc Return IMMEDIATE constant.
 immediate() -> 39.
+%% @doc Return IPV6 constant.
 ipv6() -> 42.
+%% @doc Return MECHANISM constant.
 mechanism() -> 43.
+%% @doc Return PLAIN_SERVER constant.
 plain_server() -> 44.
+%% @doc Return PLAIN_USERNAME constant.
 plain_username() -> 45.
+%% @doc Return PLAIN_PASSWORD constant.
 plain_password() -> 46.
+%% @doc Return CURVE_SERVER constant.
 curve_server() -> 47.
+%% @doc Return CURVE_PUBLICKEY constant.
 curve_publickey() -> 48.
+%% @doc Return CURVE_SECRETKEY constant.
 curve_secretkey() -> 49.
+%% @doc Return CURVE_SERVERKEY constant.
 curve_serverkey() -> 50.
+%% @doc Return CONFLATE constant.
 conflate() -> 54.
+%% @doc Return ROUTER_HANDOVER constant.
 router_handover() -> 56.
+%% @doc Return HANDSHAKE_IVL constant.
 handshake_ivl() -> 66.
+%% @doc Return HEARTBEAT_IVL constant.
 heartbeat_ivl() -> 75.
+%% @doc Return HEARTBEAT_TTL constant.
 heartbeat_ttl() -> 76.
+%% @doc Return HEARTBEAT_TIMEOUT constant.
 heartbeat_timeout() -> 77.
+%% @doc Return CONNECT_TIMEOUT constant.
 connect_timeout() -> 79.
+%% @doc Return TCP_MAXRT constant.
 tcp_maxrt() -> 80.
+%% @doc Return RECONNECT_STOP constant.
 reconnect_stop() -> 109.
+%% @doc Return RATE constant.
 rate() -> 8.
+%% @doc Return SNDBUF constant.
 sndbuf() -> 11.
+%% @doc Return RCVBUF constant.
 rcvbuf() -> 12.
+%% @doc Return LAST_ENDPOINT constant.
 last_endpoint() -> 32.
+%% @doc Return IPV4ONLY constant.
 ipv4only() -> 31.
+%% @doc Return TCP_ACCEPT_FILTER constant.
 tcp_accept_filter() -> 38.
+%% @doc Return XPUB_VERBOSE constant.
 xpub_verbose() -> 40.
+%% @doc Return PROBE_ROUTER constant.
 probe_router() -> 51.
+%% @doc Return REQ_CORRELATE constant.
 req_correlate() -> 52.
+%% @doc Return REQ_RELAXED constant.
 req_relaxed() -> 53.
+%% @doc Return ZAP_DOMAIN constant.
 zap_domain() -> 55.
+%% @doc Return MULTICAST_HOPS constant.
 multicast_hops() -> 25.
+%% @doc Return RECOVERY_IVL constant.
 recovery_ivl() -> 9.
+%% @doc Return OMQ_ON_MUTE constant.
 omq_on_mute() -> 1004.
+%% @doc Return OMQ_COMPRESSION_LEVEL constant.
 omq_compression_level() -> 1005.
+%% @doc Return OMQ_COMPRESSION_DICT constant.
 omq_compression_dict() -> 1006.
+%% @doc Return OMQ_COMPRESSION_AUTO_TRAIN constant.
 omq_compression_auto_train() -> 1007.
+%% @doc Return OMQ_WORKLOAD_PROFILE constant.
 omq_workload_profile() -> 1100.
+%% @doc Return OMQ_ON_MUTE_BLOCK constant.
 omq_on_mute_block() -> 0.
+%% @doc Return OMQ_ON_MUTE_DROP_NEWEST constant.
 omq_on_mute_drop_newest() -> 1.
+%% @doc Return OMQ_ON_MUTE_DROP_OLDEST constant.
 omq_on_mute_drop_oldest() -> 2.
+%% @doc Return FORWARDER constant.
 forwarder() -> 2.
+%% @doc Return QUEUE constant.
 queue() -> 3.
+%% @doc Return STREAMER constant.
 streamer() -> 1.
+%% @doc Return NULL constant.
 null() -> 0.
+%% @doc Return PLAIN constant.
 plain() -> 1.
+%% @doc Return CURVE constant.
 curve() -> 2.
 
 socket_type_code(pair) -> pair();

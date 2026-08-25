@@ -406,9 +406,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     let Ok(overlay) = sock.overlay.lock() else {
         return false;
     };
-    let opts = overlay
-        .to_options()
-        .workload_profile(omq_tokio::options::WorkloadProfile::Throughput);
+    let opts = overlay.to_options();
     let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     // SAFETY: materialization runs before hot-path send ownership and freezes
     // bind/connect-scoped options for this socket.

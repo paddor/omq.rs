@@ -58,9 +58,13 @@ const OMQ_ON_MUTE: i32 = 1004;
 const OMQ_COMPRESSION_LEVEL: i32 = 1005;
 const OMQ_COMPRESSION_DICT: i32 = 1006;
 const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
+const OMQ_WORKLOAD_PROFILE: i32 = 1008;
 const OMQ_ON_MUTE_BLOCK: i32 = 0;
 const OMQ_ON_MUTE_DROP_NEWEST: i32 = 1;
 const OMQ_ON_MUTE_DROP_OLDEST: i32 = 2;
+const OMQ_WORKLOAD_DEFAULT: i32 = -1;
+const OMQ_WORKLOAD_THROUGHPUT: i32 = 0;
+const OMQ_WORKLOAD_LATENCY: i32 = 1;
 
 const ZMQ_NULL: i32 = 0;
 const ZMQ_PLAIN: i32 = 1;
@@ -594,6 +598,30 @@ fn omq_on_mute_roundtrip() {
     assert_eq!(set_i32(s, OMQ_ON_MUTE, 99), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_BLOCK);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn omq_workload_profile_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_DEALER);
+
+    assert_eq!(get_i32(s, OMQ_WORKLOAD_PROFILE), OMQ_WORKLOAD_DEFAULT);
+
+    assert_eq!(set_i32(s, OMQ_WORKLOAD_PROFILE, OMQ_WORKLOAD_LATENCY), 0);
+    assert_eq!(get_i32(s, OMQ_WORKLOAD_PROFILE), OMQ_WORKLOAD_LATENCY);
+
+    assert_eq!(set_i32(s, OMQ_WORKLOAD_PROFILE, OMQ_WORKLOAD_THROUGHPUT), 0);
+    assert_eq!(get_i32(s, OMQ_WORKLOAD_PROFILE), OMQ_WORKLOAD_THROUGHPUT);
+
+    assert_eq!(set_i32(s, OMQ_WORKLOAD_PROFILE, OMQ_WORKLOAD_DEFAULT), 0);
+    assert_eq!(get_i32(s, OMQ_WORKLOAD_PROFILE), OMQ_WORKLOAD_DEFAULT);
+
+    assert_eq!(set_i32(s, OMQ_WORKLOAD_PROFILE, 99), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(s, OMQ_WORKLOAD_PROFILE), OMQ_WORKLOAD_DEFAULT);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

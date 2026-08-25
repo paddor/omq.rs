@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_tokio::MechanismSetup;
-use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy};
+use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 
 use crate::error::fail;
 #[cfg(unix)]
@@ -56,6 +56,7 @@ pub(crate) struct SocketOverlay {
     pub compression_level: Option<i32>,
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
+    pub workload_profile: Option<WorkloadProfile>,
     pub ipv6: bool,
     pub backlog: i32,
     pub immediate: bool,
@@ -101,6 +102,7 @@ impl Default for SocketOverlay {
             compression_level: None,
             compression_dict: None,
             compression_auto_train: false,
+            workload_profile: None,
             ipv6: false,
             backlog: 0,
             immediate: false,
@@ -237,6 +239,7 @@ impl SocketOverlay {
             compression_level: self.compression_level,
             compression_dict: self.compression_dict.clone(),
             compression_auto_train: self.compression_auto_train,
+            workload_profile: self.workload_profile,
             xpub_nodrop: self.xpub_nodrop,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
             wss_tls: omq_tokio::options::WssTls {
@@ -381,10 +384,14 @@ const OMQ_ON_MUTE: c_int = 1004;
 const OMQ_COMPRESSION_LEVEL: c_int = 1005;
 const OMQ_COMPRESSION_DICT: c_int = 1006;
 const OMQ_COMPRESSION_AUTO_TRAIN: c_int = 1007;
+const OMQ_WORKLOAD_PROFILE: c_int = 1008;
 const OMQ_ARENA_THRESHOLD: c_int = 10_001;
 const OMQ_ON_MUTE_BLOCK: c_int = 0;
 const OMQ_ON_MUTE_DROP_NEWEST: c_int = 1;
 const OMQ_ON_MUTE_DROP_OLDEST: c_int = 2;
+const OMQ_WORKLOAD_DEFAULT: c_int = -1;
+const OMQ_WORKLOAD_THROUGHPUT: c_int = 0;
+const OMQ_WORKLOAD_LATENCY: c_int = 1;
 const ZSTD_LEVEL_MIN: i32 = -8;
 const ZSTD_LEVEL_MAX: i32 = 4;
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
@@ -639,6 +646,17 @@ pub extern "C" fn zmq_setsockopt(
                 return fail(libc::EINVAL);
             };
             lock_overlay!(sock_arc).compression_auto_train = v != 0;
+        }
+        OMQ_WORKLOAD_PROFILE => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).workload_profile = match v {
+                OMQ_WORKLOAD_DEFAULT => None,
+                OMQ_WORKLOAD_THROUGHPUT => Some(WorkloadProfile::Throughput),
+                OMQ_WORKLOAD_LATENCY => Some(WorkloadProfile::Latency),
+                _ => return fail(libc::EINVAL),
+            };
         }
         ZMQ_SUBSCRIBE => {
             return do_subscribe(sock_arc, optval, optvallen, true);
@@ -1178,6 +1196,14 @@ pub extern "C" fn zmq_getsockopt(
             let v = lock_overlay!(sock_arc).compression_auto_train;
             write_i32(optval, optvallen, i32::from(v))
         }
+        OMQ_WORKLOAD_PROFILE => {
+            let v = match lock_overlay!(sock_arc).workload_profile {
+                None => OMQ_WORKLOAD_DEFAULT,
+                Some(WorkloadProfile::Throughput) => OMQ_WORKLOAD_THROUGHPUT,
+                Some(WorkloadProfile::Latency) => OMQ_WORKLOAD_LATENCY,
+            };
+            write_i32(optval, optvallen, v)
+        }
         ZMQ_LAST_ENDPOINT => {
             let Ok(ep) = sock_arc.last_endpoint.lock() else {
                 return crate::error::fail(crate::error::ETERM);
@@ -1629,6 +1655,26 @@ mod tests {
         };
 
         assert_eq!(overlay.to_options().on_mute, OnMute::DropOldest);
+    }
+
+    #[test]
+    fn workload_profile_defaults_to_backend_socket_type_selection() {
+        let overlay = SocketOverlay::default();
+
+        assert_eq!(overlay.to_options().workload_profile, None);
+    }
+
+    #[test]
+    fn workload_profile_maps_to_backend_options() {
+        let overlay = SocketOverlay {
+            workload_profile: Some(WorkloadProfile::Latency),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overlay.to_options().workload_profile,
+            Some(WorkloadProfile::Latency)
+        );
     }
 
     #[test]

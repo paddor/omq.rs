@@ -8,6 +8,8 @@ Erlang is the base binding. Elixir and Gleam are thin wrappers over the same
 Erlang module and NIF, so one Rust native library serves all three languages.
 
 Architecture detail: [`doc/architecture.md`](doc/architecture.md).
+Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
+`exzmq` is not included because its current public API is CLIENT/SERVER-only.
 
 ## API Shape
 

@@ -47,7 +47,8 @@ Gleam wrapper:
 ```sh
 (cd bindings/beam/gleam && \
   ~/src/gleam/target/release/gleam format --check src/omq_gleam.gleam && \
-  ~/src/gleam/target/release/gleam check)
+  ~/src/gleam/target/release/gleam check && \
+  ~/src/gleam/target/release/gleam test)
 ```
 
 ## Soak

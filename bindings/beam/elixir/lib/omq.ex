@@ -16,6 +16,8 @@ defmodule OMQ do
   def disconnect(socket, endpoint), do: call(:disconnect, [socket, endpoint])
   def send(socket, data), do: call(:send, [socket, data])
   def send(socket, data, opts), do: call(:send, [socket, data, opts])
+  def try_send(socket, data), do: call(:try_send, [socket, data])
+  def try_send(socket, data, opts), do: call(:try_send, [socket, data, opts])
   def send_multipart(socket, parts), do: call(:send_multipart, [socket, parts])
   def send_multipart(socket, parts, opts), do: call(:send_multipart, [socket, parts, opts])
   def recv(socket), do: call(:recv, [socket])

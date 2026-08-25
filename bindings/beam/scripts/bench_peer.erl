@@ -78,6 +78,10 @@ send({omq_erlang, _, Sock}, Msg) -> omq:send(Sock, Msg);
 send({omq_gleam, _, Sock}, Msg) -> omq_gleam:send(Sock, Msg);
 send({erlzmq, _, Sock}, Msg) -> erlzmq:send(Sock, Msg).
 
+send_fast({omq_erlang, _, Sock}, Msg) -> omq:try_send(Sock, Msg);
+send_fast({omq_gleam, _, Sock}, Msg) -> omq:try_send(Sock, Msg);
+send_fast(Sock, Msg) -> send(Sock, Msg).
+
 recv({omq_erlang, _, Sock}) -> omq:recv(Sock);
 recv({omq_gleam, _, Sock}) -> omq_gleam:recv(Sock);
 recv({erlzmq, _, Sock}) -> erlzmq:recv(Sock).
@@ -158,8 +162,16 @@ recv_timer_check_interval(Size) ->
     end.
 
 push_loop(Sock, Payload) ->
-    okish(send(Sock, Payload)),
-    push_loop(Sock, Payload).
+    case send_fast(Sock, Payload) of
+        ok ->
+            push_loop(Sock, Payload);
+        {error, would_block, _} ->
+            erlang:yield(),
+            push_loop(Sock, Payload);
+        Error ->
+            okish(Error),
+            push_loop(Sock, Payload)
+    end.
 
 rep_loop(Sock) ->
     {ok, Msg} = recv(Sock),

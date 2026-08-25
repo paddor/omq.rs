@@ -1,0 +1,9 @@
+{application, omq, [
+    {description, "OMQ BEAM bindings"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {modules, [omq, omq_nif]},
+    {licenses, ["ISC"]},
+    {links, [{"GitHub", "https://github.com/paddor/omq.rs"}]}
+]}.

@@ -1,0 +1,17 @@
+.{
+    .name = .omq,
+    .version = "0.1.0",
+    .fingerprint = 0x4b9b014f2d9af2a2, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "scripts",
+        "README.md",
+        "DEVELOPMENT.md",
+        "doc",
+    },
+}

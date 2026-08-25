@@ -54,6 +54,13 @@ const ZMQ_CURVE_SERVER: i32 = 47;
 const ZMQ_CURVE_PUBLICKEY: i32 = 48;
 const ZMQ_CURVE_SECRETKEY: i32 = 49;
 const ZMQ_CURVE_SERVERKEY: i32 = 50;
+const OMQ_ON_MUTE: i32 = 1004;
+const OMQ_COMPRESSION_LEVEL: i32 = 1005;
+const OMQ_COMPRESSION_DICT: i32 = 1006;
+const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
+const OMQ_ON_MUTE_BLOCK: i32 = 0;
+const OMQ_ON_MUTE_DROP_NEWEST: i32 = 1;
+const OMQ_ON_MUTE_DROP_OLDEST: i32 = 2;
 
 const ZMQ_NULL: i32 = 0;
 const ZMQ_PLAIN: i32 = 1;
@@ -563,6 +570,71 @@ fn arena_threshold_roundtrip() {
     assert_eq!(set_i64(s, OMQ_ARENA_THRESHOLD, -2), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     assert_eq!(get_i64(s, OMQ_ARENA_THRESHOLD), 4 * 1024);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn omq_on_mute_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_BLOCK);
+
+    assert_eq!(set_i32(s, OMQ_ON_MUTE, OMQ_ON_MUTE_DROP_NEWEST), 0);
+    assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_DROP_NEWEST);
+
+    assert_eq!(set_i32(s, OMQ_ON_MUTE, OMQ_ON_MUTE_DROP_OLDEST), 0);
+    assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_DROP_OLDEST);
+
+    assert_eq!(set_i32(s, OMQ_ON_MUTE, OMQ_ON_MUTE_BLOCK), 0);
+    assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_BLOCK);
+
+    assert_eq!(set_i32(s, OMQ_ON_MUTE, 99), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(s, OMQ_ON_MUTE), OMQ_ON_MUTE_BLOCK);
+
+    zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn omq_compression_options_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let s = zmq_socket(ctx, ZMQ_PUSH);
+
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 0);
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, 1), 0);
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 1);
+
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, -9), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 1);
+
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_LEVEL, 5), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_LEVEL), 1);
+
+    let mut buf = [0u8; 64];
+    assert_eq!(get_bytes(s, OMQ_COMPRESSION_DICT, &mut buf), 0);
+
+    assert_eq!(set_bytes(s, OMQ_COMPRESSION_DICT, b"dict-bytes"), 0);
+    let len = get_bytes(s, OMQ_COMPRESSION_DICT, &mut buf);
+    assert_eq!(&buf[..len], b"dict-bytes");
+
+    assert_eq!(set_bytes(s, OMQ_COMPRESSION_DICT, b""), 0);
+    assert_eq!(get_bytes(s, OMQ_COMPRESSION_DICT, &mut buf), 0);
+
+    let too_big = vec![0u8; 8 * 1024 + 1];
+    assert_eq!(set_bytes(s, OMQ_COMPRESSION_DICT, &too_big), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_AUTO_TRAIN), 0);
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_AUTO_TRAIN, 1), 0);
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_AUTO_TRAIN), 1);
+    assert_eq!(set_i32(s, OMQ_COMPRESSION_AUTO_TRAIN, 0), 0);
+    assert_eq!(get_i32(s, OMQ_COMPRESSION_AUTO_TRAIN), 0);
 
     zmq_close(s);
     zmq_ctx_term(ctx);

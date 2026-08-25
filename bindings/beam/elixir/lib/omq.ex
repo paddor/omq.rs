@@ -4,6 +4,14 @@ defmodule OMQ do
   def context, do: call(:context, [])
   def context(io_threads), do: call(:context, [io_threads])
   def term(context), do: call(:term, [context])
+  def destroy(context), do: call(:destroy, [context])
+  def context_share_key(context), do: call(:context_share_key, [context])
+  def context_from_share_key(share_key), do: call(:context_from_share_key, [share_key])
+  def context_closed(context), do: call(:context_closed, [context])
+  def backend_name, do: call(:backend_name, [])
+  def version, do: call(:version, [])
+  def share_key(context), do: call(:share_key, [context])
+  def from_share_key(share_key), do: call(:from_share_key, [share_key])
   def socket(context, type), do: call(:socket, [context, type])
   def bind(socket, endpoint), do: call(:bind, [socket, endpoint])
   def bind_to_random_port(socket, addr), do: call(:bind_to_random_port, [socket, addr])
@@ -22,15 +30,31 @@ defmodule OMQ do
   def connection_info(socket, connection_id), do: call(:connection_info, [socket, connection_id])
   def send(socket, data), do: call(:send, [socket, data])
   def send(socket, data, opts), do: call(:send, [socket, data, opts])
+  def send_string(socket, text), do: call(:send_string, [socket, text])
+
+  def send_string(socket, text, opts_or_encoding),
+    do: call(:send_string, [socket, text, opts_or_encoding])
+
+  def send_string(socket, text, encoding, opts),
+    do: call(:send_string, [socket, text, encoding, opts])
+
   def try_send(socket, data), do: call(:try_send, [socket, data])
   def try_send(socket, data, opts), do: call(:try_send, [socket, data, opts])
   def send_multipart(socket, parts), do: call(:send_multipart, [socket, parts])
   def send_multipart(socket, parts, opts), do: call(:send_multipart, [socket, parts, opts])
   def recv(socket), do: call(:recv, [socket])
   def recv(socket, timeout), do: call(:recv, [socket, timeout])
+  def recv_string(socket), do: call(:recv_string, [socket])
+
+  def recv_string(socket, timeout_or_encoding),
+    do: call(:recv_string, [socket, timeout_or_encoding])
+
+  def recv_string(socket, timeout, encoding), do: call(:recv_string, [socket, timeout, encoding])
   def recv_frame(socket), do: call(:recv_frame, [socket])
   def recv_frame(socket, timeout), do: call(:recv_frame, [socket, timeout])
   def try_recv(socket), do: call(:try_recv, [socket])
+  def try_recv_string(socket), do: call(:try_recv_string, [socket])
+  def try_recv_string(socket, encoding), do: call(:try_recv_string, [socket, encoding])
   def recv_multipart(socket), do: call(:recv_multipart, [socket])
   def recv_multipart(socket, timeout), do: call(:recv_multipart, [socket, timeout])
   def try_recv_multipart(socket), do: call(:try_recv_multipart, [socket])
@@ -42,6 +66,7 @@ defmodule OMQ do
   def proxy_steerable(frontend, backend, capture, control),
     do: call(:proxy_steerable, [frontend, backend, capture, control])
 
+  def device(device_type, frontend, backend), do: call(:device, [device_type, frontend, backend])
   def has(capability), do: call(:has, [capability])
   def curve_keypair, do: call(:curve_keypair, [])
   def curve_public(secret), do: call(:curve_public, [secret])
@@ -59,9 +84,20 @@ defmodule OMQ do
   def wait_subscribed(socket, min_subscriptions, timeout),
     do: call(:wait_subscribed, [socket, min_subscriptions, timeout])
 
+  def set(socket, option, value), do: call(:set, [socket, option, value])
+  def get(socket, option), do: call(:get, [socket, option])
   def setsockopt(socket, option, value), do: call(:setsockopt, [socket, option, value])
   def getsockopt(socket, option), do: call(:getsockopt, [socket, option])
+  def set_hwm(socket, value), do: call(:set_hwm, [socket, value])
+  def get_hwm(socket), do: call(:get_hwm, [socket])
+
+  def setsockopt_string(socket, option, text),
+    do: call(:setsockopt_string, [socket, option, text])
+
+  def getsockopt_string(socket, option), do: call(:getsockopt_string, [socket, option])
   def socket_type(socket), do: call(:socket_type, [socket])
+  def socket_id(socket), do: call(:socket_id, [socket])
+  def closed(socket), do: call(:closed, [socket])
 
   def pair, do: call(:pair, [])
   def pub, do: call(:pub, [])
@@ -87,9 +123,11 @@ defmodule OMQ do
   def pollin, do: call(:pollin, [])
   def pollout, do: call(:pollout, [])
   def pollerr, do: call(:pollerr, [])
+  def pollpri, do: call(:pollpri, [])
   def sndmore, do: call(:sndmore, [])
   def noblock, do: call(:noblock, [])
   def dontwait, do: call(:dontwait, [])
+  def hwm, do: call(:hwm, [])
   def affinity, do: call(:affinity, [])
   def identity, do: call(:identity, [])
   def routing_id, do: call(:routing_id, [])
@@ -150,6 +188,15 @@ defmodule OMQ do
   def omq_compression_dict, do: call(:omq_compression_dict, [])
   def omq_compression_auto_train, do: call(:omq_compression_auto_train, [])
   def omq_workload_profile, do: call(:omq_workload_profile, [])
+  def omq_on_mute_block, do: call(:omq_on_mute_block, [])
+  def omq_on_mute_drop_newest, do: call(:omq_on_mute_drop_newest, [])
+  def omq_on_mute_drop_oldest, do: call(:omq_on_mute_drop_oldest, [])
+  def forwarder, do: call(:forwarder, [])
+  def queue, do: call(:queue, [])
+  def streamer, do: call(:streamer, [])
+  def null, do: call(:null, [])
+  def plain, do: call(:plain, [])
+  def curve, do: call(:curve, [])
 
   defp call(function, args), do: :erlang.apply(:omq, function, args)
 end

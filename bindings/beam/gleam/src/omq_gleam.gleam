@@ -17,6 +17,30 @@ pub fn context() -> Result(Context, Error)
 @external(erlang, "omq_gleam_ffi", "term")
 pub fn term(context: Context) -> Result(Nil, Error)
 
+@external(erlang, "omq_gleam_ffi", "destroy")
+pub fn destroy(context: Context) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "context_share_key")
+pub fn context_share_key(context: Context) -> Result(Int, Error)
+
+@external(erlang, "omq_gleam_ffi", "context_from_share_key")
+pub fn context_from_share_key(share_key: Int) -> Result(Context, Error)
+
+@external(erlang, "omq_gleam_ffi", "context_closed")
+pub fn context_closed(context: Context) -> Bool
+
+@external(erlang, "omq_gleam_ffi", "backend_name")
+pub fn backend_name() -> Result(BitArray, Error)
+
+@external(erlang, "omq_gleam_ffi", "version")
+pub fn version() -> Result(BitArray, Error)
+
+@external(erlang, "omq_gleam_ffi", "share_key")
+pub fn share_key(context: Context) -> Result(Int, Error)
+
+@external(erlang, "omq_gleam_ffi", "from_share_key")
+pub fn from_share_key(share_key: Int) -> Result(Context, Error)
+
 @external(erlang, "omq_gleam_ffi", "socket")
 pub fn socket(context: Context, socket_type: Int) -> Result(Socket, Error)
 
@@ -79,8 +103,18 @@ pub fn proxy_steerable(
   control: Socket,
 ) -> Result(Nil, Error)
 
+@external(erlang, "omq_gleam_ffi", "device")
+pub fn device(
+  device_type: Int,
+  frontend: Socket,
+  backend: Socket,
+) -> Result(Nil, Error)
+
 @external(erlang, "omq_gleam_ffi", "send")
 pub fn send(socket: Socket, data: BitArray) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "send_string")
+pub fn send_string(socket: Socket, text: String) -> Result(Nil, Error)
 
 @external(erlang, "omq_gleam_ffi", "send_multipart")
 pub fn send_multipart(
@@ -91,11 +125,23 @@ pub fn send_multipart(
 @external(erlang, "omq_gleam_ffi", "recv")
 pub fn recv(socket: Socket) -> Result(BitArray, Error)
 
+@external(erlang, "omq_gleam_ffi", "recv_string")
+pub fn recv_string(socket: Socket) -> Result(String, Error)
+
+@external(erlang, "omq_gleam_ffi", "recv_string_timeout")
+pub fn recv_string_timeout(
+  socket: Socket,
+  timeout_ms: Int,
+) -> Result(String, Error)
+
 @external(erlang, "omq_gleam_ffi", "recv_frame")
 pub fn recv_frame(socket: Socket) -> Result(BitArray, Error)
 
 @external(erlang, "omq_gleam_ffi", "try_recv")
 pub fn try_recv(socket: Socket) -> Result(BitArray, Error)
+
+@external(erlang, "omq_gleam_ffi", "try_recv_string")
+pub fn try_recv_string(socket: Socket) -> Result(String, Error)
 
 @external(erlang, "omq_gleam_ffi", "recv_multipart")
 pub fn recv_multipart(socket: Socket) -> Result(List(BitArray), Error)
@@ -153,14 +199,36 @@ pub fn setsockopt_binary(
   value: BitArray,
 ) -> Result(Nil, Error)
 
+@external(erlang, "omq_gleam_ffi", "setsockopt_string")
+pub fn setsockopt_string(
+  socket: Socket,
+  option: Int,
+  value: String,
+) -> Result(Nil, Error)
+
 @external(erlang, "omq_gleam_ffi", "getsockopt_int")
 pub fn getsockopt_int(socket: Socket, option: Int) -> Result(Int, Error)
 
 @external(erlang, "omq_gleam_ffi", "getsockopt_binary")
 pub fn getsockopt_binary(socket: Socket, option: Int) -> Result(BitArray, Error)
 
+@external(erlang, "omq_gleam_ffi", "getsockopt_string")
+pub fn getsockopt_string(socket: Socket, option: Int) -> Result(String, Error)
+
+@external(erlang, "omq_gleam_ffi", "set_hwm")
+pub fn set_hwm(socket: Socket, value: Int) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "get_hwm")
+pub fn get_hwm(socket: Socket) -> Result(Int, Error)
+
 @external(erlang, "omq_gleam_ffi", "socket_type")
 pub fn socket_type(socket: Socket) -> Result(String, Error)
+
+@external(erlang, "omq_gleam_ffi", "socket_id")
+pub fn socket_id(socket: Socket) -> Result(Int, Error)
+
+@external(erlang, "omq_gleam_ffi", "closed")
+pub fn closed(socket: Socket) -> Bool
 
 @external(erlang, "omq_gleam_ffi", "has")
 pub fn has(capability: BitArray) -> Bool
@@ -183,6 +251,10 @@ pub fn pollerr() -> Int {
   4
 }
 
+pub fn pollpri() -> Int {
+  32
+}
+
 pub fn sndmore() -> Int {
   2
 }
@@ -192,6 +264,10 @@ pub fn noblock() -> Int {
 }
 
 pub fn dontwait() -> Int {
+  1
+}
+
+pub fn hwm() -> Int {
   1
 }
 
@@ -524,5 +600,29 @@ pub fn omq_on_mute_drop_newest() -> Int {
 }
 
 pub fn omq_on_mute_drop_oldest() -> Int {
+  2
+}
+
+pub fn forwarder() -> Int {
+  2
+}
+
+pub fn queue() -> Int {
+  3
+}
+
+pub fn streamer() -> Int {
+  1
+}
+
+pub fn null() -> Int {
+  0
+}
+
+pub fn plain() -> Int {
+  1
+}
+
+pub fn curve() -> Int {
   2
 }

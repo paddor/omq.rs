@@ -13,6 +13,72 @@ context_socket_type_test() ->
     ?assertEqual(ok, omq:close(Sock)),
     ?assertEqual(ok, omq:term(Ctx)).
 
+metadata_and_destroy_alias_test() ->
+    {ok, <<"tokio">>} = omq:backend_name(),
+    {ok, Version} = omq:version(),
+    ?assert(is_binary(Version)),
+    ?assert(byte_size(Version) > 0),
+    ?assertEqual(32, omq:pollpri()),
+    ?assertEqual(2, omq:forwarder()),
+    ?assertEqual(3, omq:queue()),
+    ?assertEqual(1, omq:streamer()),
+    ?assertEqual(0, omq:null()),
+    ?assertEqual(1, omq:plain()),
+    ?assertEqual(2, omq:curve()),
+    {ok, Ctx} = omq:context(),
+    ?assertEqual(ok, omq:destroy(Ctx)),
+    ?assertEqual(true, omq:context_closed(Ctx)).
+
+socket_id_and_closed_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, A} = omq:socket(Ctx, pair),
+    {ok, B} = omq:socket(Ctx, pair),
+    ?assertEqual(false, omq:closed(A)),
+    {ok, AId} = omq:socket_id(A),
+    {ok, BId} = omq:socket_id(B),
+    ?assert(is_integer(AId)),
+    ?assert(is_integer(BId)),
+    ?assertNotEqual(AId, BId),
+    ok = omq:close(A),
+    ?assertEqual(true, omq:closed(A)),
+    ?assertEqual(ok, omq:close(A)),
+    ?assertEqual(false, omq:closed(B)),
+    ok = omq:close(B),
+    ok = omq:term(Ctx).
+
+context_share_key_roundtrip_test() ->
+    {ok, Ctx} = omq:context(),
+    ?assertEqual(false, omq:context_closed(Ctx)),
+    {ok, ShareKey} = omq:context_share_key(Ctx),
+    ?assertEqual({ok, ShareKey}, omq:share_key(Ctx)),
+    ?assert(is_integer(ShareKey)),
+    {ok, Shared} = omq:context_from_share_key(ShareKey),
+    {ok, SharedAlias} = omq:from_share_key(ShareKey),
+    ok = omq:term(SharedAlias),
+    Endpoint = endpoint(<<"beam-share-key">>),
+    {ok, Pull} = omq:socket(Shared, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send(Push, <<"shared">>),
+    ?assertEqual({ok, <<"shared">>}, omq:recv(Pull, 1000)),
+    ok = omq:term(Shared),
+    ?assertEqual(true, omq:context_closed(Shared)),
+    ?assertEqual(false, omq:context_closed(Ctx)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx),
+    ?assertEqual(true, omq:context_closed(Ctx)).
+
+context_from_share_key_observes_owner_term_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, ShareKey} = omq:context_share_key(Ctx),
+    {ok, Shared} = omq:context_from_share_key(ShareKey),
+    ok = omq:term(Ctx),
+    ?assertEqual(true, omq:context_closed(Ctx)),
+    ?assertEqual(true, omq:context_closed(Shared)),
+    ?assertMatch({error, closed, _}, omq:context_from_share_key(ShareKey)).
+
 last_endpoint_and_random_port_test() ->
     {ok, Ctx} = omq:context(),
     {ok, Pull} = omq:socket(Ctx, pull),
@@ -81,6 +147,34 @@ sndmore_flag_aggregates_test() ->
     ok = omq:send(Push, <<"b">>, [sndmore]),
     ok = omq:send(Push, <<"c">>, [dontwait]),
     ?assertEqual({ok, [<<"a">>, <<"b">>, <<"c">>]}, omq:recv_multipart(Pull, 1000)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+send_recv_string_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-string">>),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_string(Push, <<"hello">>),
+    ?assertEqual({ok, <<"hello">>}, omq:recv_string(Pull, 1000)),
+    ok = omq:send_string(Push, <<"hello">>),
+    eventually(fun() -> omq:try_recv_string(Pull) end, {ok, <<"hello">>}, 100),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+send_recv_string_encoding_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-string-encoding">>),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_string(Push, <<"hello">>, utf16),
+    ?assertEqual({ok, <<"hello">>}, omq:recv_string(Pull, 1000, utf16)),
     ok = omq:close(Push),
     ok = omq:close(Pull),
     ok = omq:term(Ctx).
@@ -162,6 +256,28 @@ radio_dish_group_test() ->
     ok = omq:send_group(Radio, <<"x">>, <<"drop">>),
     ok = omq:send_group(Radio, <<"g">>, <<"keep">>),
     ?assertEqual({ok, #{parts => [<<"g">>, <<"keep">>], routing_id => undefined}}, omq:recv(Dish, 1000)),
+    ok = omq:close(Dish),
+    ok = omq:close(Radio),
+    ok = omq:term(Ctx).
+
+radio_dish_udp_group_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = udp_endpoint(),
+    {ok, Radio} = omq:socket(Ctx, radio),
+    {ok, Dish} = omq:socket(Ctx, dish),
+    {ok, Endpoint} = omq:bind(Dish, Endpoint),
+    ok = omq:join(Dish, <<"weather">>),
+    ok = omq:connect(Radio, Endpoint),
+    timer:sleep(50),
+    ok = omq:send_group(Radio, <<"news">>, <<"ignored">>),
+    ok = omq:send_group(Radio, <<"weather">>, <<"sunny">>),
+    ?assertEqual(
+        {ok, #{parts => [<<"weather">>, <<"sunny">>], routing_id => undefined}},
+        omq:recv(Dish, 1000)
+    ),
+    ok = omq:leave(Dish, <<"weather">>),
+    ok = omq:send_group(Radio, <<"weather">>, <<"ignored">>),
+    ?assertMatch({error, timeout, _}, omq:recv(Dish, 100)),
     ok = omq:close(Dish),
     ok = omq:close(Radio),
     ok = omq:term(Ctx).
@@ -280,6 +396,17 @@ try_recv_nonblocking_test() ->
     eventually(fun() -> omq:try_recv_multipart(Pull) end, {ok, [<<"a">>, <<"b">>]}, 100),
     ok = omq:close(Push),
     ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+sndtimeo_full_queue_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Push} = omq:socket(Ctx, push),
+    ok = omq:setsockopt(Push, sndhwm, 1),
+    ok = omq:setsockopt(Push, sndtimeo, 50),
+    {ok, _Endpoint} = omq:bind(Push, <<"tcp://127.0.0.1:0">>),
+    Result = fill_until_timeout(Push, 1000),
+    ?assertMatch({error, timeout, _}, Result),
+    ok = omq:close(Push),
     ok = omq:term(Ctx).
 
 huge_rcvtimeo_receives_late_message_test() ->
@@ -441,6 +568,11 @@ connect_before_bind_tcp_test() ->
     ok = omq:close(Push),
     ok = omq:close(Pull),
     ok = omq:term(Ctx).
+
+connect_before_bind_matrix_test() ->
+    lists:foreach(fun cbb_push_pull/1, cbb_endpoints(<<"push-pull">>)),
+    lists:foreach(fun cbb_req_rep/1, cbb_endpoints(<<"req-rep">>)),
+    lists:foreach(fun cbb_pair/1, cbb_endpoints(<<"pair">>)).
 
 setsockopt_subscribe_alias_test() ->
     {ok, Ctx} = omq:context(),
@@ -651,8 +783,8 @@ zstd_push_pull_tcp_test() ->
 options_before_materialize_test() ->
     {ok, Ctx} = omq:context(),
     {ok, Sock} = omq:socket(Ctx, dealer),
-    ok = omq:setsockopt(Sock, identity, <<"beam-id">>),
-    ?assertEqual({ok, <<"beam-id">>}, omq:getsockopt(Sock, identity)),
+    ok = omq:set(Sock, identity, <<"beam-id">>),
+    ?assertEqual({ok, <<"beam-id">>}, omq:get(Sock, identity)),
     ok = omq:setsockopt(Sock, sndhwm, 42),
     ?assertEqual({ok, 42}, omq:getsockopt(Sock, sndhwm)),
     ok = omq:setsockopt(Sock, rcvhwm, 43),
@@ -683,6 +815,14 @@ options_before_materialize_test() ->
     ?assertEqual({ok, <<"srv">>}, omq:getsockopt(Sock, curve_serverkey)),
     ok = omq:setsockopt(Sock, immediate, true),
     ?assertEqual({ok, 0}, omq:getsockopt(Sock, immediate)),
+    NoopOptions = [
+        xpub_verbose, probe_router, req_correlate, req_relaxed, router_handover,
+        zap_domain, rate, connect_timeout, recovery_ivl, ipv6, ipv4only,
+        tcp_accept_filter, tcp_maxrt, multicast_hops
+    ],
+    lists:foreach(fun(Option) ->
+        ok = omq:setsockopt(Sock, Option, 0)
+    end, NoopOptions),
     ?assertEqual({ok, <<>>}, omq:getsockopt(Sock, last_endpoint)),
     ok = omq:close(Sock),
     ok = omq:term(Ctx).
@@ -696,6 +836,20 @@ option_parity_rejections_test() ->
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, rcvhwm, -1)),
     ?assertEqual({ok, 64}, omq:getsockopt(Sock, sndhwm)),
     ?assertEqual({ok, 32}, omq:getsockopt(Sock, rcvhwm)),
+    ok = omq:setsockopt(Sock, hwm, 128),
+    ?assertEqual({ok, 128}, omq:getsockopt(Sock, hwm)),
+    ?assertEqual({ok, 128}, omq:getsockopt(Sock, sndhwm)),
+    ?assertEqual({ok, 128}, omq:getsockopt(Sock, rcvhwm)),
+    ok = omq:setsockopt(Sock, omq:hwm(), 256),
+    ?assertEqual({ok, 256}, omq:getsockopt(Sock, omq:hwm())),
+    ?assertEqual({ok, 256}, omq:getsockopt(Sock, sndhwm)),
+    ?assertEqual({ok, 256}, omq:getsockopt(Sock, rcvhwm)),
+    ok = omq:set_hwm(Sock, 512),
+    ?assertEqual({ok, 512}, omq:get_hwm(Sock)),
+    ?assertEqual({ok, 512}, omq:getsockopt(Sock, sndhwm)),
+    ?assertEqual({ok, 512}, omq:getsockopt(Sock, rcvhwm)),
+    ok = omq:setsockopt_string(Sock, identity, <<"string-id">>),
+    ?assertEqual({ok, <<"string-id">>}, omq:getsockopt_string(Sock, identity)),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, type, omq:pull())),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, affinity, 1)),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, backlog, 1)),
@@ -704,8 +858,10 @@ option_parity_rejections_test() ->
     ?assertEqual({ok, 1}, omq:getsockopt(Sock, omq_on_mute)),
     ok = omq:setsockopt(Sock, omq_on_mute, 2),
     ?assertEqual({ok, 2}, omq:getsockopt(Sock, omq_on_mute)),
-    ok = omq:setsockopt(Sock, omq_on_mute, 0),
+    ok = omq:setsockopt(Sock, omq_on_mute, omq:omq_on_mute_block()),
     ?assertEqual({ok, 0}, omq:getsockopt(Sock, omq_on_mute)),
+    ?assertEqual(1, omq:omq_on_mute_drop_newest()),
+    ?assertEqual(2, omq:omq_on_mute_drop_oldest()),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, omq_on_mute, 99)),
     ok = omq:setsockopt(Sock, omq_compression_level, 1),
     ?assertEqual({ok, 1}, omq:getsockopt(Sock, omq_compression_level)),
@@ -730,6 +886,81 @@ unbound_tcp_endpoint() ->
     {ok, Port} = inet:port(Socket),
     ok = gen_tcp:close(Socket),
     iolist_to_binary(io_lib:format("tcp://127.0.0.1:~B", [Port])).
+
+udp_endpoint() ->
+    {ok, Socket} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(Socket),
+    ok = gen_udp:close(Socket),
+    iolist_to_binary(io_lib:format("udp://127.0.0.1:~B", [Port])).
+
+ipc_endpoint(Name) ->
+    Id = integer_to_binary(erlang:unique_integer([positive, monotonic])),
+    Path = iolist_to_binary(["/tmp/omq-beam-", Name, "-", Id, ".sock"]),
+    _ = file:delete(Path),
+    <<"ipc://", Path/binary>>.
+
+cbb_endpoints(Name) ->
+    [endpoint(<<"beam-cbb-", Name/binary>>), ipc_endpoint(Name), unbound_tcp_endpoint()].
+
+cbb_push_pull(Endpoint) ->
+    {ok, Ctx} = omq:context(),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    ok = omq:connect(Push, Endpoint),
+    timer:sleep(50),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:send(Push, <<"late">>),
+    ?assertEqual({ok, <<"late">>}, omq:recv(Pull, 1000)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx),
+    cleanup_ipc_endpoint(Endpoint).
+
+cbb_req_rep(Endpoint) ->
+    {ok, Ctx} = omq:context(),
+    {ok, Req} = omq:socket(Ctx, req),
+    {ok, Rep} = omq:socket(Ctx, rep),
+    ok = omq:connect(Req, Endpoint),
+    timer:sleep(50),
+    {ok, Endpoint} = omq:bind(Rep, Endpoint),
+    ok = omq:send(Req, <<"q">>),
+    ?assertEqual({ok, <<"q">>}, omq:recv(Rep, 1000)),
+    ok = omq:send(Rep, <<"a">>),
+    ?assertEqual({ok, <<"a">>}, omq:recv(Req, 1000)),
+    ok = omq:close(Req),
+    ok = omq:close(Rep),
+    ok = omq:term(Ctx),
+    cleanup_ipc_endpoint(Endpoint).
+
+cbb_pair(Endpoint) ->
+    {ok, Ctx} = omq:context(),
+    {ok, A} = omq:socket(Ctx, pair),
+    {ok, B} = omq:socket(Ctx, pair),
+    ok = omq:connect(A, Endpoint),
+    timer:sleep(50),
+    {ok, Endpoint} = omq:bind(B, Endpoint),
+    ok = omq:send(A, <<"from-a">>),
+    ?assertEqual({ok, <<"from-a">>}, omq:recv(B, 1000)),
+    ok = omq:send(B, <<"from-b">>),
+    ?assertEqual({ok, <<"from-b">>}, omq:recv(A, 1000)),
+    ok = omq:close(A),
+    ok = omq:close(B),
+    ok = omq:term(Ctx),
+    cleanup_ipc_endpoint(Endpoint).
+
+cleanup_ipc_endpoint(<<"ipc://", Path/binary>>) ->
+    _ = file:delete(Path),
+    ok;
+cleanup_ipc_endpoint(_Endpoint) ->
+    ok.
+
+fill_until_timeout(_Push, 0) ->
+    ok;
+fill_until_timeout(Push, Attempts) ->
+    case omq:send(Push, <<"x">>) of
+        ok -> fill_until_timeout(Push, Attempts - 1);
+        Error -> Error
+    end.
 
 tcp_host_port(Endpoint) ->
     <<"tcp://", Rest/binary>> = Endpoint,

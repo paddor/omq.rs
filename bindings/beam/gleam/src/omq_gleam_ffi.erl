@@ -3,6 +3,14 @@
 -export([
     context/0,
     term/1,
+    destroy/1,
+    context_share_key/1,
+    context_from_share_key/1,
+    context_closed/1,
+    backend_name/0,
+    version/0,
+    share_key/1,
+    from_share_key/1,
     socket/2,
     bind/2,
     bind_to_random_port/4,
@@ -17,11 +25,16 @@
     proxy/2,
     proxy_with_capture/3,
     proxy_steerable/4,
+    device/3,
     send/2,
+    send_string/2,
     send_multipart/2,
     recv/1,
+    recv_string/1,
+    recv_string_timeout/2,
     recv_frame/1,
     try_recv/1,
+    try_recv_string/1,
     recv_multipart/1,
     try_recv_multipart/1,
     subscribe/2,
@@ -34,9 +47,15 @@
     wait_subscribed/3,
     setsockopt_int/3,
     setsockopt_binary/3,
+    setsockopt_string/3,
     getsockopt_int/2,
     getsockopt_binary/2,
+    getsockopt_string/2,
+    set_hwm/2,
+    get_hwm/1,
     socket_type/1,
+    socket_id/1,
+    closed/1,
     has/1,
     curve_keypair/0,
     curve_public/1
@@ -47,6 +66,30 @@ context() ->
 
 term(Context) ->
     result_nil(omq:term(Context)).
+
+destroy(Context) ->
+    result_nil(omq:destroy(Context)).
+
+context_share_key(Context) ->
+    result(omq:context_share_key(Context)).
+
+context_from_share_key(ShareKey) ->
+    result(omq:context_from_share_key(ShareKey)).
+
+context_closed(Context) ->
+    omq:context_closed(Context).
+
+backend_name() ->
+    result(omq:backend_name()).
+
+version() ->
+    result(omq:version()).
+
+share_key(Context) ->
+    result(omq:share_key(Context)).
+
+from_share_key(ShareKey) ->
+    result(omq:from_share_key(ShareKey)).
 
 socket(Context, SocketType) ->
     result(omq:socket(Context, SocketType)).
@@ -90,8 +133,14 @@ proxy_with_capture(Frontend, Backend, Capture) ->
 proxy_steerable(Frontend, Backend, Capture, Control) ->
     result_nil(omq:proxy_steerable(Frontend, Backend, Capture, Control)).
 
+device(DeviceType, Frontend, Backend) ->
+    result_nil(omq:device(DeviceType, Frontend, Backend)).
+
 send(Socket, Data) ->
     result_nil(omq:send(Socket, Data)).
+
+send_string(Socket, Text) ->
+    result_nil(omq:send_string(Socket, Text)).
 
 send_multipart(Socket, Parts) ->
     result_nil(omq:send_multipart(Socket, Parts)).
@@ -99,11 +148,20 @@ send_multipart(Socket, Parts) ->
 recv(Socket) ->
     result(omq:recv(Socket)).
 
+recv_string(Socket) ->
+    result(omq:recv_string(Socket)).
+
+recv_string_timeout(Socket, Timeout) ->
+    result(omq:recv_string(Socket, Timeout)).
+
 recv_frame(Socket) ->
     result(omq:recv_frame(Socket)).
 
 try_recv(Socket) ->
     result(omq:try_recv(Socket)).
+
+try_recv_string(Socket) ->
+    result(omq:try_recv_string(Socket)).
 
 recv_multipart(Socket) ->
     result(omq:recv_multipart(Socket)).
@@ -141,17 +199,35 @@ setsockopt_int(Socket, Option, Value) ->
 setsockopt_binary(Socket, Option, Value) ->
     result_nil(omq:setsockopt(Socket, Option, Value)).
 
+setsockopt_string(Socket, Option, Value) ->
+    result_nil(omq:setsockopt_string(Socket, Option, Value)).
+
 getsockopt_int(Socket, Option) ->
     result(omq:getsockopt(Socket, Option)).
 
 getsockopt_binary(Socket, Option) ->
     result(omq:getsockopt(Socket, Option)).
 
+getsockopt_string(Socket, Option) ->
+    result(omq:getsockopt_string(Socket, Option)).
+
+set_hwm(Socket, Value) ->
+    result_nil(omq:set_hwm(Socket, Value)).
+
+get_hwm(Socket) ->
+    result(omq:get_hwm(Socket)).
+
 socket_type(Socket) ->
     case omq:socket_type(Socket) of
         {ok, Type} -> {ok, atom_to_binary(Type)};
         Error -> result(Error)
     end.
+
+socket_id(Socket) ->
+    result(omq:socket_id(Socket)).
+
+closed(Socket) ->
+    omq:closed(Socket).
 
 has(Capability) ->
     omq:has(Capability).

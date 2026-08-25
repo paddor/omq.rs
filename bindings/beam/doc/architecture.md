@@ -14,11 +14,16 @@ model for all three languages.
 
 `omq:context/0,1` creates a Rust `omq_tokio::Context` resource. The context
 owns the native runtime and IO threads. The BEAM resource keeps the context
-alive until explicit `term/1` or resource collection.
+alive until explicit `term/1`, `destroy/1`, or resource collection.
 
 Sockets store a clone of the native context, so socket resources remain valid
 while they are open. `term/1` requests context shutdown; open sockets still
 close through their own resource path.
+
+`share_key/1` returns the native context-core key. `from_share_key/1` imports
+that core into another BEAM wrapper without taking runtime ownership. Terming
+the imported context only marks that wrapper closed; terming the owner shuts
+down the native core and all imported contexts observe it as closed.
 
 ## Sockets
 
@@ -29,6 +34,7 @@ in a native `Options` value and applied when the socket is built.
 
 The native socket resource contains:
 
+- monotonically increasing wrapper socket ID
 - socket type
 - option overlay
 - wrapper-only receive and send timeouts
@@ -64,11 +70,15 @@ Nonblocking calls use normal NIF scheduling:
 copy parts into Rust `Bytes` for native submission. `SNDMORE` is buffered in
 the calling BEAM process until a final send flushes one native multipart
 message. `NOBLOCK` and `DONTWAIT` route through the native `try_send` path.
+`send_string/2,3,4` converts UTF-8 Erlang text into the requested wire
+encoding before using the same send path.
 
 `recv/1,2` converts native message parts into BEAM binaries. `recv_frame/1,2`
 stores remaining frames in the calling BEAM process so `RCVMORE` can report
 frame iteration state. Routing IDs are exposed as Erlang maps for
 SERVER/CLIENT and other routing-ID-bearing messages.
+`recv_string/1,2,3` and `try_recv_string/1,2` decode one binary frame back to
+UTF-8 Erlang text.
 
 ## Monitoring
 
@@ -97,8 +107,9 @@ native-probed. `POLLERR` is currently a compatibility constant only.
 `proxy/2,3` is implemented in Erlang over `poll/2`, `recv_multipart/2`, and
 `send_multipart/3`. It forwards both directions and optionally mirrors each
 message to a capture socket. `proxy_steerable/4` adds a control socket that
-accepts `PAUSE`, `RESUME`, and `TERMINATE` commands. Routing IDs carried by
-native messages are preserved when forwarding.
+accepts `PAUSE`, `RESUME`, and `TERMINATE` commands. `device/3` is a
+libzmq-compatible alias over `proxy/2`. Routing IDs carried by native messages
+are preserved when forwarding.
 
 ## Options
 
@@ -109,6 +120,12 @@ directly.
 Most transport and protocol options must be set before lazy materialization.
 `RCVTIMEO`, `SNDTIMEO`, `SUBSCRIBE`, and `UNSUBSCRIBE` remain mutable after
 materialization because they are wrapper state or native socket commands.
+`HWM` is implemented as a compatibility alias that sets both `SNDHWM` and
+`RCVHWM` and reads back `SNDHWM`.
+
+`set/3` and `get/2` are aliases over `setsockopt/3` and `getsockopt/2`.
+`backend_name/0`, `version/0`, `FORWARDER`, `QUEUE`, `STREAMER`, `NULL`,
+`PLAIN`, `CURVE`, and poll constants are wrapper-level metadata and constants.
 
 Unsupported or read-only options return `{error, badarg, Reason}`. Core OMQ
 transport options use IDs outside the libzmq range.

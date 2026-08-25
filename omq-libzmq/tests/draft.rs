@@ -211,8 +211,9 @@ fn scatter_to_tokio_gather_large_tcp() {
             set_timeo(scatter, 2_000);
             assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
             std::thread::sleep(Duration::from_millis(100));
+            let expected_len = i32::try_from(payload.len()).unwrap();
             let rc = zmq_send(scatter, payload.as_ptr().cast(), payload.len(), 0);
-            assert_eq!(rc, payload.len() as i32, "scatter send failed");
+            assert_eq!(rc, expected_len, "scatter send failed");
             zmq_close(scatter);
             zmq_ctx_term(ctx);
         });

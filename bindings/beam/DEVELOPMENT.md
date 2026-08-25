@@ -62,7 +62,21 @@ per scenario.
 ```
 
 The harness currently runs sustained PUSH/PULL, REQ/REP cycles, and TCP peer
-churn. Use `600` or `1800` for longer 10 minute and 30 minute passes.
+churn. It samples RSS, VmData, file descriptors, and thread count throughout
+each scenario and fails on sustained RSS/FD growth or final FD/thread growth.
+Use `600` or `1800` for longer 10 minute and 30 minute passes.
+
+Useful resource knobs:
+
+- `OMQ_BEAM_SOAK_REPORT_INTERVAL_SECS`
+- `OMQ_BEAM_SOAK_SETTLE_MS`
+- `OMQ_BEAM_SOAK_MAX_FD_GROWTH`
+- `OMQ_BEAM_SOAK_MAX_FINAL_FD_GROWTH`
+- `OMQ_BEAM_SOAK_MAX_THREAD_GROWTH`
+- `OMQ_BEAM_SOAK_MAX_FINAL_THREAD_GROWTH`
+- `OMQ_BEAM_SOAK_RSS_SLOPE_LIMIT_KIB_S`
+- `OMQ_BEAM_SOAK_RSS_TAIL_GROWTH_PERCENT`
+- `OMQ_BEAM_SOAK_TRACE_FD=1`
 
 ## Benchmarks
 

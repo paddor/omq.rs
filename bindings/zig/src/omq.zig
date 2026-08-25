@@ -95,10 +95,14 @@ pub const OMQ_ON_MUTE = c.OMQ_ON_MUTE;
 pub const OMQ_COMPRESSION_LEVEL = c.OMQ_COMPRESSION_LEVEL;
 pub const OMQ_COMPRESSION_DICT = c.OMQ_COMPRESSION_DICT;
 pub const OMQ_COMPRESSION_AUTO_TRAIN = c.OMQ_COMPRESSION_AUTO_TRAIN;
+pub const OMQ_WORKLOAD_PROFILE = c.OMQ_WORKLOAD_PROFILE;
 pub const OMQ_ARENA_THRESHOLD = c.OMQ_ARENA_THRESHOLD;
 pub const OMQ_ON_MUTE_BLOCK = c.OMQ_ON_MUTE_BLOCK;
 pub const OMQ_ON_MUTE_DROP_NEWEST = c.OMQ_ON_MUTE_DROP_NEWEST;
 pub const OMQ_ON_MUTE_DROP_OLDEST = c.OMQ_ON_MUTE_DROP_OLDEST;
+pub const OMQ_WORKLOAD_DEFAULT = c.OMQ_WORKLOAD_DEFAULT;
+pub const OMQ_WORKLOAD_THROUGHPUT = c.OMQ_WORKLOAD_THROUGHPUT;
+pub const OMQ_WORKLOAD_LATENCY = c.OMQ_WORKLOAD_LATENCY;
 
 pub const POLLIN = c.ZMQ_POLLIN;
 pub const POLLOUT = c.ZMQ_POLLOUT;
@@ -541,8 +545,7 @@ pub const Socket = struct {
         if (c.zmq_msg_recv(&msg, try self.ptr(), flags) == -1) return mapErrno();
 
         const len = c.zmq_msg_size(&msg);
-        const src: [*]const u8 = @ptrCast(c.zmq_msg_data(&msg).?);
-        return allocator.dupe(u8, src[0..len]);
+        return allocator.dupe(u8, try msgDataSlice(&msg, len));
     }
 
     pub fn recvFrameAlloc(self: *Socket, allocator: std.mem.Allocator, flags: i32) !Frame {
@@ -553,8 +556,7 @@ pub const Socket = struct {
         if (c.zmq_msg_recv(&msg, try self.ptr(), flags) == -1) return mapErrno();
 
         const len = c.zmq_msg_size(&msg);
-        const src: [*]const u8 = @ptrCast(c.zmq_msg_data(&msg).?);
-        const data = try allocator.dupe(u8, src[0..len]);
+        const data = try allocator.dupe(u8, try msgDataSlice(&msg, len));
         errdefer allocator.free(data);
 
         const group = c.zmq_msg_group(&msg);
@@ -824,6 +826,14 @@ pub const Socket = struct {
         try self.setInt(OMQ_COMPRESSION_AUTO_TRAIN, @intFromBool(enabled));
     }
 
+    pub fn setWorkloadProfile(self: *Socket, profile: i32) Error!void {
+        try self.setInt(OMQ_WORKLOAD_PROFILE, profile);
+    }
+
+    pub fn workloadProfile(self: *Socket) Error!i32 {
+        return self.getInt(OMQ_WORKLOAD_PROFILE);
+    }
+
     pub fn setArenaThreshold(self: *Socket, bytes: i64) Error!void {
         try self.setI64(OMQ_ARENA_THRESHOLD, bytes);
     }
@@ -965,6 +975,16 @@ fn mapErrno() Error {
 fn dataPtr(data: []const u8) *const anyopaque {
     if (data.len == 0) return "";
     return data.ptr;
+}
+
+fn msgDataSlice(msg: *c.zmq_msg_t, len: usize) Error![]const u8 {
+    const raw = c.zmq_msg_data(msg);
+    if (raw == null) {
+        if (len == 0) return &.{};
+        return Error.Fault;
+    }
+    const src: [*]const u8 = @ptrCast(raw.?);
+    return src[0..len];
 }
 
 test {

@@ -1,6 +1,13 @@
 const std = @import("std");
 const omq = @import("omq");
 
+const c = @cImport({
+    @cInclude("arpa/inet.h");
+    @cInclude("netinet/in.h");
+    @cInclude("sys/socket.h");
+    @cInclude("unistd.h");
+});
+
 const testing = std.testing;
 const allocator = testing.allocator;
 
@@ -27,10 +34,46 @@ fn inprocEndpoint(comptime label: []const u8) []const u8 {
     return "inproc://zig-parity-" ++ label;
 }
 
+fn freeUdpPort() !u16 {
+    const fd = c.socket(c.AF_INET, c.SOCK_DGRAM, 0);
+    try testing.expect(fd >= 0);
+    defer _ = c.close(fd);
+
+    var addr: c.struct_sockaddr_in = std.mem.zeroes(c.struct_sockaddr_in);
+    addr.sin_family = c.AF_INET;
+    addr.sin_port = c.htons(0);
+    addr.sin_addr.s_addr = c.htonl(0x7f000001);
+
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.bind(fd, @ptrCast(&addr), @sizeOf(c.struct_sockaddr_in)),
+    );
+
+    var len: c.socklen_t = @sizeOf(c.struct_sockaddr_in);
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.getsockname(fd, @ptrCast(&addr), &len),
+    );
+    return c.ntohs(addr.sin_port);
+}
+
 fn expectRecv(socket: *omq.Socket, expected: []const u8) !void {
     const got = try socket.recvAlloc(allocator, 0);
     defer allocator.free(got);
     try testing.expectEqualStrings(expected, got);
+}
+
+const ProxyState = struct {
+    frontend: *omq.Socket,
+    backend: *omq.Socket,
+    control: *omq.Socket,
+    failed: *bool,
+};
+
+fn proxySteerableThread(state: *ProxyState) void {
+    omq.proxySteerable(state.frontend, state.backend, null, state.control) catch {
+        state.failed.* = true;
+    };
 }
 
 test "convenience methods cover pyomq behavior" {
@@ -155,9 +198,11 @@ test "socket poll helper reports timeout and readiness" {
     defer allocator.free(bound);
     try push.connect(allocator, bound);
 
+    try testing.expect(try pull.fd() >= 0);
     try testing.expectEqual(@as(i16, 0), try pull.poll(20, omq.POLLIN));
     _ = try push.send("ready", 0);
     try testing.expect((try pull.poll(1000, omq.POLLIN)) & omq.POLLIN != 0);
+    try testing.expect((try pull.pollEvents()) & omq.POLLIN != 0);
     try expectRecv(&pull, "ready");
 }
 
@@ -203,6 +248,65 @@ test "connect before bind works for inproc pair" {
     try expectRecv(&a, "from-b");
 }
 
+test "connect before bind works for ipc push pull" {
+    if (!try omq.has(allocator, "ipc")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+
+    const path_raw = try std.fmt.allocPrint(allocator, "/tmp/omq-zig-cbb-{d}", .{c.getpid()});
+    defer allocator.free(path_raw);
+    const path = try allocator.dupeZ(u8, path_raw);
+    defer allocator.free(path);
+    _ = c.unlink(path.ptr);
+    defer _ = c.unlink(path.ptr);
+
+    const endpoint = try std.fmt.allocPrint(allocator, "ipc://{s}", .{path});
+    defer allocator.free(endpoint);
+
+    try pull.setReceiveTimeout(2000);
+    try push.setSendTimeout(2000);
+    try push.connect(allocator, endpoint);
+    sleepMillis(20);
+    const bound = try pull.bind(allocator, endpoint);
+    defer allocator.free(bound);
+
+    _ = try push.send("ipc-cbb", 0);
+    try expectRecv(&pull, "ipc-cbb");
+}
+
+test "connect before bind works for tcp push pull" {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var probe = try ctx.socket(omq.PULL);
+    const port = try probe.bindToRandomPort(allocator, "tcp://127.0.0.1", .{});
+    try probe.close();
+
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+
+    const endpoint = try std.fmt.allocPrint(allocator, "tcp://127.0.0.1:{d}", .{port});
+    defer allocator.free(endpoint);
+
+    try pull.setReceiveTimeout(5000);
+    try push.setSendTimeout(5000);
+    try push.connect(allocator, endpoint);
+    sleepMillis(20);
+    const bound = try pull.bind(allocator, endpoint);
+    defer allocator.free(bound);
+
+    _ = try push.send("tcp-cbb", 0);
+    try expectRecv(&pull, "tcp-cbb");
+}
+
 test "poller timeout unregister and modify" {
     var ctx = try omq.Context.init();
     defer ctx.deinit();
@@ -237,6 +341,141 @@ test "poller timeout unregister and modify" {
 
     try poller.unregister(&pull);
     try testing.expectError(error.NoSocket, poller.modify(&pull, omq.POLLIN));
+}
+
+test "proxy steerable forwards and terminates" {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var frontend = try ctx.socket(omq.PULL);
+    defer frontend.deinit();
+    var backend = try ctx.socket(omq.PUSH);
+    defer backend.deinit();
+    var control = try ctx.socket(omq.PULL);
+    defer control.deinit();
+    var sender = try ctx.socket(omq.PUSH);
+    defer sender.deinit();
+    var receiver = try ctx.socket(omq.PULL);
+    defer receiver.deinit();
+    var controller = try ctx.socket(omq.PUSH);
+    defer controller.deinit();
+
+    try frontend.allowThreadMigration();
+    try backend.allowThreadMigration();
+    try control.allowThreadMigration();
+
+    const frontend_endpoint = try frontend.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(frontend_endpoint);
+    const backend_endpoint = try backend.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(backend_endpoint);
+    const control_endpoint = try control.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(control_endpoint);
+
+    try sender.connect(allocator, frontend_endpoint);
+    try receiver.connect(allocator, backend_endpoint);
+    try controller.connect(allocator, control_endpoint);
+    try receiver.setReceiveTimeout(2000);
+
+    var failed = false;
+    var state: ProxyState = .{
+        .frontend = &frontend,
+        .backend = &backend,
+        .control = &control,
+        .failed = &failed,
+    };
+    const thread = try std.Thread.spawn(.{}, proxySteerableThread, .{&state});
+    sleepMillis(50);
+
+    _ = try sender.send("through-proxy", 0);
+    try expectRecv(&receiver, "through-proxy");
+    _ = try controller.send("TERMINATE", 0);
+    thread.join();
+    try testing.expect(!failed);
+}
+
+test "stream socket accepts raw tcp" {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var stream = try ctx.socket(omq.STREAM);
+    defer stream.deinit();
+    try stream.setReceiveTimeout(2000);
+
+    const port = try stream.bindToRandomPort(allocator, "tcp://127.0.0.1", .{});
+
+    const fd = c.socket(c.AF_INET, c.SOCK_STREAM, 0);
+    try testing.expect(fd >= 0);
+    defer _ = c.close(fd);
+
+    var addr: c.struct_sockaddr_in = std.mem.zeroes(c.struct_sockaddr_in);
+    addr.sin_family = c.AF_INET;
+    addr.sin_port = c.htons(port);
+    addr.sin_addr.s_addr = c.htonl(0x7f000001);
+
+    try testing.expectEqual(
+        @as(c_int, 0),
+        c.connect(
+            fd,
+            @ptrCast(&addr),
+            @sizeOf(c.struct_sockaddr_in),
+        ),
+    );
+
+    try testing.expectEqual(@as(isize, 5), c.send(fd, "hello", 5, 0));
+
+    var opened = try stream.recvMultipartAlloc(allocator, 0);
+    defer opened.deinit();
+    try testing.expectEqual(@as(usize, 2), opened.parts.len);
+    try testing.expect(opened.parts[0].len > 0);
+    try testing.expectEqualStrings("", opened.parts[1]);
+
+    var data = try stream.recvMultipartAlloc(allocator, 0);
+    defer data.deinit();
+    try testing.expectEqual(@as(usize, 2), data.parts.len);
+    try testing.expectEqualSlices(u8, opened.parts[0], data.parts[0]);
+    try testing.expectEqualStrings("hello", data.parts[1]);
+
+    const reply = [_][]const u8{ data.parts[0], "world" };
+    try stream.sendMultipart(&reply, 0);
+
+    var buffer: [16]u8 = undefined;
+    const received = c.recv(fd, &buffer, buffer.len, 0);
+    try testing.expectEqual(@as(isize, 5), received);
+    try testing.expectEqualStrings("world", buffer[0..5]);
+}
+
+test "radio dish udp filters groups" {
+    if (!try omq.has(allocator, "udp")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var dish = try ctx.socket(omq.DISH);
+    defer dish.deinit();
+    var radio = try ctx.socket(omq.RADIO);
+    defer radio.deinit();
+
+    const port = try freeUdpPort();
+    const endpoint = try std.fmt.allocPrint(allocator, "udp://127.0.0.1:{d}", .{port});
+    defer allocator.free(endpoint);
+
+    try dish.setReceiveTimeout(500);
+    try dish.join(allocator, "weather");
+    const bound = try dish.bind(allocator, endpoint);
+    defer allocator.free(bound);
+    try radio.connect(allocator, endpoint);
+    sleepMillis(50);
+
+    try radio.sendGroup(allocator, "news", "ignored", 0);
+    try radio.sendGroup(allocator, "weather", "sunny", 0);
+
+    var got = try dish.recvFrameAlloc(allocator, 0);
+    defer got.deinit();
+    try testing.expectEqualStrings("sunny", got.data);
+
+    try dish.leave(allocator, "weather");
+    try radio.sendGroup(allocator, "weather", "ignored", 0);
+    try testing.expectError(error.Again, dish.recvAlloc(allocator, 0));
 }
 
 test "plain req rep tcp" {
@@ -294,6 +533,36 @@ test "curve req rep tcp" {
     try expectRecv(&rep, "ping");
     _ = try rep.send("pong", 0);
     try expectRecv(&req, "pong");
+}
+
+test "curve option helpers round trip" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    const keys = try omq.curveKeypair();
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var sock = try ctx.socket(omq.PUSH);
+    defer sock.deinit();
+
+    try sock.setCurveServer(allocator, keys.publicSlice(), keys.secretSlice());
+    try testing.expect(try sock.curveServer());
+
+    try sock.setCurvePublicKey(allocator, keys.publicSlice());
+    try sock.setCurveSecretKey(allocator, keys.secretSlice());
+    const public = try sock.curvePublicKeyAlloc(allocator);
+    defer allocator.free(public);
+    try testing.expectEqualStrings(keys.publicSlice(), public);
+
+    const secret = try sock.curveSecretKeyAlloc(allocator);
+    defer allocator.free(secret);
+    try testing.expectEqualStrings(keys.secretSlice(), secret);
+
+    try sock.setCurveServerKey(allocator, keys.publicSlice());
+    const server_key = try sock.curveServerKeyAlloc(allocator);
+    defer allocator.free(server_key);
+    try testing.expectEqualStrings(keys.publicSlice(), server_key);
 }
 
 test "zstd tcp static dict" {

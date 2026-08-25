@@ -13,6 +13,7 @@ const testing = std.testing;
 const allocator = std.heap.page_allocator;
 const ns_per_s = std.time.ns_per_s;
 const default_duration_ns: i128 = 120 * ns_per_s;
+const scenario_count: i128 = 3;
 
 const Sample = struct {
     rss_bytes: u64,
@@ -112,6 +113,10 @@ fn soakDurationNs() i128 {
     return @intFromFloat(seconds * @as(f64, @floatFromInt(ns_per_s)));
 }
 
+fn scenarioDurationNs() i128 {
+    return @max(@divTrunc(soakDurationNs(), scenario_count), ns_per_s);
+}
+
 fn nowNs() i128 {
     var ts: c.struct_timespec = undefined;
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
@@ -165,8 +170,56 @@ fn reqRepServer(state: *ReqRepServer) void {
     }
 }
 
+test "context churn tracks resources" {
+    const duration_ns = scenarioDurationNs();
+    var monitor = try ResourceMonitor.init(allocator);
+    defer monitor.deinit();
+
+    const start = nowNs();
+    var next_sample = start + ns_per_s;
+    var iterations: u64 = 0;
+
+    while (nowNs() - start < duration_ns) {
+        var ctx = try omq.Context.init();
+
+        var pull = try ctx.socket(omq.PULL);
+        errdefer pull.deinit();
+        var push = try ctx.socket(omq.PUSH);
+        errdefer push.deinit();
+
+        try pull.setReceiveTimeout(1000);
+        try push.setSendTimeout(1000);
+
+        var endpoint_buf: [96]u8 = undefined;
+        const endpoint = try std.fmt.bufPrint(&endpoint_buf, "inproc://zig-soak-context-{d}", .{iterations});
+        const bound = try pull.bind(allocator, endpoint);
+        try push.connect(allocator, bound);
+
+        _ = try push.send("churn", 0);
+        const got = try pull.recvAlloc(allocator, 0);
+        try testing.expectEqualStrings("churn", got);
+        allocator.free(got);
+
+        try push.close();
+        try pull.close();
+        try ctx.term();
+        allocator.free(bound);
+        iterations += 1;
+
+        const now = nowNs();
+        if (now >= next_sample) {
+            try monitor.sample();
+            next_sample = now + ns_per_s;
+            std.debug.print("[context_churn] {} contexts\n", .{iterations});
+        }
+    }
+
+    try testing.expect(iterations > 0);
+    try monitor.assertNoLeak("context_churn", 16);
+}
+
 test "req rep cycles track resources" {
-    const duration_ns = soakDurationNs();
+    const duration_ns = scenarioDurationNs();
     var monitor = try ResourceMonitor.init(allocator);
     defer monitor.deinit();
 
@@ -230,7 +283,7 @@ const Peer = struct {
 };
 
 test "peer churn tracks resources" {
-    const duration_ns = soakDurationNs();
+    const duration_ns = scenarioDurationNs();
     var monitor = try ResourceMonitor.init(allocator);
     defer monitor.deinit();
 

@@ -26,6 +26,8 @@ Rust NIF checks:
 ```sh
 (cd bindings/beam/native && cargo fmt --check && cargo check)
 (cd bindings/beam/native && cargo check --no-default-features)
+(cd bindings/beam/native && cargo clippy --all-targets)
+(cd bindings/beam/native && cargo clippy --all-targets --no-default-features)
 ```
 
 Default native features are `plain`, `curve`, `lz4`, and `zstd`. The
@@ -36,7 +38,8 @@ Elixir wrapper:
 ```sh
 (cd bindings/beam/elixir && \
   mix format --check-formatted lib/omq.ex ../scripts/bench_peer.exs && \
-  mix compile --warnings-as-errors)
+  mix compile --warnings-as-errors && \
+  mix test)
 ```
 
 Gleam wrapper:
@@ -46,6 +49,19 @@ Gleam wrapper:
   ~/src/gleam/target/release/gleam format --check src/omq_gleam.gleam && \
   ~/src/gleam/target/release/gleam check)
 ```
+
+## Soak
+
+Build once, then run the Erlang soak harness. Argument is duration in seconds
+per scenario.
+
+```sh
+(cd bindings/beam && rebar3 compile)
+(cd bindings/beam && escript scripts/soak.erl 300)
+```
+
+The harness currently runs sustained PUSH/PULL, REQ/REP cycles, and TCP peer
+churn. Use `600` or `1800` for longer 10 minute and 30 minute passes.
 
 ## Benchmarks
 

@@ -2,6 +2,12 @@ pub type Context
 
 pub type Socket
 
+pub type Monitor
+
+pub type MonitorEvent
+
+pub type ConnectionInfo
+
 pub type Error =
   #(String, String)
 
@@ -33,6 +39,45 @@ pub fn unbind(socket: Socket, endpoint: BitArray) -> Result(Nil, Error)
 
 @external(erlang, "omq_gleam_ffi", "disconnect")
 pub fn disconnect(socket: Socket, endpoint: BitArray) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "monitor")
+pub fn monitor(socket: Socket) -> Result(Monitor, Error)
+
+@external(erlang, "omq_gleam_ffi", "monitor_recv")
+pub fn monitor_recv(
+  monitor: Monitor,
+  timeout_ms: Int,
+) -> Result(MonitorEvent, Error)
+
+@external(erlang, "omq_gleam_ffi", "monitor_try_recv")
+pub fn monitor_try_recv(monitor: Monitor) -> Result(MonitorEvent, Error)
+
+@external(erlang, "omq_gleam_ffi", "connections")
+pub fn connections(socket: Socket) -> Result(List(ConnectionInfo), Error)
+
+@external(erlang, "omq_gleam_ffi", "connection_info")
+pub fn connection_info(
+  socket: Socket,
+  connection_id: Int,
+) -> Result(ConnectionInfo, Error)
+
+@external(erlang, "omq_gleam_ffi", "proxy")
+pub fn proxy(frontend: Socket, backend: Socket) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "proxy_with_capture")
+pub fn proxy_with_capture(
+  frontend: Socket,
+  backend: Socket,
+  capture: Socket,
+) -> Result(Nil, Error)
+
+@external(erlang, "omq_gleam_ffi", "proxy_steerable")
+pub fn proxy_steerable(
+  frontend: Socket,
+  backend: Socket,
+  capture: Socket,
+  control: Socket,
+) -> Result(Nil, Error)
 
 @external(erlang, "omq_gleam_ffi", "send")
 pub fn send(socket: Socket, data: BitArray) -> Result(Nil, Error)
@@ -119,6 +164,12 @@ pub fn socket_type(socket: Socket) -> Result(String, Error)
 
 @external(erlang, "omq_gleam_ffi", "has")
 pub fn has(capability: BitArray) -> Bool
+
+@external(erlang, "omq_gleam_ffi", "curve_keypair")
+pub fn curve_keypair() -> Result(#(BitArray, BitArray), Error)
+
+@external(erlang, "omq_gleam_ffi", "curve_public")
+pub fn curve_public(secret: BitArray) -> Result(BitArray, Error)
 
 pub fn pollin() -> Int {
   1

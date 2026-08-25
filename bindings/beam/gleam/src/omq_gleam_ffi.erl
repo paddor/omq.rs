@@ -9,6 +9,14 @@
     connect/2,
     unbind/2,
     disconnect/2,
+    monitor/1,
+    monitor_recv/2,
+    monitor_try_recv/1,
+    connections/1,
+    connection_info/2,
+    proxy/2,
+    proxy_with_capture/3,
+    proxy_steerable/4,
     send/2,
     send_multipart/2,
     recv/1,
@@ -29,7 +37,9 @@
     getsockopt_int/2,
     getsockopt_binary/2,
     socket_type/1,
-    has/1
+    has/1,
+    curve_keypair/0,
+    curve_public/1
 ]).
 
 context() ->
@@ -55,6 +65,30 @@ unbind(Socket, Endpoint) ->
 
 disconnect(Socket, Endpoint) ->
     result_nil(omq:disconnect(Socket, Endpoint)).
+
+monitor(Socket) ->
+    result(omq:monitor(Socket)).
+
+monitor_recv(Monitor, Timeout) ->
+    result(omq:monitor_recv(Monitor, Timeout)).
+
+monitor_try_recv(Monitor) ->
+    result(omq:monitor_try_recv(Monitor)).
+
+connections(Socket) ->
+    result(omq:connections(Socket)).
+
+connection_info(Socket, ConnectionId) ->
+    result(omq:connection_info(Socket, ConnectionId)).
+
+proxy(Frontend, Backend) ->
+    result_nil(omq:proxy(Frontend, Backend)).
+
+proxy_with_capture(Frontend, Backend, Capture) ->
+    result_nil(omq:proxy(Frontend, Backend, Capture)).
+
+proxy_steerable(Frontend, Backend, Capture, Control) ->
+    result_nil(omq:proxy_steerable(Frontend, Backend, Capture, Control)).
 
 send(Socket, Data) ->
     result_nil(omq:send(Socket, Data)).
@@ -122,6 +156,12 @@ socket_type(Socket) ->
 has(Capability) ->
     omq:has(Capability).
 
+curve_keypair() ->
+    result_pair(omq:curve_keypair()).
+
+curve_public(Secret) ->
+    result(omq:curve_public(Secret)).
+
 result(ok) ->
     {ok, nil};
 result({ok, Value}) ->
@@ -132,4 +172,9 @@ result({error, Class, Reason}) ->
 result_nil(ok) ->
     {ok, nil};
 result_nil(Other) ->
+    result(Other).
+
+result_pair({ok, A, B}) ->
+    {ok, {A, B}};
+result_pair(Other) ->
     result(Other).

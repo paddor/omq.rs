@@ -14,6 +14,12 @@ defmodule OMQ do
   def connect(socket, endpoint), do: call(:connect, [socket, endpoint])
   def unbind(socket, endpoint), do: call(:unbind, [socket, endpoint])
   def disconnect(socket, endpoint), do: call(:disconnect, [socket, endpoint])
+  def monitor(socket), do: call(:monitor, [socket])
+  def monitor_recv(monitor), do: call(:monitor_recv, [monitor])
+  def monitor_recv(monitor, timeout), do: call(:monitor_recv, [monitor, timeout])
+  def monitor_try_recv(monitor), do: call(:monitor_try_recv, [monitor])
+  def connections(socket), do: call(:connections, [socket])
+  def connection_info(socket, connection_id), do: call(:connection_info, [socket, connection_id])
   def send(socket, data), do: call(:send, [socket, data])
   def send(socket, data, opts), do: call(:send, [socket, data, opts])
   def try_send(socket, data), do: call(:try_send, [socket, data])
@@ -30,7 +36,15 @@ defmodule OMQ do
   def try_recv_multipart(socket), do: call(:try_recv_multipart, [socket])
   def poll(entries, timeout), do: call(:poll, [entries, timeout])
   def select(rlist, wlist, xlist, timeout), do: call(:select, [rlist, wlist, xlist, timeout])
+  def proxy(frontend, backend), do: call(:proxy, [frontend, backend])
+  def proxy(frontend, backend, capture), do: call(:proxy, [frontend, backend, capture])
+
+  def proxy_steerable(frontend, backend, capture, control),
+    do: call(:proxy_steerable, [frontend, backend, capture, control])
+
   def has(capability), do: call(:has, [capability])
+  def curve_keypair, do: call(:curve_keypair, [])
+  def curve_public(secret), do: call(:curve_public, [secret])
   def subscribe(socket, prefix), do: call(:subscribe, [socket, prefix])
   def unsubscribe(socket, prefix), do: call(:unsubscribe, [socket, prefix])
   def join(socket, group), do: call(:join, [socket, group])

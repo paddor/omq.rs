@@ -70,6 +70,18 @@ stores remaining frames in the calling BEAM process so `RCVMORE` can report
 frame iteration state. Routing IDs are exposed as Erlang maps for
 SERVER/CLIENT and other routing-ID-bearing messages.
 
+## Monitoring
+
+`monitor/1` materializes the socket and returns a native monitor resource.
+The resource owns an `omq_tokio::MonitorStream` behind a mutex.
+`monitor_recv/1,2` runs as dirty IO and polls that stream until an event,
+timeout, lag notification, or close. `monitor_try_recv/1` is nonblocking.
+
+Monitor events are encoded as Erlang maps with atom keys. Connection snapshots
+from `connections/1` and `connection_info/2` use the same map shape for peer
+metadata. Elixir receives those maps unchanged. Gleam exposes them as opaque
+external types.
+
 ## Readiness
 
 `poll/2` and `select/4` are implemented in Erlang over the native
@@ -79,6 +91,14 @@ The later `recv` call drains that buffer before touching the native socket.
 
 `POLLOUT` is treated as ready by the Erlang wrapper. `POLLIN` readiness is
 native-probed. `POLLERR` is currently a compatibility constant only.
+
+## Proxy
+
+`proxy/2,3` is implemented in Erlang over `poll/2`, `recv_multipart/2`, and
+`send_multipart/3`. It forwards both directions and optionally mirrors each
+message to a capture socket. `proxy_steerable/4` adds a control socket that
+accepts `PAUSE`, `RESUME`, and `TERMINATE` commands. Routing IDs carried by
+native messages are preserved when forwarding.
 
 ## Options
 
@@ -92,6 +112,11 @@ materialization because they are wrapper state or native socket commands.
 
 Unsupported or read-only options return `{error, badarg, Reason}`. Core OMQ
 transport options use IDs outside the libzmq range.
+
+The native library builds PLAIN, CURVE, LZ4, and ZSTD by default. `has/1`
+delegates to native compile-time feature detection, so builds with custom
+Cargo features report actual capability state. CURVE key helper functions live
+in the NIF because they operate on native key types.
 
 ## Language Wrappers
 

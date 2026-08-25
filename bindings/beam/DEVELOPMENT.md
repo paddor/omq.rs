@@ -25,6 +25,7 @@ Rust NIF checks:
 
 ```sh
 (cd bindings/beam/native && cargo fmt --check && cargo check)
+(cd bindings/beam/native && cargo check --no-default-features)
 ```
 
 Elixir wrapper:

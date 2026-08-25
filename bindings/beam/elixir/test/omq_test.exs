@@ -48,4 +48,32 @@ defmodule OMQTest do
     assert :ok = OMQ.close(pull)
     assert :ok = OMQ.term(ctx)
   end
+
+  test "Elixir wrapper receives from Erlang API peer" do
+    assert {:ok, ctx} = OMQ.context()
+    assert {:ok, pull} = OMQ.socket(ctx, :pull)
+    assert {:ok, push} = :omq.socket(ctx, :push)
+    ep = endpoint("erlang-to-elixir")
+    assert {:ok, ^ep} = OMQ.bind(pull, ep)
+    assert :ok = :omq.connect(push, ep)
+    assert :ok = :omq.send(push, <<"from-erlang-api">>)
+    assert {:ok, "from-erlang-api"} = OMQ.recv_string(pull, 1000)
+    assert :ok = :omq.close(push)
+    assert :ok = OMQ.close(pull)
+    assert :ok = OMQ.term(ctx)
+  end
+
+  test "Erlang API receives from Elixir wrapper peer" do
+    assert {:ok, ctx} = OMQ.context()
+    assert {:ok, pull} = :omq.socket(ctx, :pull)
+    assert {:ok, push} = OMQ.socket(ctx, :push)
+    ep = endpoint("elixir-to-erlang")
+    assert {:ok, ^ep} = :omq.bind(pull, ep)
+    assert :ok = OMQ.connect(push, ep)
+    assert :ok = OMQ.send_json(push, %{"from" => "elixir"})
+    assert {:ok, %{"from" => "elixir"}} = :omq.recv_json(pull, 1000)
+    assert :ok = OMQ.close(push)
+    assert :ok = :omq.close(pull)
+    assert :ok = OMQ.term(ctx)
+  end
 end

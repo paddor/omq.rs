@@ -12,21 +12,38 @@ defmodule OmqBenchPeer do
     payload = :binary.copy("x", size)
 
     case {bench, impl, role} do
-      {"pushpull", "omq-elixir", "pull"} -> pull(endpoint, payload, duration_ms, warmup_ms)
-      {"pushpull", "omq-elixir", "push"} -> push(endpoint, payload)
-      {"reqrep", "omq-elixir", "rep"} -> rep(endpoint)
-      {"reqrep", "omq-elixir", "req"} -> req(endpoint, payload, duration_ms, warmup_ms)
-      {"pushpull", "erlzmq", "pull"} -> pull(impl, endpoint, payload, duration_ms, warmup_ms)
-      {"pushpull", "erlzmq", "push"} -> push(impl, endpoint, payload)
-      {"reqrep", "erlzmq", "rep"} -> rep(impl, endpoint)
-      {"reqrep", "erlzmq", "req"} -> req(impl, endpoint, payload, duration_ms, warmup_ms)
-      _ -> die("bad benchmark args")
+      {"pushpull", "omq-elixir", "pull"} ->
+        pull(endpoint, payload, duration_ms, warmup_ms)
+
+      {"pushpull", "omq-elixir", "push"} ->
+        push(endpoint, payload)
+
+      {"reqrep", "omq-elixir", "rep"} ->
+        rep(endpoint)
+
+      {"reqrep", "omq-elixir", "req"} ->
+        req(endpoint, payload, duration_ms, warmup_ms)
+
+      {"pushpull", impl, "pull"} when impl in ["erlzmq", "chumak"] ->
+        pull(impl, endpoint, payload, duration_ms, warmup_ms)
+
+      {"pushpull", impl, "push"} when impl in ["erlzmq", "chumak"] ->
+        push(impl, endpoint, payload)
+
+      {"reqrep", impl, "rep"} when impl in ["erlzmq", "chumak"] ->
+        rep(impl, endpoint)
+
+      {"reqrep", impl, "req"} when impl in ["erlzmq", "chumak"] ->
+        req(impl, endpoint, payload, duration_ms, warmup_ms)
+
+      _ ->
+        die("bad benchmark args")
     end
   end
 
   def main(_args) do
     die(
-      "usage: bench_peer.exs <pushpull|reqrep> <omq-elixir|erlzmq> <push|pull|req|rep> <endpoint> <size> <duration> <warmup>"
+      "usage: bench_peer.exs <pushpull|reqrep> <omq-elixir|erlzmq|chumak> <push|pull|req|rep> <endpoint> <size> <duration> <warmup>"
     )
   end
 
@@ -44,6 +61,12 @@ defmodule OmqBenchPeer do
     Mix.install([{:erlzmq, "~> 4.2", hex: :erlzmq_dnif}], verbose: false)
   end
 
+  defp ensure_impl("chumak") do
+    Mix.install([{:chumak, "~> 1.5"}], verbose: false)
+    {:ok, _apps} = Application.ensure_all_started(:chumak)
+    :ok
+  end
+
   defp ensure_impl(_impl), do: :ok
 
   defp open("omq-elixir", type) do
@@ -59,14 +82,25 @@ defmodule OmqBenchPeer do
     {:erlzmq, ctx, sock}
   end
 
+  defp open("chumak", type) do
+    {:ok, sock} = chumak(:socket, [type])
+    {:chumak, sock}
+  end
+
   defp bind({:omq_elixir, _ctx, sock}, endpoint), do: OMQ.bind(sock, endpoint)
   defp bind({:erlzmq, _ctx, sock}, endpoint), do: erlzmq(:bind, [sock, endpoint])
+  defp bind({:chumak, sock}, endpoint), do: chumak_bind(sock, endpoint)
   defp connect({:omq_elixir, _ctx, sock}, endpoint), do: OMQ.connect(sock, endpoint)
   defp connect({:erlzmq, _ctx, sock}, endpoint), do: erlzmq(:connect, [sock, endpoint])
+  defp connect({:chumak, sock}, endpoint), do: chumak_connect(sock, endpoint)
   defp send_msg({:omq_elixir, _ctx, sock}, payload), do: OMQ.send(sock, payload)
   defp send_msg({:erlzmq, _ctx, sock}, payload), do: erlzmq(:send, [sock, payload])
+  defp send_msg({:chumak, sock}, payload), do: chumak(:send, [sock, payload])
+  defp send_fast({:omq_elixir, _ctx, sock}, payload), do: OMQ.try_send(sock, payload)
+  defp send_fast(pair, payload), do: send_msg(pair, payload)
   defp recv_msg({:omq_elixir, _ctx, sock}), do: OMQ.recv(sock)
   defp recv_msg({:erlzmq, _ctx, sock}), do: erlzmq(:recv, [sock])
+  defp recv_msg({:chumak, sock}), do: chumak(:recv, [sock])
   defp try_recv_msg({:omq_elixir, _ctx, sock}), do: OMQ.try_recv(sock)
   defp try_recv_msg(pair), do: recv_msg(pair)
 
@@ -80,7 +114,53 @@ defmodule OmqBenchPeer do
     erlzmq(:term, [ctx])
   end
 
+  defp close({:chumak, sock}) do
+    chumak(:stop, [sock])
+  end
+
   defp erlzmq(function, args), do: :erlang.apply(:erlzmq, function, args)
+  defp chumak(function, args), do: :erlang.apply(:chumak, function, args)
+
+  defp chumak_bind(sock, endpoint) do
+    {host, port} = tcp_host_port(endpoint)
+    chumak(:bind, [sock, :tcp, host, port])
+  end
+
+  defp chumak_connect(sock, endpoint) do
+    {host, port} = tcp_host_port(endpoint)
+    chumak(:connect, [sock, :tcp, host, port])
+  end
+
+  defp tcp_host_port("tcp://" <> rest) do
+    [host, port] = String.split(rest, ":", parts: 2)
+    {String.to_charlist(host), String.to_integer(port)}
+  end
+
+  defp await_first_message({:chumak, sock} = pair, size) do
+    unblocker =
+      spawn(fn ->
+        Process.sleep(10_000)
+        chumak(:unblock, [sock])
+      end)
+
+    try do
+      case recv_msg(pair) do
+        {:ok, msg} ->
+          true = byte_size(msg) == size
+          :ok
+
+        {:error, :again} ->
+          die("chumak peer did not deliver first message")
+
+        error ->
+          okish(error)
+      end
+    after
+      Process.exit(unblocker, :kill)
+    end
+  end
+
+  defp await_first_message(_pair, _size), do: :ok
 
   defp pull(endpoint, payload, duration_ms, warmup_ms) do
     pull("omq-elixir", endpoint, payload, duration_ms, warmup_ms)
@@ -90,8 +170,9 @@ defmodule OmqBenchPeer do
     sock = open(impl, :pull)
     okish(bind(sock, endpoint))
     IO.puts("READY #{endpoint}")
+    await_first_message(sock, byte_size(payload))
 
-    drain_until(
+    timed_drain_until(
       sock,
       byte_size(payload),
       deadline(warmup_ms),
@@ -103,7 +184,7 @@ defmodule OmqBenchPeer do
     start = now_ms()
 
     count =
-      drain_until(
+      timed_drain_until(
         sock,
         byte_size(payload),
         start + duration_ms,
@@ -160,6 +241,43 @@ defmodule OmqBenchPeer do
     )
   end
 
+  defp timed_drain_until({:chumak, sock} = pair, size, deadline, count, _checks_left, _interval) do
+    unblocker =
+      spawn(fn ->
+        Process.sleep(max(deadline - now_ms(), 0))
+        chumak(:unblock, [sock])
+      end)
+
+    try do
+      chumak_drain_until(pair, size, deadline, count)
+    after
+      Process.exit(unblocker, :kill)
+    end
+  end
+
+  defp timed_drain_until(pair, size, deadline, count, checks_left, interval) do
+    drain_until(pair, size, deadline, count, checks_left, interval)
+  end
+
+  defp chumak_drain_until(pair, size, deadline, count) do
+    if now_ms() >= deadline do
+      count
+    else
+      case recv_msg(pair) do
+        {:ok, msg} ->
+          true = byte_size(msg) == size
+          chumak_drain_until(pair, size, deadline, count + 1)
+
+        {:error, :again} ->
+          count
+
+        error ->
+          okish(error)
+          count
+      end
+    end
+  end
+
   defp drain_until(pair, size, deadline, count, 0, interval) do
     if now_ms() >= deadline do
       count
@@ -188,7 +306,20 @@ defmodule OmqBenchPeer do
   defp timer_check_interval(_size), do: 256
 
   defp push_loop(pair, payload) do
-    okish(send_msg(pair, payload))
+    case send_fast(pair, payload) do
+      :ok ->
+        :ok
+
+      {:error, :would_block, _reason} ->
+        :erlang.yield()
+
+      {:error, :no_connected_peers} ->
+        :erlang.yield()
+
+      error ->
+        okish(error)
+    end
+
     push_loop(pair, payload)
   end
 

@@ -28,18 +28,24 @@ CHART = ROOT / "doc" / "charts" / "bindings.svg"
 DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
 LATENCY_MAX_SIZE = 4096
-SIZES = DEFAULT_SIZES.copy()
+# NOTE: Chumak 1.5.0 can deliver one large frame in-process, but its
+# two-BEAM-process TCP PUSH/PULL path hung and crashed the receiver while
+# decoding 1024 B frames, producing an 8 GiB crash dump. Keep timed Chumak
+# throughput measurements on small frames unless that upstream path is fixed.
+CHUMAK_MAX_SAFE_SIZE = 512
+CHART_SIZES = DEFAULT_SIZES.copy()
 TARGET_RUNTIME_S = 2.5
 THROUGHPUT_WARMUP_S = 0.5
 N_ROUNDS = 3
 LATENCY_WARMUP_S = 0.5
 LATENCY_RUNTIME_S = 1.5
 SUBPROCESS_TIMEOUT_S = 60.0
-DEFAULT_IMPLS = ["omq-erlang", "omq-elixir", "omq-gleam", "erlzmq", "exzmq"]
+DEFAULT_IMPLS = ["omq-erlang", "omq-elixir", "omq-gleam", "erlzmq", "chumak", "exzmq"]
 C_OMQ_ERLANG = "#ef4444"
 C_OMQ_ELIXIR = "#fb923c"
 C_OMQ_GLEAM = "#ffaff3"
 C_ERLZMQ = "#60a5fa"
+C_CHUMAK = "#a78bfa"
 
 
 def impl_lang(impl):
@@ -48,6 +54,7 @@ def impl_lang(impl):
         "erlzmq": "erlang",
         "omq-elixir": "elixir",
         "exzmq": "elixir",
+        "chumak": "erlang",
         "omq-gleam": "gleam",
     }.get(impl, "unknown")
 
@@ -110,9 +117,15 @@ def impl_available(impl):
         return gleam_bin() is not None
     if impl == "erlzmq":
         return shutil.which("elixir") is not None
+    if impl == "chumak":
+        return shutil.which("elixir") is not None
     if impl == "exzmq":
         return False
     return True
+
+
+def bench_size_supported(impl, size):
+    return impl != "chumak" or size <= CHUMAK_MAX_SAFE_SIZE
 
 
 def erl_module_available(module):
@@ -177,7 +190,7 @@ def peer_cmd(impl, bench, role, endpoint, size, duration, warmup):
             f"{duration:.6f}",
             f"{warmup:.6f}",
         ]
-    if impl in {"omq-elixir", "erlzmq"}:
+    if impl in {"omq-elixir", "erlzmq", "chumak"}:
         return [
             "elixir",
             str(ROOT / "scripts" / "bench_peer.exs"),
@@ -251,6 +264,9 @@ def run_bench(args):
             print(f"skip: {impl} unavailable", flush=True)
             continue
         for size in args.sizes:
+            if not bench_size_supported(impl, size):
+                print(f"skip: {impl} {size} B unsupported", flush=True)
+                continue
             for round_index in range(args.rounds):
                 row = run_pair(
                     impl,
@@ -385,7 +401,8 @@ def _detect_hardware():
 
 
 def gen_combined_chart(data, path):
-    latency_sizes = latency_sizes_from(SIZES)
+    sizes = CHART_SIZES
+    latency_sizes = latency_sizes_from(sizes)
     lat_n = len(latency_sizes)
     hw_label = _detect_hardware()
     hw_offset = 14 if hw_label else 0
@@ -403,8 +420,8 @@ def gen_combined_chart(data, path):
     t2_bot = t2_top + 200
     t2_h = t2_bot - t2_top
 
-    small_sizes = [s for s in SIZES if s <= 1024]
-    large_sizes = [s for s in SIZES if s >= 256]
+    small_sizes = [s for s in sizes if s <= 1024]
+    large_sizes = [s for s in sizes if s >= 256]
     small_xs = [
         top_left + i * (top_mid - top_left) / max(len(small_sizes) - 1, 1)
         for i in range(len(small_sizes))
@@ -420,10 +437,11 @@ def gen_combined_chart(data, path):
     elixir_tp = data["elixir_tp"]
     gleam_tp = data["gleam_tp"]
     erlzmq_tp = data["erlzmq_tp"]
+    chumak_tp = data["chumak_tp"]
 
-    tp_values = [erlang_tp, elixir_tp, gleam_tp, erlzmq_tp]
-    small_indices = [SIZES.index(s) for s in small_sizes]
-    large_indices = [SIZES.index(s) for s in large_sizes]
+    tp_values = [erlang_tp, elixir_tp, gleam_tp, erlzmq_tp, chumak_tp]
+    small_indices = [sizes.index(s) for s in small_sizes]
+    large_indices = [sizes.index(s) for s in large_sizes]
     msg_values = [
         values[i]
         for values in tp_values
@@ -432,7 +450,7 @@ def gen_combined_chart(data, path):
     ]
     msg_max = _nice_ceil(max(msg_values, default=1))
     gbs_values = [
-        v * SIZES[i] / 1_000_000_000
+        v * sizes[i] / 1_000_000_000
         for values in tp_values
         for i in large_indices
         for v in [values[i]]
@@ -533,27 +551,59 @@ def gen_combined_chart(data, path):
         ("OMQ Elixir", C_OMQ_ELIXIR, elixir_tp),
         ("OMQ Gleam", C_OMQ_GLEAM, gleam_tp),
         ("erlzmq", C_ERLZMQ, erlzmq_tp),
+        ("Chumak", C_CHUMAK, chumak_tp),
     ]
 
+    def add_polyline_segments(points, color, **attrs):
+        segment = []
+
+        def flush_segment():
+            if len(segment) < 2:
+                segment.clear()
+                return
+            pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in segment)
+            extra = "".join(f' {name}="{value}"' for name, value in attrs.items())
+            L.append(f'  <polyline points="{pts}" fill="none" stroke="{color}"{extra}/>')
+            segment.clear()
+
+        for x, y, present in points:
+            if present:
+                segment.append((x, y))
+            else:
+                flush_segment()
+        flush_segment()
+
     for _, color, vals in tp_series:
-        pts = " ".join(
-            f"{small_xs[j]:.1f},{y_msg(vals[i]):.1f}"
+        points = (
+            (small_xs[j], y_msg(vals[i]), i < len(vals) and vals[i] > 0)
             for j, i in enumerate(small_indices)
         )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
+        add_polyline_segments(
+            points, color, **{"stroke-width": "2", "stroke-dasharray": "6,4"}
         )
 
     for _, color, vals in tp_series:
-        gbs = [vals[i] * SIZES[i] / 1e9 for i in large_indices]
-        pts = " ".join(f"{large_xs[j]:.1f},{y_gbs(v):.1f}" for j, v in enumerate(gbs))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        points = (
+            (
+                large_xs[j],
+                y_gbs(vals[i] * sizes[i] / 1e9),
+                i < len(vals) and vals[i] > 0,
+            )
+            for j, i in enumerate(large_indices)
         )
-        for j, v in enumerate(gbs):
-            yy = y_gbs(v)
+        add_polyline_segments(
+            points,
+            color,
+            **{
+                "stroke-width": "2.5",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+            },
+        )
+        for j, i in enumerate(large_indices):
+            if i >= len(vals) or vals[i] <= 0:
+                continue
+            yy = y_gbs(vals[i] * sizes[i] / 1e9)
             L.append(
                 f'  <circle cx="{large_xs[j]:.1f}" cy="{yy:.1f}" r="3"'
                 f' fill="{color}" stroke="#000000" stroke-width="1"/>'
@@ -583,6 +633,7 @@ def gen_combined_chart(data, path):
     elixir_lat = data["elixir_lat"]
     gleam_lat = data["gleam_lat"]
     erlzmq_lat = data["erlzmq_lat"]
+    chumak_lat = data["chumak_lat"]
 
     for v in list(range(int(lat_min), int(lat_max), int(lat_step))) + [int(lat_max)]:
         yy = y_lat(v)
@@ -616,15 +667,26 @@ def gen_combined_chart(data, path):
         ("OMQ Elixir", C_OMQ_ELIXIR, elixir_lat),
         ("OMQ Gleam", C_OMQ_GLEAM, gleam_lat),
         ("erlzmq", C_ERLZMQ, erlzmq_lat),
+        ("Chumak", C_CHUMAK, chumak_lat),
     ]
 
     for _, color, vals in lat_series:
-        pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        points = (
+            (lat_xs[i], y_lat(v), v > 0)
+            for i, v in enumerate(vals)
+        )
+        add_polyline_segments(
+            points,
+            color,
+            **{
+                "stroke-width": "2.5",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+            },
         )
         for i, v in enumerate(vals):
+            if v <= 0:
+                continue
             yy = y_lat(v)
             L.append(
                 f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'
@@ -645,6 +707,7 @@ def gen_combined_chart(data, path):
         ("OMQ Elixir", C_OMQ_ELIXIR),
         ("OMQ Gleam", C_OMQ_GLEAM),
         ("erlzmq", C_ERLZMQ),
+        ("Chumak", C_CHUMAK),
     ]
     item_w = 140
     total_w = len(legend_items) * item_w
@@ -676,49 +739,56 @@ def gen_combined_chart(data, path):
 
 
 def chart_data_from_jsonl():
-    latest_run_by_impl = {}
+    latest_run_by_key = {}
     rows_by_key = {}
     for row in load_rows():
         impl = row["impl"]
         run_id = row.get("run_id", "")
-        latest_run_by_impl[impl] = max(run_id, latest_run_by_impl.get(impl, ""))
-        key = (impl, run_id, row["kind"], row["msg_size"])
+        chart_key = (impl, row["kind"], row["msg_size"])
+        latest_run_by_key[chart_key] = max(run_id, latest_run_by_key.get(chart_key, ""))
+        key = (impl, row["kind"], row["msg_size"], run_id)
         rows_by_key.setdefault(key, []).append(row)
 
     def tp(impl, size):
-        run_id = latest_run_by_impl.get(impl, "")
+        if not bench_size_supported(impl, size):
+            return 0.0
+        run_id = latest_run_by_key.get((impl, "throughput", size), "")
         values = [
             row["msgs_s"]
-            for row in rows_by_key.get((impl, run_id, "throughput", size), [])
+            for row in rows_by_key.get((impl, "throughput", size, run_id), [])
         ]
         return statistics.median(values) if values else 0.0
 
     def lat(impl, size):
-        run_id = latest_run_by_impl.get(impl, "")
+        if not bench_size_supported(impl, size):
+            return 0.0
+        run_id = latest_run_by_key.get((impl, "latency", size), "")
         values = [
             row["p50_us"]
-            for row in rows_by_key.get((impl, run_id, "latency", size), [])
+            for row in rows_by_key.get((impl, "latency", size, run_id), [])
         ]
         return statistics.median(values) if values else 0.0
 
     return {
-        "erlang_tp": [tp("omq-erlang", s) for s in SIZES],
-        "elixir_tp": [tp("omq-elixir", s) for s in SIZES],
-        "gleam_tp": [tp("omq-gleam", s) for s in SIZES],
-        "erlzmq_tp": [tp("erlzmq", s) for s in SIZES],
-        "erlang_lat": [lat("omq-erlang", s) for s in latency_sizes_from(SIZES)],
-        "elixir_lat": [lat("omq-elixir", s) for s in latency_sizes_from(SIZES)],
-        "gleam_lat": [lat("omq-gleam", s) for s in latency_sizes_from(SIZES)],
-        "erlzmq_lat": [lat("erlzmq", s) for s in latency_sizes_from(SIZES)],
+        "erlang_tp": [tp("omq-erlang", s) for s in CHART_SIZES],
+        "elixir_tp": [tp("omq-elixir", s) for s in CHART_SIZES],
+        "gleam_tp": [tp("omq-gleam", s) for s in CHART_SIZES],
+        "erlzmq_tp": [tp("erlzmq", s) for s in CHART_SIZES],
+        "chumak_tp": [tp("chumak", s) for s in CHART_SIZES],
+        "erlang_lat": [lat("omq-erlang", s) for s in latency_sizes_from(CHART_SIZES)],
+        "elixir_lat": [lat("omq-elixir", s) for s in latency_sizes_from(CHART_SIZES)],
+        "gleam_lat": [lat("omq-gleam", s) for s in latency_sizes_from(CHART_SIZES)],
+        "erlzmq_lat": [lat("erlzmq", s) for s in latency_sizes_from(CHART_SIZES)],
+        "chumak_lat": [lat("chumak", s) for s in latency_sizes_from(CHART_SIZES)],
     }
 
 
 def parse_args():
-    global SIZES
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--chart-only", action="store_true")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--no-chart", action="store_true")
     parser.add_argument("--impl", default=",".join(DEFAULT_IMPLS))
     parser.add_argument("--sizes")
     parser.add_argument("--rounds", type=int, default=N_ROUNDS)
@@ -738,7 +808,6 @@ def parse_args():
         args.sizes = [int(part.strip()) for part in args.sizes.split(",") if part.strip()]
     else:
         args.sizes = DEFAULT_SIZES.copy()
-    SIZES = args.sizes
     args.run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return args
 
@@ -748,7 +817,8 @@ def main():
     if not args.chart_only:
         build(args.no_build)
         run_bench(args)
-    gen_combined_chart(chart_data_from_jsonl(), CHART)
+    if not args.no_chart:
+        gen_combined_chart(chart_data_from_jsonl(), CHART)
 
 
 if __name__ == "__main__":

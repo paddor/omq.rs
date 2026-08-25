@@ -2,6 +2,10 @@
 
 -export([
     context/0,
+    context_instance/0,
+    context_instance/1,
+    instance/0,
+    instance/1,
     term/1,
     destroy/1,
     context_share_key/1,
@@ -9,6 +13,11 @@
     context_closed/1,
     backend_name/0,
     version/0,
+    omq_version/0,
+    omq_version_info/0,
+    zmq_version/0,
+    zmq_version_info/0,
+    strerror/1,
     share_key/1,
     from_share_key/1,
     socket/2,
@@ -28,10 +37,16 @@
     device/3,
     send/2,
     send_string/2,
+    send_json/2,
+    send_term/2,
     send_multipart/2,
     recv/1,
     recv_string/1,
     recv_string_timeout/2,
+    recv_json/1,
+    try_recv_json/1,
+    recv_term/1,
+    try_recv_term/1,
     recv_frame/1,
     try_recv/1,
     try_recv_string/1,
@@ -64,6 +79,18 @@
 context() ->
     result(omq:context()).
 
+context_instance() ->
+    result(omq:context_instance()).
+
+context_instance(IoThreads) ->
+    result(omq:context_instance(IoThreads)).
+
+instance() ->
+    result(omq:instance()).
+
+instance(IoThreads) ->
+    result(omq:instance(IoThreads)).
+
 term(Context) ->
     result_nil(omq:term(Context)).
 
@@ -84,6 +111,21 @@ backend_name() ->
 
 version() ->
     result(omq:version()).
+
+omq_version() ->
+    result(omq:omq_version()).
+
+omq_version_info() ->
+    result(omq:omq_version_info()).
+
+zmq_version() ->
+    omq:zmq_version().
+
+zmq_version_info() ->
+    omq:zmq_version_info().
+
+strerror(Errno) ->
+    omq:strerror(Errno).
 
 share_key(Context) ->
     result(omq:share_key(Context)).
@@ -142,6 +184,12 @@ send(Socket, Data) ->
 send_string(Socket, Text) ->
     result_nil(omq:send_string(Socket, Text)).
 
+send_json(Socket, Value) ->
+    result_nil(omq:send_json(Socket, Value)).
+
+send_term(Socket, Term) ->
+    result_nil(omq:send_term(Socket, Term)).
+
 send_multipart(Socket, Parts) ->
     result_nil(omq:send_multipart(Socket, Parts)).
 
@@ -153,6 +201,18 @@ recv_string(Socket) ->
 
 recv_string_timeout(Socket, Timeout) ->
     result(omq:recv_string(Socket, Timeout)).
+
+recv_json(Socket) ->
+    result(omq:recv_json(Socket)).
+
+try_recv_json(Socket) ->
+    result(omq:try_recv_json(Socket)).
+
+recv_term(Socket) ->
+    result(omq:recv_term(Socket)).
+
+try_recv_term(Socket) ->
+    result(omq:try_recv_term(Socket)).
 
 recv_frame(Socket) ->
     result(omq:recv_frame(Socket)).

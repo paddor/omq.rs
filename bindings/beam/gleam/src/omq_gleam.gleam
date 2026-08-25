@@ -1,3 +1,5 @@
+import gleam/dynamic.{type Dynamic}
+
 /// Native OMQ context resource.
 pub type Context
 
@@ -20,6 +22,24 @@ pub type Error =
 /// Create a context with one IO thread.
 @external(erlang, "omq_gleam_ffi", "context")
 pub fn context() -> Result(Context, Error)
+
+/// Return process-wide singleton context.
+@external(erlang, "omq_gleam_ffi", "context_instance")
+pub fn context_instance() -> Result(Context, Error)
+
+/// Return process-wide singleton context, creating it with IO thread count.
+@external(erlang, "omq_gleam_ffi", "context_instance")
+pub fn context_instance_with_io_threads(
+  io_threads: Int,
+) -> Result(Context, Error)
+
+/// Return process-wide singleton context.
+@external(erlang, "omq_gleam_ffi", "instance")
+pub fn instance() -> Result(Context, Error)
+
+/// Return process-wide singleton context, creating it with IO thread count.
+@external(erlang, "omq_gleam_ffi", "instance")
+pub fn instance_with_io_threads(io_threads: Int) -> Result(Context, Error)
 
 /// Terminate a context.
 @external(erlang, "omq_gleam_ffi", "term")
@@ -48,6 +68,26 @@ pub fn backend_name() -> Result(BitArray, Error)
 /// Return native binding version.
 @external(erlang, "omq_gleam_ffi", "version")
 pub fn version() -> Result(BitArray, Error)
+
+/// Return native binding version. Alias for version.
+@external(erlang, "omq_gleam_ffi", "omq_version")
+pub fn omq_version() -> Result(BitArray, Error)
+
+/// Return native binding version as #(major, minor, patch).
+@external(erlang, "omq_gleam_ffi", "omq_version_info")
+pub fn omq_version_info() -> Result(#(Int, Int, Int), Error)
+
+/// Return libzmq compatibility version string.
+@external(erlang, "omq_gleam_ffi", "zmq_version")
+pub fn zmq_version() -> BitArray
+
+/// Return libzmq compatibility version tuple.
+@external(erlang, "omq_gleam_ffi", "zmq_version_info")
+pub fn zmq_version_info() -> #(Int, Int, Int)
+
+/// Return POSIX strerror text for common libzmq errno values.
+@external(erlang, "omq_gleam_ffi", "strerror")
+pub fn strerror(errno: Int) -> BitArray
 
 /// Return opaque native context share key.
 @external(erlang, "omq_gleam_ffi", "share_key")
@@ -149,6 +189,14 @@ pub fn send(socket: Socket, data: BitArray) -> Result(Nil, Error)
 @external(erlang, "omq_gleam_ffi", "send_string")
 pub fn send_string(socket: Socket, text: String) -> Result(Nil, Error)
 
+/// Send one JSON value encoded by OTP `json`.
+@external(erlang, "omq_gleam_ffi", "send_json")
+pub fn send_json(socket: Socket, value: Dynamic) -> Result(Nil, Error)
+
+/// Send one Erlang term using external term format.
+@external(erlang, "omq_gleam_ffi", "send_term")
+pub fn send_term(socket: Socket, term: Dynamic) -> Result(Nil, Error)
+
 /// Send one multipart message.
 @external(erlang, "omq_gleam_ffi", "send_multipart")
 pub fn send_multipart(
@@ -170,6 +218,22 @@ pub fn recv_string_timeout(
   socket: Socket,
   timeout_ms: Int,
 ) -> Result(String, Error)
+
+/// Receive one JSON value decoded by OTP `json`.
+@external(erlang, "omq_gleam_ffi", "recv_json")
+pub fn recv_json(socket: Socket) -> Result(Dynamic, Error)
+
+/// Try to receive one JSON value without blocking.
+@external(erlang, "omq_gleam_ffi", "try_recv_json")
+pub fn try_recv_json(socket: Socket) -> Result(Dynamic, Error)
+
+/// Receive one Erlang term encoded by `send_term`.
+@external(erlang, "omq_gleam_ffi", "recv_term")
+pub fn recv_term(socket: Socket) -> Result(Dynamic, Error)
+
+/// Try to receive one Erlang term without blocking.
+@external(erlang, "omq_gleam_ffi", "try_recv_term")
+pub fn try_recv_term(socket: Socket) -> Result(Dynamic, Error)
 
 /// Receive next frame from multipart message.
 @external(erlang, "omq_gleam_ffi", "recv_frame")

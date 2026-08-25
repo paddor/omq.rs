@@ -3,6 +3,10 @@
 -export([
     context/0,
     context/1,
+    context_instance/0,
+    context_instance/1,
+    instance/0,
+    instance/1,
     term/1,
     destroy/1,
     context_share_key/1,
@@ -10,6 +14,11 @@
     context_closed/1,
     backend_name/0,
     version/0,
+    omq_version/0,
+    omq_version_info/0,
+    zmq_version/0,
+    zmq_version_info/0,
+    strerror/1,
     share_key/1,
     from_share_key/1,
     socket/2,
@@ -30,6 +39,10 @@
     send_string/2,
     send_string/3,
     send_string/4,
+    send_json/2,
+    send_json/3,
+    send_term/2,
+    send_term/3,
     send_multipart/2,
     send_multipart/3,
     try_send/2,
@@ -39,6 +52,12 @@
     recv_string/1,
     recv_string/2,
     recv_string/3,
+    recv_json/1,
+    recv_json/2,
+    try_recv_json/1,
+    recv_term/1,
+    recv_term/2,
+    try_recv_term/1,
     try_recv_string/1,
     try_recv_string/2,
     recv_frame/1,
@@ -111,6 +130,31 @@ context() ->
 context(IoThreads) ->
     omq_nif:context_new(IoThreads).
 
+%% @doc Return process-wide singleton context.
+context_instance() ->
+    context_instance(1).
+
+context_instance(IoThreads) ->
+    global:trans({?MODULE, context_instance}, fun() ->
+        Key = {?MODULE, context_instance},
+        case persistent_term:get(Key, undefined) of
+            undefined ->
+                put_context_instance(Key, IoThreads);
+            Context ->
+                case context_closed(Context) of
+                    true -> put_context_instance(Key, IoThreads);
+                    false -> {ok, Context}
+                end
+        end
+    end).
+
+%% @doc Return process-wide singleton context. Alias for `context_instance/0,1`.
+instance() ->
+    context_instance().
+
+instance(IoThreads) ->
+    context_instance(IoThreads).
+
 %% @doc Terminate a context.
 term(Context) ->
     omq_nif:context_term(Context).
@@ -138,6 +182,32 @@ backend_name() ->
 %% @doc Return native binding version.
 version() ->
     omq_nif:version().
+
+%% @doc Return native binding version. Alias for `version/0`.
+omq_version() ->
+    version().
+
+%% @doc Return native binding version as `{Major, Minor, Patch}`.
+omq_version_info() ->
+    case version() of
+        {ok, Version} -> {ok, version_info_tuple(Version)};
+        Error -> Error
+    end.
+
+%% @doc Return libzmq compatibility version string.
+zmq_version() ->
+    <<"4.3.4">>.
+
+%% @doc Return libzmq compatibility version tuple.
+zmq_version_info() ->
+    {4, 3, 4}.
+
+%% @doc Return POSIX strerror text for common libzmq errno values.
+strerror(Errno) when is_integer(Errno) ->
+    case errno_atom(Errno) of
+        undefined -> unicode:characters_to_binary("Unknown error");
+        Atom -> unicode:characters_to_binary(erl_posix_msg:message(Atom))
+    end.
 
 %% @doc Return opaque native context share key.
 share_key(Context) ->
@@ -220,6 +290,20 @@ send_string(Socket, Text, Opts) ->
 send_string(Socket, Text, Encoding, Opts) ->
     send(Socket, unicode:characters_to_binary(Text, utf8, Encoding), Opts).
 
+%% @doc Send one JSON value encoded with OTP `json`.
+send_json(Socket, Value) ->
+    send_json(Socket, Value, []).
+
+send_json(Socket, Value, Opts) ->
+    send(Socket, json:encode(Value), Opts).
+
+%% @doc Send one Erlang term using external term format.
+send_term(Socket, Term) ->
+    send_term(Socket, Term, []).
+
+send_term(Socket, Term, Opts) ->
+    send(Socket, term_to_binary(Term), Opts).
+
 %% @doc Send one multipart message.
 send_multipart(Socket, Parts) ->
     send_multipart(Socket, Parts, []).
@@ -271,6 +355,28 @@ recv_string(Socket, Timeout, Encoding) ->
         Other ->
             Other
     end.
+
+%% @doc Receive one JSON value decoded by OTP `json`.
+recv_json(Socket) ->
+    recv_json(Socket, infinity).
+
+recv_json(Socket, Timeout) ->
+    decode_json_result(recv(Socket, Timeout)).
+
+%% @doc Try to receive one JSON value without blocking.
+try_recv_json(Socket) ->
+    decode_json_result(try_recv(Socket)).
+
+%% @doc Receive one Erlang term encoded by `send_term/2,3`.
+recv_term(Socket) ->
+    recv_term(Socket, infinity).
+
+recv_term(Socket, Timeout) ->
+    decode_term_result(recv(Socket, Timeout)).
+
+%% @doc Try to receive one Erlang term without blocking.
+try_recv_term(Socket) ->
+    decode_term_result(try_recv(Socket)).
 
 %% @doc Receive next frame and update RCVMORE wrapper state.
 recv_frame(Socket) ->
@@ -500,7 +606,7 @@ closed(Socket) ->
 timeout_ms(infinity) -> -1;
 timeout_ms(Value) when is_integer(Value), Value >= 0 -> Value.
 
-%% @doc Return ROUTING_ID constant.
+%% Normalize absent routing IDs for multipart metadata.
 routing_id(0) -> undefined;
 routing_id(Value) -> Value.
 
@@ -519,6 +625,29 @@ bind_to_random_port_try(Socket, Addr, Port, MaxPort) ->
         {ok, _Bound} -> {ok, Port};
         _Error -> bind_to_random_port_try(Socket, Addr, Port + 1, MaxPort)
     end.
+
+put_context_instance(Key, IoThreads) ->
+    case context(IoThreads) of
+        {ok, Context} ->
+            persistent_term:put(Key, Context),
+            {ok, Context};
+        Error ->
+            Error
+    end.
+
+version_info_tuple(Version) ->
+    [Major, Minor, Patch | _] = binary:split(Version, <<".">>, [global]) ++ [<<"0">>, <<"0">>],
+    {leading_integer(Major), leading_integer(Minor), leading_integer(Patch)}.
+
+leading_integer(Bin) ->
+    leading_integer(Bin, []).
+
+leading_integer(<<Char, Rest/binary>>, Acc) when Char >= $0, Char =< $9 ->
+    leading_integer(Rest, [Char | Acc]);
+leading_integer(_Rest, []) ->
+    0;
+leading_integer(_Rest, Acc) ->
+    list_to_integer(lists:reverse(Acc)).
 
 send_options(Flags) when is_integer(Flags) ->
     {0, Flags};
@@ -596,6 +725,36 @@ rcvmore_value(Socket) ->
     case get(recv_more_key(Socket)) of
         [_ | _] -> 1;
         _ -> 0
+    end.
+
+decode_term_result({ok, Data}) when is_binary(Data) ->
+    decode_term_binary(Data);
+decode_term_result({ok, #{data := Data, routing_id := RoutingId}}) when is_binary(Data) ->
+    case decode_term_binary(Data) of
+        {ok, Term} -> {ok, #{data => Term, routing_id => RoutingId}};
+        Error -> Error
+    end;
+decode_term_result(Other) ->
+    Other.
+
+decode_term_binary(Data) ->
+    try {ok, binary_to_term(Data, [safe])}
+    catch error:badarg -> {error, badarg, "invalid external term format"}
+    end.
+
+decode_json_result({ok, Data}) when is_binary(Data) ->
+    decode_json_binary(Data);
+decode_json_result({ok, #{data := Data, routing_id := RoutingId}}) when is_binary(Data) ->
+    case decode_json_binary(Data) of
+        {ok, Value} -> {ok, #{data => Value, routing_id => RoutingId}};
+        Error -> Error
+    end;
+decode_json_result(Other) ->
+    Other.
+
+decode_json_binary(Data) ->
+    try {ok, json:decode(Data)}
+    catch error:_ -> {error, badarg, "invalid JSON"}
     end.
 
 poll_ready_entry(InEntries, Index) ->
@@ -761,6 +920,7 @@ channel() -> 20.
 affinity() -> 4.
 %% @doc Return IDENTITY constant.
 identity() -> 5.
+%% @doc Return ROUTING_ID constant.
 routing_id() -> 5.
 %% @doc Return SUBSCRIBE_OPT constant.
 subscribe_opt() -> 6.
@@ -936,6 +1096,26 @@ socket_type_atom(16) -> gather;
 socket_type_atom(17) -> scatter;
 socket_type_atom(19) -> peer;
 socket_type_atom(20) -> channel.
+
+errno_atom(11) -> eagain;
+errno_atom(95) -> enotsup;
+errno_atom(22) -> einval;
+errno_atom(14) -> efault;
+errno_atom(12) -> enomem;
+errno_atom(19) -> enodev;
+errno_atom(90) -> emsgsize;
+errno_atom(97) -> eafnosupport;
+errno_atom(101) -> enetunreach;
+errno_atom(103) -> econnaborted;
+errno_atom(104) -> econnreset;
+errno_atom(107) -> enotconn;
+errno_atom(110) -> etimedout;
+errno_atom(113) -> ehostunreach;
+errno_atom(102) -> enetreset;
+errno_atom(98) -> eaddrinuse;
+errno_atom(99) -> eaddrnotavail;
+errno_atom(108) -> enotsock;
+errno_atom(_Errno) -> undefined.
 
 option_code(Option) when is_integer(Option) -> Option;
 option_code(hwm) -> hwm();

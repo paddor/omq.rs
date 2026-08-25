@@ -12,6 +12,18 @@ defmodule OMQ do
   @doc "Create a context with requested native IO thread count."
   def context(io_threads), do: call(:context, [io_threads])
 
+  @doc "Return process-wide singleton context."
+  def context_instance, do: call(:context_instance, [])
+
+  @doc "Return process-wide singleton context, creating it with IO thread count."
+  def context_instance(io_threads), do: call(:context_instance, [io_threads])
+
+  @doc "Return process-wide singleton context."
+  def instance, do: call(:instance, [])
+
+  @doc "Return process-wide singleton context, creating it with IO thread count."
+  def instance(io_threads), do: call(:instance, [io_threads])
+
   @doc "Terminate a context."
   def term(context), do: call(:term, [context])
 
@@ -32,6 +44,21 @@ defmodule OMQ do
 
   @doc "Return native binding version."
   def version, do: call(:version, [])
+
+  @doc "Return native binding version. Alias for `version/0`."
+  def omq_version, do: call(:omq_version, [])
+
+  @doc "Return native binding version as `{major, minor, patch}`."
+  def omq_version_info, do: call(:omq_version_info, [])
+
+  @doc "Return libzmq compatibility version string."
+  def zmq_version, do: call(:zmq_version, [])
+
+  @doc "Return libzmq compatibility version tuple."
+  def zmq_version_info, do: call(:zmq_version_info, [])
+
+  @doc "Return POSIX strerror text for common libzmq errno values."
+  def strerror(errno), do: call(:strerror, [errno])
 
   @doc "Return opaque native context share key."
   def share_key(context), do: call(:share_key, [context])
@@ -96,6 +123,18 @@ defmodule OMQ do
   def send_string(socket, text, encoding, opts),
     do: call(:send_string, [socket, text, encoding, opts])
 
+  @doc "Send one JSON value encoded by OTP `json`."
+  def send_json(socket, value), do: call(:send_json, [socket, value])
+
+  @doc "Send one JSON value with flags or options."
+  def send_json(socket, value, opts), do: call(:send_json, [socket, value, opts])
+
+  @doc "Send one Erlang term using external term format."
+  def send_term(socket, term), do: call(:send_term, [socket, term])
+
+  @doc "Send one Erlang term with flags or options."
+  def send_term(socket, term, opts), do: call(:send_term, [socket, term, opts])
+
   @doc "Try to send one binary message without blocking."
   def try_send(socket, data), do: call(:try_send, [socket, data])
 
@@ -123,6 +162,24 @@ defmodule OMQ do
 
   @doc "Receive one string with timeout and wire encoding."
   def recv_string(socket, timeout, encoding), do: call(:recv_string, [socket, timeout, encoding])
+
+  @doc "Receive one JSON value decoded by OTP `json`."
+  def recv_json(socket), do: call(:recv_json, [socket])
+
+  @doc "Receive one JSON value with timeout in milliseconds."
+  def recv_json(socket, timeout), do: call(:recv_json, [socket, timeout])
+
+  @doc "Try to receive one JSON value without blocking."
+  def try_recv_json(socket), do: call(:try_recv_json, [socket])
+
+  @doc "Receive one Erlang term encoded by `send_term/2,3`."
+  def recv_term(socket), do: call(:recv_term, [socket])
+
+  @doc "Receive one Erlang term with timeout in milliseconds."
+  def recv_term(socket, timeout), do: call(:recv_term, [socket, timeout])
+
+  @doc "Try to receive one Erlang term without blocking."
+  def try_recv_term(socket), do: call(:try_recv_term, [socket])
 
   @doc "Receive next frame from multipart message."
   def recv_frame(socket), do: call(:recv_frame, [socket])

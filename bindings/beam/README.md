@@ -13,17 +13,21 @@ Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 
 ## API Shape
 
-- `omq:context/0,1` owns native IO threads.
-- `term/1` and `destroy/1` close contexts. `backend_name/0` and `version/0`
-  expose native metadata.
+- `omq:context/0,1` owns native IO threads. `context_instance/0,1` and
+  `instance/0,1` return a process-wide singleton.
+- `term/1` and `destroy/1` close contexts. `backend_name/0`, `version/0`,
+  `omq_version/0`, `omq_version_info/0`, `zmq_version/0`,
+  `zmq_version_info/0`, and `strerror/1` expose metadata and compatibility
+  helpers.
 - `share_key/1` and `from_share_key/1` import an existing native context for
   cross-wrapper inproc use.
 - `omq:socket/2` creates Erlang socket resources for all 20 ZMQ socket types.
 - `bind`, `bind_to_random_port`, `connect`, `unbind`, and `disconnect` use
   normal endpoint strings.
-- `send`, `send_string`, `try_send`, `recv`, `recv_string`, `recv_frame`,
-  `try_recv`, `send_multipart`, and `recv_multipart` cover blocking and
-  nonblocking message calls.
+- `send`, `send_string`, `send_json`, `send_term`, `try_send`, `recv`,
+  `recv_string`, `recv_json`, `recv_term`, `recv_frame`, `try_recv`,
+  `send_multipart`, and `recv_multipart` cover blocking and nonblocking
+  message calls.
 - `poll/2` and `select/4` provide libzmq-style readiness helpers.
 - `monitor`, `connections`, and `connection_info` expose backend lifecycle
   state.

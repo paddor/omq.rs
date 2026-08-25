@@ -15,6 +15,8 @@ model for all three languages.
 `omq:context/0,1` creates a Rust `omq_tokio::Context` resource. The context
 owns the native runtime and IO threads. The BEAM resource keeps the context
 alive until explicit `term/1`, `destroy/1`, or resource collection.
+`context_instance/0,1` stores a process-wide singleton context in
+`persistent_term` and replaces it when the stored context has closed.
 
 Sockets store a clone of the native context, so socket resources remain valid
 while they are open. `term/1` requests context shutdown; open sockets still
@@ -71,14 +73,18 @@ copy parts into Rust `Bytes` for native submission. `SNDMORE` is buffered in
 the calling BEAM process until a final send flushes one native multipart
 message. `NOBLOCK` and `DONTWAIT` route through the native `try_send` path.
 `send_string/2,3,4` converts UTF-8 Erlang text into the requested wire
-encoding before using the same send path.
+encoding before using the same send path. `send_json/2,3` encodes values with
+OTP `json`. `send_term/2,3` serializes Erlang terms with external term format
+and then uses the normal send path.
 
 `recv/1,2` converts native message parts into BEAM binaries. `recv_frame/1,2`
 stores remaining frames in the calling BEAM process so `RCVMORE` can report
 frame iteration state. Routing IDs are exposed as Erlang maps for
 SERVER/CLIENT and other routing-ID-bearing messages.
 `recv_string/1,2,3` and `try_recv_string/1,2` decode one binary frame back to
-UTF-8 Erlang text.
+UTF-8 Erlang text. `recv_json/1,2` and `try_recv_json/1` decode one frame with
+OTP `json`. `recv_term/1,2` and `try_recv_term/1` decode one frame with
+`binary_to_term/2` in safe mode.
 
 ## Monitoring
 
@@ -124,8 +130,10 @@ materialization because they are wrapper state or native socket commands.
 `RCVHWM` and reads back `SNDHWM`.
 
 `set/3` and `get/2` are aliases over `setsockopt/3` and `getsockopt/2`.
-`backend_name/0`, `version/0`, `FORWARDER`, `QUEUE`, `STREAMER`, `NULL`,
-`PLAIN`, `CURVE`, and poll constants are wrapper-level metadata and constants.
+`backend_name/0`, `version/0`, `omq_version/0`, `omq_version_info/0`,
+`zmq_version/0`, `zmq_version_info/0`, `strerror/1`, `FORWARDER`, `QUEUE`,
+`STREAMER`, `NULL`, `PLAIN`, `CURVE`, and poll constants are wrapper-level
+metadata and constants.
 
 Unsupported or read-only options return `{error, badarg, Reason}`. Core OMQ
 transport options use IDs outside the libzmq range.

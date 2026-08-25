@@ -6,6 +6,11 @@ defmodule OMQ do
   def term(context), do: call(:term, [context])
   def socket(context, type), do: call(:socket, [context, type])
   def bind(socket, endpoint), do: call(:bind, [socket, endpoint])
+  def bind_to_random_port(socket, addr), do: call(:bind_to_random_port, [socket, addr])
+
+  def bind_to_random_port(socket, addr, min_port, max_port),
+    do: call(:bind_to_random_port, [socket, addr, min_port, max_port])
+
   def connect(socket, endpoint), do: call(:connect, [socket, endpoint])
   def unbind(socket, endpoint), do: call(:unbind, [socket, endpoint])
   def disconnect(socket, endpoint), do: call(:disconnect, [socket, endpoint])
@@ -15,6 +20,8 @@ defmodule OMQ do
   def send_multipart(socket, parts, opts), do: call(:send_multipart, [socket, parts, opts])
   def recv(socket), do: call(:recv, [socket])
   def recv(socket, timeout), do: call(:recv, [socket, timeout])
+  def recv_frame(socket), do: call(:recv_frame, [socket])
+  def recv_frame(socket, timeout), do: call(:recv_frame, [socket, timeout])
   def try_recv(socket), do: call(:try_recv, [socket])
   def recv_multipart(socket), do: call(:recv_multipart, [socket])
   def recv_multipart(socket, timeout), do: call(:recv_multipart, [socket, timeout])
@@ -64,6 +71,9 @@ defmodule OMQ do
   def pollin, do: call(:pollin, [])
   def pollout, do: call(:pollout, [])
   def pollerr, do: call(:pollerr, [])
+  def sndmore, do: call(:sndmore, [])
+  def noblock, do: call(:noblock, [])
+  def dontwait, do: call(:dontwait, [])
   def affinity, do: call(:affinity, [])
   def identity, do: call(:identity, [])
   def routing_id, do: call(:routing_id, [])

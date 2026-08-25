@@ -6,6 +6,8 @@
     term/1,
     socket/2,
     bind/2,
+    bind_to_random_port/2,
+    bind_to_random_port/4,
     connect/2,
     unbind/2,
     disconnect/2,
@@ -17,6 +19,8 @@
     try_send/3,
     recv/1,
     recv/2,
+    recv_frame/1,
+    recv_frame/2,
     try_recv/1,
     recv_multipart/1,
     recv_multipart/2,
@@ -45,7 +49,7 @@
 ]).
 
 -export([
-    pollin/0, pollout/0, pollerr/0,
+    pollin/0, pollout/0, pollerr/0, sndmore/0, noblock/0, dontwait/0,
     affinity/0, identity/0, routing_id/0, subscribe_opt/0, unsubscribe_opt/0, rcvmore/0,
     fd/0, events/0, type/0, backlog/0,
     linger/0, reconnect_ivl/0, reconnect_ivl_max/0, maxmsgsize/0,
@@ -79,6 +83,13 @@ socket(Context, Type) when is_integer(Type) ->
 bind(Socket, Endpoint) ->
     omq_nif:bind(Socket, iolist_to_binary(Endpoint)).
 
+bind_to_random_port(Socket, Addr) ->
+    bind_to_random_port(Socket, Addr, 49152, 65536).
+
+bind_to_random_port(Socket, Addr, MinPort, MaxPort)
+        when is_integer(MinPort), is_integer(MaxPort), MinPort =< MaxPort ->
+    bind_to_random_port_try(Socket, iolist_to_binary(Addr), MinPort, MaxPort).
+
 connect(Socket, Endpoint) ->
     omq_nif:connect(Socket, iolist_to_binary(Endpoint)).
 
@@ -92,22 +103,22 @@ send(Socket, Data) ->
     send(Socket, Data, []).
 
 send(Socket, Data, Opts) ->
-    RoutingId = proplists:get_value(routing_id, Opts, 0),
-    omq_nif:send(Socket, [iolist_to_binary(Data)], RoutingId).
+    {RoutingId, Flags} = send_options(Opts),
+    send_parts(Socket, [iolist_to_binary(Data)], RoutingId, Flags).
 
 send_multipart(Socket, Parts) ->
     send_multipart(Socket, Parts, []).
 
 send_multipart(Socket, Parts, Opts) ->
-    RoutingId = proplists:get_value(routing_id, Opts, 0),
-    omq_nif:send(Socket, [iolist_to_binary(Part) || Part <- Parts], RoutingId).
+    {RoutingId, Flags} = send_options(Opts),
+    send_parts(Socket, [iolist_to_binary(Part) || Part <- Parts], RoutingId, Flags).
 
 try_send(Socket, Data) ->
     try_send(Socket, Data, []).
 
 try_send(Socket, Data, Opts) ->
-    RoutingId = proplists:get_value(routing_id, Opts, 0),
-    omq_nif:try_send(Socket, [iolist_to_binary(Data)], RoutingId).
+    {RoutingId, Flags} = send_options(Opts),
+    try_send_parts(Socket, [iolist_to_binary(Data)], RoutingId, Flags).
 
 recv(Socket) ->
     case omq_nif:recv(Socket, -2) of
@@ -123,6 +134,21 @@ recv(Socket, Timeout) ->
         {ok, [Part], RoutingId} -> {ok, #{data => Part, routing_id => RoutingId}};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => routing_id(RoutingId)}};
         Error -> Error
+    end.
+
+recv_frame(Socket) ->
+    recv_frame(Socket, infinity).
+
+recv_frame(Socket, Timeout) ->
+    case pop_recv_frame(Socket) of
+        {ok, Part} ->
+            {ok, Part};
+        empty ->
+            case omq_nif:recv(Socket, timeout_ms(Timeout)) of
+                {ok, Parts, 0} -> first_recv_frame(Socket, Parts);
+                {ok, Parts, _RoutingId} -> first_recv_frame(Socket, Parts);
+                Error -> Error
+            end
     end.
 
 try_recv(Socket) ->
@@ -238,7 +264,10 @@ setsockopt(Socket, Option, Value) when is_integer(Value) ->
     omq_nif:setsockopt(Socket, option_code(Option), Value, <<>>).
 
 getsockopt(Socket, Option) ->
-    omq_nif:getsockopt(Socket, option_code(Option)).
+    case option_code(Option) of
+        13 -> {ok, rcvmore_value(Socket)};
+        Code -> omq_nif:getsockopt(Socket, Code)
+    end.
 
 socket_type(Socket) ->
     case omq_nif:socket_type(Socket) of
@@ -258,6 +287,94 @@ bool_int(false) -> 0.
 normalize_poll_entry({Socket, Flags}) -> {Socket, Flags};
 normalize_poll_entry(Socket) -> {Socket, pollin()}.
 
+bind_to_random_port_try(_Socket, _Addr, Port, MaxPort) when Port > MaxPort ->
+    {error, invalid_endpoint, "no free port"};
+bind_to_random_port_try(Socket, Addr, Port, MaxPort) ->
+    PortBin = integer_to_binary(Port),
+    Endpoint = <<Addr/binary, ":", PortBin/binary>>,
+    case bind(Socket, Endpoint) of
+        {ok, _Bound} -> {ok, Port};
+        _Error -> bind_to_random_port_try(Socket, Addr, Port + 1, MaxPort)
+    end.
+
+send_options(Flags) when is_integer(Flags) ->
+    {0, Flags};
+send_options(Opts) ->
+    Flags0 = proplists:get_value(flags, Opts, 0),
+    Flags = lists:foldl(fun flag_value/2, flag_value(Flags0, 0), Opts),
+    {proplists:get_value(routing_id, Opts, 0), Flags}.
+
+flag_value({flags, _}, Acc) -> Acc;
+flag_value({routing_id, _}, Acc) -> Acc;
+flag_value(sndmore, Acc) -> Acc bor sndmore();
+flag_value(noblock, Acc) -> Acc bor noblock();
+flag_value(dontwait, Acc) -> Acc bor dontwait();
+flag_value({sndmore, true}, Acc) -> Acc bor sndmore();
+flag_value({noblock, true}, Acc) -> Acc bor noblock();
+flag_value({dontwait, true}, Acc) -> Acc bor dontwait();
+flag_value(Value, Acc) when is_integer(Value) -> Acc bor Value;
+flag_value(_, Acc) -> Acc.
+
+send_parts(Socket, Parts, RoutingId, Flags) ->
+    case (Flags band sndmore()) =/= 0 of
+        true ->
+            append_send_more(Socket, Parts),
+            ok;
+        false ->
+            FinalParts = take_send_more(Socket) ++ Parts,
+            case (Flags band noblock()) =/= 0 of
+                true -> omq_nif:try_send(Socket, FinalParts, RoutingId);
+                false -> omq_nif:send(Socket, FinalParts, RoutingId)
+            end
+    end.
+
+try_send_parts(Socket, Parts, RoutingId, Flags) ->
+    send_parts(Socket, Parts, RoutingId, Flags bor noblock()).
+
+append_send_more(Socket, Parts) ->
+    put(send_more_key(Socket), take_send_more(Socket) ++ Parts).
+
+take_send_more(Socket) ->
+    Key = send_more_key(Socket),
+    case get(Key) of
+        undefined -> [];
+        Parts ->
+            erase(Key),
+            Parts
+    end.
+
+send_more_key(Socket) ->
+    {?MODULE, sndmore, Socket}.
+
+first_recv_frame(Socket, []) ->
+    put(recv_more_key(Socket), []),
+    {ok, <<>>};
+first_recv_frame(Socket, [Part | Rest]) ->
+    put(recv_more_key(Socket), Rest),
+    {ok, Part}.
+
+pop_recv_frame(Socket) ->
+    Key = recv_more_key(Socket),
+    case get(Key) of
+        [Part | Rest] ->
+            put(Key, Rest),
+            {ok, Part};
+        [] ->
+            erase(Key),
+            empty;
+        undefined ->
+            empty
+    end.
+
+recv_more_key(Socket) ->
+    {?MODULE, rcvmore, Socket}.
+
+rcvmore_value(Socket) ->
+    case get(recv_more_key(Socket)) of
+        [_ | _] -> 1;
+        _ -> 0
+    end.
+
 poll_ready_entry(InEntries, Index) ->
     {Socket, _Flags} = lists:nth(Index + 1, InEntries),
     {Socket, pollin()}.
@@ -270,6 +387,9 @@ merge_poll_ready(Entries) ->
 pollin() -> 1.
 pollout() -> 2.
 pollerr() -> 4.
+sndmore() -> 2.
+noblock() -> 1.
+dontwait() -> noblock().
 
 pair() -> 0.
 pub() -> 1.

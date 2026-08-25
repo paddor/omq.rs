@@ -2,7 +2,7 @@
 
 BEAM bindings for OMQ, backed by `omq-tokio`.
 
-![OMQ.beam performance](doc/charts/bindings.svg)
+![OMQ.beam performance](https://raw.githubusercontent.com/paddor/omq.rs/main/bindings/beam/doc/charts/bindings.svg)
 
 Erlang is the base binding. Elixir and Gleam are thin wrappers over the same
 Erlang module and NIF, so one Rust native library serves all three languages.
@@ -13,8 +13,9 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 
 - `omq:context/0,1` owns native IO threads.
 - `omq:socket/2` creates Erlang socket resources for all 20 ZMQ socket types.
-- `bind`, `connect`, `unbind`, and `disconnect` use normal endpoint strings.
-- `send`, `try_send`, `recv`, `try_recv`, `send_multipart`, and
+- `bind`, `bind_to_random_port`, `connect`, `unbind`, and `disconnect` use
+  normal endpoint strings.
+- `send`, `try_send`, `recv`, `recv_frame`, `try_recv`, `send_multipart`, and
   `recv_multipart` cover blocking and nonblocking message calls.
 - `poll/2` and `select/4` provide libzmq-style readiness helpers.
 - `setsockopt/3` and `getsockopt/2` cover core libzmq-compatible options and

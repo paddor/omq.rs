@@ -17,6 +17,14 @@ pub fn socket(context: Context, socket_type: Int) -> Result(Socket, Error)
 @external(erlang, "omq_gleam_ffi", "bind")
 pub fn bind(socket: Socket, endpoint: BitArray) -> Result(BitArray, Error)
 
+@external(erlang, "omq_gleam_ffi", "bind_to_random_port")
+pub fn bind_to_random_port(
+  socket: Socket,
+  addr: BitArray,
+  min_port: Int,
+  max_port: Int,
+) -> Result(Int, Error)
+
 @external(erlang, "omq_gleam_ffi", "connect")
 pub fn connect(socket: Socket, endpoint: BitArray) -> Result(Nil, Error)
 
@@ -37,6 +45,9 @@ pub fn send_multipart(
 
 @external(erlang, "omq_gleam_ffi", "recv")
 pub fn recv(socket: Socket) -> Result(BitArray, Error)
+
+@external(erlang, "omq_gleam_ffi", "recv_frame")
+pub fn recv_frame(socket: Socket) -> Result(BitArray, Error)
 
 @external(erlang, "omq_gleam_ffi", "try_recv")
 pub fn try_recv(socket: Socket) -> Result(BitArray, Error)
@@ -119,6 +130,18 @@ pub fn pollout() -> Int {
 
 pub fn pollerr() -> Int {
   4
+}
+
+pub fn sndmore() -> Int {
+  2
+}
+
+pub fn noblock() -> Int {
+  1
+}
+
+pub fn dontwait() -> Int {
+  1
 }
 
 pub fn pair() -> Int {

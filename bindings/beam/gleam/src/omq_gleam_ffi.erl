@@ -5,12 +5,14 @@
     term/1,
     socket/2,
     bind/2,
+    bind_to_random_port/4,
     connect/2,
     unbind/2,
     disconnect/2,
     send/2,
     send_multipart/2,
     recv/1,
+    recv_frame/1,
     try_recv/1,
     recv_multipart/1,
     try_recv_multipart/1,
@@ -42,6 +44,9 @@ socket(Context, SocketType) ->
 bind(Socket, Endpoint) ->
     result(omq:bind(Socket, Endpoint)).
 
+bind_to_random_port(Socket, Addr, MinPort, MaxPort) ->
+    result(omq:bind_to_random_port(Socket, Addr, MinPort, MaxPort)).
+
 connect(Socket, Endpoint) ->
     result_nil(omq:connect(Socket, Endpoint)).
 
@@ -59,6 +64,9 @@ send_multipart(Socket, Parts) ->
 
 recv(Socket) ->
     result(omq:recv(Socket)).
+
+recv_frame(Socket) ->
+    result(omq:recv_frame(Socket)).
 
 try_recv(Socket) ->
     result(omq:try_recv(Socket)).

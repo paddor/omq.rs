@@ -55,6 +55,7 @@ struct NativeSocket {
     curve_publickey: Mutex<Option<Vec<u8>>>,
     curve_secretkey: Mutex<Option<Vec<u8>>>,
     curve_serverkey: Mutex<Option<Vec<u8>>>,
+    last_endpoint: Mutex<Vec<u8>>,
     recv_buffer: Mutex<VecDeque<Message>>,
     socket: RwLock<Option<omq_tokio::blocking::Socket>>,
     closed: AtomicBool,
@@ -423,6 +424,7 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
             curve_publickey: Mutex::new(None),
             curve_secretkey: Mutex::new(None),
             curve_serverkey: Mutex::new(None),
+            last_endpoint: Mutex::new(Vec::new()),
             recv_buffer: Mutex::new(VecDeque::new()),
             socket: RwLock::new(None),
             closed: AtomicBool::new(false),
@@ -445,7 +447,11 @@ fn bind<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, endpoint: Binary<'a
         .materialize()
         .and_then(|socket| socket.bind(endpoint))
     {
-        Ok(bound) => ok_binary(env, bound.to_string().as_bytes()),
+        Ok(bound) => {
+            let bound = bound.to_string();
+            *socket.last_endpoint.lock().unwrap() = bound.as_bytes().to_vec();
+            ok_binary(env, bound.as_bytes())
+        }
         Err(error) => map_error(env, error),
     }
 }
@@ -456,11 +462,15 @@ fn connect<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, endpoint: Binary
         Ok(endpoint) => endpoint,
         Err(error) => return map_error(env, error),
     };
+    let endpoint_text = endpoint.to_string();
     match socket
         .materialize()
         .and_then(|socket| socket.connect(endpoint))
     {
-        Ok(()) => ok_unit(env),
+        Ok(()) => {
+            *socket.last_endpoint.lock().unwrap() = endpoint_text.into_bytes();
+            ok_unit(env)
+        }
         Err(error) => map_error(env, error),
     }
 }
@@ -471,11 +481,18 @@ fn unbind<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, endpoint: Binary<
         Ok(endpoint) => endpoint,
         Err(error) => return map_error(env, error),
     };
+    let endpoint_text = endpoint.to_string();
     match socket
         .materialize()
         .and_then(|socket| socket.unbind(endpoint))
     {
-        Ok(()) => ok_unit(env),
+        Ok(()) => {
+            let mut last = socket.last_endpoint.lock().unwrap();
+            if last.as_slice() == endpoint_text.as_bytes() {
+                last.clear();
+            }
+            ok_unit(env)
+        }
         Err(error) => map_error(env, error),
     }
 }
@@ -490,11 +507,18 @@ fn disconnect<'a>(
         Ok(endpoint) => endpoint,
         Err(error) => return map_error(env, error),
     };
+    let endpoint_text = endpoint.to_string();
     match socket
         .materialize()
         .and_then(|socket| socket.disconnect(endpoint))
     {
-        Ok(()) => ok_unit(env),
+        Ok(()) => {
+            let mut last = socket.last_endpoint.lock().unwrap();
+            if last.as_slice() == endpoint_text.as_bytes() {
+                last.clear();
+            }
+            ok_unit(env)
+        }
         Err(error) => map_error(env, error),
     }
 }
@@ -994,7 +1018,8 @@ fn getsockopt<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, option: i64) 
         }
         109 => ok(env, i64::from(options.reconnect_stop_conn_refused)),
         43 | 39 | 42 | 31 | 8 | 79 | 40 | 51 | 52 | 53 | 56 | 80 | 25 | 9 => ok(env, 0i64),
-        32 | 38 | 55 => ok_binary(env, &[]),
+        32 => ok_binary(env, &socket.last_endpoint.lock().unwrap()),
+        38 | 55 => ok_binary(env, &[]),
         _ => err_term(env, atoms::badarg(), format!("unsupported option {option}")),
     }
 }

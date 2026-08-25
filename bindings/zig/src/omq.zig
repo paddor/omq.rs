@@ -246,6 +246,12 @@ pub const PollEvent = struct {
     events: i16,
 };
 
+pub const BindRandomPortOptions = struct {
+    min_port: u16 = 49152,
+    max_port: u16 = 65535,
+    max_tries: usize = 100,
+};
+
 const PollRegistration = struct {
     socket: *Socket,
     events: i16,
@@ -391,6 +397,10 @@ pub const Context = struct {
         }
     }
 
+    pub fn closed(self: *const Context) bool {
+        return self.raw == null;
+    }
+
     pub fn term(self: *Context) Error!void {
         const ctx = self.raw orelse return;
         self.raw = null;
@@ -418,11 +428,11 @@ pub const Context = struct {
         return .{ .raw = ctx };
     }
 
-    pub fn setInt(self: *Context, option: i32, value: i32) Error!void {
+    fn setInt(self: *Context, option: i32, value: i32) Error!void {
         try setCtxInt(try self.ptr(), option, value);
     }
 
-    pub fn getInt(self: *Context, option: i32) Error!i32 {
+    fn getInt(self: *Context, option: i32) Error!i32 {
         const rc = c.zmq_ctx_get(try self.ptr(), option);
         if (rc == -1) return mapErrno();
         return rc;
@@ -445,6 +455,10 @@ pub const Socket = struct {
         }
     }
 
+    pub fn closed(self: *const Socket) bool {
+        return self.raw == null;
+    }
+
     pub fn close(self: *Socket) Error!void {
         const socket_raw = self.raw orelse return;
         self.raw = null;
@@ -456,6 +470,43 @@ pub const Socket = struct {
         defer allocator.free(endpoint_z);
         try check(c.zmq_bind(try self.ptr(), endpoint_z.ptr));
         return try self.getLastEndpoint(allocator);
+    }
+
+    /// Bind to a TCP port and return the selected port. Default options ask
+    /// the OS for a free port with `:0`. Custom ranges try concrete ports in
+    /// order, bounded by `max_tries`.
+    pub fn bindToRandomPort(
+        self: *Socket,
+        allocator: std.mem.Allocator,
+        addr: []const u8,
+        options: BindRandomPortOptions,
+    ) !u16 {
+        if (options.min_port > options.max_port or options.max_tries == 0) return Error.Invalid;
+
+        if (std.meta.eql(options, BindRandomPortOptions{})) {
+            const endpoint = try std.fmt.allocPrint(allocator, "{s}:0", .{addr});
+            defer allocator.free(endpoint);
+
+            const bound = try self.bind(allocator, endpoint);
+            defer allocator.free(bound);
+            return try endpointPort(bound);
+        }
+
+        const range_len = @as(usize, options.max_port - options.min_port) + 1;
+        const attempts = @min(options.max_tries, range_len);
+        for (0..attempts) |offset| {
+            const port = options.min_port + @as(u16, @intCast(offset));
+            const endpoint = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ addr, port });
+            defer allocator.free(endpoint);
+
+            const bound = self.bind(allocator, endpoint) catch |err| switch (err) {
+                Error.AddressInUse => continue,
+                else => return err,
+            };
+            allocator.free(bound);
+            return port;
+        }
+        return Error.AddressInUse;
     }
 
     pub fn connect(self: *Socket, allocator: std.mem.Allocator, endpoint: []const u8) !void {
@@ -644,7 +695,7 @@ pub const Socket = struct {
         try check(c.zmq_leave(try self.ptr(), group_z.ptr));
     }
 
-    pub fn setInt(self: *Socket, option: i32, value: i32) Error!void {
+    fn setInt(self: *Socket, option: i32, value: i32) Error!void {
         var raw_value: c_int = @intCast(value);
         try check(c.zmq_setsockopt(
             try self.ptr(),
@@ -654,7 +705,7 @@ pub const Socket = struct {
         ));
     }
 
-    pub fn setI64(self: *Socket, option: i32, value: i64) Error!void {
+    fn setI64(self: *Socket, option: i32, value: i64) Error!void {
         var raw_value: i64 = value;
         try check(c.zmq_setsockopt(
             try self.ptr(),
@@ -664,31 +715,31 @@ pub const Socket = struct {
         ));
     }
 
-    pub fn setBytes(self: *Socket, option: i32, data: []const u8) Error!void {
+    fn setBytes(self: *Socket, option: i32, data: []const u8) Error!void {
         try check(c.zmq_setsockopt(try self.ptr(), option, dataPtr(data), data.len));
     }
 
-    pub fn setString(self: *Socket, allocator: std.mem.Allocator, option: i32, value: []const u8) !void {
+    fn setString(self: *Socket, allocator: std.mem.Allocator, option: i32, value: []const u8) !void {
         const value_z = try allocator.dupeZ(u8, value);
         defer allocator.free(value_z);
         try check(c.zmq_setsockopt(try self.ptr(), option, value_z.ptr, value.len));
     }
 
-    pub fn getInt(self: *Socket, option: i32) Error!i32 {
+    fn getInt(self: *Socket, option: i32) Error!i32 {
         var value: c_int = 0;
         var len: usize = @sizeOf(c_int);
         try check(c.zmq_getsockopt(try self.ptr(), option, &value, &len));
         return value;
     }
 
-    pub fn getI64(self: *Socket, option: i32) Error!i64 {
+    fn getI64(self: *Socket, option: i32) Error!i64 {
         var value: i64 = 0;
         var len: usize = @sizeOf(i64);
         try check(c.zmq_getsockopt(try self.ptr(), option, &value, &len));
         return value;
     }
 
-    pub fn getBytesAlloc(self: *Socket, allocator: std.mem.Allocator, option: i32, capacity: usize) ![]u8 {
+    fn getBytesAlloc(self: *Socket, allocator: std.mem.Allocator, option: i32, capacity: usize) ![]u8 {
         const buffer = try allocator.alloc(u8, capacity);
         errdefer allocator.free(buffer);
 
@@ -697,7 +748,7 @@ pub const Socket = struct {
         return try allocator.realloc(buffer, len);
     }
 
-    pub fn getStringAlloc(self: *Socket, allocator: std.mem.Allocator, option: i32, capacity: usize) ![]u8 {
+    fn getStringAlloc(self: *Socket, allocator: std.mem.Allocator, option: i32, capacity: usize) ![]u8 {
         const bytes = try self.getBytesAlloc(allocator, option, capacity);
         errdefer allocator.free(bytes);
         const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
@@ -721,24 +772,69 @@ pub const Socket = struct {
         };
     }
 
+    /// Poll this socket and return the event mask, or 0 on timeout.
+    pub fn poll(self: *Socket, timeout_ms: i64, events: i16) Error!i16 {
+        var item = try self.pollItem(events);
+        const rc = c.zmq_poll(&item, 1, @intCast(timeout_ms));
+        if (rc == -1) return mapErrno();
+        return item.revents;
+    }
+
+    pub fn socketType(self: *Socket) Error!i32 {
+        return self.getInt(TYPE);
+    }
+
+    pub fn hasReceiveMore(self: *Socket) Error!bool {
+        return try self.getInt(RCVMORE) != 0;
+    }
+
     pub fn setLinger(self: *Socket, millis: i32) Error!void {
         try self.setInt(LINGER, millis);
+    }
+
+    pub fn linger(self: *Socket) Error!i32 {
+        return self.getInt(LINGER);
     }
 
     pub fn setSendTimeout(self: *Socket, millis: i32) Error!void {
         try self.setInt(SNDTIMEO, millis);
     }
 
+    pub fn sendTimeout(self: *Socket) Error!i32 {
+        return self.getInt(SNDTIMEO);
+    }
+
     pub fn setReceiveTimeout(self: *Socket, millis: i32) Error!void {
         try self.setInt(RCVTIMEO, millis);
+    }
+
+    pub fn receiveTimeout(self: *Socket) Error!i32 {
+        return self.getInt(RCVTIMEO);
     }
 
     pub fn setSendHighWaterMark(self: *Socket, value: i32) Error!void {
         try self.setInt(SNDHWM, value);
     }
 
+    pub fn sendHighWaterMark(self: *Socket) Error!i32 {
+        return self.getInt(SNDHWM);
+    }
+
     pub fn setReceiveHighWaterMark(self: *Socket, value: i32) Error!void {
         try self.setInt(RCVHWM, value);
+    }
+
+    pub fn receiveHighWaterMark(self: *Socket) Error!i32 {
+        return self.getInt(RCVHWM);
+    }
+
+    pub fn setHighWaterMark(self: *Socket, value: i32) Error!void {
+        try self.setSendHighWaterMark(value);
+        try self.setReceiveHighWaterMark(value);
+    }
+
+    pub fn highWaterMark(self: *Socket) Error!i32 {
+        return self.getInt(SNDHWM);
     }
 
     pub fn setIdentity(self: *Socket, value: []const u8) Error!void {
@@ -749,28 +845,68 @@ pub const Socket = struct {
         return self.getBytesAlloc(allocator, IDENTITY, 255);
     }
 
+    pub fn setSendBufferSize(self: *Socket, bytes: i32) Error!void {
+        try self.setInt(SNDBUF, bytes);
+    }
+
+    pub fn sendBufferSize(self: *Socket) Error!i32 {
+        return self.getInt(SNDBUF);
+    }
+
+    pub fn setReceiveBufferSize(self: *Socket, bytes: i32) Error!void {
+        try self.setInt(RCVBUF, bytes);
+    }
+
+    pub fn receiveBufferSize(self: *Socket) Error!i32 {
+        return self.getInt(RCVBUF);
+    }
+
     pub fn setRouterMandatory(self: *Socket, enabled: bool) Error!void {
         try self.setInt(ROUTER_MANDATORY, @intFromBool(enabled));
+    }
+
+    pub fn routerMandatory(self: *Socket) Error!bool {
+        return try self.getInt(ROUTER_MANDATORY) != 0;
     }
 
     pub fn setConflate(self: *Socket, enabled: bool) Error!void {
         try self.setInt(CONFLATE, @intFromBool(enabled));
     }
 
+    pub fn conflate(self: *Socket) Error!bool {
+        return try self.getInt(CONFLATE) != 0;
+    }
+
     pub fn setImmediate(self: *Socket, enabled: bool) Error!void {
         try self.setInt(IMMEDIATE, @intFromBool(enabled));
+    }
+
+    pub fn immediate(self: *Socket) Error!bool {
+        return try self.getInt(IMMEDIATE) != 0;
     }
 
     pub fn setIpv6(self: *Socket, enabled: bool) Error!void {
         try self.setInt(IPV6, @intFromBool(enabled));
     }
 
+    pub fn ipv6(self: *Socket) Error!bool {
+        return try self.getInt(IPV6) != 0;
+    }
+
     pub fn setXpubNoDrop(self: *Socket, enabled: bool) Error!void {
         try self.setInt(XPUB_NODROP, @intFromBool(enabled));
     }
 
+    pub fn xpubNoDrop(self: *Socket) Error!bool {
+        return try self.getInt(XPUB_NODROP) != 0;
+    }
+
     pub fn setPlainServer(self: *Socket, enabled: bool) Error!void {
         try self.setInt(PLAIN_SERVER, @intFromBool(enabled));
+    }
+
+    pub fn plainServer(self: *Socket) Error!bool {
+        return try self.getInt(PLAIN_SERVER) != 0;
     }
 
     pub fn setPlainClient(
@@ -783,14 +919,26 @@ pub const Socket = struct {
         try self.setString(allocator, PLAIN_PASSWORD, password);
     }
 
+    pub fn plainUsernameAlloc(self: *Socket, allocator: std.mem.Allocator) ![]u8 {
+        return self.getStringAlloc(allocator, PLAIN_USERNAME, 64);
+    }
+
+    pub fn plainPasswordAlloc(self: *Socket, allocator: std.mem.Allocator) ![]u8 {
+        return self.getStringAlloc(allocator, PLAIN_PASSWORD, 64);
+    }
+
+    pub fn mechanism(self: *Socket) Error!i32 {
+        return self.getInt(MECHANISM);
+    }
+
     pub fn setCurveServer(
         self: *Socket,
         allocator: std.mem.Allocator,
-        public_key: []const u8,
+        _public_key: []const u8,
         secret_key: []const u8,
     ) !void {
+        _ = _public_key;
         try self.setInt(CURVE_SERVER, 1);
-        try self.setString(allocator, CURVE_PUBLICKEY, public_key);
         try self.setString(allocator, CURVE_SECRETKEY, secret_key);
     }
 
@@ -810,8 +958,16 @@ pub const Socket = struct {
         try self.setInt(OMQ_ON_MUTE, mode);
     }
 
+    pub fn onMute(self: *Socket) Error!i32 {
+        return self.getInt(OMQ_ON_MUTE);
+    }
+
     pub fn setCompressionLevel(self: *Socket, level: i32) Error!void {
         try self.setInt(OMQ_COMPRESSION_LEVEL, level);
+    }
+
+    pub fn compressionLevel(self: *Socket) Error!i32 {
+        return self.getInt(OMQ_COMPRESSION_LEVEL);
     }
 
     pub fn setCompressionDict(self: *Socket, dict: []const u8) Error!void {
@@ -824,6 +980,10 @@ pub const Socket = struct {
 
     pub fn setCompressionAutoTrain(self: *Socket, enabled: bool) Error!void {
         try self.setInt(OMQ_COMPRESSION_AUTO_TRAIN, @intFromBool(enabled));
+    }
+
+    pub fn compressionAutoTrain(self: *Socket) Error!bool {
+        return try self.getInt(OMQ_COMPRESSION_AUTO_TRAIN) != 0;
     }
 
     pub fn setWorkloadProfile(self: *Socket, profile: i32) Error!void {
@@ -975,6 +1135,12 @@ fn mapErrno() Error {
 fn dataPtr(data: []const u8) *const anyopaque {
     if (data.len == 0) return "";
     return data.ptr;
+}
+
+fn endpointPort(endpoint: []const u8) Error!u16 {
+    const separator = std.mem.lastIndexOfScalar(u8, endpoint, ':') orelse return Error.Invalid;
+    if (separator + 1 == endpoint.len) return Error.Invalid;
+    return std.fmt.parseUnsigned(u16, endpoint[separator + 1 ..], 10) catch Error.Invalid;
 }
 
 fn msgDataSlice(msg: *c.zmq_msg_t, len: usize) Error![]const u8 {

@@ -28,6 +28,9 @@ Rust NIF checks:
 (cd bindings/beam/native && cargo check --no-default-features)
 ```
 
+Default native features are `plain`, `curve`, `lz4`, and `zstd`. The
+`--no-default-features` check keeps runtime `has/1` detection honest.
+
 Elixir wrapper:
 
 ```sh

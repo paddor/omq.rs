@@ -14,20 +14,27 @@ Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 ## API Shape
 
 - `omq:context/0,1` owns native IO threads.
+- `term/1` and `destroy/1` close contexts. `backend_name/0` and `version/0`
+  expose native metadata.
+- `share_key/1` and `from_share_key/1` import an existing native context for
+  cross-wrapper inproc use.
 - `omq:socket/2` creates Erlang socket resources for all 20 ZMQ socket types.
 - `bind`, `bind_to_random_port`, `connect`, `unbind`, and `disconnect` use
   normal endpoint strings.
-- `send`, `try_send`, `recv`, `recv_frame`, `try_recv`, `send_multipart`, and
-  `recv_multipart` cover blocking and nonblocking message calls.
+- `send`, `send_string`, `try_send`, `recv`, `recv_string`, `recv_frame`,
+  `try_recv`, `send_multipart`, and `recv_multipart` cover blocking and
+  nonblocking message calls.
 - `poll/2` and `select/4` provide libzmq-style readiness helpers.
 - `monitor`, `connections`, and `connection_info` expose backend lifecycle
   state.
-- `proxy/2,3` and `proxy_steerable/4` forward between sockets, with optional
-  capture and PAUSE/RESUME/TERMINATE control.
+- `proxy/2,3`, `proxy_steerable/4`, and `device/3` forward between sockets,
+  with optional capture and PAUSE/RESUME/TERMINATE control.
 - `setsockopt/3` and `getsockopt/2` cover core libzmq-compatible options and
-  OMQ transport options.
+  OMQ transport options, plus `set/get`, `set_hwm/get_hwm`, string option
+  aliases, device constants, mechanism constants, and poll constants.
 - `curve_keypair/0`, `curve_public/1`, and `has/1` expose optional feature
   state.
+- `socket_id/1`, `closed/1`, and `context_closed/1` expose wrapper state.
 - `subscribe`, `unsubscribe`, `join`, `leave`, and `send_group` expose
   pub/sub and RADIO/DISH controls.
 

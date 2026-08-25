@@ -4,6 +4,14 @@
     context/0,
     context/1,
     term/1,
+    destroy/1,
+    context_share_key/1,
+    context_from_share_key/1,
+    context_closed/1,
+    backend_name/0,
+    version/0,
+    share_key/1,
+    from_share_key/1,
     socket/2,
     bind/2,
     bind_to_random_port/2,
@@ -19,12 +27,20 @@
     connection_info/2,
     send/2,
     send/3,
+    send_string/2,
+    send_string/3,
+    send_string/4,
     send_multipart/2,
     send_multipart/3,
     try_send/2,
     try_send/3,
     recv/1,
     recv/2,
+    recv_string/1,
+    recv_string/2,
+    recv_string/3,
+    try_recv_string/1,
+    try_recv_string/2,
     recv_frame/1,
     recv_frame/2,
     try_recv/1,
@@ -36,6 +52,7 @@
     proxy/2,
     proxy/3,
     proxy_steerable/4,
+    device/3,
     has/1,
     curve_keypair/0,
     curve_public/1,
@@ -48,9 +65,17 @@
     close/2,
     wait_connected/3,
     wait_subscribed/3,
+    set/3,
+    get/2,
     setsockopt/3,
     getsockopt/2,
-    socket_type/1
+    set_hwm/2,
+    get_hwm/1,
+    setsockopt_string/3,
+    getsockopt_string/2,
+    socket_type/1,
+    socket_id/1,
+    closed/1
 ]).
 
 -export([
@@ -60,8 +85,8 @@
 ]).
 
 -export([
-    pollin/0, pollout/0, pollerr/0, sndmore/0, noblock/0, dontwait/0,
-    affinity/0, identity/0, routing_id/0, subscribe_opt/0, unsubscribe_opt/0, rcvmore/0,
+    pollin/0, pollout/0, pollerr/0, pollpri/0, sndmore/0, noblock/0, dontwait/0,
+    hwm/0, affinity/0, identity/0, routing_id/0, subscribe_opt/0, unsubscribe_opt/0, rcvmore/0,
     fd/0, events/0, type/0, backlog/0,
     linger/0, reconnect_ivl/0, reconnect_ivl_max/0, maxmsgsize/0,
     sndhwm/0, rcvhwm/0, rcvtimeo/0, sndtimeo/0, router_mandatory/0, tcp_keepalive/0,
@@ -74,7 +99,9 @@
     zap_domain/0, mechanism/0, plain_server/0, plain_username/0,
     plain_password/0, curve_server/0, curve_publickey/0, curve_secretkey/0,
     curve_serverkey/0, last_endpoint/0, omq_on_mute/0, omq_compression_level/0,
-    omq_compression_dict/0, omq_compression_auto_train/0, omq_workload_profile/0
+    omq_compression_dict/0, omq_compression_auto_train/0, omq_workload_profile/0,
+    omq_on_mute_block/0, omq_on_mute_drop_newest/0, omq_on_mute_drop_oldest/0,
+    forwarder/0, queue/0, streamer/0, null/0, plain/0, curve/0
 ]).
 
 context() ->
@@ -85,6 +112,30 @@ context(IoThreads) ->
 
 term(Context) ->
     omq_nif:context_term(Context).
+
+destroy(Context) ->
+    term(Context).
+
+context_share_key(Context) ->
+    omq_nif:context_share_key(Context).
+
+context_from_share_key(ShareKey) ->
+    omq_nif:context_from_share_key(ShareKey).
+
+context_closed(Context) ->
+    omq_nif:context_closed(Context).
+
+backend_name() ->
+    omq_nif:backend_name().
+
+version() ->
+    omq_nif:version().
+
+share_key(Context) ->
+    context_share_key(Context).
+
+from_share_key(ShareKey) ->
+    context_from_share_key(ShareKey).
 
 socket(Context, Type) when is_atom(Type) ->
     socket(Context, socket_type_code(Type));
@@ -135,6 +186,17 @@ send(Socket, Data, Opts) ->
     {RoutingId, Flags} = send_options(Opts),
     send_parts(Socket, [iolist_to_binary(Data)], RoutingId, Flags).
 
+send_string(Socket, Text) ->
+    send_string(Socket, Text, []).
+
+send_string(Socket, Text, Encoding) when is_atom(Encoding) ->
+    send_string(Socket, Text, Encoding, []);
+send_string(Socket, Text, Opts) ->
+    send(Socket, unicode:characters_to_binary(Text), Opts).
+
+send_string(Socket, Text, Encoding, Opts) ->
+    send(Socket, unicode:characters_to_binary(Text, utf8, Encoding), Opts).
+
 send_multipart(Socket, Parts) ->
     send_multipart(Socket, Parts, []).
 
@@ -165,6 +227,24 @@ recv(Socket, Timeout) ->
         Error -> Error
     end.
 
+recv_string(Socket) ->
+    recv_string(Socket, infinity).
+
+recv_string(Socket, infinity) ->
+    recv_string(Socket, infinity, utf8);
+recv_string(Socket, Encoding) when is_atom(Encoding) ->
+    recv_string(Socket, infinity, Encoding);
+recv_string(Socket, Timeout) ->
+    recv_string(Socket, Timeout, utf8).
+
+recv_string(Socket, Timeout, Encoding) ->
+    case recv(Socket, Timeout) of
+        {ok, Data} when is_binary(Data) ->
+            {ok, unicode:characters_to_binary(Data, Encoding, utf8)};
+        Other ->
+            Other
+    end.
+
 recv_frame(Socket) ->
     recv_frame(Socket, infinity).
 
@@ -186,6 +266,17 @@ try_recv(Socket) ->
         {ok, [Part], RoutingId} -> {ok, #{data => Part, routing_id => RoutingId}};
         {ok, Parts, RoutingId} -> {ok, #{parts => Parts, routing_id => routing_id(RoutingId)}};
         Error -> Error
+    end.
+
+try_recv_string(Socket) ->
+    try_recv_string(Socket, utf8).
+
+try_recv_string(Socket, Encoding) ->
+    case try_recv(Socket) of
+        {ok, Data} when is_binary(Data) ->
+            {ok, unicode:characters_to_binary(Data, Encoding, utf8)};
+        Other ->
+            Other
     end.
 
 recv_multipart(Socket) ->
@@ -245,6 +336,9 @@ proxy(Frontend, Backend, Capture) ->
 proxy_steerable(Frontend, Backend, Capture, Control) ->
     proxy_steerable_loop(Frontend, Backend, Capture, Control, active).
 
+device(_DeviceType, Frontend, Backend) ->
+    proxy(Frontend, Backend).
+
 has(Capability) when is_atom(Capability) ->
     has(atom_to_binary(Capability, utf8));
 has(Capability) when is_list(Capability) ->
@@ -285,6 +379,17 @@ wait_connected(Socket, MinPeers, Timeout) ->
 wait_subscribed(Socket, MinSubscriptions, Timeout) ->
     omq_nif:wait_subscribed(Socket, MinSubscriptions, timeout_ms(Timeout)).
 
+set(Socket, Option, Value) ->
+    setsockopt(Socket, Option, Value).
+
+get(Socket, Option) ->
+    getsockopt(Socket, Option).
+
+setsockopt(Socket, hwm, Value) when is_integer(Value) ->
+    case setsockopt(Socket, sndhwm, Value) of
+        ok -> setsockopt(Socket, rcvhwm, Value);
+        Error -> Error
+    end;
 setsockopt(Socket, Option, Value) when is_binary(Value); is_list(Value) ->
     case option_code(Option) of
         6 -> subscribe(Socket, Value);
@@ -296,10 +401,29 @@ setsockopt(Socket, Option, Value) when is_boolean(Value) ->
 setsockopt(Socket, Option, Value) when is_integer(Value) ->
     omq_nif:setsockopt(Socket, option_code(Option), Value, <<>>).
 
+getsockopt(Socket, hwm) ->
+    getsockopt(Socket, sndhwm);
 getsockopt(Socket, Option) ->
     case option_code(Option) of
         13 -> {ok, rcvmore_value(Socket)};
         Code -> omq_nif:getsockopt(Socket, Code)
+    end.
+
+set_hwm(Socket, Value) ->
+    setsockopt(Socket, hwm, Value).
+
+get_hwm(Socket) ->
+    getsockopt(Socket, hwm).
+
+setsockopt_string(Socket, Option, Text) ->
+    setsockopt(Socket, Option, unicode:characters_to_binary(Text)).
+
+getsockopt_string(Socket, Option) ->
+    case getsockopt(Socket, Option) of
+        {ok, Data} when is_binary(Data) ->
+            {ok, unicode:characters_to_binary(Data)};
+        Other ->
+            Other
     end.
 
 socket_type(Socket) ->
@@ -307,6 +431,12 @@ socket_type(Socket) ->
         {ok, Code} -> {ok, socket_type_atom(Code)};
         Error -> Error
     end.
+
+socket_id(Socket) ->
+    omq_nif:socket_id(Socket).
+
+closed(Socket) ->
+    omq_nif:closed(Socket).
 
 timeout_ms(infinity) -> -1;
 timeout_ms(Value) when is_integer(Value), Value >= 0 -> Value.
@@ -511,9 +641,12 @@ proxy_steerable_forward(Frontend, Backend, Capture, Ready, active) ->
 pollin() -> 1.
 pollout() -> 2.
 pollerr() -> 4.
+pollpri() -> 32.
 sndmore() -> 2.
 noblock() -> 1.
 dontwait() -> noblock().
+
+hwm() -> 1.
 
 pair() -> 0.
 pub() -> 1.
@@ -596,6 +729,15 @@ omq_compression_level() -> 1005.
 omq_compression_dict() -> 1006.
 omq_compression_auto_train() -> 1007.
 omq_workload_profile() -> 1100.
+omq_on_mute_block() -> 0.
+omq_on_mute_drop_newest() -> 1.
+omq_on_mute_drop_oldest() -> 2.
+forwarder() -> 2.
+queue() -> 3.
+streamer() -> 1.
+null() -> 0.
+plain() -> 1.
+curve() -> 2.
 
 socket_type_code(pair) -> pair();
 socket_type_code(pub) -> pub();
@@ -640,6 +782,7 @@ socket_type_atom(19) -> peer;
 socket_type_atom(20) -> channel.
 
 option_code(Option) when is_integer(Option) -> Option;
+option_code(hwm) -> hwm();
 option_code(affinity) -> affinity();
 option_code(identity) -> identity();
 option_code(routing_id) -> routing_id();

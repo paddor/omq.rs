@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -68,12 +68,15 @@ mod atoms {
 
 struct NativeContext {
     ctx: Context,
+    owns_runtime: bool,
+    closed: AtomicBool,
 }
 
 #[rustler::resource_impl]
 impl rustler::Resource for NativeContext {}
 
 struct NativeSocket {
+    id: u64,
     ctx: Context,
     socket_type: SocketType,
     options: Mutex<Options>,
@@ -105,6 +108,8 @@ struct NativeMonitor {
 
 #[rustler::resource_impl]
 impl rustler::Resource for NativeMonitor {}
+
+static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
 
 impl NativeSocket {
     fn materialize(&self) -> Result<omq_tokio::blocking::Socket, OmqError> {
@@ -259,6 +264,16 @@ fn owned_binary(bytes: &[u8]) -> OwnedBinary {
 fn ok_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
     let binary = owned_binary(bytes).release(env);
     ok(env, binary)
+}
+
+#[rustler::nif]
+fn backend_name<'a>(env: Env<'a>) -> Term<'a> {
+    ok(env, text_term(env, "tokio"))
+}
+
+#[rustler::nif]
+fn version<'a>(env: Env<'a>) -> Term<'a> {
+    ok(env, text_term(env, env!("CARGO_PKG_VERSION")))
 }
 
 fn message_from_parts(parts: Vec<Binary<'_>>, routing_id: u32) -> Message {
@@ -620,13 +635,48 @@ fn context_new<'a>(env: Env<'a>, io_threads: i64) -> Term<'a> {
     let ctx = Context::with_config(ContextConfig {
         io_threads: io_threads as usize,
     });
-    ok(env, ResourceArc::new(NativeContext { ctx }))
+    ok(
+        env,
+        ResourceArc::new(NativeContext {
+            ctx,
+            owns_runtime: true,
+            closed: AtomicBool::new(false),
+        }),
+    )
 }
 
 #[rustler::nif]
 fn context_term<'a>(env: Env<'a>, context: ResourceArc<NativeContext>) -> Term<'a> {
-    context.ctx.term();
+    context.closed.store(true, Ordering::Release);
+    if context.owns_runtime {
+        context.ctx.term();
+    }
     ok_unit(env)
+}
+
+#[rustler::nif]
+fn context_share_key<'a>(env: Env<'a>, context: ResourceArc<NativeContext>) -> Term<'a> {
+    ok(env, context.ctx.share_key())
+}
+
+#[rustler::nif]
+fn context_from_share_key<'a>(env: Env<'a>, share_key: u128) -> Term<'a> {
+    match Context::from_share_key(share_key) {
+        Some(ctx) => ok(
+            env,
+            ResourceArc::new(NativeContext {
+                ctx,
+                owns_runtime: false,
+                closed: AtomicBool::new(false),
+            }),
+        ),
+        None => err_term(env, atoms::closed(), "context closed"),
+    }
+}
+
+#[rustler::nif]
+fn context_closed(context: ResourceArc<NativeContext>) -> bool {
+    context.closed.load(Ordering::Acquire) || context.ctx.is_terminated()
 }
 
 #[rustler::nif]
@@ -637,6 +687,7 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
     ok(
         env,
         ResourceArc::new(NativeSocket {
+            id: NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed),
             ctx: context.ctx.clone(),
             socket_type,
             options: Mutex::new(Options::default()),
@@ -660,6 +711,16 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
 #[rustler::nif]
 fn socket_type<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
     ok(env, socket_type_to_i64(socket.socket_type))
+}
+
+#[rustler::nif]
+fn socket_id<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
+    ok(env, socket.id)
+}
+
+#[rustler::nif]
+fn closed(socket: ResourceArc<NativeSocket>) -> bool {
+    socket.closed.load(Ordering::Acquire)
 }
 
 #[rustler::nif]
@@ -1111,6 +1172,13 @@ fn setsockopt<'a>(
     }
     let mut options = socket.options.lock().unwrap();
     match option {
+        1 => {
+            if int_value < 0 {
+                return err_term(env, atoms::badarg(), "HWM must be >= 0");
+            }
+            options.send_hwm = int_value as u32;
+            options.recv_hwm = int_value as u32;
+        }
         5 => options.identity = Bytes::copy_from_slice(bin_value.as_slice()),
         17 => options.linger = duration_from_millis(int_value),
         18 => options.reconnect = ReconnectPolicy::Fixed(duration_from_millis(int_value).unwrap()),
@@ -1260,6 +1328,7 @@ fn setsockopt<'a>(
 fn getsockopt<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>, option: i64) -> Term<'a> {
     let options = socket.options.lock().unwrap();
     match option {
+        1 => ok(env, i64::from(options.send_hwm)),
         5 => ok_binary(env, &options.identity),
         13 => ok(env, 0i64),
         16 => ok(env, socket_type_to_i64(socket.socket_type)),

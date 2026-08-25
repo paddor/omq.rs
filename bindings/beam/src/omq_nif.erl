@@ -5,8 +5,16 @@
 -export([
     context_new/1,
     context_term/1,
+    has_feature/1,
+    curve_keypair/0,
+    curve_public/1,
     socket_new/2,
     socket_type/1,
+    monitor/1,
+    monitor_recv/2,
+    monitor_try_recv/1,
+    connections/1,
+    connection_info/2,
     bind/2,
     connect/2,
     unbind/2,
@@ -39,8 +47,16 @@ load() ->
 
 context_new(_IoThreads) -> nif_error().
 context_term(_Context) -> nif_error().
+has_feature(_Name) -> nif_error().
+curve_keypair() -> nif_error().
+curve_public(_Secret) -> nif_error().
 socket_new(_Context, _SocketType) -> nif_error().
 socket_type(_Socket) -> nif_error().
+monitor(_Socket) -> nif_error().
+monitor_recv(_Monitor, _TimeoutMs) -> nif_error().
+monitor_try_recv(_Monitor) -> nif_error().
+connections(_Socket) -> nif_error().
+connection_info(_Socket, _ConnectionId) -> nif_error().
 bind(_Socket, _Endpoint) -> nif_error().
 connect(_Socket, _Endpoint) -> nif_error().
 unbind(_Socket, _Endpoint) -> nif_error().

@@ -14,7 +14,7 @@ name = "omq_beam_native"
 crate-type = ["cdylib"]
 
 [features]
-default = []
+default = ["plain", "curve", "lz4", "zstd"]
 plain = ["omq-tokio/plain"]
 curve = ["omq-tokio/curve"]
 lz4 = ["omq-tokio/lz4"]

@@ -11,6 +11,12 @@
     connect/2,
     unbind/2,
     disconnect/2,
+    monitor/1,
+    monitor_recv/1,
+    monitor_recv/2,
+    monitor_try_recv/1,
+    connections/1,
+    connection_info/2,
     send/2,
     send/3,
     send_multipart/2,
@@ -27,7 +33,12 @@
     try_recv_multipart/1,
     poll/2,
     select/4,
+    proxy/2,
+    proxy/3,
+    proxy_steerable/4,
     has/1,
+    curve_keypair/0,
+    curve_public/1,
     subscribe/2,
     unsubscribe/2,
     join/2,
@@ -98,6 +109,24 @@ unbind(Socket, Endpoint) ->
 
 disconnect(Socket, Endpoint) ->
     omq_nif:disconnect(Socket, iolist_to_binary(Endpoint)).
+
+monitor(Socket) ->
+    omq_nif:monitor(Socket).
+
+monitor_recv(Monitor) ->
+    monitor_recv(Monitor, infinity).
+
+monitor_recv(Monitor, Timeout) ->
+    omq_nif:monitor_recv(Monitor, timeout_ms(Timeout)).
+
+monitor_try_recv(Monitor) ->
+    omq_nif:monitor_try_recv(Monitor).
+
+connections(Socket) ->
+    omq_nif:connections(Socket).
+
+connection_info(Socket, ConnectionId) ->
+    omq_nif:connection_info(Socket, ConnectionId).
 
 send(Socket, Data) ->
     send(Socket, Data, []).
@@ -207,23 +236,27 @@ select(RList, WList, _XList, Timeout) ->
             Error
     end.
 
+proxy(Frontend, Backend) ->
+    proxy(Frontend, Backend, undefined).
+
+proxy(Frontend, Backend, Capture) ->
+    proxy_loop(Frontend, Backend, Capture).
+
+proxy_steerable(Frontend, Backend, Capture, Control) ->
+    proxy_steerable_loop(Frontend, Backend, Capture, Control, active).
+
 has(Capability) when is_atom(Capability) ->
     has(atom_to_binary(Capability, utf8));
 has(Capability) when is_list(Capability) ->
     has(list_to_binary(Capability));
 has(Capability) when is_binary(Capability) ->
-    case string:lowercase(binary_to_list(Capability)) of
-        "ipc" -> true;
-        "inproc" -> true;
-        "tcp" -> true;
-        "pgm" -> false;
-        "gssapi" -> false;
-        "curve" -> true;
-        "plain" -> true;
-        "lz4" -> true;
-        "zstd" -> true;
-        _ -> false
-    end.
+    omq_nif:has_feature(string:lowercase(Capability)).
+
+curve_keypair() ->
+    omq_nif:curve_keypair().
+
+curve_public(Secret) ->
+    omq_nif:curve_public(iolist_to_binary(Secret)).
 
 subscribe(Socket, Prefix) ->
     omq_nif:subscribe(Socket, iolist_to_binary(Prefix)).
@@ -383,6 +416,97 @@ merge_poll_ready(Entries) ->
     maps:to_list(lists:foldl(fun({Socket, Flags}, Acc) ->
         maps:update_with(Socket, fun(Existing) -> Existing bor Flags end, Flags, Acc)
     end, #{}, Entries)).
+
+proxy_loop(Frontend, Backend, Capture) ->
+    case poll([{Frontend, pollin()}, {Backend, pollin()}], infinity) of
+        {ok, Ready} ->
+            case lists:member({Frontend, pollin()}, Ready) of
+                true -> proxy_forward(Frontend, Backend, Capture);
+                false -> ok
+            end,
+            case lists:member({Backend, pollin()}, Ready) of
+                true -> proxy_forward(Backend, Frontend, Capture);
+                false -> ok
+            end,
+            proxy_loop(Frontend, Backend, Capture);
+        {error, closed, _} ->
+            ok;
+        Error ->
+            Error
+    end.
+
+proxy_forward(In, Out, Capture) ->
+    case recv_multipart(In, 0) of
+        {ok, Parts} when is_list(Parts) ->
+            proxy_capture(Capture, Parts, []),
+            send_multipart(Out, Parts);
+        {ok, #{parts := Parts, routing_id := RoutingId}} ->
+            Opts = [{routing_id, RoutingId}],
+            proxy_capture(Capture, Parts, Opts),
+            send_multipart(Out, Parts, Opts);
+        {error, would_block, _} ->
+            ok;
+        {error, closed, _} ->
+            ok;
+        Error ->
+            Error
+    end.
+
+proxy_capture(undefined, _Parts, _Opts) ->
+    ok;
+proxy_capture(Capture, Parts, Opts) ->
+    _ = send_multipart(Capture, Parts, Opts),
+    ok.
+
+proxy_steerable_loop(Frontend, Backend, Capture, Control, State) ->
+    Entries = [{Control, pollin()} | proxy_data_poll_entries(Frontend, Backend, State)],
+    case poll(Entries, infinity) of
+        {ok, Ready} ->
+            case lists:member({Control, pollin()}, Ready) of
+                true ->
+                    case proxy_control_state(Control, State) of
+                        terminate -> ok;
+                        NextState ->
+                            proxy_steerable_forward(Frontend, Backend, Capture, Ready, NextState),
+                            proxy_steerable_loop(Frontend, Backend, Capture, Control, NextState)
+                    end;
+                false ->
+                    proxy_steerable_forward(Frontend, Backend, Capture, Ready, State),
+                    proxy_steerable_loop(Frontend, Backend, Capture, Control, State)
+            end;
+        {error, closed, _} ->
+            ok;
+        Error ->
+            Error
+    end.
+
+proxy_data_poll_entries(_Frontend, _Backend, paused) ->
+    [];
+proxy_data_poll_entries(Frontend, Backend, active) ->
+    [{Frontend, pollin()}, {Backend, pollin()}].
+
+proxy_control_state(Control, State) ->
+    case recv(Control, 0) of
+        {ok, <<"TERMINATE">>} -> terminate;
+        {ok, <<"PAUSE">>} -> paused;
+        {ok, <<"RESUME">>} -> active;
+        {ok, _Other} -> State;
+        {error, would_block, _} -> State;
+        {error, closed, _} -> terminate;
+        _Error -> State
+    end.
+
+proxy_steerable_forward(_Frontend, _Backend, _Capture, _Ready, paused) ->
+    ok;
+proxy_steerable_forward(Frontend, Backend, Capture, Ready, active) ->
+    case lists:member({Frontend, pollin()}, Ready) of
+        true -> proxy_forward(Frontend, Backend, Capture);
+        false -> ok
+    end,
+    case lists:member({Backend, pollin()}, Ready) of
+        true -> proxy_forward(Backend, Frontend, Capture);
+        false -> ok
+    end.
 
 pollin() -> 1.
 pollout() -> 2.

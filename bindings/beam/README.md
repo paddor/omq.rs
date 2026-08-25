@@ -20,8 +20,14 @@ Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 - `send`, `try_send`, `recv`, `recv_frame`, `try_recv`, `send_multipart`, and
   `recv_multipart` cover blocking and nonblocking message calls.
 - `poll/2` and `select/4` provide libzmq-style readiness helpers.
+- `monitor`, `connections`, and `connection_info` expose backend lifecycle
+  state.
+- `proxy/2,3` and `proxy_steerable/4` forward between sockets, with optional
+  capture and PAUSE/RESUME/TERMINATE control.
 - `setsockopt/3` and `getsockopt/2` cover core libzmq-compatible options and
   OMQ transport options.
+- `curve_keypair/0`, `curve_public/1`, and `has/1` expose optional feature
+  state.
 - `subscribe`, `unsubscribe`, `join`, `leave`, and `send_group` expose
   pub/sub and RADIO/DISH controls.
 

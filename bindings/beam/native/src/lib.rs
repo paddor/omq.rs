@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
-    Context, ContextConfig, Endpoint, Error as OmqError, KeepAlive, Message, OnMute, Options,
-    ReconnectPolicy, SocketType, TrySendError,
+    ConnectionStatus, Context, ContextConfig, DisconnectReason, Endpoint, Error as OmqError,
+    KeepAlive, Message, MonitorEvent, MonitorStream, MonitorTryRecvError, OnMute, Options,
+    PeerCommandKind, PeerInfo, ReconnectPolicy, SocketType, TrySendError,
 };
 #[cfg(feature = "curve")]
 use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey};
@@ -18,20 +19,50 @@ mod atoms {
     rustler::atoms! {
         ok,
         error,
+        event,
         badarg,
         closed,
         config,
+        connection_id,
+        connected,
+        connect_delayed,
+        accepted,
+        attempt,
+        disconnected,
         handshake_failed,
+        handshake_succeeded,
+        identity,
         invalid_endpoint,
         io,
+        endpoint,
+        listening,
+        lagged,
+        local_close,
         message_too_large,
         no_route,
+        peer_address,
+        peer_closed,
+        peer_command,
+        peer_identity,
+        peer_info,
         protocol,
         rate_limit,
+        reason,
+        retry_in_ms,
+        subscribe_received,
+        unsubscribe_received,
+        join_received,
+        leave_received,
+        handover,
+        command,
+        group,
+        prefix,
+        count,
         timeout,
         unsupported_scheme,
         would_block,
         undefined,
+        zmtp_version,
     }
 }
 
@@ -67,6 +98,13 @@ impl rustler::Resource for NativeSocket {
         let _ = self.close_with_linger(None);
     }
 }
+
+struct NativeMonitor {
+    stream: Mutex<MonitorStream>,
+}
+
+#[rustler::resource_impl]
+impl rustler::Resource for NativeMonitor {}
 
 impl NativeSocket {
     fn materialize(&self) -> Result<omq_tokio::blocking::Socket, OmqError> {
@@ -135,7 +173,7 @@ impl NativeSocket {
 }
 
 #[cfg(feature = "curve")]
-fn z85_text(bytes: &[u8], name: &str) -> Result<&str, OmqError> {
+fn z85_text<'a>(bytes: &'a [u8], name: &str) -> Result<&'a str, OmqError> {
     str::from_utf8(bytes).map_err(|_| OmqError::Config(format!("invalid {name}")))
 }
 
@@ -242,6 +280,193 @@ fn message_to_term<'a>(env: Env<'a>, message: Message) -> Term<'a> {
         .collect();
     let routing_id = message.routing_id().unwrap_or(0);
     (atoms::ok(), parts, routing_id).encode(env)
+}
+
+fn put<'a>(map: Term<'a>, key: impl Encoder, value: impl Encoder) -> Term<'a> {
+    map.map_put(key, value).expect("encode BEAM map")
+}
+
+fn bytes_term<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
+    owned_binary(bytes).release(env).encode(env)
+}
+
+fn text_term<'a>(env: Env<'a>, text: &str) -> Term<'a> {
+    bytes_term(env, text.as_bytes())
+}
+
+fn endpoint_term<'a>(env: Env<'a>, endpoint: &Endpoint) -> Term<'a> {
+    text_term(env, &endpoint.to_string())
+}
+
+fn peer_info_term<'a>(env: Env<'a>, peer: &PeerInfo) -> Term<'a> {
+    let mut map = Term::map_new(env);
+    map = put(map, atoms::connection_id(), peer.connection_id);
+    map = put(
+        map,
+        atoms::peer_address(),
+        peer.peer_address.as_ref().map_or_else(
+            || atoms::undefined().encode(env),
+            |addr| text_term(env, &addr.to_string()),
+        ),
+    );
+    map = put(
+        map,
+        atoms::peer_identity(),
+        peer.peer_identity.as_ref().map_or_else(
+            || atoms::undefined().encode(env),
+            |identity| bytes_term(env, identity),
+        ),
+    );
+    put(
+        map,
+        atoms::zmtp_version(),
+        (peer.zmtp_version.0, peer.zmtp_version.1),
+    )
+}
+
+fn connection_status_term<'a>(env: Env<'a>, status: &ConnectionStatus) -> Term<'a> {
+    let mut map = Term::map_new(env);
+    map = put(map, atoms::connection_id(), status.connection_id);
+    map = put(map, atoms::endpoint(), endpoint_term(env, &status.endpoint));
+    map = put(map, atoms::identity(), bytes_term(env, &status.identity));
+    put(
+        map,
+        atoms::peer_info(),
+        status.peer_info.as_ref().map_or_else(
+            || atoms::undefined().encode(env),
+            |peer| peer_info_term(env, peer),
+        ),
+    )
+}
+
+fn disconnect_reason_term<'a>(env: Env<'a>, reason: &DisconnectReason) -> Term<'a> {
+    match reason {
+        DisconnectReason::PeerClosed => atoms::peer_closed().encode(env),
+        DisconnectReason::LocalClose => atoms::local_close().encode(env),
+        DisconnectReason::Error(reason) => (atoms::error(), text_term(env, reason)).encode(env),
+        DisconnectReason::Handover => atoms::handover().encode(env),
+        _ => atoms::undefined().encode(env),
+    }
+}
+
+fn peer_command_term<'a>(env: Env<'a>, command: &PeerCommandKind) -> Term<'a> {
+    match command {
+        PeerCommandKind::Error { reason } => (atoms::error(), text_term(env, reason)).encode(env),
+        PeerCommandKind::Unknown { name, body } => (
+            atoms::undefined(),
+            bytes_term(env, name),
+            bytes_term(env, body),
+        )
+            .encode(env),
+        _ => atoms::undefined().encode(env),
+    }
+}
+
+fn monitor_event_term<'a>(env: Env<'a>, event: MonitorEvent) -> Term<'a> {
+    let mut map = Term::map_new(env);
+    match event {
+        MonitorEvent::Listening { endpoint } => {
+            map = put(map, atoms::event(), atoms::listening());
+            put(map, atoms::endpoint(), endpoint_term(env, &endpoint))
+        }
+        MonitorEvent::Accepted {
+            endpoint,
+            connection_id,
+            ..
+        } => {
+            map = put(map, atoms::event(), atoms::accepted());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            put(map, atoms::connection_id(), connection_id)
+        }
+        MonitorEvent::Connected {
+            endpoint,
+            connection_id,
+            ..
+        } => {
+            map = put(map, atoms::event(), atoms::connected());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            put(map, atoms::connection_id(), connection_id)
+        }
+        MonitorEvent::HandshakeSucceeded { endpoint, peer } => {
+            map = put(map, atoms::event(), atoms::handshake_succeeded());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            map = put(map, atoms::connection_id(), peer.connection_id);
+            map = put(map, atoms::peer_info(), peer_info_term(env, &peer));
+            put(
+                map,
+                atoms::peer_identity(),
+                peer.peer_identity.as_ref().map_or_else(
+                    || atoms::undefined().encode(env),
+                    |identity| bytes_term(env, identity),
+                ),
+            )
+        }
+        MonitorEvent::HandshakeFailed {
+            endpoint, reason, ..
+        } => {
+            map = put(map, atoms::event(), atoms::handshake_failed());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            put(map, atoms::reason(), text_term(env, &reason))
+        }
+        MonitorEvent::ConnectDelayed {
+            endpoint,
+            retry_in,
+            attempt,
+        } => {
+            map = put(map, atoms::event(), atoms::connect_delayed());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            map = put(
+                map,
+                atoms::retry_in_ms(),
+                duration_to_millis(Some(retry_in)),
+            );
+            put(map, atoms::attempt(), attempt)
+        }
+        MonitorEvent::Disconnected {
+            endpoint,
+            peer,
+            reason,
+        } => {
+            map = put(map, atoms::event(), atoms::disconnected());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            map = put(map, atoms::connection_id(), peer.connection_id);
+            put(map, atoms::reason(), disconnect_reason_term(env, &reason))
+        }
+        MonitorEvent::SubscribeReceived { prefix } => {
+            map = put(map, atoms::event(), atoms::subscribe_received());
+            put(map, atoms::prefix(), bytes_term(env, &prefix))
+        }
+        MonitorEvent::UnsubscribeReceived { prefix } => {
+            map = put(map, atoms::event(), atoms::unsubscribe_received());
+            put(map, atoms::prefix(), bytes_term(env, &prefix))
+        }
+        MonitorEvent::JoinReceived { group } => {
+            map = put(map, atoms::event(), atoms::join_received());
+            put(map, atoms::group(), bytes_term(env, &group))
+        }
+        MonitorEvent::LeaveReceived { group } => {
+            map = put(map, atoms::event(), atoms::leave_received());
+            put(map, atoms::group(), bytes_term(env, &group))
+        }
+        MonitorEvent::PeerCommand {
+            endpoint,
+            peer,
+            command,
+        } => {
+            map = put(map, atoms::event(), atoms::peer_command());
+            map = put(map, atoms::endpoint(), endpoint_term(env, &endpoint));
+            map = put(map, atoms::connection_id(), peer.connection_id);
+            put(map, atoms::command(), peer_command_term(env, &command))
+        }
+        MonitorEvent::Closed => put(map, atoms::event(), atoms::closed()),
+        _ => put(map, atoms::event(), atoms::undefined()),
+    }
+}
+
+fn lagged_monitor_event_term<'a>(env: Env<'a>, count: u64) -> Term<'a> {
+    let mut map = Term::map_new(env);
+    map = put(map, atoms::event(), atoms::lagged());
+    put(map, atoms::count(), count)
 }
 
 fn socket_type_from_i64(value: i64) -> Option<SocketType> {
@@ -435,6 +660,160 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
 #[rustler::nif]
 fn socket_type<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
     ok(env, socket_type_to_i64(socket.socket_type))
+}
+
+#[rustler::nif]
+fn has_feature(name: Binary<'_>) -> bool {
+    let Ok(name) = str::from_utf8(name.as_slice()) else {
+        return false;
+    };
+    match name {
+        "ipc" | "inproc" | "tcp" => true,
+        #[cfg(feature = "curve")]
+        "curve" => true,
+        #[cfg(feature = "plain")]
+        "plain" => true,
+        #[cfg(feature = "lz4")]
+        "lz4" => true,
+        #[cfg(feature = "zstd")]
+        "zstd" => true,
+        _ => false,
+    }
+}
+
+#[rustler::nif]
+fn curve_keypair<'a>(env: Env<'a>) -> Term<'a> {
+    #[cfg(feature = "curve")]
+    {
+        let keypair = CurveKeypair::generate();
+        let public = keypair.public.to_z85();
+        let secret = keypair.secret.to_z85();
+        (
+            atoms::ok(),
+            text_term(env, &public),
+            text_term(env, &secret),
+        )
+            .encode(env)
+    }
+    #[cfg(not(feature = "curve"))]
+    {
+        err_term(
+            env,
+            atoms::unsupported_scheme(),
+            "curve feature not compiled",
+        )
+    }
+}
+
+#[rustler::nif]
+fn curve_public<'a>(env: Env<'a>, secret: Binary<'a>) -> Term<'a> {
+    #[cfg(feature = "curve")]
+    {
+        let secret = match str::from_utf8(secret.as_slice()) {
+            Ok(secret) => secret,
+            Err(_) => return err_term(env, atoms::badarg(), "secret key must be valid UTF-8 Z85"),
+        };
+        let secret = match CurveSecretKey::from_z85(secret) {
+            Ok(secret) => secret,
+            Err(error) => return err_term(env, atoms::badarg(), error),
+        };
+        let public = secret.derive_public().to_z85();
+        ok(env, text_term(env, &public))
+    }
+    #[cfg(not(feature = "curve"))]
+    {
+        let _ = secret;
+        err_term(
+            env,
+            atoms::unsupported_scheme(),
+            "curve feature not compiled",
+        )
+    }
+}
+
+#[rustler::nif]
+fn monitor<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
+    match socket.materialize() {
+        Ok(materialized) => ok(
+            env,
+            ResourceArc::new(NativeMonitor {
+                stream: Mutex::new(materialized.monitor()),
+            }),
+        ),
+        Err(error) => map_error(env, error),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn monitor_recv<'a>(
+    env: Env<'a>,
+    monitor: ResourceArc<NativeMonitor>,
+    timeout_ms: i64,
+) -> Term<'a> {
+    let deadline = duration_from_millis(timeout_ms).and_then(deadline_after);
+    loop {
+        match monitor.stream.lock().unwrap().try_recv() {
+            Ok(event) => return ok(env, monitor_event_term(env, event)),
+            Err(MonitorTryRecvError::Lagged(count)) => {
+                return ok(env, lagged_monitor_event_term(env, count));
+            }
+            Err(MonitorTryRecvError::Closed) => {
+                return err_term(env, atoms::closed(), "monitor closed");
+            }
+            Err(MonitorTryRecvError::Empty) => {}
+            Err(_) => return err_term(env, atoms::closed(), "monitor closed"),
+        }
+        if timeout_ms == 0 || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return err_term(env, atoms::timeout(), "operation timed out");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[rustler::nif]
+fn monitor_try_recv<'a>(env: Env<'a>, monitor: ResourceArc<NativeMonitor>) -> Term<'a> {
+    match monitor.stream.lock().unwrap().try_recv() {
+        Ok(event) => ok(env, monitor_event_term(env, event)),
+        Err(MonitorTryRecvError::Lagged(count)) => ok(env, lagged_monitor_event_term(env, count)),
+        Err(MonitorTryRecvError::Closed) => err_term(env, atoms::closed(), "monitor closed"),
+        Err(MonitorTryRecvError::Empty) => {
+            err_term(env, atoms::would_block(), "operation would block")
+        }
+        Err(_) => err_term(env, atoms::closed(), "monitor closed"),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn connections<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
+    let result = socket
+        .materialize()
+        .and_then(|materialized| materialized.connections());
+    match result {
+        Ok(connections) => {
+            let terms: Vec<_> = connections
+                .iter()
+                .map(|status| connection_status_term(env, status))
+                .collect();
+            ok(env, terms)
+        }
+        Err(error) => map_error(env, error),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn connection_info<'a>(
+    env: Env<'a>,
+    socket: ResourceArc<NativeSocket>,
+    connection_id: u64,
+) -> Term<'a> {
+    let result = socket
+        .materialize()
+        .and_then(|materialized| materialized.connection_info(connection_id));
+    match result {
+        Ok(Some(status)) => ok(env, connection_status_term(env, &status)),
+        Ok(None) => ok(env, atoms::undefined()),
+        Err(error) => map_error(env, error),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

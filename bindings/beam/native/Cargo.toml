@@ -1,0 +1,27 @@
+[package]
+name = "omq_beam_native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "ISC"
+authors = ["Patrik Wenger <paddor@gmail.com>"]
+repository = "https://github.com/paddor/omq.rs"
+description = "BEAM NIF binding for omq.rs."
+publish = false
+
+[lib]
+name = "omq_beam_native"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+plain = ["omq-tokio/plain"]
+curve = ["omq-tokio/curve"]
+lz4 = ["omq-tokio/lz4"]
+zstd = ["omq-tokio/zstd"]
+ws = ["omq-tokio/ws"]
+
+[dependencies]
+bytes = "1.12.0"
+omq-tokio = { path = "../../../omq-tokio", default-features = false }
+rustler = "0.38.0"

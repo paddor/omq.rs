@@ -1,0 +1,4 @@
+/_build/
+/elixir/_build/
+/priv/omq_beam_native.so
+/gleam/build/

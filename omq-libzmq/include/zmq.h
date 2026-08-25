@@ -274,11 +274,15 @@ extern "C" {
 #define OMQ_COMPRESSION_LEVEL       1005
 #define OMQ_COMPRESSION_DICT        1006
 #define OMQ_COMPRESSION_AUTO_TRAIN  1007
+#define OMQ_WORKLOAD_PROFILE        1008
 #define OMQ_ARENA_THRESHOLD         10001
 
 #define OMQ_ON_MUTE_BLOCK           0
 #define OMQ_ON_MUTE_DROP_NEWEST     1
 #define OMQ_ON_MUTE_DROP_OLDEST     2
+#define OMQ_WORKLOAD_DEFAULT        -1
+#define OMQ_WORKLOAD_THROUGHPUT     0
+#define OMQ_WORKLOAD_LATENCY        1
 
 /*  Deprecated options and aliases.                                          */
 #define ZMQ_CONNECT_RID ZMQ_CONNECT_ROUTING_ID
@@ -330,6 +334,11 @@ extern "C" {
     this are copied into OMQ's frame arena; payloads at or above this value
     use gather-write from their Bytes payload. Set before first bind/connect.
     -1 restores the OMQ default.
+
+    OMQ_WORKLOAD_PROFILE is an int32_t scheduling hint. The default (-1) uses
+    OMQ's socket-type default: REQ/REP latency profile, other sockets
+    throughput profile. Set 1 for latency-sensitive SERVER/CLIENT,
+    ROUTER/DEALER, or PAIR sockets. Set 0 to force throughput.
 */
 
 /*  Message options ---------------------------------------------------------- */

@@ -694,6 +694,7 @@ fn recv_msg_to_buf(
     let data = m.get(start).unwrap_or(&[]);
     copy_to_buf(buf, buf_len, data);
     stash_remaining_parts(sock, m, start);
+    mark_external_req_recv(sock);
     match checked_c_int_len(data.len()) {
         Ok(n) => n,
         Err(e) => fail(e),
@@ -782,6 +783,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
             let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
             let bytes = Bytes::copy_from_slice(slice);
             bypass.advance(len);
+            mark_external_req_recv(sock);
             return Ok((bytes, false));
         }
         if dontwait {
@@ -827,6 +829,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
                 let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
                 let bytes = Bytes::copy_from_slice(slice);
                 bypass.advance(len);
+                mark_external_req_recv(sock);
                 return Ok(Some((bytes, false)));
             }
             if bypass.pipe.closed.load(Ordering::Acquire) {
@@ -905,9 +908,11 @@ fn recv_bypass_direct(
         && let Some(popped) = try_pop_dual(cons, sock)
     {
         signal_recv_space_if_full(sock, popped.released_full_slot);
-        let data = popped.message.get(0).unwrap_or(&[]);
+        let start = msg_start_index(sock, &popped.message);
+        let data = popped.message.get(start).unwrap_or(&[]);
         copy_to_buf(buf, buf_len, data);
-        stash_remaining_parts(sock, &popped.message, 0);
+        stash_remaining_parts(sock, &popped.message, start);
+        mark_external_req_recv(sock);
         return checked_c_int_len(data.len());
     }
 
@@ -1019,6 +1024,7 @@ fn try_recv_bypass_or_yring(
             }
         }
         bypass.advance(len);
+        mark_external_req_recv(sock);
         return checked_c_int_len(len).map(Some);
     }
     // SAFETY: libzmq sockets are accessed by at most one application thread.
@@ -1026,10 +1032,12 @@ fn try_recv_bypass_or_yring(
         && let Some(popped) = try_pop_dual(cons, sock)
     {
         signal_recv_space_if_full(sock, popped.released_full_slot);
-        let data = popped.message.get(0).unwrap_or(&[]);
+        let start = msg_start_index(sock, &popped.message);
+        let data = popped.message.get(start).unwrap_or(&[]);
         let frame_len = data.len();
         copy_to_buf(buf, buf_len, data);
-        stash_remaining_parts(sock, &popped.message, 0);
+        stash_remaining_parts(sock, &popped.message, start);
+        mark_external_req_recv(sock);
         return checked_c_int_len(frame_len).map(Some);
     }
     if bypass
@@ -1076,7 +1084,24 @@ fn try_pop_dual(
 
 #[inline]
 fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
-    usize::from(sock.socket_type == omq_tokio::SocketType::Dish && msg.len() >= 2)
+    if sock.socket_type == omq_tokio::SocketType::Dish && msg.len() >= 2 {
+        return 1;
+    }
+    if sock.socket_type == omq_tokio::SocketType::Req
+        && msg.len() >= 2
+        && msg.get(0).is_some_and(<[u8]>::is_empty)
+    {
+        return 1;
+    }
+    0
+}
+
+fn mark_external_req_recv(sock: &OmqSocket) {
+    if sock.socket_type == omq_tokio::SocketType::Req
+        && let Some(inner) = sock.inner.get()
+    {
+        inner.mark_req_reply_received_for_external_recv();
+    }
 }
 
 fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usize) {
@@ -1097,15 +1122,15 @@ fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usiz
 fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
 
-    let dish = sock.socket_type == omq_tokio::SocketType::Dish;
     let nparts = msg.len();
 
-    if nparts <= 1 && !dish {
+    let start = msg_start_index(sock, msg);
+    if nparts <= 1 && start == 0 {
         let head = msg.part_bytes(0).unwrap_or_default();
+        mark_external_req_recv(sock);
         return Ok((head, false));
     }
 
-    let start = usize::from(dish && nparts >= 2);
     let head = msg.part_bytes(start).unwrap_or_default();
 
     let remaining = start + 1;
@@ -1121,6 +1146,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
         }
     }
 
+    mark_external_req_recv(sock);
     Ok((head, remaining < nparts))
 }
 

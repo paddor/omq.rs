@@ -272,6 +272,15 @@ impl Socket {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[doc(hidden)]
+    pub fn mark_req_reply_received_for_external_recv(&self) {
+        if self.inner.socket_type == SocketType::Req {
+            self.inner
+                .req_awaiting_reply
+                .store(false, Ordering::Release);
+        }
+    }
+
     /// Bind to an endpoint. Returns the resolved endpoint once the
     /// listener is active. For wildcard binds (`tcp://...:0`) the
     /// returned endpoint contains the actual port.

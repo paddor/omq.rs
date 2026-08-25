@@ -139,12 +139,13 @@ fn runLatency(
     defer allocator.free(payload);
     @memset(payload, 'x');
 
-    var echo: Echoer = .{ .endpoint = endpoint, .allocator = allocator };
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var echo: Echoer = .{ .ctx = &ctx, .endpoint = endpoint, .allocator = allocator };
     const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
     sleepMillis(50);
 
-    var ctx = try omq.Context.init();
-    defer ctx.deinit();
     var req = try ctx.socket(omq.REQ);
     defer req.deinit();
     try req.connect(allocator, endpoint);
@@ -181,14 +182,13 @@ fn sendLoop(sender: *Sender) !void {
 }
 
 const Echoer = struct {
+    ctx: *omq.Context,
     endpoint: []const u8,
     allocator: std.mem.Allocator,
 };
 
 fn echoLoop(echoer: *Echoer) !void {
-    var ctx = try omq.Context.init();
-    defer ctx.deinit();
-    var socket = try ctx.socket(omq.REP);
+    var socket = try echoer.ctx.socket(omq.REP);
     defer socket.deinit();
     const bound = try socket.bind(echoer.allocator, echoer.endpoint);
     defer echoer.allocator.free(bound);

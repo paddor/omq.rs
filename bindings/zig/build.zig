@@ -41,6 +41,42 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
 
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/parity.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "omq", .module = omq },
+            },
+            .link_libc = true,
+        }),
+        .filters = test_filters,
+    });
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    if (b.args) |args| {
+        run_parity_tests.addArgs(args);
+    }
+    test_step.dependOn(&run_parity_tests.step);
+
+    const soak_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soak.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "omq", .module = omq },
+            },
+            .link_libc = true,
+        }),
+    });
+    const run_soak_tests = b.addRunArtifact(soak_tests);
+    if (b.args) |args| {
+        run_soak_tests.addArgs(args);
+    }
+    const soak_step = b.step("soak", "Run long-running soak tests");
+    soak_step.dependOn(&run_soak_tests.step);
+
     const docs_module = b.createModule(.{
         .root_source_file = b.path("src/omq.zig"),
         .target = target,

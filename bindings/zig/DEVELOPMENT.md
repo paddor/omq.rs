@@ -29,6 +29,16 @@ Run one filtered test group:
 (cd bindings/zig && zig build test -Dtest-filter=pub)
 ```
 
+Run soak tests. Default script duration is one hour:
+
+```sh
+bindings/zig/scripts/soak.sh
+bindings/zig/scripts/soak.sh 10m
+```
+
+Soak tests sample RSS and `/proc/self/fd` counts and fail on resource growth.
+They are not part of `zig build test`.
+
 Override native paths when building outside this repository layout:
 
 ```sh

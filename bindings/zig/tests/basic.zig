@@ -67,7 +67,7 @@ test "construct every socket type" {
 
     for (types) |socket_type| {
         var socket = try ctx.socket(socket_type);
-        try testing.expectEqual(socket_type, try socket.getInt(omq.TYPE));
+        try testing.expectEqual(socket_type, try socket.socketType());
         socket.deinit();
     }
 }
@@ -117,7 +117,7 @@ test "push pull multipart and rcvmore" {
     try testing.expectEqual(@as(usize, 2), got.parts.len);
     try testing.expectEqualStrings("meta", got.parts[0]);
     try testing.expectEqualStrings("trailer", got.parts[1]);
-    try testing.expectEqual(@as(i32, 0), try pull.getInt(omq.RCVMORE));
+    try testing.expect(!try pull.hasReceiveMore());
 }
 
 test "sndmore aggregates frames" {
@@ -371,13 +371,13 @@ test "option round trips" {
     defer push.deinit();
 
     try push.setLinger(50);
-    try testing.expectEqual(@as(i32, 50), try push.getInt(omq.LINGER));
+    try testing.expectEqual(@as(i32, 50), try push.linger());
 
     try push.setSendHighWaterMark(64);
-    try testing.expectEqual(@as(i32, 64), try push.getInt(omq.SNDHWM));
+    try testing.expectEqual(@as(i32, 64), try push.sendHighWaterMark());
 
     try push.setReceiveHighWaterMark(32);
-    try testing.expectEqual(@as(i32, 32), try push.getInt(omq.RCVHWM));
+    try testing.expectEqual(@as(i32, 32), try push.receiveHighWaterMark());
 }
 
 test "receive timeout maps to Again" {
@@ -412,23 +412,23 @@ test "extended option round trips" {
     var push = try ctx.socket(omq.PUSH);
     defer push.deinit();
 
-    try push.setInt(omq.SNDBUF, 65536);
-    try testing.expectEqual(@as(i32, 65536), try push.getInt(omq.SNDBUF));
+    try push.setSendBufferSize(65536);
+    try testing.expectEqual(@as(i32, 65536), try push.sendBufferSize());
 
-    try push.setInt(omq.RCVBUF, 32768);
-    try testing.expectEqual(@as(i32, 32768), try push.getInt(omq.RCVBUF));
+    try push.setReceiveBufferSize(32768);
+    try testing.expectEqual(@as(i32, 32768), try push.receiveBufferSize());
 
     try push.setRouterMandatory(true);
-    try testing.expectEqual(@as(i32, 1), try push.getInt(omq.ROUTER_MANDATORY));
+    try testing.expect(try push.routerMandatory());
 
     try push.setConflate(true);
-    try testing.expectEqual(@as(i32, 1), try push.getInt(omq.CONFLATE));
+    try testing.expect(try push.conflate());
 
     try push.setArenaThreshold(2048);
     try testing.expectEqual(@as(i64, 2048), try push.arenaThreshold());
 
     try push.setOnMute(omq.OMQ_ON_MUTE_DROP_NEWEST);
-    try testing.expectEqual(@as(i32, omq.OMQ_ON_MUTE_DROP_NEWEST), try push.getInt(omq.OMQ_ON_MUTE));
+    try testing.expectEqual(@as(i32, omq.OMQ_ON_MUTE_DROP_NEWEST), try push.onMute());
 
     try testing.expectEqual(@as(i32, omq.OMQ_WORKLOAD_DEFAULT), try push.workloadProfile());
     try push.setWorkloadProfile(omq.OMQ_WORKLOAD_LATENCY);
@@ -437,10 +437,10 @@ test "extended option round trips" {
     try testing.expectEqual(@as(i32, omq.OMQ_WORKLOAD_DEFAULT), try push.workloadProfile());
 
     try push.setCompressionLevel(1);
-    try testing.expectEqual(@as(i32, 1), try push.getInt(omq.OMQ_COMPRESSION_LEVEL));
+    try testing.expectEqual(@as(i32, 1), try push.compressionLevel());
 
     try push.setCompressionAutoTrain(true);
-    try testing.expectEqual(@as(i32, 1), try push.getInt(omq.OMQ_COMPRESSION_AUTO_TRAIN));
+    try testing.expect(try push.compressionAutoTrain());
 
     try push.setCompressionDict("my-dict-bytes");
     const dict = try push.compressionDictAlloc(allocator);
@@ -461,16 +461,16 @@ test "identity and plain option bytes round trip" {
     try testing.expectEqualStrings("zig-id", identity);
 
     try push.setPlainServer(true);
-    try testing.expectEqual(@as(i32, 1), try push.getInt(omq.PLAIN_SERVER));
+    try testing.expect(try push.plainServer());
 
     try push.setPlainClient(allocator, "admin", "secret");
-    const username = try push.getStringAlloc(allocator, omq.PLAIN_USERNAME, 64);
+    const username = try push.plainUsernameAlloc(allocator);
     defer allocator.free(username);
-    const password = try push.getStringAlloc(allocator, omq.PLAIN_PASSWORD, 64);
+    const password = try push.plainPasswordAlloc(allocator);
     defer allocator.free(password);
     try testing.expectEqualStrings("admin", username);
     try testing.expectEqualStrings("secret", password);
-    try testing.expectEqual(@as(i32, omq.PLAIN), try push.getInt(omq.MECHANISM));
+    try testing.expectEqual(@as(i32, omq.PLAIN), try push.mechanism());
 }
 
 test "poll reports readable socket" {

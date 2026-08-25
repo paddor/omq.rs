@@ -1,24 +1,36 @@
 <img src="doc/omq-logo.svg" alt="OMQ" width="525" />
 
-Pure Rust [ZeroMQ](https://zeromq.org): brokerless message passing for distributed and concurrent applications. Socket-level messaging patterns that work the same way in-process, between processes, and over the network.
+Connect threads, processes, hosts, and languages without a broker. OMQ gives
+you the same small send/recv model across in-process queues, IPC, TCP,
+WebSocket, compressed links, and language boundaries.
 
-- 20 socket types: stable ZMQ patterns plus draft CLIENT/SERVER, RADIO/DISH, SCATTER/GATHER, CHANNEL/PEER, and STREAM
-- 8 stable transports: TCP, IPC, inproc, UDP, WS, WSS, `lz4+tcp://`,
-  and `lz4+ws://`; experimental `zstd+tcp://` compression transport behind
-  the `zstd` feature
-- 3 security mechanisms: NULL, PLAIN, CURVE
-- OMQ-owned background I/O threads on Linux, macOS, and Windows
-- No C compiler, no libzmq, no libsodium
-- Bindings and compatibility APIs:
+OMQ follows [ZeroMQ](https://zeromq.org): same socket patterns, compatible
+wire protocol, and libzmq-style APIs. The core is memory-safe Rust and does
+not depend on libzmq, libsodium, or a C compiler.
+
+- Messaging patterns for pipelines, publish/subscribe, request/reply,
+  routed services, exclusive peers, and raw streams.
+- Transports for threads, processes, hosts, browsers, and compressed links:
+  inproc, IPC, TCP, UDP, WebSocket, `lz4+tcp://`, `lz4+ws://`, and
+  `zstd+tcp://`.
+- Security for open, password-authenticated, and encrypted connections:
+  NULL, PLAIN, and CURVE.
+- Near-linear I/O scalability with OMQ-owned background threads on Linux,
+  macOS, and Windows.
+- No C compiler, no libzmq, no libsodium.
+- Native bindings and compatibility APIs:
   - [C/C++](omq-libzmq/)
-  - [Python](bindings/pyomq/)
-  - [.NET](bindings/dotnet/)
-  - [Ruby](bindings/ruby/)
-  - [Java](bindings/java/)
+  - [Crystal](https://github.com/paddor/omq-binding.cr) and pure Crystal [OMQ.cr](https://github.com/paddor/omq.cr)
   - [Go](bindings/go/)
-  - [Node.js](bindings/node/)
+  - [Java](bindings/java/)
   - [Lua](bindings/lua/)
-  - ([Crystal](https://github.com/paddor/omq.rs/pull/287))
+  - [.NET](bindings/dotnet/)
+  - [Node.js](bindings/node/)
+  - [Python](bindings/pyomq/)
+  - [Ruby](bindings/ruby/) and pure Ruby [OMQ.rb](https://github.com/zeromq/omq.rb)
+  - [TypeScript](https://github.com/paddor/omq.ts) for browsers (ZWS transport only)
+
+## Performance
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
@@ -143,12 +155,6 @@ Five Cargo workspace crates plus language bindings.
 | [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
 | [`OMQ.node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
 | [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
-
-## Sister projects
-
-- [OMQ.rb](https://github.com/zeromq/omq.rb): pure Ruby implementation.
-- [OMQ.ts](https://github.com/paddor/omq.ts): TypeScript browser/WebSocket implementation.
-- [OMQ.cr](https://github.com/paddor/omq.cr): pure Crystal implementation.
 
 ## Testing
 

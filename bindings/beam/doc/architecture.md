@@ -61,8 +61,13 @@ Nonblocking calls use normal NIF scheduling:
 - socket type constants and metadata
 
 `send/2,3` and `send_multipart/2,3` convert iodata to binaries in Erlang, then
-copy parts into Rust `Bytes` for native submission. `recv/1,2` converts native
-message parts into BEAM binaries. Routing IDs are exposed as Erlang maps for
+copy parts into Rust `Bytes` for native submission. `SNDMORE` is buffered in
+the calling BEAM process until a final send flushes one native multipart
+message. `NOBLOCK` and `DONTWAIT` route through the native `try_send` path.
+
+`recv/1,2` converts native message parts into BEAM binaries. `recv_frame/1,2`
+stores remaining frames in the calling BEAM process so `RCVMORE` can report
+frame iteration state. Routing IDs are exposed as Erlang maps for
 SERVER/CLIENT and other routing-ID-bearing messages.
 
 ## Readiness

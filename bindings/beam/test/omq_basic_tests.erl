@@ -13,6 +13,24 @@ context_socket_type_test() ->
     ?assertEqual(ok, omq:close(Sock)),
     ?assertEqual(ok, omq:term(Ctx)).
 
+last_endpoint_and_random_port_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    ?assertEqual({ok, <<>>}, omq:getsockopt(Pull, last_endpoint)),
+    {ok, Bound} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+    ?assertEqual({ok, Bound}, omq:getsockopt(Pull, last_endpoint)),
+    ok = omq:close(Pull),
+    {ok, Other} = omq:socket(Ctx, pull),
+    {ok, Port} = omq:bind_to_random_port(Other, <<"tcp://127.0.0.1">>, 49152, 65535),
+    ?assert(is_integer(Port)),
+    ?assert(Port >= 49152),
+    ?assert(Port =< 65535),
+    {ok, RandomEndpoint} = omq:getsockopt(Other, last_endpoint),
+    {_, RandomPort} = tcp_host_port(RandomEndpoint),
+    ?assertEqual(Port, RandomPort),
+    ok = omq:close(Other),
+    ?assertEqual(ok, omq:term(Ctx)).
+
 all_socket_types_create_test() ->
     Types = [
         pair, pub, sub, req, rep, dealer, router, pull, push, xpub, xsub,
@@ -50,6 +68,39 @@ push_pull_multipart_test() ->
     ?assertEqual({ok, [<<"a">>, <<"b">>]}, omq:recv_multipart(Pull, 1000)),
     ok = omq:close(Pull),
     ok = omq:close(Push),
+    ok = omq:term(Ctx).
+
+sndmore_flag_aggregates_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-sndmore">>),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send(Push, <<"a">>, omq:sndmore()),
+    ok = omq:send(Push, <<"b">>, [sndmore]),
+    ok = omq:send(Push, <<"c">>, [dontwait]),
+    ?assertEqual({ok, [<<"a">>, <<"b">>, <<"c">>]}, omq:recv_multipart(Pull, 1000)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+recv_frame_rcvmore_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-rcvmore">>),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_multipart(Push, [<<"x">>, <<"y">>, <<"z">>]),
+    ?assertEqual({ok, <<"x">>}, omq:recv_frame(Pull, 1000)),
+    ?assertEqual({ok, 1}, omq:getsockopt(Pull, rcvmore)),
+    ?assertEqual({ok, <<"y">>}, omq:recv_frame(Pull, 1000)),
+    ?assertEqual({ok, 1}, omq:getsockopt(Pull, omq:rcvmore())),
+    ?assertEqual({ok, <<"z">>}, omq:recv_frame(Pull, 1000)),
+    ?assertEqual({ok, 0}, omq:getsockopt(Pull, rcvmore)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
     ok = omq:term(Ctx).
 
 req_rep_roundtrip_test() ->

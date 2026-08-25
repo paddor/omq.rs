@@ -18,6 +18,15 @@ metadata_and_destroy_alias_test() ->
     {ok, Version} = omq:version(),
     ?assert(is_binary(Version)),
     ?assert(byte_size(Version) > 0),
+    ?assertEqual({ok, Version}, omq:omq_version()),
+    {ok, {Major, Minor, Patch}} = omq:omq_version_info(),
+    ?assert(is_integer(Major)),
+    ?assert(is_integer(Minor)),
+    ?assert(is_integer(Patch)),
+    ?assertEqual(<<"4.3.4">>, omq:zmq_version()),
+    ?assertEqual({4, 3, 4}, omq:zmq_version_info()),
+    ?assert(is_binary(omq:strerror(11))),
+    ?assert(byte_size(omq:strerror(11)) > 0),
     ?assertEqual(32, omq:pollpri()),
     ?assertEqual(2, omq:forwarder()),
     ?assertEqual(3, omq:queue()),
@@ -69,6 +78,17 @@ context_share_key_roundtrip_test() ->
     ok = omq:close(Pull),
     ok = omq:term(Ctx),
     ?assertEqual(true, omq:context_closed(Ctx)).
+
+context_instance_singleton_test() ->
+    {ok, A} = omq:context_instance(),
+    {ok, B} = omq:instance(),
+    {ok, AKey} = omq:context_share_key(A),
+    {ok, AKey} = omq:context_share_key(B),
+    ok = omq:term(A),
+    {ok, C} = omq:context_instance(2),
+    {ok, CKey} = omq:context_share_key(C),
+    ?assertNotEqual(AKey, CKey),
+    ok = omq:term(C).
 
 context_from_share_key_observes_owner_term_test() ->
     {ok, Ctx} = omq:context(),
@@ -175,6 +195,42 @@ send_recv_string_encoding_test() ->
     ok = omq:connect(Push, Endpoint),
     ok = omq:send_string(Push, <<"hello">>, utf16),
     ?assertEqual({ok, <<"hello">>}, omq:recv_string(Pull, 1000, utf16)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+send_recv_json_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-json">>),
+    Value = #{<<"symbol">> => <<"OMQ">>, <<"price">> => 42, <<"tags">> => [<<"fast">>]},
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_json(Push, Value),
+    ?assertEqual({ok, Value}, omq:recv_json(Pull, 1000)),
+    ok = omq:send_json(Push, #{<<"next">> => 1}),
+    eventually(fun() -> omq:try_recv_json(Pull) end, {ok, #{<<"next">> => 1}}, 100),
+    ok = omq:send(Push, <<"not-json">>),
+    ?assertEqual({error, badarg, "invalid JSON"}, omq:recv_json(Pull, 1000)),
+    ok = omq:close(Push),
+    ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+send_recv_term_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-term">>),
+    Term = #{<<"symbol">> => <<"OMQ">>, price => 42, tags => [fast, native]},
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send_term(Push, Term),
+    ?assertEqual({ok, Term}, omq:recv_term(Pull, 1000)),
+    ok = omq:send_term(Push, {next, 1}),
+    eventually(fun() -> omq:try_recv_term(Pull) end, {ok, {next, 1}}, 100),
+    ok = omq:send(Push, <<"not-a-term">>),
+    ?assertEqual({error, badarg, "invalid external term format"}, omq:recv_term(Pull, 1000)),
     ok = omq:close(Push),
     ok = omq:close(Pull),
     ok = omq:term(Ctx).
@@ -708,6 +764,78 @@ pyzmq_pair_interop_tcp_test() ->
         ok = omq:term(Ctx)
     end).
 
+pyzmq_xsub_xpub_interop_tcp_test() ->
+    with_pyzmq(fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, XPub} = omq:socket(Ctx, xpub),
+        {ok, Endpoint} = omq:bind(XPub, <<"tcp://127.0.0.1:0">>),
+        Port = python_peer("xsub", Endpoint),
+        wait_python_ready(Port),
+        ?assertEqual({ok, <<1, "topic">>}, omq:recv(XPub, 2000)),
+        ok = omq:send(XPub, <<"topic from-omq">>),
+        wait_python(Port),
+        ok = omq:close(XPub),
+        ok = omq:term(Ctx)
+    end).
+
+pyzmq_xpub_xsub_interop_tcp_test() ->
+    with_pyzmq(fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, XSub} = omq:socket(Ctx, xsub),
+        {ok, Endpoint} = omq:bind(XSub, <<"tcp://127.0.0.1:0">>),
+        Port = python_peer("xpub", Endpoint),
+        wait_python_ready(Port),
+        ok = omq:send(XSub, <<1, "topic">>),
+        ?assertEqual({ok, <<"topic from-pyzmq">>}, omq:recv(XSub, 3000)),
+        wait_python(Port),
+        ok = omq:close(XSub),
+        ok = omq:term(Ctx)
+    end).
+
+pyzmq_curve_client_omq_server_push_pull_test() ->
+    with_pyzmq(fun() ->
+        with_feature(curve, fun() ->
+            {ok, Ctx} = omq:context(),
+            {ok, Pull} = omq:socket(Ctx, pull),
+            {ok, ServerPublic, ServerSecret} = omq:curve_keypair(),
+            {ok, ClientPublic, ClientSecret} = omq:curve_keypair(),
+            ok = omq:setsockopt(Pull, curve_server, true),
+            ok = omq:setsockopt(Pull, curve_publickey, ServerPublic),
+            ok = omq:setsockopt(Pull, curve_secretkey, ServerSecret),
+            {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+            Port = python_peer_args("curve_push", Endpoint, [
+                ClientPublic, ClientSecret, ServerPublic
+            ]),
+            ?assertEqual({ok, <<"from-pyzmq-curve">>}, omq:recv(Pull, 5000)),
+            wait_python(Port),
+            ok = omq:close(Pull),
+            ok = omq:term(Ctx)
+        end)
+    end).
+
+pyzmq_curve_server_omq_client_push_pull_test() ->
+    with_pyzmq(fun() ->
+        with_feature(curve, fun() ->
+            Endpoint = unbound_tcp_endpoint(),
+            {ok, ServerPublic, ServerSecret} = omq:curve_keypair(),
+            {ok, ClientPublic, ClientSecret} = omq:curve_keypair(),
+            Port = python_peer_args("curve_pull_server", Endpoint, [
+                ServerPublic, ServerSecret
+            ]),
+            wait_python_ready(Port),
+            {ok, Ctx} = omq:context(),
+            {ok, Push} = omq:socket(Ctx, push),
+            ok = omq:setsockopt(Push, curve_serverkey, ServerPublic),
+            ok = omq:setsockopt(Push, curve_publickey, ClientPublic),
+            ok = omq:setsockopt(Push, curve_secretkey, ClientSecret),
+            ok = omq:connect(Push, Endpoint),
+            ok = omq:send(Push, <<"from-omq-curve">>),
+            wait_python(Port),
+            ok = omq:close(Push),
+            ok = omq:term(Ctx)
+        end)
+    end).
+
 has_feature_test() ->
     ?assertEqual(true, omq:has(ipc)),
     ?assertEqual(true, omq:has(<<"INPROC">>)),
@@ -721,8 +849,11 @@ has_feature_test() ->
 curve_key_helpers_test() ->
     with_feature(curve, fun() ->
         {ok, Public, Secret} = omq:curve_keypair(),
+        {ok, Public2, Secret2} = omq:curve_keypair(),
         ?assertEqual(40, byte_size(Public)),
         ?assertEqual(40, byte_size(Secret)),
+        ?assertNotEqual(Public, Public2),
+        ?assertNotEqual(Secret, Secret2),
         ?assertEqual({ok, Public}, omq:curve_public(Secret)),
         ?assertMatch({error, badarg, _}, omq:curve_public(<<"not-valid-z85-key">>))
     end).
@@ -744,6 +875,57 @@ plain_push_pull_tcp_test() ->
         ok = omq:term(Ctx)
     end).
 
+plain_req_rep_tcp_test() ->
+    with_feature(plain, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Rep} = omq:socket(Ctx, rep),
+        {ok, Req} = omq:socket(Ctx, req),
+        set_plain_server_client(Rep, Req),
+        {ok, Endpoint} = omq:bind(Rep, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Req, Endpoint),
+        ok = omq:send(Req, <<"ping over plain">>),
+        ?assertEqual({ok, <<"ping over plain">>}, omq:recv(Rep, 5000)),
+        ok = omq:send(Rep, <<"pong over plain">>),
+        ?assertEqual({ok, <<"pong over plain">>}, omq:recv(Req, 5000)),
+        ok = omq:close(Req),
+        ok = omq:close(Rep),
+        ok = omq:term(Ctx)
+    end).
+
+plain_pub_sub_tcp_test() ->
+    with_feature(plain, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pub} = omq:socket(Ctx, pub),
+        {ok, Sub} = omq:socket(Ctx, sub),
+        set_plain_server_client(Pub, Sub),
+        ok = omq:subscribe(Sub, <<"hot/">>),
+        {ok, Endpoint} = omq:bind(Pub, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Sub, Endpoint),
+        {ok, _} = omq:wait_connected(Pub, 1, 5000),
+        {ok, _} = omq:wait_subscribed(Pub, 1, 5000),
+        ok = omq:send(Pub, <<"cold/skip">>),
+        ok = omq:send(Pub, <<"hot/take">>),
+        ?assertEqual({ok, <<"hot/take">>}, omq:recv(Sub, 5000)),
+        ok = omq:close(Sub),
+        ok = omq:close(Pub),
+        ok = omq:term(Ctx)
+    end).
+
+plain_multipart_tcp_test() ->
+    with_feature(plain, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        {ok, Push} = omq:socket(Ctx, push),
+        set_plain_server_client(Pull, Push),
+        {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Push, Endpoint),
+        ok = omq:send_multipart(Push, [<<"a">>, <<"bb">>, <<"ccc">>]),
+        ?assertEqual({ok, [<<"a">>, <<"bb">>, <<"ccc">>]}, omq:recv_multipart(Pull, 5000)),
+        ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
 curve_push_pull_tcp_test() ->
     with_feature(curve, fun() ->
         {ok, Ctx} = omq:context(),
@@ -754,6 +936,57 @@ curve_push_pull_tcp_test() ->
         ok = omq:connect(Push, Endpoint),
         ok = omq:send(Push, <<"hello over curve">>),
         ?assertEqual({ok, <<"hello over curve">>}, omq:recv(Pull, 5000)),
+        ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
+curve_req_rep_tcp_test() ->
+    with_feature(curve, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Rep} = omq:socket(Ctx, rep),
+        {ok, Req} = omq:socket(Ctx, req),
+        set_curve_server_client(Rep, Req),
+        {ok, Endpoint} = omq:bind(Rep, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Req, Endpoint),
+        ok = omq:send(Req, <<"ping over curve">>),
+        ?assertEqual({ok, <<"ping over curve">>}, omq:recv(Rep, 5000)),
+        ok = omq:send(Rep, <<"pong over curve">>),
+        ?assertEqual({ok, <<"pong over curve">>}, omq:recv(Req, 5000)),
+        ok = omq:close(Req),
+        ok = omq:close(Rep),
+        ok = omq:term(Ctx)
+    end).
+
+curve_pub_sub_tcp_test() ->
+    with_feature(curve, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pub} = omq:socket(Ctx, pub),
+        {ok, Sub} = omq:socket(Ctx, sub),
+        set_curve_server_client(Pub, Sub),
+        ok = omq:subscribe(Sub, <<"hot/">>),
+        {ok, Endpoint} = omq:bind(Pub, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Sub, Endpoint),
+        {ok, _} = omq:wait_connected(Pub, 1, 5000),
+        {ok, _} = omq:wait_subscribed(Pub, 1, 5000),
+        ok = omq:send(Pub, <<"cold/skip">>),
+        ok = omq:send(Pub, <<"hot/take">>),
+        ?assertEqual({ok, <<"hot/take">>}, omq:recv(Sub, 5000)),
+        ok = omq:close(Sub),
+        ok = omq:close(Pub),
+        ok = omq:term(Ctx)
+    end).
+
+curve_multipart_tcp_test() ->
+    with_feature(curve, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        {ok, Push} = omq:socket(Ctx, push),
+        set_curve_server_client(Pull, Push),
+        {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
+        ok = omq:connect(Push, Endpoint),
+        ok = omq:send_multipart(Push, [<<"a">>, <<"bb">>, <<"ccc">>]),
+        ?assertEqual({ok, [<<"a">>, <<"bb">>, <<"ccc">>]}, omq:recv_multipart(Pull, 5000)),
         ok = omq:close(Push),
         ok = omq:close(Pull),
         ok = omq:term(Ctx)
@@ -775,6 +1008,44 @@ zstd_push_pull_tcp_test() ->
         Msg = payload(4096),
         ok = omq:send(Push, Msg),
         ?assertEqual({ok, Msg}, omq:recv(Pull, 5000)),
+        ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
+zstd_static_dict_tcp_test() ->
+    with_feature(zstd, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        {ok, Push} = omq:socket(Ctx, push),
+        Dict = zstd_dict(),
+        ok = omq:setsockopt(Push, omq_compression_level, 1),
+        ok = omq:setsockopt(Push, omq_compression_dict, Dict),
+        ?assertEqual({ok, Dict}, omq:getsockopt(Push, omq_compression_dict)),
+        {ok, Endpoint} = omq:bind(Pull, <<"zstd+tcp://127.0.0.1:0">>),
+        ok = omq:connect(Push, Endpoint),
+        Msg = payload(1024),
+        ok = omq:send(Push, Msg),
+        ?assertEqual({ok, Msg}, omq:recv(Pull, 5000)),
+        ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
+zstd_auto_train_tcp_test() ->
+    with_feature(zstd, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        {ok, Push} = omq:socket(Ctx, push),
+        ok = omq:setsockopt(Push, omq_compression_auto_train, true),
+        ?assertEqual({ok, 1}, omq:getsockopt(Push, omq_compression_auto_train)),
+        {ok, Endpoint} = omq:bind(Pull, <<"zstd+tcp://127.0.0.1:0">>),
+        ok = omq:connect(Push, Endpoint),
+        Messages = [payload(1024) || _ <- lists:seq(1, 130)],
+        lists:foreach(fun(Msg) -> ok = omq:send(Push, Msg) end, Messages),
+        lists:foreach(fun(Msg) ->
+            ?assertEqual({ok, Msg}, omq:recv(Pull, 5000))
+        end, Messages),
         ok = omq:close(Push),
         ok = omq:close(Pull),
         ok = omq:term(Ctx)
@@ -1003,6 +1274,11 @@ set_curve_server_client(Server, Client) ->
     ok = omq:setsockopt(Client, curve_publickey, ClientPublic),
     ok = omq:setsockopt(Client, curve_secretkey, ClientSecret).
 
+set_plain_server_client(Server, Client) ->
+    ok = omq:setsockopt(Server, plain_server, true),
+    ok = omq:setsockopt(Client, plain_username, <<"alice">>),
+    ok = omq:setsockopt(Client, plain_password, <<"secret">>).
+
 compression_push_pull(Endpoint, Msg) ->
     {ok, Ctx} = omq:context(),
     {ok, Pull} = omq:socket(Ctx, pull),
@@ -1021,6 +1297,14 @@ payload(Size) ->
     Padding = binary:copy(<<"A">>, Size - byte_size(Prefix) - byte_size(Suffix)),
     <<Prefix/binary, Padding/binary, Suffix/binary>>.
 
+zstd_dict() ->
+    <<55,164,48,236,190,170,221,92,129,17,32,132,16,66,102,70,
+      68,68,68,68,36,73,2,0,33,20,196,24,99,140,33,132,
+      16,66,8,33,132,16,66,8,33,68,68,68,68,68,68,68,
+      68,36,9,0,0,81,16,99,140,49,198,24,99,12,33,196,
+      24,99,102,102,134,70,146,4,0,128,0,0,0,12,0,0,
+      0,0,1,0,0>>.
+
 with_pyzmq(Fun) ->
     case pyzmq_available() of
         true -> Fun();
@@ -1033,10 +1317,14 @@ pyzmq_available() ->
         os:cmd(Python ++ " -c 'import zmq' >/dev/null 2>&1; echo $?") =:= "0\n".
 
 python_peer(Mode, Endpoint) ->
+    python_peer_args(Mode, Endpoint, []).
+
+python_peer_args(Mode, Endpoint, ExtraArgs) ->
     Python = os:find_executable("python3"),
     ?assertNotEqual(false, Python),
     open_port({spawn_executable, Python}, [
-        {args, ["-u", "-c", python_peer_code(), Mode, binary_to_list(Endpoint)]},
+        {args, ["-u", "-c", python_peer_code(), Mode, binary_to_list(Endpoint)] ++
+            [binary_to_list(Arg) || Arg <- ExtraArgs]},
         exit_status,
         use_stdio,
         stderr_to_stdout,
@@ -1067,6 +1355,7 @@ wait_python(Port) ->
 python_peer_code() ->
     "import sys, time, zmq\n"
     "mode, ep = sys.argv[1], sys.argv[2]\n"
+    "extra = [a.encode('ascii') for a in sys.argv[3:]]\n"
     "ctx = zmq.Context()\n"
     "def sock(t):\n"
     "    s = ctx.socket(t)\n"
@@ -1089,6 +1378,14 @@ python_peer_code() ->
     "        s = sock(zmq.PUB); s.connect(ep); print('READY', flush=True); time.sleep(0.3); s.send(b'topic from-pyzmq'); s.close()\n"
     "    elif mode == 'pair':\n"
     "        s = sock(zmq.PAIR); s.connect(ep); s.send(b'from-pyzmq'); assert s.recv() == b'from-omq'; s.close()\n"
+    "    elif mode == 'xsub':\n"
+    "        s = sock(zmq.XSUB); s.connect(ep); time.sleep(0.05); s.send(b'\\x01topic'); print('READY', flush=True); assert s.recv() == b'topic from-omq'; s.close()\n"
+    "    elif mode == 'xpub':\n"
+    "        s = sock(zmq.XPUB); s.connect(ep); print('READY', flush=True); assert s.recv() == b'\\x01topic'; s.send(b'topic from-pyzmq'); s.close()\n"
+    "    elif mode == 'curve_push':\n"
+    "        s = sock(zmq.PUSH); s.curve_publickey, s.curve_secretkey, s.curve_serverkey = extra; s.connect(ep); time.sleep(0.05); s.send(b'from-pyzmq-curve'); s.close()\n"
+    "    elif mode == 'curve_pull_server':\n"
+    "        s = sock(zmq.PULL); s.curve_server = 1; s.curve_publickey, s.curve_secretkey = extra; s.bind(ep); print('READY', flush=True); assert s.recv() == b'from-omq-curve'; s.close()\n"
     "    else:\n"
     "        raise SystemExit('bad mode: ' + mode)\n"
     "finally:\n"

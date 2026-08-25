@@ -90,6 +90,9 @@ pub const CONNECT_TIMEOUT = c.ZMQ_CONNECT_TIMEOUT;
 pub const RECONNECT_IVL = c.ZMQ_RECONNECT_IVL;
 pub const RECONNECT_IVL_MAX = c.ZMQ_RECONNECT_IVL_MAX;
 pub const RECONNECT_STOP = c.ZMQ_RECONNECT_STOP;
+pub const RECONNECT_STOP_CONN_REFUSED = c.ZMQ_RECONNECT_STOP_CONN_REFUSED;
+pub const RECONNECT_STOP_HANDSHAKE_FAILED = c.ZMQ_RECONNECT_STOP_HANDSHAKE_FAILED;
+pub const RECONNECT_STOP_AFTER_DISCONNECT = c.ZMQ_RECONNECT_STOP_AFTER_DISCONNECT;
 pub const TCP_MAXRT = c.ZMQ_TCP_MAXRT;
 pub const OMQ_ON_MUTE = c.OMQ_ON_MUTE;
 pub const OMQ_COMPRESSION_LEVEL = c.OMQ_COMPRESSION_LEVEL;
@@ -763,18 +766,18 @@ pub const Socket = struct {
         return allocator.dupe(u8, buffer[0..end]);
     }
 
-    pub fn pollItem(self: *Socket, events: i16) Error!PollItem {
+    pub fn pollItem(self: *Socket, event_mask: i16) Error!PollItem {
         return .{
             .socket = try self.ptr(),
             .fd = 0,
-            .events = events,
+            .events = event_mask,
             .revents = 0,
         };
     }
 
     /// Poll this socket and return the event mask, or 0 on timeout.
-    pub fn poll(self: *Socket, timeout_ms: i64, events: i16) Error!i16 {
-        var item = try self.pollItem(events);
+    pub fn poll(self: *Socket, timeout_ms: i64, event_mask: i16) Error!i16 {
+        var item = try self.pollItem(event_mask);
         const rc = c.zmq_poll(&item, 1, @intCast(timeout_ms));
         if (rc == -1) return mapErrno();
         return item.revents;
@@ -786,6 +789,14 @@ pub const Socket = struct {
 
     pub fn hasReceiveMore(self: *Socket) Error!bool {
         return try self.getInt(RCVMORE) != 0;
+    }
+
+    pub fn fd(self: *Socket) Error!i32 {
+        return self.getInt(FD);
+    }
+
+    pub fn pollEvents(self: *Socket) Error!i32 {
+        return self.getInt(EVENTS);
     }
 
     pub fn setLinger(self: *Socket, millis: i32) Error!void {
@@ -893,12 +904,96 @@ pub const Socket = struct {
         return try self.getInt(IPV6) != 0;
     }
 
+    pub fn setIpv4Only(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(IPV4ONLY, @intFromBool(enabled));
+    }
+
+    pub fn ipv4Only(self: *Socket) Error!bool {
+        return try self.getInt(IPV4ONLY) != 0;
+    }
+
+    pub fn setTcpKeepalive(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(TCP_KEEPALIVE, @intFromBool(enabled));
+    }
+
+    pub fn tcpKeepalive(self: *Socket) Error!bool {
+        return try self.getInt(TCP_KEEPALIVE) != 0;
+    }
+
+    pub fn setTcpKeepaliveIdle(self: *Socket, seconds: i32) Error!void {
+        try self.setInt(TCP_KEEPALIVE_IDLE, seconds);
+    }
+
+    pub fn tcpKeepaliveIdle(self: *Socket) Error!i32 {
+        return self.getInt(TCP_KEEPALIVE_IDLE);
+    }
+
+    pub fn setTcpKeepaliveInterval(self: *Socket, seconds: i32) Error!void {
+        try self.setInt(TCP_KEEPALIVE_INTVL, seconds);
+    }
+
+    pub fn tcpKeepaliveInterval(self: *Socket) Error!i32 {
+        return self.getInt(TCP_KEEPALIVE_INTVL);
+    }
+
+    pub fn setTcpKeepaliveCount(self: *Socket, count: i32) Error!void {
+        try self.setInt(TCP_KEEPALIVE_CNT, count);
+    }
+
+    pub fn tcpKeepaliveCount(self: *Socket) Error!i32 {
+        return self.getInt(TCP_KEEPALIVE_CNT);
+    }
+
+    pub fn setTcpMaxRetransmitTimeout(self: *Socket, millis: i32) Error!void {
+        try self.setInt(TCP_MAXRT, millis);
+    }
+
     pub fn setXpubNoDrop(self: *Socket, enabled: bool) Error!void {
         try self.setInt(XPUB_NODROP, @intFromBool(enabled));
     }
 
     pub fn xpubNoDrop(self: *Socket) Error!bool {
         return try self.getInt(XPUB_NODROP) != 0;
+    }
+
+    pub fn setXpubVerbose(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(XPUB_VERBOSE, @intFromBool(enabled));
+    }
+
+    pub fn xpubVerbose(self: *Socket) Error!bool {
+        return try self.getInt(XPUB_VERBOSE) != 0;
+    }
+
+    pub fn setProbeRouter(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(PROBE_ROUTER, @intFromBool(enabled));
+    }
+
+    pub fn probeRouter(self: *Socket) Error!bool {
+        return try self.getInt(PROBE_ROUTER) != 0;
+    }
+
+    pub fn setReqCorrelate(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(REQ_CORRELATE, @intFromBool(enabled));
+    }
+
+    pub fn reqCorrelate(self: *Socket) Error!bool {
+        return try self.getInt(REQ_CORRELATE) != 0;
+    }
+
+    pub fn setReqRelaxed(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(REQ_RELAXED, @intFromBool(enabled));
+    }
+
+    pub fn reqRelaxed(self: *Socket) Error!bool {
+        return try self.getInt(REQ_RELAXED) != 0;
+    }
+
+    pub fn setRouterHandover(self: *Socket, enabled: bool) Error!void {
+        try self.setInt(ROUTER_HANDOVER, @intFromBool(enabled));
+    }
+
+    pub fn routerHandover(self: *Socket) Error!bool {
+        return try self.getInt(ROUTER_HANDOVER) != 0;
     }
 
     pub fn setPlainServer(self: *Socket, enabled: bool) Error!void {
@@ -931,6 +1026,34 @@ pub const Socket = struct {
         return self.getInt(MECHANISM);
     }
 
+    pub fn curveServer(self: *Socket) Error!bool {
+        return try self.getInt(CURVE_SERVER) != 0;
+    }
+
+    pub fn setCurvePublicKey(self: *Socket, allocator: std.mem.Allocator, public_key: []const u8) !void {
+        try self.setString(allocator, CURVE_PUBLICKEY, public_key);
+    }
+
+    pub fn curvePublicKeyAlloc(self: *Socket, allocator: std.mem.Allocator) ![]u8 {
+        return self.getStringAlloc(allocator, CURVE_PUBLICKEY, 41);
+    }
+
+    pub fn setCurveSecretKey(self: *Socket, allocator: std.mem.Allocator, secret_key: []const u8) !void {
+        try self.setString(allocator, CURVE_SECRETKEY, secret_key);
+    }
+
+    pub fn curveSecretKeyAlloc(self: *Socket, allocator: std.mem.Allocator) ![]u8 {
+        return self.getStringAlloc(allocator, CURVE_SECRETKEY, 41);
+    }
+
+    pub fn setCurveServerKey(self: *Socket, allocator: std.mem.Allocator, server_key: []const u8) !void {
+        try self.setString(allocator, CURVE_SERVERKEY, server_key);
+    }
+
+    pub fn curveServerKeyAlloc(self: *Socket, allocator: std.mem.Allocator) ![]u8 {
+        return self.getStringAlloc(allocator, CURVE_SERVERKEY, 41);
+    }
+
     pub fn setCurveServer(
         self: *Socket,
         allocator: std.mem.Allocator,
@@ -939,7 +1062,7 @@ pub const Socket = struct {
     ) !void {
         _ = _public_key;
         try self.setInt(CURVE_SERVER, 1);
-        try self.setString(allocator, CURVE_SECRETKEY, secret_key);
+        try self.setCurveSecretKey(allocator, secret_key);
     }
 
     pub fn setCurveClient(
@@ -949,9 +1072,9 @@ pub const Socket = struct {
         secret_key: []const u8,
         server_key: []const u8,
     ) !void {
-        try self.setString(allocator, CURVE_PUBLICKEY, public_key);
-        try self.setString(allocator, CURVE_SECRETKEY, secret_key);
-        try self.setString(allocator, CURVE_SERVERKEY, server_key);
+        try self.setCurvePublicKey(allocator, public_key);
+        try self.setCurveSecretKey(allocator, secret_key);
+        try self.setCurveServerKey(allocator, server_key);
     }
 
     pub fn setOnMute(self: *Socket, mode: i32) Error!void {
@@ -994,6 +1117,94 @@ pub const Socket = struct {
         return self.getInt(OMQ_WORKLOAD_PROFILE);
     }
 
+    pub fn setReconnectInterval(self: *Socket, millis: i32) Error!void {
+        try self.setInt(RECONNECT_IVL, millis);
+    }
+
+    pub fn reconnectInterval(self: *Socket) Error!i32 {
+        return self.getInt(RECONNECT_IVL);
+    }
+
+    pub fn setMaxReconnectInterval(self: *Socket, millis: i32) Error!void {
+        try self.setInt(RECONNECT_IVL_MAX, millis);
+    }
+
+    pub fn maxReconnectInterval(self: *Socket) Error!i32 {
+        return self.getInt(RECONNECT_IVL_MAX);
+    }
+
+    pub fn setReconnectStop(self: *Socket, flags: i32) Error!void {
+        try self.setInt(RECONNECT_STOP, flags);
+    }
+
+    pub fn reconnectStop(self: *Socket) Error!i32 {
+        return self.getInt(RECONNECT_STOP);
+    }
+
+    pub fn setHeartbeatInterval(self: *Socket, millis: i32) Error!void {
+        try self.setInt(HEARTBEAT_IVL, millis);
+    }
+
+    pub fn heartbeatInterval(self: *Socket) Error!i32 {
+        return self.getInt(HEARTBEAT_IVL);
+    }
+
+    pub fn setHeartbeatTtl(self: *Socket, millis: i32) Error!void {
+        try self.setInt(HEARTBEAT_TTL, millis);
+    }
+
+    pub fn heartbeatTtl(self: *Socket) Error!i32 {
+        return self.getInt(HEARTBEAT_TTL);
+    }
+
+    pub fn setHeartbeatTimeout(self: *Socket, millis: i32) Error!void {
+        try self.setInt(HEARTBEAT_TIMEOUT, millis);
+    }
+
+    pub fn heartbeatTimeout(self: *Socket) Error!i32 {
+        return self.getInt(HEARTBEAT_TIMEOUT);
+    }
+
+    pub fn setHandshakeInterval(self: *Socket, millis: i32) Error!void {
+        try self.setInt(HANDSHAKE_IVL, millis);
+    }
+
+    pub fn handshakeInterval(self: *Socket) Error!i32 {
+        return self.getInt(HANDSHAKE_IVL);
+    }
+
+    pub fn setConnectTimeout(self: *Socket, millis: i32) Error!void {
+        try self.setInt(CONNECT_TIMEOUT, millis);
+    }
+
+    pub fn connectTimeout(self: *Socket) Error!i32 {
+        return self.getInt(CONNECT_TIMEOUT);
+    }
+
+    pub fn setMaxMessageSize(self: *Socket, bytes: i64) Error!void {
+        try self.setI64(MAXMSGSIZE, bytes);
+    }
+
+    pub fn maxMessageSize(self: *Socket) Error!i64 {
+        return self.getI64(MAXMSGSIZE);
+    }
+
+    pub fn setRate(self: *Socket, rate: i32) Error!void {
+        try self.setInt(RATE, rate);
+    }
+
+    pub fn setRecoveryInterval(self: *Socket, millis: i32) Error!void {
+        try self.setInt(RECOVERY_IVL, millis);
+    }
+
+    pub fn setMulticastHops(self: *Socket, hops: i32) Error!void {
+        try self.setInt(MULTICAST_HOPS, hops);
+    }
+
+    pub fn setZapDomain(self: *Socket, allocator: std.mem.Allocator, domain: []const u8) !void {
+        try self.setString(allocator, ZAP_DOMAIN, domain);
+    }
+
     pub fn setArenaThreshold(self: *Socket, bytes: i64) Error!void {
         try self.setI64(OMQ_ARENA_THRESHOLD, bytes);
     }
@@ -1011,11 +1222,11 @@ pub const Socket = struct {
         ctx: *Context,
         allocator: std.mem.Allocator,
         endpoint: []const u8,
-        events: i32,
+        event_mask: i32,
     ) !Monitor {
         const endpoint_z = try allocator.dupeZ(u8, endpoint);
         defer allocator.free(endpoint_z);
-        try check(c.zmq_socket_monitor(try self.ptr(), endpoint_z.ptr, events));
+        try check(c.zmq_socket_monitor(try self.ptr(), endpoint_z.ptr, event_mask));
 
         var monitor_socket = try ctx.socket(PAIR);
         errdefer monitor_socket.deinit();

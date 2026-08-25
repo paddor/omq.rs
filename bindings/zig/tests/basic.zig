@@ -424,6 +424,64 @@ test "extended option round trips" {
     try push.setConflate(true);
     try testing.expect(try push.conflate());
 
+    try push.setImmediate(true);
+    try testing.expect(try push.immediate());
+
+    try push.setIpv6(false);
+    try testing.expect(!try push.ipv6());
+    try push.setIpv4Only(true);
+    try testing.expect(try push.ipv4Only());
+
+    try push.setTcpKeepalive(true);
+    try push.setTcpKeepaliveIdle(30);
+    try push.setTcpKeepaliveInterval(5);
+    try push.setTcpKeepaliveCount(3);
+    try testing.expect(try push.tcpKeepalive());
+    try testing.expectEqual(@as(i32, 30), try push.tcpKeepaliveIdle());
+    try testing.expectEqual(@as(i32, 5), try push.tcpKeepaliveInterval());
+    try testing.expectEqual(@as(i32, 3), try push.tcpKeepaliveCount());
+    try push.setTcpMaxRetransmitTimeout(0);
+
+    try push.setReconnectInterval(500);
+    try push.setMaxReconnectInterval(5000);
+    try push.setReconnectStop(omq.RECONNECT_STOP_CONN_REFUSED);
+    try testing.expectEqual(@as(i32, 500), try push.reconnectInterval());
+    try testing.expectEqual(@as(i32, 5000), try push.maxReconnectInterval());
+    try testing.expectEqual(@as(i32, omq.RECONNECT_STOP_CONN_REFUSED), try push.reconnectStop());
+
+    try push.setHeartbeatInterval(1000);
+    try push.setHeartbeatTtl(3000);
+    try push.setHeartbeatTimeout(5000);
+    try testing.expectEqual(@as(i32, 1000), try push.heartbeatInterval());
+    try testing.expectEqual(@as(i32, 3000), try push.heartbeatTtl());
+    try testing.expectEqual(@as(i32, 5000), try push.heartbeatTimeout());
+
+    try push.setHandshakeInterval(2000);
+    try testing.expectEqual(@as(i32, 2000), try push.handshakeInterval());
+
+    try push.setConnectTimeout(750);
+    try testing.expectEqual(@as(i32, 750), try push.connectTimeout());
+
+    try push.setMaxMessageSize(1024 * 1024);
+    try testing.expectEqual(@as(i64, 1024 * 1024), try push.maxMessageSize());
+    try push.setMaxMessageSize(-1);
+    try testing.expectEqual(@as(i64, -1), try push.maxMessageSize());
+
+    try push.setXpubVerbose(true);
+    try testing.expect(try push.xpubVerbose());
+    try push.setProbeRouter(true);
+    try testing.expect(try push.probeRouter());
+    try push.setReqCorrelate(true);
+    try testing.expect(try push.reqCorrelate());
+    try push.setReqRelaxed(true);
+    try testing.expect(try push.reqRelaxed());
+    try push.setRouterHandover(true);
+    try testing.expect(try push.routerHandover());
+    try push.setRate(0);
+    try push.setRecoveryInterval(0);
+    try push.setMulticastHops(0);
+    try push.setZapDomain(allocator, "");
+
     try push.setArenaThreshold(2048);
     try testing.expectEqual(@as(i64, 2048), try push.arenaThreshold());
 

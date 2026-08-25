@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_tokio::MechanismSetup;
-use omq_tokio::options::{KeepAlive, ReconnectPolicy};
+use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy};
 
 use crate::error::fail;
 #[cfg(unix)]
@@ -52,6 +52,10 @@ pub(crate) struct SocketOverlay {
     pub sndbuf: Option<usize>,
     pub rcvbuf: Option<usize>,
     pub xpub_verbose: bool,
+    pub on_mute: OnMute,
+    pub compression_level: Option<i32>,
+    pub compression_dict: Option<Bytes>,
+    pub compression_auto_train: bool,
     pub ipv6: bool,
     pub backlog: i32,
     pub immediate: bool,
@@ -93,6 +97,10 @@ impl Default for SocketOverlay {
             sndbuf: None,
             rcvbuf: None,
             xpub_verbose: false,
+            on_mute: OnMute::Block,
+            compression_level: None,
+            compression_dict: None,
+            compression_auto_train: false,
             ipv6: false,
             backlog: 0,
             immediate: false,
@@ -225,6 +233,10 @@ impl SocketOverlay {
             send_buffer_size: self.sndbuf,
             recv_buffer_size: self.rcvbuf,
             mechanism,
+            on_mute: self.on_mute,
+            compression_level: self.compression_level,
+            compression_dict: self.compression_dict.clone(),
+            compression_auto_train: self.compression_auto_train,
             xpub_nodrop: self.xpub_nodrop,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
             wss_tls: omq_tokio::options::WssTls {
@@ -365,7 +377,17 @@ const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
 const DEFAULT_HANDSHAKE_IVL_MS: i32 = 30_000;
+const OMQ_ON_MUTE: c_int = 1004;
+const OMQ_COMPRESSION_LEVEL: c_int = 1005;
+const OMQ_COMPRESSION_DICT: c_int = 1006;
+const OMQ_COMPRESSION_AUTO_TRAIN: c_int = 1007;
 const OMQ_ARENA_THRESHOLD: c_int = 10_001;
+const OMQ_ON_MUTE_BLOCK: c_int = 0;
+const OMQ_ON_MUTE_DROP_NEWEST: c_int = 1;
+const OMQ_ON_MUTE_DROP_OLDEST: c_int = 2;
+const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MAX: i32 = 4;
+const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
 #[expect(clippy::too_many_lines)]
 #[unsafe(no_mangle)]
@@ -577,6 +599,46 @@ pub extern "C" fn zmq_setsockopt(
                 return fail(libc::EINVAL);
             };
             lock_overlay!(sock_arc).xpub_verbose = v != 0;
+        }
+        OMQ_ON_MUTE => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            let on_mute = match v {
+                OMQ_ON_MUTE_BLOCK => OnMute::Block,
+                OMQ_ON_MUTE_DROP_NEWEST => OnMute::DropNewest,
+                OMQ_ON_MUTE_DROP_OLDEST => OnMute::DropOldest,
+                _ => return fail(libc::EINVAL),
+            };
+            lock_overlay!(sock_arc).on_mute = on_mute;
+        }
+        OMQ_COMPRESSION_LEVEL => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            if !(ZSTD_LEVEL_MIN..=ZSTD_LEVEL_MAX).contains(&v) {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).compression_level = Some(v);
+        }
+        OMQ_COMPRESSION_DICT => {
+            let Some(v) = read_bytes(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            if v.len() > COMPRESSION_DICT_MAX {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).compression_dict = if v.is_empty() {
+                None
+            } else {
+                Some(Bytes::from(v))
+            };
+        }
+        OMQ_COMPRESSION_AUTO_TRAIN => {
+            let Some(v) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).compression_auto_train = v != 0;
         }
         ZMQ_SUBSCRIBE => {
             return do_subscribe(sock_arc, optval, optvallen, true);
@@ -1090,6 +1152,32 @@ pub extern "C" fn zmq_getsockopt(
             let v = lock_overlay!(sock_arc).xpub_verbose;
             write_i32(optval, optvallen, i32::from(v))
         }
+        #[expect(clippy::match_same_arms)]
+        OMQ_ON_MUTE => {
+            let v = match lock_overlay!(sock_arc).on_mute {
+                OnMute::Block => OMQ_ON_MUTE_BLOCK,
+                OnMute::DropNewest => OMQ_ON_MUTE_DROP_NEWEST,
+                OnMute::DropOldest => OMQ_ON_MUTE_DROP_OLDEST,
+                _ => OMQ_ON_MUTE_BLOCK,
+            };
+            write_i32(optval, optvallen, v)
+        }
+        OMQ_COMPRESSION_LEVEL => {
+            let v = lock_overlay!(sock_arc).compression_level.unwrap_or(0);
+            write_i32(optval, optvallen, v)
+        }
+        OMQ_COMPRESSION_DICT => {
+            let ov = lock_overlay!(sock_arc);
+            write_bytes(
+                optval,
+                optvallen,
+                ov.compression_dict.as_deref().unwrap_or(b""),
+            )
+        }
+        OMQ_COMPRESSION_AUTO_TRAIN => {
+            let v = lock_overlay!(sock_arc).compression_auto_train;
+            write_i32(optval, optvallen, i32::from(v))
+        }
         ZMQ_LAST_ENDPOINT => {
             let Ok(ep) = sock_arc.last_endpoint.lock() else {
                 return crate::error::fail(crate::error::ETERM);
@@ -1516,6 +1604,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(overlay.to_options().arena_threshold, Some(2048));
+    }
+
+    #[test]
+    fn compression_fields_map_to_backend_options() {
+        let overlay = SocketOverlay {
+            compression_level: Some(1),
+            compression_dict: Some(Bytes::from_static(b"dict")),
+            compression_auto_train: true,
+            ..Default::default()
+        };
+        let opts = overlay.to_options();
+
+        assert_eq!(opts.compression_level, Some(1));
+        assert_eq!(opts.compression_dict.as_deref(), Some(&b"dict"[..]));
+        assert!(opts.compression_auto_train);
+    }
+
+    #[test]
+    fn on_mute_maps_to_backend_options() {
+        let overlay = SocketOverlay {
+            on_mute: OnMute::DropOldest,
+            ..Default::default()
+        };
+
+        assert_eq!(overlay.to_options().on_mute, OnMute::DropOldest);
     }
 
     #[test]

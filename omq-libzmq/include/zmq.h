@@ -270,7 +270,15 @@ extern "C" {
 #define ZMQ_NORM_PUSH               124
 
 /*  OMQ extension socket options.                                            */
+#define OMQ_ON_MUTE                 1004
+#define OMQ_COMPRESSION_LEVEL       1005
+#define OMQ_COMPRESSION_DICT        1006
+#define OMQ_COMPRESSION_AUTO_TRAIN  1007
 #define OMQ_ARENA_THRESHOLD         10001
+
+#define OMQ_ON_MUTE_BLOCK           0
+#define OMQ_ON_MUTE_DROP_NEWEST     1
+#define OMQ_ON_MUTE_DROP_OLDEST     2
 
 /*  Deprecated options and aliases.                                          */
 #define ZMQ_CONNECT_RID ZMQ_CONNECT_ROUTING_ID

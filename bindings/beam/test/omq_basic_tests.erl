@@ -77,7 +77,8 @@ context_share_key_roundtrip_test() ->
     ok = omq:close(Push),
     ok = omq:close(Pull),
     ok = omq:term(Ctx),
-    ?assertEqual(true, omq:context_closed(Ctx)).
+    ?assertEqual(true, omq:context_closed(Ctx)),
+    ?assertMatch({error, closed, _}, omq:context_share_key(Ctx)).
 
 context_instance_singleton_test() ->
     {ok, A} = omq:context_instance(),
@@ -85,6 +86,7 @@ context_instance_singleton_test() ->
     {ok, AKey} = omq:context_share_key(A),
     {ok, AKey} = omq:context_share_key(B),
     ok = omq:term(A),
+    ?assertEqual(undefined, persistent_term:get({omq, context_instance}, undefined)),
     {ok, C} = omq:context_instance(2),
     {ok, CKey} = omq:context_share_key(C),
     ?assertNotEqual(AKey, CKey),
@@ -98,6 +100,31 @@ context_from_share_key_observes_owner_term_test() ->
     ?assertEqual(true, omq:context_closed(Ctx)),
     ?assertEqual(true, omq:context_closed(Shared)),
     ?assertMatch({error, closed, _}, omq:context_from_share_key(ShareKey)).
+
+terminated_context_rejects_socket_test() ->
+    {ok, Ctx} = omq:context(),
+    ok = omq:term(Ctx),
+    ?assertMatch({error, closed, _}, omq:socket(Ctx, push)).
+
+context_term_closes_existing_sockets_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Sock} = omq:socket(Ctx, push),
+    ok = omq:term(Ctx),
+    ?assertEqual(true, omq:closed(Sock)),
+    ?assertMatch({error, closed, _}, omq:send(Sock, <<"closed">>)).
+
+imported_context_term_closes_own_sockets_only_test() ->
+    {ok, Owner} = omq:context(),
+    {ok, ShareKey} = omq:context_share_key(Owner),
+    {ok, Imported} = omq:context_from_share_key(ShareKey),
+    {ok, ImportedSocket} = omq:socket(Imported, push),
+    ok = omq:term(Imported),
+    ?assertEqual(true, omq:closed(ImportedSocket)),
+    ?assertEqual(false, omq:context_closed(Owner)),
+    {ok, OwnerSocket} = omq:socket(Owner, push),
+    ?assertEqual(false, omq:closed(OwnerSocket)),
+    ok = omq:close(OwnerSocket),
+    ok = omq:term(Owner).
 
 last_endpoint_and_random_port_test() ->
     {ok, Ctx} = omq:context(),
@@ -251,6 +278,27 @@ recv_frame_rcvmore_test() ->
     ?assertEqual({ok, 0}, omq:getsockopt(Pull, rcvmore)),
     ok = omq:close(Push),
     ok = omq:close(Pull),
+    ok = omq:term(Ctx).
+
+close_clears_process_multipart_state_test() ->
+    {ok, Ctx} = omq:context(),
+    Endpoint = endpoint(<<"beam-close-clears-state">>),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    {ok, Endpoint} = omq:bind(Pull, Endpoint),
+    ok = omq:connect(Push, Endpoint),
+    ok = omq:send(Push, <<"queued">>, [sndmore]),
+    ?assert(lists:keymember({omq, sndmore, Push}, 1, process_dictionary())),
+    ok = omq:close(Push),
+    ?assertNot(lists:keymember({omq, sndmore, Push}, 1, process_dictionary())),
+    {ok, Push2} = omq:socket(Ctx, push),
+    ok = omq:connect(Push2, Endpoint),
+    ok = omq:send_multipart(Push2, [<<"x">>, <<"y">>]),
+    ?assertEqual({ok, <<"x">>}, omq:recv_frame(Pull, 1000)),
+    ?assert(lists:keymember({omq, rcvmore, Pull}, 1, process_dictionary())),
+    ok = omq:close(Pull),
+    ?assertNot(lists:keymember({omq, rcvmore, Pull}, 1, process_dictionary())),
+    ok = omq:close(Push2),
     ok = omq:term(Ctx).
 
 req_rep_roundtrip_test() ->
@@ -1105,8 +1153,14 @@ option_parity_rejections_test() ->
     ok = omq:setsockopt(Sock, rcvhwm, 32),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, sndhwm, -1)),
     ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, rcvhwm, -1)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, sndhwm, 1 bsl 40)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, rcvhwm, 1 bsl 40)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, hwm, 1 bsl 40)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, tcp_keepalive_cnt, 1 bsl 40)),
     ?assertEqual({ok, 64}, omq:getsockopt(Sock, sndhwm)),
     ?assertEqual({ok, 32}, omq:getsockopt(Sock, rcvhwm)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, reconnect_ivl, -1)),
+    ?assertMatch({error, badarg, _}, omq:setsockopt(Sock, reconnect_ivl_max, -1)),
     ok = omq:setsockopt(Sock, hwm, 128),
     ?assertEqual({ok, 128}, omq:getsockopt(Sock, hwm)),
     ?assertEqual({ok, 128}, omq:getsockopt(Sock, sndhwm)),
@@ -1257,6 +1311,10 @@ eventually_monitor_event(Monitor, Kind, Attempts) ->
         Other ->
             ?assertMatch({ok, #{event := Kind}}, Other)
     end.
+
+process_dictionary() ->
+    {dictionary, Dict} = erlang:process_info(self(), dictionary),
+    Dict.
 
 with_feature(Feature, Fun) ->
     case omq:has(Feature) of

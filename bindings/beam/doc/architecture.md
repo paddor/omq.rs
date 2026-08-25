@@ -18,9 +18,10 @@ alive until explicit `term/1`, `destroy/1`, or resource collection.
 `context_instance/0,1` stores a process-wide singleton context in
 `persistent_term` and replaces it when the stored context has closed.
 
-Sockets store a clone of the native context, so socket resources remain valid
-while they are open. `term/1` requests context shutdown; open sockets still
-close through their own resource path.
+Sockets keep the BEAM context resource that created them plus a clone of the
+native context. `term/1` marks that wrapper closed and, for owning contexts,
+requests native context shutdown. Sockets created from a terminated context
+wrapper report closed and reject later materialization.
 
 `share_key/1` returns the native context-core key. `from_share_key/1` imports
 that core into another BEAM wrapper without taking runtime ownership. Terming
@@ -33,6 +34,15 @@ down the native core and all imported contexts observe it as closed.
 `omq_tokio::blocking::Socket` is materialized lazily on the first operation
 that needs backend state. Options set before materialization are accumulated
 in a native `Options` value and applied when the socket is built.
+
+The intended ownership model is one BEAM process per socket. BEAM resources
+can be passed between processes, and the native socket handle can serialize
+concurrent whole-message operations, but the Erlang wrapper owns some
+compatibility state in the calling process dictionary. `SNDMORE` queues partial
+send frames per caller process, and `recv_frame/1,2` stores remaining received
+frames per caller process for `RCVMORE`. Single-part socket types avoid this
+multipart state, but sharing one socket still leaves message ownership and
+REQ/REP sequencing to racing callers.
 
 The native socket resource contains:
 

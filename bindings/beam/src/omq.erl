@@ -157,7 +157,10 @@ instance(IoThreads) ->
 
 %% @doc Terminate a context.
 term(Context) ->
-    omq_nif:context_term(Context).
+    global:trans({?MODULE, context_instance}, fun() ->
+        maybe_clear_context_instance(Context),
+        omq_nif:context_term(Context)
+    end).
 
 %% @doc Terminate a context. Alias for `term/1`.
 destroy(Context) ->
@@ -523,6 +526,7 @@ close(Socket) ->
     close(Socket, 0).
 
 close(Socket, Linger) ->
+    clear_socket_process_state(Socket),
     omq_nif:close(Socket, timeout_ms(Linger)).
 
 %% @doc Wait until minimum peer count is connected.
@@ -635,6 +639,13 @@ put_context_instance(Key, IoThreads) ->
             Error
     end.
 
+maybe_clear_context_instance(Context) ->
+    Key = {?MODULE, context_instance},
+    case persistent_term:get(Key, undefined) of
+        Context -> persistent_term:erase(Key);
+        _Other -> ok
+    end.
+
 version_info_tuple(Version) ->
     [Major, Minor, Patch | _] = binary:split(Version, <<".">>, [global]) ++ [<<"0">>, <<"0">>],
     {leading_integer(Major), leading_integer(Minor), leading_integer(Patch)}.
@@ -720,6 +731,11 @@ pop_recv_frame(Socket) ->
 
 recv_more_key(Socket) ->
     {?MODULE, rcvmore, Socket}.
+
+clear_socket_process_state(Socket) ->
+    erase(send_more_key(Socket)),
+    erase(recv_more_key(Socket)),
+    ok.
 
 rcvmore_value(Socket) ->
     case get(recv_more_key(Socket)) of

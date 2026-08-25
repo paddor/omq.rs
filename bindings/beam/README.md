@@ -42,6 +42,17 @@ Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 - `subscribe`, `unsubscribe`, `join`, `leave`, and `send_group` expose
   pub/sub and RADIO/DISH controls.
 
+## Ownership
+
+Treat each socket as owned by one BEAM process. This matches normal BEAM
+actor style and keeps libzmq-style socket sequencing explicit. The native
+socket is safe to hold as a resource, but wrapper frame state for `SNDMORE`,
+`RCVMORE`, `recv_frame`, and `send(..., [sndmore])` is stored in the calling
+process. Sharing one socket across processes is only appropriate for direct
+whole-message calls where racing callers are acceptable. Single-part socket
+types avoid multipart frame state, but an owner process is still the intended
+shape.
+
 Example:
 
 ```erlang

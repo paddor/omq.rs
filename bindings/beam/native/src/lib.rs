@@ -77,6 +77,7 @@ impl rustler::Resource for NativeContext {}
 
 struct NativeSocket {
     id: u64,
+    context: ResourceArc<NativeContext>,
     ctx: Context,
     socket_type: SocketType,
     options: Mutex<Options>,
@@ -116,10 +117,16 @@ impl NativeSocket {
         if self.closed.load(Ordering::Acquire) {
             return Err(OmqError::Closed);
         }
+        if native_context_closed(&self.context) {
+            return Err(OmqError::Closed);
+        }
         if let Some(socket) = self.socket.read().unwrap().as_ref() {
             return Ok(socket.clone());
         }
         let mut guard = self.socket.write().unwrap();
+        if self.closed.load(Ordering::Acquire) || native_context_closed(&self.context) {
+            return Err(OmqError::Closed);
+        }
         if let Some(socket) = guard.as_ref() {
             return Ok(socket.clone());
         }
@@ -170,6 +177,7 @@ impl NativeSocket {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        self.recv_buffer.lock().unwrap().clear();
         if let Some(socket) = self.socket.write().unwrap().take() {
             socket.close_with_linger(linger)?;
         }
@@ -550,6 +558,10 @@ fn duration_to_millis(value: Option<Duration>) -> i64 {
     })
 }
 
+fn u32_option<'a>(env: Env<'a>, name: &str, value: i64) -> Result<u32, Term<'a>> {
+    u32::try_from(value).map_err(|_| err_term(env, atoms::badarg(), format!("{name} out of range")))
+}
+
 fn deadline_after(timeout: Duration) -> Option<Instant> {
     if timeout.is_zero() {
         Some(Instant::now())
@@ -656,6 +668,9 @@ fn context_term<'a>(env: Env<'a>, context: ResourceArc<NativeContext>) -> Term<'
 
 #[rustler::nif]
 fn context_share_key<'a>(env: Env<'a>, context: ResourceArc<NativeContext>) -> Term<'a> {
+    if native_context_closed(&context) {
+        return err_term(env, atoms::closed(), "context closed");
+    }
     ok(env, context.ctx.share_key())
 }
 
@@ -676,11 +691,18 @@ fn context_from_share_key<'a>(env: Env<'a>, share_key: u128) -> Term<'a> {
 
 #[rustler::nif]
 fn context_closed(context: ResourceArc<NativeContext>) -> bool {
+    native_context_closed(&context)
+}
+
+fn native_context_closed(context: &NativeContext) -> bool {
     context.closed.load(Ordering::Acquire) || context.ctx.is_terminated()
 }
 
 #[rustler::nif]
 fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type: i64) -> Term<'a> {
+    if native_context_closed(&context) {
+        return err_term(env, atoms::closed(), "context closed");
+    }
     let Some(socket_type) = socket_type_from_i64(socket_type) else {
         return err_term(env, atoms::badarg(), "unknown socket type");
     };
@@ -688,6 +710,7 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
         env,
         ResourceArc::new(NativeSocket {
             id: NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed),
+            context: context.clone(),
             ctx: context.ctx.clone(),
             socket_type,
             options: Mutex::new(Options::default()),
@@ -720,7 +743,7 @@ fn socket_id<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
 
 #[rustler::nif]
 fn closed(socket: ResourceArc<NativeSocket>) -> bool {
-    socket.closed.load(Ordering::Acquire)
+    socket.closed.load(Ordering::Acquire) || native_context_closed(&socket.context)
 }
 
 #[rustler::nif]
@@ -1163,7 +1186,8 @@ fn setsockopt<'a>(
     int_value: i64,
     bin_value: Binary<'a>,
 ) -> Term<'a> {
-    if socket.socket.read().unwrap().is_some() && !matches!(option, 6 | 7 | 27 | 28) {
+    let materialized_guard = socket.socket.read().unwrap();
+    if materialized_guard.is_some() && !matches!(option, 6 | 7 | 27 | 28) {
         return err_term(
             env,
             atoms::badarg(),
@@ -1176,22 +1200,31 @@ fn setsockopt<'a>(
             if int_value < 0 {
                 return err_term(env, atoms::badarg(), "HWM must be >= 0");
             }
-            options.send_hwm = int_value as u32;
-            options.recv_hwm = int_value as u32;
+            let value = match u32_option(env, "HWM", int_value) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            options.send_hwm = value;
+            options.recv_hwm = value;
         }
         5 => options.identity = Bytes::copy_from_slice(bin_value.as_slice()),
         17 => options.linger = duration_from_millis(int_value),
-        18 => options.reconnect = ReconnectPolicy::Fixed(duration_from_millis(int_value).unwrap()),
+        18 => {
+            let Some(duration) = duration_from_millis(int_value) else {
+                return err_term(env, atoms::badarg(), "RECONNECT_IVL must be >= 0");
+            };
+            options.reconnect = ReconnectPolicy::Fixed(duration);
+        }
         21 => {
+            let Some(max) = duration_from_millis(int_value) else {
+                return err_term(env, atoms::badarg(), "RECONNECT_IVL_MAX must be >= 0");
+            };
             let min = match options.reconnect {
                 ReconnectPolicy::Fixed(min) | ReconnectPolicy::Exponential { min, .. } => min,
                 ReconnectPolicy::Disabled => Duration::from_millis(100),
                 _ => Duration::from_millis(100),
             };
-            options.reconnect = ReconnectPolicy::Exponential {
-                min,
-                max: duration_from_millis(int_value).unwrap(),
-            };
+            options.reconnect = ReconnectPolicy::Exponential { min, max };
         }
         22 => {
             options.max_message_size = if int_value < 0 {
@@ -1204,13 +1237,19 @@ fn setsockopt<'a>(
             if int_value < 0 {
                 return err_term(env, atoms::badarg(), "SNDHWM must be >= 0");
             }
-            options.send_hwm = int_value as u32;
+            options.send_hwm = match u32_option(env, "SNDHWM", int_value) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
         }
         24 => {
             if int_value < 0 {
                 return err_term(env, atoms::badarg(), "RCVHWM must be >= 0");
             }
-            options.recv_hwm = int_value as u32;
+            options.recv_hwm = match u32_option(env, "RCVHWM", int_value) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
         }
         27 => *socket.rcvtimeo.lock().unwrap() = duration_from_millis(int_value),
         28 => *socket.sndtimeo.lock().unwrap() = duration_from_millis(int_value),
@@ -1231,7 +1270,10 @@ fn setsockopt<'a>(
             options.tcp_keepalive = KeepAlive::Enabled {
                 idle,
                 intvl,
-                cnt: int_value.max(0) as u32,
+                cnt: match u32_option(env, "TCP_KEEPALIVE_CNT", int_value.max(0)) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                },
             };
         }
         36 => {

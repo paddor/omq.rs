@@ -149,12 +149,13 @@ fn runLatency(
     defer allocator.free(payload);
     @memset(payload, 'x');
 
-    var echo: Echoer = .{ .endpoint = endpoint, .allocator = allocator };
+    const ctx: *zimq.Context = try .init();
+    defer ctx.deinit();
+
+    var echo: Echoer = .{ .ctx = ctx, .endpoint = endpoint, .allocator = allocator };
     const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
     sleepMillis(50);
 
-    const ctx: *zimq.Context = try .init();
-    defer ctx.deinit();
     const req: *zimq.Socket = try .init(ctx, .req);
     defer req.deinit();
     const endpoint_z = try allocator.dupeZ(u8, endpoint);
@@ -193,14 +194,13 @@ fn sendLoop(sender: *Sender) !void {
 }
 
 const Echoer = struct {
+    ctx: *zimq.Context,
     endpoint: []const u8,
     allocator: std.mem.Allocator,
 };
 
 fn echoLoop(echoer: *Echoer) !void {
-    const ctx: *zimq.Context = try .init();
-    defer ctx.deinit();
-    const socket: *zimq.Socket = try .init(ctx, .rep);
+    const socket: *zimq.Socket = try .init(echoer.ctx, .rep);
     defer socket.deinit();
     const endpoint_z = try echoer.allocator.dupeZ(u8, echoer.endpoint);
     defer echoer.allocator.free(endpoint_z);

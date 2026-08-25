@@ -144,12 +144,13 @@ fn runLatency(
     defer allocator.free(payload);
     @memset(payload, 'x');
 
-    var echo: Echoer = .{ .endpoint = endpoint, .allocator = allocator };
+    var ctx = try zzmq.ZContext.init(allocator);
+    defer ctx.deinit();
+
+    var echo: Echoer = .{ .ctx = &ctx, .endpoint = endpoint, .allocator = allocator };
     const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
     sleepMillis(50);
 
-    var ctx = try zzmq.ZContext.init(allocator);
-    defer ctx.deinit();
     const req = try zzmq.ZSocket.init(zzmq.ZSocketType.Req, &ctx);
     defer req.deinit();
     try req.connect(endpoint);
@@ -185,14 +186,13 @@ fn sendLoop(sender: *Sender) !void {
 }
 
 const Echoer = struct {
+    ctx: *zzmq.ZContext,
     endpoint: []const u8,
     allocator: std.mem.Allocator,
 };
 
 fn echoLoop(echoer: *Echoer) !void {
-    var ctx = try zzmq.ZContext.init(echoer.allocator);
-    defer ctx.deinit();
-    const socket = try zzmq.ZSocket.init(zzmq.ZSocketType.Rep, &ctx);
+    const socket = try zzmq.ZSocket.init(zzmq.ZSocketType.Rep, echoer.ctx);
     defer socket.deinit();
     try socket.bind(echoer.endpoint);
 

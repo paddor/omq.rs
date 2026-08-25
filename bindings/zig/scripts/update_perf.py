@@ -11,7 +11,6 @@ import math
 import os
 import select
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -20,6 +19,10 @@ import time
 DEFAULT_SIZES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 QUICK_SIZES = [16, 128, 1024, 4096, 32768]
 LATENCY_MAX_SIZE = 4096
+THROUGHPUT_MSG_MAX = 12_000_000
+THROUGHPUT_MSG_STEP = 2_000_000
+LATENCY_US_MAX = 120
+LATENCY_US_STEP = 20
 SIZES = DEFAULT_SIZES.copy()
 TARGET_RUNTIME_S = 2.5
 THROUGHPUT_WARMUP_S = 0.5
@@ -165,41 +168,43 @@ def build_omq():
 
 def build_zzmq():
     src = ensure_clone("zzmq")
-    work = tempfile.mkdtemp(prefix="omq-zig-zzmq-")
-    shutil.copytree(src, os.path.join(work, "zzmq"), symlinks=True)
-    patched = os.path.join(work, "zzmq", "src", "classes", "zmessage.zig")
-    with open(patched) as f:
-        content = f.read()
-    content = content.replace("callconv(.C)", "callconv(.c)")
-    with open(patched, "w") as f:
-        f.write(content)
-    out = IMPLS["zzmq"]["bench"]
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    run(
-        [
-            "zig",
-            "build-exe",
-            "-O",
-            "ReleaseFast",
-            "--dep",
-            "zzmq",
-            f"-Mroot={os.path.join(BINDING_DIR, 'scripts', 'bench', 'zzmq_bench.zig')}",
-            f"-Mzzmq={os.path.join(work, 'zzmq', 'src', 'zzmq.zig')}",
-            "-lc",
-            "-lzmq",
-            f"-femit-bin={out}",
-        ],
-        timeout=120,
-    )
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="zzmq-", dir=CACHE_DIR) as work:
+        shutil.copytree(src, os.path.join(work, "zzmq"), symlinks=True)
+        patched = os.path.join(work, "zzmq", "src", "classes", "zmessage.zig")
+        with open(patched) as f:
+            content = f.read()
+        content = content.replace("callconv(.C)", "callconv(.c)")
+        with open(patched, "w") as f:
+            f.write(content)
+        out = IMPLS["zzmq"]["bench"]
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        run(
+            [
+                "zig",
+                "build-exe",
+                "-O",
+                "ReleaseFast",
+                "--dep",
+                "zzmq",
+                f"-Mroot={os.path.join(BINDING_DIR, 'scripts', 'bench', 'zzmq_bench.zig')}",
+                f"-Mzzmq={os.path.join(work, 'zzmq', 'src', 'zzmq.zig')}",
+                "-lc",
+                "-lzmq",
+                f"-femit-bin={out}",
+            ],
+            timeout=120,
+        )
 
 
 def build_zimq():
     src = ensure_clone("zimq")
-    work = tempfile.mkdtemp(prefix="omq-zig-zimq-build-")
-    deps_dir = os.path.join(work, "deps")
-    os.makedirs(deps_dir, exist_ok=True)
-    os.symlink(src, os.path.join(deps_dir, "zimq"))
-    build_zig = f"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="zimq-build-", dir=CACHE_DIR) as work:
+        deps_dir = os.path.join(work, "deps")
+        os.makedirs(deps_dir, exist_ok=True)
+        os.symlink(src, os.path.join(deps_dir, "zimq"))
+        build_zig = f"""
 const std = @import("std");
 pub fn build(b: *std.Build) void {{
     const target = b.standardTargetOptions(.{{}});
@@ -221,7 +226,7 @@ pub fn build(b: *std.Build) void {{
     b.installArtifact(exe);
 }}
 """
-    build_zon = f""".{{
+        build_zon = f""".{{
     .name = .zimq_bench,
     .version = "0.0.0",
     .fingerprint = 0xaef28a37f715d243,
@@ -232,11 +237,11 @@ pub fn build(b: *std.Build) void {{
     .paths = .{{ "build.zig" }},
 }}
 """
-    with open(os.path.join(work, "build.zig"), "w") as f:
-        f.write(build_zig)
-    with open(os.path.join(work, "build.zig.zon"), "w") as f:
-        f.write(build_zon)
-    run(["zig", "build", "-Doptimize=ReleaseFast", "--prefix", CACHE_DIR], cwd=work, timeout=240)
+        with open(os.path.join(work, "build.zig"), "w") as f:
+            f.write(build_zig)
+        with open(os.path.join(work, "build.zig.zon"), "w") as f:
+            f.write(build_zon)
+        run(["zig", "build", "-Doptimize=ReleaseFast", "--prefix", CACHE_DIR], cwd=work, timeout=240)
 
 
 def build_impls(impls):
@@ -296,16 +301,6 @@ def run_bench(exe, args, timeout):
     return float(r.stdout.strip())
 
 
-def free_tcp_endpoint():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    finally:
-        sock.close()
-    return f"tcp://127.0.0.1:{port}"
-
-
 def _fail_process(proc):
     try:
         proc.kill()
@@ -360,6 +355,42 @@ def run_throughput_tcp(exe, size, duration):
             raise RuntimeError(f"{exe} throughput-push {size}B printed warning:\n{stdout}{stderr}")
 
 
+def run_latency_tcp(exe, size, warmup_s, duration_s):
+    rep_proc = subprocess.Popen(
+        [exe, "latency-rep", str(size)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert rep_proc.stdout is not None
+    assert rep_proc.stderr is not None
+    try:
+        ready, _, _ = select.select([rep_proc.stdout], [], [], SUBPROCESS_TIMEOUT_S)
+        if not ready:
+            _fail_process(rep_proc)
+            raise RuntimeError(f"{exe} latency-rep {size}B timed out before endpoint")
+        endpoint = rep_proc.stdout.readline().strip()
+        if not endpoint:
+            _, stderr = rep_proc.communicate(timeout=5)
+            raise RuntimeError(f"{exe} latency-rep {size}B failed:\n{stderr}")
+
+        req = run(
+            [exe, "latency", str(size), str(warmup_s), str(duration_s), endpoint],
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        return float(req.stdout.strip())
+    finally:
+        try:
+            stdout, stderr = rep_proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            _fail_process(rep_proc)
+            raise RuntimeError(f"{exe} latency-rep {size}B did not exit")
+        if rep_proc.returncode != 0:
+            raise RuntimeError(f"{exe} latency-rep {size}B failed:\n{stdout}{stderr}")
+        if "warning:" in stdout.lower() or "warning:" in stderr.lower():
+            raise RuntimeError(f"{exe} latency-rep {size}B printed warning:\n{stdout}{stderr}")
+
+
 def run_throughput(impl):
     results = []
     exe = IMPLS[impl]["bench"]
@@ -386,17 +417,7 @@ def run_latency(impl):
         sys.stdout.write(f"  {label:>7} ...")
         sys.stdout.flush()
         runs = [
-            run_bench(
-                exe,
-                [
-                    "latency",
-                    str(size),
-                    str(LATENCY_WARMUP_S),
-                    str(LATENCY_RUNTIME_S),
-                    free_tcp_endpoint(),
-                ],
-                SUBPROCESS_TIMEOUT_S,
-            )
+            run_latency_tcp(exe, size, LATENCY_WARMUP_S, LATENCY_RUNTIME_S)
             for _ in range(N_ROUNDS)
         ]
         p50 = median(runs)
@@ -483,7 +504,7 @@ def _fmt_y_rate(val):
 def _fmt_y_us(val):
     if val >= 1000:
         return f"{val / 1000:g} ms"
-    return f"{val:g} us"
+    return f"{val:g} μs"
 
 
 def _read_chart_hw():
@@ -563,12 +584,7 @@ def gen_combined_chart(data, path):
     mid_x = (x_left + x_right) / 2
 
     tp_series = [(label, color, data["throughput"][label]) for label, color in CHART_SERIES]
-    msg_max = _nice_ceil(
-        max(
-            [vals[i] for _, _, vals in tp_series for i in small_indices],
-            default=1,
-        )
-    )
+    msg_max = THROUGHPUT_MSG_MAX
     gbs_values = [
         vals[i] * SIZES[i] / 1_000_000_000
         for _, _, vals in tp_series
@@ -584,15 +600,11 @@ def gen_combined_chart(data, path):
         frac = v / gbs_max if gbs_max > 0 else 0
         return t1_bot - frac * t1_h
 
-    lat_values = [v for values in data["latency"].values() for v in values]
-    lat_max = _nice_ceil(max(lat_values, default=1))
-    if lat_max < 100:
-        lat_step = 10
-    else:
-        lat_step = max(10, lat_max // 10)
+    lat_max = LATENCY_US_MAX
+    lat_step = LATENCY_US_STEP
 
     def y_lat(v):
-        return t2_bot - (v / lat_max) * t2_h
+        return t2_bot - (min(v, lat_max) / lat_max) * t2_h
 
     L = []
     L.append(
@@ -614,7 +626,7 @@ def gen_combined_chart(data, path):
             f' fill="#9ca3af" font-size="10">{hw_label}</text>'
         )
 
-    left_ticks = [msg_max * i / 5 for i in range(1, 6)]
+    left_ticks = list(range(THROUGHPUT_MSG_STEP, THROUGHPUT_MSG_MAX + 1, THROUGHPUT_MSG_STEP))
     right_ticks = [i / 2 for i in range(1, int(gbs_max * 2) + 1)]
     for panel_left, panel_right, panel_xs, ticks, panel_max, formatter, label_x in (
         (top_left, top_mid, small_xs, left_ticks, msg_max, _fmt_y_rate, top_left - 8),
@@ -703,7 +715,7 @@ def gen_combined_chart(data, path):
     L.append(
         f'  <text x="{mid_x}" y="{t2_top - 17}" text-anchor="middle" fill="#f9fafb"'
         f' font-size="13" font-weight="700">'
-        f"REQ/REP latency: TCP loopback, p50 us (lower is better)</text>"
+        f"REQ/REP latency: TCP loopback, p50 μs (lower is better)</text>"
     )
 
     for v in range(int(lat_step), int(lat_max) + 1, int(lat_step)):

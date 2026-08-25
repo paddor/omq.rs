@@ -28,6 +28,11 @@ pub fn main(init: std.process.Init) !void {
         try runLatency(init, allocator, try parseUsize(args[2]), try parseSeconds(args[3]), try parseSeconds(args[4]), args[5]);
         return;
     }
+    if (std.mem.eql(u8, args[1], "latency-rep")) {
+        if (args.len != 3) return usage(init);
+        try runLatencyRep(init, allocator, try parseUsize(args[2]));
+        return;
+    }
     return usage(init);
 }
 
@@ -57,7 +62,7 @@ fn runThroughputTcp(init: std.process.Init, allocator: std.mem.Allocator, size: 
 
     var count: u64 = 0;
     var start_ns: ?i128 = null;
-    var recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
+    const recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
     defer allocator.free(recv_buffer);
     while (true) {
         const received = try pull.recvInto(recv_buffer, 0);
@@ -111,7 +116,7 @@ fn runThroughputPull(init: std.process.Init, allocator: std.mem.Allocator, endpo
 
     var count: u64 = 0;
     var start_ns: ?i128 = null;
-    var recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
+    const recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
     defer allocator.free(recv_buffer);
     while (true) {
         const received = try pull.recvInto(recv_buffer, 0);
@@ -141,14 +146,11 @@ fn runLatency(
 
     var ctx = try omq.Context.init();
     defer ctx.deinit();
-
-    var echo: Echoer = .{ .ctx = &ctx, .endpoint = endpoint, .allocator = allocator };
-    const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
-    sleepMillis(50);
-
     var req = try ctx.socket(omq.REQ);
     defer req.deinit();
+    try req.setLinger(0);
     try req.connect(allocator, endpoint);
+    sleepMillis(50);
 
     try pingLoop(&req, allocator, payload, secondsToNanos(warmup_s), null);
 
@@ -156,14 +158,38 @@ fn runLatency(
     defer samples.deinit();
     try pingLoop(&req, allocator, payload, secondsToNanos(duration_s), &samples);
 
-    _ = try req.send(stop, 0);
-    const final = try req.recvAlloc(allocator, 0);
-    allocator.free(final);
-    thread.join();
-
     std.mem.sort(f64, samples.items, {}, comptime std.sort.asc(f64));
     const p50 = percentile(samples.items, 50);
     try printFloat(init, p50);
+
+    _ = try req.send(stop, 0);
+    std.process.exit(0);
+}
+
+fn runLatencyRep(init: std.process.Init, allocator: std.mem.Allocator, size: usize) !void {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var rep = try ctx.socket(omq.REP);
+    defer rep.deinit();
+    try rep.setLinger(0);
+    try rep.setReceiveTimeout(1000);
+
+    const endpoint = try rep.bind(allocator, "tcp://127.0.0.1:0");
+    defer allocator.free(endpoint);
+    try printLine(init, endpoint);
+
+    var recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
+    defer allocator.free(recv_buffer);
+    while (true) {
+        const received = rep.recvInto(recv_buffer, 0) catch |err| switch (err) {
+            error.Again => break,
+            else => return err,
+        };
+        const msg = recv_buffer[0..received];
+        _ = try rep.send(msg, 0);
+        if (std.mem.eql(u8, msg, stop)) break;
+    }
     std.process.exit(0);
 }
 
@@ -179,30 +205,6 @@ fn sendLoop(sender: *Sender) !void {
         _ = try sender.socket.send(sender.payload, 0);
     }
     _ = try sender.socket.send(stop, 0);
-}
-
-const Echoer = struct {
-    ctx: *omq.Context,
-    endpoint: []const u8,
-    allocator: std.mem.Allocator,
-};
-
-fn echoLoop(echoer: *Echoer) !void {
-    var socket = try echoer.ctx.socket(omq.REP);
-    defer socket.deinit();
-    const bound = try socket.bind(echoer.allocator, echoer.endpoint);
-    defer echoer.allocator.free(bound);
-
-    var recv_buffer = try echoer.allocator.alloc(u8, 1024 * 1024);
-    defer echoer.allocator.free(recv_buffer);
-    while (true) {
-        const received = try socket.recvInto(recv_buffer, 0);
-        const msg = recv_buffer[0..received];
-        _ = try socket.send(msg, 0);
-        if (std.mem.eql(u8, msg, stop)) {
-            break;
-        }
-    }
 }
 
 fn pingLoop(
@@ -285,7 +287,7 @@ fn usage(init: std.process.Init) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(init.io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("usage: omq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT\n", .{});
+    try stderr.print("usage: omq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT | latency-rep SIZE\n", .{});
     try stderr.flush();
     return error.InvalidArgs;
 }

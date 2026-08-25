@@ -28,6 +28,11 @@ pub fn main(init: std.process.Init) !void {
         try runLatency(init, allocator, try parseUsize(args[2]), try parseSeconds(args[3]), try parseSeconds(args[4]), args[5]);
         return;
     }
+    if (std.mem.eql(u8, args[1], "latency-rep")) {
+        if (args.len != 3) return usage(init);
+        try runLatencyRep(init, allocator, try parseUsize(args[2]));
+        return;
+    }
     return usage(init);
 }
 
@@ -151,31 +156,52 @@ fn runLatency(
 
     const ctx: *zimq.Context = try .init();
     defer ctx.deinit();
-
-    var echo: Echoer = .{ .ctx = ctx, .endpoint = endpoint, .allocator = allocator };
-    const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
-    sleepMillis(50);
-
     const req: *zimq.Socket = try .init(ctx, .req);
     defer req.deinit();
+    try req.set(.linger, 0);
     const endpoint_z = try allocator.dupeZ(u8, endpoint);
     defer allocator.free(endpoint_z);
     try req.connect(endpoint_z);
+    sleepMillis(50);
 
-    try pingLoop(req, payload, secondsToNanos(warmup_s), null);
+    try pingLoop(req, allocator, payload, secondsToNanos(warmup_s), null);
 
     var samples: std.array_list.Managed(f64) = .init(allocator);
     defer samples.deinit();
-    try pingLoop(req, payload, secondsToNanos(duration_s), &samples);
-
-    try req.sendSlice(stop, .{});
-    var final: zimq.Message = .empty();
-    _ = try req.recvMsg(&final, .{});
-    final.deinit();
-    thread.join();
+    try pingLoop(req, allocator, payload, secondsToNanos(duration_s), &samples);
 
     std.mem.sort(f64, samples.items, {}, comptime std.sort.asc(f64));
     try printFloat(init, percentile(samples.items, 50));
+
+    try req.sendSlice(stop, .{});
+    std.process.exit(0);
+}
+
+fn runLatencyRep(init: std.process.Init, allocator: std.mem.Allocator, size: usize) !void {
+    const ctx: *zimq.Context = try .init();
+    defer ctx.deinit();
+
+    const rep: *zimq.Socket = try .init(ctx, .rep);
+    defer rep.deinit();
+    try rep.set(.linger, 0);
+    try rep.set(.rcvtimeo, 1000);
+    try rep.bind("tcp://127.0.0.1:0");
+    const endpoint = try lastEndpoint(allocator, rep);
+    defer allocator.free(endpoint);
+    try printLine(init, endpoint);
+
+    const recv_buffer = try allocator.alloc(u8, @max(size, stop.len));
+    defer allocator.free(recv_buffer);
+    while (true) {
+        const received = rep.recv(recv_buffer, .{}) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+        const data = recv_buffer[0..received];
+        try rep.sendSlice(data, .{});
+        const done = std.mem.eql(u8, data, stop);
+        if (done) break;
+    }
     std.process.exit(0);
 }
 
@@ -193,43 +219,20 @@ fn sendLoop(sender: *Sender) !void {
     try sender.socket.sendSlice(stop, .{});
 }
 
-const Echoer = struct {
-    ctx: *zimq.Context,
-    endpoint: []const u8,
-    allocator: std.mem.Allocator,
-};
-
-fn echoLoop(echoer: *Echoer) !void {
-    const socket: *zimq.Socket = try .init(echoer.ctx, .rep);
-    defer socket.deinit();
-    const endpoint_z = try echoer.allocator.dupeZ(u8, echoer.endpoint);
-    defer echoer.allocator.free(endpoint_z);
-    try socket.bind(endpoint_z);
-
-    while (true) {
-        var msg: zimq.Message = .empty();
-        _ = try socket.recvMsg(&msg, .{});
-        const data = msg.slice();
-        try socket.sendSlice(data, .{});
-        const done = std.mem.eql(u8, data, stop);
-        msg.deinit();
-        if (done) break;
-    }
-}
-
 fn pingLoop(
     req: *zimq.Socket,
+    allocator: std.mem.Allocator,
     payload: []const u8,
     duration_ns: u64,
     samples: ?*std.array_list.Managed(f64),
 ) !void {
+    const recv_buffer = try allocator.alloc(u8, @max(payload.len, stop.len));
+    defer allocator.free(recv_buffer);
     const start = nowNs();
     while (nowNs() - start < duration_ns) {
         const t0 = nowNs();
         try req.sendSlice(payload, .{});
-        var msg: zimq.Message = .empty();
-        _ = try req.recvMsg(&msg, .{});
-        msg.deinit();
+        _ = try req.recv(recv_buffer, .{});
         if (samples) |out| {
             try out.append(elapsedSeconds(t0, nowNs()) * 1_000_000.0);
         }
@@ -304,7 +307,7 @@ fn usage(init: std.process.Init) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(init.io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("usage: zimq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT\n", .{});
+    try stderr.print("usage: zimq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT | latency-rep SIZE\n", .{});
     try stderr.flush();
     return error.InvalidArgs;
 }

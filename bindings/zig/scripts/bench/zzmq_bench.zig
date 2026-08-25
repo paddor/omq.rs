@@ -31,6 +31,11 @@ pub fn main(init: std.process.Init) !void {
         try runLatency(init, allocator, try parseUsize(args[2]), try parseSeconds(args[3]), try parseSeconds(args[4]), args[5]);
         return;
     }
+    if (std.mem.eql(u8, args[1], "latency-rep")) {
+        if (args.len != 3) return usage(init);
+        try runLatencyRep(init, allocator, try parseUsize(args[2]));
+        return;
+    }
     return usage(init);
 }
 
@@ -146,14 +151,11 @@ fn runLatency(
 
     var ctx = try zzmq.ZContext.init(allocator);
     defer ctx.deinit();
-
-    var echo: Echoer = .{ .ctx = &ctx, .endpoint = endpoint, .allocator = allocator };
-    const thread = try std.Thread.spawn(.{}, echoLoop, .{&echo});
-    sleepMillis(50);
-
     const req = try zzmq.ZSocket.init(zzmq.ZSocketType.Req, &ctx);
     defer req.deinit();
+    try req.setSocketOption(.{ .LingerTimeout = 0 });
     try req.connect(endpoint);
+    sleepMillis(50);
 
     try pingLoop(req, payload, secondsToNanos(warmup_s), null);
 
@@ -161,13 +163,38 @@ fn runLatency(
     defer samples.deinit();
     try pingLoop(req, payload, secondsToNanos(duration_s), &samples);
 
-    try sendSlice(req, stop);
-    var final = try req.receive(.{});
-    final.deinit();
-    thread.join();
-
     std.mem.sort(f64, samples.items, {}, comptime std.sort.asc(f64));
     try printFloat(init, percentile(samples.items, 50));
+
+    try sendSlice(req, stop);
+    std.process.exit(0);
+}
+
+fn runLatencyRep(init: std.process.Init, allocator: std.mem.Allocator, size: usize) !void {
+    var ctx = try zzmq.ZContext.init(allocator);
+    defer ctx.deinit();
+
+    const rep = try zzmq.ZSocket.init(zzmq.ZSocketType.Rep, &ctx);
+    defer rep.deinit();
+    try rep.setSocketOption(.{ .LingerTimeout = 0 });
+    try rep.setSocketOption(.{ .ReceiveTimeout = 1000 });
+    try rep.bind("tcp://127.0.0.1:0");
+    try printLine(init, try rep.endpoint());
+
+    _ = size;
+    while (true) {
+        var msg = rep.receive(.{}) catch |err| switch (err) {
+            error.NonBlockingQueueEmpty => break,
+            else => return err,
+        };
+        const data = try msg.data();
+        const copy = try allocator.dupe(u8, data);
+        const done = std.mem.eql(u8, data, stop);
+        msg.deinit();
+        defer allocator.free(copy);
+        try sendSlice(rep, copy);
+        if (done) break;
+    }
     std.process.exit(0);
 }
 
@@ -183,29 +210,6 @@ fn sendLoop(sender: *Sender) !void {
         try sendSlice(sender.socket, sender.payload);
     }
     try sendSlice(sender.socket, stop);
-}
-
-const Echoer = struct {
-    ctx: *zzmq.ZContext,
-    endpoint: []const u8,
-    allocator: std.mem.Allocator,
-};
-
-fn echoLoop(echoer: *Echoer) !void {
-    const socket = try zzmq.ZSocket.init(zzmq.ZSocketType.Rep, echoer.ctx);
-    defer socket.deinit();
-    try socket.bind(echoer.endpoint);
-
-    while (true) {
-        var msg = try socket.receive(.{});
-        const data = try msg.data();
-        const copy = try echoer.allocator.dupe(u8, data);
-        const done = std.mem.eql(u8, data, stop);
-        msg.deinit();
-        defer echoer.allocator.free(copy);
-        try sendSlice(socket, copy);
-        if (done) break;
-    }
 }
 
 fn pingLoop(
@@ -291,7 +295,7 @@ fn usage(init: std.process.Init) !void {
     var buffer: [256]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(init.io, &buffer);
     const stderr = &stderr_writer.interface;
-    try stderr.print("usage: zzmq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT\n", .{});
+    try stderr.print("usage: zzmq_bench throughput SIZE SECONDS | throughput-push SIZE SECONDS | throughput-pull ENDPOINT SIZE | latency SIZE WARMUP_SECONDS SECONDS ENDPOINT | latency-rep SIZE\n", .{});
     try stderr.flush();
     return error.InvalidArgs;
 }

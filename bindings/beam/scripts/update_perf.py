@@ -14,6 +14,7 @@ import os
 import selectors
 import shutil
 import socket
+import statistics
 import subprocess
 import sys
 import time
@@ -37,7 +38,7 @@ SUBPROCESS_TIMEOUT_S = 60.0
 DEFAULT_IMPLS = ["omq-erlang", "omq-elixir", "omq-gleam", "erlzmq", "exzmq"]
 C_OMQ_ERLANG = "#ef4444"
 C_OMQ_ELIXIR = "#fb923c"
-C_OMQ_GLEAM = "#22c55e"
+C_OMQ_GLEAM = "#ffaff3"
 C_ERLZMQ = "#60a5fa"
 
 
@@ -675,17 +676,30 @@ def gen_combined_chart(data, path):
 
 
 def chart_data_from_jsonl():
-    latest = {}
+    latest_run_by_impl = {}
+    rows_by_key = {}
     for row in load_rows():
-        key = (row["impl"], row["kind"], row["msg_size"])
-        if key not in latest or row.get("run_id", "") >= latest[key].get("run_id", ""):
-            latest[key] = row
+        impl = row["impl"]
+        run_id = row.get("run_id", "")
+        latest_run_by_impl[impl] = max(run_id, latest_run_by_impl.get(impl, ""))
+        key = (impl, run_id, row["kind"], row["msg_size"])
+        rows_by_key.setdefault(key, []).append(row)
 
     def tp(impl, size):
-        return latest.get((impl, "throughput", size), {}).get("msgs_s", 0.0)
+        run_id = latest_run_by_impl.get(impl, "")
+        values = [
+            row["msgs_s"]
+            for row in rows_by_key.get((impl, run_id, "throughput", size), [])
+        ]
+        return statistics.median(values) if values else 0.0
 
     def lat(impl, size):
-        return latest.get((impl, "latency", size), {}).get("p50_us", 0.0)
+        run_id = latest_run_by_impl.get(impl, "")
+        values = [
+            row["p50_us"]
+            for row in rows_by_key.get((impl, run_id, "latency", size), [])
+        ]
+        return statistics.median(values) if values else 0.0
 
     return {
         "erlang_tp": [tp("omq-erlang", s) for s in SIZES],

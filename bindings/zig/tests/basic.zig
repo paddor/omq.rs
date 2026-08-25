@@ -430,6 +430,12 @@ test "extended option round trips" {
     try push.setOnMute(omq.OMQ_ON_MUTE_DROP_NEWEST);
     try testing.expectEqual(@as(i32, omq.OMQ_ON_MUTE_DROP_NEWEST), try push.getInt(omq.OMQ_ON_MUTE));
 
+    try testing.expectEqual(@as(i32, omq.OMQ_WORKLOAD_DEFAULT), try push.workloadProfile());
+    try push.setWorkloadProfile(omq.OMQ_WORKLOAD_LATENCY);
+    try testing.expectEqual(@as(i32, omq.OMQ_WORKLOAD_LATENCY), try push.workloadProfile());
+    try push.setWorkloadProfile(omq.OMQ_WORKLOAD_DEFAULT);
+    try testing.expectEqual(@as(i32, omq.OMQ_WORKLOAD_DEFAULT), try push.workloadProfile());
+
     try push.setCompressionLevel(1);
     try testing.expectEqual(@as(i32, 1), try push.getInt(omq.OMQ_COMPRESSION_LEVEL));
 

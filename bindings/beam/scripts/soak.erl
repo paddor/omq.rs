@@ -8,9 +8,9 @@ main(Args) ->
     ensure_priv(),
     DurationMs = duration_ms(Args),
     io:format("OMQ.beam soak: ~B ms~n", [DurationMs]),
-    push_pull(DurationMs),
-    req_rep(DurationMs),
-    peer_churn(DurationMs),
+    run_resource_scenario(push_pull, DurationMs, fun push_pull/1),
+    run_resource_scenario(req_rep, DurationMs, fun req_rep/1),
+    run_resource_scenario(peer_churn, DurationMs, fun peer_churn/1),
     ok.
 
 duration_ms([Seconds]) ->
@@ -46,6 +46,296 @@ usable_file(Path) ->
     case file:read_file_info(Path) of
         {ok, #file_info{type = regular, size = Size}} when Size > 0 -> true;
         _ -> false
+    end.
+
+run_resource_scenario(Name, DurationMs, Fun) ->
+    Monitor = start_resource_monitor(Name),
+    try Fun(DurationMs)
+    after stop_resource_monitor(Name, Monitor)
+    end.
+
+start_resource_monitor(Name) ->
+    Started = monotonic_ms(),
+    Baseline = sample_resources(),
+    log_resources(Name, 0, Baseline),
+    Pid = spawn_link(fun() ->
+        resource_monitor(Name, Started, Baseline, [{0, Baseline}])
+    end),
+    {Pid, Started, Baseline}.
+
+stop_resource_monitor(Name, {Pid, Started, Baseline}) ->
+    Pid ! {stop, self()},
+    Samples = receive
+        {resource_samples, Pid, Value} -> Value
+    after 5000 ->
+        erlang:error({resource_monitor_timeout, Name})
+    end,
+    settle_resources(),
+    Final = sample_resources(),
+    log_resources(Name, monotonic_ms() - Started, Final),
+    trace_fds(Name),
+    assert_final_resources(Name, Baseline, Final, Samples).
+
+resource_monitor(Name, Started, Baseline, Samples) ->
+    receive
+        {stop, Parent} ->
+            Parent ! {resource_samples, self(), Samples}
+    after report_interval_ms() ->
+        Elapsed = monotonic_ms() - Started,
+        Current = sample_resources(),
+        log_resources(Name, Elapsed, Current),
+        Samples1 = Samples ++ [{Elapsed, Current}],
+        assert_live_resources(Name, Baseline, Current, Samples1),
+        resource_monitor(Name, Started, Baseline, Samples1)
+    end.
+
+report_interval_ms() ->
+    env_int("OMQ_BEAM_SOAK_REPORT_INTERVAL_SECS", 10) * 1000.
+
+sample_resources() ->
+    Status = proc_status(),
+    #{
+        rss_kib => maps:get(rss_kib, Status, 0),
+        vmdata_kib => maps:get(vmdata_kib, Status, 0),
+        threads => maps:get(threads, Status, 0),
+        fds => fd_count()
+    }.
+
+proc_status() ->
+    case file:read_file("/proc/self/status") of
+        {ok, Data} -> parse_proc_status(Data);
+        _Error -> #{rss_kib => 0, vmdata_kib => 0, threads => 0}
+    end.
+
+parse_proc_status(Data) ->
+    Lines = binary:split(Data, <<"\n">>, [global]),
+    lists:foldl(fun parse_proc_line/2, #{rss_kib => 0, vmdata_kib => 0, threads => 0}, Lines).
+
+parse_proc_line(<<"VmRSS:", Rest/binary>>, Acc) ->
+    Acc#{rss_kib => proc_line_int(Rest)};
+parse_proc_line(<<"VmData:", Rest/binary>>, Acc) ->
+    Acc#{vmdata_kib => proc_line_int(Rest)};
+parse_proc_line(<<"Threads:", Rest/binary>>, Acc) ->
+    Acc#{threads => proc_line_int(Rest)};
+parse_proc_line(_Line, Acc) ->
+    Acc.
+
+proc_line_int(Line) ->
+    case string:lexemes(binary_to_list(Line), " \t") of
+        [Value | _] -> list_to_integer(Value);
+        [] -> 0
+    end.
+
+fd_count() ->
+    case file:list_dir("/proc/self/fd") of
+        {ok, Entries} -> length(Entries);
+        _Error -> 0
+    end.
+
+settle_resources() ->
+    erlang:garbage_collect(),
+    timer:sleep(env_int("OMQ_BEAM_SOAK_SETTLE_MS", 100)),
+    erlang:garbage_collect().
+
+trace_fds(Name) ->
+    case os:getenv("OMQ_BEAM_SOAK_TRACE_FD") of
+        "1" ->
+            case file:list_dir("/proc/self/fd") of
+                {ok, Entries} ->
+                    lists:foreach(fun(Entry) -> trace_fd(Name, Entry) end, lists:sort(Entries));
+                _Error ->
+                    ok
+            end;
+        _Other ->
+            ok
+    end.
+
+trace_fd(Name, Entry) ->
+    Path = filename:join("/proc/self/fd", Entry),
+    Target = case file:read_link(Path) of
+        {ok, Link} -> Link;
+        _Error -> "unknown"
+    end,
+    io:format("[beam-soak-fd] ~s ~s -> ~s~n", [atom_to_list(Name), Entry, Target]).
+
+log_resources(Name, ElapsedMs, Sample) ->
+    io:format(
+        "[beam-soak] ~s ~Bs rss=~.1fMB vmdata=~.1fMB fds=~B threads=~B~n",
+        [
+            atom_to_list(Name),
+            ElapsedMs div 1000,
+            resource_mb(rss_kib, Sample),
+            resource_mb(vmdata_kib, Sample),
+            maps:get(fds, Sample),
+            maps:get(threads, Sample)
+        ]
+    ).
+
+resource_mb(Key, Sample) ->
+    maps:get(Key, Sample) / 1024.
+
+assert_live_resources(Name, Baseline, Current, Samples) ->
+    assert_count_growth(
+        Name,
+        "FD",
+        maps:get(fds, Baseline),
+        maps:get(fds, Current),
+        env_int("OMQ_BEAM_SOAK_MAX_FD_GROWTH", 128)
+    ),
+    assert_count_growth(
+        Name,
+        "thread",
+        maps:get(threads, Baseline),
+        maps:get(threads, Current),
+        env_int("OMQ_BEAM_SOAK_MAX_THREAD_GROWTH", 8)
+    ),
+    assert_live_slope(
+        Name,
+        "RSS",
+        Samples,
+        fun(Sample) -> maps:get(rss_kib, Sample) end,
+        env_float("OMQ_BEAM_SOAK_RSS_SLOPE_LIMIT_KIB_S", 1024.0),
+        env_int("OMQ_BEAM_SOAK_RSS_SLOPE_MIN_GROWTH_MB", 128) * 1024
+    ),
+    assert_live_slope(
+        Name,
+        "FD",
+        Samples,
+        fun(Sample) -> maps:get(fds, Sample) end,
+        env_float("OMQ_BEAM_SOAK_FD_SLOPE_LIMIT_PER_SEC", 0.05),
+        env_int("OMQ_BEAM_SOAK_FD_SLOPE_MIN_GROWTH", 32)
+    ).
+
+assert_count_growth(_Name, _Metric, 0, _Current, _Limit) ->
+    ok;
+assert_count_growth(Name, Metric, Baseline, Current, Limit) when Current > Baseline + Limit ->
+    erlang:error({resource_growth, Name, Metric, Baseline, Current, Limit});
+assert_count_growth(_Name, _Metric, _Baseline, _Current, _Limit) ->
+    ok.
+
+assert_live_slope(Name, Metric, Samples, ValueFun, Limit, MinGrowth) ->
+    Warmup = env_int("OMQ_BEAM_SOAK_RESOURCE_WARMUP_SECS", 600) * 1000,
+    Window = env_int("OMQ_BEAM_SOAK_RESOURCE_WINDOW_SECS", 300) * 1000,
+    MinSamples = env_int("OMQ_BEAM_SOAK_RESOURCE_MIN_SAMPLES", 12),
+    case live_window(Samples, Warmup, Window, MinSamples) of
+        {ok, [{StartMs, StartSample} | _] = WindowSamples} ->
+            {EndMs, EndSample} = lists:last(WindowSamples),
+            StartValue = ValueFun(StartSample),
+            EndValue = ValueFun(EndSample),
+            Growth = saturating_sub(EndValue, StartValue),
+            Seconds = max((EndMs - StartMs) / 1000, 1.0),
+            Slope = Growth / Seconds,
+            case Growth >= MinGrowth andalso Slope > Limit of
+                true -> erlang:error({resource_slope, Name, Metric, Growth, Slope, Limit});
+                false -> ok
+            end;
+        skip ->
+            ok
+    end.
+
+live_window(Samples, Warmup, Window, MinSamples) ->
+    case length(Samples) >= MinSamples of
+        false ->
+            skip;
+        true ->
+            {Elapsed, _} = lists:last(Samples),
+            case Elapsed >= Warmup + Window of
+                false ->
+                    skip;
+                true ->
+                    WindowStart = Elapsed - Window,
+                    WindowSamples = [{At, Sample} || {At, Sample} <- Samples, At >= WindowStart],
+                    case length(WindowSamples) >= MinSamples of
+                        true -> {ok, WindowSamples};
+                        false -> skip
+                    end
+            end
+    end.
+
+assert_final_resources(Name, Baseline, Final, Samples) ->
+    assert_count_growth(
+        Name,
+        "final FD",
+        maps:get(fds, Baseline),
+        maps:get(fds, Final),
+        env_int("OMQ_BEAM_SOAK_MAX_FINAL_FD_GROWTH", 16)
+    ),
+    assert_count_growth(
+        Name,
+        "final thread",
+        maps:get(threads, Baseline),
+        maps:get(threads, Final),
+        env_int("OMQ_BEAM_SOAK_MAX_FINAL_THREAD_GROWTH", 4)
+    ),
+    assert_rss_residual(Name, Final, Samples).
+
+assert_rss_residual(Name, Final, Samples) ->
+    Warmup = env_int("OMQ_BEAM_SOAK_RESOURCE_WARMUP_SECS", 600) * 1000,
+    MinSamples = env_int("OMQ_BEAM_SOAK_RESOURCE_MIN_SAMPLES", 12),
+    Warm = [Sample || {At, Sample} <- Samples, At >= Warmup],
+    case length(Warm) >= MinSamples of
+        false ->
+            ok;
+        true ->
+            BaseCount = max(length(Warm) div 10, 1),
+            TailCount = max(length(Warm) div 5, 1),
+            Base = average([maps:get(rss_kib, Sample) || Sample <- lists:sublist(Warm, BaseCount)]),
+            Tail = lists:max([maps:get(rss_kib, Sample) || Sample <- last_n(Warm, TailCount)]),
+            FinalRss = maps:get(rss_kib, Final),
+            TailGrowth = saturating_sub(Tail, Base),
+            FinalGrowth = saturating_sub(FinalRss, Base),
+            MinGrowth = env_int("OMQ_BEAM_SOAK_RSS_TAIL_GROWTH_MIN_MB", 128) * 1024,
+            Limit = env_float("OMQ_BEAM_SOAK_RSS_TAIL_GROWTH_PERCENT", 25.0),
+            io:format(
+                "[beam-soak] ~s RSS baseline=~.1fMB tail-max=~.1fMB final=~.1fMB growth=~.1f%~n",
+                [
+                    atom_to_list(Name),
+                    Base / 1024,
+                    Tail / 1024,
+                    FinalRss / 1024,
+                    percent_growth(FinalGrowth, Base)
+                ]
+            ),
+            case TailGrowth >= MinGrowth
+                    andalso FinalGrowth >= MinGrowth
+                    andalso percent_growth(TailGrowth, Base) > Limit
+                    andalso percent_growth(FinalGrowth, Base) > Limit of
+                true -> erlang:error({rss_residual, Name, Base, Tail, FinalRss, Limit});
+                false -> ok
+            end
+    end.
+
+last_n(List, Count) ->
+    lists:nthtail(max(length(List) - Count, 0), List).
+
+average(Values) ->
+    lists:sum(Values) / max(length(Values), 1).
+
+percent_growth(_Growth, 0) ->
+    0.0;
+percent_growth(Growth, Baseline) ->
+    Growth * 100 / Baseline.
+
+saturating_sub(A, B) when A > B ->
+    A - B;
+saturating_sub(_A, _B) ->
+    0.
+
+env_int(Name, Default) ->
+    case os:getenv(Name) of
+        false -> Default;
+        Value -> list_to_integer(Value)
+    end.
+
+env_float(Name, Default) ->
+    case os:getenv(Name) of
+        false ->
+            Default;
+        Value ->
+            case string:to_float(Value) of
+                {Float, _Rest} when is_float(Float) -> Float;
+                {error, no_float} -> list_to_integer(Value) * 1.0
+            end
     end.
 
 push_pull(DurationMs) ->

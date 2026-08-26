@@ -21,6 +21,7 @@ not depend on libzmq, libsodium, or a C compiler.
 - Native bindings and compatibility APIs:
   - [C/C++](omq-libzmq/)
   - [Crystal](https://github.com/paddor/omq-binding.cr) and pure Crystal [OMQ.cr](https://github.com/paddor/omq.cr)
+  - [BEAM: Erlang, Elixir, and Gleam](bindings/beam/)
   - [Go](bindings/go/)
   - [Java](bindings/java/)
   - [Lua](bindings/lua/)
@@ -155,6 +156,7 @@ Five Cargo workspace crates plus language bindings.
 | [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
 | [`OMQ.node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
 | [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
+| [`OMQ.beam`](bindings/beam/) | Erlang binding plus Elixir and Gleam wrappers (Rustler NIF over omq-tokio) | BEAM NIF boundary |
 
 ## Testing
 

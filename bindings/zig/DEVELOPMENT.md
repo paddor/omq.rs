@@ -37,7 +37,10 @@ bindings/zig/scripts/soak.sh 10m
 ```
 
 Soak tests sample RSS and `/proc/self/fd` counts and fail on resource growth.
-They are not part of `zig build test`.
+They are not part of `zig build test`. The script runs all soak scenarios in
+parallel by default, like pyomq, and each scenario gets the full requested
+duration. Set `OMQ_ZIG_SOAK_JOBS=1` to run them serially. Set
+`OMQ_ZIG_SOAK_TIMEOUT_EXTRA_SECS` to tune shutdown/build slack.
 
 Override native paths when building outside this repository layout:
 

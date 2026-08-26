@@ -30,6 +30,7 @@ not depend on libzmq, libsodium, or a C compiler.
   - [Python](bindings/pyomq/)
   - [Ruby](bindings/ruby/) and pure Ruby [OMQ.rb](https://github.com/zeromq/omq.rb)
   - [TypeScript](https://github.com/paddor/omq.ts) for browsers (ZWS transport only)
+  - [Zig](bindings/zig/)
 
 ## Performance
 
@@ -157,6 +158,7 @@ Five Cargo workspace crates plus language bindings.
 | [`OMQ.node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
 | [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
 | [`OMQ.beam`](bindings/beam/) | Erlang binding plus Elixir and Gleam wrappers (Rustler NIF over omq-tokio) | BEAM NIF boundary |
+| [`OMQ.zig`](bindings/zig/) | Zig 0.16 binding (thin wrapper over omq-libzmq) | C ABI boundary |
 
 ## Testing
 

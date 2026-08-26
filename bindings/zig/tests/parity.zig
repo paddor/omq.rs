@@ -63,6 +63,18 @@ fn expectRecv(socket: *omq.Socket, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, got);
 }
 
+fn configurePlain(server: *omq.Socket, client: *omq.Socket) !void {
+    try server.setPlainServer(true);
+    try client.setPlainClient(allocator, "alice", "secret");
+}
+
+fn configureCurve(server_sock: *omq.Socket, client_sock: *omq.Socket) !void {
+    const server = try omq.curveKeypair();
+    const client = try omq.curveKeypair();
+    try server_sock.setCurveServer(allocator, server.publicSlice(), server.secretSlice());
+    try client_sock.setCurveClient(allocator, client.publicSlice(), client.secretSlice(), server.publicSlice());
+}
+
 const ProxyState = struct {
     frontend: *omq.Socket,
     backend: *omq.Socket,
@@ -131,6 +143,30 @@ test "socket lifecycle and option helpers match pyomq shape" {
 
     try ctx.term();
     try testing.expect(ctx.closed());
+}
+
+test "named option helpers reject invalid values" {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var sock = try ctx.socket(omq.PUSH);
+    defer sock.deinit();
+
+    try sock.setSendHighWaterMark(64);
+    try sock.setReceiveHighWaterMark(32);
+    try testing.expectError(error.Invalid, sock.setSendHighWaterMark(-1));
+    try testing.expectError(error.Invalid, sock.setReceiveHighWaterMark(-1));
+    try testing.expectEqual(@as(i32, 64), try sock.sendHighWaterMark());
+    try testing.expectEqual(@as(i32, 32), try sock.receiveHighWaterMark());
+
+    try testing.expectError(error.Invalid, sock.setOnMute(99));
+    try testing.expectError(error.Invalid, sock.setCompressionLevel(-9));
+    try testing.expectError(error.Invalid, sock.setCompressionLevel(5));
+
+    const oversize = try allocator.alloc(u8, 8 * 1024 + 1);
+    defer allocator.free(oversize);
+    @memset(oversize, 0);
+    try testing.expectError(error.Invalid, sock.setCompressionDict(oversize));
 }
 
 test "bindToRandomPort and getLastEndpoint" {
@@ -489,8 +525,7 @@ test "plain req rep tcp" {
     var req = try ctx.socket(omq.REQ);
     defer req.deinit();
 
-    try rep.setPlainServer(true);
-    try req.setPlainClient(allocator, "alice", "secret");
+    try configurePlain(&rep, &req);
     try rep.setReceiveTimeout(5000);
     try req.setReceiveTimeout(5000);
     try req.setSendTimeout(5000);
@@ -505,11 +540,83 @@ test "plain req rep tcp" {
     try expectRecv(&req, "pong");
 }
 
+test "plain push pull tcp" {
+    if (!try omq.has(allocator, "plain")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try configurePlain(&pull, &push);
+    try pull.setReceiveTimeout(5000);
+    try push.setSendTimeout(5000);
+
+    const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    _ = try push.send("hello over plain", 0);
+    try expectRecv(&pull, "hello over plain");
+}
+
+test "plain pub sub tcp" {
+    if (!try omq.has(allocator, "plain")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var publisher = try ctx.socket(omq.PUB);
+    defer publisher.deinit();
+    var sub = try ctx.socket(omq.SUB);
+    defer sub.deinit();
+
+    try configurePlain(&publisher, &sub);
+    try sub.subscribe("hot/");
+    try sub.setReceiveTimeout(5000);
+
+    const bound = try publisher.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try sub.connect(allocator, bound);
+    sleepMillis(300);
+
+    _ = try publisher.send("cold/skip", 0);
+    _ = try publisher.send("hot/take", 0);
+    try expectRecv(&sub, "hot/take");
+}
+
+test "plain multipart tcp" {
+    if (!try omq.has(allocator, "plain")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try configurePlain(&pull, &push);
+    try pull.setReceiveTimeout(5000);
+
+    const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    try push.sendMultipart(&.{ "a", "bb", "ccc" }, 0);
+    var got = try pull.recvMultipartAlloc(allocator, 0);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 3), got.parts.len);
+    try testing.expectEqualStrings("a", got.parts[0]);
+    try testing.expectEqualStrings("bb", got.parts[1]);
+    try testing.expectEqualStrings("ccc", got.parts[2]);
+}
+
 test "curve req rep tcp" {
     if (!try omq.has(allocator, "curve")) return;
-
-    const server = try omq.curveKeypair();
-    const client = try omq.curveKeypair();
 
     var ctx = try omq.Context.init();
     defer ctx.deinit();
@@ -519,8 +626,7 @@ test "curve req rep tcp" {
     var req = try ctx.socket(omq.REQ);
     defer req.deinit();
 
-    try rep.setCurveServer(allocator, server.publicSlice(), server.secretSlice());
-    try req.setCurveClient(allocator, client.publicSlice(), client.secretSlice(), server.publicSlice());
+    try configureCurve(&rep, &req);
     try rep.setReceiveTimeout(5000);
     try req.setReceiveTimeout(5000);
     try req.setSendTimeout(5000);
@@ -533,6 +639,107 @@ test "curve req rep tcp" {
     try expectRecv(&rep, "ping");
     _ = try rep.send("pong", 0);
     try expectRecv(&req, "pong");
+}
+
+test "curve push pull tcp" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try configureCurve(&pull, &push);
+    try pull.setReceiveTimeout(5000);
+
+    const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    _ = try push.send("hello over curve", 0);
+    try expectRecv(&pull, "hello over curve");
+}
+
+test "curve pub sub tcp" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var publisher = try ctx.socket(omq.PUB);
+    defer publisher.deinit();
+    var sub = try ctx.socket(omq.SUB);
+    defer sub.deinit();
+
+    try configureCurve(&publisher, &sub);
+    try sub.subscribe("hot/");
+    try sub.setReceiveTimeout(5000);
+
+    const bound = try publisher.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try sub.connect(allocator, bound);
+    sleepMillis(300);
+
+    _ = try publisher.send("cold/skip", 0);
+    _ = try publisher.send("hot/take", 0);
+    try expectRecv(&sub, "hot/take");
+}
+
+test "curve multipart tcp" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try configureCurve(&pull, &push);
+    try pull.setReceiveTimeout(5000);
+
+    const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    try push.sendMultipart(&.{ "a", "bb", "ccc" }, 0);
+    var got = try pull.recvMultipartAlloc(allocator, 0);
+    defer got.deinit();
+    try testing.expectEqual(@as(usize, 3), got.parts.len);
+    try testing.expectEqualStrings("a", got.parts[0]);
+    try testing.expectEqualStrings("bb", got.parts[1]);
+    try testing.expectEqualStrings("ccc", got.parts[2]);
+}
+
+test "curve bad server key rejects" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    const server = try omq.curveKeypair();
+    const wrong = try omq.curveKeypair();
+    const client = try omq.curveKeypair();
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try pull.setCurveServer(allocator, server.publicSlice(), server.secretSlice());
+    try push.setCurveClient(allocator, client.publicSlice(), client.secretSlice(), wrong.publicSlice());
+    try pull.setReceiveTimeout(1000);
+
+    const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    _ = try push.send("should not arrive", 0);
+    try testing.expectError(error.Again, pull.recvAlloc(allocator, 0));
 }
 
 test "curve option helpers round trip" {
@@ -587,6 +794,58 @@ test "zstd tcp static dict" {
     const payload = try allocator.alloc(u8, 4096);
     defer allocator.free(payload);
     @memset(payload, 'A');
+
+    _ = try push.send(payload, 0);
+    const got = try pull.recvAlloc(allocator, 0);
+    defer allocator.free(got);
+    try testing.expectEqualSlices(u8, payload, got);
+}
+
+test "zstd tcp custom level" {
+    if (!try omq.has(allocator, "zstd")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try pull.setReceiveTimeout(2000);
+    try push.setCompressionLevel(3);
+    try testing.expectEqual(@as(i32, 3), try push.compressionLevel());
+
+    const bound = try pull.bind(allocator, "zstd+tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    _ = try push.send("compressed-level", 0);
+    try expectRecv(&pull, "compressed-level");
+}
+
+test "zstd tcp auto train" {
+    if (!try omq.has(allocator, "zstd")) return;
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var pull = try ctx.socket(omq.PULL);
+    defer pull.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try pull.setReceiveTimeout(2000);
+    try push.setCompressionAutoTrain(true);
+    try testing.expect(try push.compressionAutoTrain());
+
+    const bound = try pull.bind(allocator, "zstd+tcp://127.0.0.1:*");
+    defer allocator.free(bound);
+    try push.connect(allocator, bound);
+
+    const payload = try allocator.alloc(u8, 2048);
+    defer allocator.free(payload);
+    @memset(payload, 'z');
 
     _ = try push.send(payload, 0);
     const got = try pull.recvAlloc(allocator, 0);

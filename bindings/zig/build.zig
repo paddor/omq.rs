@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
             },
             .link_libc = true,
         }),
+        .filters = test_filters,
     });
     const run_soak_tests = b.addRunArtifact(soak_tests);
     if (b.args) |args| {

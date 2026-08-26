@@ -17,43 +17,18 @@ Benchmark and build details live in
 
 ## API Shape
 
-- Socket constants: all 20 ZMTP socket types, including `CLIENT`, `SERVER`,
-  `RADIO`, `DISH`, `SCATTER`, `GATHER`, `CHANNEL`, `PEER`, and `STREAM`.
-- Flags: `DONTWAIT`, `SNDMORE`.
-- Arena constants: `OMQ_ARENA_THRESHOLD`, `DEFAULT_ARENA_THRESHOLD`.
-- `omq.monotonic_seconds()` returns a monotonic timestamp for tests and
-  benchmarks.
-- `omq.context({ io_threads = 1 })` creates a context.
-- `Context:socket("push", opts)` creates a socket by name or numeric constant.
-- `Context:term()` closes the context. It errors while sockets or helper peers
-  are still live.
-- `Context:close()` aliases `Context:term()`.
-- `Socket:bind(endpoint)` binds and returns the resolved endpoint, including
-  wildcard TCP ports when available.
-- `Socket:connect(endpoint)` connects an endpoint.
-- `Socket:close()` closes the socket. It is idempotent.
-- `Socket:send("bytes", flags)` sends one frame.
-- `Socket:send({ "part1", "part2" }, flags)` sends multipart.
-- `Socket:send_parts(parts, flags)` sends multipart.
-- `Socket:recv(max_size, flags)` receives one frame. If `max_size` is set and
-  the frame is larger, the call errors after consuming that frame.
-- `Socket:try_recv(max_size)` is nonblocking and returns `nil` when no frame is
-  ready.
-- `Socket:recv_parts(max_size, flags)` receives all frames in one message.
-- `Socket:subscribe(prefix)` adds a SUB prefix.
-- `Socket:unsubscribe(prefix)` removes a SUB prefix.
-- `Socket:join(group)` and `Socket:leave(group)` manage DISH groups.
-- `Socket:send_group(group, "bytes", flags)` sends a RADIO message to a group.
-- `Socket:set_linger(ms)`, `Socket:set_send_timeout(ms)`,
-  `Socket:set_recv_timeout(ms)`, `Socket:set_send_hwm(value)`,
-  `Socket:set_recv_hwm(value)`, `Socket:set_arena_threshold(bytes)`, and
-  `Socket:get_arena_threshold()` expose supported socket options.
-- Socket option tables support `linger`, `send_timeout`, `recv_timeout`,
-  `send_hwm`, `recv_hwm`, `arena_threshold`, and `subscribe`.
-- `arena_threshold` uses `4 KiB` by default. `0` means gather-write for all
-  payloads. `-1` restores the native default.
-- `omq.testing.*` helpers are test-only Rust backend peers. Their join handles
-  expose `endpoint()`, `join()`, and `received()`.
+- `Context` owns the native OMQ context and IO threads.
+- `Context:socket(...)` creates sockets by name or numeric ZMQ constant.
+- Socket calls follow the normal libzmq shape: bind/connect, send/receive,
+  multipart, pub/sub controls, RADIO/DISH groups, and close.
+- Lua strings are message payloads. Lua tables are multipart messages.
+- Nonblocking calls use libzmq-style flags and `try_*` helpers.
+- Socket options are supplied at creation or through setter methods for HWM,
+  linger, timeouts, subscription, and arena threshold tuning.
+- Treat each socket as owned by one Lua coroutine/thread at a time. Create
+  more sockets for more concurrent flows.
+- `omq.testing.*` helpers are test-only Rust backend peers, not application
+  APIs.
 
 Example:
 

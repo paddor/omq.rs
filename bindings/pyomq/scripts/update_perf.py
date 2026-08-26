@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import selectors
 import subprocess
 import sys
 import time
@@ -118,6 +119,7 @@ def save_results(
                 "impl": impl,
                 "kind": "latency",
                 "mode": "sync",
+                "transport": "tcp",
                 "msg_size": size,
                 **latency_fields(lat[i]),
             }
@@ -128,6 +130,7 @@ def save_results(
                 "impl": impl,
                 "kind": "latency",
                 "mode": "async",
+                "transport": "tcp",
                 "msg_size": size,
                 **latency_fields(alat[i]),
             }
@@ -197,7 +200,9 @@ def chart_data_from_jsonl():
         return r["msgs_s"] if r else 0.0
 
     def get_lat(mode, impl, size):
-        r = latest.get((impl, "latency", mode, "", size, ""))
+        r = latest.get((impl, "latency", mode, "tcp", size, ""))
+        if r is None:
+            r = latest.get((impl, "latency", mode, "", size, ""))
         return r["p50_us"] if r else 0.0
 
     sync_omq_tp = [get_tp("sync", "pyomq", "tcp", s) for s in SIZES]
@@ -369,6 +374,28 @@ def _run_subprocess(code, label, timeout=None, retries=None):
     if r.returncode != 0:
         raise RuntimeError(f"{label} failed:\n{r.stdout}{r.stderr}")
     return json.loads(r.stdout.strip())
+
+
+def _read_line_timeout(pipe, timeout):
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(pipe, selectors.EVENT_READ)
+        if not selector.select(timeout):
+            return None
+        return pipe.readline()
+    finally:
+        selector.close()
+
+
+def _kill_process(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def _measure_throughput_subprocess(lib_name, transport, size, duration=None):
@@ -678,50 +705,53 @@ def run_async_throughput(lib_name):
     return results
 
 
-# sync REQ/REP latency
+# async REQ/REP latency
 
 
 def _measure_latency_subprocess(lib_name, size, warmup_seconds, duration_seconds):
-    code = f"""
-import time, threading, json, socket as sock
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
-if '{lib_name}' == 'pyzmq':
-    import zmq as lib
-else:
-    import pyomq as lib
-payload = b'x' * {size}
-ep = free_tcp()
+    if lib_name == "pyzmq":
+        lib_import = "import zmq as lib"
+    else:
+        lib_import = "import pyomq as lib"
+
+    endpoint = free_tcp()
+    rep_code = f"""
+import os, sys
+{lib_import}
+endpoint = sys.argv[1]
 ctx = lib.Context()
 rep = ctx.socket(lib.REP)
-req = ctx.socket(lib.REQ)
 rep.linger = 0
+rep.bind(endpoint)
+print('READY', flush=True)
+while True:
+    msg = rep.recv()
+    rep.send(msg)
+    if msg == b'__OMQ_BENCH_STOP__':
+        break
+rep.close()
+sys.stdout.flush()
+os._exit(0)
+"""
+    req_code = f"""
+import json, os, sys, time
+{lib_import}
+endpoint = sys.argv[1]
+size = int(sys.argv[2])
+warmup_seconds = float(sys.argv[3])
+duration_seconds = float(sys.argv[4])
+payload = b'x' * size
+ctx = lib.Context()
+req = ctx.socket(lib.REQ)
 req.linger = 0
-rep.bind(ep)
-req.connect(ep)
-time.sleep(0.05)
-def echo():
-    try:
-        while True:
-            msg = rep.recv()
-            rep.send(msg)
-            if msg == b'__OMQ_BENCH_STOP__':
-                break
-    except Exception:
-        pass
-t = threading.Thread(target=echo, daemon=True)
-t.start()
-warmup_deadline = time.monotonic() + {warmup_seconds}
+req.connect(endpoint)
+warmup_deadline = time.monotonic() + warmup_seconds
 while time.monotonic() < warmup_deadline:
     req.send(payload)
     req.recv()
 rtts = []
 start = time.monotonic()
-deadline = start + {duration_seconds}
+deadline = start + duration_seconds
 while True:
     t0 = time.monotonic()
     req.send(payload)
@@ -733,20 +763,57 @@ elapsed = time.monotonic() - start
 req.send(b'__OMQ_BENCH_STOP__')
 req.recv()
 req.close()
-rep.close()
-t.join(timeout=1.0)
+if not rtts:
+    raise RuntimeError('no latency samples')
 rtts.sort()
 p50 = rtts[len(rtts)*50//100]*1e6
 p99 = rtts[len(rtts)*99//100]*1e6
 print(json.dumps([p50, p99, len(rtts), elapsed]))
-import sys; sys.stdout.flush(); import os; os._exit(0)
+sys.stdout.flush()
+os._exit(0)
 """
-    result = _run_subprocess(
-        code,
-        f"{lib_name} lat {size}B",
-        timeout=LATENCY_TIMEOUT_S,
+    label = f"{lib_name} tcp lat {size}B"
+    rep_proc = subprocess.Popen(
+        [sys.executable, "-c", rep_code, endpoint],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    return tuple(result) if result is not None else (999999.0, 999999.0)
+    assert rep_proc.stdout is not None
+    try:
+        ready = _read_line_timeout(rep_proc.stdout, 10.0)
+        if ready is None or not ready.startswith("READY"):
+            stderr = ""
+            if rep_proc.poll() is not None:
+                _, stderr = rep_proc.communicate(timeout=1)
+            raise RuntimeError(f"{label} rep did not become ready:\n{stderr}")
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    req_code,
+                    endpoint,
+                    str(size),
+                    str(warmup_seconds),
+                    str(duration_seconds),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=LATENCY_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{label} req timeout after {LATENCY_TIMEOUT_S}s") from error
+        if result.returncode != 0:
+            raise RuntimeError(f"{label} req failed:\n{result.stdout}{result.stderr}")
+        try:
+            rep_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{label} rep did not exit") from error
+        return tuple(json.loads(result.stdout.strip()))
+    finally:
+        _kill_process(rep_proc)
 
 
 def run_latency(lib_name):
@@ -795,41 +862,47 @@ def _measure_async_latency_subprocess(lib_name, size, warmup_seconds, duration_s
         lib_import = "import pyomq; import pyomq.asyncio as actx; lib = pyomq"
 
     send_await = "await " if lib_name == "pyzmq" else ""
-    code = f"""
-import asyncio, time, json, socket as sock
-def free_tcp():
-    s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return f'tcp://127.0.0.1:{{port}}'
+    endpoint = free_tcp()
+    rep_code = f"""
+import asyncio, os, sys
 {lib_import}
 async def run():
-    payload = b'x' * {size}
-    ep = free_tcp()
+    endpoint = sys.argv[1]
     ctx = actx.Context()
     rep = ctx.socket(lib.REP)
+    rep.linger = 0
+    rep.bind(endpoint)
+    print('READY', flush=True)
+    while True:
+        msg = await rep.recv()
+        {send_await}rep.send(msg)
+        if msg == b'__OMQ_BENCH_STOP__':
+            break
+    rep.close()
+    sys.stdout.flush()
+    os._exit(0)
+asyncio.run(run())
+"""
+    req_code = f"""
+import asyncio, json, os, sys, time
+{lib_import}
+async def run():
+    endpoint = sys.argv[1]
+    size = int(sys.argv[2])
+    warmup_seconds = float(sys.argv[3])
+    duration_seconds = float(sys.argv[4])
+    payload = b'x' * size
+    ctx = actx.Context()
     req = ctx.socket(lib.REQ)
-    rep.bind(ep)
-    req.connect(ep)
-    await asyncio.sleep(0.05)
-    async def echo():
-        try:
-            while True:
-                msg = await rep.recv()
-                {send_await}rep.send(msg)
-                if msg == b'__OMQ_BENCH_STOP__':
-                    break
-        except Exception:
-            pass
-    task = asyncio.create_task(echo())
-    warmup_deadline = time.monotonic() + {warmup_seconds}
+    req.linger = 0
+    req.connect(endpoint)
+    warmup_deadline = time.monotonic() + warmup_seconds
     while time.monotonic() < warmup_deadline:
         {send_await}req.send(payload)
         await req.recv()
     rtts = []
     start = time.monotonic()
-    deadline = start + {duration_seconds}
+    deadline = start + duration_seconds
     while True:
         t0 = time.monotonic()
         {send_await}req.send(payload)
@@ -840,20 +913,59 @@ async def run():
     elapsed = time.monotonic() - start
     {send_await}req.send(b'__OMQ_BENCH_STOP__')
     await req.recv()
-    await task
+    req.close()
+    if not rtts:
+        raise RuntimeError('no latency samples')
     rtts.sort()
     p50 = rtts[len(rtts)*50//100]*1e6
     p99 = rtts[len(rtts)*99//100]*1e6
     print(json.dumps([p50, p99, len(rtts), elapsed]))
-    import sys; sys.stdout.flush(); import os; os._exit(0)
+    sys.stdout.flush()
+    os._exit(0)
 asyncio.run(run())
 """
-    result = _run_subprocess(
-        code,
-        f"{lib_name} async lat {size}B",
-        timeout=LATENCY_TIMEOUT_S,
+    label = f"{lib_name} async tcp lat {size}B"
+    rep_proc = subprocess.Popen(
+        [sys.executable, "-c", rep_code, endpoint],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    return tuple(result) if result is not None else (999999.0, 999999.0)
+    assert rep_proc.stdout is not None
+    try:
+        ready = _read_line_timeout(rep_proc.stdout, 10.0)
+        if ready is None or not ready.startswith("READY"):
+            stderr = ""
+            if rep_proc.poll() is not None:
+                _, stderr = rep_proc.communicate(timeout=1)
+            raise RuntimeError(f"{label} rep did not become ready:\n{stderr}")
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    req_code,
+                    endpoint,
+                    str(size),
+                    str(warmup_seconds),
+                    str(duration_seconds),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=LATENCY_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{label} req timeout after {LATENCY_TIMEOUT_S}s") from error
+        if result.returncode != 0:
+            raise RuntimeError(f"{label} req failed:\n{result.stdout}{result.stderr}")
+        try:
+            rep_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"{label} rep did not exit") from error
+        return tuple(json.loads(result.stdout.strip()))
+    finally:
+        _kill_process(rep_proc)
 
 
 def run_async_latency(lib_name):

@@ -1,8 +1,18 @@
 name = "omq_gleam"
 version = "0.1.0"
+description = "Gleam wrapper for OMQ.beam, backed by the Erlang OMQ NIF package."
+licences = ["ISC"]
 target = "erlang"
 
+[repository]
+type = "github"
+user = "paddor"
+repo = "omq.rs"
+path = "bindings/beam/gleam"
+tag-prefix = "bindings/beam/gleam/v"
+
 [dependencies]
+omq = ">= 0.1.0 and < 1.0.0"
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
 
 [dev-dependencies]

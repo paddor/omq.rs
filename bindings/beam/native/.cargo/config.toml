@@ -1,0 +1,4 @@
+[patch.crates-io]
+omq-proto = { path = "../../../omq-proto" }
+omq-tokio = { path = "../../../omq-tokio" }
+yring = { path = "../../../yring" }

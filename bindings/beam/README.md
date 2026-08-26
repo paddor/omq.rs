@@ -11,6 +11,29 @@ Architecture detail: [`doc/architecture.md`](doc/architecture.md).
 Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 `exzmq` is not included because its current public API is CLIENT/SERVER-only.
 
+## Install
+
+Erlang:
+
+```erlang
+{deps, [{omq, "0.1.0"}]}.
+```
+
+Elixir:
+
+```elixir
+def deps do
+  [{:omq_elixir, "~> 0.1"}]
+end
+```
+
+Gleam:
+
+```toml
+[dependencies]
+omq_gleam = ">= 0.1.0 and < 1.0.0"
+```
+
 ## API Shape
 
 - `omq:context(...)` owns native IO threads and creates sockets.

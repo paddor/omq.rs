@@ -16,7 +16,7 @@ export class Req extends Socket {
   } | null = null;
   private replyConnection: Connection | null = null;
 
-  /** @ignore */
+  /** Create a REQ socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

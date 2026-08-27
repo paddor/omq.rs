@@ -12,7 +12,7 @@ export class Dealer extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "DEALER";
 
-  /** @ignore */
+  /** Create a DEALER socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

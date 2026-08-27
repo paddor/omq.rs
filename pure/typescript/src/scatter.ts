@@ -11,7 +11,7 @@ export class Scatter extends Push {
   /** @ignore */
   protected override readonly socketType: SocketTypeName = "SCATTER";
 
-  /** @ignore */
+  /** Create a SCATTER socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

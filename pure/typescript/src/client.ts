@@ -13,7 +13,7 @@ export class Client extends Dealer {
   /** @ignore */
   protected override readonly socketType: SocketTypeName = "CLIENT";
 
-  /** @ignore */
+  /** Create a CLIENT socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

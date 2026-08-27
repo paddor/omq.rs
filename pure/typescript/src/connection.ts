@@ -31,21 +31,37 @@ import {
 export type ConnectionState = "connecting" | "handshaking" | "ready" | "closed";
 type PlainHandshakeState = "awaiting-welcome" | "awaiting-ready";
 
+/** Low-level WebSocket connection options used by `Socket`. */
 export interface ConnectionOptions {
+  /** Local ZMQ socket type advertised in READY. */
   socketType: SocketTypeName;
+  /** Local ZMQ identity bytes advertised in READY. */
   identity: Uint8Array;
+  /** Pre-shared LZ4 dictionary sent before compressed messages. */
   lz4Dict?: Uint8Array;
+  /** Maximum decompressed message size accepted from the peer. */
   maxMessageSize?: number;
+  /** Maximum queued sends before new sends reject. */
   sendHighWaterMark?: number;
+  /** WebSocket buffered bytes above which sends wait. */
   sendBufferHighWaterMark?: number;
+  /** WebSocket buffered bytes at or below which sends resume. */
   sendBufferLowWaterMark?: number;
+  /** Milliseconds between WebSocket bufferedAmount checks. */
   sendBufferPollMs?: number;
+  /** Close if WebSocket/ZMTP handshake does not complete in time. */
   handshakeTimeoutMs?: number;
+  /** Optional ZMTP PLAIN credentials. */
   plain?: PlainAuthOptions;
+  /** Called after ZMTP READY/PLAIN handshake succeeds. */
   onReady?: (conn: Connection) => void;
+  /** Called for each decoded application message. */
   onMessage?: (conn: Connection, msg: Message) => void;
+  /** Called for incoming ZMTP command frames. */
   onCommand?: (conn: Connection, name: string, body: Uint8Array) => void;
+  /** Called when the WebSocket connection closes. */
   onClose?: (conn: Connection) => void;
+  /** Called when protocol or transport errors close the connection. */
   onError?: (conn: Connection, error: Error) => void;
 }
 
@@ -79,7 +95,9 @@ function eventDataToArrayBuffer(data: unknown): ArrayBuffer {
   throw new Error("Expected binary WebSocket message");
 }
 
+/** Low-level ZWS/ZMTP connection used by socket classes. */
 export class Connection {
+  /** Original endpoint URL passed to the constructor. */
   readonly url: string;
   private ws: WebSocket | null = null;
   private state: ConnectionState = "connecting";
@@ -94,8 +112,10 @@ export class Connection {
   private sending = false;
   private queuedSends = 0;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Peer READY properties after the ZMTP handshake completes. */
   peerProperties: PeerProperties | null = null;
 
+  /** Create and start opening a WebSocket connection. */
   constructor(url: string, opts: ConnectionOptions) {
     this.url = url;
     this.opts = opts;
@@ -141,10 +161,12 @@ export class Connection {
     this.startHandshakeTimer();
   }
 
+  /** Current connection lifecycle state. */
   get connectionState(): ConnectionState {
     return this.state;
   }
 
+  /** Whether the ZMTP handshake has completed. */
   get isReady(): boolean {
     return this.state === "ready";
   }
@@ -164,6 +186,7 @@ export class Connection {
     return this.opts.sendBufferPollMs ?? DEFAULT_SEND_BUFFER_POLL_MS;
   }
 
+  /** Send one application message over this ready connection. */
   send(msg: Message): Promise<void> {
     if (!this.ws || this.state !== "ready") {
       throw new Error("Connection not ready");
@@ -245,11 +268,13 @@ export class Connection {
     } while (this.ws.bufferedAmount > this.sendBufferLowWaterMark);
   }
 
+  /** Send a raw ZMTP command payload. */
   sendCommand(payload: Uint8Array): void {
     if (!this.ws) throw new Error("Connection closed");
     this.ws.send(encodeCommandFrame(payload));
   }
 
+  /** Close the WebSocket and release compression state. */
   close(): void {
     this.pendingParts = [];
     this.clearHandshakeTimer();

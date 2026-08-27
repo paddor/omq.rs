@@ -176,6 +176,7 @@ export abstract class Socket {
     }
   }
 
+  /** @ignore */
   private openConnection(endpoint: EndpointState): void {
     if (this.closed || endpoint.closedByUser) return;
     const connOpts: ConnectionOptions = {
@@ -429,15 +430,18 @@ export abstract class Socket {
     conn.close();
   }
 
+  /** @ignore */
   private get reconnectInitialDelayMs(): number {
     return this.opts.reconnectInitialDelayMs ??
       DEFAULT_RECONNECT_INITIAL_DELAY_MS;
   }
 
+  /** @ignore */
   private get reconnectMaxDelayMs(): number {
     return this.opts.reconnectMaxDelayMs ?? DEFAULT_RECONNECT_MAX_DELAY_MS;
   }
 
+  /** @ignore */
   private scheduleReconnect(endpoint: EndpointState): void {
     if (endpoint.reconnectTimer !== null) return;
 
@@ -455,6 +459,7 @@ export abstract class Socket {
     endpoint.reconnectTimer = timer;
   }
 
+  /** @ignore */
   private clearReconnectTimer(endpoint: EndpointState): void {
     if (endpoint.reconnectTimer !== null) {
       clearTimeout(endpoint.reconnectTimer);
@@ -462,16 +467,19 @@ export abstract class Socket {
     }
   }
 
+  /** @ignore */
   private endpointFor(conn: Connection): EndpointState | null {
     const url = this.urlsByConnection.get(conn);
     return url ? this.endpoints.get(url) ?? null : null;
   }
 
+  /** @ignore */
   private removeReadyConnection(conn: Connection): void {
     const idx = this.readyConnections.indexOf(conn);
     if (idx >= 0) this.readyConnections.splice(idx, 1);
   }
 
+  /** @ignore */
   private drainReadyWaiters(): void {
     while (this.readyWaiters.length > 0 && this.readyConnections.length > 0) {
       const waiter = this.readyWaiters.shift()!;
@@ -480,6 +488,7 @@ export abstract class Socket {
     }
   }
 
+  /** @ignore */
   private rejectWaitersIfNoEndpoints(error: Error): void {
     if (this.endpoints.size > 0) return;
     this.rejectConnectionReadyWaiters(error);
@@ -488,24 +497,28 @@ export abstract class Socket {
     this.onSocketClosed(error);
   }
 
+  /** @ignore */
   private drainConnectionReadyWaiters(): void {
     const waiters = this.connectionReadyWaiters;
     this.connectionReadyWaiters = [];
     for (const waiter of waiters) waiter.resolve(undefined);
   }
 
+  /** @ignore */
   private rejectConnectionReadyWaiters(error: Error): void {
     const waiters = this.connectionReadyWaiters;
     this.connectionReadyWaiters = [];
     for (const waiter of waiters) waiter.reject(error);
   }
 
+  /** @ignore */
   private rejectReadyWaiters(error: Error): void {
     const waiters = this.readyWaiters;
     this.readyWaiters = [];
     for (const waiter of waiters) waiter.reject(error);
   }
 
+  /** @ignore */
   private rejectMessageWaiters(error: Error): void {
     const waiters = this.messageWaiters;
     this.messageWaiters = [];

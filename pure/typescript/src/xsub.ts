@@ -15,7 +15,7 @@ export class XSub extends Socket {
   protected readonly socketType: SocketTypeName = "XSUB";
   private subscriptions: Map<string, Uint8Array> = new Map();
 
-  /** @ignore */
+  /** Create an XSUB socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

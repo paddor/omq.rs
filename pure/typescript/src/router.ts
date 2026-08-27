@@ -18,7 +18,7 @@ export class Router extends Socket {
   protected connectionsByIdentity: Map<string, Connection> = new Map();
   private idCounter = 0;
 
-  /** @ignore */
+  /** Create a ROUTER socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }
@@ -85,6 +85,7 @@ export class Router extends Socket {
     this.enqueueMessage(conn, withIdentity);
   }
 
+  /** @ignore */
   private generateIdentity(): Uint8Array {
     const id = new Uint8Array(5);
     id[0] = 0;

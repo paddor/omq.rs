@@ -15,7 +15,7 @@ export class Radio extends Socket {
   protected readonly socketType: SocketTypeName = "RADIO";
   private peerGroups: Map<Connection, Set<string>> = new Map();
 
-  /** @ignore */
+  /** Create a RADIO socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

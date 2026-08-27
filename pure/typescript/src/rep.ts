@@ -20,7 +20,7 @@ export class Rep extends Socket {
   private routingEnvelope: Uint8Array[] | null = null;
   private replyConnection: Connection | null = null;
 
-  /** @ignore */
+  /** Create a REP socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

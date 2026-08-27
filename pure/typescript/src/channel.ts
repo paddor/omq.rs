@@ -12,7 +12,7 @@ export class Channel extends Pair {
   /** @ignore */
   protected override readonly socketType: SocketTypeName = "CHANNEL";
 
-  /** @ignore */
+  /** Create a CHANNEL socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

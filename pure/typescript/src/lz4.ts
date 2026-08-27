@@ -33,14 +33,18 @@ export async function initLz4(): Promise<void> {
   if (!lz4Init) {
     lz4Init = (async () => {
       const mod = await import("@paddor/lz4rip");
-      await mod.init();
+      if (isNodeRuntime()) {
+        await initLz4FromNodePackageBytes(mod);
+      } else {
+        await mod.init();
+      }
       lz4Module = mod;
     })();
   }
   await lz4Init;
 }
 
-/** Initialize LZ4 from bytes. Useful in runtimes where fetch cannot load file URLs. */
+/** Initialize LZ4 from bytes in runtimes where fetch cannot load file URLs. */
 export async function initLz4FromBytes(bytes: BufferSource): Promise<void> {
   const mod = await import("@paddor/lz4rip");
   mod.initSyncFromBytes(bytes);
@@ -52,6 +56,30 @@ function requireLz4(): Lz4Module {
     throw new Error("LZ4 not initialized.");
   }
   return lz4Module;
+}
+
+async function initLz4FromNodePackageBytes(
+  mod: Lz4Module,
+): Promise<void> {
+  const [{ createRequire }, { readFile }, { dirname, resolve }] = await Promise
+    .all([
+      import("node:module"),
+      import("node:fs/promises"),
+      import("node:path"),
+    ]);
+  const require = createRequire(import.meta.url);
+  const wasmPath = resolve(
+    dirname(require.resolve("@paddor/lz4rip")),
+    "pkg/lz4rip_wasm_bg.wasm",
+  );
+  mod.initSyncFromBytes(await readFile(wasmPath));
+}
+
+function isNodeRuntime(): boolean {
+  const processLike = globalThis as typeof globalThis & {
+    process?: { versions?: { node?: string } };
+  };
+  return Boolean(processLike.process?.versions?.node);
 }
 
 function readSentinel(data: Uint8Array): number {
@@ -91,10 +119,12 @@ function rejectImplausibleCompressedSize(
   }
 }
 
+/** Return whether a compressed transport part carries an LZ4 dictionary. */
 export function isLz4DictionaryShipment(data: Uint8Array): boolean {
   return data.byteLength >= 4 && readSentinel(data) === SENTINEL_LZ4D;
 }
 
+/** Stateful decoder for the omq LZ4 transport envelope. */
 export class Lz4Decoder {
   private decompressor: DecompressorInstance;
   private dictReceived = false;
@@ -102,6 +132,7 @@ export class Lz4Decoder {
   private readonly blockSize: number;
   private freed = false;
 
+  /** Create a decoder with an optional decompressed message size limit. */
   constructor(maxMessageSize?: number, blockSize = LZ4M_BLOCK_SIZE) {
     validateBlockSize(blockSize);
     this.decompressor = new (requireLz4().Decompressor)();
@@ -109,6 +140,7 @@ export class Lz4Decoder {
     this.blockSize = blockSize;
   }
 
+  /** Decode one enveloped part and consume message size budget. */
   decodePart(
     data: Uint8Array,
     budgetRemaining: number,
@@ -176,6 +208,7 @@ export class Lz4Decoder {
     );
   }
 
+  /** Decode one enveloped multipart message, or `null` for a dictionary shipment. */
   decodeMessage(parts: Uint8Array[]): Uint8Array[] | null {
     this.assertOpen();
     const budget = this.maxMessageSize ?? Infinity;
@@ -199,16 +232,19 @@ export class Lz4Decoder {
     return decoded;
   }
 
+  /** Release native WASM decoder memory. Safe to call more than once. */
   free(): void {
     if (this.freed) return;
     this.decompressor.free();
     this.freed = true;
   }
 
+  /** @ignore */
   private assertOpen(): void {
     if (this.freed) throw new Error("LZ4 decoder closed");
   }
 
+  /** @ignore */
   private decodeMultiBlock(
     data: Uint8Array,
     budgetRemaining: number,
@@ -270,6 +306,7 @@ export class Lz4Decoder {
   }
 }
 
+/** Stateful encoder for the omq LZ4 transport envelope. */
 export class Lz4Encoder {
   private compressor: CompressorInstance;
   private sendDict: Uint8Array | null;
@@ -277,6 +314,7 @@ export class Lz4Encoder {
   private readonly blockSize: number;
   private freed = false;
 
+  /** Create an encoder with an optional pre-shared dictionary. */
   constructor(sendDict?: Uint8Array, blockSize = LZ4M_BLOCK_SIZE) {
     validateBlockSize(blockSize);
     this.sendDict = sendDict ?? null;
@@ -292,6 +330,7 @@ export class Lz4Encoder {
     this.blockSize = blockSize;
   }
 
+  /** @ignore */
   private encodePart(plaintext: Uint8Array): Uint8Array {
     const threshold = this.sendDict
       ? MIN_COMPRESS_WITH_DICT
@@ -323,6 +362,7 @@ export class Lz4Encoder {
     return wrapLz4b(plaintext.byteLength, compressed);
   }
 
+  /** Encode one multipart message, including dictionary shipment if needed. */
   encodeMessage(parts: Uint8Array[]): Uint8Array[][] {
     this.assertOpen();
     const encoded = parts.map((p) => this.encodePart(p));
@@ -334,16 +374,19 @@ export class Lz4Encoder {
     return [encoded];
   }
 
+  /** Release native WASM encoder memory. Safe to call more than once. */
   free(): void {
     if (this.freed) return;
     this.compressor.free();
     this.freed = true;
   }
 
+  /** @ignore */
   private assertOpen(): void {
     if (this.freed) throw new Error("LZ4 encoder closed");
   }
 
+  /** @ignore */
   private encodeMultiBlock(plaintext: Uint8Array): Uint8Array {
     const blocks: Uint8Array[] = [];
     for (

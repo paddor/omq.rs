@@ -15,7 +15,7 @@ export class Sub extends Socket {
   protected readonly socketType: SocketTypeName = "SUB";
   private subscriptions: Set<string> = new Set();
 
-  /** @ignore */
+  /** Create a SUB socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

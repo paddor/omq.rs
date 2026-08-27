@@ -11,7 +11,7 @@ export class Pair extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "PAIR";
 
-  /** @ignore */
+  /** Create a PAIR socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

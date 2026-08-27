@@ -11,7 +11,7 @@ export class Pull extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "PULL";
 
-  /** @ignore */
+  /** Create a PULL socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

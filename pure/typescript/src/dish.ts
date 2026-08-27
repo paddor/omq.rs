@@ -16,7 +16,7 @@ export class Dish extends Socket {
   protected readonly socketType: SocketTypeName = "DISH";
   private groups: Set<string> = new Set();
 
-  /** @ignore */
+  /** Create a DISH socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

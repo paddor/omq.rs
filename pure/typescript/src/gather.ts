@@ -12,7 +12,7 @@ export class Gather extends Pull {
   /** @ignore */
   protected override readonly socketType: SocketTypeName = "GATHER";
 
-  /** @ignore */
+  /** Create a GATHER socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

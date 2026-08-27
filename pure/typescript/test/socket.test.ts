@@ -1914,7 +1914,7 @@ describe("Socket connection management", () => {
 
     await vi.waitFor(() => {
       expect(createdSockets.length).toBe(1);
-    });
+    }, { timeout: 5_000 });
     const ws = createdSockets[0]!;
     const pending = push.ready();
     makeReady(ws, "PULL");

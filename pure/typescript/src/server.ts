@@ -16,7 +16,7 @@ export class Server extends Socket {
   private connectionsByRoutingId: Map<number, Connection> = new Map();
   private nextRoutingId = 1;
 
-  /** @ignore */
+  /** Create a SERVER socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

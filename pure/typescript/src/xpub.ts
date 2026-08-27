@@ -13,7 +13,7 @@ export class XPub extends Pub {
   /** @ignore */
   protected override readonly socketType: SocketTypeName = "XPUB";
 
-  /** @ignore */
+  /** Create an XPUB socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

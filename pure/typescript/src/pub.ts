@@ -22,7 +22,7 @@ export class Pub extends Socket {
   /** @ignore */
   protected peerSubscriptions: Map<Connection, Uint8Array[]> = new Map();
 
-  /** @ignore */
+  /** Create a PUB socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

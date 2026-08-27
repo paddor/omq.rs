@@ -11,7 +11,7 @@ export class Push extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "PUSH";
 
-  /** @ignore */
+  /** Create a PUSH socket. */
   constructor(opts?: SocketOptions) {
     super(opts);
   }

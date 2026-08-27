@@ -1,4 +1,10 @@
-import { Compressor, Decompressor } from "@paddor/lz4rip";
+import type {
+  Compressor as CompressorInstance,
+  Decompressor as DecompressorInstance,
+} from "@paddor/lz4rip";
+import { setLz4Factories } from "./lz4-registry.ts";
+
+type Lz4Module = typeof import("@paddor/lz4rip");
 
 const SENTINEL_PLAIN = 0x00000000;
 const SENTINEL_LZ4B = 0x4c5a3442; // "LZ4B"
@@ -12,10 +18,47 @@ const MAX_TS_SEND_PART_SIZE = LZ4M_BLOCK_SIZE - 1;
 const MIN_COMPRESS_NO_DICT = 512;
 const MIN_COMPRESS_WITH_DICT = 128;
 
+let lz4Module: Lz4Module | null = null;
+
 // ENVELOPE_PLAIN = 4 bytes (sentinel only)
 // ENVELOPE_LZ4B = 12 bytes (sentinel + u64 LE decompressed_size)
 const ENVELOPE_PLAIN = 4;
 const ENVELOPE_LZ4B = 12;
+
+/** Initialize the LZ4 WASM module. Call once before connecting to `lz4+` URLs. */
+export async function initLz4(): Promise<void> {
+  if (lz4Module) {
+    installLz4Factories();
+    return;
+  }
+  const mod = await import("@paddor/lz4rip");
+  await mod.init();
+  lz4Module = mod;
+  installLz4Factories();
+}
+
+/** Initialize LZ4 from bytes. Useful in runtimes where fetch cannot load file URLs. */
+export async function initLz4FromBytes(bytes: BufferSource): Promise<void> {
+  const mod = await import("@paddor/lz4rip");
+  mod.initSyncFromBytes(bytes);
+  lz4Module = mod;
+  installLz4Factories();
+}
+
+function installLz4Factories(): void {
+  setLz4Factories({
+    createDecoder: (maxMessageSize) => new Lz4Decoder(maxMessageSize),
+    createEncoder: (dict) => new Lz4Encoder(dict),
+    isDictionaryShipment: isLz4DictionaryShipment,
+  });
+}
+
+function requireLz4(): Lz4Module {
+  if (!lz4Module) {
+    throw new Error("LZ4 not initialized. Call initLz4() before lz4+ sockets.");
+  }
+  return lz4Module;
+}
 
 function readSentinel(data: Uint8Array): number {
   if (data.byteLength < 4) throw new Error("Part too short for sentinel");
@@ -59,7 +102,7 @@ export function isLz4DictionaryShipment(data: Uint8Array): boolean {
 }
 
 export class Lz4Decoder {
-  private decompressor: Decompressor;
+  private decompressor: DecompressorInstance;
   private dictReceived = false;
   private maxMessageSize: number | undefined;
   private readonly blockSize: number;
@@ -67,7 +110,7 @@ export class Lz4Decoder {
 
   constructor(maxMessageSize?: number, blockSize = LZ4M_BLOCK_SIZE) {
     validateBlockSize(blockSize);
-    this.decompressor = new Decompressor();
+    this.decompressor = new (requireLz4().Decompressor)();
     this.maxMessageSize = maxMessageSize;
     this.blockSize = blockSize;
   }
@@ -88,7 +131,9 @@ export class Lz4Decoder {
         throw new Error(`Invalid dictionary size: ${dict.byteLength}`);
       }
       this.decompressor.free();
-      this.decompressor = Decompressor.withDict(new Uint8Array(dict));
+      this.decompressor = requireLz4().Decompressor.withDict(
+        new Uint8Array(dict),
+      );
       this.dictReceived = true;
       return null;
     }
@@ -232,7 +277,7 @@ export class Lz4Decoder {
 }
 
 export class Lz4Encoder {
-  private compressor: Compressor;
+  private compressor: CompressorInstance;
   private sendDict: Uint8Array | null;
   private dictShipped = false;
   private readonly blockSize: number;
@@ -246,6 +291,7 @@ export class Lz4Encoder {
         `Dictionary too large: ${this.sendDict.byteLength} > ${MAX_DICT_BYTES}`,
       );
     }
+    const { Compressor } = requireLz4();
     this.compressor = sendDict
       ? Compressor.withDict(sendDict)
       : new Compressor();

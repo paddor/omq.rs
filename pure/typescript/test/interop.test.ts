@@ -25,6 +25,7 @@ import {
   XPub,
   XSub,
 } from "../src/mod.ts";
+import { initLz4FromBytes } from "../src/lz4.ts";
 
 interface Peer {
   child: ChildProcessWithoutNullStreams;
@@ -37,13 +38,15 @@ const describeInterop = runInterop ? describe : describe.skip;
 const peers: Peer[] = [];
 const encoder = new TextEncoder();
 
-beforeAll(() => {
+beforeAll(async () => {
   if (!runInterop) return;
   const wasmPath = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "../node_modules/@paddor/lz4rip/src/pkg/lz4rip_wasm_bg.wasm",
   );
-  initSyncFromBytes(readFileSync(wasmPath));
+  const wasm = readFileSync(wasmPath);
+  initSyncFromBytes(wasm);
+  await initLz4FromBytes(wasm);
 });
 
 afterEach(() => {

@@ -258,7 +258,9 @@ async function startBrowserPeer({ beforeAttempt } = {}) {
       await cleanup?.();
     }
   }
-  throw new Error(`could not start browser peer after port collisions: ${lastError}`);
+  throw new Error(
+    `could not start browser peer after port collisions: ${lastError}`,
+  );
 }
 
 async function stopPeer(peer) {

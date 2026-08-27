@@ -6,9 +6,7 @@
  * compression via {@link https://jsr.io/@paddor/lz4rip | @paddor/lz4rip}.
  *
  * ```ts
- * import { initLz4, Sub } from "@zeromq/omq";
- *
- * await initLz4();
+ * import { Sub } from "@zeromq/omq";
  *
  * const sub = new Sub();
  * sub.subscribe("market.");

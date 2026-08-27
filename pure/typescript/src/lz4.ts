@@ -2,7 +2,6 @@ import type {
   Compressor as CompressorInstance,
   Decompressor as DecompressorInstance,
 } from "@paddor/lz4rip";
-import { setLz4Factories } from "./lz4-registry.ts";
 
 type Lz4Module = typeof import("@paddor/lz4rip");
 
@@ -19,22 +18,26 @@ const MIN_COMPRESS_NO_DICT = 512;
 const MIN_COMPRESS_WITH_DICT = 128;
 
 let lz4Module: Lz4Module | null = null;
+let lz4Init: Promise<void> | null = null;
 
 // ENVELOPE_PLAIN = 4 bytes (sentinel only)
 // ENVELOPE_LZ4B = 12 bytes (sentinel + u64 LE decompressed_size)
 const ENVELOPE_PLAIN = 4;
 const ENVELOPE_LZ4B = 12;
 
-/** Initialize the LZ4 WASM module. Call once before connecting to `lz4+` URLs. */
+/** Initialize the LZ4 WASM module. Useful for prewarming `lz4+` sockets. */
 export async function initLz4(): Promise<void> {
   if (lz4Module) {
-    installLz4Factories();
     return;
   }
-  const mod = await import("@paddor/lz4rip");
-  await mod.init();
-  lz4Module = mod;
-  installLz4Factories();
+  if (!lz4Init) {
+    lz4Init = (async () => {
+      const mod = await import("@paddor/lz4rip");
+      await mod.init();
+      lz4Module = mod;
+    })();
+  }
+  await lz4Init;
 }
 
 /** Initialize LZ4 from bytes. Useful in runtimes where fetch cannot load file URLs. */
@@ -42,20 +45,11 @@ export async function initLz4FromBytes(bytes: BufferSource): Promise<void> {
   const mod = await import("@paddor/lz4rip");
   mod.initSyncFromBytes(bytes);
   lz4Module = mod;
-  installLz4Factories();
-}
-
-function installLz4Factories(): void {
-  setLz4Factories({
-    createDecoder: (maxMessageSize) => new Lz4Decoder(maxMessageSize),
-    createEncoder: (dict) => new Lz4Encoder(dict),
-    isDictionaryShipment: isLz4DictionaryShipment,
-  });
 }
 
 function requireLz4(): Lz4Module {
   if (!lz4Module) {
-    throw new Error("LZ4 not initialized. Call initLz4() before lz4+ sockets.");
+    throw new Error("LZ4 not initialized.");
   }
   return lz4Module;
 }

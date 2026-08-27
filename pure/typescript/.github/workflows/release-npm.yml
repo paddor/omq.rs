@@ -1,0 +1,146 @@
+name: Release omq.ts npm
+
+on:
+  push:
+    tags:
+      - "omq-npm-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: npm version to publish, for example 0.2.3
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout omq.ts
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+          cache: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#omq-npm-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare package metadata
+        run: npm pkg set version="${{ steps.version.outputs.version }}"
+
+      - name: Test package
+        run: npm run ci
+
+      - name: Pack tarball
+        run: |
+          mkdir -p release-tarballs
+          npm pack --pack-destination release-tarballs
+          ls -l release-tarballs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-tarball
+          path: release-tarballs/*.tgz
+          retention-days: 7
+
+  smoke:
+    name: Smoke npm tarball
+    runs-on: ubuntu-latest
+    needs: [package]
+    timeout-minutes: 10
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-release-tarball
+          path: dist
+
+      - name: Install packed package
+        shell: bash
+        run: |
+          mkdir smoke
+          cd smoke
+          tarball="../dist/zeromq-omq-${{ needs.package.outputs.version }}.tgz"
+          test -f "$tarball"
+          npm init -y
+          npm install "$tarball"
+
+      - name: Run public API smoke
+        shell: bash
+        working-directory: smoke
+        run: |
+          node --input-type=module <<'NODE'
+          import { initLz4, Message, Sub } from "@zeromq/omq";
+          import { Message as MessageFromSubpath } from "@zeromq/omq/message";
+
+          await initLz4();
+          const msg = new Message("npm", "smoke");
+          if (msg.string(0) !== "npm" || msg.string(1) !== "smoke") {
+            throw new Error("message decode mismatch");
+          }
+          if (msg.size !== 8) {
+            throw new Error(`unexpected message size: ${msg.size}`);
+          }
+          if (MessageFromSubpath !== Message) {
+            throw new Error("subpath Message export mismatch");
+          }
+          if (typeof Sub !== "function") {
+            throw new Error("Sub export missing");
+          }
+          NODE
+
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [package, smoke]
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@zeromq/omq
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-release-tarball
+          path: dist
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "./dist/zeromq-omq-${{ needs.package.outputs.version }}.tgz" --access public --provenance

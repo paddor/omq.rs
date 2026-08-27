@@ -15,16 +15,17 @@ that needs native transports should use an OMQ.rs binding such as
 
 ## Install
 
-Published on JSR as [`@zeromq/omq`](https://jsr.io/@zeromq/omq).
+Published as [`@zeromq/omq`](https://jsr.io/@zeromq/omq) on JSR and
+[`@zeromq/omq`](https://www.npmjs.com/package/@zeromq/omq) on npm.
 
 ```sh
 deno add jsr:@zeromq/omq
 ```
 
-For npm projects, use JSR's npm compatibility layer:
+For npm projects:
 
 ```sh
-npx jsr add @zeromq/omq
+npm install @zeromq/omq
 ```
 
 ## Usage

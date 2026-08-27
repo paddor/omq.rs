@@ -58,7 +58,7 @@ Publishing uses npm trusted publishing with GitHub Actions OIDC. In npm,
 configure a trusted publisher for `@zeromq/omq` before tagging:
 
 ```text
-GitHub owner: zeromq
+GitHub owner: paddor
 GitHub repository: omq.ts
 Workflow filename: release-npm.yml
 Environment name: npm
@@ -73,5 +73,5 @@ configure the trusted publisher before the next CI release.
 ```sh
 git tag -a omq-npm-v0.2.3 -m "omq.ts npm 0.2.3"
 git push origin omq-npm-v0.2.3
-gh run watch --repo zeromq/omq.ts --exit-status
+gh run watch --repo paddor/omq.ts --exit-status
 ```

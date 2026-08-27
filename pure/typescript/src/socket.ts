@@ -54,8 +54,16 @@ export interface SocketOptions {
   reconnectMaxDelayMs?: number;
   /** Maximum queued inbound messages. The affected connection closes when full. */
   receiveHighWaterMark?: number;
-  /** Maximum sends waiting for a ready connection. New sends reject when full. */
+  /** Maximum sends waiting for ready or queued per connection. */
   sendHighWaterMark?: number;
+  /** WebSocket buffered bytes above which sends wait. Defaults to 1 MiB. */
+  sendBufferHighWaterMark?: number;
+  /** WebSocket buffered bytes at or below which queued sends resume. Defaults to 512 KiB. */
+  sendBufferLowWaterMark?: number;
+  /** Milliseconds between WebSocket bufferedAmount checks. Defaults to 4. */
+  sendBufferPollMs?: number;
+  /** Close if WebSocket/ZMTP handshake has not completed by this time. Disabled by default. */
+  handshakeTimeoutMs?: number;
   /** Called when a connection or protocol error occurs. */
   onError?: (error: Error) => void;
 }
@@ -105,6 +113,30 @@ export abstract class Socket {
         opts.sendHighWaterMark,
       );
     }
+    if (opts.sendBufferHighWaterMark !== undefined) {
+      validateNonNegativeInteger(
+        "sendBufferHighWaterMark",
+        opts.sendBufferHighWaterMark,
+      );
+    }
+    if (opts.sendBufferLowWaterMark !== undefined) {
+      validateNonNegativeInteger(
+        "sendBufferLowWaterMark",
+        opts.sendBufferLowWaterMark,
+      );
+    }
+    if (opts.sendBufferPollMs !== undefined) {
+      validateNonNegativeInteger(
+        "sendBufferPollMs",
+        opts.sendBufferPollMs,
+      );
+    }
+    if (opts.handshakeTimeoutMs !== undefined) {
+      validateNonNegativeInteger(
+        "handshakeTimeoutMs",
+        opts.handshakeTimeoutMs,
+      );
+    }
     if (opts.reconnectInitialDelayMs !== undefined) {
       validateNonNegativeInteger(
         "reconnectInitialDelayMs",
@@ -151,6 +183,11 @@ export abstract class Socket {
       identity: this.identity,
       lz4Dict: this.opts.lz4Dict,
       maxMessageSize: this.opts.maxMessageSize,
+      sendHighWaterMark: this.opts.sendHighWaterMark,
+      sendBufferHighWaterMark: this.opts.sendBufferHighWaterMark,
+      sendBufferLowWaterMark: this.opts.sendBufferLowWaterMark,
+      sendBufferPollMs: this.opts.sendBufferPollMs,
+      handshakeTimeoutMs: this.opts.handshakeTimeoutMs,
       plain: this.opts.plain,
       onReady: (conn) => this.onConnectionReady(conn),
       onMessage: (conn, msg) => this.onConnectionMessage(conn, msg),
@@ -367,7 +404,7 @@ export abstract class Socket {
 
   /** @ignore */
   protected sendOnConnection(conn: Connection, msg: Message): Promise<void> {
-    return this.runSynchronously(() => conn.send(msg));
+    return conn.send(msg);
   }
 
   /** @ignore */

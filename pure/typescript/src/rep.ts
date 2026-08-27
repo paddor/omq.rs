@@ -61,7 +61,7 @@ export class Rep extends Socket {
    * envelope is prepended automatically. Throws if no request has been
    * received yet.
    */
-  send(msg: Message): Promise<void> {
+  async send(msg: Message): Promise<void> {
     if (!this.routingEnvelope || !this.replyConnection) {
       return Promise.reject(
         new Error("REP socket must receive a request before sending"),
@@ -72,11 +72,9 @@ export class Rep extends Socket {
       ...msg.parts,
     ]);
     const conn = this.replyConnection;
-    return this.runSynchronously(() => {
-      conn.send(withEnvelope);
-      this.routingEnvelope = null;
-      this.replyConnection = null;
-    });
+    await this.sendOnConnection(conn, withEnvelope);
+    this.routingEnvelope = null;
+    this.replyConnection = null;
   }
 
   /** Async iterator that yields requests until all connections close. */

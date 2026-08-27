@@ -24,19 +24,19 @@ export class Radio extends Socket {
    * Send a message. The first frame is the group name. Only peers
    * that have joined this group receive the message.
    */
-  send(msg: Message): Promise<void> {
-    return this.runSynchronously(() => {
-      if (msg.parts.length !== 2) {
-        throw new Error("RADIO socket requires [group, body]");
+  async send(msg: Message): Promise<void> {
+    if (msg.parts.length !== 2) {
+      throw new Error("RADIO socket requires [group, body]");
+    }
+    const group = bytesKey(msg.parts[0]!);
+    const sends: Promise<void>[] = [];
+    for (const conn of this.readyConnections) {
+      const groups = this.peerGroups.get(conn);
+      if (groups && groups.has(group)) {
+        sends.push(this.sendOnConnection(conn, msg));
       }
-      const group = bytesKey(msg.parts[0]!);
-      for (const conn of this.readyConnections) {
-        const groups = this.peerGroups.get(conn);
-        if (groups && groups.has(group)) {
-          conn.send(msg);
-        }
-      }
-    });
+    }
+    await Promise.all(sends);
   }
 
   /** @ignore */

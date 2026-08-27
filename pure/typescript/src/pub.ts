@@ -28,16 +28,16 @@ export class Pub extends Socket {
   }
 
   /** Send a message to all peers whose subscriptions match the first frame. */
-  send(msg: Message): Promise<void> {
-    return this.runSynchronously(() => {
-      const topic = msg.parts[0] || new Uint8Array(0);
-      for (const conn of this.readyConnections) {
-        const subs = this.peerSubscriptions.get(conn);
-        if (subs && subs.some((prefix) => prefixMatches(topic, prefix))) {
-          conn.send(msg);
-        }
+  async send(msg: Message): Promise<void> {
+    const topic = msg.parts[0] || new Uint8Array(0);
+    const sends: Promise<void>[] = [];
+    for (const conn of this.readyConnections) {
+      const subs = this.peerSubscriptions.get(conn);
+      if (subs && subs.some((prefix) => prefixMatches(topic, prefix))) {
+        sends.push(this.sendOnConnection(conn, msg));
       }
-    });
+    }
+    await Promise.all(sends);
   }
 
   /** @ignore */

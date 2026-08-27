@@ -12,7 +12,13 @@ import {
   type SocketTypeName,
 } from "./command.ts";
 import type { PlainAuthOptions } from "./auth.ts";
-import { isLz4DictionaryShipment, Lz4Decoder, Lz4Encoder } from "./lz4.ts";
+import {
+  createLz4Decoder,
+  createLz4Encoder,
+  isLz4DictionaryShipment,
+  type Lz4DecoderLike,
+  type Lz4EncoderLike,
+} from "./lz4-registry.ts";
 import { Message } from "./message.ts";
 import {
   decodeZwsFrame,
@@ -31,6 +37,11 @@ export interface ConnectionOptions {
   identity: Uint8Array;
   lz4Dict?: Uint8Array;
   maxMessageSize?: number;
+  sendHighWaterMark?: number;
+  sendBufferHighWaterMark?: number;
+  sendBufferLowWaterMark?: number;
+  sendBufferPollMs?: number;
+  handshakeTimeoutMs?: number;
   plain?: PlainAuthOptions;
   onReady?: (conn: Connection) => void;
   onMessage?: (conn: Connection, msg: Message) => void;
@@ -39,8 +50,23 @@ export interface ConnectionOptions {
   onError?: (conn: Connection, error: Error) => void;
 }
 
+interface QueuedSend {
+  msg: Message;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 function errorFromUnknown(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+const DEFAULT_SEND_BUFFER_HIGH_WATER_MARK = 1024 * 1024;
+const DEFAULT_SEND_BUFFER_LOW_WATER_MARK = 512 * 1024;
+const DEFAULT_SEND_BUFFER_POLL_MS = 4;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 0;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function eventDataToArrayBuffer(data: unknown): ArrayBuffer {
@@ -60,11 +86,15 @@ export class Connection {
   private state: ConnectionState = "connecting";
   private opts: ConnectionOptions;
   private pendingParts: Uint8Array[] = [];
-  private lz4Decoder: Lz4Decoder | null = null;
-  private lz4Encoder: Lz4Encoder | null = null;
+  private lz4Decoder: Lz4DecoderLike | null = null;
+  private lz4Encoder: Lz4EncoderLike | null = null;
   private useLz4: boolean;
   private closeEmitted = false;
   private plainState: PlainHandshakeState | null = null;
+  private sendQueue: QueuedSend[] = [];
+  private sending = false;
+  private queuedSends = 0;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   peerProperties: PeerProperties | null = null;
 
   constructor(url: string, opts: ConnectionOptions) {
@@ -77,8 +107,8 @@ export class Connection {
     }
 
     if (this.useLz4) {
-      this.lz4Decoder = new Lz4Decoder(opts.maxMessageSize);
-      this.lz4Encoder = new Lz4Encoder(opts.lz4Dict);
+      this.lz4Decoder = createLz4Decoder(opts.maxMessageSize);
+      this.lz4Encoder = createLz4Encoder(opts.lz4Dict);
     }
 
     const ws = new WebSocket(wsUrl, ["ZWS2.0"]);
@@ -88,6 +118,7 @@ export class Connection {
     ws.onclose = () => this.onWsClose();
     ws.onerror = () => this.onWsError();
     this.ws = ws;
+    this.startHandshakeTimer();
   }
 
   get connectionState(): ConnectionState {
@@ -98,7 +129,55 @@ export class Connection {
     return this.state === "ready";
   }
 
-  send(msg: Message): void {
+  private get sendBufferHighWaterMark(): number {
+    return this.opts.sendBufferHighWaterMark ??
+      DEFAULT_SEND_BUFFER_HIGH_WATER_MARK;
+  }
+
+  private get sendBufferLowWaterMark(): number {
+    const low = this.opts.sendBufferLowWaterMark ??
+      DEFAULT_SEND_BUFFER_LOW_WATER_MARK;
+    return Math.min(low, this.sendBufferHighWaterMark);
+  }
+
+  private get sendBufferPollMs(): number {
+    return this.opts.sendBufferPollMs ?? DEFAULT_SEND_BUFFER_POLL_MS;
+  }
+
+  send(msg: Message): Promise<void> {
+    if (!this.ws || this.state !== "ready") {
+      throw new Error("Connection not ready");
+    }
+    if (
+      this.opts.sendHighWaterMark !== undefined &&
+      this.queuedSends >= this.opts.sendHighWaterMark
+    ) {
+      return Promise.reject(new Error("Send high water mark reached"));
+    }
+
+    return new Promise((resolve, reject) => {
+      this.queuedSends++;
+      this.sendQueue.push({ msg, resolve, reject });
+      this.drainSendQueue();
+    });
+  }
+
+  private drainSendQueue(): void {
+    if (this.sending) return;
+    const item = this.sendQueue.shift();
+    if (!item) return;
+
+    this.sending = true;
+    this.sendNow(item.msg)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        this.queuedSends--;
+        this.sending = false;
+        this.drainSendQueue();
+      });
+  }
+
+  private async sendNow(msg: Message): Promise<void> {
     if (!this.ws || this.state !== "ready") {
       throw new Error("Connection not ready");
     }
@@ -110,15 +189,40 @@ export class Connection {
       for (const wireMsg of encoded) {
         const frames = encodeDataFrames({ parts: wireMsg });
         for (const frame of frames) {
+          const wait = this.waitForWritable();
+          if (wait) await wait;
           this.ws.send(frame);
         }
       }
     } else {
       const frames = encodeDataFrames(msg);
       for (const frame of frames) {
+        const wait = this.waitForWritable();
+        if (wait) await wait;
         this.ws.send(frame);
       }
     }
+  }
+
+  private waitForWritable(): Promise<void> | null {
+    if (
+      !this.ws ||
+      this.state !== "ready" ||
+      this.ws.bufferedAmount <= this.sendBufferHighWaterMark
+    ) {
+      return null;
+    }
+
+    return this.waitForLowSendBuffer();
+  }
+
+  private async waitForLowSendBuffer(): Promise<void> {
+    do {
+      await delay(this.sendBufferPollMs);
+      if (!this.ws || this.state !== "ready") {
+        throw new Error("Connection not ready");
+      }
+    } while (this.ws.bufferedAmount > this.sendBufferLowWaterMark);
   }
 
   sendCommand(payload: Uint8Array): void {
@@ -128,10 +232,15 @@ export class Connection {
 
   close(): void {
     this.pendingParts = [];
+    this.clearHandshakeTimer();
     this.lz4Decoder?.free();
     this.lz4Decoder = null;
     this.lz4Encoder?.free();
     this.lz4Encoder = null;
+    const error = new Error("Connection closed");
+    const queued = this.sendQueue.splice(0);
+    this.queuedSends -= queued.length;
+    for (const item of queued) item.reject(error);
     const ws = this.ws;
     this.state = "closed";
     this.ws = null;
@@ -228,6 +337,7 @@ export class Connection {
     this.state = "closed";
     this.ws = null;
     this.pendingParts = [];
+    this.clearHandshakeTimer();
     this.opts.onClose?.(this);
   }
 
@@ -326,6 +436,7 @@ export class Connection {
     }
     this.plainState = null;
     this.state = "ready";
+    this.clearHandshakeTimer();
     this.opts.onReady?.(this);
   }
 
@@ -334,5 +445,20 @@ export class Connection {
     const context = body.subarray(2);
     if (context.byteLength > 16) throw new Error("PING context too long");
     this.sendCommand(encodePong(context));
+  }
+
+  private startHandshakeTimer(): void {
+    const timeout = this.opts.handshakeTimeoutMs ??
+      DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    if (timeout <= 0) return;
+    this.handshakeTimer = setTimeout(() => {
+      this.closeWithError(`Handshake timeout on ${this.url}`);
+    }, timeout);
+  }
+
+  private clearHandshakeTimer(): void {
+    if (this.handshakeTimer === null) return;
+    clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = null;
   }
 }

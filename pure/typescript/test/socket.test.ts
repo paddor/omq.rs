@@ -46,6 +46,7 @@ class MockWebSocket {
   binaryType = "blob";
   protocol = "ZWS2.0";
   readyState = MockWebSocket.CONNECTING;
+  bufferedAmount = 0;
   sentFrames: Uint8Array[] = [];
 
   onopen: (() => void) | null = null;
@@ -200,6 +201,39 @@ describe("Push", () => {
     makeReady(ws, "PULL");
     await promise;
     expect(ws.sentFrames.length).toBe(2); // READY + data
+  });
+
+  it("queues sends while WebSocket send buffer is high", async () => {
+    vi.useFakeTimers();
+    try {
+      const push = new Push({
+        sendBufferHighWaterMark: 4,
+        sendBufferLowWaterMark: 2,
+        sendBufferPollMs: 5,
+      });
+      push.connect("ws://localhost:8083");
+      const ws = createdSockets[0]!;
+      makeReady(ws, "PULL");
+
+      ws.bufferedAmount = 5;
+      const first = push.send(Message.from("first"));
+      const second = push.send(Message.from("second"));
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(dataFramesAfterReady(ws)).toHaveLength(0);
+
+      ws.bufferedAmount = 2;
+      await vi.advanceTimersByTimeAsync(5);
+      await Promise.all([first, second]);
+
+      const messages = dataFramesAfterReady(ws);
+      expect(messages.map((msg) => new TextDecoder().decode(msg[0]))).toEqual([
+        "first",
+        "second",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends multipart messages", async () => {
@@ -1915,6 +1949,32 @@ describe("Socket connection management", () => {
     await expect(pending).rejects.toThrow("Socket closed");
   });
 
+  it("closes sockets that do not finish the handshake before timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const errors: Error[] = [];
+      const push = new Push({
+        handshakeTimeoutMs: 20,
+        reconnect: false,
+        onError: (error) => errors.push(error),
+      });
+      push.connect("ws://localhost:8083");
+      const ws = createdSockets[0]!;
+      const pending = push.ready();
+      pending.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      await expect(pending).rejects.toThrow("Connection closed");
+      expect(errors.map((error) => error.message)).toContain(
+        "Handshake timeout on ws://localhost:8083",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses valid ZWS subprotocol with PLAIN socket options", () => {
     const push = new Push({
       plain: { username: "alice", password: "secret" },
@@ -2011,9 +2071,52 @@ describe("Socket connection management", () => {
     expect(new TextDecoder().decode(messages[0]![0])).toBe("first");
   });
 
+  it("rejects sends beyond sendHighWaterMark while buffer is high", async () => {
+    vi.useFakeTimers();
+    try {
+      const push = new Push({
+        sendHighWaterMark: 1,
+        sendBufferHighWaterMark: 4,
+        sendBufferLowWaterMark: 2,
+        sendBufferPollMs: 5,
+      });
+      push.connect("ws://localhost:8083");
+      const ws = createdSockets[0]!;
+      makeReady(ws, "PULL");
+
+      ws.bufferedAmount = 5;
+      const first = push.send(Message.from("first"));
+      await expect(push.send(Message.from("second"))).rejects.toThrow(
+        "Send high water mark",
+      );
+
+      ws.bufferedAmount = 2;
+      await vi.advanceTimersByTimeAsync(5);
+      await first;
+
+      const messages = dataFramesAfterReady(ws);
+      expect(messages.length).toBe(1);
+      expect(new TextDecoder().decode(messages[0]![0])).toBe("first");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("validates sendHighWaterMark", () => {
     expect(() => new Push({ sendHighWaterMark: -1 })).toThrow(
       "sendHighWaterMark",
+    );
+  });
+
+  it("validates send buffer water marks", () => {
+    expect(() => new Push({ sendBufferHighWaterMark: -1 })).toThrow(
+      "sendBufferHighWaterMark",
+    );
+    expect(() => new Push({ sendBufferLowWaterMark: -1 })).toThrow(
+      "sendBufferLowWaterMark",
+    );
+    expect(() => new Push({ sendBufferPollMs: -1 })).toThrow(
+      "sendBufferPollMs",
     );
   });
 

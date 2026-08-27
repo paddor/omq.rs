@@ -49,7 +49,7 @@ export class Req extends Socket {
     });
 
     try {
-      conn.send(withDelimiter);
+      await this.sendOnConnection(conn, withDelimiter);
     } catch (error) {
       this.pendingReply = null;
       this.replyConnection = null;

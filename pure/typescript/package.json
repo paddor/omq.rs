@@ -1,4 +1,15 @@
 {
+  "name": "@zeromq/omq",
+  "version": "0.2.2",
+  "type": "module",
+  "exports": {
+    ".": "./src/mod.ts",
+    "./client": "./src/client.ts",
+    "./dish": "./src/dish.ts",
+    "./lz4": "./src/lz4.ts",
+    "./message": "./src/message.ts",
+    "./scatter": "./src/scatter.ts"
+  },
   "scripts": {
     "check": "deno check src/mod.ts",
     "lint": "deno lint",

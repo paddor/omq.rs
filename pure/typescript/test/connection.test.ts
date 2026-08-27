@@ -18,15 +18,17 @@ import {
   FLAG_MORE,
 } from "../src/zws.ts";
 import { Connection } from "../src/connection.ts";
-import { Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
+import { initLz4FromBytes, Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
 import { Message } from "../src/message.ts";
 
-beforeAll(() => {
+beforeAll(async () => {
   const wasmPath = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "../node_modules/@paddor/lz4rip/src/pkg/lz4rip_wasm_bg.wasm",
   );
-  initSyncFromBytes(readFileSync(wasmPath));
+  const wasm = readFileSync(wasmPath);
+  initSyncFromBytes(wasm);
+  await initLz4FromBytes(wasm);
 });
 
 // Mock WebSocket for Node.js environment
@@ -39,6 +41,7 @@ class MockWebSocket {
   binaryType = "blob";
   protocol = "ZWS2.0";
   readyState = MockWebSocket.CONNECTING;
+  bufferedAmount = 0;
   sentFrames: Uint8Array[] = [];
 
   onopen: (() => void) | null = null;

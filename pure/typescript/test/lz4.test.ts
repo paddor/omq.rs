@@ -3,16 +3,18 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Compressor, initSyncFromBytes } from "@paddor/lz4rip";
-import { Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
+import { initLz4FromBytes, Lz4Decoder, Lz4Encoder } from "../src/lz4.ts";
 
 const enc = new TextEncoder();
 
-beforeAll(() => {
+beforeAll(async () => {
   const wasmPath = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "../node_modules/@paddor/lz4rip/src/pkg/lz4rip_wasm_bg.wasm",
   );
-  initSyncFromBytes(readFileSync(wasmPath));
+  const wasm = readFileSync(wasmPath);
+  initSyncFromBytes(wasm);
+  await initLz4FromBytes(wasm);
 });
 
 function lz4m(payload: Uint8Array, blockSize = payload.byteLength): Uint8Array {

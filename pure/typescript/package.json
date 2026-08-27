@@ -6,11 +6,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zeromq/omq.ts.git"
+    "url": "git+https://github.com/paddor/omq.ts.git"
   },
-  "homepage": "https://github.com/zeromq/omq.ts#readme",
+  "homepage": "https://github.com/paddor/omq.ts#readme",
   "bugs": {
-    "url": "https://github.com/zeromq/omq.ts/issues"
+    "url": "https://github.com/paddor/omq.ts/issues"
   },
   "keywords": [
     "zeromq",

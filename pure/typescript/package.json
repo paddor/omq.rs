@@ -1,16 +1,67 @@
 {
   "name": "@zeromq/omq",
   "version": "0.2.2",
+  "description": "ZMQ client library for browsers over WebSocket with LZ4 dictionary compression.",
+  "license": "ISC",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zeromq/omq.ts.git"
+  },
+  "homepage": "https://github.com/zeromq/omq.ts#readme",
+  "bugs": {
+    "url": "https://github.com/zeromq/omq.ts/issues"
+  },
+  "keywords": [
+    "zeromq",
+    "zmq",
+    "omq",
+    "zmtp",
+    "websocket",
+    "lz4",
+    "typescript"
+  ],
   "exports": {
-    ".": "./src/mod.ts",
-    "./client": "./src/client.ts",
-    "./dish": "./src/dish.ts",
-    "./lz4": "./src/lz4.ts",
-    "./message": "./src/message.ts",
-    "./scatter": "./src/scatter.ts"
+    ".": {
+      "types": "./dist/mod.d.ts",
+      "import": "./dist/mod.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./dish": {
+      "types": "./dist/dish.d.ts",
+      "import": "./dist/dish.js"
+    },
+    "./lz4": {
+      "types": "./dist/lz4.d.ts",
+      "import": "./dist/lz4.js"
+    },
+    "./message": {
+      "types": "./dist/message.d.ts",
+      "import": "./dist/message.js"
+    },
+    "./scatter": {
+      "types": "./dist/scatter.d.ts",
+      "import": "./dist/scatter.js"
+    }
+  },
+  "types": "./dist/mod.d.ts",
+  "files": [
+    "dist/",
+    "deno.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
+    "build:npm": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.npm.json",
+    "prepack": "npm run build:npm",
+    "pack:dry": "npm pack --dry-run",
     "check": "deno check src/mod.ts",
     "lint": "deno lint",
     "test": "vitest run",
@@ -20,11 +71,12 @@
     "ci": "npm run check && npm run lint && npm test && deno publish --dry-run --allow-dirty"
   },
   "dependencies": {
-    "@paddor/lz4rip": "npm:@jsr/paddor__lz4rip@^0.2.8"
+    "@paddor/lz4rip": "https://npm.jsr.io/~/11/@jsr/paddor__lz4rip/0.2.8.tgz"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",
     "@types/node": "^26.1.2",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }

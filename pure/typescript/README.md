@@ -32,9 +32,7 @@ npx jsr add @zeromq/omq
 ### Subscribe
 
 ```ts
-import { initLz4, Sub } from "@zeromq/omq";
-
-await initLz4();
+import { Sub } from "@zeromq/omq";
 
 const sub = new Sub();
 sub.subscribe("market.");
@@ -71,13 +69,14 @@ await push.send(new Message("event", JSON.stringify({ ts: Date.now() })));
 
 ### LZ4 Dictionary Compression
 
-For `lz4+ws://` URLs, call `initLz4()` once before connecting. An optional
-pre-shared dictionary improves compression ratio on small messages:
+For `lz4+ws://` URLs, the socket initializes LZ4 before the WebSocket handshake.
+`initLz4()` is available as an optional prewarm step. A pre-shared dictionary
+improves compression ratio on small messages:
 
 ```ts
 import { initLz4, Sub } from "@zeromq/omq";
 
-await initLz4();
+await initLz4(); // optional prewarm
 
 const dict = new Uint8Array([...]); // pre-shared dictionary
 const sub = new Sub({ lz4Dict: dict });

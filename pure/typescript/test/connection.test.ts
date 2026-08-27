@@ -111,6 +111,13 @@ function commandFrame(name: string, body = new Uint8Array(0)): Uint8Array {
   return encodeCommandFrame(payload);
 }
 
+async function waitForWebSocket(): Promise<MockWebSocket> {
+  await vi.waitFor(() => {
+    expect(lastCreatedWs).not.toBeNull();
+  });
+  return lastCreatedWs!;
+}
+
 describe("Connection", () => {
   it("opens WebSocket with ZWS2.0 subprotocol", () => {
     new Connection("ws://localhost:8081", {
@@ -140,12 +147,12 @@ describe("Connection", () => {
     expect(lastCreatedWs!.protocols).toEqual(["ZWS2.0"]);
   });
 
-  it("strips lz4+ prefix from URL", () => {
+  it("strips lz4+ prefix from URL", async () => {
     new Connection("lz4+ws://localhost:8087", {
       socketType: "SUB",
       identity: new Uint8Array(0),
     });
-    expect(lastCreatedWs!.url).toBe("ws://localhost:8087");
+    expect((await waitForWebSocket()).url).toBe("ws://localhost:8087");
   });
 
   it("rejects unsupported prefixed secure URLs", () => {
@@ -167,7 +174,7 @@ describe("Connection", () => {
     expect(lastCreatedWs!.url).toBe("wss://localhost:8087");
   });
 
-  it("frees LZ4 contexts on close", () => {
+  it("frees LZ4 contexts on close", async () => {
     const decoderFree = vi.spyOn(Lz4Decoder.prototype, "free");
     const encoderFree = vi.spyOn(Lz4Encoder.prototype, "free");
     try {
@@ -175,8 +182,9 @@ describe("Connection", () => {
         socketType: "PUSH",
         identity: new Uint8Array(0),
       });
-      lastCreatedWs!.simulateOpen();
-      lastCreatedWs!.simulateMessage(serverReady("PULL"));
+      const ws = await waitForWebSocket();
+      ws.simulateOpen();
+      ws.simulateMessage(serverReady("PULL"));
 
       conn.close();
 

@@ -1908,6 +1908,21 @@ describe("Socket connection management", () => {
     expect(resolved).toBe(true);
   });
 
+  it("initializes LZ4 before lz4+ws connections", async () => {
+    const push = new Push();
+    push.connect("lz4+ws://localhost:8083");
+
+    await vi.waitFor(() => {
+      expect(createdSockets.length).toBe(1);
+    });
+    const ws = createdSockets[0]!;
+    const pending = push.ready();
+    makeReady(ws, "PULL");
+
+    await pending;
+    expect(ws.url).toBe("ws://localhost:8083");
+  });
+
   it("ready() resolves immediately after a connection is ready", async () => {
     const push = new Push();
     push.connect("ws://localhost:8083");

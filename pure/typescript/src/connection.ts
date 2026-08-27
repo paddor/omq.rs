@@ -13,12 +13,11 @@ import {
 } from "./command.ts";
 import type { PlainAuthOptions } from "./auth.ts";
 import {
-  createLz4Decoder,
-  createLz4Encoder,
+  initLz4,
   isLz4DictionaryShipment,
-  type Lz4DecoderLike,
-  type Lz4EncoderLike,
-} from "./lz4-registry.ts";
+  Lz4Decoder,
+  Lz4Encoder,
+} from "./lz4.ts";
 import { Message } from "./message.ts";
 import {
   decodeZwsFrame,
@@ -86,8 +85,8 @@ export class Connection {
   private state: ConnectionState = "connecting";
   private opts: ConnectionOptions;
   private pendingParts: Uint8Array[] = [];
-  private lz4Decoder: Lz4DecoderLike | null = null;
-  private lz4Encoder: Lz4EncoderLike | null = null;
+  private lz4Decoder: Lz4Decoder | null = null;
+  private lz4Encoder: Lz4Encoder | null = null;
   private useLz4: boolean;
   private closeEmitted = false;
   private plainState: PlainHandshakeState | null = null;
@@ -107,8 +106,29 @@ export class Connection {
     }
 
     if (this.useLz4) {
-      this.lz4Decoder = createLz4Decoder(opts.maxMessageSize);
-      this.lz4Encoder = createLz4Encoder(opts.lz4Dict);
+      void this.openLz4WebSocket(wsUrl);
+    } else {
+      this.openWebSocket(wsUrl);
+    }
+  }
+
+  private async openLz4WebSocket(wsUrl: string): Promise<void> {
+    try {
+      await initLz4();
+      if (this.state === "closed") return;
+      this.lz4Decoder = new Lz4Decoder(this.opts.maxMessageSize);
+      this.lz4Encoder = new Lz4Encoder(this.opts.lz4Dict);
+      this.openWebSocket(wsUrl);
+    } catch (error) {
+      this.closeWithError(errorFromUnknown(error).message);
+    }
+  }
+
+  private openWebSocket(wsUrl: string): void {
+    if (this.useLz4) {
+      if (!this.lz4Decoder || !this.lz4Encoder) {
+        throw new Error("LZ4 not initialized.");
+      }
     }
 
     const ws = new WebSocket(wsUrl, ["ZWS2.0"]);

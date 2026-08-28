@@ -1,4 +1,4 @@
-# @zeromq/omq
+# @paddor/omq
 
 ZMQ client library for browsers over WebSocket. Implements ZMTP 3.x NULL and
 PLAIN security over the ZWS 2.0 framing protocol, with optional LZ4 dictionary
@@ -15,11 +15,12 @@ that needs native transports should use an OMQ.rs binding such as
 
 ## Install
 
-Published as [`@zeromq/omq`](https://jsr.io/@zeromq/omq) on JSR and
-[`@paddor/omq`](https://www.npmjs.com/package/@paddor/omq) on npm.
+Published as `@paddor/omq` on
+[JSR](https://jsr.io/@paddor/omq) and
+[npm](https://www.npmjs.com/package/@paddor/omq).
 
 ```sh
-deno add jsr:@zeromq/omq
+deno add jsr:@paddor/omq
 ```
 
 For npm projects:
@@ -28,15 +29,14 @@ For npm projects:
 npm install @paddor/omq
 ```
 
-In npm projects, import from `@paddor/omq`. In Deno projects, import from
-`@zeromq/omq`.
+Import from `@paddor/omq` in Deno and npm projects.
 
 ## Usage
 
 ### Subscribe
 
 ```ts
-import { Sub } from "@zeromq/omq";
+import { Sub } from "@paddor/omq";
 
 const sub = new Sub();
 sub.subscribe("market.");
@@ -50,7 +50,7 @@ for await (const msg of sub) {
 ### Request-Reply
 
 ```ts
-import { Message, Req } from "@zeromq/omq";
+import { Message, Req } from "@paddor/omq";
 
 const req = new Req();
 req.connect("wss://broker.example.com/req");
@@ -62,7 +62,7 @@ console.log(reply.string(0));
 ### Push
 
 ```ts
-import { Message, Push } from "@zeromq/omq";
+import { Message, Push } from "@paddor/omq";
 
 const push = new Push();
 push.connect("wss://broker.example.com/push");
@@ -78,7 +78,7 @@ For `lz4+ws://` URLs, the socket initializes LZ4 before the WebSocket handshake.
 improves compression ratio on small messages:
 
 ```ts
-import { initLz4, Sub } from "@zeromq/omq";
+import { initLz4, Sub } from "@paddor/omq";
 
 await initLz4(); // optional prewarm
 

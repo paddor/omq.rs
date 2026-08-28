@@ -6,7 +6,7 @@
  * compression via {@link https://jsr.io/@paddor/lz4rip | @paddor/lz4rip}.
  *
  * ```ts
- * import { Sub } from "@zeromq/omq";
+ * import { Sub } from "@paddor/omq";
  *
  * const sub = new Sub();
  * sub.subscribe("market.");

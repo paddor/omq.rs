@@ -11,7 +11,7 @@ and CHANNEL. Security mechanisms are NULL and PLAIN.
 This package is browser/client focused. It does not bind, open `tcp://`,
 `ipc://`, or `inproc://` endpoints, or load native code. Server-side JavaScript
 that needs native transports should use an OMQ.rs binding such as
-`@zeromq/omq-node`.
+`@paddor/omq-node`.
 
 ## Install
 

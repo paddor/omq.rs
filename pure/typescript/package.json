@@ -1,5 +1,5 @@
 {
-  "name": "@zeromq/omq",
+  "name": "@paddor/omq",
   "version": "0.2.2",
   "description": "ZMQ client library for browsers over WebSocket with LZ4 dictionary compression.",
   "license": "ISC",
@@ -64,7 +64,7 @@
     "pack:dry": "npm pack --dry-run",
     "check": "deno check src/mod.ts",
     "lint": "deno lint",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers 2",
     "test:interop": "OMQ_TS_INTEROP=1 vitest run test/interop.test.ts --test-timeout 120000",
     "test:browser": "playwright test --config=playwright.config.mjs",
     "soak": "OMQ_TS_SOAK=1 playwright test --config=playwright.config.mjs --grep 'browser soak'",

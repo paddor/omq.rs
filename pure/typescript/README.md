@@ -16,7 +16,7 @@ that needs native transports should use an OMQ.rs binding such as
 ## Install
 
 Published as [`@zeromq/omq`](https://jsr.io/@zeromq/omq) on JSR and
-[`@zeromq/omq`](https://www.npmjs.com/package/@zeromq/omq) on npm.
+[`@paddor/omq`](https://www.npmjs.com/package/@paddor/omq) on npm.
 
 ```sh
 deno add jsr:@zeromq/omq
@@ -25,8 +25,11 @@ deno add jsr:@zeromq/omq
 For npm projects:
 
 ```sh
-npm install @zeromq/omq
+npm install @paddor/omq
 ```
+
+In npm projects, import from `@paddor/omq`. In Deno projects, import from
+`@zeromq/omq`.
 
 ## Usage
 

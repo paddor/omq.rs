@@ -88,7 +88,7 @@ jobs:
         run: |
           mkdir smoke
           cd smoke
-          tarball="../dist/zeromq-omq-${{ needs.package.outputs.version }}.tgz"
+          tarball="../dist/paddor-omq-${{ needs.package.outputs.version }}.tgz"
           test -f "$tarball"
           npm init -y
           npm install "$tarball"
@@ -98,8 +98,8 @@ jobs:
         working-directory: smoke
         run: |
           node --input-type=module <<'NODE'
-          import { initLz4, Message, Sub } from "@zeromq/omq";
-          import { Message as MessageFromSubpath } from "@zeromq/omq/message";
+          import { initLz4, Message, Sub } from "@paddor/omq";
+          import { Message as MessageFromSubpath } from "@paddor/omq/message";
 
           await initLz4();
           const msg = new Message("npm", "smoke");
@@ -124,7 +124,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@zeromq/omq
+      url: https://www.npmjs.com/package/@paddor/omq
     permissions:
       contents: read
       id-token: write
@@ -143,4 +143,4 @@ jobs:
       - name: Publish package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "./dist/zeromq-omq-${{ needs.package.outputs.version }}.tgz" --access public --provenance
+        run: npm publish "./dist/paddor-omq-${{ needs.package.outputs.version }}.tgz" --access public --provenance

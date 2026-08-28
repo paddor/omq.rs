@@ -48,14 +48,14 @@ against the crates.io `omq-tokio` fixture.
 
 ### npm
 
-`@zeromq/omq` publishes to npm from `.github/workflows/release-npm.yml`. The
+`@paddor/omq` publishes to npm from `.github/workflows/release-npm.yml`. The
 workflow version comes from an `omq-npm-v*` tag or the manual
 `workflow_dispatch` input. It runs checks, lint, tests, `deno publish
 --dry-run`, packs the tarball, smoke-tests an installed tarball, then publishes
 from the `npm` environment.
 
 Publishing uses npm trusted publishing with GitHub Actions OIDC. In npm,
-configure a trusted publisher for `@zeromq/omq` before tagging:
+configure a trusted publisher for `@paddor/omq` before tagging:
 
 ```text
 GitHub owner: paddor

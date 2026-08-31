@@ -279,7 +279,6 @@ module OMQ
 
         @recv_timeout = recv_timeout
         @send_timeout = send_timeout
-        @recv_batch   = []
         @request_waiting = false
         @reply_ready     = false
         @native       = Native::Socket.new(@socket_type.to_s.upcase)
@@ -440,18 +439,11 @@ module OMQ
       # @return [Array<String, Integer>, nil] next message, or +nil+ if none is ready
       def try_recv
         ensure_materialized
-        unless @recv_batch.empty?
-          message = @recv_batch.shift
-          received!
-          return message
-        end
 
         message = if ROUTED_TYPES.include?(@socket_type)
           @native.try_recv_routed
-        elsif (batch = @native.try_recv_batch)
-          first = batch.shift
-          @recv_batch = batch
-          first
+        else
+          @native.try_recv
         end
         received! if message
         message

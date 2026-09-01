@@ -1,9 +1,22 @@
 {application, omq, [
-    {description, "OMQ BEAM bindings"},
+    {description, "Erlang bindings for OMQ, a Rust ZeroMQ-compatible messaging stack"},
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [kernel, stdlib]},
     {modules, [omq, omq_nif]},
     {licenses, ["ISC"]},
-    {links, [{"GitHub", "https://github.com/paddor/omq.rs"}]}
+    {links, [
+        {"GitHub", "https://github.com/paddor/omq.rs"},
+        {"OMQ.beam", "https://github.com/paddor/omq.rs/tree/main/bindings/beam"}
+    ]},
+    {files, [
+        "src",
+        "native/Cargo.toml",
+        "native/src",
+        "rebar.config",
+        "rebar.lock",
+        "README.md",
+        "DEVELOPMENT.md",
+        "doc/architecture.md"
+    ]}
 ]}.

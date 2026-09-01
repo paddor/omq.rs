@@ -154,3 +154,70 @@ Useful flags:
 - `--latency-duration SECONDS`
 - `--latency-warmup-duration SECONDS`
 - `--timeout SECONDS`
+
+## Publishing
+
+Hex package names:
+
+- `omq`: Erlang base package. Owns the Rust NIF and native OMQ runtime.
+- `omq_elixir`: Elixir wrapper. Depends on `omq`.
+- `omq_gleam`: Gleam wrapper. Depends on `omq`.
+
+Publish in that order. The wrapper packages cannot resolve until `omq` is
+published on Hex.
+
+One-time local setup:
+
+```sh
+mix local.hex --force
+mix hex.user auth
+mkdir -p ~/.config/rebar3
+$EDITOR ~/.config/rebar3/rebar.config
+rebar3 hex user auth
+~/src/gleam/target/release/gleam hex authenticate
+```
+
+No standalone `hex` command is needed. Mix, Rebar3, and Gleam each publish
+through their own Hex tasks.
+
+Add this line to `~/.config/rebar3/rebar.config` if it is not already there:
+
+```erlang
+{plugins, [rebar3_hex]}.
+```
+
+Dry-run/audit the Erlang package:
+
+```sh
+(cd bindings/beam && rebar3 compile)
+(cd bindings/beam && rebar3 hex build)
+```
+
+Publish `omq`:
+
+```sh
+(cd bindings/beam && rebar3 hex publish)
+```
+
+After Hex shows `omq` 0.1.0, dry-run/audit and publish the Elixir wrapper:
+
+```sh
+(cd bindings/beam/elixir && mix deps.get)
+(cd bindings/beam/elixir && mix compile --warnings-as-errors)
+(cd bindings/beam/elixir && mix hex.build --unpack)
+(cd bindings/beam/elixir && mix hex.publish)
+```
+
+After Hex shows `omq` 0.1.0, dry-run/audit and publish the Gleam wrapper:
+
+```sh
+(cd bindings/beam/gleam && ~/src/gleam/target/release/gleam update)
+(cd bindings/beam/gleam && ~/src/gleam/target/release/gleam check)
+(cd bindings/beam/gleam && ~/src/gleam/target/release/gleam test)
+(cd bindings/beam/gleam && ~/src/gleam/target/release/gleam export hex-tarball)
+(cd bindings/beam/gleam && ~/src/gleam/target/release/gleam publish)
+```
+
+For token-based publishing, Mix reads `HEX_API_KEY`; Gleam reads
+`HEXPM_API_KEY`. Prefer the interactive commands above for the first publish
+so package metadata and included files can be reviewed before confirming.

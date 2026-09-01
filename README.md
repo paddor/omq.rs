@@ -63,7 +63,9 @@ not depend on libzmq, libsodium, or a C compiler.
 [Full compression transport benchmarks (LZ4 and Zstd)](BENCHMARKS_COMPRESSION.md)
 </details>
 
-[Full comparison charts](COMPARISONS.md)
+[More comparison charts: latency, PUB/SUB, fan-in/fan-out, and brokered messaging](COMPARISONS.md)
+
+[Brokered messaging comparison](COMPARISONS.md#producerconsumer-throughput)
 
 ## The hard parts
 

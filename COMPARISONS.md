@@ -61,6 +61,17 @@ blocking API.
   <img src="doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
 </p>
 
+## Producer/Consumer Throughput
+
+Direct ZMTP, gRPC streaming over HTTP/2, brokered queues, and
+persistent stream/log systems over loopback TCP. Kafka and Redis Streams
+are included for context, but they are not transparent ZMQ-style
+PUSH/PULL sockets.
+
+<p align="center">
+  <img src="doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+</p>
+
 <p align="center">
   <img src="doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput: TCP" width="850">
 </p>

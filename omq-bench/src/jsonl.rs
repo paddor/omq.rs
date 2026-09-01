@@ -83,6 +83,8 @@ pub(crate) struct ComparisonRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_cpu_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_cpu_time: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pub_cpu_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub req_cpu_time: Option<f64>,

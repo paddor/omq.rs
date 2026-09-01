@@ -230,6 +230,16 @@ processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
 blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and
 application-level QoS are disabled.
 
+The brokered MOM comparison uses the optional `mom_bench` binary. It
+measures one sender process, one receiver process, and the broker process
+over the same timed window. Start the external brokers first, then run:
+
+```sh
+cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
+  --impl nats --impl rabbitmq --impl kafka --impl redis-streams \
+  --warmup 1 --duration 3 --run-id mom-rust-timed-cpu-YYYYMMDD
+```
+
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts

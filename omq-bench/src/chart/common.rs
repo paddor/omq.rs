@@ -30,6 +30,7 @@ pub(crate) type ValMap = BTreeMap<u64, BTreeMap<String, f64>>;
 
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
+    pub broker: Option<f64>,
     pub receiver: Option<f64>,
 }
 
@@ -49,6 +50,29 @@ enum LegendVersionMode {
     ShowOtherImpls,
 }
 
+#[derive(Clone, Copy)]
+enum LegendTableLayout {
+    Threads,
+    BrokeredMom,
+}
+
+impl LegendTableLayout {
+    fn meta_label(self) -> &'static str {
+        match self {
+            Self::Threads => "threads",
+            Self::BrokeredMom => "broker",
+        }
+    }
+
+    fn show_crate(self) -> bool {
+        matches!(self, Self::BrokeredMom)
+    }
+
+    fn empty_meta_uses_cores(self) -> bool {
+        matches!(self, Self::Threads)
+    }
+}
+
 // colors
 
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
@@ -64,6 +88,11 @@ pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
 pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
+pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
+pub(crate) const C_RABBITMQ: RGBColor = RGBColor(251, 146, 60);
+pub(crate) const C_KAFKA: RGBColor = RGBColor(148, 163, 184);
+pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
+pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
 
 // formatting
 
@@ -157,12 +186,16 @@ impl MsgAxisMode {
 const MSG_AXIS_STEP: f64 = 2_000_000.0;
 
 pub(crate) fn msg_axis_2m(max_val: f64) -> (f64, usize) {
+    msg_axis_fixed_step(max_val, MSG_AXIS_STEP)
+}
+
+fn msg_axis_fixed_step(max_val: f64, step: f64) -> (f64, usize) {
     let ticks = if max_val <= 0.0 {
         1
     } else {
-        (max_val / MSG_AXIS_STEP).ceil().max(1.0) as usize
+        (max_val / step).ceil().max(1.0) as usize
     };
-    (MSG_AXIS_STEP * ticks as f64, ticks)
+    (step * ticks as f64, ticks)
 }
 
 // hardware detection
@@ -362,18 +395,23 @@ pub(crate) fn draw_legend_table(
         impls,
         cpu,
         snd_label,
+        "",
         rcv_label,
         LegendVersionMode::Hide,
+        LegendTableLayout::Threads,
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 fn draw_legend_table_with_versions(
     table_area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
     impls: &[&Impl],
     cpu: &BTreeMap<String, CpuData>,
     snd_label: &str,
+    broker_label: &str,
     rcv_label: &str,
     version_mode: LegendVersionMode,
+    layout: LegendTableLayout,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let style_hdr = ("sans-serif", 11).into_font().color(&MUTED_TEXT_COLOR);
     let style_val = ("sans-serif", 11).into_font().color(&TEXT_COLOR);
@@ -381,14 +419,26 @@ fn draw_legend_table_with_versions(
 
     let col_swatch = 78;
     let col_name = col_swatch + 20;
-    let col_threads = 250;
-    let col_snd = 360;
-    let col_rcv = 450;
+    let show_crate = layout.show_crate();
+    let (col_crate, col_meta, col_snd, col_broker, col_rcv) = if show_crate {
+        (240, 420, 555, 655, 765)
+    } else if broker_label.is_empty() {
+        (0, 250, 360, 0, 450)
+    } else {
+        (0, 350, 515, 610, 710)
+    };
     let row_h = 16i32;
 
-    table_area.draw_text("threads", &style_hdr, (col_threads, 4))?;
+    if show_crate {
+        table_area.draw_text("protocol", &style_hdr, (col_name, 4))?;
+        table_area.draw_text("crate", &style_hdr, (col_crate, 4))?;
+    }
+    table_area.draw_text(layout.meta_label(), &style_hdr, (col_meta, 4))?;
     if !snd_label.is_empty() {
         table_area.draw_text(snd_label, &style_hdr, (col_snd, 4))?;
+    }
+    if !broker_label.is_empty() {
+        table_area.draw_text(broker_label, &style_hdr, (col_broker, 4))?;
     }
     if !rcv_label.is_empty() {
         table_area.draw_text(rcv_label, &style_hdr, (col_rcv, 4))?;
@@ -404,21 +454,41 @@ fn draw_legend_table_with_versions(
             vec![(col_swatch, y + 6), (col_swatch + 14, y + 6)],
             imp.color.stroke_width(2),
         ))?;
-        let label = legend_label(imp, version_mode);
+        let label = if show_crate {
+            imp.label.to_string()
+        } else {
+            legend_label(imp, version_mode)
+        };
         table_area.draw_text(&label, &style_val, (col_name, y))?;
 
-        let threads = if imp.threads.is_empty() {
-            format!("{cores} MT")
+        if show_crate {
+            let client = mom_client_crate_label(imp.key);
+            table_area.draw_text(client, &style_dim, (col_crate, y))?;
+        }
+
+        let meta = if imp.threads.is_empty() {
+            if layout.empty_meta_uses_cores() {
+                format!("{cores} MT")
+            } else {
+                String::new()
+            }
         } else {
             imp.threads.to_string()
         };
-        table_area.draw_text(&threads, &style_dim, (col_threads, y))?;
+        if !meta.is_empty() {
+            table_area.draw_text(&meta, &style_dim, (col_meta, y))?;
+        }
 
         if let Some(cd) = cpu.get(imp.key) {
             if !snd_label.is_empty()
                 && let Some(v) = cd.sender
             {
                 table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_snd, y))?;
+            }
+            if !broker_label.is_empty()
+                && let Some(v) = cd.broker
+            {
+                table_area.draw_text(&format!("{v:.0}%"), &style_dim, (col_broker, y))?;
             }
             if !rcv_label.is_empty()
                 && let Some(v) = cd.receiver
@@ -430,13 +500,27 @@ fn draw_legend_table_with_versions(
     Ok(())
 }
 
+fn mom_client_crate_label(key: &str) -> &'static str {
+    match key {
+        "omq-tokio-1t" => "omq-tokio v0.21.4",
+        "grpc-rust" => "tonic v0.12.3",
+        "rabbitmq" => "lapin v2.5.5",
+        "kafka" => "rdkafka v0.38.0",
+        "nats" => "async-nats v0.42.0",
+        "redis-streams" => "redis v0.32.7",
+        _ => "",
+    }
+}
+
 // data loading
 
 #[derive(Default)]
 struct CpuAccum {
     sender_sum: f64,
+    broker_sum: f64,
     receiver_sum: f64,
     sender_count: u32,
+    broker_count: u32,
     receiver_count: u32,
 }
 
@@ -451,6 +535,11 @@ impl CpuAccum {
         self.receiver_count += 1;
     }
 
+    fn add_broker_pct(&mut self, pct: f64) {
+        self.broker_sum += pct;
+        self.broker_count += 1;
+    }
+
     fn add_sender(&mut self, cpu_time: f64, elapsed: f64) {
         self.add_sender_pct(cpu_time / elapsed * 100.0);
     }
@@ -459,9 +548,14 @@ impl CpuAccum {
         self.add_receiver_pct(cpu_time / elapsed * 100.0);
     }
 
+    fn add_broker(&mut self, cpu_time: f64, elapsed: f64) {
+        self.add_broker_pct(cpu_time / elapsed * 100.0);
+    }
+
     fn into_data(self) -> CpuData {
         CpuData {
             sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
+            broker: (self.broker_count > 0).then(|| self.broker_sum / f64::from(self.broker_count)),
             receiver: (self.receiver_count > 0)
                 .then(|| self.receiver_sum / f64::from(self.receiver_count)),
         }
@@ -478,6 +572,9 @@ pub(crate) fn merge_cpu_data<'a>(
             let accum = cpu_sums.entry(name.clone()).or_default();
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
+            }
+            if let Some(broker) = data.broker {
+                accum.add_broker_pct(broker);
             }
             if let Some(receiver) = data.receiver {
                 accum.add_receiver_pct(receiver);
@@ -542,6 +639,9 @@ pub(crate) fn load_tput(
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
+            }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
             }
             if let Some(pull) = row.pull_cpu_time {
                 e.add_receiver(pull, elapsed);
@@ -759,8 +859,9 @@ pub(crate) fn draw_throughput_dual_panel(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Auto,
+        ThroughputChartConfig::default(),
         LegendVersionMode::Hide,
     )
 }
@@ -786,8 +887,9 @@ pub(crate) fn draw_throughput_dual_panel_with_versions(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Auto,
+        ThroughputChartConfig::default(),
         LegendVersionMode::ShowOtherImpls,
     )
 }
@@ -813,10 +915,72 @@ pub(crate) fn draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
         msgs,
         cpu,
         snd_label,
+        "",
         rcv_label,
-        MsgAxisMode::Fixed2M,
+        ThroughputChartConfig {
+            msg_axis: MsgAxisMode::Fixed2M,
+            ..ThroughputChartConfig::default()
+        },
         LegendVersionMode::ShowOtherImpls,
     )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    tput: &ValMap,
+    msgs: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+    snd_label: &str,
+    broker_label: &str,
+    rcv_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    draw_throughput_dual_panel_with_msg_axis(
+        out_path,
+        title,
+        sizes,
+        impls,
+        tput,
+        msgs,
+        cpu,
+        snd_label,
+        broker_label,
+        rcv_label,
+        ThroughputChartConfig {
+            chart_h: 460,
+            msg_target_ticks: 10,
+            msg_log_scale: true,
+            legend_layout: LegendTableLayout::BrokeredMom,
+            ..ThroughputChartConfig::default()
+        },
+        LegendVersionMode::ShowOtherImpls,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ThroughputChartConfig {
+    chart_h: u32,
+    msg_target_ticks: usize,
+    gbs_target_ticks: usize,
+    msg_axis: MsgAxisMode,
+    msg_log_scale: bool,
+    legend_layout: LegendTableLayout,
+}
+
+impl Default for ThroughputChartConfig {
+    fn default() -> Self {
+        Self {
+            chart_h: 340,
+            msg_target_ticks: 6,
+            gbs_target_ticks: 6,
+            msg_axis: MsgAxisMode::Auto,
+            msg_log_scale: false,
+            legend_layout: LegendTableLayout::Threads,
+        }
+    }
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -829,8 +993,9 @@ fn draw_throughput_dual_panel_with_msg_axis(
     msgs: &ValMap,
     cpu: &BTreeMap<String, CpuData>,
     snd_label: &str,
+    broker_label: &str,
     rcv_label: &str,
-    msg_axis: MsgAxisMode,
+    config: ThroughputChartConfig,
     version_mode: LegendVersionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -855,7 +1020,7 @@ fn draw_throughput_dual_panel_with_msg_axis(
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 340u32;
+    let chart_h = config.chart_h;
     let total_h = chart_h + table_h;
     let width = 950u32;
     let hw_label = detect_hardware();
@@ -865,14 +1030,13 @@ fn draw_throughput_dual_panel_with_msg_axis(
     let (chart_area, table_area) = root.split_vertically(chart_h);
     let (left_area, right_area) = chart_area.split_horizontally(width / 2 - 10);
 
-    let n_ticks = 6usize;
     let gbs_raw = large
         .iter()
         .filter_map(|s| tput.get(s))
         .flat_map(|m| m.values())
         .map(|v| v / 1000.0)
         .fold(0.0_f64, f64::max);
-    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, n_ticks);
+    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, config.gbs_target_ticks);
 
     let msgs_raw = small
         .iter()
@@ -880,12 +1044,16 @@ fn draw_throughput_dual_panel_with_msg_axis(
         .flat_map(|m| m.values())
         .copied()
         .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = msg_axis.bounds(msgs_raw, n_ticks);
+    let (msgs_max, msgs_ticks) = config.msg_axis.bounds(msgs_raw, config.msg_target_ticks);
 
     if !small.is_empty() {
-        draw_msgs_panel(
-            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
-        )?;
+        if config.msg_log_scale {
+            draw_msgs_log_panel(&left_area, &small, &present, msgs, config.msg_target_ticks)?;
+        } else {
+            draw_msgs_panel(
+                &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+            )?;
+        }
     }
     if !large.is_empty() {
         draw_gbs_panel(
@@ -904,8 +1072,10 @@ fn draw_throughput_dual_panel_with_msg_axis(
         &present,
         cpu,
         snd_label,
+        broker_label,
         rcv_label,
         version_mode,
+        config.legend_layout,
     )?;
     root.present()?;
     drop(root);
@@ -960,6 +1130,86 @@ pub(crate) fn draw_msgs_panel(
             .iter()
             .enumerate()
             .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
+            .collect();
+        if pts.is_empty() {
+            continue;
+        }
+        chart.draw_series(DashedLineSeries::new(
+            pts.iter().copied(),
+            6,
+            3,
+            imp.color.stroke_width(2),
+        ))?;
+        chart.draw_series(
+            pts.iter()
+                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn draw_msgs_log_panel(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    sizes: &[u64],
+    present: &[&Impl],
+    msgs: &ValMap,
+    n_ticks: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let values = sizes
+        .iter()
+        .filter_map(|s| msgs.get(s))
+        .flat_map(|m| m.values())
+        .copied()
+        .filter(|v| *v > 0.0);
+    let (min_val, max_val) = values.fold((f64::MAX, 0.0_f64), |(min_val, max_val), v| {
+        (min_val.min(v), max_val.max(v))
+    });
+    let y_min = if min_val.is_finite() {
+        10.0_f64.powf(min_val.log10().floor()).max(1.0)
+    } else {
+        1.0
+    };
+    let y_max = if max_val > 0.0 {
+        10.0_f64.powf(max_val.log10().ceil()).max(y_min * 10.0)
+    } else {
+        10.0
+    };
+
+    let mut chart = ChartBuilder::on(area)
+        .caption(
+            "small messages, log scale (higher is better)",
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
+        )
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 70)
+        .margin_top(36)
+        .margin_left(10)
+        .margin_right(20)
+        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, (y_min..y_max).log_scale())?;
+
+    chart
+        .configure_mesh()
+        .x_labels(sizes.len())
+        .x_label_formatter(&|v| {
+            sizes
+                .get(v.round() as usize)
+                .map_or(String::new(), |&s| fmt_size(s))
+        })
+        .y_labels(n_ticks + 1)
+        .y_label_formatter(&|v| fmt_msgs(*v))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR)
+        .draw()?;
+
+    for imp in present.iter().rev() {
+        let pts: Vec<(f64, f64)> = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
+            .filter(|(_, v)| *v > 0.0)
             .collect();
         if pts.is_empty() {
             continue;
@@ -1169,8 +1419,10 @@ fn draw_latency_single_panel_with_version_mode(
         &present,
         cpu,
         "req CPU%",
+        "",
         "rep CPU%",
         version_mode,
+        LegendTableLayout::Threads,
     )?;
     root.present()?;
     drop(root);

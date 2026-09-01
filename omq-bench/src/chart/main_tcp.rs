@@ -1,7 +1,8 @@
 use super::common::{
-    self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE,
-    C_OMQ_MT, C_RZMQ, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl,
-    draw_latency_single_panel_with_versions,
+    self, C_GRPC, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T,
+    C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_RABBITMQ, C_REDIS, C_RZMQ, C_RZMQ_IOURING, C_TMQ,
+    C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
+    draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -114,6 +115,45 @@ const REQREP_IMPLS: &[Impl] = &[
     },
 ];
 
+const MOM_IMPLS: &[Impl] = &[
+    Impl {
+        key: "omq-tokio-1t",
+        label: "ZMTP",
+        threads: "",
+        color: C_OMQ_1T,
+    },
+    Impl {
+        key: "grpc-rust",
+        label: "gRPC over HTTP/2",
+        threads: "",
+        color: C_GRPC,
+    },
+    Impl {
+        key: "rabbitmq",
+        label: "AMQP 0-9-1",
+        threads: "RabbitMQ",
+        color: C_RABBITMQ,
+    },
+    Impl {
+        key: "kafka",
+        label: "Kafka",
+        threads: "Redpanda",
+        color: C_KAFKA,
+    },
+    Impl {
+        key: "nats",
+        label: "NATS",
+        threads: "nats-server",
+        color: C_NATS,
+    },
+    Impl {
+        key: "redis-streams",
+        label: "Redis Streams",
+        threads: "Redis",
+        color: C_REDIS,
+    },
+];
+
 const PUBSUB_IMPLS: &[Impl] = &[
     Impl {
         key: "libzmq",
@@ -186,7 +226,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_pushpull_tcp.svg");
         draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
             &out,
-            "PUSH/PULL throughput, TCP loopback, 2-process",
+            "PUSH/PULL throughput, ZMQ-family TCP loopback, 2-process",
             TPUT_SIZES,
             PUSHPULL_IMPLS,
             &tput,
@@ -196,6 +236,26 @@ pub(crate) fn generate() {
             "rcv CPU%",
         )
         .expect("draw pushpull chart");
+        eprintln!("Written: {}", out.display());
+    }
+
+    // Producer/consumer throughput across direct, RPC, and brokered transports.
+    let (tput, msgs, cpu) = load_tput("throughput", "tcp", None, MOM_IMPLS);
+    if !tput.is_empty() {
+        let out = dir.join("main_mom_tcp.svg");
+        draw_throughput_dual_panel_brokered_with_versions(
+            &out,
+            "Producer/consumer throughput, direct/RPC/brokered TCP loopback",
+            TPUT_SIZES,
+            MOM_IMPLS,
+            &tput,
+            &msgs,
+            &cpu,
+            "snd CPU%",
+            "broker CPU%",
+            "rcv CPU%",
+        )
+        .expect("draw RPC/MOM chart");
         eprintln!("Written: {}", out.display());
     }
 

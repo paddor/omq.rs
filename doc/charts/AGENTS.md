@@ -16,14 +16,15 @@ cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Main charts (3 files)
+## Main charts (4 files)
 
 Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
-| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
+| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring |
+| `main_mom_tcp.svg` | omq 1IO, gRPC Rust, RabbitMQ, Kafka/Redpanda, NATS, Redis Streams |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB

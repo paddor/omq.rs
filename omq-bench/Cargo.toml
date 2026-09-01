@@ -11,14 +11,49 @@ publish = false
 name = "omq-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "grpc_bench_peer"
+path = "src/bin/grpc_bench_peer.rs"
+
+[[bin]]
+name = "mom_bench"
+path = "src/bin/mom_bench.rs"
+required-features = ["mom-bench"]
+
+[features]
+default = []
+mom-bench = [
+  "dep:anyhow",
+  "dep:async-nats",
+  "dep:bytes",
+  "dep:lapin",
+  "dep:rdkafka",
+  "dep:redis",
+  "dep:uuid",
+]
+
 [dependencies]
+anyhow = { version = "1", optional = true }
+async-nats = { version = "0.42", optional = true }
+bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+lapin = { version = "2", optional = true }
 libc = "0.2"
 omq-tokio = { path = "../omq-tokio", default-features = false }
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
+rdkafka = { version = "0.38", default-features = false, features = ["cmake-build", "curl-static", "libz", "tokio"], optional = true }
+redis = { version = "0.32", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.12", features = ["transport"] }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
 
 [lints]
 workspace = true

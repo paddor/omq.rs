@@ -5,10 +5,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use futures_util::StreamExt;
 use serde_json::{Value, json};
+
+#[path = "mom_bench/grpc.rs"]
+pub mod grpc;
+#[path = "mom_bench/kafka.rs"]
+mod kafka;
+#[path = "mom_bench/nats.rs"]
+mod nats;
+#[path = "mom_bench/rabbit.rs"]
+mod rabbit;
+#[path = "mom_bench/redis.rs"]
+mod redis;
 
 const CHART_SIZES: &[usize] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
@@ -23,77 +32,88 @@ enum Role {
 #[derive(Parser)]
 struct Args {
     #[arg(long = "impl", required = true)]
-    impls: Vec<String>,
+    pub(crate) impls: Vec<String>,
 
     #[arg(long, default_value_t = default_sizes())]
-    sizes: String,
+    pub(crate) sizes: String,
 
     #[arg(long, default_value_t = 3.0)]
-    duration: f64,
+    pub(crate) duration: f64,
 
     #[arg(long, default_value_t = 1.0)]
-    warmup: f64,
+    pub(crate) warmup: f64,
 
     #[arg(long, default_value = "mom-rust-20260901")]
-    run_id: String,
+    pub(crate) run_id: String,
 
     #[arg(long, value_enum, default_value_t = Role::Coordinator)]
-    role: Role,
+    pub(crate) role: Role,
 
     #[arg(long)]
-    token: Option<String>,
+    pub(crate) token: Option<String>,
 
     #[arg(long)]
-    start_file: Option<PathBuf>,
+    pub(crate) start_file: Option<PathBuf>,
 
     #[arg(long)]
-    stop_file: Option<PathBuf>,
+    pub(crate) stop_file: Option<PathBuf>,
 
     #[arg(long)]
-    result_file: Option<PathBuf>,
+    pub(crate) result_file: Option<PathBuf>,
 
     #[arg(long, default_value = "nats://127.0.0.1:4222")]
-    nats_url: String,
+    pub(crate) nats_url: String,
 
     #[arg(long, default_value = "amqp://guest:guest@127.0.0.1:5672/%2f")]
-    rabbitmq_url: String,
+    pub(crate) rabbitmq_url: String,
 
     #[arg(long, default_value = "redis://127.0.0.1:6379/0")]
-    redis_url: String,
+    pub(crate) redis_url: String,
 
     #[arg(long, default_value = "127.0.0.1:19092")]
-    kafka_url: String,
+    pub(crate) kafka_url: String,
+
+    #[arg(long)]
+    pub(crate) grpc_port_file: Option<PathBuf>,
 }
 
-struct BenchResult {
-    count: u64,
-    elapsed: f64,
-    pull_cpu_time: f64,
-    push_cpu_time: f64,
-    broker_cpu_time: Option<f64>,
+pub(crate) struct BenchResult {
+    pub(crate) count: u64,
+    pub(crate) elapsed: f64,
+    pub(crate) pull_cpu_time: f64,
+    pub(crate) push_cpu_time: f64,
+    pub(crate) broker_cpu_time: Option<f64>,
 }
 
-struct CpuWindow {
+pub(crate) struct CpuWindow {
     start_at: Instant,
     cpu_start: Option<f64>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ProducerFiles<'a> {
+    pub(crate) start: &'a Path,
+    pub(crate) stop: &'a Path,
+    pub(crate) result: &'a Path,
+    pub(crate) grpc_port: Option<&'a Path>,
+}
+
 impl CpuWindow {
-    fn new(warmup: Duration) -> Self {
+    pub(crate) fn new(warmup: Duration) -> Self {
         Self {
             start_at: Instant::now() + warmup,
             cpu_start: None,
         }
     }
 
-    fn sample_start(&mut self) -> Result<()> {
+    pub(crate) fn sample_start(&mut self) -> Result<()> {
         if self.cpu_start.is_none() && Instant::now() >= self.start_at {
             self.cpu_start = Some(self_cpu_secs()?);
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<f64> {
+    pub(crate) fn finish(self) -> Result<f64> {
         let start = self.cpu_start.unwrap_or(self_cpu_secs()?);
         Ok(self_cpu_secs()? - start)
     }
@@ -142,12 +162,12 @@ fn append_row(run_id: &str, impl_name: &str, size: usize, r: &BenchResult) -> Re
     Ok(())
 }
 
-fn write_push_cpu(path: &Path, cpu_time: f64) -> Result<()> {
+pub(crate) fn write_push_cpu(path: &Path, cpu_time: f64) -> Result<()> {
     std::fs::write(path, json!({ "push_cpu_time": cpu_time }).to_string())?;
     Ok(())
 }
 
-fn read_push_cpu(path: &Path) -> Result<f64> {
+pub(crate) fn read_push_cpu(path: &Path) -> Result<f64> {
     let value: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     value
         .get("push_cpu_time")
@@ -161,16 +181,16 @@ fn wait_for_file(path: &Path) {
     }
 }
 
-fn write_marker(path: &Path) -> Result<()> {
+pub(crate) fn write_marker(path: &Path) -> Result<()> {
     std::fs::write(path, b"1")?;
     Ok(())
 }
 
-fn stop_requested(stop_file: &Path, sent: u64, check_every: u64) -> bool {
+pub(crate) fn stop_requested(stop_file: &Path, sent: u64, check_every: u64) -> bool {
     sent.is_multiple_of(check_every) && stop_file.exists()
 }
 
-fn check_every(size: usize) -> u64 {
+pub(crate) fn check_every(size: usize) -> u64 {
     u64::try_from((1024 * 1024 / size.max(1)).clamp(1, 1024)).unwrap()
 }
 
@@ -179,7 +199,7 @@ fn ticks_per_second() -> f64 {
     if ticks > 0 { ticks as f64 } else { 100.0 }
 }
 
-fn process_cpu_secs(pid: u32) -> Result<f64> {
+pub(crate) fn process_cpu_secs(pid: u32) -> Result<f64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat.rfind(") ").context("bad proc stat")? + 2;
     let fields: Vec<&str> = stat[end..].split_whitespace().collect();
@@ -188,7 +208,7 @@ fn process_cpu_secs(pid: u32) -> Result<f64> {
     Ok((utime + stime) / ticks_per_second())
 }
 
-fn self_cpu_secs() -> Result<f64> {
+pub(crate) fn self_cpu_secs() -> Result<f64> {
     process_cpu_secs(std::process::id())
 }
 
@@ -202,7 +222,7 @@ fn broker_container(impl_name: &str) -> Option<&'static str> {
     }
 }
 
-fn broker_pid(impl_name: &str) -> Option<u32> {
+pub(crate) fn broker_pid(impl_name: &str) -> Option<u32> {
     let container = broker_container(impl_name)?;
     let output = Command::new("podman")
         .args(["inspect", "--format", "{{.State.Pid}}", container])
@@ -215,18 +235,16 @@ fn broker_pid(impl_name: &str) -> Option<u32> {
     text.trim().parse().ok().filter(|pid| *pid > 0)
 }
 
-fn spawn_producer(
+pub(crate) fn spawn_producer(
     args: &Args,
     impl_name: &str,
     size: usize,
     token: &str,
-    start_file: &Path,
-    stop_file: &Path,
-    result_file: &Path,
+    files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
     let exe = std::env::current_exe()?;
-    Command::new(exe)
-        .arg("--role")
+    let mut cmd = Command::new(exe);
+    cmd.arg("--role")
         .arg("producer")
         .arg("--impl")
         .arg(impl_name)
@@ -239,11 +257,11 @@ fn spawn_producer(
         .arg("--token")
         .arg(token)
         .arg("--start-file")
-        .arg(start_file)
+        .arg(files.start)
         .arg("--stop-file")
-        .arg(stop_file)
+        .arg(files.stop)
         .arg("--result-file")
-        .arg(result_file)
+        .arg(files.result)
         .arg("--nats-url")
         .arg(&args.nats_url)
         .arg("--rabbitmq-url")
@@ -252,9 +270,11 @@ fn spawn_producer(
         .arg(&args.redis_url)
         .arg("--kafka-url")
         .arg(&args.kafka_url)
-        .stdout(Stdio::null())
-        .spawn()
-        .context("spawn producer")
+        .stdout(Stdio::null());
+    if let Some(path) = files.grpc_port {
+        cmd.arg("--grpc-port-file").arg(path);
+    }
+    cmd.spawn().context("spawn producer")
 }
 
 async fn run_producer(args: &Args) -> Result<()> {
@@ -264,469 +284,26 @@ async fn run_producer(args: &Args) -> Result<()> {
     let start_file = args.start_file.as_deref().context("start file missing")?;
     let stop_file = args.stop_file.as_deref().context("stop file missing")?;
     let result_file = args.result_file.as_deref().context("result file missing")?;
+    if impl_name == "grpc-rust" {
+        let port_file = args
+            .grpc_port_file
+            .as_deref()
+            .context("gRPC port file missing")?;
+        return grpc::producer(size, start_file, port_file).await;
+    }
     wait_for_file(start_file);
     let warmup = Duration::from_secs_f64(args.warmup);
     let cpu_time = match impl_name.as_str() {
-        "nats" => producer_nats(&args.nats_url, token, size, warmup, stop_file).await?,
-        "rabbitmq" => producer_rabbit(&args.rabbitmq_url, token, size, warmup, stop_file).await?,
-        "kafka" => producer_kafka(&args.kafka_url, token, size, warmup, stop_file)?,
-        "redis-streams" => producer_redis(&args.redis_url, token, size, warmup, stop_file)?,
+        "nats" => nats::producer(&args.nats_url, token, size, warmup, stop_file).await?,
+        "rabbitmq" => rabbit::producer(&args.rabbitmq_url, token, size, warmup, stop_file).await?,
+        "kafka" => kafka::producer(&args.kafka_url, token, size, warmup, stop_file)?,
+        "redis-streams" => redis::producer(&args.redis_url, token, size, warmup, stop_file)?,
         other => bail!("unknown impl {other}"),
     };
     write_push_cpu(result_file, cpu_time)
 }
 
-async fn producer_nats(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    let subject = format!("omq.bench.rust.{token}.{size}");
-    let payload = Bytes::from(vec![b'x'; size]);
-    let client = async_nats::connect(url).await?;
-    let check_every = check_every(size);
-    let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
-    loop {
-        client.publish(subject.clone(), payload.clone()).await?;
-        sent += 1;
-        if sent.is_multiple_of(check_every) {
-            client.flush().await?;
-            cpu.sample_start()?;
-            if stop_requested(stop_file, sent, check_every) {
-                break;
-            }
-        }
-    }
-    client.flush().await?;
-    cpu.finish()
-}
-
-async fn producer_rabbit(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    use lapin::{BasicProperties, Connection, ConnectionProperties, options::BasicPublishOptions};
-
-    let queue = format!("omq-bench-rust-{token}-{size}");
-    let payload = vec![b'x'; size];
-    let conn = Connection::connect(url, ConnectionProperties::default()).await?;
-    let ch = conn.create_channel().await?;
-    let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
-    loop {
-        let confirm = ch
-            .basic_publish(
-                "",
-                &queue,
-                BasicPublishOptions::default(),
-                &payload,
-                BasicProperties::default().with_delivery_mode(1),
-            )
-            .await?;
-        confirm.await?;
-        sent += 1;
-        cpu.sample_start()?;
-        if stop_requested(stop_file, sent, 1) {
-            break;
-        }
-    }
-    conn.close(0, "done").await?;
-    cpu.finish()
-}
-
-fn producer_kafka(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    use rdkafka::{
-        ClientConfig,
-        producer::{FutureProducer, FutureRecord, Producer},
-    };
-
-    let topic = format!("omq-bench-rust-{token}-{size}");
-    let payload = vec![b'x'; size];
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", url)
-        .set("queue.buffering.max.messages", "1000000")
-        .set("queue.buffering.max.kbytes", "65536")
-        .set("message.max.bytes", "16777216")
-        .set("batch.size", "1048576")
-        .set("linger.ms", "0")
-        .create()?;
-    let check_every = check_every(size);
-    let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
-    loop {
-        let record = FutureRecord::<(), _>::to(&topic).payload(payload.as_slice());
-        match producer.send_result(record) {
-            Ok(_) => sent += 1,
-            Err((_err, _record)) => producer.poll(Duration::from_millis(1)),
-        }
-        if sent.is_multiple_of(check_every) {
-            producer.poll(Duration::ZERO);
-            cpu.sample_start()?;
-            if stop_requested(stop_file, sent, check_every) {
-                break;
-            }
-        }
-    }
-    producer.flush(Duration::from_secs(10))?;
-    cpu.finish()
-}
-
-fn producer_redis(
-    url: &str,
-    token: &str,
-    size: usize,
-    warmup: Duration,
-    stop_file: &Path,
-) -> Result<f64> {
-    let key = format!("omq:bench:rust:{token}:{size}");
-    let payload = vec![b'x'; size];
-    let client = redis::Client::open(url)?;
-    let mut conn = client.get_connection()?;
-    let mut sent = 0_u64;
-    let mut cpu = CpuWindow::new(warmup);
-    loop {
-        let _: String = redis::cmd("XADD")
-            .arg(&key)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(100_000)
-            .arg("*")
-            .arg("d")
-            .arg(payload.as_slice())
-            .query(&mut conn)?;
-        sent += 1;
-        cpu.sample_start()?;
-        if stop_requested(stop_file, sent, 1) {
-            break;
-        }
-    }
-    cpu.finish()
-}
-
-async fn bench_nats(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    let subject = format!("omq.bench.rust.{token}.{size}");
-    let client = async_nats::connect(&args.nats_url).await?;
-    let mut sub = client.subscribe(subject).await?;
-    client.flush().await?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(args, "nats", size, token, &paths.0, &paths.1, &paths.2)?;
-    write_marker(&paths.0)?;
-
-    let warmup = Duration::from_secs_f64(args.warmup);
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        let remaining = warmup_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, sub.next()).await {
-            Ok(Some(msg)) => {
-                if msg.payload.len() != size {
-                    bail!("bad NATS payload size");
-                }
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-
-    measure_receive(
-        args,
-        &paths.1,
-        &paths.2,
-        &mut producer,
-        "nats",
-        |deadline| async move {
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, sub.next()).await {
-                    Ok(Some(msg)) => {
-                        if msg.payload.len() != size {
-                            bail!("bad NATS payload size");
-                        }
-                        count += 1;
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            Ok(count)
-        },
-    )
-    .await
-}
-
-async fn bench_rabbit(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    use lapin::{
-        Connection, ConnectionProperties,
-        options::{BasicConsumeOptions, QueueDeclareOptions, QueueDeleteOptions},
-        types::FieldTable,
-    };
-
-    let queue = format!("omq-bench-rust-{token}-{size}");
-    let conn = Connection::connect(&args.rabbitmq_url, ConnectionProperties::default()).await?;
-    let consume_ch = conn.create_channel().await?;
-    consume_ch
-        .queue_declare(
-            &queue,
-            QueueDeclareOptions {
-                durable: false,
-                exclusive: true,
-                auto_delete: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    let mut consumer = consume_ch
-        .basic_consume(
-            &queue,
-            "omq-bench-rust",
-            BasicConsumeOptions {
-                no_ack: true,
-                ..BasicConsumeOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(args, "rabbitmq", size, token, &paths.0, &paths.1, &paths.2)?;
-    write_marker(&paths.0)?;
-
-    let warmup = Duration::from_secs_f64(args.warmup);
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        let remaining = warmup_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, consumer.next()).await {
-            Ok(Some(delivery)) => {
-                let delivery = delivery?;
-                if delivery.data.len() != size {
-                    bail!("bad RabbitMQ payload size");
-                }
-            }
-            Ok(None) | Err(_) => break,
-        }
-    }
-
-    let result = measure_receive(
-        args,
-        &paths.1,
-        &paths.2,
-        &mut producer,
-        "rabbitmq",
-        |deadline| async move {
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, consumer.next()).await {
-                    Ok(Some(delivery)) => {
-                        let delivery = delivery?;
-                        if delivery.data.len() != size {
-                            bail!("bad RabbitMQ payload size");
-                        }
-                        count += 1;
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            Ok(count)
-        },
-    )
-    .await?;
-    let _ = consume_ch
-        .queue_delete(&queue, QueueDeleteOptions::default())
-        .await;
-    conn.close(0, "done").await?;
-    Ok(result)
-}
-
-async fn bench_kafka(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    use rdkafka::{
-        ClientConfig, Message,
-        admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
-        consumer::{Consumer, StreamConsumer},
-    };
-
-    let topic = format!("omq-bench-rust-{token}-{size}");
-    let admin: AdminClient<_> = ClientConfig::new()
-        .set("bootstrap.servers", &args.kafka_url)
-        .create()?;
-    let new_topic = NewTopic::new(&topic, 1, TopicReplication::Fixed(1))
-        .set("cleanup.policy", "delete")
-        .set("retention.ms", "30000")
-        .set("retention.bytes", "67108864")
-        .set("segment.bytes", "16777216")
-        .set("max.message.bytes", "16777216");
-    admin
-        .create_topics(&[new_topic], &AdminOptions::new())
-        .await
-        .context("create Kafka topic")?;
-
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &args.kafka_url)
-        .set("group.id", format!("omq-bench-rust-{token}"))
-        .set("auto.offset.reset", "earliest")
-        .set("enable.auto.commit", "false")
-        .set("fetch.message.max.bytes", "16777216")
-        .set("max.partition.fetch.bytes", "16777216")
-        .create()?;
-    consumer.subscribe(&[&topic])?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(args, "kafka", size, token, &paths.0, &paths.1, &paths.2)?;
-    write_marker(&paths.0)?;
-
-    let warmup = Duration::from_secs_f64(args.warmup);
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        let remaining = warmup_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, consumer.recv()).await {
-            Ok(Ok(msg)) => {
-                let payload = msg.payload().context("Kafka message payload")?;
-                if payload.len() != size {
-                    bail!("bad Kafka payload size");
-                }
-            }
-            Ok(Err(err)) => bail!(err),
-            Err(_) => break,
-        }
-    }
-
-    let result = measure_receive(
-        args,
-        &paths.1,
-        &paths.2,
-        &mut producer,
-        "kafka",
-        |deadline| async move {
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match tokio::time::timeout(remaining, consumer.recv()).await {
-                    Ok(Ok(msg)) => {
-                        let payload = msg.payload().context("Kafka message payload")?;
-                        if payload.len() != size {
-                            bail!("bad Kafka payload size");
-                        }
-                        count += 1;
-                    }
-                    Ok(Err(err)) => bail!(err),
-                    Err(_) => break,
-                }
-            }
-            Ok(count)
-        },
-    )
-    .await?;
-    let _ = admin.delete_topics(&[&topic], &AdminOptions::new()).await;
-    Ok(result)
-}
-
-async fn bench_redis(args: &Args, token: &str, size: usize) -> Result<BenchResult> {
-    let key = format!("omq:bench:rust:{token}:{size}");
-    let client = redis::Client::open(args.redis_url.as_str())?;
-    let mut conn = client.get_connection()?;
-    let _: () = redis::cmd("DEL").arg(&key).query(&mut conn)?;
-
-    let paths = run_paths(token, size);
-    clean_paths(&paths)?;
-    let mut producer = spawn_producer(
-        args,
-        "redis-streams",
-        size,
-        token,
-        &paths.0,
-        &paths.1,
-        &paths.2,
-    )?;
-    write_marker(&paths.0)?;
-
-    let warmup = Duration::from_secs_f64(args.warmup);
-    let duration = Duration::from_secs_f64(args.duration);
-    let broker_pid_for_measure = broker_pid("redis-streams");
-    let (count, elapsed, pull_cpu_time, broker_cpu_time) =
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut last_id = "$".to_string();
-            let warmup_deadline = Instant::now() + warmup;
-            while Instant::now() < warmup_deadline {
-                let value: redis::Value = redis::cmd("XREAD")
-                    .arg("COUNT")
-                    .arg(1024)
-                    .arg("BLOCK")
-                    .arg(50)
-                    .arg("STREAMS")
-                    .arg(&key)
-                    .arg(&last_id)
-                    .query(&mut conn)?;
-                for (entry_id, body) in parse_redis_xread(value)? {
-                    if body.len() != size {
-                        bail!("bad Redis payload size");
-                    }
-                    last_id = entry_id;
-                }
-            }
-
-            let broker_start = broker_pid_for_measure.and_then(|pid| process_cpu_secs(pid).ok());
-            let pull_start = self_cpu_secs()?;
-            let start = Instant::now();
-            let deadline = start + duration;
-            let mut count = 0_u64;
-            while Instant::now() < deadline {
-                let value: redis::Value = redis::cmd("XREAD")
-                    .arg("COUNT")
-                    .arg(1024)
-                    .arg("BLOCK")
-                    .arg(50)
-                    .arg("STREAMS")
-                    .arg(&key)
-                    .arg(&last_id)
-                    .query(&mut conn)?;
-                for (entry_id, body) in parse_redis_xread(value)? {
-                    if body.len() != size {
-                        bail!("bad Redis payload size");
-                    }
-                    last_id = entry_id;
-                    count += 1;
-                }
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-            let pull_cpu_time = self_cpu_secs()? - pull_start;
-            let broker_cpu_time = broker_pid_for_measure
-                .zip(broker_start)
-                .and_then(|(pid, start)| process_cpu_secs(pid).ok().map(|end| end - start));
-            let _: () = redis::cmd("DEL").arg(&key).query(&mut conn)?;
-            Ok((count, elapsed, pull_cpu_time, broker_cpu_time))
-        })
-        .await??;
-    write_marker(&paths.1)?;
-    let status = producer.wait()?;
-    if !status.success() {
-        bail!("producer failed: {status}");
-    }
-    let push_cpu_time = read_push_cpu(&paths.2)?;
-    Ok(BenchResult {
-        count,
-        elapsed,
-        pull_cpu_time,
-        push_cpu_time,
-        broker_cpu_time,
-    })
-}
-
-async fn measure_receive<F, Fut>(
+pub(crate) async fn measure_receive<F, Fut>(
     args: &Args,
     stop_file: &Path,
     result_file: &Path,
@@ -767,7 +344,7 @@ where
     })
 }
 
-fn run_paths(token: &str, size: usize) -> (PathBuf, PathBuf, PathBuf) {
+pub(crate) fn run_paths(token: &str, size: usize) -> (PathBuf, PathBuf, PathBuf) {
     let base = std::env::temp_dir();
     (
         base.join(format!("omq-mom-{token}-{size}.start")),
@@ -776,7 +353,7 @@ fn run_paths(token: &str, size: usize) -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
-fn clean_paths(paths: &(PathBuf, PathBuf, PathBuf)) -> Result<()> {
+pub(crate) fn clean_paths(paths: &(PathBuf, PathBuf, PathBuf)) -> Result<()> {
     for path in [&paths.0, &paths.1, &paths.2] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
@@ -785,53 +362,6 @@ fn clean_paths(paths: &(PathBuf, PathBuf, PathBuf)) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn parse_redis_xread(value: redis::Value) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut out = Vec::new();
-    let redis::Value::Array(streams) = value else {
-        return Ok(out);
-    };
-    for stream in streams {
-        let redis::Value::Array(stream) = stream else {
-            continue;
-        };
-        if stream.len() != 2 {
-            continue;
-        }
-        let redis::Value::Array(entries) = &stream[1] else {
-            continue;
-        };
-        for entry in entries {
-            let redis::Value::Array(entry) = entry else {
-                continue;
-            };
-            if entry.len() != 2 {
-                continue;
-            }
-            let entry_id = match &entry[0] {
-                redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone())?,
-                redis::Value::SimpleString(s) => s.clone(),
-                _ => continue,
-            };
-            let redis::Value::Array(fields) = &entry[1] else {
-                continue;
-            };
-            let mut i = 0;
-            while i + 1 < fields.len() {
-                let is_data = match &fields[i] {
-                    redis::Value::BulkString(bytes) => bytes == b"d",
-                    redis::Value::SimpleString(s) => s == "d",
-                    _ => false,
-                };
-                if is_data && let redis::Value::BulkString(bytes) = &fields[i + 1] {
-                    out.push((entry_id.clone(), bytes.clone()));
-                }
-                i += 2;
-            }
-        }
-    }
-    Ok(out)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -855,10 +385,11 @@ async fn main() -> Result<()> {
                 uuid::Uuid::new_v4().simple()
             );
             let result = match impl_name.as_str() {
-                "nats" => bench_nats(&args, &token, size).await?,
-                "rabbitmq" => bench_rabbit(&args, &token, size).await?,
-                "kafka" => bench_kafka(&args, &token, size).await?,
-                "redis-streams" => bench_redis(&args, &token, size).await?,
+                "nats" => nats::bench(&args, &token, size).await?,
+                "grpc-rust" => grpc::bench(&args, &token, size).await?,
+                "rabbitmq" => rabbit::bench(&args, &token, size).await?,
+                "kafka" => kafka::bench(&args, &token, size).await?,
+                "redis-streams" => redis::bench(&args, &token, size).await?,
                 other => bail!("unknown impl {other}"),
             };
             append_row(&args.run_id, impl_name, size, &result)?;

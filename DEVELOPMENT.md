@@ -215,7 +215,6 @@ when a measured cell looks bad, don't hand-wave it as noise.
 | `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
-| `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
 
 Each binary speaks a subcommand protocol:
 
@@ -225,18 +224,15 @@ Each binary speaks a subcommand protocol:
 - `inproc <name> <size> <duration>`: in-process PUSH/PULL.
 - `rep <addr> <size>` / `req <addr> <size> <iters> <warmup>`: latency.
 
-The `grpc-rust` baseline uses plaintext gRPC over TCP between separate
-processes. PUSH/PULL uses one server-streaming RPC carrying opaque byte
-blobs. REQ/REP uses unary `Echo` RPCs. TLS, compression, retries, and
-application-level QoS are disabled.
-
-The brokered MOM comparison uses the optional `mom_bench` binary. It
-measures one sender process, one receiver process, and the broker process
-over the same timed window. Start the external brokers first, then run:
+The brokered MOM comparison uses the optional `mom_bench` binary. It also
+includes `grpc-rust`, a plaintext gRPC over HTTP/2 server-streaming
+baseline. It measures one sender process, one receiver process, and any
+broker process over the same timed window. Start the external brokers first,
+then run:
 
 ```sh
 cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
-  --impl nats --impl rabbitmq --impl kafka --impl redis-streams \
+  --impl grpc-rust --impl nats --impl rabbitmq --impl kafka --impl redis-streams \
   --warmup 1 --duration 3 --run-id mom-rust-timed-cpu-YYYYMMDD
 ```
 

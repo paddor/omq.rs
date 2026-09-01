@@ -76,10 +76,10 @@ impl AsyncSocket {
 
     // ── Send (sync push into yring) ─────────────────────────────────
 
-    #[pyo3(signature = (payload, flags = 0))]
-    fn send(&self, payload: &Bound<'_, PyAny>, flags: i32) -> PyResult<()> {
+    #[pyo3(signature = (payload, flags = 0, copy = true))]
+    fn send(&self, payload: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
         let routing_id = conversions::routing_id_from_pyany(payload);
-        let bytes = conversions::bytes_from_pyany(payload)?;
+        let bytes = conversions::bytes_from_pyany(payload, copy)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(());
         };
@@ -96,10 +96,10 @@ impl AsyncSocket {
         }
     }
 
-    #[pyo3(signature = (parts, flags = 0))]
-    fn send_multipart(&self, parts: &Bound<'_, PyAny>, flags: i32) -> PyResult<()> {
+    #[pyo3(signature = (parts, flags = 0, copy = true))]
+    fn send_multipart(&self, parts: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
         let _ = flags;
-        let msg = conversions::message_from_pylist(parts)?;
+        let msg = conversions::message_from_pylist(parts, copy)?;
         self.inner.materialize()?;
         let materialized_guard = self.inner.materialized.read().unwrap();
         let materialized = materialized_guard.as_ref().unwrap();

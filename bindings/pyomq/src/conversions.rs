@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use omq_proto::message::Message;
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -46,17 +47,50 @@ impl AsRef<[u8]> for PyBytesOwner {
     }
 }
 
-/// Build a `Bytes` from a Python `bytes`-like object. Uses the
-/// zero-copy `Bytes::from_owner` path when the input is an immutable
-/// `bytes`; falls back to `Bytes::copy_from_slice` for `bytearray` /
-/// `memoryview` / other buffer-protocol types whose backing storage
-/// might be mutable or transient.
-pub fn bytes_from_pyany(b: &Bound<'_, PyAny>) -> PyResult<Bytes> {
+/// Owner that holds a Python buffer export alive while exposing its
+/// backing storage as `&[u8]`.
+///
+/// SAFETY:
+/// - `PyBuffer<u8>` pins the exporter according to Python's buffer
+///   protocol until release/drop.
+/// - We only construct this for C-contiguous `u8` buffers.
+/// - `copy=False` callers are responsible for not mutating the backing
+///   object until the send completes, matching PyZMQ's zero-copy contract.
+struct PyBufferOwner {
+    _buffer: PyBuffer<u8>,
+    ptr: *const u8,
+    len: usize,
+}
+
+unsafe impl Send for PyBufferOwner {}
+unsafe impl Sync for PyBufferOwner {}
+
+impl AsRef<[u8]> for PyBufferOwner {
+    fn as_ref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+/// Build a `Bytes` from a Python bytes-like object. Immutable `bytes`
+/// use zero-copy ownership. Buffer-protocol objects copy by default,
+/// and use zero-copy ownership for C-contiguous `u8` buffers only when
+/// the caller requested `copy=False`.
+pub fn bytes_from_pyany(b: &Bound<'_, PyAny>, copy: bool) -> PyResult<Bytes> {
     if let Ok(frame) = b.cast::<Frame>() {
         return Ok(frame.borrow().bytes_clone());
     }
     if let Ok(pb) = b.cast::<PyBytes>() {
         return Ok(Bytes::from_owner(PyBytesOwner::from_pybytes(pb)));
+    }
+    if let Ok(buffer) = PyBuffer::<u8>::get(b) {
+        if !copy && buffer.as_slice(b.py()).is_some() {
+            return Ok(Bytes::from_owner(PyBufferOwner {
+                ptr: buffer.buf_ptr().cast(),
+                len: buffer.len_bytes(),
+                _buffer: buffer,
+            }));
+        }
+        return Ok(Bytes::from(buffer.to_vec(b.py())?));
     }
     let view: &[u8] = b.extract()?;
     Ok(Bytes::copy_from_slice(view))
@@ -69,14 +103,14 @@ pub fn routing_id_from_pyany(b: &Bound<'_, PyAny>) -> u32 {
 }
 
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
-pub fn message_from_pylist(parts: &Bound<'_, PyAny>) -> PyResult<Message> {
+pub fn message_from_pylist(parts: &Bound<'_, PyAny>, copy: bool) -> PyResult<Message> {
     let it = parts.try_iter()?;
     let mut collected = Vec::new();
     let mut routing_id = 0;
     for part in it {
         let part = part?;
         routing_id = routing_id.max(routing_id_from_pyany(&part));
-        collected.push(bytes_from_pyany(&part)?);
+        collected.push(bytes_from_pyany(&part, copy)?);
     }
     let message = match collected.len() {
         0 => Message::new(),

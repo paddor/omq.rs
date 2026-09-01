@@ -58,6 +58,38 @@ async def test_async_send_multipart(tcp_endpoint):
 
 
 @pytest.mark.asyncio
+async def test_async_send_accepts_memoryview_copy_false(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    push = ctx.socket(pyomq.PUSH)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        await push.send(memoryview(b"hello"), copy=False)
+        assert await pull.recv() == b"hello"
+    finally:
+        push.close()
+        pull.close()
+
+
+@pytest.mark.asyncio
+async def test_async_send_multipart_accepts_buffers_copy_false(tcp_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    push = ctx.socket(pyomq.PUSH)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        await push.send_multipart(
+            [bytearray(b"meta"), memoryview(b"payload")], copy=False
+        )
+        assert await pull.recv_multipart() == [b"meta", b"payload"]
+    finally:
+        push.close()
+        pull.close()
+
+
+@pytest.mark.asyncio
 async def test_async_pubsub(tcp_endpoint):
     ctx = zmq_async.Context()
     pub = ctx.socket(pyomq.PUB)

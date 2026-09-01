@@ -645,13 +645,13 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send(
         self,
-        data: bytes | str,
+        data: Any,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
         try:
-            self._sock.send(data, flags)
+            self._sock.send(data, flags, copy)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
         if track:
@@ -680,14 +680,14 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send_multipart(
         self,
-        parts: Iterable[bytes | str],
+        parts: Iterable[Any],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
         parts = [p.encode("utf-8") if isinstance(p, str) else p for p in parts]
         try:
-            self._sock.send_multipart(parts, flags)
+            self._sock.send_multipart(parts, flags, copy)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
         if track:
@@ -926,24 +926,24 @@ class _ShadowSocket(_SocketOptionsBase):
 
     def send(
         self,
-        data: bytes | str,
+        data: Any,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
-        self._blocking_send(lambda: self._native.send(data, flags))
+        self._blocking_send(lambda: self._native.send(data, flags, copy))
         if track:
             return MessageTracker(_pending=True)
         return None
 
     def send_multipart(
         self,
-        parts: list[bytes | str],
+        parts: list[Any],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
-        self._blocking_send(lambda: self._native.send_multipart(parts, flags))
+        self._blocking_send(lambda: self._native.send_multipart(parts, flags, copy))
         if track:
             return MessageTracker(_pending=True)
         return None

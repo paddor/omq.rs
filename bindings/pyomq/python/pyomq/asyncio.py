@@ -209,16 +209,16 @@ class Socket(_BaseSocket):
 
     def send(
         self,
-        data: bytes | str,
+        data: Any,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> Awaitable[Any | None]:
         try:
-            self._sock.send(data, flags)
+            self._sock.send(data, flags, copy)
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
-                return self._send_with_backpressure(data, flags)
+                return self._send_with_backpressure(data, flags, copy)
             raise error.from_native(e) from None
         return _SEND_DONE
 
@@ -231,16 +231,16 @@ class Socket(_BaseSocket):
 
     def send_multipart(
         self,
-        parts: list[bytes | str],
+        parts: list[Any],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> Awaitable[Any | None]:
         try:
-            self._sock.send_multipart(parts, flags)
+            self._sock.send_multipart(parts, flags, copy)
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
-                return self._send_multipart_with_backpressure(parts, flags)
+                return self._send_multipart_with_backpressure(parts, flags, copy)
             raise error.from_native(e) from None
         return _SEND_DONE
 
@@ -400,11 +400,11 @@ class Socket(_BaseSocket):
             )
 
         def _send_with_backpressure(
-            self, data: bytes | str, flags: int
+            self, data: Any, flags: int, copy: bool
         ) -> asyncio.Future[Any]:
             def try_send() -> bool | None:
                 try:
-                    self._sock.send(data, flags)
+                    self._sock.send(data, flags, copy)
                     return True
                 except _native.ZMQError as e:
                     if e.errno == _errno.EAGAIN:
@@ -419,11 +419,11 @@ class Socket(_BaseSocket):
             )
 
         def _send_multipart_with_backpressure(
-            self, parts: list[bytes | str], flags: int
+            self, parts: list[Any], flags: int, copy: bool
         ) -> asyncio.Future[Any]:
             def try_send() -> bool | None:
                 try:
-                    self._sock.send_multipart(parts, flags)
+                    self._sock.send_multipart(parts, flags, copy)
                     return True
                 except _native.ZMQError as e:
                     if e.errno == _errno.EAGAIN:
@@ -462,12 +462,12 @@ class Socket(_BaseSocket):
 
             return _RecvFuture(try_fn, fd)
 
-        def _send_with_backpressure(self, data: bytes | str, flags: int) -> _RecvFuture:
+        def _send_with_backpressure(self, data: Any, flags: int, copy: bool) -> _RecvFuture:
             fd = self._sock._send_fd()
 
             def try_send() -> bool | None:
                 try:
-                    self._sock.send(data, flags)
+                    self._sock.send(data, flags, copy)
                     return True
                 except _native.ZMQError as e:
                     if e.errno == _EAGAIN:
@@ -477,13 +477,13 @@ class Socket(_BaseSocket):
             return _RecvFuture(try_send, fd)
 
         def _send_multipart_with_backpressure(
-            self, parts: list[bytes | str], flags: int
+            self, parts: list[Any], flags: int, copy: bool
         ) -> _RecvFuture:
             fd = self._sock._send_fd()
 
             def try_send() -> bool | None:
                 try:
-                    self._sock.send_multipart(parts, flags)
+                    self._sock.send_multipart(parts, flags, copy)
                     return True
                 except _native.ZMQError as e:
                     if e.errno == _EAGAIN:

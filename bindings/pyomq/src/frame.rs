@@ -63,6 +63,7 @@ impl Frame {
         match data {
             Some(data) => Ok(Self::from_bytes(crate::conversions::bytes_from_pyany(
                 data,
+                copy.unwrap_or(true),
             )?)),
             None => Ok(Self::from_bytes(Bytes::new())),
         }

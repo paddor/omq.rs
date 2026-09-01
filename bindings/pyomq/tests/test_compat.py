@@ -235,6 +235,107 @@ def test_copy_false_frames_can_be_rerouted():
         ctx.term()
 
 
+def test_send_accepts_bytearray_buffer(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        push.send(bytearray(b"hello"))
+        assert pull.recv() == b"hello"
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_send_copies_mutable_buffer_by_default(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        data = bytearray(b"hello")
+        push.send(data)
+        data[:] = b"xxxxx"
+        assert pull.recv() == b"hello"
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_send_accepts_memoryview_buffer_copy_false(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        push.send(memoryview(b"hello"), copy=False)
+        assert pull.recv() == b"hello"
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_frame_accepts_memoryview_buffer_copy_false():
+    frame = zmq.Frame(memoryview(b"hello"), copy=False)
+    assert bytes(frame) == b"hello"
+
+
+def test_send_multipart_accepts_buffer_parts(tcp_endpoint):
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        push.send_multipart([bytearray(b"meta"), memoryview(b"payload")], copy=False)
+        assert pull.recv_multipart() == [b"meta", b"payload"]
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_send_accepts_noncontiguous_numpy_array_copy_false(tcp_endpoint):
+    np = pytest.importorskip("numpy")
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        data = np.arange(16, dtype=np.uint8)[::2]
+        push.send(data, copy=False)
+        assert pull.recv() == data.tobytes()
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
+def test_send_accepts_numpy_uint8_array_copy_false(tcp_endpoint):
+    np = pytest.importorskip("numpy")
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+        data = np.arange(12, dtype=np.uint8).reshape((2, 2, 3))
+        push.send(data, copy=False)
+        assert pull.recv() == data.tobytes()
+    finally:
+        push.close()
+        pull.close()
+        ctx.term()
+
+
 def test_copy_false_send_accepted():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)

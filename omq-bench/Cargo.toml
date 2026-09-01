@@ -6,32 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
-build = "build.rs"
 
 [[bin]]
 name = "omq-bench"
 path = "src/main.rs"
 
-[[bin]]
-name = "grpc_bench_peer"
-path = "src/bin/grpc_bench_peer.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-futures-util = "0.3"
 libc = "0.2"
 omq-tokio = { path = "../omq-tokio", default-features = false }
-prost = "0.13"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.12", features = ["transport"] }
-
-[build-dependencies]
-protoc-bin-vendored = "3"
-tonic-build = "0.12"
 
 [lints]
 workspace = true

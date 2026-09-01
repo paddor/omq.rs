@@ -1,3 +1,20 @@
+//// Gleam API for OMQ.
+////
+//// OMQ sockets are ZeroMQ-compatible message queues backed by the Rust
+//// `omq-tokio` runtime. Create a context with `context` or reuse the
+//// process-wide singleton with `context_instance`, then create sockets with
+//// `socket`.
+////
+//// Endpoints are UTF-8 bit arrays such as <<"tcp://127.0.0.1:5555":utf8>>,
+//// <<"ipc:///tmp/omq.sock":utf8>>, <<"inproc://queue":utf8>>,
+//// <<"lz4+tcp://127.0.0.1:5555":utf8>>, and
+//// <<"zstd+tcp://127.0.0.1:5555":utf8>>.
+////
+//// Functions return `Ok(value)` or `Error(#(class, reason))` unless they are
+//// pure constants or feature checks. `send` and `recv` move binary frames;
+//// string, JSON, term, multipart, pub/sub, RADIO/DISH, and socket option
+//// helpers wrap the Erlang base package.
+
 import gleam/dynamic.{type Dynamic}
 
 /// Native OMQ context resource.

@@ -9,6 +9,7 @@ defmodule Omq.MixProject do
       description: description(),
       package: package(),
       source_url: "https://github.com/paddor/omq.rs",
+      docs: docs(),
       deps: deps()
     ]
   end
@@ -18,7 +19,10 @@ defmodule Omq.MixProject do
   end
 
   defp deps do
-    [{:omq, "~> 0.1"}]
+    [
+      {:omq, "~> 0.1"},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
+    ]
   end
 
   defp description do
@@ -33,6 +37,15 @@ defmodule Omq.MixProject do
         "OMQ.beam" => "https://github.com/paddor/omq.rs/tree/main/bindings/beam"
       },
       files: ~w(lib mix.exs README.md)
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: ["README.md"],
+      source_ref: "main",
+      source_url: "https://github.com/paddor/omq.rs"
     ]
   end
 end

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-09-02
+
+### Added
+
+- Include the `py.typed` marker so downstream type checkers recognize pyomq
+  as typed.
+
 ## [0.20.2] - 2026-09-01
 
 ### Added

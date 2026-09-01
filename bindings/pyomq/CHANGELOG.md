@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-09-01
+
+### Added
+
+- Accept Python buffer-protocol objects for sync and asyncio `send()` calls.
+
+### Changed
+
+- Refresh the pyomq vs pyzmq benchmark chart and proxy table.
+
 ## [0.20.1] - 2026-08-23
 
 ### Fixed

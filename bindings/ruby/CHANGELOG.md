@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-01
+
+- Route `Socket#try_recv` directly through the native nonblocking receive path.
+- Avoid Ruby-side batch array churn in hot polling loops.
+
 ## [0.1.1] - 2026-08-23
 
 - Document the full public API and publish the RubyDoc documentation link.

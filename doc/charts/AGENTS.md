@@ -17,7 +17,7 @@ cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Main charts (3 files)
+## Main charts (4 files)
 
 Data: `comparisons.jsonl`. External impls required.
 

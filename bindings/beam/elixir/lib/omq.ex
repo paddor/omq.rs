@@ -1,10 +1,51 @@
 defmodule OMQ do
   @moduledoc """
-  Thin Elixir wrapper over the Erlang `:omq` module.
+  Elixir API for OMQ.
 
-  Functions return Erlang result shapes unchanged: `:ok`, `{:ok, value}`, or
+  OMQ sockets are ZeroMQ-compatible message queues backed by the Rust
+  `omq-tokio` runtime. Create a context with `context/0` or reuse the
+  process-wide singleton with `context_instance/0`, then create sockets with
+  `socket/2`.
+
+  Endpoints are binaries or strings such as `"tcp://127.0.0.1:5555"`,
+  `"ipc:///tmp/omq.sock"`, `"inproc://queue"`, `"lz4+tcp://127.0.0.1:5555"`,
+  and `"zstd+tcp://127.0.0.1:5555"`.
+
+  Functions return Erlang result shapes unchanged: `:ok`, `{:ok, value}`,
+  `{:ok, value, metadata}` where documented by Erlang, or
   `{:error, class, reason}`.
+
+  `send/3` accepts either an integer flags mask or an option list. Supported
+  options are `:sndmore`, `:noblock`, `:dontwait`, `{:flags, flags}`, and
+  `{:routing_id, id}`. `recv/1` and `recv/2` return either `{:ok, data}` or
+  routing metadata maps for ROUTER/SERVER-style sockets.
   """
+
+  @typedoc "Native OMQ context resource."
+  @type context :: term()
+
+  @typedoc "Native OMQ socket resource."
+  @type socket :: term()
+
+  @typedoc "Socket monitor event stream resource."
+  @type monitor :: term()
+
+  @typedoc "Common OMQ result shape."
+  @type result(value) :: :ok | {:ok, value} | {:error, atom(), binary() | String.t()}
+
+  @typedoc "Endpoint URI accepted by bind/connect."
+  @type endpoint :: binary() | String.t()
+
+  @typedoc "Send flags or option list."
+  @type send_opts ::
+          integer()
+          | [
+              :sndmore
+              | :noblock
+              | :dontwait
+              | {:flags, integer()}
+              | {:routing_id, non_neg_integer()}
+            ]
 
   @doc "Create a context with one IO thread."
   def context, do: call(:context, [])

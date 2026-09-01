@@ -1,3 +1,23 @@
+%% @doc Erlang API for OMQ.
+%%
+%% OMQ sockets are ZeroMQ-compatible message queues backed by the Rust
+%% omq-tokio runtime. Create a context with context/0 or reuse the
+%% process-wide singleton with context_instance/0, then create sockets with
+%% socket/2.
+%%
+%% Endpoints are binaries or iodata URI strings such as
+%% tcp://127.0.0.1:5555, ipc:///tmp/omq.sock, inproc://queue,
+%% lz4+tcp://127.0.0.1:5555, and zstd+tcp://127.0.0.1:5555.
+%%
+%% Most calls return ok, {ok, Value}, or {error, Class, Reason}.
+%% send/3 accepts an integer flags mask or an option list. Supported option
+%% entries are sndmore, noblock, dontwait, {flags, Flags}, and
+%% {routing_id, Id}. recv/1,2 returns either {ok, Data} or routing
+%% metadata maps for ROUTER/SERVER-style sockets.
+%%
+%% Socket type constants match libzmq values where libzmq defines one. Socket
+%% options can be passed by atom or integer option ID.
+%% @end
 -module(omq).
 
 -export([
@@ -123,7 +143,7 @@
     forwarder/0, queue/0, streamer/0, null/0, plain/0, curve/0
 ]).
 
-%% @doc Create a context. `context/0` uses one IO thread.
+%% @doc Create a context. context/0 uses one IO thread.
 context() ->
     context(1).
 
@@ -148,7 +168,7 @@ context_instance(IoThreads) ->
         end
     end).
 
-%% @doc Return process-wide singleton context. Alias for `context_instance/0,1`.
+%% @doc Return process-wide singleton context. Alias for context_instance/0,1.
 instance() ->
     context_instance().
 
@@ -162,7 +182,7 @@ term(Context) ->
         omq_nif:context_term(Context)
     end).
 
-%% @doc Terminate a context. Alias for `term/1`.
+%% @doc Terminate a context. Alias for term/1.
 destroy(Context) ->
     term(Context).
 
@@ -186,11 +206,11 @@ backend_name() ->
 version() ->
     omq_nif:version().
 
-%% @doc Return native binding version. Alias for `version/0`.
+%% @doc Return native binding version. Alias for version/0.
 omq_version() ->
     version().
 
-%% @doc Return native binding version as `{Major, Minor, Patch}`.
+%% @doc Return native binding version as {Major, Minor, Patch}.
 omq_version_info() ->
     case version() of
         {ok, Version} -> {ok, version_info_tuple(Version)};
@@ -293,7 +313,7 @@ send_string(Socket, Text, Opts) ->
 send_string(Socket, Text, Encoding, Opts) ->
     send(Socket, unicode:characters_to_binary(Text, utf8, Encoding), Opts).
 
-%% @doc Send one JSON value encoded with OTP `json`.
+%% @doc Send one JSON value encoded with OTP json.
 send_json(Socket, Value) ->
     send_json(Socket, Value, []).
 
@@ -359,7 +379,7 @@ recv_string(Socket, Timeout, Encoding) ->
             Other
     end.
 
-%% @doc Receive one JSON value decoded by OTP `json`.
+%% @doc Receive one JSON value decoded by OTP json.
 recv_json(Socket) ->
     recv_json(Socket, infinity).
 
@@ -370,7 +390,7 @@ recv_json(Socket, Timeout) ->
 try_recv_json(Socket) ->
     decode_json_result(try_recv(Socket)).
 
-%% @doc Receive one Erlang term encoded by `send_term/2,3`.
+%% @doc Receive one Erlang term encoded by send_term/2,3.
 recv_term(Socket) ->
     recv_term(Socket, infinity).
 
@@ -537,11 +557,11 @@ wait_connected(Socket, MinPeers, Timeout) ->
 wait_subscribed(Socket, MinSubscriptions, Timeout) ->
     omq_nif:wait_subscribed(Socket, MinSubscriptions, timeout_ms(Timeout)).
 
-%% @doc Set socket option. Alias for `setsockopt/3`.
+%% @doc Set socket option. Alias for setsockopt/3.
 set(Socket, Option, Value) ->
     setsockopt(Socket, Option, Value).
 
-%% @doc Get socket option. Alias for `getsockopt/2`.
+%% @doc Get socket option. Alias for getsockopt/2.
 get(Socket, Option) ->
     getsockopt(Socket, Option).
 

@@ -1,8 +1,8 @@
 # Comparisons
 
-These charts compare OMQ with `libzmq`, `tmq`, `zmq.rs`, `rzmq`, and gRPC. The
-benchmark runner records throughput, latency, CPU time, and peer
-fairness where the pattern has multiple peers.
+These charts compare OMQ with `libzmq`, `tmq`, `zmq.rs`, `rzmq`, gRPC, and
+brokered messaging systems. The benchmark runner records throughput,
+latency, CPU time, and peer fairness where the pattern has multiple peers.
 
 ## Setup
 
@@ -12,6 +12,7 @@ fairness where the pattern has multiple peers.
 - `rzmq v0.5.24` in its normal and io_uring modes
 - OMQ from this repository
 - Rust gRPC over plaintext TCP, with opaque blob payloads and no QoS
+- RabbitMQ, Redpanda, NATS, and Redis over loopback TCP using Rust clients
 
 ## Methodology
 
@@ -119,4 +120,14 @@ N-to-1 PUSH/PULL over TCP.
 
 <p align="center">
   <img src="doc/charts/pubsub/curve_tcp.svg" alt="CURVE PUB/SUB throughput: TCP" width="850">
+</p>
+
+## Producer/Consumer Throughput
+
+Direct ZMTP, gRPC streaming over HTTP/2, brokered queues, and persistent
+stream/log systems over loopback TCP. Kafka and Redis Streams are included
+for context, but they are not transparent ZMQ-style PUSH/PULL sockets.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>

@@ -85,6 +85,17 @@ Check((await pull.ReceiveAsync()).ToString() == "async", "async message mismatch
 await push.SendAsync(new Message([new ReadOnlyMemory<byte>([1, 2]), new ReadOnlyMemory<byte>([3, 4])]));
 var asyncMultipart = await pull.ReceiveAsync();
 Check(asyncMultipart.IsMultipart && asyncMultipart.Parts.Count == 2 && asyncMultipart.Parts[1].SequenceEqual(new byte[] { 3, 4 }), "async multipart mismatch");
+using var asyncServer = context.CreateSocket(SocketType.Server, new SocketOptions { Linger = 0 });
+using var asyncClient = context.CreateSocket(SocketType.Client, new SocketOptions { Linger = 0 });
+string asyncServerEndpoint = asyncServer.Bind("tcp://127.0.0.1:0");
+asyncClient.Connect(asyncServerEndpoint);
+await asyncClient.SendAsync(Message.Text("request"));
+Message asyncRequest = await asyncServer.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2));
+Check(asyncRequest.RoutingId != 0, "async SERVER request is missing a routing ID");
+Message asyncReply = Message.Text("reply");
+asyncReply.RoutingId = asyncRequest.RoutingId;
+await asyncServer.SendAsync(asyncReply);
+Check((await asyncClient.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2))).ToString() == "reply", "async SERVER reply mismatch");
 using (var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(20)))
 {
     bool observed = false;

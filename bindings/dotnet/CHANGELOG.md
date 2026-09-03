@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve SERVER routing IDs in asynchronous message sends.
+
 ### Changed
 
 - Make `ReceiveInto` write directly into the caller's span and return the

@@ -11,6 +11,8 @@ use omq_tokio::engine::StateSignal;
 use crate::error::{ETERM, fail};
 use crate::socket::OmqSocket;
 
+const ROUTED_MESSAGE_MAGIC: &[u8; 8] = b"OMQROUTE";
+
 #[allow(unreachable_pub)]
 pub type OMQAsyncCallback = extern "C" fn(*mut c_void, i32);
 
@@ -27,15 +29,28 @@ fn decode_message(encoded: *const u8, length: usize) -> Option<Message> {
     }
     // SAFETY: caller supplies a readable buffer of `length` bytes.
     let bytes = unsafe { std::slice::from_raw_parts(encoded, length) };
-    let count = usize::try_from(u64::from_le_bytes(bytes[..8].try_into().ok()?)).ok()?;
-    let table_end = 8usize.checked_add(count.checked_mul(8)?)?;
+    let (count, routing_id, table_start) = if bytes.starts_with(ROUTED_MESSAGE_MAGIC) {
+        if length < 20 {
+            return None;
+        }
+        let routing_id = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+        if routing_id == 0 {
+            return None;
+        }
+        let count = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().ok()?)).ok()?;
+        (count, Some(routing_id), 20usize)
+    } else {
+        let count = usize::try_from(u64::from_le_bytes(bytes[..8].try_into().ok()?)).ok()?;
+        (count, None, 8usize)
+    };
+    let table_end = table_start.checked_add(count.checked_mul(8)?)?;
     if table_end > length {
         return None;
     }
     let mut parts = Vec::with_capacity(count);
     let mut offset = table_end;
     for index in 0..count {
-        let start = 8 + index * 8;
+        let start = table_start + index * 8;
         let size =
             usize::try_from(u64::from_le_bytes(bytes[start..start + 8].try_into().ok()?)).ok()?;
         let end = offset.checked_add(size)?;
@@ -45,7 +60,14 @@ fn decode_message(encoded: *const u8, length: usize) -> Option<Message> {
         parts.push(Bytes::copy_from_slice(&bytes[offset..end]));
         offset = end;
     }
-    (offset == length).then(|| Message::multipart(parts))
+    if offset != length {
+        return None;
+    }
+    let message = Message::multipart(parts);
+    Some(match routing_id {
+        Some(routing_id) => message.with_routing_id(routing_id),
+        None => message,
+    })
 }
 
 #[unsafe(no_mangle)]

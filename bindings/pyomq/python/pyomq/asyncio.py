@@ -142,6 +142,8 @@ class _RecvFuture:
         try_fn = self._try_fn
 
         def _on_readable() -> None:
+            # Check fut.done() before closing. After cancellation,
+            # _on_cancel owns the descriptor.
             try:
                 os.read(fd, 8)
             except OSError:
@@ -149,20 +151,22 @@ class _RecvFuture:
             try:
                 r = try_fn()
             except Exception as e:
+                if fut.done():
+                    return
                 loop.remove_reader(fd)
                 os.close(fd)
-                if not fut.done():
-                    fut.set_exception(e)
+                fut.set_exception(e)
                 return
             if r is not None:
                 try:
                     os.write(fd, b"\x01\x00\x00\x00\x00\x00\x00\x00")
                 except OSError:
                     pass
+                if fut.done():
+                    return
                 loop.remove_reader(fd)
                 os.close(fd)
-                if not fut.done():
-                    fut.set_result(r)
+                fut.set_result(r)
 
         def _on_cancel(f: asyncio.Future[Any]) -> None:
             if f.cancelled():

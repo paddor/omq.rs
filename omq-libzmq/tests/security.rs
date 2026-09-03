@@ -151,6 +151,34 @@ fn curve_public_derives_from_secret() {
 }
 
 #[test]
+fn mismatched_curve_keypair_returns_einval_and_can_be_corrected() {
+    let mut first_pub = [0u8; 41];
+    let mut first_sec = [0u8; 41];
+    let mut second_pub = [0u8; 41];
+    let mut second_sec = [0u8; 41];
+    zmq_curve_keypair(first_pub.as_mut_ptr().cast(), first_sec.as_mut_ptr().cast());
+    zmq_curve_keypair(
+        second_pub.as_mut_ptr().cast(),
+        second_sec.as_mut_ptr().cast(),
+    );
+
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(push, ZMQ_CURVE_PUBLICKEY, &first_pub[..40]);
+    set_bytes(push, ZMQ_CURVE_SECRETKEY, &second_sec[..40]);
+    set_bytes(push, ZMQ_CURVE_SERVERKEY, &first_pub[..40]);
+
+    assert_eq!(zmq_connect(push, c"tcp://127.0.0.1:1".as_ptr()), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    set_bytes(push, ZMQ_CURVE_PUBLICKEY, &second_pub[..40]);
+    assert_eq!(zmq_connect(push, c"tcp://127.0.0.1:1".as_ptr()), 0);
+
+    zmq_close(push);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
 fn curve_req_rep_tcp() {
     let mut srv_pub = [0u8; 41];
     let mut srv_sec = [0u8; 41];

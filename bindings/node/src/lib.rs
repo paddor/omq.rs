@@ -799,9 +799,6 @@ fn build_options(input: Option<NativeSocketOptions>) -> Result<Options> {
 fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<CurveKeypair> {
     let public = CurvePublicKey::from_z85(&public_key).map_err(map_omq_error)?;
     let secret = CurveSecretKey::from_z85(&secret_key).map_err(map_omq_error)?;
-    if secret.derive_public() != public {
-        return Err(napi_error("CURVE public key does not match secret key"));
-    }
     Ok(CurveKeypair { public, secret })
 }
 

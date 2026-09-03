@@ -75,7 +75,7 @@ pub(crate) fn map_omq_err(e: &omq_tokio::error::Error) -> c_int {
     match e {
         Error::WouldBlock | Error::Timeout => libc::EAGAIN,
         Error::Closed => ETERM,
-        Error::InvalidEndpoint(_) => libc::EINVAL,
+        Error::InvalidEndpoint(_) | Error::Config(_) => libc::EINVAL,
         Error::UnsupportedScheme(_) | Error::HandshakeFailed(_) | Error::Protocol(_) => {
             EPROTONOSUPPORT
         }

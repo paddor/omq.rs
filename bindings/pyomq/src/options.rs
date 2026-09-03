@@ -193,6 +193,8 @@ impl Overlay {
             let keypair = backend::CurveKeypair { public, secret };
             opts = opts.curve_client(keypair, server_public);
         }
+        opts.validate()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(opts)
     }
 

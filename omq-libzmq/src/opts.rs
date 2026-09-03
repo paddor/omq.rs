@@ -951,7 +951,9 @@ fn do_subscribe(
             std::slice::from_raw_parts(optval.cast::<u8>(), optvallen)
         })
     };
-    crate::socket::ensure_materialized(sock_arc);
+    if let Err(error) = crate::socket::ensure_materialized(sock_arc) {
+        return crate::error::fail(error);
+    }
     let Some(inner) = sock_arc.inner.get() else {
         return crate::error::fail(crate::error::ETERM);
     };

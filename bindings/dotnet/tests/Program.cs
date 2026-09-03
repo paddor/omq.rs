@@ -94,6 +94,15 @@ var keys = Curve.GenerateKeyPair();
 Check(keys.PublicKey.Length == 40 && keys.SecretKey.Length == 40, "CURVE keypair mismatch");
 Check(Curve.PublicKey(keys.SecretKey) == keys.PublicKey, "CURVE public key mismatch");
 var serverKeys = Curve.GenerateKeyPair();
+var otherKeys = Curve.GenerateKeyPair();
+using (var invalidCurve = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 }))
+{
+    invalidCurve.ConfigureCurveClient(keys.PublicKey, otherKeys.SecretKey, serverKeys.PublicKey);
+    bool rejected = false;
+    try { invalidCurve.Connect("tcp://127.0.0.1:1"); }
+    catch (OmqException error) when (error.Errno == 22) { rejected = true; }
+    Check(rejected, "mismatched CURVE keypair should return EINVAL");
+}
 using var curveRep = context.CreateSocket(SocketType.Rep, new SocketOptions { Linger = 0 });
 using var curveReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 });
 curveRep.ConfigureCurveServer(serverKeys.PublicKey, serverKeys.SecretKey);

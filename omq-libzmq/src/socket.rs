@@ -387,10 +387,23 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
 /// options, then start the recv pump. Called once on first bind/connect
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
-pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
-    if sock.ctx.io_context().is_none() {
-        return false;
+pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
+    let Some(ctx) = sock.ctx.io_context().cloned() else {
+        return Err(ETERM);
+    };
+    if sock.inner.get().is_some() {
+        return Ok(());
     }
+    let (opts, recv_hwm, queue_without_ready_peer) = {
+        let overlay = sock.overlay.lock().map_err(|_| ETERM)?;
+        (
+            overlay.to_options(),
+            overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize,
+            !overlay.immediate,
+        )
+    };
+    opts.validate().map_err(|_| libc::EINVAL)?;
+
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
         .bound_or_connected
@@ -401,17 +414,11 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
         while sock.inner.get().is_none() {
             std::hint::spin_loop();
         }
-        return true;
+        return Ok(());
     }
-    let Ok(overlay) = sock.overlay.lock() else {
-        return false;
-    };
-    let opts = overlay.to_options();
-    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     // SAFETY: materialization runs before hot-path send ownership and freezes
     // bind/connect-scoped options for this socket.
-    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = !overlay.immediate;
-    drop(overlay);
+    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = queue_without_ready_peer;
 
     let socket_type = sock.socket_type;
 
@@ -450,9 +457,6 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     // Enter the tokio runtime context so that Socket::new (which calls
     // tokio::spawn internally for its driver task) and the recv pump
     // spawn below are scheduled on the context's runtime.
-    let Some(ctx) = sock.ctx.io_context().cloned() else {
-        return false;
-    };
     let handle = ctx.handle().clone();
     let _guard = handle.enter();
 
@@ -471,7 +475,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
 
     let _ = sock.inner.set(inner);
     let _ = sock.recv_pump.set(recv_pump);
-    true
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -642,8 +646,8 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         }
     }
 
-    if !ensure_materialized(sock) {
-        return fail(ETERM);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
     }
 
     let Some(inner) = sock.inner.get() else {
@@ -692,8 +696,8 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         }
     }
 
-    if !ensure_materialized(sock) {
-        return fail(ETERM);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
     }
 
     let Some(inner) = sock.inner.get() else {
@@ -791,7 +795,9 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
         Ok(t) => t,
         Err(e) => return fail(e),
     };
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
@@ -805,7 +811,9 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
         Ok(t) => t,
         Err(e) => return fail(e),
     };
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
@@ -841,7 +849,9 @@ pub extern "C" fn zmq_socket_monitor(
     let addr_str = addr_str.to_owned();
     let events_mask = events as u16;
 
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);

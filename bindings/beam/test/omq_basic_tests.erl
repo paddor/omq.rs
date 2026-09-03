@@ -906,6 +906,23 @@ curve_key_helpers_test() ->
         ?assertMatch({error, badarg, _}, omq:curve_public(<<"not-valid-z85-key">>))
     end).
 
+curve_mismatched_keypair_returns_config_test() ->
+    with_feature(curve, fun() ->
+        {ok, FirstPublic, _} = omq:curve_keypair(),
+        {ok, _, SecondSecret} = omq:curve_keypair(),
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        ok = omq:setsockopt(Pull, curve_server, true),
+        ok = omq:setsockopt(Pull, curve_publickey, FirstPublic),
+        ok = omq:setsockopt(Pull, curve_secretkey, SecondSecret),
+        ?assertMatch(
+            {error, config, _},
+            omq:bind(Pull, <<"tcp://127.0.0.1:0">>)
+        ),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
 plain_push_pull_tcp_test() ->
     with_feature(plain, fun() ->
         {ok, Ctx} = omq:context(),

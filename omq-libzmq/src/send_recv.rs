@@ -338,7 +338,9 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
 
     // XSUB: intercept subscription frames.
     if sock.socket_type == omq_tokio::SocketType::XSub && !data.is_empty() {
-        crate::socket::ensure_materialized(sock);
+        if let Err(error) = crate::socket::ensure_materialized(sock) {
+            return fail(error);
+        }
         let Some(inner) = sock.inner.get() else {
             return fail(ETERM);
         };

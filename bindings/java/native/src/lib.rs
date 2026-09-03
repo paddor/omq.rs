@@ -2244,11 +2244,6 @@ fn socket_type_from_code(code: jint) -> Result<SocketType, Error> {
 fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<CurveKeypair, Error> {
     let public = CurvePublicKey::from_z85(&public_key)?;
     let secret = CurveSecretKey::from_z85(&secret_key)?;
-    if secret.derive_public() != public {
-        return Err(Error::Config(
-            "CURVE public key does not match secret key".to_string(),
-        ));
-    }
     Ok(CurveKeypair { public, secret })
 }
 

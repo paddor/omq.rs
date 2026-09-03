@@ -455,6 +455,15 @@ impl Options {
             }
         }
         #[cfg(feature = "curve")]
+        if let MechanismSetup::CurveServer { our_keypair, .. }
+        | MechanismSetup::CurveClient { our_keypair, .. } = &self.mechanism
+            && our_keypair.secret.derive_public() != our_keypair.public
+        {
+            return Err(crate::error::Error::Config(
+                "CURVE public key does not match secret key".into(),
+            ));
+        }
+        #[cfg(feature = "curve")]
         if let MechanismSetup::CurveServer { ref options, .. } = self.mechanism
             && options.cookie_lifetime.is_zero()
         {
@@ -1013,6 +1022,36 @@ mod tests {
         let mut o = Options::default().curve_client(CurveKeypair::generate(), server_kp.public);
         o.handshake_timeout = None;
         assert!(o.validate().is_err());
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn rejects_mismatched_curve_keypairs() {
+        let valid = CurveKeypair::generate();
+        let mut bad_public = *valid.public.as_bytes();
+        bad_public[0] ^= 1;
+        let mismatched = CurveKeypair {
+            public: CurvePublicKey::from_bytes(bad_public),
+            secret: valid.secret,
+        };
+
+        let server_error = Options::default()
+            .curve_server(mismatched.clone())
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            server_error.to_string(),
+            "invalid configuration: CURVE public key does not match secret key"
+        );
+
+        let client_error = Options::default()
+            .curve_client(mismatched, CurveKeypair::generate().public)
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            client_error.to_string(),
+            "invalid configuration: CURVE public key does not match secret key"
+        );
     }
 
     #[test]

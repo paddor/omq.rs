@@ -34,10 +34,10 @@ export interface SocketOptions {
     onMute?: "block" | "dropNewest" | "dropOldest";
     /** Workload hint used by the native transport. */
     workloadProfile?: "throughput" | "latency";
-    /** Enable LZ4 transport compression, optionally with a dictionary. */
-    lz4?: boolean | {
+    /** Configure a dictionary for `lz4+tcp://` or `lz4+ws://` endpoints. */
+    lz4?: {
         /** Static LZ4 dictionary bytes shared with peers. */
-        dictionary?: MessagePart;
+        dictionary: MessagePart;
     };
     /** PLAIN authentication options. */
     plain?: {

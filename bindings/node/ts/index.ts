@@ -159,10 +159,10 @@ export interface SocketOptions {
   onMute?: "block" | "dropNewest" | "dropOldest";
   /** Workload hint used by the native transport. */
   workloadProfile?: "throughput" | "latency";
-  /** Enable LZ4 transport compression, optionally with a dictionary. */
-  lz4?: boolean | {
+  /** Configure a dictionary for `lz4+tcp://` or `lz4+ws://` endpoints. */
+  lz4?: {
     /** Static LZ4 dictionary bytes shared with peers. */
-    dictionary?: MessagePart;
+    dictionary: MessagePart;
   };
   /** PLAIN authentication options. */
   plain?: {
@@ -849,13 +849,20 @@ function normalizeOptions(options: SocketOptions): NativeSocketOptions {
     xpubNodrop: options.xpubNodrop,
     onMute: options.onMute,
     workloadProfile: options.workloadProfile,
-    compressionDictionary:
-      typeof options.lz4 === "object" && options.lz4.dictionary !== undefined
-        ? toBytes(options.lz4.dictionary)
-        : undefined,
+    compressionDictionary: lz4Dictionary(options.lz4),
     plain: options.plain,
     curve: options.curve,
   };
+}
+
+function lz4Dictionary(lz4: SocketOptions["lz4"]): Uint8Array | undefined {
+  if (lz4 === undefined) return undefined;
+  if (typeof lz4 !== "object" || lz4 === null || lz4.dictionary === undefined) {
+    throw new TypeError(
+      "LZ4 is enabled by an lz4+tcp:// or lz4+ws:// endpoint; the lz4 option only configures a dictionary",
+    );
+  }
+  return toBytes(lz4.dictionary);
 }
 
 function sendNativeSync(socket: NativeSocket, input: Message | MessagePart | MessagePart[]): void {

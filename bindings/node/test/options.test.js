@@ -44,6 +44,7 @@ test("invalid option values reject early", () => {
   assert.throws(() => new Push({ onMute: "bad" }), /unknown onMute/);
   assert.throws(() => new Push({ workloadProfile: "bad" }), /unknown workloadProfile/);
   assert.throws(() => new Push({ identity: Buffer.alloc(256) }), /identity length/);
+  assert.throws(() => new Push({ lz4: true }), /lz4\+tcp:\/\//);
   assert.throws(() => new Push({ lz4: { dictionary: Buffer.alloc(0) } }), /compression dict/);
 });
 

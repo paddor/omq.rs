@@ -52,7 +52,7 @@ public sealed class Poller : IDisposable
 
     private IReadOnlyList<PollResult> WaitCancellable(TimeSpan timeout, CancellationToken token)
     {
-        DateTime deadline = timeout == default ? DateTime.MaxValue : DateTime.UtcNow + timeout;
+        DateTime deadline = timeout == Timeout.InfiniteTimeSpan ? DateTime.MaxValue : DateTime.UtcNow + timeout;
         while (true)
         {
             token.ThrowIfCancellationRequested();

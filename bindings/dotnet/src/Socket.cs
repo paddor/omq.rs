@@ -245,7 +245,7 @@ public sealed class Socket : IDisposable
     /// Receives one frame into a caller-provided buffer.
     public byte[] ReceiveInto(Span<byte> buffer, bool dontWait = false)
     {
-        lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); copy.AsSpan(0, n).CopyTo(buffer); return copy[..n]; } } }
+        lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); int copied = Math.Min(n, copy.Length); copy.AsSpan(0, copied).CopyTo(buffer); return copy[..copied]; } } }
     }
     private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
 

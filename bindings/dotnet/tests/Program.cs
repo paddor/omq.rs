@@ -73,6 +73,13 @@ Check(received.Parts.Count == 2, "multipart part count mismatch");
 Check(received.Parts[0].SequenceEqual(new byte[] { 1, 2, 3 }), "multipart first part mismatch");
 Check(received.Parts[1].SequenceEqual(new byte[] { 4, 5 }), "multipart second part mismatch");
 
+byte[] largeFrame = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray();
+push.Send(largeFrame);
+byte[] shortBuffer = new byte[10];
+byte[] truncated = pull.ReceiveInto(shortBuffer);
+Check(truncated.Length == shortBuffer.Length, "ReceiveInto returned the untruncated frame length");
+Check(truncated.SequenceEqual(largeFrame[..shortBuffer.Length]), "ReceiveInto truncated data mismatch");
+
 await push.SendAsync(Message.Text("async"));
 Check((await pull.ReceiveAsync()).ToString() == "async", "async message mismatch");
 await push.SendAsync(new Message([new ReadOnlyMemory<byte>([1, 2]), new ReadOnlyMemory<byte>([3, 4])]));
@@ -85,11 +92,16 @@ using (var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(20)
     catch (OperationCanceledException) { observed = true; }
     Check(observed, "async receive cancellation mismatch");
 }
-var poller = new Poller(); poller.Add(pull);
+using var poller = new Poller(); poller.Add(pull);
 push.Send(Message.Text("poll"));
 Check(poller.Wait(TimeSpan.FromSeconds(1)).Count != 0, "poller did not report readable socket");
 Check(pull.Receive().ToString() == "poll", "poller message mismatch");
 Check(pull.Poll(TimeSpan.Zero).Count == 0, "socket poll should be empty");
+using (var zeroTimeoutGuard = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+{
+    Check((await poller.WaitAsync(TimeSpan.Zero, zeroTimeoutGuard.Token)).Count == 0,
+        "async zero-timeout poll should be empty");
+}
 var keys = Curve.GenerateKeyPair();
 Check(keys.PublicKey.Length == 40 && keys.SecretKey.Length == 40, "CURVE keypair mismatch");
 Check(Curve.PublicKey(keys.SecretKey) == keys.PublicKey, "CURVE public key mismatch");

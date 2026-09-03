@@ -231,6 +231,16 @@ pub struct NativePackedMessages {
     pub message_parts: Uint32Array,
 }
 
+#[expect(
+    missing_debug_implementations,
+    reason = "napi typed arrays do not implement Debug"
+)]
+#[napi(object)]
+pub struct NativeRoutedMessage {
+    pub parts: Vec<Uint8Array>,
+    pub routing_id: u32,
+}
+
 #[napi]
 impl NativeContext {
     #[napi(constructor)]
@@ -353,9 +363,27 @@ impl NativeSocket {
             .build(&env)
     }
 
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn send_routed_async(
+        &self,
+        env: Env,
+        parts: Vec<Uint8Array>,
+        routing_id: u32,
+    ) -> Result<AsyncBlock<()>> {
+        let socket = self.socket_clone()?.into_async();
+        let message = message_from_parts(parts).with_routing_id(routing_id);
+        AsyncBlockBuilder::new(async move { socket.send(message).await.map_err(map_omq_error) })
+            .build(&env)
+    }
+
     #[napi]
     pub fn try_send(&self, parts: Vec<Uint8Array>) -> Result<bool> {
         self.try_send_message(message_from_parts(parts))
+    }
+
+    #[napi]
+    pub fn try_send_routed(&self, parts: Vec<Uint8Array>, routing_id: u32) -> Result<bool> {
+        self.try_send_message(message_from_parts(parts).with_routing_id(routing_id))
     }
 
     #[napi]
@@ -382,6 +410,15 @@ impl NativeSocket {
         self.with_socket_ref(|socket| {
             socket
                 .send(message_from_parts(parts))
+                .map_err(map_omq_error)
+        })
+    }
+
+    #[napi]
+    pub fn send_routed_sync(&self, parts: Vec<Uint8Array>, routing_id: u32) -> Result<()> {
+        self.with_socket_ref(|socket| {
+            socket
+                .send(message_from_parts(parts).with_routing_id(routing_id))
                 .map_err(map_omq_error)
         })
     }
@@ -480,6 +517,40 @@ impl NativeSocket {
         block
     }
 
+    #[napi(ts_return_type = "Promise<NativeRoutedMessage>")]
+    pub fn recv_routed(
+        &self,
+        env: Env,
+        cancel_id: Option<u32>,
+    ) -> Result<AsyncBlock<NativeRoutedMessage>> {
+        let socket = self.socket_clone()?.into_async();
+        let cancel = CancellationToken::new();
+        if let Some(id) = cancel_id {
+            self.inner.register_recv(id, cancel.clone())?;
+        }
+        let state = self.inner.clone();
+        let block = AsyncBlockBuilder::build_with_map(
+            &env,
+            async move {
+                let result = match cancel.run_until_cancelled_owned(socket.recv()).await {
+                    Some(result) => result.map_err(map_omq_error),
+                    None => Err(NapiError::new(Status::Cancelled, "recv aborted")),
+                };
+                if let Some(id) = cancel_id {
+                    state.finish_recv(id);
+                }
+                result
+            },
+            |env, message| message_to_routed(&env, message),
+        );
+        if block.is_err()
+            && let Some(id) = cancel_id
+        {
+            self.inner.finish_recv(id);
+        }
+        block
+    }
+
     #[napi]
     pub fn cancel_recv(&self, cancel_id: u32) -> Result<()> {
         self.inner.cancel_recv(cancel_id)
@@ -509,6 +580,25 @@ impl NativeSocket {
     pub fn try_recv_raw(&self, env: Env) -> Result<Option<Either<Uint8Array, Vec<Uint8Array>>>> {
         self.with_socket_ref(|socket| match socket.try_recv() {
             Ok(message) => Ok(Some(message_to_raw(&env, message)?)),
+            Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
+            Err(error) => Err(map_omq_error(error)),
+        })
+    }
+
+    #[napi]
+    pub fn recv_routed_sync(&self, env: Env) -> Result<NativeRoutedMessage> {
+        self.with_socket_ref(|socket| {
+            socket
+                .recv()
+                .map_err(map_omq_error)
+                .and_then(|message| message_to_routed(&env, message))
+        })
+    }
+
+    #[napi]
+    pub fn try_recv_routed(&self, env: Env) -> Result<Option<NativeRoutedMessage>> {
+        self.with_socket_ref(|socket| match socket.try_recv() {
+            Ok(message) => Ok(Some(message_to_routed(&env, message)?)),
             Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(None),
             Err(error) => Err(map_omq_error(error)),
         })
@@ -604,6 +694,35 @@ impl NativeSocket {
                 Ok(_) => out
                     .into_iter()
                     .map(|message| message_to_arrays(&env, message))
+                    .collect(),
+                Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(Vec::new()),
+                Err(error) => Err(map_omq_error(error)),
+            }
+        })
+    }
+
+    #[napi]
+    pub fn recv_routed_many_sync(
+        &self,
+        env: Env,
+        max: u32,
+        timeout_ms: Option<u32>,
+    ) -> Result<Vec<NativeRoutedMessage>> {
+        let max = max as usize;
+        let mut out = Vec::with_capacity(max.min(512));
+        self.with_socket_ref(|socket| {
+            let received = match timeout_ms {
+                Some(timeout_ms) => socket.recv_many_timeout_into(
+                    max,
+                    Duration::from_millis(timeout_ms.into()),
+                    &mut out,
+                ),
+                None => socket.recv_many_into(max, &mut out),
+            };
+            match received {
+                Ok(_) => out
+                    .into_iter()
+                    .map(|message| message_to_routed(&env, message))
                     .collect(),
                 Err(omq_tokio::Error::Timeout | omq_tokio::Error::WouldBlock) => Ok(Vec::new()),
                 Err(error) => Err(map_omq_error(error)),
@@ -851,6 +970,16 @@ fn message_to_raw(env: &Env, message: Message) -> Result<Either<Uint8Array, Vec<
         return uint8_array_from_slice(env, part).map(Either::A);
     }
     message_to_arrays(env, message).map(Either::B)
+}
+
+fn message_to_routed(env: &Env, message: Message) -> Result<NativeRoutedMessage> {
+    let routing_id = message
+        .routing_id()
+        .ok_or_else(|| napi_error("SERVER message is missing a routing ID"))?;
+    Ok(NativeRoutedMessage {
+        parts: message_to_arrays(env, message)?,
+        routing_id,
+    })
 }
 
 fn messages_to_packed(env: &Env, messages: Vec<Message>) -> Result<NativePackedMessages> {

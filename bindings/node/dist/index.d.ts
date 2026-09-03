@@ -72,13 +72,15 @@ export interface RecvOptions {
     /** Abort signal used to cancel an async receive wait. */
     signal?: AbortSignal;
 }
-/** Immutable OMQ message wrapper with one or more frames. */
+/** OMQ message wrapper with one or more frames and optional routing metadata. */
 export declare class Message {
     private materializedParts?;
     private singlePart?;
     private packedData?;
     private packedOffset?;
     private packedLength?;
+    /** Opaque SERVER routing ID. Copy it from a request to its reply. */
+    routingId?: number;
     /** Create a message from one frame or a multipart frame array. */
     constructor(input?: MessagePart | MessagePart[]);
     /** Return input unchanged when already a message, otherwise wrap it. */

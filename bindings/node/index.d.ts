@@ -14,10 +14,13 @@ export declare class NativeSocket {
   disconnect(endpoint: string): void
   send(parts: Array<Uint8Array>): void
   sendAsync(parts: Array<Uint8Array>): Promise<void>
+  sendRoutedAsync(parts: Array<Uint8Array>, routingId: number): Promise<void>
   trySend(parts: Array<Uint8Array>): boolean
+  trySendRouted(parts: Array<Uint8Array>, routingId: number): boolean
   trySendOne(payload: Uint8Array): boolean
   trySendBuffer(payload: Buffer): boolean
   sendSync(parts: Array<Uint8Array>): void
+  sendRoutedSync(parts: Array<Uint8Array>, routingId: number): void
   sendOneSync(payload: Uint8Array): void
   sendBufferSync(payload: Buffer): void
   sendGroupSync(group: Uint8Array, payload: Uint8Array): void
@@ -25,16 +28,20 @@ export declare class NativeSocket {
   recvSync(): Array<Uint8Array>
   recvRawSync(): Uint8Array | Array<Uint8Array>
   recvRaw(cancelId?: number | undefined | null): Promise<Uint8Array | Array<Uint8Array>>
+  recvRouted(cancelId?: number | undefined | null): Promise<NativeRoutedMessage>
   cancelRecv(cancelId: number): void
   recvTimeout(timeoutMs: number): Array<Uint8Array> | null
   tryRecv(): Array<Uint8Array> | null
   tryRecvRaw(): Uint8Array | Array<Uint8Array> | null
+  recvRoutedSync(): NativeRoutedMessage
+  tryRecvRouted(): NativeRoutedMessage | null
   recvRawManySync(max: number): Array<Uint8Array | Array<Uint8Array>>
   recvPackedManySync(max: number): NativePackedMessages
   tryRecvRawManySync(max: number): Array<Uint8Array | Array<Uint8Array>>
   tryRecvPackedManySync(max: number): NativePackedMessages
   waitConnectedSync(minPeers: number, timeoutMs: number): number
   recvManySync(max: number, timeoutMs?: number | undefined | null): Array<Array<Uint8Array>>
+  recvRoutedManySync(max: number, timeoutMs?: number | undefined | null): Array<NativeRoutedMessage>
   subscribe(prefix: Uint8Array): void
   unsubscribe(prefix: Uint8Array): void
   join(group: Uint8Array): void
@@ -75,6 +82,11 @@ export interface NativePlainOptions {
   username: string
   password: string
   server?: boolean
+}
+
+export interface NativeRoutedMessage {
+  parts: Array<Uint8Array>
+  routingId: number
 }
 
 export interface NativeSocketOptions {

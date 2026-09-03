@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Preserve SERVER routing IDs across receive and send operations.
+
 ## [0.1.3] - 2026-08-23
 
 - Run asynchronous socket I/O on the shared Tokio runtime without blocking

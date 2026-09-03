@@ -76,9 +76,9 @@ Check(received.Parts[1].SequenceEqual(new byte[] { 4, 5 }), "multipart second pa
 byte[] largeFrame = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray();
 push.Send(largeFrame);
 byte[] shortBuffer = new byte[10];
-byte[] truncated = pull.ReceiveInto(shortBuffer);
-Check(truncated.Length == shortBuffer.Length, "ReceiveInto returned the untruncated frame length");
-Check(truncated.SequenceEqual(largeFrame[..shortBuffer.Length]), "ReceiveInto truncated data mismatch");
+int copied = pull.ReceiveInto(shortBuffer);
+Check(copied == shortBuffer.Length, "ReceiveInto returned the untruncated frame length");
+Check(shortBuffer.SequenceEqual(largeFrame[..shortBuffer.Length]), "ReceiveInto truncated data mismatch");
 
 await push.SendAsync(Message.Text("async"));
 Check((await pull.ReceiveAsync()).ToString() == "async", "async message mismatch");

@@ -242,10 +242,10 @@ public sealed class Socket : IDisposable
         try { message = Receive(dontWait: true); return true; }
         catch (OmqAgainException) { message = null; return false; }
     }
-    /// Receives one frame into a caller-provided buffer.
-    public byte[] ReceiveInto(Span<byte> buffer, bool dontWait = false)
+    /// Receives one frame into a caller-provided buffer and returns the number of bytes copied.
+    public int ReceiveInto(Span<byte> buffer, bool dontWait = false)
     {
-        lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); int copied = Math.Min(n, copy.Length); copy.AsSpan(0, copied).CopyTo(buffer); return copy[..copied]; } } }
+        lock (gate) { unsafe { fixed (byte* p = buffer) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)buffer.Length, dontWait ? 1 : 0); Errors.Check("recv", n); return Math.Min(n, buffer.Length); } } }
     }
     private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
 

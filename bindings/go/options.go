@@ -47,8 +47,8 @@ type SocketOptions struct {
 	// NoMaxMessageSize reports disabled receive size limit.
 	NoMaxMessageSize bool
 
-	// PlainServer is fixed PLAIN server credentials.
-	PlainServer OptionValue[PlainCredentials]
+	// PlainServer is the fixed PLAIN server credential allowlist.
+	PlainServer OptionValue[[]PlainCredential]
 	// PlainServerAuth reports a PLAIN server callback.
 	PlainServerAuth bool
 	// PlainClient is PLAIN client credentials.
@@ -129,13 +129,17 @@ type SocketOptions struct {
 	DefaultTransmitSlotCapacity bool
 }
 
-// PlainCredentials stores configured PLAIN username and password.
-type PlainCredentials struct {
+// PlainCredential stores one exact PLAIN server username/password pair.
+// Both fields must contain at most 255 ASCII VCHAR bytes.
+type PlainCredential struct {
 	// Username is the PLAIN username.
 	Username string
 	// Password is the PLAIN password.
 	Password string
 }
+
+// PlainCredentials is the former name of PlainCredential.
+type PlainCredentials = PlainCredential
 
 // CurveClientConfig stores configured CURVE client keys.
 type CurveClientConfig struct {
@@ -340,19 +344,31 @@ func NoMaxMessageSize() SocketOption {
 	})
 }
 
-// PlainServer configures fixed PLAIN server credentials.
+// PlainServer configures one fixed PLAIN server credential pair.
+// PLAIN authenticates clients but does not encrypt traffic.
 func PlainServer(username, password string) SocketOption {
+	return PlainServerCredentials(PlainCredential{Username: username, Password: password})
+}
+
+// PlainServerCredentials configures an exact, case-sensitive PLAIN server
+// credential allowlist. Each field must contain at most 255 ASCII VCHAR bytes.
+// Calling it without credentials configures a deny-all policy. PLAIN
+// authenticates clients but does not encrypt traffic.
+func PlainServerCredentials(credentials ...PlainCredential) SocketOption {
+	credentials = append([]PlainCredential(nil), credentials...)
 	return trackedOption(func(handle *nativeSocket) error {
-		if err := validateZmtpShortString("PLAIN username", username); err != nil {
-			return err
+		for _, credential := range credentials {
+			if err := validateZmtpShortString("PLAIN username", credential.Username); err != nil {
+				return err
+			}
+			if err := validateZmtpShortString("PLAIN password", credential.Password); err != nil {
+				return err
+			}
 		}
-		if err := validateZmtpShortString("PLAIN password", password); err != nil {
-			return err
-		}
-		return setPlainServerNative(handle, username, password)
+		return setPlainServerNative(handle, credentials)
 	}, func(options *SocketOptions) {
-		options.PlainServer = OptionValue[PlainCredentials]{
-			Value: PlainCredentials{Username: username, Password: password},
+		options.PlainServer = OptionValue[[]PlainCredential]{
+			Value: append([]PlainCredential(nil), credentials...),
 			Set:   true,
 		}
 		options.PlainServerAuth = false
@@ -366,7 +382,7 @@ func PlainServerAuth(auth Authenticator) SocketOption {
 			return setPlainServerAuthNative(handle, id)
 		})
 	}, func(options *SocketOptions) {
-		options.PlainServer = OptionValue[PlainCredentials]{}
+		options.PlainServer = OptionValue[[]PlainCredential]{}
 		options.PlainServerAuth = true
 	})
 }
@@ -884,6 +900,11 @@ func trackedNonNegativeInt64Option(
 func validateZmtpShortString(name, value string) error {
 	if len([]byte(value)) > zmtpMaxShortStringBytes {
 		return &ConfigError{Err: name + " length must be at most 255 bytes"}
+	}
+	for _, b := range []byte(value) {
+		if b < 0x21 || b > 0x7e {
+			return &ConfigError{Err: name + " must contain only ASCII VCHAR bytes"}
+		}
 	}
 	return nil
 }

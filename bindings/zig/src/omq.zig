@@ -180,6 +180,13 @@ pub const CurveKeypair = struct {
     }
 };
 
+/// One exact username/password pair accepted by a PLAIN server.
+/// Each field must contain at most 255 ASCII VCHAR bytes.
+pub const PlainCredential = struct {
+    username: []const u8,
+    password: []const u8,
+};
+
 /// Owned message frame with pyomq-style metadata.
 ///
 /// `data` and optional `group` are allocator-owned. Call `deinit` when done.
@@ -1000,18 +1007,32 @@ pub const Socket = struct {
         try self.setInt(PLAIN_SERVER, @intFromBool(enabled));
     }
 
-    /// Configure a PLAIN server accepting one fixed credential pair.
+    /// Configure an exact, case-sensitive PLAIN server credential allowlist.
+    /// Call before bind/connect. An empty slice rejects every client. Input is
+    /// copied by the native library. PLAIN does not encrypt traffic.
     pub fn setPlainServerCredentials(
         self: *Socket,
-        username: []const u8,
-        password: []const u8,
-    ) Error!void {
+        allocator: std.mem.Allocator,
+        credentials: []const PlainCredential,
+    ) !void {
+        const native = try allocator.alloc(c.omq_plain_credential_t, credentials.len);
+        defer allocator.free(native);
+        for (credentials, native) |credential, *entry| {
+            entry.* = .{
+                .username = credential.username.ptr,
+                .username_size = credential.username.len,
+                .password = credential.password.ptr,
+                .password_size = credential.password.len,
+            };
+        }
+        const native_ptr: [*c]const c.omq_plain_credential_t = if (native.len == 0)
+            null
+        else
+            native.ptr;
         try check(c.omq_socket_set_plain_server_credentials(
             try self.ptr(),
-            username.ptr,
-            username.len,
-            password.ptr,
-            password.len,
+            native_ptr,
+            native.len,
         ));
     }
 

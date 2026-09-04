@@ -49,8 +49,8 @@ omq_gleam = ">= 0.2.0 and < 1.0.0"
   sequencing and keeps multipart frame state local to the caller.
 - Create more sockets for more concurrent flows; share contexts when wrappers
   need the same `inproc://` namespace.
-- PLAIN servers require fixed credentials through
-  `omq:plain_server(Socket, Username, Password)` before bind. Bare
+- PLAIN servers require a fixed credential allowlist through
+  `omq:plain_server(Socket, [{Username, Password}, ...])` before bind. Bare
   `plain_server` option staging fails closed.
 
 Example:

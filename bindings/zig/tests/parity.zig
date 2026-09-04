@@ -64,7 +64,11 @@ fn expectRecv(socket: *omq.Socket, expected: []const u8) !void {
 }
 
 fn configurePlain(server: *omq.Socket, client: *omq.Socket) !void {
-    try server.setPlainServerCredentials("alice", "secret");
+    const credentials = [_]omq.PlainCredential{
+        .{ .username = "alice", .password = "secret" },
+        .{ .username = "bob", .password = "hunter2" },
+    };
+    try server.setPlainServerCredentials(allocator, &credentials);
     try client.setPlainClient(allocator, "alice", "secret");
 }
 
@@ -550,17 +554,24 @@ test "plain push pull tcp" {
     defer pull.deinit();
     var push = try ctx.socket(omq.PUSH);
     defer push.deinit();
+    var bob = try ctx.socket(omq.PUSH);
+    defer bob.deinit();
 
     try configurePlain(&pull, &push);
+    try bob.setPlainClient(allocator, "bob", "hunter2");
     try pull.setReceiveTimeout(5000);
     try push.setSendTimeout(5000);
+    try bob.setSendTimeout(5000);
 
     const bound = try pull.bind(allocator, "tcp://127.0.0.1:*");
     defer allocator.free(bound);
     try push.connect(allocator, bound);
+    try bob.connect(allocator, bound);
 
     _ = try push.send("hello over plain", 0);
     try expectRecv(&pull, "hello over plain");
+    _ = try bob.send("hello from bob", 0);
+    try expectRecv(&pull, "hello from bob");
 }
 
 test "plain pub sub tcp" {

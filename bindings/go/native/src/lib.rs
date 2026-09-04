@@ -90,6 +90,12 @@ pub struct OmqGoWireMessage {
 }
 
 #[repr(C)]
+pub struct OmqGoPlainCredential {
+    username: *const c_char,
+    password: *const c_char,
+}
+
+#[repr(C)]
 pub struct OmqGoEvent {
     kind: *mut c_char,
     endpoint: *mut c_char,
@@ -2479,18 +2485,34 @@ pub extern "C" fn omq_go_socket_set_max_message_size(
 #[cfg(feature = "plain")]
 pub extern "C" fn omq_go_socket_set_plain_server(
     socket: *mut OmqGoSocket,
-    username: *const c_char,
-    password: *const c_char,
+    credentials: *const OmqGoPlainCredential,
+    credential_count: usize,
 ) -> OmqGoStatus {
     let result = (|| {
-        let expected_username = str_from_c(username)?.to_string();
-        let expected_password = str_from_c(password)?.to_string();
+        if credentials.is_null() && credential_count != 0 {
+            return Err(Error::Config("null PLAIN credential array".into()));
+        }
+        if credential_count > isize::MAX as usize / std::mem::size_of::<OmqGoPlainCredential>() {
+            return Err(Error::Config("PLAIN credential count is too large".into()));
+        }
+        let credentials = if credential_count == 0 {
+            &[]
+        } else {
+            // SAFETY: the C caller provides `credential_count` readable entries.
+            unsafe { slice::from_raw_parts(credentials, credential_count) }
+        };
+        let expected = credentials
+            .iter()
+            .map(|credential| {
+                Ok((
+                    str_from_c(credential.username)?.to_string(),
+                    str_from_c(credential.password)?.to_string(),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         Ok(set_socket_option(socket, move |options| {
             options.mechanism = MechanismSetup::PlainServer {
-                authenticator: Authenticator::plain_credentials([(
-                    expected_username,
-                    expected_password,
-                )]),
+                authenticator: Authenticator::plain_credentials(expected),
             };
         }))
     })();
@@ -2504,8 +2526,8 @@ pub extern "C" fn omq_go_socket_set_plain_server(
 #[cfg(not(feature = "plain"))]
 pub extern "C" fn omq_go_socket_set_plain_server(
     _socket: *mut OmqGoSocket,
-    _username: *const c_char,
-    _password: *const c_char,
+    _credentials: *const OmqGoPlainCredential,
+    _credential_count: usize,
 ) -> OmqGoStatus {
     OmqGoStatus::err(CONFIG, "PLAIN support not enabled")
 }

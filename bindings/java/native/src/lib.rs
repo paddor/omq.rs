@@ -1751,6 +1751,21 @@ fn java_string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, Error
     env.get_string(&value).map(|s| s.into()).map_err(jni_error)
 }
 
+fn java_strings(env: &mut JNIEnv<'_>, values: &JObjectArray<'_>) -> Result<Vec<String>, Error> {
+    let len = env.get_array_length(values).map_err(jni_error)?;
+    let mut out = Vec::with_capacity(len as usize);
+    for index in 0..len {
+        let value = env
+            .get_object_array_element(values, index)
+            .map_err(jni_error)?;
+        if value.is_null() {
+            return Err(Error::Config("PLAIN credential must not be null".into()));
+        }
+        out.push(java_string(env, JString::from(value))?);
+    }
+    Ok(out)
+}
+
 fn byte_array(env: &mut JNIEnv<'_>, value: JByteArray<'_>) -> Result<Vec<u8>, Error> {
     env.convert_byte_array(value).map_err(jni_error)
 }
@@ -3369,20 +3384,23 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
-    username: JString<'_>,
-    password: JString<'_>,
+    usernames: JObjectArray<'_>,
+    passwords: JObjectArray<'_>,
 ) {
     guard(&mut env, (), |env| {
         let result = (|| {
             let socket = socket_from_handle(handle)?;
-            let expected_username = java_string(env, username)?;
-            let expected_password = java_string(env, password)?;
+            let usernames = java_strings(env, &usernames)?;
+            let passwords = java_strings(env, &passwords)?;
+            if usernames.len() != passwords.len() {
+                return Err(Error::Config(
+                    "PLAIN username/password array lengths differ".into(),
+                ));
+            }
+            let expected = usernames.into_iter().zip(passwords);
             socket.set_option(move |options| {
                 options.mechanism = MechanismSetup::PlainServer {
-                    authenticator: Authenticator::plain_credentials([(
-                        expected_username,
-                        expected_password,
-                    )]),
+                    authenticator: Authenticator::plain_credentials(expected),
                 };
             })
         })();

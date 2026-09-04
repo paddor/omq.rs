@@ -138,7 +138,10 @@ curveRep.SendText("ok");
 Check(ReceiveEventually(curveReq).ToString() == "ok", "CURVE reply mismatch");
 using var plainRep = context.CreateSocket(SocketType.Rep, new SocketOptions { Linger = 0 });
 using var plainReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 });
-plainRep.ConfigurePlainServer("user", "pass");
+plainRep.ConfigurePlainServer([
+    new PlainCredential("user", "pass"),
+    new PlainCredential("backup", "second")
+]);
 plainReq.ConfigurePlainClient("user", "pass");
 string plainEndpoint = plainRep.Bind("tcp://127.0.0.1:0");
 plainRep.SetOption(SocketOption.ReceiveTimeout, 300);
@@ -158,6 +161,15 @@ plainReq.SendText("plain");
 Check(ReceiveEventually(plainRep).ToString() == "plain", "PLAIN request mismatch");
 plainRep.SendText("ok");
 Check(ReceiveEventually(plainReq).ToString() == "ok", "PLAIN reply mismatch");
+using (var backupReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 }))
+{
+    backupReq.ConfigurePlainClient("backup", "second");
+    backupReq.Connect(plainEndpoint);
+    backupReq.SendText("backup");
+    Check(ReceiveEventually(plainRep).ToString() == "backup", "PLAIN backup request mismatch");
+    plainRep.SendText("ok");
+    Check(ReceiveEventually(backupReq).ToString() == "ok", "PLAIN backup reply mismatch");
+}
 using var monitor = pull.Monitor();
 using (var idleSocket = context.CreateSocket(SocketType.Pair, new SocketOptions { Linger = 0 }))
 using (var idleMonitor = idleSocket.Monitor())

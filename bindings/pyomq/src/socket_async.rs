@@ -398,6 +398,11 @@ impl AsyncSocket {
     }
 
     #[cfg(feature = "plain")]
+    /// Configure PLAIN server admission before first socket use.
+    ///
+    /// Pass an iterable of exact `(username, password)` pairs or a callable
+    /// receiving `PeerInfo`. An empty iterable rejects every client. PLAIN
+    /// authenticates clients but does not encrypt traffic.
     fn set_plain_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::auth::set_plain_auth_impl(&self.inner, auth)
     }

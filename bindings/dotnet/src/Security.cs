@@ -2,6 +2,11 @@ using System.Runtime.InteropServices;
 
 namespace Omq;
 
+/// <summary>One exact username/password pair accepted by a PLAIN server.</summary>
+/// <param name="Username">PLAIN username containing at most 255 ASCII VCHAR bytes.</param>
+/// <param name="Password">PLAIN password containing at most 255 ASCII VCHAR bytes.</param>
+public readonly record struct PlainCredential(string Username, string Password);
+
 /// A Z85-encoded CURVE public/secret key pair.
 public readonly record struct CurveKeyPair(string PublicKey, string SecretKey);
 

@@ -79,8 +79,10 @@ export interface NativePackedMessages {
 }
 
 export interface NativePlainOptions {
-  username: string
-  password: string
+  username?: string
+  password?: string
+  usernames?: Array<string>
+  passwords?: Array<string>
   server?: boolean
 }
 

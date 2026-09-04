@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +14,9 @@ final class PlainTest {
     @Test
     void pushPullOverPlain() {
         try (Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL).plainServer("alice", "secret");
+             Socket pull = context.socket(SocketType.PULL).plainServer(List.of(
+                     new PlainCredential("alice", "secret"),
+                     new PlainCredential("bob", "hunter2")));
              Socket push = context.socket(SocketType.PUSH).plainClient("alice", "secret")) {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             push.connect(endpoint);
@@ -21,6 +24,12 @@ final class PlainTest {
             push.send("hello over plain");
 
             assertEquals("hello over plain", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+
+            try (Socket bob = context.socket(SocketType.PUSH).plainClient("bob", "hunter2")) {
+                bob.connect(endpoint);
+                bob.send("hello from bob");
+                assertEquals("hello from bob", pull.receive(Duration.ofSeconds(5)).orElseThrow().text());
+            }
         }
     }
 
@@ -121,6 +130,8 @@ final class PlainTest {
              Socket socket = context.socket(SocketType.PULL)) {
             assertThrows(IllegalArgumentException.class,
                     () -> socket.plainServer(overlong, "secret"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> socket.plainServer("has space", "secret"));
             assertThrows(IllegalArgumentException.class,
                     () -> socket.plainClient("alice", overlong));
         }

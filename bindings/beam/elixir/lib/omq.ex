@@ -274,7 +274,20 @@ defmodule OMQ do
   @doc "Derive CURVE public key from secret key."
   def curve_public(secret), do: call(:curve_public, [secret])
 
-  @doc "Configure a PLAIN server accepting one fixed credential pair."
+  @doc """
+  Configures an exact, case-sensitive PLAIN server credential allowlist.
+
+  Call before bind, connect, send, or receive. Each username and password must
+  contain at most 255 ASCII VCHAR bytes. An empty list rejects every client.
+  PLAIN authenticates clients but does not encrypt traffic.
+  """
+  def plain_server(socket, credentials), do: call(:plain_server, [socket, credentials])
+
+  @doc """
+  Configures a PLAIN server accepting one fixed credential pair.
+
+  The same validation and pre-use requirement as `plain_server/2` applies.
+  """
   def plain_server(socket, username, password),
     do: call(:plain_server, [socket, username, password])
 

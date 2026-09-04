@@ -19,8 +19,10 @@ type NativeSocketOptions = {
   workloadProfile?: "throughput" | "latency";
   compressionDictionary?: Uint8Array;
   plain?: {
-    username: string;
-    password: string;
+    username?: string;
+    password?: string;
+    usernames?: string[];
+    passwords?: string[];
     server?: boolean;
   };
   curve?: {
@@ -164,12 +166,18 @@ export interface SocketOptions {
     /** Static LZ4 dictionary bytes shared with peers. */
     dictionary: MessagePart;
   };
-  /** PLAIN authentication options. */
+  /**
+   * PLAIN authentication options. Servers require `server: true` plus either
+   * `credentials` or one `username`/`password` pair. An empty credential list
+   * rejects every client. PLAIN does not encrypt traffic.
+   */
   plain?: {
-    /** User name sent by clients or accepted by servers. */
-    username: string;
-    /** Password sent by clients or accepted by servers. */
-    password: string;
+    /** Username sent by a client or accepted by a one-pair server policy. */
+    username?: string;
+    /** Password sent by a client or accepted by a one-pair server policy. */
+    password?: string;
+    /** Exact, case-sensitive server allowlist. Configure before socket use. */
+    credentials?: readonly PlainCredential[];
     /** Whether this socket acts as a PLAIN server. */
     server?: boolean;
   };
@@ -192,6 +200,14 @@ export interface CurveKeypair {
   publicKey: string;
   /** Secret key. */
   secretKey: string;
+}
+
+/** One exact username/password pair accepted by a PLAIN server. */
+export interface PlainCredential {
+  /** Username containing at most 255 ASCII VCHAR bytes. */
+  username: string;
+  /** Password containing at most 255 ASCII VCHAR bytes. */
+  password: string;
 }
 
 /** Receive options. */
@@ -850,9 +866,40 @@ function normalizeOptions(options: SocketOptions): NativeSocketOptions {
     onMute: options.onMute,
     workloadProfile: options.workloadProfile,
     compressionDictionary: lz4Dictionary(options.lz4),
-    plain: options.plain,
+    plain: normalizePlain(options.plain),
     curve: options.curve,
   };
+}
+
+function normalizePlain(plain: SocketOptions["plain"]): NativeSocketOptions["plain"] {
+  if (plain === undefined) return undefined;
+  if (plain.server === true) {
+    if (plain.credentials !== undefined) {
+      if (plain.username !== undefined || plain.password !== undefined) {
+        throw new TypeError("PLAIN server must use credentials or username/password, not both");
+      }
+      return {
+        server: true,
+        usernames: plain.credentials.map((credential) => credential.username),
+        passwords: plain.credentials.map((credential) => credential.password),
+      };
+    }
+    if (plain.username === undefined || plain.password === undefined) {
+      throw new TypeError("PLAIN server requires credentials");
+    }
+    return {
+      server: true,
+      usernames: [plain.username],
+      passwords: [plain.password],
+    };
+  }
+  if (plain.credentials !== undefined) {
+    throw new TypeError("PLAIN credentials allowlist requires server: true");
+  }
+  if (plain.username === undefined || plain.password === undefined) {
+    throw new TypeError("PLAIN client requires username and password");
+  }
+  return { username: plain.username, password: plain.password };
 }
 
 function lz4Dictionary(lz4: SocketOptions["lz4"]): Uint8Array | undefined {

@@ -928,13 +928,23 @@ plain_push_pull_tcp_test() ->
         {ok, Ctx} = omq:context(),
         {ok, Pull} = omq:socket(Ctx, pull),
         {ok, Push} = omq:socket(Ctx, push),
-        ok = omq:plain_server(Pull, <<"alice">>, <<"secret">>),
+        {ok, Bob} = omq:socket(Ctx, push),
+        ok = omq:plain_server(Pull, [
+            {<<"alice">>, <<"secret">>},
+            {<<"bob">>, <<"hunter2">>}
+        ]),
         ok = omq:setsockopt(Push, plain_username, <<"alice">>),
         ok = omq:setsockopt(Push, plain_password, <<"secret">>),
+        ok = omq:setsockopt(Bob, plain_username, <<"bob">>),
+        ok = omq:setsockopt(Bob, plain_password, <<"hunter2">>),
         {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
         ok = omq:connect(Push, Endpoint),
+        ok = omq:connect(Bob, Endpoint),
         ok = omq:send(Push, <<"hello over plain">>),
         ?assertEqual({ok, <<"hello over plain">>}, omq:recv(Pull, 5000)),
+        ok = omq:send(Bob, <<"hello from bob">>),
+        ?assertEqual({ok, <<"hello from bob">>}, omq:recv(Pull, 5000)),
+        ok = omq:close(Bob),
         ok = omq:close(Push),
         ok = omq:close(Pull),
         ok = omq:term(Ctx)
@@ -948,6 +958,18 @@ plain_server_requires_policy_test() ->
         ?assertMatch(
             {error, config, _},
             omq:bind(Pull, <<"tcp://127.0.0.1:0">>)
+        ),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
+plain_server_rejects_invalid_credentials_test() ->
+    with_feature(plain, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        ?assertMatch(
+            {error, badarg, _},
+            omq:plain_server(Pull, [{<<"has space">>, <<"secret">>}])
         ),
         ok = omq:close(Pull),
         ok = omq:term(Ctx)
@@ -1363,7 +1385,7 @@ set_curve_server_client(Server, Client) ->
     ok = omq:setsockopt(Client, curve_secretkey, ClientSecret).
 
 set_plain_server_client(Server, Client) ->
-    ok = omq:plain_server(Server, <<"alice">>, <<"secret">>),
+    ok = omq:plain_server(Server, [{<<"alice">>, <<"secret">>}]),
     ok = omq:setsockopt(Client, plain_username, <<"alice">>),
     ok = omq:setsockopt(Client, plain_password, <<"secret">>).
 

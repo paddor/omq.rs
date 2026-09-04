@@ -664,12 +664,28 @@ func setMaxMessageSizeNative(socket *nativeSocket, value int64) error {
 	return statusErr(C.omq_go_socket_set_max_message_size((*C.OmqGoSocket)(socket), C.int64_t(value)))
 }
 
-func setPlainServerNative(socket *nativeSocket, username, password string) error {
-	cUsername := C.CString(username)
-	defer C.free(unsafe.Pointer(cUsername))
-	cPassword := C.CString(password)
-	defer C.free(unsafe.Pointer(cPassword))
-	return statusErr(C.omq_go_socket_set_plain_server((*C.OmqGoSocket)(socket), cUsername, cPassword))
+func setPlainServerNative(socket *nativeSocket, credentials []PlainCredential) error {
+	if len(credentials) == 0 {
+		return statusErr(C.omq_go_socket_set_plain_server((*C.OmqGoSocket)(socket), nil, 0))
+	}
+	size := C.size_t(len(credentials)) * C.size_t(C.sizeof_OmqGoPlainCredential)
+	memory := C.malloc(size)
+	if memory == nil {
+		return &Error{Err: "allocate PLAIN credential array"}
+	}
+	defer C.free(memory)
+	native := unsafe.Slice((*C.OmqGoPlainCredential)(memory), len(credentials))
+	for i, credential := range credentials {
+		native[i].username = C.CString(credential.Username)
+		defer C.free(unsafe.Pointer(native[i].username))
+		native[i].password = C.CString(credential.Password)
+		defer C.free(unsafe.Pointer(native[i].password))
+	}
+	return statusErr(C.omq_go_socket_set_plain_server(
+		(*C.OmqGoSocket)(socket),
+		(*C.OmqGoPlainCredential)(memory),
+		C.size_t(len(native)),
+	))
 }
 
 func setPlainServerAuthNative(socket *nativeSocket, callbackID uint64) error {

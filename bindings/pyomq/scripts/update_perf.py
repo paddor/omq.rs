@@ -360,11 +360,18 @@ def configure_benchmark(args):
 # subprocess runner
 
 
+def _bench_command(role, *command):
+    if os.environ.get("OMQ_BENCH_TASKSET"):
+        cpus = "0-2" if role in ("inproc", "pull", "rep", "client") else "3-5"
+        return ["taskset", "-c", cpus, *command]
+    return list(command)
+
+
 def _run_subprocess(code, label, timeout=None, retries=None):
     timeout = SUBPROCESS_TIMEOUT_S if timeout is None else timeout
     try:
         r = subprocess.run(
-            [sys.executable, "-c", code],
+            _bench_command("inproc", sys.executable, "-c", code),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -494,7 +501,7 @@ sys.stdout.flush()
 import os; os._exit(0)
 """
     push_proc = subprocess.Popen(
-        [sys.executable, "-c", push_code],
+        _bench_command("push", sys.executable, "-c", push_code),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.PIPE,
@@ -512,7 +519,7 @@ import os; os._exit(0)
             return 0.0
         label = f"{lib_name} {transport} {size}B"
         pull_proc = subprocess.Popen(
-            [sys.executable, "-c", pull_code, port_line],
+            _bench_command("pull", sys.executable, "-c", pull_code, port_line),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -635,7 +642,7 @@ async def run():
 asyncio.run(run())
 """
     push_proc = subprocess.Popen(
-        [sys.executable, "-c", push_code],
+        _bench_command("push", sys.executable, "-c", push_code),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.PIPE,
@@ -653,7 +660,7 @@ asyncio.run(run())
             return 0.0
         label = f"{lib_name} async tcp {size}B"
         pull_proc = subprocess.Popen(
-            [sys.executable, "-c", pull_code, port_line],
+            _bench_command("pull", sys.executable, "-c", pull_code, port_line),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -774,7 +781,7 @@ os._exit(0)
 """
     label = f"{lib_name} tcp lat {size}B"
     rep_proc = subprocess.Popen(
-        [sys.executable, "-c", rep_code, endpoint],
+        _bench_command("rep", sys.executable, "-c", rep_code, endpoint),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -789,7 +796,8 @@ os._exit(0)
             raise RuntimeError(f"{label} rep did not become ready:\n{stderr}")
         try:
             result = subprocess.run(
-                [
+                _bench_command(
+                    "req",
                     sys.executable,
                     "-c",
                     req_code,
@@ -797,14 +805,16 @@ os._exit(0)
                     str(size),
                     str(warmup_seconds),
                     str(duration_seconds),
-                ],
+                ),
                 capture_output=True,
                 text=True,
                 timeout=LATENCY_TIMEOUT_S,
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError(f"{label} req timeout after {LATENCY_TIMEOUT_S}s") from error
+            raise RuntimeError(
+                f"{label} req timeout after {LATENCY_TIMEOUT_S}s"
+            ) from error
         if result.returncode != 0:
             raise RuntimeError(f"{label} req failed:\n{result.stdout}{result.stderr}")
         try:
@@ -926,7 +936,7 @@ asyncio.run(run())
 """
     label = f"{lib_name} async tcp lat {size}B"
     rep_proc = subprocess.Popen(
-        [sys.executable, "-c", rep_code, endpoint],
+        _bench_command("rep", sys.executable, "-c", rep_code, endpoint),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -941,7 +951,8 @@ asyncio.run(run())
             raise RuntimeError(f"{label} rep did not become ready:\n{stderr}")
         try:
             result = subprocess.run(
-                [
+                _bench_command(
+                    "req",
                     sys.executable,
                     "-c",
                     req_code,
@@ -949,14 +960,16 @@ asyncio.run(run())
                     str(size),
                     str(warmup_seconds),
                     str(duration_seconds),
-                ],
+                ),
                 capture_output=True,
                 text=True,
                 timeout=LATENCY_TIMEOUT_S,
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError(f"{label} req timeout after {LATENCY_TIMEOUT_S}s") from error
+            raise RuntimeError(
+                f"{label} req timeout after {LATENCY_TIMEOUT_S}s"
+            ) from error
         if result.returncode != 0:
             raise RuntimeError(f"{label} req failed:\n{result.stdout}{result.stderr}")
         try:
@@ -1044,7 +1057,7 @@ except Exception:
 """
 
     proxy_proc = subprocess.Popen(
-        [sys.executable, "-c", proxy_code],
+        _bench_command("proxy", sys.executable, "-c", proxy_code),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
@@ -1133,7 +1146,7 @@ sys.stdout.flush(); os._exit(0)
 
     try:
         r = subprocess.run(
-            [sys.executable, "-c", bench_code],
+            _bench_command("client", sys.executable, "-c", bench_code),
             capture_output=True,
             text=True,
             timeout=LATENCY_TIMEOUT_S,
@@ -1194,7 +1207,7 @@ except Exception:
 """
 
     proxy_proc = subprocess.Popen(
-        [sys.executable, "-c", proxy_code],
+        _bench_command("proxy", sys.executable, "-c", proxy_code),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
@@ -1210,7 +1223,9 @@ except Exception:
 
     try:
         r = subprocess.run(
-            [client, str(fe_port), str(be_port), "128", str(duration)],
+            _bench_command(
+                "client", client, str(fe_port), str(be_port), "128", str(duration)
+            ),
             capture_output=True,
             text=True,
             timeout=duration + 10,

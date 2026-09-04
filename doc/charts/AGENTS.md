@@ -16,19 +16,21 @@ cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Main charts (4 files)
+## Main charts (5 files)
 
 Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
 | `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring |
-| `main_mom_tcp.svg` | omq 1IO, gRPC Rust, RabbitMQ, Kafka/Redpanda, NATS, Redis Streams |
+| `main_mom_tcp.svg` | omq 1IO, gRPC Rust, RabbitMQ, Kafka/Redpanda, NATS, Redis Streams, Apache Iggy |
+| `main_mom_latency_tcp.svg` | omq 1IO, gRPC Rust, RabbitMQ, Kafka/Redpanda, NATS, Redis Streams, Apache Iggy |
 | `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 64 peers). REQ/REP latency sizes: 16B..16KiB (6 points).
+MOM request/reply-like latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
 
 ## Secondary comparison charts (6 files)
 

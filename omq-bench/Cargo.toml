@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
+build = "build.rs"
+default-run = "omq-bench"
 
 [[bin]]
 name = "omq-bench"
@@ -22,6 +24,7 @@ mom-bench = [
   "dep:anyhow",
   "dep:async-nats",
   "dep:bytes",
+  "dep:iggy",
   "dep:lapin",
   "dep:prost",
   "dep:rdkafka",
@@ -37,6 +40,7 @@ async-nats = { version = "0.42", optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+iggy = { version = "0.10", optional = true }
 lapin = { version = "2", optional = true }
 libc = "0.2"
 omq-tokio = { path = "../omq-tokio", default-features = false }

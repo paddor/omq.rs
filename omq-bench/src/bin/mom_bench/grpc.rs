@@ -9,8 +9,8 @@ use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Status};
 
 use super::{
-    Args, BenchResult, ProducerFiles, clean_paths, process_cpu_secs, run_paths, self_cpu_secs,
-    spawn_producer, write_marker,
+    Args, BenchResult, LatencyMeter, LatencyResult, ProducerFiles, clean_paths, process_cpu_secs,
+    run_paths, self_cpu_secs, spawn_producer, spawn_responder, write_marker,
 };
 
 #[allow(
@@ -152,6 +152,50 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
         push_cpu_time,
         broker_cpu_time: None,
     })
+}
+
+pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<LatencyResult> {
+    let paths = run_paths(token, size);
+    clean_paths(&paths)?;
+    let port_file = std::env::temp_dir().join(format!("omq-mom-{token}-{size}.grpc-port"));
+    remove_if_exists(&port_file)?;
+
+    let responder = spawn_responder(
+        args,
+        "grpc-rust",
+        size,
+        token,
+        ProducerFiles {
+            start: &paths.0,
+            stop: &paths.1,
+            result: &paths.2,
+            grpc_port: Some(&port_file),
+        },
+    )?;
+    let mut meter = LatencyMeter::new("grpc-rust", args.latency_iterations, responder)?;
+    let port = wait_port(&port_file).await?;
+    let mut grpc = client(&format!("127.0.0.1:{port}")).await?;
+    let payload = Blob {
+        data: vec![b'x'; size],
+    };
+
+    for _ in 0..args.latency_warmup {
+        let response = tokio::time::timeout(Duration::from_secs(5), grpc.echo(payload.clone()))
+            .await??
+            .into_inner();
+        check_payload(&response, size)?;
+    }
+
+    meter.begin()?;
+    for _ in 0..args.latency_iterations {
+        let start = Instant::now();
+        let response = tokio::time::timeout(Duration::from_secs(5), grpc.echo(payload.clone()))
+            .await??
+            .into_inner();
+        check_payload(&response, size)?;
+        meter.record(start.elapsed())?;
+    }
+    meter.finish()
 }
 
 async fn client(addr: &str) -> Result<BlobServiceClient<Channel>> {

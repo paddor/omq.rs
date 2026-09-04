@@ -1,8 +1,8 @@
 use super::common::{
-    self, C_GRPC, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T,
-    C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_RABBITMQ, C_REDIS, C_RZMQ, C_RZMQ_IOURING, C_TMQ,
-    C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
-    draw_throughput_dual_panel_brokered_with_versions,
+    self, C_GRPC, C_IGGY, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T,
+    C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_RABBITMQ, C_REDIS, C_RZMQ, C_RZMQ_IOURING,
+    C_TMQ, C_ZMQRS, Impl, draw_latency_brokered_with_versions,
+    draw_latency_single_panel_with_versions, draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -152,6 +152,12 @@ const MOM_IMPLS: &[Impl] = &[
         threads: "Redis",
         color: C_REDIS,
     },
+    Impl {
+        key: "iggy",
+        label: "Iggy",
+        threads: "Apache Iggy",
+        color: C_IGGY,
+    },
 ];
 
 const PUBSUB_IMPLS: &[Impl] = &[
@@ -256,6 +262,22 @@ pub(crate) fn generate() {
             "rcv CPU%",
         )
         .expect("draw RPC/MOM chart");
+        eprintln!("Written: {}", out.display());
+    }
+
+    // Sequential request/reply-like latency across direct, RPC, and brokered transports.
+    let (lat, cpu) = load_latency("tcp", LAT_SIZES, MOM_IMPLS);
+    if !lat.is_empty() {
+        let out = dir.join("main_mom_latency_tcp.svg");
+        draw_latency_brokered_with_versions(
+            &out,
+            "Sequential request/reply-like latency, direct/RPC/brokered TCP loopback",
+            LAT_SIZES,
+            MOM_IMPLS,
+            &lat,
+            &cpu,
+        )
+        .expect("draw RPC/MOM latency chart");
         eprintln!("Written: {}", out.display());
     }
 

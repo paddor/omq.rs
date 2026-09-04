@@ -93,6 +93,7 @@ pub(crate) const C_RABBITMQ: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_KAFKA: RGBColor = RGBColor(148, 163, 184);
 pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
+pub(crate) const C_IGGY: RGBColor = RGBColor(255, 255, 255);
 
 // formatting
 
@@ -508,6 +509,7 @@ fn mom_client_crate_label(key: &str) -> &'static str {
         "kafka" => "rdkafka v0.38.0",
         "nats" => "async-nats v0.42.0",
         "redis-streams" => "redis v0.32.7",
+        "iggy" => "iggy v0.10.0",
         _ => "",
     }
 }
@@ -760,6 +762,9 @@ pub(crate) fn load_latency(
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
             }
+            if let Some(broker) = row.broker_cpu_time {
+                e.add_broker(broker, elapsed);
+            }
             if let (Some(total), Some(req)) = (row.cpu_time, row.req_cpu_time) {
                 e.add_receiver(total - req, elapsed);
             }
@@ -950,9 +955,9 @@ pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
         broker_label,
         rcv_label,
         ThroughputChartConfig {
-            chart_h: 460,
+            chart_h: 520,
             msg_target_ticks: 10,
-            msg_log_scale: true,
+            msg_log_scale: false,
             legend_layout: LegendTableLayout::BrokeredMom,
             ..ThroughputChartConfig::default()
         },
@@ -1336,6 +1341,100 @@ pub(crate) fn draw_latency_single_panel_with_versions(
         lat_range,
         LegendVersionMode::ShowOtherImpls,
     )
+}
+
+pub(crate) fn draw_latency_brokered_with_versions(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    lat: &ValMap,
+    cpu: &BTreeMap<String, CpuData>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let present: Vec<&Impl> = impls
+        .iter()
+        .filter(|imp| {
+            sizes.iter().any(|size| {
+                lat.get(size)
+                    .is_some_and(|values| values.contains_key(imp.key))
+            })
+        })
+        .collect();
+    let lat_range = auto_lat_range(lat);
+
+    let row_h = 16u32;
+    let table_h = 20 + present.len() as u32 * row_h + 10;
+    let chart_h = 460u32;
+    let total_h = chart_h + table_h;
+    let width = 850u32;
+    let hardware = detect_hardware();
+    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    let (chart_area, table_area) = root.split_vertically(chart_h);
+
+    let mut chart = ChartBuilder::on(&chart_area)
+        .caption(
+            "p50 round-trip latency (lower is better)",
+            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
+        )
+        .set_label_area_size(LabelAreaPosition::Bottom, 28)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .margin_top(36)
+        .margin_left(10)
+        .margin_right(30)
+        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, lat_range.0..lat_range.1)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(sizes.len())
+        .x_label_formatter(&|value| {
+            sizes
+                .get(value.round() as usize)
+                .map_or(String::new(), |&size| fmt_size(size))
+        })
+        .y_labels(16)
+        .y_label_formatter(&|value| fmt_us(*value))
+        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
+        .light_line_style(TRANSPARENT)
+        .bold_line_style(GRID_COLOR)
+        .axis_style(AXIS_COLOR)
+        .draw()?;
+
+    for imp in present.iter().rev() {
+        let points: Vec<(f64, f64)> = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, size)| {
+                lat.get(size)?
+                    .get(imp.key)
+                    .map(|&value| (index as f64, value))
+            })
+            .collect();
+        if points.is_empty() {
+            continue;
+        }
+        chart.draw_series(LineSeries::new(points.clone(), imp.color.stroke_width(2)))?;
+        chart.draw_series(
+            points
+                .iter()
+                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
+        )?;
+    }
+
+    draw_legend_table_with_versions(
+        &table_area,
+        &present,
+        cpu,
+        "req CPU%",
+        "broker CPU%",
+        "rep CPU%",
+        LegendVersionMode::ShowOtherImpls,
+        LegendTableLayout::BrokeredMom,
+    )?;
+    root.present()?;
+    drop(root);
+    postprocess_svg(out_path, width, total_h, title, hardware.as_deref())
 }
 
 #[expect(clippy::too_many_arguments)]

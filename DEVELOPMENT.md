@@ -232,9 +232,27 @@ then run:
 
 ```sh
 cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
-  --impl grpc-rust --impl nats --impl rabbitmq --impl kafka --impl redis-streams \
+  --impl grpc-rust --impl nats --impl rabbitmq --impl kafka --impl redis-streams --impl iggy \
   --warmup 1 --duration 3 --run-id mom-rust-timed-cpu-YYYYMMDD
 ```
+
+Latency mode measures one request at a time and reports round-trip
+percentiles. gRPC uses unary echo, NATS uses native request/reply, RabbitMQ
+uses its RPC queue pattern, and Kafka, Redis Streams, and Iggy use paired
+request/response topics or streams:
+
+```sh
+cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
+  --mode latency \
+  --impl grpc-rust --impl nats --impl rabbitmq --impl kafka --impl redis-streams --impl iggy \
+  --latency-warmup 500 --latency-iterations 5000 \
+  --run-id mom-latency-YYYYMMDD
+```
+
+The Iggy benchmark uses its TCP transport at
+`iggy://iggy:iggy@127.0.0.1:8090` by default. Name its Podman container
+`omq-bench-iggy` so broker CPU usage is included. Override the endpoint with
+`--iggy-url`.
 
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
@@ -254,7 +272,9 @@ automatically.
 
 Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
 `doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
-`doc/charts/main_reqrep_tcp.svg` (REQ/REP latency), TCP only.
+`doc/charts/main_reqrep_tcp.svg` (REQ/REP latency). The MOM benchmark also
+feeds `doc/charts/main_mom_tcp.svg` (throughput) and
+`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). TCP only.
 Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:
 
 ```sh

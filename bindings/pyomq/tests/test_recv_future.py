@@ -120,3 +120,91 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
     finally:
         push.close()
         pull.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows callback path only")
+@pytest.mark.event_loop("selector", "proactor")
+@pytest.mark.asyncio
+async def test_windows_cancelled_recv_does_not_stall_replacement(tcp_endpoint):
+    ctx = zmq_async.Context()
+    push = ctx.socket(pyomq.PUSH)
+    pull = ctx.socket(pyomq.PULL)
+    try:
+        ep = pull.bind(tcp_endpoint)
+        push.connect(ep)
+
+        for index in range(200):
+            pending_task = asyncio.create_task(_await(pull.recv_multipart()))
+            await asyncio.sleep(0)
+            pending_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending_task
+            await asyncio.sleep(0)
+            assert not pull._recv_waiters
+
+            replacement_task = asyncio.create_task(_await(pull.recv_multipart()))
+            push.send_multipart([str(index).encode()])
+            assert await asyncio.wait_for(replacement_task, timeout=5.0) == [
+                str(index).encode()
+            ]
+    finally:
+        push.close()
+        pull.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows callback path only")
+def test_windows_socket_rejects_cross_loop_use(inproc_endpoint):
+    ctx = zmq_async.Context()
+    pull = ctx.socket(pyomq.PULL)
+    first_loop = asyncio.new_event_loop()
+    second_loop = asyncio.new_event_loop()
+
+    async def bind_to_first_loop():
+        pending = asyncio.ensure_future(pull.recv())
+        pending.cancel()
+        await asyncio.sleep(0)
+
+    async def use_from_second_loop():
+        with pytest.raises(RuntimeError, match="different event loop"):
+            pull.recv()
+
+    try:
+        pull.bind(inproc_endpoint)
+        first_loop.run_until_complete(bind_to_first_loop())
+        second_loop.run_until_complete(use_from_second_loop())
+    finally:
+        pull.close()
+        first_loop.close()
+        second_loop.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows callback path only")
+def test_windows_schedule_failure_releases_native_claim():
+    class ClosingLoop:
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback):
+            raise RuntimeError("event loop closed during scheduling")
+
+    class NativeSpy:
+        def __init__(self):
+            self.clear_calls = 0
+            self.complete_calls = 0
+
+        def _clear_wakeup_modes(self, **kwargs):
+            self.clear_calls += 1
+
+        def _mark_recv_drain_complete(self):
+            self.complete_calls += 1
+
+    native = NativeSpy()
+    sock = object.__new__(zmq_async.Socket)
+    sock._sock = native
+    sock._loop = ClosingLoop()
+    sock._closed = True
+
+    sock._schedule_recv_drain()
+
+    assert native.clear_calls == 1
+    assert native.complete_calls == 1

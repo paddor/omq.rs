@@ -72,6 +72,31 @@ class _DoneFuture:
 _SEND_DONE: Final[_DoneFuture] = _DoneFuture()
 
 
+class _WindowsWaiter:
+    """One loop-owned Windows readiness waiter."""
+
+    __slots__ = ("future", "try_fn")
+
+    def __init__(self, future: asyncio.Future[Any], try_fn: Callable[[], Any]) -> None:
+        self.future = future
+        self.try_fn = try_fn
+
+    def __call__(self) -> bool:
+        future = self.future
+        if future.done():
+            return True
+        try:
+            result = self.try_fn()
+        except Exception as error:
+            if not future.done():
+                future.set_exception(error)
+            return True
+        if result is not None and not future.done():
+            future.set_result(result)
+            return True
+        return False
+
+
 class _RecvFuture:
     """Supports both ``await fut`` (event-loop) and ``fut.result()`` (blocking)."""
 
@@ -185,8 +210,8 @@ class Socket(_BaseSocket):
     _context: Context
     _closed: bool
     _loop: asyncio.AbstractEventLoop | None
-    _recv_waiters: deque[Callable[[], bool]]
-    _send_waiters: deque[Callable[[], bool]]
+    _recv_waiters: deque[_WindowsWaiter]
+    _send_waiters: deque[_WindowsWaiter]
     _recv_wakeup_event: threading.Event
     _send_wakeup_event: threading.Event
     _wakeup_registered: bool
@@ -289,7 +314,13 @@ class Socket(_BaseSocket):
                 self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_recv_drain_complete()
                 return
-            loop.call_soon_threadsafe(self._drain_recv_waiters)
+            try:
+                loop.call_soon_threadsafe(self._drain_recv_waiters)
+            except RuntimeError:
+                # The loop closed after the check. No drain was queued, so
+                # release the native callback claim here.
+                self._clear_wakeup_modes(recv_mode=_WAKEUP_MODE_ASYNC)
+                self._sock._mark_recv_drain_complete()
 
         def _schedule_send_drain(self) -> None:
             loop = self._loop
@@ -297,7 +328,11 @@ class Socket(_BaseSocket):
                 self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
                 self._sock._mark_send_drain_complete()
                 return
-            loop.call_soon_threadsafe(self._drain_send_waiters)
+            try:
+                loop.call_soon_threadsafe(self._drain_send_waiters)
+            except RuntimeError:
+                self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC)
+                self._sock._mark_send_drain_complete()
 
         def _drain_recv_waiters(self) -> None:
             """Invoke each waiter until one returns False (not ready)."""
@@ -340,7 +375,7 @@ class Socket(_BaseSocket):
         def _add_waitable(
             self,
             try_fn: Callable[[], Any],
-            waiters: deque[Callable[[], bool]],
+            waiters: deque[_WindowsWaiter],
             set_mode: Callable[[], None],
             clear_mode: Callable[[], None],
         ) -> asyncio.Future[Any]:
@@ -348,7 +383,12 @@ class Socket(_BaseSocket):
             non-None. try_fn must return None when not ready and raise on
             real errors."""
             loop = asyncio.get_running_loop()
-            self._loop = loop
+            if self._loop is None:
+                self._loop = loop
+            elif self._loop is not loop:
+                raise RuntimeError(
+                    "pyomq asyncio socket is bound to a different event loop"
+                )
 
             result = try_fn()
             if result is not None:
@@ -356,34 +396,31 @@ class Socket(_BaseSocket):
 
             self._register_wakeup_hooks()
             fut: asyncio.Future[Any] = loop.create_future()
+            waiter = _WindowsWaiter(fut, try_fn)
 
-            def _waiter() -> bool:
-                if fut.done():
-                    return True
+            def _on_cancel(done: asyncio.Future[Any]) -> None:
+                if not done.cancelled():
+                    return
                 try:
-                    result = try_fn()
-                except Exception as e:
-                    if not fut.done():
-                        fut.set_exception(e)
-                    return True
-                if result is not None and not fut.done():
-                    fut.set_result(result)
-                    return True
-                return False
+                    waiters.remove(waiter)
+                except ValueError:
+                    return
+                if not waiters:
+                    clear_mode()
 
-            waiters.append(_waiter)
-            set_mode()
-            # Try once more immediately; if ready, remove from queue before returning.
-            # This must happen before we return the future to the caller.
-            # Catch ValueError in case drain callback already processed this waiter (race).
+            fut.add_done_callback(_on_cancel)
+            waiters.append(waiter)
             try:
-                if _waiter():
-                    # Successfully resolved, remove from queue so drain doesn't process it.
-                    waiters.remove(_waiter)
-            except ValueError:
-                # Queue might have been modified by drain callback (race condition).
-                # This is OK - drain already processed the waiter and marked it done.
-                pass
+                set_mode()
+            except BaseException:
+                waiters.remove(waiter)
+                if not waiters:
+                    clear_mode()
+                raise
+
+            # Close the arm-before-check race without yielding to the loop.
+            if waiter():
+                waiters.remove(waiter)
             if not waiters:
                 clear_mode()
 
@@ -466,7 +503,9 @@ class Socket(_BaseSocket):
 
             return _RecvFuture(try_fn, fd)
 
-        def _send_with_backpressure(self, data: Any, flags: int, copy: bool) -> _RecvFuture:
+        def _send_with_backpressure(
+            self, data: Any, flags: int, copy: bool
+        ) -> _RecvFuture:
             fd = self._sock._send_fd()
 
             def try_send() -> bool | None:
@@ -608,9 +647,7 @@ class Poller:
         ready_ids = await loop.run_in_executor(None, _native.wait_any, pollin_socks, t)
         for rid in ready_ids:
             ready[rid] = ready.get(rid, 0) | POLLIN
-        return [
-            (s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready
-        ]
+        return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
 
 
 class Context(_SyncContext):

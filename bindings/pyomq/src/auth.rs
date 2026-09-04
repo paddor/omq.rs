@@ -138,10 +138,7 @@ pub(crate) fn build_plain_authenticator(
 }
 
 #[cfg(feature = "plain")]
-pub(crate) fn set_plain_auth_impl(
-    inner: &SocketInner,
-    auth: &Bound<'_, PyAny>,
-) -> PyResult<()> {
+pub(crate) fn set_plain_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) -> PyResult<()> {
     let materialized = inner.materialized.read().unwrap();
     let blocking_materialized = inner.blocking_materialized.read().unwrap();
     if materialized.is_some() || blocking_materialized.is_some() {

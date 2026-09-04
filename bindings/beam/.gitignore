@@ -1,4 +1,7 @@
 /_build/
+/doc/.build*
+/doc/dist/
+/doc/*.epub
 /elixir/_build/
 /priv/omq_beam_native.so
 /gleam/build/

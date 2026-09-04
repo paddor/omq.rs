@@ -1,6 +1,6 @@
 {
   "name": "@paddor/omq-node",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Native Node.js binding for OMQ.rs",
   "license": "ISC",
   "type": "commonjs",
@@ -56,15 +56,5 @@
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3",
     "zeromq": "^6.5.0"
-  },
-  "optionalDependencies": {
-    "@paddor/omq-node-linux-x64-gnu": "0.2.0",
-    "@paddor/omq-node-linux-x64-musl": "0.2.0",
-    "@paddor/omq-node-linux-arm64-gnu": "0.2.0",
-    "@paddor/omq-node-linux-arm64-musl": "0.2.0",
-    "@paddor/omq-node-darwin-x64": "0.2.0",
-    "@paddor/omq-node-darwin-arm64": "0.2.0",
-    "@paddor/omq-node-win32-x64-msvc": "0.2.0",
-    "@paddor/omq-node-win32-arm64-msvc": "0.2.0"
   }
 }

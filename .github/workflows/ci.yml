@@ -28,6 +28,7 @@ jobs:
       run_lua: ${{ steps.scope.outputs.lua }}
       run_dotnet: ${{ steps.scope.outputs.dotnet }}
       run_ruby: ${{ steps.scope.outputs.ruby }}
+      run_node: ${{ steps.scope.outputs.node }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -103,6 +104,10 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
+            node:
+              - 'bindings/node/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release-node.yml'
       - id: matrix
         run: |
           echo 'test_matrix={"include":[{"toolchain":"1.93","os":"ubuntu-latest"},{"toolchain":"stable","os":"macos-15"},{"toolchain":"stable","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}' >> "$GITHUB_OUTPUT"
@@ -160,6 +165,30 @@ jobs:
           dotnet-version: '10.0.x'
       - name: verify formatting
         run: dotnet format bindings/dotnet/Omq.Net.csproj --verify-no-changes --verbosity minimal
+
+  node-package:
+    name: node package metadata
+    needs: [changes]
+    if: needs.changes.outputs.run_node == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: install dependencies
+        working-directory: bindings/node
+        run: npm ci
+      - name: validate package metadata
+        working-directory: bindings/node
+        run: |
+          npm run build:ts
+          node --check scripts/prepare-release.js
+          version="$(node -p 'require("./package.json").version')"
+          npm run release:prepare -- "$version" --dry-run
 
   go-test:
     name: go test
@@ -866,6 +895,7 @@ jobs:
         ruby-test,
         dotnet-lint,
         dotnet,
+        node-package,
       ]
     runs-on: ubuntu-latest
     if: always()

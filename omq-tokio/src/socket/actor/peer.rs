@@ -625,11 +625,12 @@ pub(super) struct InprocDriverCtx {
 #[expect(clippy::too_many_lines)]
 pub(super) async fn inproc_peer_driver(
     mut inbox: mpsc::Receiver<crate::engine::PeerDriverCommand>,
+    mut data_inbox: mpsc::Receiver<crate::engine::PeerDriverData>,
     mut in_rx: mpsc::Receiver<InboundFrame>,
     out: mpsc::Sender<InboundFrame>,
     ctx: InprocDriverCtx,
 ) {
-    use crate::engine::{PeerDriverCommand, PeerEvent};
+    use crate::engine::{PeerDriverCommand, PeerDriverData, PeerEvent};
     use omq_proto::proto::greeting::ZMTP_MINOR;
 
     let InprocDriverCtx {
@@ -645,7 +646,9 @@ pub(super) async fn inproc_peer_driver(
         blocking_recv_waker,
     } = ctx;
     let mut send_pipe_batch = Vec::new();
+    let mut pending_out = std::collections::VecDeque::new();
     let mut data_plane_active = false;
+    let mut data_inbox_open = true;
 
     #[expect(clippy::items_after_statements)]
     async fn emit_event(
@@ -684,22 +687,27 @@ pub(super) async fn inproc_peer_driver(
                     Some(PeerDriverCommand::ActivateDataPlane) => {
                         data_plane_active = true;
                     }
-                    Some(PeerDriverCommand::SendMessage(m)) => {
-                        if out.send(InboundFrame::Message(m)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(PeerDriverCommand::SendEncoded(_)) => {}
                     Some(PeerDriverCommand::SendCommand(c)) => {
-                        if out.send(InboundFrame::Command(Box::new(c))).await.is_err() {
-                            return;
-                        }
+                        pending_out.push_back(InboundFrame::Command(Box::new(c)));
                     }
                     Some(PeerDriverCommand::Close) | None => return,
                 },
+                permit = out.reserve(), if !pending_out.is_empty() => match permit {
+                    Ok(permit) => permit.send(pending_out.pop_front().unwrap()),
+                    Err(_) => return,
+                },
+                data = data_inbox.recv(), if data_inbox_open && data_plane_active && pending_out.is_empty() => {
+                    match data {
+                        Some(PeerDriverData::SendMessage(message)) => {
+                            pending_out.push_back(InboundFrame::Message(message));
+                        }
+                        Some(PeerDriverData::SendEncoded(_)) => {}
+                        None => data_inbox_open = false,
+                    }
+                },
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
-                }, if send_pipe_rx.is_some() && data_plane_active => {
+                }, if send_pipe_rx.is_some() && data_plane_active && pending_out.is_empty() => {
                     let send_pipe_rx = send_pipe_rx.as_mut().unwrap();
                     let drained = send_pipe_rx.drain_into(
                         &mut send_pipe_batch,
@@ -712,11 +720,7 @@ pub(super) async fn inproc_peer_driver(
                         }
                         continue;
                     }
-                    for msg in send_pipe_batch.drain(..) {
-                        if out.send(InboundFrame::Message(msg)).await.is_err() {
-                            return;
-                        }
-                    }
+                    pending_out.extend(send_pipe_batch.drain(..).map(InboundFrame::Message));
                     if send_pipe_rx.is_disconnected() {
                         return;
                     }

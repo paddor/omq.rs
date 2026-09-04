@@ -263,7 +263,7 @@ impl SendPipeConsumer {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         match &self.inner {
             SendPipeConsumerInner::Queue(consumer) => consumer.is_empty(),
             SendPipeConsumerInner::Conflate(state) => {

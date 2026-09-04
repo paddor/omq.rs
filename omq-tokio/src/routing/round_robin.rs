@@ -649,8 +649,10 @@ mod tests {
 
         let (send_pipe, mut send_pipe_rx) = send_pipe(1);
         let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
+        let (data_inbox, _data_inbox_rx) = tokio::sync::mpsc::channel(1);
         let handle = PeerDriverHandle {
             inbox,
+            data_inbox,
             cancel: CancellationToken::new(),
             transmit_slot: None,
             direct_tcp_writer: None,

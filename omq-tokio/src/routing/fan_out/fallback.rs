@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use bytes::Bytes;
 
-use crate::engine::PeerDriverCommand;
+use crate::engine::PeerDriverData;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::peer_outbound::PeerOutbound;
 use omq_proto::error::Result;
@@ -100,7 +100,7 @@ fn push_to_peers(
                 }
             }
             PeerOutbound::Inbox(tx) => {
-                let _ = tx.try_send(PeerDriverCommand::SendMessage(msg.clone()));
+                let _ = tx.try_send(PeerDriverData::SendMessage(msg.clone()));
             }
         }
     }
@@ -311,10 +311,10 @@ mod tests {
         slot
     }
 
-    fn recv_inbox_message(rx: &mut tokio::sync::mpsc::Receiver<PeerDriverCommand>) -> Message {
+    fn recv_inbox_message(rx: &mut tokio::sync::mpsc::Receiver<PeerDriverData>) -> Message {
         match rx.try_recv().expect("inbox message") {
-            PeerDriverCommand::SendMessage(msg) => msg,
-            other => panic!("unexpected command {other:?}"),
+            PeerDriverData::SendMessage(msg) => msg,
+            other @ PeerDriverData::SendEncoded(_) => panic!("unexpected command {other:?}"),
         }
     }
 

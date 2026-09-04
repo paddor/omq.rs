@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use crate::engine::signal::StateSignal;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
-use crate::engine::{PeerDriverCommand, PeerDriverHandle};
+use crate::engine::{PeerDriverData, PeerDriverHandle};
 use omq_proto::message::Message;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PeerOutbound {
     Wire {
         slot: Arc<PeerTransmitSlot>,
-        inbox: tokio::sync::mpsc::Sender<PeerDriverCommand>,
+        inbox: tokio::sync::mpsc::Sender<PeerDriverData>,
         direct: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     },
-    Inbox(tokio::sync::mpsc::Sender<PeerDriverCommand>),
+    Inbox(tokio::sync::mpsc::Sender<PeerDriverData>),
 }
 
 impl PeerOutbound {
@@ -20,10 +20,10 @@ impl PeerOutbound {
         match handle.transmit_slot {
             Some(ref slot) => Self::Wire {
                 slot: slot.clone(),
-                inbox: handle.inbox.clone(),
+                inbox: handle.data_inbox.clone(),
                 direct: handle.direct_tcp_writer.clone(),
             },
-            None => Self::Inbox(handle.inbox.clone()),
+            None => Self::Inbox(handle.data_inbox.clone()),
         }
     }
 
@@ -79,11 +79,8 @@ impl PeerOutbound {
     }
 }
 
-fn try_send_inbox(
-    tx: &tokio::sync::mpsc::Sender<PeerDriverCommand>,
-    msg: &Message,
-) -> TryFrameResult {
-    match tx.try_send(PeerDriverCommand::SendMessage(msg.clone())) {
+fn try_send_inbox(tx: &tokio::sync::mpsc::Sender<PeerDriverData>, msg: &Message) -> TryFrameResult {
+    match tx.try_send(PeerDriverData::SendMessage(msg.clone())) {
         Ok(()) => TryFrameResult::Ok,
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => TryFrameResult::Full,
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryFrameResult::Dead,
@@ -93,7 +90,7 @@ fn try_send_inbox(
 #[cfg(test)]
 mod tests {
     use super::PeerOutbound;
-    use crate::engine::PeerDriverCommand;
+    use crate::engine::PeerDriverData;
     use omq_proto::message::Message;
 
     #[test]
@@ -102,10 +99,8 @@ mod tests {
         let target = PeerOutbound::Inbox(tx.clone());
 
         assert!(target.is_empty());
-        tx.try_send(PeerDriverCommand::SendMessage(Message::from_slice(
-            b"queued",
-        )))
-        .unwrap();
+        tx.try_send(PeerDriverData::SendMessage(Message::from_slice(b"queued")))
+            .unwrap();
         assert!(!target.is_empty());
 
         assert!(rx.try_recv().is_ok());

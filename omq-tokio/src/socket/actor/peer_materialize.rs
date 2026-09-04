@@ -52,6 +52,7 @@ pub(super) fn spawn_byte_stream_connection(
     };
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
@@ -83,6 +84,7 @@ pub(super) fn spawn_byte_stream_connection(
         child_cancel.clone(),
         driver_cfg,
     )
+    .with_data_inbox(data_inbox_rx)
     .with_receive_profile(
         crate::engine::driver::ReceiveProfile::from_workload_for_socket(
             workload_profile,
@@ -130,6 +132,7 @@ pub(super) fn spawn_byte_stream_connection(
             ident: peer_ident,
             handle: PeerDriverHandle {
                 inbox: inbox_tx,
+                data_inbox: data_inbox_tx,
                 cancel: child_cancel,
                 transmit_slot: transmit_slot.clone(),
                 direct_tcp_writer,
@@ -173,6 +176,7 @@ pub(super) fn spawn_inproc_peer(
     }
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
     let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
     let peer_props = omq_proto::proto::command::PeerProperties::default()
@@ -209,6 +213,7 @@ pub(super) fn spawn_inproc_peer(
             ident: peer_ident,
             handle: PeerDriverHandle {
                 inbox: inbox_tx,
+                data_inbox: data_inbox_tx,
                 cancel: child_cancel.clone(),
                 transmit_slot: None,
                 direct_tcp_writer: None,
@@ -243,6 +248,7 @@ pub(super) fn spawn_inproc_peer(
         io_thread,
         inproc_peer_driver(
             inbox_rx,
+            data_inbox_rx,
             in_rx,
             out,
             InprocDriverCtx {

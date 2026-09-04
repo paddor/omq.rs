@@ -135,7 +135,7 @@ Soak tests cover peer churn, reconnect storms, reconnect all types,
 PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, WebSocket
 throughput, WebSocket reconnect, large-message throughput, compression
 with lz4/zstd, PLAIN, CURVE, multi-socket, inproc cross-thread,
-and cancel safety.
+cancel safety, and driver control responsiveness under stalled writes.
 
 Set duration with `OMQ_SOAK_DURATION_SECS` (default 600s). `Context::new()`
 uses one dedicated background IO thread. `OMQ_IO_THREADS=N` selects N

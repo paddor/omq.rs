@@ -168,6 +168,7 @@ mod tests {
             1,
             PeerDriverHandle {
                 inbox: tokio::sync::mpsc::channel(1).0,
+                data_inbox: tokio::sync::mpsc::channel(1).0,
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,
                 direct_tcp_writer: None,

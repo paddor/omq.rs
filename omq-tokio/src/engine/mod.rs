@@ -2,7 +2,8 @@
 //! sans-I/O ZMTP [`omq_proto::proto::Connection`].
 //!
 //! The driver owns the stream and the codec and runs a `tokio::select!`
-//! loop over (socket read, socket write, command inbox, cancellation).
+//! loop over socket read/write, separate control and fallback-data inboxes,
+//! and cancellation.
 //! Events produced by the codec are forwarded on a `mpsc::Sender<Event>`.
 //!
 //! The socket actor composes one of these per peer.
@@ -16,8 +17,8 @@ pub(crate) mod transmit_slot;
 
 pub use crate::socket::recv::RecvItem;
 pub use driver::{
-    AuthenticatedRecvItem, ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle,
-    PeerEvent, RecvSink, RecvSinkConfig, YringSink,
+    AuthenticatedRecvItem, ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverData,
+    PeerDriverHandle, PeerEvent, RecvSink, RecvSinkConfig, YringSink,
 };
 pub(crate) use send_pipe::{
     SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer, send_pipe, send_pipe_with_mode,

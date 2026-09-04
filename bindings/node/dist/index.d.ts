@@ -39,12 +39,18 @@ export interface SocketOptions {
         /** Static LZ4 dictionary bytes shared with peers. */
         dictionary: MessagePart;
     };
-    /** PLAIN authentication options. */
+    /**
+     * PLAIN authentication options. Servers require `server: true` plus either
+     * `credentials` or one `username`/`password` pair. An empty credential list
+     * rejects every client. PLAIN does not encrypt traffic.
+     */
     plain?: {
-        /** User name sent by clients or accepted by servers. */
-        username: string;
-        /** Password sent by clients or accepted by servers. */
-        password: string;
+        /** Username sent by a client or accepted by a one-pair server policy. */
+        username?: string;
+        /** Password sent by a client or accepted by a one-pair server policy. */
+        password?: string;
+        /** Exact, case-sensitive server allowlist. Configure before socket use. */
+        credentials?: readonly PlainCredential[];
         /** Whether this socket acts as a PLAIN server. */
         server?: boolean;
     };
@@ -66,6 +72,13 @@ export interface CurveKeypair {
     publicKey: string;
     /** Secret key. */
     secretKey: string;
+}
+/** One exact username/password pair accepted by a PLAIN server. */
+export interface PlainCredential {
+    /** Username containing at most 255 ASCII VCHAR bytes. */
+    username: string;
+    /** Password containing at most 255 ASCII VCHAR bytes. */
+    password: string;
 }
 /** Receive options. */
 export interface RecvOptions {

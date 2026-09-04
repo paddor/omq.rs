@@ -341,7 +341,8 @@ impl Authenticator {
         Self(Arc::new(f))
     }
 
-    /// Admit any exact PLAIN username + password pair in an allowlist.
+    /// Admit any exact, case-sensitive PLAIN username/password pair in an
+    /// allowlist. An empty allowlist denies every client.
     #[cfg(feature = "plain")]
     pub fn plain_credentials<I, U, P>(credentials: I) -> Self
     where

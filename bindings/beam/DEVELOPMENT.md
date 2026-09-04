@@ -199,7 +199,7 @@ Publish `omq`:
 (cd bindings/beam && rebar3 hex publish)
 ```
 
-After Hex shows `omq` 0.1.0, dry-run/audit and publish the Elixir wrapper:
+After Hex shows `omq` 0.2.0, dry-run/audit and publish the Elixir wrapper:
 
 ```sh
 (cd bindings/beam/elixir && mix deps.get)
@@ -208,7 +208,7 @@ After Hex shows `omq` 0.1.0, dry-run/audit and publish the Elixir wrapper:
 (cd bindings/beam/elixir && mix hex.publish)
 ```
 
-After Hex shows `omq` 0.1.0, dry-run/audit and publish the Gleam wrapper:
+After Hex shows `omq` 0.2.0, dry-run/audit and publish the Gleam wrapper:
 
 ```sh
 (cd bindings/beam/gleam && ~/src/gleam/target/release/gleam update)

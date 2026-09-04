@@ -95,6 +95,7 @@
     has/1,
     curve_keypair/0,
     curve_public/1,
+    plain_server/2,
     plain_server/3,
     subscribe/2,
     unsubscribe/2,
@@ -522,13 +523,25 @@ curve_keypair() ->
 curve_public(Secret) ->
     omq_nif:curve_public(iolist_to_binary(Secret)).
 
-%% @doc Configure a PLAIN server accepting one fixed credential pair.
-plain_server(Socket, Username, Password) ->
+%% @doc Configure an exact, case-sensitive PLAIN server credential allowlist.
+%%
+%% Call before bind, connect, send, or receive. Each username and password
+%% must contain at most 255 ASCII VCHAR bytes. An empty list rejects every
+%% client. PLAIN authenticates clients but does not encrypt traffic.
+plain_server(Socket, Credentials) ->
     omq_nif:plain_server_credentials(
         Socket,
-        iolist_to_binary(Username),
-        iolist_to_binary(Password)
+        [plain_credential(Credential) || Credential <- Credentials]
     ).
+
+%% @doc Configure a PLAIN server accepting one fixed credential pair.
+%%
+%% The same validation and pre-use requirement as plain_server/2 applies.
+plain_server(Socket, Username, Password) ->
+    plain_server(Socket, [{Username, Password}]).
+
+plain_credential({Username, Password}) ->
+    {iolist_to_binary(Username), iolist_to_binary(Password)}.
 
 %% @doc Subscribe SUB or XSUB socket to prefix.
 subscribe(Socket, Prefix) ->

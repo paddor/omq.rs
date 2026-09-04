@@ -198,8 +198,10 @@ pub struct NativeSocketOptions {
 #[expect(missing_debug_implementations, reason = "napi object")]
 #[napi(object)]
 pub struct NativePlainOptions {
-    pub username: String,
-    pub password: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub usernames: Option<Vec<String>>,
+    pub passwords: Option<Vec<String>>,
     pub server: Option<bool>,
 }
 
@@ -888,11 +890,35 @@ fn build_options(input: Option<NativeSocketOptions>) -> Result<Options> {
         options = options.compression_dict(Bytes::copy_from_slice(dict.as_ref()));
     }
     if let Some(plain) = input.plain {
-        let username = plain.username;
-        let password = plain.password;
         if plain.server.unwrap_or(false) {
-            options = options.plain_server_credentials([(username, password)]);
+            let usernames = plain
+                .usernames
+                .ok_or_else(|| napi_error("PLAIN server usernames are required"))?;
+            let passwords = plain
+                .passwords
+                .ok_or_else(|| napi_error("PLAIN server passwords are required"))?;
+            if usernames.len() != passwords.len() {
+                return Err(napi_error(
+                    "PLAIN server username/password array lengths differ",
+                ));
+            }
+            let credentials = usernames
+                .into_iter()
+                .zip(passwords)
+                .map(|(username, password)| {
+                    validate_plain_string("username", &username)?;
+                    validate_plain_string("password", &password)?;
+                    Ok((username, password))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            options = options.plain_server_credentials(credentials);
         } else {
+            let username = plain
+                .username
+                .ok_or_else(|| napi_error("PLAIN client username is required"))?;
+            let password = plain
+                .password
+                .ok_or_else(|| napi_error("PLAIN client password is required"))?;
             options = options.plain_client(username, password);
         }
     }
@@ -910,6 +936,20 @@ fn build_options(input: Option<NativeSocketOptions>) -> Result<Options> {
     }
     options.validate().map_err(map_omq_error)?;
     Ok(options)
+}
+
+fn validate_plain_string(name: &str, value: &str) -> Result<()> {
+    if value.len() > 255 {
+        return Err(napi_error(format!(
+            "PLAIN {name} length must be at most 255 bytes"
+        )));
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(napi_error(format!(
+            "PLAIN {name} must contain only ASCII VCHAR bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn curve_keypair_from_z85(public_key: String, secret_key: String) -> Result<CurveKeypair> {

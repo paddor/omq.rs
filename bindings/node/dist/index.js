@@ -612,9 +612,40 @@ function normalizeOptions(options) {
         onMute: options.onMute,
         workloadProfile: options.workloadProfile,
         compressionDictionary: lz4Dictionary(options.lz4),
-        plain: options.plain,
+        plain: normalizePlain(options.plain),
         curve: options.curve,
     };
+}
+function normalizePlain(plain) {
+    if (plain === undefined)
+        return undefined;
+    if (plain.server === true) {
+        if (plain.credentials !== undefined) {
+            if (plain.username !== undefined || plain.password !== undefined) {
+                throw new TypeError("PLAIN server must use credentials or username/password, not both");
+            }
+            return {
+                server: true,
+                usernames: plain.credentials.map((credential) => credential.username),
+                passwords: plain.credentials.map((credential) => credential.password),
+            };
+        }
+        if (plain.username === undefined || plain.password === undefined) {
+            throw new TypeError("PLAIN server requires credentials");
+        }
+        return {
+            server: true,
+            usernames: [plain.username],
+            passwords: [plain.password],
+        };
+    }
+    if (plain.credentials !== undefined) {
+        throw new TypeError("PLAIN credentials allowlist requires server: true");
+    }
+    if (plain.username === undefined || plain.password === undefined) {
+        throw new TypeError("PLAIN client requires username and password");
+    }
+    return { username: plain.username, password: plain.password };
 }
 function lz4Dictionary(lz4) {
     if (lz4 === undefined)

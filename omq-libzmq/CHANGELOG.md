@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-09-04
+
+### Added
+
+- RFC 27 ZAP authentication over `inproc://zeromq.zap.01` for NULL, PLAIN,
+  and CURVE using REP or ROUTER handlers.
+- `omq_socket_set_plain_server_credentials()` for high-level bindings that
+  need one fixed PLAIN credential pair.
+- C options for on-mute policy, compression, and workload profile selection.
+
+### Changed
+
+- `ZMQ_PLAIN_SERVER` enables the mechanism and delegates policy to ZAP; it
+  fails closed when no ZAP handler is available.
+- REQ/REP sockets use the latency workload profile by default.
+- *(deps)* Bump `omq-tokio` to 0.22.0 and `omq-proto` to 0.27.0.
+
+### Fixed
+
+- Reject mismatched CURVE public and secret keys.
+- Drain stale receive notifier state after wakeups.
+
 ## [0.5.15] - 2026-08-23
 
 ### Added

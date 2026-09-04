@@ -7,6 +7,7 @@ import java.nio.ReadOnlyBufferException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -573,13 +574,44 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
-    /** Configures this socket as a PLAIN server before first I/O. */
+    /**
+     * Configures this socket as a PLAIN server accepting one credential pair.
+     * PLAIN authenticates clients but does not encrypt traffic.
+     *
+     * @param username accepted username
+     * @param password accepted password
+     * @return this socket
+     * @throws NullPointerException if either value is null
+     * @throws IllegalArgumentException if either value exceeds 255 bytes or contains
+     *     bytes outside ASCII VCHAR
+     */
     public synchronized Socket plainServer(String username, String password) {
-        Objects.requireNonNull(username, "username");
-        Objects.requireNonNull(password, "password");
-        requireZmtpShortString("username", username);
-        requireZmtpShortString("password", password);
-        withHandleVoid(handle -> Native.socketSetPlainServer(handle, username, password));
+        return plainServer(List.of(new PlainCredential(username, password)));
+    }
+
+    /**
+     * Configures an exact, case-sensitive PLAIN credential allowlist before
+     * bind, connect, or I/O. An empty list rejects every client. PLAIN
+     * authenticates clients but does not encrypt traffic.
+     *
+     * @param credentials accepted credential pairs
+     * @return this socket
+     * @throws NullPointerException if the list or any credential is null
+     * @throws IllegalArgumentException if a field exceeds 255 bytes or contains
+     *     bytes outside ASCII VCHAR
+     */
+    public synchronized Socket plainServer(List<PlainCredential> credentials) {
+        credentials = List.copyOf(Objects.requireNonNull(credentials, "credentials"));
+        String[] usernames = new String[credentials.size()];
+        String[] passwords = new String[credentials.size()];
+        for (int i = 0; i < credentials.size(); i++) {
+            PlainCredential credential = credentials.get(i);
+            requireZmtpShortString("username", credential.username());
+            requireZmtpShortString("password", credential.password());
+            usernames[i] = credential.username();
+            passwords[i] = credential.password();
+        }
+        withHandleVoid(handle -> Native.socketSetPlainServer(handle, usernames, passwords));
         return this;
     }
 
@@ -983,6 +1015,9 @@ public final class Socket implements AutoCloseable {
                 name,
                 value.getBytes(StandardCharsets.UTF_8).length,
                 ZMTP_MAX_SHORT_STRING_BYTES);
+        if (!value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e)) {
+            throw new IllegalArgumentException(name + " must contain only ASCII VCHAR bytes");
+        }
     }
 
     private static void requireCurvePublicKey(String publicKey) {

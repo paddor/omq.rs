@@ -2,14 +2,27 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-04
+
+### Added
+
+- Fixed username/password policy for PLAIN servers through
+  `ConfigurePlainServer`.
+
 ### Fixed
 
 - Preserve SERVER routing IDs in asynchronous message sends.
+- Make zero-duration asynchronous poll waits perform a nonblocking poll.
+- Return the copied length when receiving a frame larger than the supplied
+  `ReceiveInto` buffer.
 
 ### Changed
 
 - Make `ReceiveInto` write directly into the caller's span and return the
   number of bytes copied, removing temporary payload allocations and copies.
+- Require credentials when configuring a PLAIN server instead of enabling an
+  allow-all mode.
+- Bundle `omq-libzmq` 0.5.16.
 
 ## [0.1.3]
 

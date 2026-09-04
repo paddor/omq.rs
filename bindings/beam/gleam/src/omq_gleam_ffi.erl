@@ -74,7 +74,7 @@
     has/1,
     curve_keypair/0,
     curve_public/1,
-    plain_server/3
+    plain_server/2
 ]).
 
 context() ->
@@ -299,8 +299,8 @@ curve_keypair() ->
 curve_public(Secret) ->
     result(omq:curve_public(Secret)).
 
-plain_server(Socket, Username, Password) ->
-    result(omq:plain_server(Socket, Username, Password)).
+plain_server(Socket, Credentials) ->
+    result(omq:plain_server(Socket, Credentials)).
 
 result(ok) ->
     {ok, nil};

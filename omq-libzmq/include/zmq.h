@@ -509,11 +509,29 @@ ZMQ_EXPORT void omq_async_task_cancel (omq_async_task_t *task_);
 ZMQ_EXPORT void omq_async_task_free (omq_async_task_t *task_);
 /* Caller guarantees that socket operations are externally serialized. */
 ZMQ_EXPORT int omq_socket_allow_thread_migration (void *socket_);
-/* Fixed PLAIN policy for high-level bindings. Standard PLAIN username and
-   password socket options remain client-only; PLAIN_SERVER uses ZAP. */
+/* One exact username/password pair in an OMQ fixed PLAIN allowlist. */
+typedef struct omq_plain_credential
+{
+    /* Borrowed username bytes. May be NULL only when username_size is zero. */
+    const uint8_t *username;
+    /* Username length in bytes. Maximum 255. */
+    size_t username_size;
+    /* Borrowed password bytes. May be NULL only when password_size is zero. */
+    const uint8_t *password;
+    /* Password length in bytes. Maximum 255. */
+    size_t password_size;
+} omq_plain_credential_t;
+
+/* Configure an OMQ-specific fixed PLAIN server allowlist before bind/connect.
+   Each field must contain at most 255 ASCII VCHAR bytes. Credentials are
+   copied, so all pointers are borrowed only for this call. credentials_ may
+   be NULL only when credential_count_ is zero. An empty allowlist denies
+   every client. Returns 0 on success or -1 with errno set. Standard
+   ZMQ_PLAIN_USERNAME and ZMQ_PLAIN_PASSWORD remain client-only options;
+   ZMQ_PLAIN_SERVER uses ZAP instead. */
 ZMQ_EXPORT int omq_socket_set_plain_server_credentials (
-    void *socket_, const uint8_t *username_, size_t username_size_,
-    const uint8_t *password_, size_t password_size_);
+    void *socket_, const omq_plain_credential_t *credentials_,
+    size_t credential_count_);
 
 /*  Socket API --------------------------------------------------------------- */
 ZMQ_EXPORT void *zmq_socket     (void *context_, int type_);

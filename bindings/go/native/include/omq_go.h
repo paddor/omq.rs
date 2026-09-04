@@ -165,7 +165,11 @@ OmqGoStatus omq_go_socket_set_identity(OmqGoSocket *socket, const uint8_t *data,
 OmqGoStatus omq_go_socket_set_heartbeat_interval(OmqGoSocket *socket, int64_t millis);
 OmqGoStatus omq_go_socket_set_handshake_timeout(OmqGoSocket *socket, int64_t millis);
 OmqGoStatus omq_go_socket_set_max_message_size(OmqGoSocket *socket, int64_t bytes);
-OmqGoStatus omq_go_socket_set_plain_server(OmqGoSocket *socket, const char *username, const char *password);
+typedef struct OmqGoPlainCredential {
+    const char *username;
+    const char *password;
+} OmqGoPlainCredential;
+OmqGoStatus omq_go_socket_set_plain_server(OmqGoSocket *socket, const OmqGoPlainCredential *credentials, size_t credential_count);
 OmqGoStatus omq_go_socket_set_plain_server_callback(OmqGoSocket *socket, uint64_t callback_id);
 OmqGoStatus omq_go_socket_set_plain_client(OmqGoSocket *socket, const char *username, const char *password);
 OmqGoStatus omq_go_socket_set_curve_server(OmqGoSocket *socket, const char *public_key, const char *secret_key);

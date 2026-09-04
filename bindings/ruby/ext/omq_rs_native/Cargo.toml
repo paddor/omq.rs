@@ -1,6 +1,6 @@
 [package]
 name = "omq_rs_native"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
@@ -20,8 +20,8 @@ zstd = ["omq-tokio/zstd"]
 ws = ["omq-tokio/ws"]
 
 [dependencies]
-omq-proto = { version = ">=0.26.1, <0.28.0", default-features = false }
-omq-tokio = { version = ">=0.21.4, <0.23.0", default-features = false }
+omq-proto = { version = ">=0.27.0, <0.28.0", default-features = false }
+omq-tokio = { version = ">=0.22.0, <0.23.0", default-features = false }
 yring = { version = "=0.3.14", features = ["async"] }
 
 bytes = "1.12.0"

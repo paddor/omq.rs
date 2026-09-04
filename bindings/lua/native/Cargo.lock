@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "omq-libzmq"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.21.4"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "bytes",

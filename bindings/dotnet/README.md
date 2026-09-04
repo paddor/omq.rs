@@ -44,9 +44,10 @@ IntelliSense summaries for the public API.
 OMQ.Net follows OMQ/libzmq socket semantics; it is not a NetMQ compatibility
 layer.
 
-PLAIN servers require fixed credentials through
-`socket.ConfigurePlainServer("alice", "secret")`. Clients use
-`ConfigurePlainClient`. PLAIN authenticates but does not encrypt traffic.
+PLAIN servers require a fixed credential allowlist through
+`socket.ConfigurePlainServer([new("alice", "secret"), new("bob", "hunter2")])`.
+The two-string overload configures one pair. Clients use `ConfigurePlainClient`.
+PLAIN authenticates but does not encrypt traffic.
 
 ## Development
 

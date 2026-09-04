@@ -131,8 +131,7 @@ pub(crate) enum MechanismOverlay {
     Null,
     PlainServer,
     PlainServerCredentials {
-        username: String,
-        password: String,
+        credentials: Vec<(String, String)>,
     },
     PlainClient {
         username: String,
@@ -193,12 +192,9 @@ impl SocketOverlay {
                 // materialization. Keep detached overlays fail-closed.
                 authenticator: omq_tokio::Authenticator::new(|_| false),
             },
-            MechanismOverlay::PlainServerCredentials { username, password } => {
+            MechanismOverlay::PlainServerCredentials { credentials } => {
                 MechanismSetup::PlainServer {
-                    authenticator: omq_tokio::Authenticator::plain_credentials([(
-                        username.clone(),
-                        password.clone(),
-                    )]),
+                    authenticator: omq_tokio::Authenticator::plain_credentials(credentials.clone()),
                 }
             }
             MechanismOverlay::PlainClient { username, password } => MechanismSetup::PlainClient {
@@ -977,54 +973,69 @@ pub extern "C" fn zmq_setsockopt(
     0
 }
 
-/// Configure one fixed PLAIN server credential pair.
+/// One exact username/password pair in an OMQ fixed PLAIN server allowlist.
 ///
-/// This is an OMQ extension. Standard `ZMQ_PLAIN_USERNAME` and
-/// `ZMQ_PLAIN_PASSWORD` remain client-only options, while
-/// `ZMQ_PLAIN_SERVER` uses ZAP.
+/// Each field is borrowed for the duration of
+/// [`omq_socket_set_plain_server_credentials`] and may be null only when its
+/// corresponding length is zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OmqPlainCredential {
+    /// Username bytes.
+    pub username: *const u8,
+    /// Username byte length.
+    pub username_size: usize,
+    /// Password bytes.
+    pub password: *const u8,
+    /// Password byte length.
+    pub password_size: usize,
+}
+
+fn copy_plain_credential_field(ptr: *const u8, len: usize) -> Result<String, c_int> {
+    if ptr.is_null() && len != 0 {
+        return Err(libc::EFAULT);
+    }
+    if len > 255 {
+        return Err(libc::EINVAL);
+    }
+    if len == 0 {
+        return Ok(String::new());
+    }
+    // SAFETY: the non-null pointer is a caller-provided readable buffer of
+    // `len` bytes. The C ABI requires it to remain valid for this call.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Err(libc::EINVAL);
+    };
+    if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(libc::EINVAL);
+    }
+    Ok(text.to_owned())
+}
+
+/// Configure an OMQ-specific fixed PLAIN server credential allowlist.
+///
+/// Call this before the socket is bound or connected. Each username and
+/// password must contain at most 255 ASCII VCHAR bytes. The function copies
+/// every credential, so the input array and field buffers are borrowed only
+/// for the call. A null array is accepted only when `credential_count` is
+/// zero; an empty list denies every client.
+///
+/// Returns `0` on success, or `-1` with the C API error number set. Standard
+/// `ZMQ_PLAIN_USERNAME` and `ZMQ_PLAIN_PASSWORD` remain client-only options,
+/// while `ZMQ_PLAIN_SERVER` uses ZAP.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_socket_set_plain_server_credentials(
     sock: *mut libc::c_void,
-    username: *const u8,
-    username_len: usize,
-    password: *const u8,
-    password_len: usize,
+    credentials: *const OmqPlainCredential,
+    credential_count: usize,
 ) -> c_int {
-    if sock.is_null()
-        || (username.is_null() && username_len != 0)
-        || (password.is_null() && password_len != 0)
-    {
+    if sock.is_null() || (credentials.is_null() && credential_count != 0) {
         return fail(libc::EFAULT);
     }
-    if username_len > 255 || password_len > 255 {
+    if credential_count > isize::MAX as usize / std::mem::size_of::<OmqPlainCredential>() {
         return fail(libc::EINVAL);
     }
-    // SAFETY: non-null pointers are caller-provided readable buffers of the
-    // corresponding length. Empty inputs never dereference their pointer.
-    let username = if username_len == 0 {
-        ""
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(username, username_len) };
-        let Ok(text) = std::str::from_utf8(bytes) else {
-            return fail(libc::EINVAL);
-        };
-        if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return fail(libc::EINVAL);
-        }
-        text
-    };
-    let password = if password_len == 0 {
-        ""
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(password, password_len) };
-        let Ok(text) = std::str::from_utf8(bytes) else {
-            return fail(libc::EINVAL);
-        };
-        if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return fail(libc::EINVAL);
-        }
-        text
-    };
     // SAFETY: `sock` is non-null and must be a live handle returned by
     // `zmq_socket`, matching the rest of this C API.
     let socket = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
@@ -1034,9 +1045,30 @@ pub extern "C" fn omq_socket_set_plain_server_credentials(
     {
         return fail(libc::EINVAL);
     }
+    let entries = if credential_count == 0 {
+        &[]
+    } else {
+        // SAFETY: the non-null pointer is a caller-provided readable array of
+        // `credential_count` entries. The size check prevents slice overflow.
+        unsafe { std::slice::from_raw_parts(credentials, credential_count) }
+    };
+    let mut copied = Vec::new();
+    if copied.try_reserve_exact(entries.len()).is_err() {
+        return fail(libc::ENOMEM);
+    }
+    for entry in entries {
+        let username = match copy_plain_credential_field(entry.username, entry.username_size) {
+            Ok(value) => value,
+            Err(errno) => return fail(errno),
+        };
+        let password = match copy_plain_credential_field(entry.password, entry.password_size) {
+            Ok(value) => value,
+            Err(errno) => return fail(errno),
+        };
+        copied.push((username, password));
+    }
     lock_overlay!(socket).mechanism = MechanismOverlay::PlainServerCredentials {
-        username: username.to_owned(),
-        password: password.to_owned(),
+        credentials: copied,
     };
     0
 }

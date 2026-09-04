@@ -406,8 +406,8 @@ Prepare a release by bumping `bindings/pyomq/Cargo.toml` and
 the PR is merged, push a tag:
 
 ```sh
-git tag -a pyomq-v0.20.0 -m "pyomq 0.20.0"
-git push origin pyomq-v0.20.0
+git tag -a pyomq-v0.21.0 -m "pyomq 0.21.0"
+git push origin pyomq-v0.21.0
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 
@@ -419,8 +419,8 @@ inside `bindings/ruby`. Publish the required `omq-proto` and `omq-tokio`
 versions before pushing the Ruby tag. After the PR is merged, push a tag:
 
 ```sh
-git tag -a ruby-v0.1.0 -m "omq-rs 0.1.0"
-git push origin ruby-v0.1.0
+git tag -a ruby-v0.2.0 -m "omq-rs 0.2.0"
+git push origin ruby-v0.2.0
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 
@@ -433,8 +433,8 @@ or manual `workflow_dispatch` input; `pom.xml` normally stays at
 After the PR is merged, push a tag:
 
 ```sh
-git tag -a omq-java-v0.3.2 -m "OMQ.java 0.3.2"
-git push origin omq-java-v0.3.2
+git tag -a omq-java-v0.3.4 -m "OMQ.java 0.3.4"
+git push origin omq-java-v0.3.4
 gh run watch --repo paddor/omq.rs --exit-status
 ```
 
@@ -446,9 +446,9 @@ step; the Git tag is the release. After the PR is merged, push a subdirectory
 module tag from `main`:
 
 ```sh
-git tag -a bindings/go/v0.1.0 -m "OMQ.go 0.1.0"
-git push origin bindings/go/v0.1.0
-go list -m github.com/paddor/omq.rs/bindings/go@v0.1.0
+git tag -a bindings/go/v0.1.2 -m "OMQ.go 0.1.2"
+git push origin bindings/go/v0.1.2
+go list -m github.com/paddor/omq.rs/bindings/go@v0.1.2
 ```
 
 The public Go module proxy discovers the version from that tag.
@@ -494,9 +494,44 @@ release. After the PR is merged and trusted publishers are configured, push a
 tag:
 
 ```sh
-git tag -a omq-node-v0.1.2 -m "OMQ.node 0.1.2"
-git push origin omq-node-v0.1.2
+git tag -a omq-node-v0.2.0 -m "OMQ.node 0.2.0"
+git push origin omq-node-v0.2.0
 gh run watch --repo paddor/omq.rs --exit-status
+```
+
+`OMQ.Net` publishes to NuGet from `.github/workflows/release-dotnet.yml`.
+Prepare a release by bumping `bindings/dotnet/Omq.Net.csproj` and adding a
+`bindings/dotnet/CHANGELOG.md` entry. After the PR is merged, push a tag:
+
+```sh
+git tag -a omq-dotnet-v0.2.0 -m "OMQ.Net 0.2.0"
+git push origin omq-dotnet-v0.2.0
+gh run watch --repo paddor/omq.rs --exit-status
+```
+
+`OMQ.lua` publishes to LuaRocks. Prepare a release by adding a versioned
+rockspec and `bindings/lua/CHANGELOG.md` entry. After the PR is merged, tag the
+same commit before uploading the rockspec:
+
+```sh
+git tag -a omq-lua-v0.2.2 -m "OMQ.lua 0.2.2"
+git push origin omq-lua-v0.2.2
+luarocks upload bindings/lua/omq-0.2.2-1.rockspec
+```
+
+`OMQ.beam` publishes the `omq`, `omq_elixir`, and `omq_gleam` packages to Hex.
+Prepare them by updating all three package versions, the native crate version
+and `omq-tokio` dependency, and `bindings/beam/CHANGELOG.md`. Publish `omq`
+first, then the Elixir and Gleam wrappers, following
+`bindings/beam/DEVELOPMENT.md`.
+
+`OMQ.zig` is released from the repository tag. Prepare a release by updating
+`bindings/zig/build.zig.zon` and `bindings/zig/CHANGELOG.md`. After the PR is
+merged, push a tag:
+
+```sh
+git tag -a omq-zig-v0.1.0 -m "OMQ.zig 0.1.0"
+git push origin omq-zig-v0.1.0
 ```
 
 ### Crates To Check

@@ -284,7 +284,11 @@ func TestOptionsRejectInvalidValues(t *testing.T) {
 		ArenaThreshold(-1),
 		TransmitSlotCapacity(-1),
 		Identity(make([]byte, zmtpMaxShortStringBytes+1)),
-		PlainServer(string(make([]byte, zmtpMaxShortStringBytes+1)), "secret"),
+		PlainServerCredentials(PlainCredential{
+			Username: string(make([]byte, zmtpMaxShortStringBytes+1)),
+			Password: "secret",
+		}),
+		PlainServerCredentials(PlainCredential{Username: "has space", Password: "secret"}),
 		PlainClient("alice", string(make([]byte, zmtpMaxShortStringBytes+1))),
 		PlainServerAuth(nil),
 		CurveServerAuth(CurveKeypair{}, nil),

@@ -13,7 +13,7 @@
     has_feature/1,
     curve_keypair/0,
     curve_public/1,
-    plain_server_credentials/3,
+    plain_server_credentials/2,
     socket_new/2,
     socket_type/1,
     socket_id/1,
@@ -63,7 +63,7 @@ version() -> nif_error().
 has_feature(_Name) -> nif_error().
 curve_keypair() -> nif_error().
 curve_public(_Secret) -> nif_error().
-plain_server_credentials(_Socket, _Username, _Password) -> nif_error().
+plain_server_credentials(_Socket, _Credentials) -> nif_error().
 socket_new(_Context, _SocketType) -> nif_error().
 socket_type(_Socket) -> nif_error().
 socket_id(_Socket) -> nif_error().

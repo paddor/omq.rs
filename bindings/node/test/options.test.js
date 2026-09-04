@@ -46,17 +46,37 @@ test("invalid option values reject early", () => {
   assert.throws(() => new Push({ identity: Buffer.alloc(256) }), /identity length/);
   assert.throws(() => new Push({ lz4: true }), /lz4\+tcp:\/\//);
   assert.throws(() => new Push({ lz4: { dictionary: Buffer.alloc(0) } }), /compression dict/);
+  assert.throws(
+    () =>
+      new Push({
+        plain: { server: true, credentials: [{ username: "has space", password: "secret" }] },
+      }),
+    /ASCII VCHAR/,
+  );
 });
 
-test("PLAIN PUSH/PULL accepts correct credentials", async () => {
-  const pull = new Pull({ plain: { username: "alice", password: "secret", server: true } });
+test("PLAIN PUSH/PULL accepts credential allowlist", async () => {
+  const pull = new Pull({
+    plain: {
+      server: true,
+      credentials: [
+        { username: "alice", password: "secret" },
+        { username: "bob", password: "hunter2" },
+      ],
+    },
+  });
   const push = new Push({ plain: { username: "alice", password: "secret" } });
+  const bob = new Push({ plain: { username: "bob", password: "hunter2" } });
   try {
     const endpoint = await pull.bind("tcp://127.0.0.1:0");
     await push.connect(endpoint);
+    await bob.connect(endpoint);
     await push.send("hello over plain");
     assert.equal((await pull.recv()).string(), "hello over plain");
+    await bob.send("hello from bob");
+    assert.equal((await pull.recv()).string(), "hello from bob");
   } finally {
+    bob.close();
     push.close();
     pull.close();
   }

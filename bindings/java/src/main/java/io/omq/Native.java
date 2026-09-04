@@ -106,7 +106,7 @@ final class Native {
 
     static native void socketSetCompressionLevel(long handle, int level);
 
-    static native void socketSetPlainServer(long handle, String username, String password);
+    static native void socketSetPlainServer(long handle, String[] usernames, String[] passwords);
 
     static native void socketSetPlainServerCallback(long handle, Object authenticator);
 

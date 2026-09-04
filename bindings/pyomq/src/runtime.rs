@@ -5,7 +5,7 @@
 //! (aborts all pumps, drops the handle).
 //!
 //! omq-tokio::Socket is Send + Sync, so Python-side wrappers hold an
-//! Arc<Socket> directly in SocketInner. However, the socket's internal
+//! `Arc<Socket>` directly in `SocketInner`. However, the socket's internal
 //! driver tasks (ConnectionDriver, actor loop) are spawned via
 //! tokio::spawn and need the tokio scheduler actively polling to make
 //! progress. Python threads have no tokio runtime context, so they

@@ -384,12 +384,15 @@ pub fn curve_keypair() -> Result(#(BitArray, BitArray), Error)
 @external(erlang, "omq_gleam_ffi", "curve_public")
 pub fn curve_public(secret: BitArray) -> Result(BitArray, Error)
 
-/// Configure a PLAIN server accepting one fixed credential pair.
+/// Configure an exact, case-sensitive PLAIN server credential allowlist.
+///
+/// Call before bind, connect, send, or receive. Each username and password
+/// must contain at most 255 ASCII VCHAR bytes. An empty list rejects every
+/// client. PLAIN authenticates clients but does not encrypt traffic.
 @external(erlang, "omq_gleam_ffi", "plain_server")
 pub fn configure_plain_server(
   socket: Socket,
-  username: BitArray,
-  password: BitArray,
+  credentials: List(#(BitArray, BitArray)),
 ) -> Result(Nil, Error)
 
 /// Return POLLIN constant.

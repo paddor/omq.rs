@@ -8,11 +8,11 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use omq_zmq::{
-    omq_socket_set_plain_server_credentials, zmq_bind, zmq_close, zmq_connect, zmq_ctx_new,
-    zmq_ctx_set, zmq_ctx_term, zmq_curve_keypair, zmq_curve_public, zmq_getsockopt, zmq_msg_close,
-    zmq_msg_copy, zmq_msg_data, zmq_msg_gets, zmq_msg_init, zmq_msg_more, zmq_msg_recv,
-    zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket, zmq_unbind, zmq_z85_decode,
-    zmq_z85_encode,
+    OmqPlainCredential, omq_socket_set_plain_server_credentials, zmq_bind, zmq_close, zmq_connect,
+    zmq_ctx_new, zmq_ctx_set, zmq_ctx_term, zmq_curve_keypair, zmq_curve_public, zmq_getsockopt,
+    zmq_msg_close, zmq_msg_copy, zmq_msg_data, zmq_msg_gets, zmq_msg_init, zmq_msg_more,
+    zmq_msg_recv, zmq_msg_size, zmq_recv, zmq_send, zmq_setsockopt, zmq_socket, zmq_unbind,
+    zmq_z85_decode, zmq_z85_encode,
 };
 
 const ZMQ_PUSH: i32 = 8;
@@ -76,6 +76,15 @@ fn set_i32(sock: *mut c_void, opt: i32, val: i32) {
 
 fn set_bytes(sock: *mut c_void, opt: i32, data: &[u8]) {
     zmq_setsockopt(sock, opt, data.as_ptr().cast(), data.len());
+}
+
+fn plain_credential(username: &[u8], password: &[u8]) -> OmqPlainCredential {
+    OmqPlainCredential {
+        username: username.as_ptr(),
+        username_size: username.len(),
+        password: password.as_ptr(),
+        password_size: password.len(),
+    }
 }
 
 fn set_timeo(sock: *mut c_void, ms: i32) {
@@ -980,27 +989,116 @@ fn plain_server_honors_zap_rejection() {
 }
 
 #[test]
-fn omq_fixed_plain_credentials_are_enforced_without_zap() {
+fn omq_fixed_plain_credential_allowlist_is_enforced_without_zap() {
     let ctx = zmq_ctx_new();
     let pull = zmq_socket(ctx, ZMQ_PULL);
+    let credentials = [
+        plain_credential(b"alice", b"secret"),
+        plain_credential(b"bob", b"hunter2"),
+    ];
     assert_eq!(
-        omq_socket_set_plain_server_credentials(pull, b"alice".as_ptr(), 5, b"secret".as_ptr(), 6,),
+        omq_socket_set_plain_server_credentials(pull, credentials.as_ptr(), credentials.len()),
         0
     );
     set_i32(pull, ZMQ_RCVTIMEO, 5000);
     let addr = helpers::bind_random_tcp(pull);
 
-    let push = zmq_socket(ctx, ZMQ_PUSH);
-    set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
-    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
-    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-    assert_eq!(zmq_send(push, b"fixed".as_ptr().cast(), 5, 0), 5);
+    let alice = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(alice, ZMQ_PLAIN_USERNAME, b"alice");
+    set_bytes(alice, ZMQ_PLAIN_PASSWORD, b"secret");
+    assert_eq!(zmq_connect(alice, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(alice, b"alice".as_ptr().cast(), 5, 0), 5);
+
+    let bob = zmq_socket(ctx, ZMQ_PUSH);
+    set_bytes(bob, ZMQ_PLAIN_USERNAME, b"bob");
+    set_bytes(bob, ZMQ_PLAIN_PASSWORD, b"hunter2");
+    assert_eq!(zmq_connect(bob, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(bob, b"bob".as_ptr().cast(), 3, 0), 3);
 
     let mut buf = [0u8; 16];
-    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
-    assert_eq!(&buf[..5], b"fixed");
+    let first_len = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert!(matches!(first_len, 3 | 5));
+    let first = buf[..first_len as usize].to_vec();
+    let second_len = zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0);
+    assert!(matches!(second_len, 3 | 5));
+    let second = buf[..second_len as usize].to_vec();
+    assert!((first == b"alice" && second == b"bob") || (first == b"bob" && second == b"alice"));
 
-    zmq_close(push);
+    zmq_close(alice);
+    zmq_close(bob);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn omq_fixed_plain_credentials_validate_c_inputs() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let valid = plain_credential(b"alice", b"secret");
+
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(std::ptr::null_mut(), &raw const valid, 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, std::ptr::null(), 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    let null_username = OmqPlainCredential {
+        username: std::ptr::null(),
+        username_size: 1,
+        password: b"secret".as_ptr(),
+        password_size: 6,
+    };
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, &raw const null_username, 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
+
+    let invalid_ascii = plain_credential(b"alice smith", b"secret");
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, &raw const invalid_ascii, 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let non_ascii = plain_credential(b"alice", b"secr\xc3\xa9t");
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, &raw const non_ascii, 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let overlong = OmqPlainCredential {
+        username: b"x".as_ptr(),
+        username_size: 256,
+        password: b"secret".as_ptr(),
+        password_size: 6,
+    };
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, &raw const overlong, 1),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, std::ptr::null(), 0),
+        0
+    );
+    assert_eq!(get_i32(pull, ZMQ_PLAIN_SERVER), 1);
+
+    let _addr = helpers::bind_random_tcp(pull);
+    assert_eq!(
+        omq_socket_set_plain_server_credentials(pull, std::ptr::null(), 0),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }

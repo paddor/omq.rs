@@ -389,12 +389,17 @@ module OMQ
       # Configures PLAIN client admission on a server before materialization.
       #
       # Pass an array of username/password pairs, or a callable receiving
-      # {MechanismPeerInfo}. PLAIN never has an allow-all mode.
+      # {MechanismPeerInfo}. Pairs match exactly and case-sensitively. Each
+      # field must contain at most 255 ASCII VCHAR bytes. An empty array denies
+      # every client. PLAIN never has an allow-all mode and does not encrypt
+      # traffic.
       #
       # @param credentials [Array<Array(String, String)>, #call] credential
       #   allowlist or authenticator
       # @yieldparam peer [MechanismPeerInfo]
       # @return [Socket] self
+      # @raise [RuntimeError] if socket is already materialized
+      # @raise [TypeError, ArgumentError] if credentials are invalid
       def set_plain_auth(credentials = nil, &block)
         raise RuntimeError, "PLAIN authentication must be configured before bind or connect" if @materialized
 

@@ -84,7 +84,7 @@ struct NativeSocket {
     rcvtimeo: Mutex<Option<Duration>>,
     sndtimeo: Mutex<Option<Duration>>,
     plain_server: AtomicBool,
-    plain_server_credentials: Mutex<Option<(String, String)>>,
+    plain_server_credentials: Mutex<Option<Vec<(String, String)>>>,
     plain_username: Mutex<Option<String>>,
     plain_password: Mutex<Option<String>>,
     curve_server: AtomicBool,
@@ -145,12 +145,12 @@ impl NativeSocket {
         {
             if self.plain_server.load(Ordering::Acquire) {
                 let credentials = self.plain_server_credentials.lock().unwrap().clone();
-                let Some((username, password)) = credentials else {
+                let Some(credentials) = credentials else {
                     return Err(OmqError::Config(
                         "PLAIN server requires explicit credentials".into(),
                     ));
                 };
-                options = options.plain_server_credentials([(username, password)]);
+                options = options.plain_server_credentials(credentials);
             } else {
                 let username = self.plain_username.lock().unwrap().clone();
                 let password = self.plain_password.lock().unwrap().clone();
@@ -1190,8 +1190,7 @@ fn wait_subscribed<'a>(
 fn plain_server_credentials<'a>(
     env: Env<'a>,
     socket: ResourceArc<NativeSocket>,
-    username: Binary<'a>,
-    password: Binary<'a>,
+    credentials: Vec<(Binary<'a>, Binary<'a>)>,
 ) -> Term<'a> {
     if socket.socket.read().unwrap().is_some() {
         return err_term(
@@ -1200,17 +1199,29 @@ fn plain_server_credentials<'a>(
             "PLAIN authentication must be configured before bind/connect/send/recv",
         );
     }
-    if username.len() > 255 || password.len() > 255 {
-        return err_term(env, atoms::badarg(), "PLAIN credentials exceed 255 bytes");
+    let mut copied = Vec::with_capacity(credentials.len());
+    for (username, password) in credentials {
+        if username.len() > 255 || password.len() > 255 {
+            return err_term(env, atoms::badarg(), "PLAIN credentials exceed 255 bytes");
+        }
+        let Ok(username) = str::from_utf8(username.as_slice()) else {
+            return err_term(env, atoms::badarg(), "PLAIN username must be UTF-8");
+        };
+        let Ok(password) = str::from_utf8(password.as_slice()) else {
+            return err_term(env, atoms::badarg(), "PLAIN password must be UTF-8");
+        };
+        if !username.bytes().all(|byte| byte.is_ascii_graphic())
+            || !password.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return err_term(
+                env,
+                atoms::badarg(),
+                "PLAIN credentials must contain only ASCII VCHAR bytes",
+            );
+        }
+        copied.push((username.to_owned(), password.to_owned()));
     }
-    let Ok(username) = str::from_utf8(username.as_slice()) else {
-        return err_term(env, atoms::badarg(), "PLAIN username must be UTF-8");
-    };
-    let Ok(password) = str::from_utf8(password.as_slice()) else {
-        return err_term(env, atoms::badarg(), "PLAIN password must be UTF-8");
-    };
-    *socket.plain_server_credentials.lock().unwrap() =
-        Some((username.to_owned(), password.to_owned()));
+    *socket.plain_server_credentials.lock().unwrap() = Some(copied);
     socket.plain_server.store(true, Ordering::Release);
     ok_unit(env)
 }

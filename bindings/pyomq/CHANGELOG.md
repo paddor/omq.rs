@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-04
+
+### Added
+
+- `Socket.set_plain_auth()` and its asyncio equivalent accept an iterable of
+  username/password pairs or an authentication callback.
+- PLAIN callbacks receive peer address, username, and password metadata.
+
+### Changed
+
+- PLAIN servers require an explicit authentication policy and fail closed
+  when none is configured.
+- Refresh the pyomq performance chart with benchmark peers pinned to separate
+  physical cores.
+- *(deps)* Bundle `omq-tokio` 0.22.0 and `omq-proto` 0.27.0.
+
+### Fixed
+
+- Close Windows asyncio wakeup descriptor reuse, cancellation, and event-loop
+  shutdown races.
+- Reject CURVE public keys that do not match the configured secret key.
+
 ## [0.20.3] - 2026-09-02
 
 ### Added

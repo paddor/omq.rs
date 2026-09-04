@@ -327,7 +327,9 @@ class _NativeSocket(Protocol):
 
     def set_curve_auth(self, auth: Any) -> Any: ...
 
-    def set_plain_auth(self, auth: Any) -> Any: ...
+    def set_plain_auth(self, auth: Any) -> Any:
+        """Configure a PLAIN server allowlist or callback before socket use."""
+        ...
 
     def close(self, linger: int | None = None) -> None: ...
 
@@ -475,6 +477,13 @@ class _BaseSocket(_SocketOptionsBase):
             raise ZMQNotImplementedError("curve feature not compiled")
 
     def set_plain_auth(self, auth: Any) -> Any:
+        """Configure PLAIN server admission before first socket use.
+
+        Pass an iterable of exact ``(username, password)`` pairs or a callable
+        receiving ``PeerInfo``. Each string must contain at most 255 ASCII
+        VCHAR bytes. An empty iterable rejects every client. PLAIN
+        authenticates clients but does not encrypt traffic.
+        """
         try:
             return self._sock.set_plain_auth(auth)
         except _native.ZMQError as e:

@@ -28,7 +28,10 @@ func TestPlainTCP(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)
 
-	pull, err := ctx.Socket(Pull, PlainServer("alice", "secret"))
+	pull, err := ctx.Socket(Pull, PlainServerCredentials(
+		PlainCredential{Username: "alice", Password: "secret"},
+		PlainCredential{Username: "bob", Password: "hunter2"},
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +61,25 @@ func TestPlainTCP(t *testing.T) {
 	}
 	if got := msg.String(); got != "plain" {
 		t.Fatalf("message = %q, want plain", got)
+	}
+
+	bob, err := ctx.Socket(Push, PlainClient("bob", "hunter2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSocket(t, bob)
+	if err := bob.Connect(bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.SendTimeout(String("bob"), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	msg, err = pull.RecvTimeout(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.String(); got != "bob" {
+		t.Fatalf("message = %q, want bob", got)
 	}
 }
 

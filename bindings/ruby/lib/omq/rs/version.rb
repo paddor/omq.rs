@@ -5,6 +5,6 @@ module OMQ
   module Rust
     # Ruby binding version.
     # @return [String]
-    VERSION = "0.1.2"
+    VERSION = "0.2.0"
   end
 end

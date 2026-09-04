@@ -84,21 +84,67 @@ public sealed class Socket : IDisposable
     public void Unsubscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Unsubscribe, prefix);
     /// Removes a UTF-8 subscription prefix.
     public void Unsubscribe(string prefix) => Unsubscribe(Encoding.UTF8.GetBytes(prefix));
-    /// Configures a PLAIN server accepting one fixed credential pair.
-    public void ConfigurePlainServer(string username, string password)
+    /// <summary>Configures a fixed PLAIN server credential allowlist.</summary>
+    /// <param name="credentials">Exact, case-sensitive username/password pairs.</param>
+    /// <remarks>
+    /// Call before binding or connecting. Each field must contain at most 255
+    /// ASCII VCHAR bytes. An empty sequence rejects every client. PLAIN
+    /// authenticates clients but does not encrypt traffic.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="credentials"/> is null.</exception>
+    /// <exception cref="OmqException">A credential is invalid or the socket is already in use.</exception>
+    public void ConfigurePlainServer(IEnumerable<PlainCredential> credentials)
     {
-        lock (gate)
+        ArgumentNullException.ThrowIfNull(credentials);
+        PlainCredential[] entries = credentials.ToArray();
+        var native = new Native.PlainCredential[entries.Length];
+        var pins = new GCHandle[entries.Length * 2];
+        try
         {
-            byte[] user = Encoding.UTF8.GetBytes(username);
-            byte[] pass = Encoding.UTF8.GetBytes(password);
-            unsafe
+            for (int i = 0; i < entries.Length; i++)
             {
-                fixed (byte* userPtr = user)
-                fixed (byte* passPtr = pass)
-                    Errors.Check("plain_server", Native.omq_socket_set_plain_server_credentials(Require(), (IntPtr)userPtr, (nuint)user.Length, (IntPtr)passPtr, (nuint)pass.Length));
+                byte[] username = Encoding.UTF8.GetBytes(entries[i].Username);
+                byte[] password = Encoding.UTF8.GetBytes(entries[i].Password);
+                pins[i * 2] = GCHandle.Alloc(username, GCHandleType.Pinned);
+                pins[i * 2 + 1] = GCHandle.Alloc(password, GCHandleType.Pinned);
+                native[i] = new Native.PlainCredential
+                {
+                    Username = pins[i * 2].AddrOfPinnedObject(),
+                    UsernameLength = (nuint)username.Length,
+                    Password = pins[i * 2 + 1].AddrOfPinnedObject(),
+                    PasswordLength = (nuint)password.Length,
+                };
+            }
+
+            lock (gate)
+            {
+                unsafe
+                {
+                    fixed (Native.PlainCredential* credentialPtr = native)
+                    {
+                        IntPtr pointer = native.Length == 0 ? IntPtr.Zero : (IntPtr)credentialPtr;
+                        Errors.Check("plain_server", Native.omq_socket_set_plain_server_credentials(Require(), pointer, (nuint)native.Length));
+                    }
+                }
             }
         }
+        finally
+        {
+            foreach (GCHandle pin in pins)
+                if (pin.IsAllocated) pin.Free();
+        }
     }
+    /// <summary>Configures a PLAIN server accepting one credential pair.</summary>
+    /// <param name="username">Accepted username.</param>
+    /// <param name="password">Accepted password.</param>
+    /// <remarks>
+    /// Call before binding or connecting. Each value must contain at most 255
+    /// ASCII VCHAR bytes. PLAIN authenticates clients but does not encrypt traffic.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">Either value is null.</exception>
+    /// <exception cref="OmqException">A credential is invalid or the socket is already in use.</exception>
+    public void ConfigurePlainServer(string username, string password) =>
+        ConfigurePlainServer([new PlainCredential(username, password)]);
     /// Configures PLAIN client credentials.
     public void ConfigurePlainClient(string username, string password) { SetOption(SocketOption.PlainUsername, username); SetOption(SocketOption.PlainPassword, password); }
     /// Enables CURVE server mode with its secret key.

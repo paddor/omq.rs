@@ -138,13 +138,39 @@ public final class SocketOptions {
             return add(Socket::compressionDefaultLevel);
         }
 
-        /** Configures a PLAIN server with fixed credentials. */
+        /**
+         * Configures a PLAIN server accepting one credential pair.
+         * PLAIN authenticates clients but does not encrypt traffic.
+         *
+         * @param username accepted username
+         * @param password accepted password
+         * @return this builder
+         * @throws NullPointerException if either value is null
+         * @throws IllegalArgumentException if either value exceeds 255 bytes or contains
+         *     bytes outside ASCII VCHAR
+         */
         public Builder plainServer(String username, String password) {
-            Objects.requireNonNull(username, "username");
-            Objects.requireNonNull(password, "password");
-            requireZmtpShortString("username", username);
-            requireZmtpShortString("password", password);
-            return add(socket -> socket.plainServer(username, password));
+            return plainServer(List.of(new PlainCredential(username, password)));
+        }
+
+        /**
+         * Configures an exact, case-sensitive PLAIN server credential
+         * allowlist. An empty list rejects every client. Each field must
+         * contain at most 255 ASCII VCHAR bytes.
+         *
+         * @param credentials accepted credential pairs
+         * @return this builder
+         * @throws NullPointerException if the list or any credential is null
+         * @throws IllegalArgumentException if a field is invalid
+         */
+        public Builder plainServer(List<PlainCredential> credentials) {
+            credentials = List.copyOf(Objects.requireNonNull(credentials, "credentials"));
+            for (PlainCredential credential : credentials) {
+                requireZmtpShortString("username", credential.username());
+                requireZmtpShortString("password", credential.password());
+            }
+            List<PlainCredential> copied = credentials;
+            return add(socket -> socket.plainServer(copied));
         }
 
         /** Configures a PLAIN server with an authenticator. */
@@ -427,6 +453,9 @@ public final class SocketOptions {
                 name,
                 value.getBytes(StandardCharsets.UTF_8).length,
                 ZMTP_MAX_SHORT_STRING_BYTES);
+        if (!value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e)) {
+            throw new IllegalArgumentException(name + " must contain only ASCII VCHAR bytes");
+        }
     }
 
     private static void requireMatchingCurveKeypair(CurveKeypair keypair) {

@@ -4,9 +4,17 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use super::{
-    Args, BenchResult, CpuWindow, ProducerFiles, check_every, clean_paths, measure_receive,
-    run_paths, spawn_producer, stop_requested, write_marker,
+    Args, BenchResult, CpuWindow, LatencyMeter, LatencyResult, ProducerFiles, check_every,
+    clean_paths, measure_receive, run_paths, spawn_producer, spawn_responder, stop_requested,
+    wait_for_marker, write_marker,
 };
+
+fn rpc_topics(token: &str, size: usize) -> (String, String) {
+    (
+        format!("omq-bench-rpc-request-{token}-{size}"),
+        format!("omq-bench-rpc-response-{token}-{size}"),
+    )
+}
 
 pub(crate) fn producer(
     url: &str,
@@ -143,4 +151,147 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
     .await?;
     let _ = admin.delete_topics(&[&topic], &AdminOptions::new()).await;
     Ok(result)
+}
+
+pub(crate) async fn responder(
+    url: &str,
+    token: &str,
+    size: usize,
+    ready_file: &Path,
+) -> Result<()> {
+    use rdkafka::{
+        ClientConfig, Message,
+        consumer::{Consumer, StreamConsumer},
+        producer::{FutureProducer, FutureRecord},
+    };
+
+    let (request_topic, response_topic) = rpc_topics(token, size);
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .set("group.id", format!("omq-bench-rpc-responder-{token}"))
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .set("fetch.message.max.bytes", "16777216")
+        .set("max.partition.fetch.bytes", "16777216")
+        .create()?;
+    consumer.subscribe(&[&request_topic])?;
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .set("message.max.bytes", "16777216")
+        .set("linger.ms", "0")
+        .create()?;
+    write_marker(ready_file)?;
+
+    loop {
+        let message = consumer.recv().await?;
+        let payload = message.payload().context("Kafka request payload")?;
+        if payload.len() != size {
+            bail!("bad Kafka request payload size");
+        }
+        producer
+            .send_result(FutureRecord::<(), _>::to(&response_topic).payload(payload))
+            .map_err(|(error, _)| error)?;
+    }
+}
+
+pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<LatencyResult> {
+    use rdkafka::{
+        ClientConfig,
+        admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
+        consumer::{Consumer, StreamConsumer},
+        producer::FutureProducer,
+    };
+
+    let paths = run_paths(token, size);
+    clean_paths(&paths)?;
+    let (request_topic, response_topic) = rpc_topics(token, size);
+    let admin: AdminClient<_> = ClientConfig::new()
+        .set("bootstrap.servers", &args.kafka_url)
+        .create()?;
+    let request = NewTopic::new(&request_topic, 1, TopicReplication::Fixed(1))
+        .set("cleanup.policy", "delete")
+        .set("retention.ms", "30000")
+        .set("retention.bytes", "67108864")
+        .set("segment.bytes", "16777216")
+        .set("max.message.bytes", "16777216");
+    let response = NewTopic::new(&response_topic, 1, TopicReplication::Fixed(1))
+        .set("cleanup.policy", "delete")
+        .set("retention.ms", "30000")
+        .set("retention.bytes", "67108864")
+        .set("segment.bytes", "16777216")
+        .set("max.message.bytes", "16777216");
+    admin
+        .create_topics(&[request, response], &AdminOptions::new())
+        .await
+        .context("create Kafka RPC topics")?;
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &args.kafka_url)
+        .set("message.max.bytes", "16777216")
+        .set("linger.ms", "0")
+        .create()?;
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &args.kafka_url)
+        .set("group.id", format!("omq-bench-rpc-requester-{token}"))
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .set("fetch.message.max.bytes", "16777216")
+        .set("max.partition.fetch.bytes", "16777216")
+        .create()?;
+    consumer.subscribe(&[&response_topic])?;
+
+    let responder = spawn_responder(
+        args,
+        "kafka",
+        size,
+        token,
+        ProducerFiles {
+            start: &paths.0,
+            stop: &paths.1,
+            result: &paths.2,
+            grpc_port: None,
+        },
+    )?;
+    let mut meter = LatencyMeter::new("kafka", args.latency_iterations, responder)?;
+    wait_for_marker(&paths.0, meter.responder_mut()).await?;
+    let payload = vec![b'x'; size];
+
+    for _ in 0..args.latency_warmup {
+        kafka_roundtrip(&producer, &consumer, &request_topic, size, &payload).await?;
+    }
+
+    meter.begin()?;
+    for _ in 0..args.latency_iterations {
+        let start = Instant::now();
+        kafka_roundtrip(&producer, &consumer, &request_topic, size, &payload).await?;
+        meter.record(start.elapsed())?;
+    }
+    let result = meter.finish()?;
+    let _ = admin
+        .delete_topics(
+            &[request_topic.as_str(), response_topic.as_str()],
+            &AdminOptions::new(),
+        )
+        .await;
+    Ok(result)
+}
+
+async fn kafka_roundtrip(
+    producer: &rdkafka::producer::FutureProducer,
+    consumer: &rdkafka::consumer::StreamConsumer,
+    request_topic: &str,
+    size: usize,
+    payload: &[u8],
+) -> Result<()> {
+    use rdkafka::{Message, producer::FutureRecord};
+
+    producer
+        .send_result(FutureRecord::<(), _>::to(request_topic).payload(payload))
+        .map_err(|(error, _)| error)?;
+    let message = tokio::time::timeout(Duration::from_secs(5), consumer.recv()).await??;
+    let response = message.payload().context("Kafka response payload")?;
+    if response.len() != size {
+        bail!("bad Kafka response payload size");
+    }
+    Ok(())
 }

@@ -82,15 +82,26 @@ public static class SocketAsyncExtensions
 
     private static byte[] Encode(Message message)
     {
-        int header = checked(8 + message.Parts.Count * 8);
+        bool routed = message.RoutingId != 0;
+        int tableStart = routed ? 20 : 8;
+        int header = checked(tableStart + message.Parts.Count * 8);
         int total = header + message.Parts.Sum(part => part.Length);
         byte[] encoded = new byte[total];
-        BinaryPrimitives.WriteUInt64LittleEndian(encoded, (ulong)message.Parts.Count);
+        if (routed)
+        {
+            "OMQROUTE"u8.CopyTo(encoded);
+            BinaryPrimitives.WriteUInt32LittleEndian(encoded.AsSpan(8), message.RoutingId);
+            BinaryPrimitives.WriteUInt64LittleEndian(encoded.AsSpan(12), (ulong)message.Parts.Count);
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(encoded, (ulong)message.Parts.Count);
+        }
         int offset = header;
         for (int i = 0; i < message.Parts.Count; i++)
         {
             byte[] part = message.Parts[i];
-            BinaryPrimitives.WriteUInt64LittleEndian(encoded.AsSpan(8 + i * 8), (ulong)part.Length);
+            BinaryPrimitives.WriteUInt64LittleEndian(encoded.AsSpan(tableStart + i * 8), (ulong)part.Length);
             part.CopyTo(encoded, offset); offset += part.Length;
         }
         return encoded;

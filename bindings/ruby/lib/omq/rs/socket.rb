@@ -81,13 +81,25 @@ module OMQ
     ].freeze
     private_constant :ROUTED_TYPES, :SINGLE_FRAME_TYPES, :SOCKET_OPTIONS
 
-    # CURVE peer metadata passed to callable authenticators.
+    # Peer metadata passed to callable CURVE and PLAIN authenticators.
     #
     # @!attribute [r] public_key
-    #   @return [String] peer's 40-byte Z85 public key
+    #   @return [String, nil] peer's 40-byte Z85 public key for CURVE
     # @!attribute [r] identity
     #   @return [String, nil] peer's ZMTP identity
-    MechanismPeerInfo = Data.define(:public_key, :identity)
+    # @!attribute [r] peer_address
+    #   @return [String, nil] peer's transport address
+    # @!attribute [r] username
+    #   @return [String, nil] peer's PLAIN username
+    # @!attribute [r] password
+    #   @return [String, nil] peer's PLAIN password
+    MechanismPeerInfo = Data.define(
+      :public_key,
+      :identity,
+      :peer_address,
+      :username,
+      :password,
+    )
 
     class << self
       # Returns number of OMQ.rs IO threads.
@@ -150,17 +162,20 @@ module OMQ
         Native.curve_public(secret_key)
       end
 
-      # Adapts a public CURVE authenticator to native peer metadata.
+      # Adapts a public authenticator to native peer metadata.
       #
       # @param authenticator [#call] callable receiving {MechanismPeerInfo}
       # @return [Proc]
       # @api private
-      def wrap_curve_authenticator(authenticator)
+      def wrap_authenticator(authenticator)
         proc do |peer|
           authenticator.call(
             MechanismPeerInfo.new(
               public_key: peer.fetch(:public_key),
               identity: peer[:identity],
+              peer_address: peer[:peer_address],
+              username: peer[:username],
+              password: peer[:password],
             ),
           )
         end
@@ -222,6 +237,8 @@ module OMQ
       # @param recv_timeout [Numeric, nil] receive timeout in seconds
       # @param send_timeout [Numeric, nil] send timeout in seconds
       # @param curve_auth [Array<String>, #call, nil] CURVE allowlist or authenticator
+      # @param plain_auth [Array<Array(String, String)>, #call, nil] PLAIN
+      #   credential allowlist or authenticator
       # @param options [Hash] native OMQ.rs socket options
       # @option options [Symbol] :workload_profile +:throughput+ or +:latency+
       # @option options [Integer] :send_hwm outbound message capacity
@@ -270,7 +287,7 @@ module OMQ
       # @option options [String] :curve_serverkey CURVE server raw or Z85 public key
       # @return [Socket]
       # @raise [ArgumentError] if an option is unknown or invalid
-      def initialize(recv_timeout: nil, send_timeout: nil, curve_auth: nil, **options)
+      def initialize(recv_timeout: nil, send_timeout: nil, curve_auth: nil, plain_auth: nil, **options)
         socket_type = self.class.const_get(:SOCKET_TYPE, false)
         @socket_type = socket_type.to_s.downcase.to_sym
         unless SOCKET_TYPES.include?(@socket_type)
@@ -290,6 +307,7 @@ module OMQ
         @peer_connected = false
         @subscriber_joined = false
         set_curve_auth(curve_auth) unless curve_auth.nil?
+        set_plain_auth(plain_auth) unless plain_auth.nil?
       end
 
       # Binds socket to an endpoint.
@@ -363,7 +381,31 @@ module OMQ
             raise TypeError, "CURVE authenticator must be an Array, callable, or nil"
           end
 
-          @native.set_curve_auth_callback(Rust.wrap_curve_authenticator(authenticator))
+          @native.set_curve_auth_callback(Rust.wrap_authenticator(authenticator))
+        end
+        self
+      end
+
+      # Configures PLAIN client admission on a server before materialization.
+      #
+      # Pass an array of username/password pairs, or a callable receiving
+      # {MechanismPeerInfo}. PLAIN never has an allow-all mode.
+      #
+      # @param credentials [Array<Array(String, String)>, #call] credential
+      #   allowlist or authenticator
+      # @yieldparam peer [MechanismPeerInfo]
+      # @return [Socket] self
+      def set_plain_auth(credentials = nil, &block)
+        raise RuntimeError, "PLAIN authentication must be configured before bind or connect" if @materialized
+
+        authenticator = block || (credentials if credentials.respond_to?(:call))
+        if authenticator
+          @native.set_plain_auth_callback(Rust.wrap_authenticator(authenticator))
+        else
+          unless credentials.is_a?(Array)
+            raise TypeError, "PLAIN authentication requires a credential Array or a callable"
+          end
+          @native.set_plain_auth_credentials(credentials)
         end
         self
       end

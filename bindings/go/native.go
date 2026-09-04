@@ -963,8 +963,12 @@ func peerInfoFromC(raw *C.OmqGoAuthPeer) PeerInfo {
 		Mechanism: stringFromCBytes(raw.mechanism_data, raw.mechanism_len),
 		PublicKey: stringFromCBytes(raw.public_key_data, raw.public_key_len),
 		Identity:  bytesFromCBytes(raw.identity_data, raw.identity_len),
-		Username:  stringFromCBytes(raw.username_data, raw.username_len),
-		Password:  stringFromCBytes(raw.password_data, raw.password_len),
+		PeerAddress: stringFromCBytes(
+			raw.peer_address_data,
+			raw.peer_address_len,
+		),
+		Username: stringFromCBytes(raw.username_data, raw.username_len),
+		Password: stringFromCBytes(raw.password_data, raw.password_len),
 	}
 }
 

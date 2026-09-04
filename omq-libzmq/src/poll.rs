@@ -56,7 +56,11 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
             let bypass_recv_has_data = unsafe { sock.bypass_recv.get() }
                 .as_ref()
                 .is_some_and(|br| !br.is_empty());
-            let has_buffered = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
+            let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock);
+            let has_buffered = drain_nonempty
+                || recv_cons_has_data
+                || bypass_recv_has_data
+                || authenticated_recv_has_data;
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }
@@ -93,8 +97,12 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
                 .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
 
             let bypass_recv_has_data = crate::notify::has_bypass_data(sock);
+            let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock);
 
-            let has_buffered = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
+            let has_buffered = drain_nonempty
+                || recv_cons_has_data
+                || bypass_recv_has_data
+                || authenticated_recv_has_data;
 
             if has_buffered {
                 if item.revents == 0 {

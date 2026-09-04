@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{PeerDriverCommand, PeerDriverHandle};
+use crate::engine::{PeerDriverCommand, PeerDriverData, PeerDriverHandle};
 use crate::transport::udp;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
@@ -97,33 +97,43 @@ pub(crate) fn spawn_dish_listener(
 pub(crate) fn spawn_radio_sender(
     sock: UdpSocket,
     mut inbox_rx: mpsc::Receiver<PeerDriverCommand>,
+    mut data_inbox_rx: mpsc::Receiver<PeerDriverData>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut pending: Option<Bytes> = None;
+        let mut control_open = true;
         loop {
             tokio::select! {
+                biased;
                 () = cancel.cancelled() => break,
-                cmd = inbox_rx.recv() => match cmd {
-                    Some(PeerDriverCommand::SendMessage(m)) => {
+                cmd = inbox_rx.recv(), if control_open => match cmd {
+                    Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
+                    Some(PeerDriverCommand::Close) => break,
+                    None => control_open = false,
+                },
+                result = async {
+                    sock.send(pending.as_ref().unwrap()).await
+                }, if pending.is_some() => {
+                    // Best-effort fire-and-forget; UDP errors
+                    // (ECONNREFUSED, ENETUNREACH) are silently dropped.
+                    let _ = result;
+                    pending = None;
+                }
+                data = data_inbox_rx.recv(), if pending.is_none() => match data {
+                    Some(PeerDriverData::SendMessage(m)) => {
                         if m.len() != 2 {
                             continue;
                         }
                         let group = m.part_bytes(0).unwrap_or_default();
                         let body = m.part_bytes(1).unwrap_or_default();
                         if let Ok(dgram) = udp::encode_datagram(&group, &body) {
-                            // Best-effort fire-and-forget; UDP errors
-                            // (ECONNREFUSED, ENETUNREACH) are silently
-                            // dropped.
-                            let _ = sock.send(&dgram).await;
+                            pending = Some(dgram);
                         }
                     }
-                    Some(
-                        PeerDriverCommand::ActivateDataPlane
-                        | PeerDriverCommand::SendEncoded(_)
-                        | PeerDriverCommand::SendCommand(_),
-                    ) => {},
-                    Some(PeerDriverCommand::Close) | None => break,
-                }
+                    Some(PeerDriverData::SendEncoded(_)) => {}
+                    None => break,
+                },
             }
         }
     })
@@ -134,10 +144,12 @@ pub(crate) fn spawn_radio_sender(
 /// down on `disconnect` / socket close.
 pub(crate) fn fake_handle(
     inbox: mpsc::Sender<PeerDriverCommand>,
+    data_inbox: mpsc::Sender<PeerDriverData>,
     cancel: CancellationToken,
 ) -> PeerDriverHandle {
     PeerDriverHandle {
         inbox,
+        data_inbox,
         cancel,
         transmit_slot: None,
         direct_tcp_writer: None,

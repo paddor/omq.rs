@@ -850,6 +850,11 @@ impl Socket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
+    #[cfg(feature = "plain")]
+    fn set_plain_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_plain_auth_impl(&self.inner, auth)
+    }
+
     #[pyo3(signature = (linger=None))]
     fn close(&self, py: Python<'_>, linger: Option<i64>) -> PyResult<()> {
         let linger = self.inner.close_linger(linger);

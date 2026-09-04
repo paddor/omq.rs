@@ -217,8 +217,9 @@ size instead of cascading through doubling copies.
 
 `PeerTransmitSlot` wraps `FrameBuffer` in a short-held `std::sync::Mutex`, capped
 at 512 KiB (close to the kernel TCP send buffer). Socket handles encode into
-the slot. `ConnectionDriver` owns the writer and flushes from its `data_ready`
-select branch. Producer-to-consumer signaling uses `DataSignal`: an atomic
+the slot. `ConnectionDriver` owns the writer and stages slot data without I/O;
+its main `select!` performs bounded write progress. Producer-to-consumer
+signaling uses `DataSignal`: an atomic
 flag plus `Notify` that coalesces wakes so only the `false`-to-`true`
 transition fires `notify_one`. The consumer clears the flag before draining,
 then calls `rearm_if_nonempty` to self-wake if data remains. For
@@ -233,9 +234,11 @@ remainder queued under normal `DataSignal` readiness, so partial writes are
 finished by the connection driver and never live in a side buffer.
 
 The async driver has a separate arena-only path. It copies slot arena bytes
-into a reusable owned buffer before `write_all().await`, because the slot mutex
-guards the `arena_bytes()` borrow and must not be held across await. Gather
-entries still use `Bytes` and vectored writes.
+into a reusable driver-owned buffer because the slot mutex guards the
+`arena_bytes()` borrow and must not be held across await. Partial writes retain
+their offset in driver state. Gather entries remain owned `Bytes` and use
+vectored writes. This persistent state makes the selected write future safe to
+cancel when control work arrives.
 
 CURVE keeps per-connection nonce state, so encrypted traffic uses
 per-connection ordered transforms. CURVE encrypts and decrypts in place
@@ -354,10 +357,14 @@ await only if nothing changed meanwhile. This is used where readiness is not a
 single data queue, for example pipe-space release and route-state changes.
 
 Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
-dedicated channels separate from data. Lane workers, for example, drain all
-control commands unconditionally before draining data up to budget. This
-guarantees control latency is bounded by one data budget drain, not by queue
-depth.
+dedicated channels separate from data. Lane workers and connection drivers
+drain all queued control commands before data work. Connection drivers encode
+at most 512 messages, the configured batch-byte limit, or 1 ms at a time.
+Writes run as a main `select!` arm, retain partial progress, and return after
+`DrainBudget::WIRE_DRAIN` or 1 ms. Stalled transport writes therefore cannot
+hide control behind data queue depth or an uninterruptible full-buffer drain.
+`omq_soak_driver_control` repeatedly fills the data inbox behind a 64-byte
+transport, then verifies control-driven close remains bounded.
 
 Loom covers the race windows that would lose these wakeups:
 `omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, `StateSignal`

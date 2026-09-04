@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure OMQ.Net vs NetMQ throughput and latency (sync + async).
+"""Measure OMQ.Net vs NetMQ throughput and latency (sync, ReceiveInto, async).
 
 Run from the repository root after building the .NET benchmark peer.
 Full runs append to doc/charts/bindings.jsonl (latest run_id wins per impl).
@@ -29,6 +29,7 @@ LATENCY_TIMEOUT_S = 60.0
 SUBPROCESS_RETRIES = 2
 PROXY_DURATION_S = 2.0
 THROUGHPUT_MAX_BYTES = None
+THROUGHPUT_MSG_MAX = 8_000_000
 README = os.path.join(os.path.dirname(__file__), "..", "README.md")
 CHART_DIR = os.path.join(os.path.dirname(__file__), "..", "doc", "charts")
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -39,6 +40,7 @@ _CACHE_DIR = os.path.join(
 JSONL_FILE = os.path.join(_CACHE_DIR, "bindings.jsonl")
 
 C_OMQ = "#ef4444"
+C_OMQ_INTO = "#22c55e"
 C_OMQ_ASYNC = "#fb923c"
 C_NETMQ = "#60a5fa"
 C_NETMQ_ASYNC = "#a855f7"
@@ -65,18 +67,6 @@ def fmt_size(size):
     if size >= 1024:
         return f"{size // 1024} KiB"
     return f"{size} B"
-
-
-def _nice_ceil(v):
-    if v <= 0:
-        return 1
-    exp = math.floor(math.log10(v))
-    base = 10**exp
-    for m in [1, 2, 5, 10]:
-        candidate = m * base
-        if candidate >= v:
-            return candidate
-    return 10 * base
 
 
 def _fmt_y_rate(val):
@@ -164,14 +154,21 @@ def gen_combined_chart(data, path):
     mid_x = (x_left + x_right) / 2
 
     sync_omq_tp = data["sync_omq_tp"]
+    sync_omq_into_tp = data["sync_omq_into_tp"]
     sync_pz_tp = data["sync_pz_tp"]
     async_omq_tp = data["async_omq_tp"]
     async_pz_tp = data["async_pz_tp"]
 
-    tp_values = [sync_omq_tp, sync_pz_tp, async_omq_tp, async_pz_tp]
+    tp_values = [
+        sync_omq_tp,
+        sync_omq_into_tp,
+        sync_pz_tp,
+        async_omq_tp,
+        async_pz_tp,
+    ]
     small_indices = [SIZES.index(s) for s in small_sizes]
     large_indices = [SIZES.index(s) for s in large_sizes]
-    msg_max = 3_200_000
+    msg_max = THROUGHPUT_MSG_MAX
     gbs_values = [
         v * SIZES[i] / 1_000_000_000
         for values in tp_values
@@ -179,6 +176,12 @@ def gen_combined_chart(data, path):
         for v in [values[i]]
     ]
     gbs_max = max(1, math.ceil(max(gbs_values, default=0)))
+    throughput_tick_count = int(gbs_max * 2)
+    msg_ticks = [
+        msg_max * i / throughput_tick_count
+        for i in range(1, throughput_tick_count + 1)
+    ]
+    gbs_ticks = [i / 2 for i in range(1, throughput_tick_count + 1)]
 
     def y_msg(v):
         frac = v / msg_max if msg_max > 0 else 0
@@ -222,7 +225,7 @@ def gen_combined_chart(data, path):
             top_mid,
             small_sizes,
             small_xs,
-            list(range(400_000, int(msg_max), 400_000)) + [msg_max],
+            msg_ticks,
             _fmt_y_rate,
             top_left - 8,
         ),
@@ -231,7 +234,7 @@ def gen_combined_chart(data, path):
             top_right,
             large_sizes,
             large_xs,
-            [i / 2 for i in range(1, int(gbs_max * 2) + 1)],
+            gbs_ticks,
             lambda v: f"{v:g} GB/s",
             top_right + 8,
         ),
@@ -272,6 +275,7 @@ def gen_combined_chart(data, path):
 
     tp_series = [
         ("OMQ.Net", C_OMQ, sync_omq_tp),
+        ("OMQ.Net ReceiveInto", C_OMQ_INTO, sync_omq_into_tp),
         ("OMQ.Net async", C_OMQ_ASYNC, async_omq_tp),
         ("NetMQ", C_NETMQ, sync_pz_tp),
         ("NetMQ async", C_NETMQ_ASYNC, async_pz_tp),
@@ -322,6 +326,7 @@ def gen_combined_chart(data, path):
     )
 
     sync_omq_lat = data["sync_omq_lat"]
+    sync_omq_into_lat = data["sync_omq_into_lat"]
     sync_pz_lat = data["sync_pz_lat"]
     async_omq_lat = data["async_omq_lat"]
     async_pz_lat = data["async_pz_lat"]
@@ -355,6 +360,7 @@ def gen_combined_chart(data, path):
 
     lat_series = [
         ("OMQ.Net", C_OMQ, sync_omq_lat),
+        ("OMQ.Net ReceiveInto", C_OMQ_INTO, sync_omq_into_lat),
         ("OMQ.Net async", C_OMQ_ASYNC, async_omq_lat),
         ("NetMQ", C_NETMQ, sync_pz_lat),
         ("NetMQ async", C_NETMQ_ASYNC, async_pz_lat),
@@ -384,6 +390,7 @@ def gen_combined_chart(data, path):
     leg_y = t2_bot + 40
     legend_items = [
         ("OMQ.Net", C_OMQ),
+        ("OMQ.Net ReceiveInto", C_OMQ_INTO),
         ("OMQ.Net async", C_OMQ_ASYNC),
         ("NetMQ", C_NETMQ),
         ("NetMQ async", C_NETMQ_ASYNC),
@@ -433,10 +440,14 @@ def chart_data_from_jsonl():
 
     return {
         "sync_omq_tp": [tp("omq", s) for s in SIZES],
+        "sync_omq_into_tp": [tp("omq-into", s) for s in SIZES],
         "sync_pz_tp": [tp("netmq", s) for s in SIZES],
         "async_omq_tp": [tp("omq-async", s) for s in SIZES],
         "async_pz_tp": [tp("netmq-async", s) for s in SIZES],
         "sync_omq_lat": [lat("omq", s) for s in latency_sizes_from(SIZES)],
+        "sync_omq_into_lat": [
+            lat("omq-into", s) for s in latency_sizes_from(SIZES)
+        ],
         "sync_pz_lat": [lat("netmq", s) for s in latency_sizes_from(SIZES)],
         "async_omq_lat": [lat("omq-async", s) for s in latency_sizes_from(SIZES)],
         "async_pz_lat": [lat("netmq-async", s) for s in latency_sizes_from(SIZES)],
@@ -444,18 +455,18 @@ def chart_data_from_jsonl():
 
 
 def _peer(impl, role, pattern, endpoint, size, duration, warmup):
-    project = os.path.join(
-        os.path.dirname(__file__), "..", "bench", "Omq.Net.Bench.csproj"
-    )
-    return [
-        "dotnet",
-        "run",
-        "--no-build",
-        "--configuration",
+    assembly = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "bench",
+        "bin",
         "Release",
-        "--project",
-        project,
-        "--",
+        "net10.0",
+        "Omq.Net.Bench.dll",
+    )
+    command = [
+        "dotnet",
+        assembly,
         pattern,
         impl,
         role,
@@ -464,14 +475,23 @@ def _peer(impl, role, pattern, endpoint, size, duration, warmup):
         str(duration),
         str(warmup),
     ]
+    if os.environ.get("OMQ_BENCH_TASKSET"):
+        cpus = "0-2" if role in ("pull", "rep") else "3-5"
+        return ["taskset", "-c", cpus, *command]
+    return command
 
 
-def _read_ready(stream, timeout=30):
+def _read_ready(process, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        line = stream.readline()
+        line = process.stdout.readline()
         if line:
             return line.strip()
+        if process.poll() is not None:
+            error = process.stderr.read().strip()
+            raise RuntimeError(
+                f"benchmark peer exited with {process.returncode}: {error}"
+            )
         time.sleep(0.01)
     raise RuntimeError("benchmark peer not ready")
 
@@ -497,7 +517,7 @@ def run_cell(impl, pattern, size, duration, warmup):
     )
     client = None
     try:
-        _read_ready(server.stdout)
+        _read_ready(server)
         client = subprocess.Popen(
             _peer(impl, client_role, pattern, endpoint, size, duration, warmup),
             cwd=REPO_ROOT,
@@ -506,14 +526,20 @@ def run_cell(impl, pattern, size, duration, warmup):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        _read_ready(client.stdout)
-        source = client.stdout if pattern == "reqrep" else server.stdout
+        _read_ready(client)
+        source_process = client if pattern == "reqrep" else server
+        source = source_process.stdout
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             line = source.readline()
             if line.startswith("RESULT "):
                 return json.loads(line[7:])
             if not line:
+                if source_process.poll() is not None:
+                    error = source_process.stderr.read().strip()
+                    raise RuntimeError(
+                        f"benchmark peer exited with {source_process.returncode}: {error}"
+                    )
                 time.sleep(0.01)
         raise RuntimeError("benchmark result timeout")
     finally:
@@ -543,7 +569,9 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
-        "--impl", action="append", choices=["omq", "omq-async", "netmq", "netmq-async"]
+        "--impl",
+        action="append",
+        choices=["omq", "omq-into", "omq-async", "netmq", "netmq-async"],
     )
     args = parser.parse_args()
     SIZES = (
@@ -571,11 +599,18 @@ def main():
     rounds = 1 if args.quick else args.rounds
     duration = 0.5 if args.quick else TARGET_RUNTIME_S
     warmup = 0.1 if args.quick else THROUGHPUT_WARMUP_S
-    for impl in args.impl or ["omq", "omq-async", "netmq", "netmq-async"]:
-        for pattern in ("pushpull", "reqrep"):
-            for size in SIZES:
-                if pattern == "reqrep" and size > LATENCY_MAX_SIZE:
-                    continue
+    impls = args.impl or [
+        "omq",
+        "omq-into",
+        "omq-async",
+        "netmq",
+        "netmq-async",
+    ]
+    for pattern in ("pushpull", "reqrep"):
+        for size in SIZES:
+            if pattern == "reqrep" and size > LATENCY_MAX_SIZE:
+                continue
+            for impl in impls:
                 d, w = (
                     (0.5, 0.1)
                     if args.quick and pattern == "reqrep"

@@ -327,6 +327,8 @@ class _NativeSocket(Protocol):
 
     def set_curve_auth(self, auth: Any) -> Any: ...
 
+    def set_plain_auth(self, auth: Any) -> Any: ...
+
     def close(self, linger: int | None = None) -> None: ...
 
 
@@ -471,6 +473,14 @@ class _BaseSocket(_SocketOptionsBase):
             raise error.from_native(e) from None
         except AttributeError:
             raise ZMQNotImplementedError("curve feature not compiled")
+
+    def set_plain_auth(self, auth: Any) -> Any:
+        try:
+            return self._sock.set_plain_auth(auth)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
+        except AttributeError:
+            raise ZMQNotImplementedError("plain feature not compiled")
 
     def set_hwm(self, value: int) -> None:
         self.setsockopt(SNDHWM, value)

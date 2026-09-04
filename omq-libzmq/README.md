@@ -12,10 +12,22 @@ in other languages) to link against omq instead of libzmq.
   pipes), `ws://`, `wss://`
 - **Socket Types:** Standard ZMQ types except DGRAM (PUSH/PULL, PUB/SUB,
   REQ/REP, DEALER/ROUTER, etc.)
-- **Security:** PLAIN, CURVE
+- **Security:** NULL, PLAIN, and CURVE policy through standard ZAP; CURVE
+  also supports OMQ's native inline authenticator
 - **Compression:** LZ4 and Zstd over TCP
 - **Cross-Platform:** Linux, macOS, Windows, BSD
 - **API Compatibility:** Drop-in ABI target with documented compatibility gaps
+
+`ZMQ_PLAIN_SERVER` selects the PLAIN mechanism and delegates admission to a
+context-local ZAP REP or ROUTER handler at `inproc://zeromq.zap.01`; without
+one, authentication fails closed. A non-empty `ZMQ_ZAP_DOMAIN` enables ZAP
+filtering for NULL and CURVE. Status 300 closes silently; 400 and 500 send the
+matching mechanism ERROR. Successful user IDs and metadata are exposed by
+`zmq_msg_gets()` on received messages.
+
+`omq_socket_set_plain_server_credentials()` is the OMQ-specific fixed
+credential policy used by high-level bindings. `ZMQ_PLAIN_USERNAME` and
+`ZMQ_PLAIN_PASSWORD` remain client options.
 
 32-bit Linux support covers `i686-unknown-linux-gnu` and
 `armv7-unknown-linux-gnueabihf`. `zmq_msg_t` is 64 bytes and pointer-aligned,

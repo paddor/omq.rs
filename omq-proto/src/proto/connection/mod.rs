@@ -83,6 +83,8 @@ pub struct ConnectionConfig {
     pub max_message_size: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
+    /// Remote address exposed to security authenticators, when known.
+    pub peer_address: Option<String>,
     /// WebSocket role. `None` = standard ZMTP byte-stream framing.
     /// `Some(Client)` or `Some(Server)` = ZWS/2.0 framing with WS masking.
     #[cfg(feature = "ws")]
@@ -98,6 +100,7 @@ impl ConnectionConfig {
             identity: bytes::Bytes::new(),
             max_message_size: None,
             mechanism: MechanismSetup::Null,
+            peer_address: None,
             #[cfg(feature = "ws")]
             ws_role: None,
         }
@@ -118,6 +121,12 @@ impl ConnectionConfig {
     #[must_use]
     pub fn mechanism(mut self, m: MechanismSetup) -> Self {
         self.mechanism = m;
+        self
+    }
+
+    #[must_use]
+    pub fn peer_address(mut self, address: impl Into<String>) -> Self {
+        self.peer_address = Some(address.into());
         self
     }
 
@@ -244,9 +253,9 @@ pub struct Connection {
 
 impl Connection {
     /// Create a new connection and queue our greeting into the out buffer.
-    /// Supports the NULL and CURVE mechanisms.
+    /// Supports every configured security mechanism.
     pub fn new(config: ConnectionConfig) -> Self {
-        let mechanism = config.mechanism.clone().build();
+        let mechanism = config.mechanism.clone().build(config.peer_address.clone());
         #[cfg(feature = "ws")]
         let ws_role = config.ws_role;
         let mut conn = Self {
@@ -295,20 +304,13 @@ impl Connection {
             our_props = our_props.with_identity(self.config.identity.clone());
         }
         let mut cmds = Vec::new();
-        if self
-            .mechanism
-            .start(
-                &mut cmds,
-                our_props,
-                &self.our_greeting,
-                &self.peer_greeting,
-            )
-            .is_err()
-        {
-            self.state = State::Closed;
-            return;
-        }
-        if self.write_outbound_commands(&cmds).is_err() {
+        let result = self.mechanism.start(
+            &mut cmds,
+            our_props,
+            &self.our_greeting,
+            &self.peer_greeting,
+        );
+        if self.write_outbound_commands(&cmds).is_err() || result.is_err() {
             self.state = State::Closed;
         }
     }

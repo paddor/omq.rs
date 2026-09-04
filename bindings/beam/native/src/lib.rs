@@ -84,6 +84,7 @@ struct NativeSocket {
     rcvtimeo: Mutex<Option<Duration>>,
     sndtimeo: Mutex<Option<Duration>>,
     plain_server: AtomicBool,
+    plain_server_credentials: Mutex<Option<(String, String)>>,
     plain_username: Mutex<Option<String>>,
     plain_password: Mutex<Option<String>>,
     curve_server: AtomicBool,
@@ -143,7 +144,13 @@ impl NativeSocket {
         #[cfg(feature = "plain")]
         {
             if self.plain_server.load(Ordering::Acquire) {
-                options = options.plain_server(|_| true);
+                let credentials = self.plain_server_credentials.lock().unwrap().clone();
+                let Some((username, password)) = credentials else {
+                    return Err(OmqError::Config(
+                        "PLAIN server requires explicit credentials".into(),
+                    ));
+                };
+                options = options.plain_server_credentials([(username, password)]);
             } else {
                 let username = self.plain_username.lock().unwrap().clone();
                 let password = self.plain_password.lock().unwrap().clone();
@@ -717,6 +724,7 @@ fn socket_new<'a>(env: Env<'a>, context: ResourceArc<NativeContext>, socket_type
             rcvtimeo: Mutex::new(None),
             sndtimeo: Mutex::new(None),
             plain_server: AtomicBool::new(false),
+            plain_server_credentials: Mutex::new(None),
             plain_username: Mutex::new(None),
             plain_password: Mutex::new(None),
             curve_server: AtomicBool::new(false),
@@ -1179,6 +1187,35 @@ fn wait_subscribed<'a>(
 }
 
 #[rustler::nif]
+fn plain_server_credentials<'a>(
+    env: Env<'a>,
+    socket: ResourceArc<NativeSocket>,
+    username: Binary<'a>,
+    password: Binary<'a>,
+) -> Term<'a> {
+    if socket.socket.read().unwrap().is_some() {
+        return err_term(
+            env,
+            atoms::badarg(),
+            "PLAIN authentication must be configured before bind/connect/send/recv",
+        );
+    }
+    if username.len() > 255 || password.len() > 255 {
+        return err_term(env, atoms::badarg(), "PLAIN credentials exceed 255 bytes");
+    }
+    let Ok(username) = str::from_utf8(username.as_slice()) else {
+        return err_term(env, atoms::badarg(), "PLAIN username must be UTF-8");
+    };
+    let Ok(password) = str::from_utf8(password.as_slice()) else {
+        return err_term(env, atoms::badarg(), "PLAIN password must be UTF-8");
+    };
+    *socket.plain_server_credentials.lock().unwrap() =
+        Some((username.to_owned(), password.to_owned()));
+    socket.plain_server.store(true, Ordering::Release);
+    ok_unit(env)
+}
+
+#[rustler::nif]
 fn setsockopt<'a>(
     env: Env<'a>,
     socket: ResourceArc<NativeSocket>,
@@ -1311,7 +1348,13 @@ fn setsockopt<'a>(
                 Some(int_value as usize)
             };
         }
-        44 => socket.plain_server.store(int_value != 0, Ordering::Release),
+        44 => {
+            let enabled = int_value != 0;
+            socket.plain_server.store(enabled, Ordering::Release);
+            if !enabled {
+                *socket.plain_server_credentials.lock().unwrap() = None;
+            }
+        }
         45 => {
             *socket.plain_username.lock().unwrap() =
                 Some(String::from_utf8_lossy(bin_value.as_slice()).into_owned());

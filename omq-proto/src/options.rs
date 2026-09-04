@@ -441,18 +441,27 @@ impl Options {
             ref password,
         } = self.mechanism
         {
-            if username.len() > 255 {
+            if username.len() > 255 || !username.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(crate::error::Error::Config(format!(
-                    "PLAIN username length {} exceeds 255-byte limit",
-                    username.len()
+                    "PLAIN username must contain at most 255 ASCII VCHAR bytes, got {} bytes",
+                    username.len(),
                 )));
             }
-            if password.len() > 255 {
+            if password.len() > 255 || !password.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(crate::error::Error::Config(format!(
-                    "PLAIN password length {} exceeds 255-byte limit",
-                    password.len()
+                    "PLAIN password must contain at most 255 ASCII VCHAR bytes, got {} bytes",
+                    password.len(),
                 )));
             }
+        }
+        #[cfg(feature = "curve")]
+        if let MechanismSetup::CurveServer { our_keypair, .. }
+        | MechanismSetup::CurveClient { our_keypair, .. } = &self.mechanism
+            && our_keypair.secret.derive_public() != our_keypair.public
+        {
+            return Err(crate::error::Error::Config(
+                "CURVE public key does not match secret key".into(),
+            ));
         }
         #[cfg(feature = "curve")]
         if let MechanismSetup::CurveServer { ref options, .. } = self.mechanism
@@ -734,6 +743,23 @@ impl Options {
         self
     }
 
+    /// Configure this socket as a PLAIN server accepting an allowlist of
+    /// exact username + password pairs. No encryption is applied; use on
+    /// trusted networks only.
+    #[cfg(feature = "plain")]
+    #[must_use]
+    pub fn plain_server_credentials<I, U, P>(mut self, credentials: I) -> Self
+    where
+        I: IntoIterator<Item = (U, P)>,
+        U: Into<String>,
+        P: Into<String>,
+    {
+        self.mechanism = MechanismSetup::PlainServer {
+            authenticator: Authenticator::plain_credentials(credentials),
+        };
+        self
+    }
+
     /// Configure this socket as a PLAIN client with the given
     /// credentials. The server's authenticator decides admission.
     #[cfg(feature = "plain")]
@@ -941,6 +967,64 @@ impl KeepAlive {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "plain")]
+    #[test]
+    fn fixed_plain_credentials_match_exactly() {
+        let options =
+            Options::default().plain_server_credentials([("alice", "secret"), ("bob", "hunter2")]);
+        let MechanismSetup::PlainServer { authenticator } = options.mechanism else {
+            panic!("expected PLAIN server");
+        };
+        let peer = |username: &str, password: &str| MechanismPeerInfo {
+            mechanism: crate::proto::MechanismName::PLAIN,
+            public_key: [0; 32],
+            identity: None,
+            peer_address: None,
+            username: Some(username.to_owned()),
+            password: Some(password.to_owned()),
+        };
+
+        assert_eq!(
+            authenticator.authenticate(&peer("alice", "secret")).status,
+            crate::AuthenticationStatus::Success
+        );
+        assert_eq!(
+            authenticator.authenticate(&peer("bob", "hunter2")).status,
+            crate::AuthenticationStatus::Success
+        );
+        assert_eq!(
+            authenticator
+                .authenticate(&peer("mallory", "secret"))
+                .status,
+            crate::AuthenticationStatus::Denied
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn plain_client_credentials_require_rfc_24_vchar() {
+        assert!(Options::default().plain_client("", "").validate().is_ok());
+        assert!(
+            Options::default()
+                .plain_client("alice", "!secret~")
+                .validate()
+                .is_ok()
+        );
+        for (username, password) in [
+            ("has space", "secret"),
+            ("alice", "line\nbreak"),
+            ("alice", "\u{e9}"),
+            (&"x".repeat(256), "secret"),
+        ] {
+            assert!(
+                Options::default()
+                    .plain_client(username, password)
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
+
     #[test]
     fn defaults_are_per_socket_hwm_block() {
         let o = Options::default();
@@ -1013,6 +1097,36 @@ mod tests {
         let mut o = Options::default().curve_client(CurveKeypair::generate(), server_kp.public);
         o.handshake_timeout = None;
         assert!(o.validate().is_err());
+    }
+
+    #[cfg(feature = "curve")]
+    #[test]
+    fn rejects_mismatched_curve_keypairs() {
+        let valid = CurveKeypair::generate();
+        let mut bad_public = *valid.public.as_bytes();
+        bad_public[0] ^= 1;
+        let mismatched = CurveKeypair {
+            public: CurvePublicKey::from_bytes(bad_public),
+            secret: valid.secret,
+        };
+
+        let server_error = Options::default()
+            .curve_server(mismatched.clone())
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            server_error.to_string(),
+            "invalid configuration: CURVE public key does not match secret key"
+        );
+
+        let client_error = Options::default()
+            .curve_client(mismatched, CurveKeypair::generate().public)
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            client_error.to_string(),
+            "invalid configuration: CURVE public key does not match secret key"
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub(crate) struct OmqContext {
     /// Pending inproc connect requests waiting for a bind.
     pub(crate) inproc_waiting:
         Mutex<FxHashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
+    pub(crate) zap: Arc<crate::zap::ZapService>,
     owns_io_context: bool,
 }
 
@@ -74,6 +75,7 @@ impl OmqContext {
             zero_copy_recv: AtomicBool::new(true),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
+            zap: Arc::new(crate::zap::ZapService::default()),
             owns_io_context: true,
         })
     }
@@ -94,6 +96,7 @@ impl OmqContext {
             zero_copy_recv: AtomicBool::new(true),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
+            zap: Arc::new(crate::zap::ZapService::default()),
             owns_io_context: false,
         });
         out.ctx
@@ -170,6 +173,7 @@ impl OmqContext {
 
     pub(crate) fn shutdown(&self) {
         self.terminated.store(true, Ordering::Release);
+        self.zap.shutdown();
         let notifies = self
             .sockets
             .lock()

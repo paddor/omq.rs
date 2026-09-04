@@ -21,7 +21,7 @@ use bytes::Bytes;
 
 use crate::engine::signal::StateSignal;
 use crate::engine::transmit_slot::TryFrameResult;
-use crate::engine::{PeerDriverCommand, PeerDriverHandle, SendPipeError, SendPipeProducer};
+use crate::engine::{PeerDriverData, PeerDriverHandle, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use crate::routing::{RepEnvelope, rep_reply_with_envelope};
 use omq_proto::error::{Error, Result, TrySendError};
@@ -40,7 +40,7 @@ enum PeerTarget {
     Pipe(SendPipeProducer),
     RepInproc(SendPipeProducer),
     Direct(PeerOutbound),
-    Inbox(tokio::sync::mpsc::Sender<PeerDriverCommand>),
+    Inbox(tokio::sync::mpsc::Sender<PeerDriverData>),
 }
 
 impl PeerTarget {
@@ -53,11 +53,11 @@ impl PeerTarget {
                 TryFrameResult::Dead => Err(SendPipeError::Closed(msg)),
                 TryFrameResult::Ineligible => unreachable!("direct target handles ineligible"),
             },
-            Self::Inbox(tx) => match tx.try_send(PeerDriverCommand::SendMessage(msg)) {
+            Self::Inbox(tx) => match tx.try_send(PeerDriverData::SendMessage(msg)) {
                 Ok(()) => Ok(()),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(
-                    PeerDriverCommand::SendMessage(m),
-                )) => Err(SendPipeError::Full(m)),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(PeerDriverData::SendMessage(
+                    m,
+                ))) => Err(SendPipeError::Full(m)),
                 Err(_) => Err(SendPipeError::Closed(Message::default())),
             },
         }
@@ -434,10 +434,10 @@ impl IdentitySend {
                     PeerTarget::Pipe(pipe)
                 }
             } else {
-                PeerTarget::Inbox(handle.inbox.clone())
+                PeerTarget::Inbox(handle.data_inbox.clone())
             }
         } else {
-            PeerTarget::Inbox(handle.inbox.clone())
+            PeerTarget::Inbox(handle.data_inbox.clone())
         };
 
         let mut g = self.inner.lock().expect("identity inner poisoned");
@@ -547,6 +547,7 @@ mod tests {
         let (pipe_tx, _pipe_rx) = send_pipe(1);
         let handle = PeerDriverHandle {
             inbox: tokio::sync::mpsc::channel(1).0,
+            data_inbox: tokio::sync::mpsc::channel(1).0,
             cancel: tokio_util::sync::CancellationToken::new(),
             transmit_slot: None,
             direct_tcp_writer: None,
@@ -618,6 +619,7 @@ mod tests {
     fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
         PeerDriverHandle {
             inbox: tokio::sync::mpsc::channel(1).0,
+            data_inbox: tokio::sync::mpsc::channel(1).0,
             cancel: tokio_util::sync::CancellationToken::new(),
             transmit_slot: None,
             direct_tcp_writer: None,

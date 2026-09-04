@@ -281,6 +281,19 @@ impl Socket {
         }
     }
 
+    #[doc(hidden)]
+    pub fn mark_rep_request_received_for_external_recv(&self) {
+        if self.inner.socket_type == SocketType::Rep {
+            let request = self
+                .inner
+                .rep_pending
+                .lock()
+                .expect("rep pending")
+                .pop_front();
+            *self.inner.rep_current.lock().expect("rep current") = request;
+        }
+    }
+
     /// Bind to an endpoint. Returns the resolved endpoint once the
     /// listener is active. For wildcard binds (`tcp://...:0`) the
     /// returned endpoint contains the actual port.

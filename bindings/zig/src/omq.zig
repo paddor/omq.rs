@@ -1000,6 +1000,21 @@ pub const Socket = struct {
         try self.setInt(PLAIN_SERVER, @intFromBool(enabled));
     }
 
+    /// Configure a PLAIN server accepting one fixed credential pair.
+    pub fn setPlainServerCredentials(
+        self: *Socket,
+        username: []const u8,
+        password: []const u8,
+    ) Error!void {
+        try check(c.omq_socket_set_plain_server_credentials(
+            try self.ptr(),
+            username.ptr,
+            username.len,
+            password.ptr,
+            password.len,
+        ));
+    }
+
     pub fn plainServer(self: *Socket) Error!bool {
         return try self.getInt(PLAIN_SERVER) != 0;
     }

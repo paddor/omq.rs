@@ -509,6 +509,11 @@ ZMQ_EXPORT void omq_async_task_cancel (omq_async_task_t *task_);
 ZMQ_EXPORT void omq_async_task_free (omq_async_task_t *task_);
 /* Caller guarantees that socket operations are externally serialized. */
 ZMQ_EXPORT int omq_socket_allow_thread_migration (void *socket_);
+/* Fixed PLAIN policy for high-level bindings. Standard PLAIN username and
+   password socket options remain client-only; PLAIN_SERVER uses ZAP. */
+ZMQ_EXPORT int omq_socket_set_plain_server_credentials (
+    void *socket_, const uint8_t *username_, size_t username_size_,
+    const uint8_t *password_, size_t password_size_);
 
 /*  Socket API --------------------------------------------------------------- */
 ZMQ_EXPORT void *zmq_socket     (void *context_, int type_);

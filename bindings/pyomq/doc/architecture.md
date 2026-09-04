@@ -169,16 +169,19 @@ wakes the event loop, `callback` fires, and `_try_recv()` is invoked.
 wakeup model (`notify/windows.rs`).
 
 **State machine:**
-- `mode`: atomic u32 field stores wakeup configuration (ASYNC, SYNC, or NONE).
+- `mode`: stores wakeup configuration (ASYNC, SYNC, or NONE).
   - `WAKEUP_MODE_ASYNC` (1): invoke Python callback when signal() is called.
-  - `WAKEUP_MODE_SYNC` (2): used by sync code for `wait_timeout()`.
-- `pending`: atomic bool latches the wakeup signal (set by `signal()`,
-  cleared by `wait_timeout()`).
-- `draining`: atomic bool tracks if Python callback is currently executing.
-  Additional wakeups during this window are coalesced to prevent callback
-  re-entrancy.
-- `callback_state`: atomic u8 state machine (IDLE, SCHEDULED, PENDING)
-  to prevent duplicate callbacks while draining is in progress.
+  - `WAKEUP_MODE_SYNC` (2): set the shadow socket's Python wait event.
+- `pending`: latches the wakeup signal (set by `signal()`,
+  cleared by `wait_timeout()` or async drain completion).
+- `callback_state`: `Idle`, `Scheduled`, or `ScheduledPending`. It prevents
+  duplicate callbacks and preserves one follow-up wake while a drain is queued
+  or running.
+
+All fields are protected by one mutex. A callback dispatch is claimed while
+holding that mutex. The claim remains valid if Python clears the wake mode
+before the producer acquires the GIL. Callback invocation failures release the
+claim so later readiness changes can retry.
 
 **Callback lifecycle:**
 1. Python calls `set_wakeup_hooks(async_callback, ...)` to register
@@ -189,11 +192,16 @@ wakeup model (`notify/windows.rs`).
    directly (via PyO3).
 5. Python callback drains the waiter queue.
 6. Python calls `_mark_send_drain_complete()` / `_mark_recv_drain_complete()`
-   to clear the draining flag and re-trigger if more work arrived.
+   to finish the callback claim and re-trigger if more work arrived.
+
+An asyncio socket binds to the first event loop that waits on it. Later waits
+from another loop fail instead of routing readiness callbacks to the wrong
+loop. A canceled future's done callback removes its waiter and clears the wake
+mode when the queue becomes empty.
 
 **Wakeup modes:**
 - `WAKEUP_MODE_ASYNC`: callback-based. Used by async code.
-- `WAKEUP_MODE_SYNC`: event handle-based. Used by sync code's `wait_timeout()`.
+- `WAKEUP_MODE_SYNC`: Python event-based. Used by sync shadow sockets.
 - `WAKEUP_MODE_NONE`: inactive. No wakeups until mode is re-enabled.
 
 The recv and send signals have independent modes: async code sets
@@ -303,8 +311,8 @@ pattern:
   `loop.call_soon_threadsafe(self._drain_send_waiters)`.
 - Asyncio loop invokes `_drain_send_waiters()` in main thread context:
   - Pops waiters and invokes each, same as Unix.
-- After draining, calls `_mark_send_drain_complete()` which clears the
-  Rust draining flag and re-triggers if follow-up work arrived.
+- After draining, calls `_mark_send_drain_complete()` which finishes the
+  callback claim and re-triggers if follow-up work arrived.
 
 ### Async recv with waiter queue
 

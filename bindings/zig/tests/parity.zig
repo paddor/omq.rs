@@ -64,7 +64,7 @@ fn expectRecv(socket: *omq.Socket, expected: []const u8) !void {
 }
 
 fn configurePlain(server: *omq.Socket, client: *omq.Socket) !void {
-    try server.setPlainServer(true);
+    try server.setPlainServerCredentials("alice", "secret");
     try client.setPlainClient(allocator, "alice", "secret");
 }
 
@@ -740,6 +740,27 @@ test "curve bad server key rejects" {
 
     _ = try push.send("should not arrive", 0);
     try testing.expectError(error.Again, pull.recvAlloc(allocator, 0));
+}
+
+test "curve mismatched keypair returns invalid" {
+    if (!try omq.has(allocator, "curve")) return;
+
+    const first = try omq.curveKeypair();
+    const second = try omq.curveKeypair();
+
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+
+    try push.setCurveClient(
+        allocator,
+        first.publicSlice(),
+        second.secretSlice(),
+        first.publicSlice(),
+    );
+    try testing.expectError(error.Invalid, push.connect(allocator, "tcp://127.0.0.1:1"));
 }
 
 test "curve option helpers round trip" {

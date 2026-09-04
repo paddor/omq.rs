@@ -906,12 +906,29 @@ curve_key_helpers_test() ->
         ?assertMatch({error, badarg, _}, omq:curve_public(<<"not-valid-z85-key">>))
     end).
 
+curve_mismatched_keypair_returns_config_test() ->
+    with_feature(curve, fun() ->
+        {ok, FirstPublic, _} = omq:curve_keypair(),
+        {ok, _, SecondSecret} = omq:curve_keypair(),
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        ok = omq:setsockopt(Pull, curve_server, true),
+        ok = omq:setsockopt(Pull, curve_publickey, FirstPublic),
+        ok = omq:setsockopt(Pull, curve_secretkey, SecondSecret),
+        ?assertMatch(
+            {error, config, _},
+            omq:bind(Pull, <<"tcp://127.0.0.1:0">>)
+        ),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
 plain_push_pull_tcp_test() ->
     with_feature(plain, fun() ->
         {ok, Ctx} = omq:context(),
         {ok, Pull} = omq:socket(Ctx, pull),
         {ok, Push} = omq:socket(Ctx, push),
-        ok = omq:setsockopt(Pull, plain_server, true),
+        ok = omq:plain_server(Pull, <<"alice">>, <<"secret">>),
         ok = omq:setsockopt(Push, plain_username, <<"alice">>),
         ok = omq:setsockopt(Push, plain_password, <<"secret">>),
         {ok, Endpoint} = omq:bind(Pull, <<"tcp://127.0.0.1:0">>),
@@ -919,6 +936,19 @@ plain_push_pull_tcp_test() ->
         ok = omq:send(Push, <<"hello over plain">>),
         ?assertEqual({ok, <<"hello over plain">>}, omq:recv(Pull, 5000)),
         ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end).
+
+plain_server_requires_policy_test() ->
+    with_feature(plain, fun() ->
+        {ok, Ctx} = omq:context(),
+        {ok, Pull} = omq:socket(Ctx, pull),
+        ok = omq:setsockopt(Pull, plain_server, true),
+        ?assertMatch(
+            {error, config, _},
+            omq:bind(Pull, <<"tcp://127.0.0.1:0">>)
+        ),
         ok = omq:close(Pull),
         ok = omq:term(Ctx)
     end).
@@ -1333,7 +1363,7 @@ set_curve_server_client(Server, Client) ->
     ok = omq:setsockopt(Client, curve_secretkey, ClientSecret).
 
 set_plain_server_client(Server, Client) ->
-    ok = omq:setsockopt(Server, plain_server, true),
+    ok = omq:plain_server(Server, <<"alice">>, <<"secret">>),
     ok = omq:setsockopt(Client, plain_username, <<"alice">>),
     ok = omq:setsockopt(Client, plain_password, <<"secret">>).
 

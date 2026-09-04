@@ -55,6 +55,10 @@ zig build test
 - `omq.proxy()` and `omq.proxySteerable()` wrap native proxy helpers.
 - `omq.curveKeypair()` and `omq.curvePublic()` expose CURVE key helpers.
 
+Use `Socket.setPlainServerCredentials` for a fixed PLAIN server policy.
+`Socket.setPlainServer(true)` preserves standard libzmq semantics and therefore
+requires a ZAP handler; without one, authentication fails closed.
+
 Example:
 
 ```zig

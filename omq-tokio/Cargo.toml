@@ -276,6 +276,10 @@ name = "omq_soak_cancel_safety"
 path = "tests/omq_soak_cancel_safety.rs"
 
 [[test]]
+name = "omq_soak_driver_control"
+path = "tests/omq_soak_driver_control.rs"
+
+[[test]]
 name = "omq_soak_compression_lz4"
 path = "tests/omq_soak_compression_lz4.rs"
 

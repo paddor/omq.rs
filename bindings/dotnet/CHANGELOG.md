@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve SERVER routing IDs in asynchronous message sends.
+
+### Changed
+
+- Make `ReceiveInto` write directly into the caller's span and return the
+  number of bytes copied, removing temporary payload allocations and copies.
+
 ## [0.1.3]
 
 ### Fixed

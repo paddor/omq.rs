@@ -64,6 +64,8 @@ typedef struct {
   size_t public_key_len;
   const uint8_t *identity_data;
   size_t identity_len;
+  const uint8_t *peer_address_data;
+  size_t peer_address_len;
   const uint8_t *username_data;
   size_t username_len;
   const uint8_t *password_data;

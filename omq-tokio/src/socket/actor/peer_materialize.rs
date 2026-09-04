@@ -47,11 +47,12 @@ pub(super) fn spawn_byte_stream_connection(
     #[cfg(feature = "ws")]
     let ws_masked = is_ws && !is_server;
 
-    let Some(codec) = build_codec(socket, &stream, is_server, leftover) else {
+    let Some(codec) = build_codec(socket, &stream, &peer_ident, is_server, leftover) else {
         return;
     };
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
@@ -83,6 +84,7 @@ pub(super) fn spawn_byte_stream_connection(
         child_cancel.clone(),
         driver_cfg,
     )
+    .with_data_inbox(data_inbox_rx)
     .with_receive_profile(
         crate::engine::driver::ReceiveProfile::from_workload_for_socket(
             workload_profile,
@@ -130,6 +132,7 @@ pub(super) fn spawn_byte_stream_connection(
             ident: peer_ident,
             handle: PeerDriverHandle {
                 inbox: inbox_tx,
+                data_inbox: data_inbox_tx,
                 cancel: child_cancel,
                 transmit_slot: transmit_slot.clone(),
                 direct_tcp_writer,
@@ -173,6 +176,7 @@ pub(super) fn spawn_inproc_peer(
     }
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
     let child_cancel = socket.cancel.child_token();
     let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
     let peer_props = omq_proto::proto::command::PeerProperties::default()
@@ -209,6 +213,7 @@ pub(super) fn spawn_inproc_peer(
             ident: peer_ident,
             handle: PeerDriverHandle {
                 inbox: inbox_tx,
+                data_inbox: data_inbox_tx,
                 cancel: child_cancel.clone(),
                 transmit_slot: None,
                 direct_tcp_writer: None,
@@ -243,6 +248,7 @@ pub(super) fn spawn_inproc_peer(
         io_thread,
         inproc_peer_driver(
             inbox_rx,
+            data_inbox_rx,
             in_rx,
             out,
             InprocDriverCtx {
@@ -311,10 +317,11 @@ fn next_peer_id(socket: &mut SocketDriver) -> u64 {
 fn build_codec(
     socket: &SocketDriver,
     stream: &AnyStream,
+    peer_ident: &PeerIdent,
     is_server: bool,
     leftover: bytes::Bytes,
 ) -> Option<ZmtpConnection> {
-    let mut codec = ZmtpConnection::new(connection_config(socket, stream, is_server));
+    let mut codec = ZmtpConnection::new(connection_config(socket, stream, peer_ident, is_server));
     if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
         return None;
     }
@@ -324,6 +331,7 @@ fn build_codec(
 fn connection_config(
     socket: &SocketDriver,
     stream: &AnyStream,
+    peer_ident: &PeerIdent,
     is_server: bool,
 ) -> ConnectionConfig {
     let role = if is_server {
@@ -334,6 +342,14 @@ fn connection_config(
     let mut cfg = ConnectionConfig::new(role, socket.socket_type)
         .identity(socket.options.identity.clone())
         .mechanism(socket.options.mechanism.clone());
+    let peer_address = match peer_ident {
+        PeerIdent::Socket(address) => Some(address.ip().to_string()),
+        PeerIdent::Path(path) => Some(path.clone()),
+        _ => None,
+    };
+    if let Some(address) = peer_address {
+        cfg = cfg.peer_address(address);
+    }
     if let Some(n) = socket.options.max_message_size {
         cfg = cfg.max_message_size(n);
     }
@@ -551,9 +567,13 @@ fn attach_recv_bypass(
         return peer_driver;
     }
 
-    let can_use_yring =
-        can_use_yring_recv_bypass(socket.socket_type, socket.uses_latency_profile());
-    if can_use_yring {
+    let has_authenticated_sink = socket
+        .recv_sink_config
+        .as_ref()
+        .is_some_and(|config| config.authenticated_sink().is_some());
+    let can_use_direct_sink = has_authenticated_sink
+        || can_use_yring_recv_bypass(socket.socket_type, socket.uses_latency_profile());
+    if can_use_direct_sink {
         attach_yring_recv_bypass(socket, peer_driver, peer_id, rep_latency)
     } else if rep_latency {
         peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
@@ -577,6 +597,26 @@ fn attach_yring_recv_bypass(
     peer_id: u64,
     rep_latency: bool,
 ) -> ConnectionDriver<AnyStream> {
+    if let Some(sink) = socket
+        .recv_sink_config
+        .as_ref()
+        .and_then(|config| config.authenticated_sink())
+    {
+        return if rep_latency {
+            peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
+                sink,
+                socket.rep_pending.clone(),
+                peer_id,
+            ))
+        } else if socket.socket_type == SocketType::Server {
+            peer_driver.with_recv_sink(crate::engine::RecvSink::server(
+                sink,
+                server_routing_id(peer_id).expect("SERVER peer ID checked"),
+            ))
+        } else {
+            peer_driver.with_recv_sink(sink)
+        };
+    }
     if let Some(slot) = socket.spsc.conflate_slot.as_ref() {
         return peer_driver.with_recv_sink(crate::engine::RecvSink::Conflate(slot.clone()));
     }

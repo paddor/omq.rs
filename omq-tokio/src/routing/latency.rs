@@ -292,8 +292,10 @@ mod tests {
         let (tcp, _peer) = tcp_pair();
         let direct = crate::socket::dispatch::DirectTcpWriter::new(tcp);
         let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
+        let (data_inbox, _data_rx) = tokio::sync::mpsc::channel(1);
         PeerDriverHandle {
             inbox,
+            data_inbox,
             cancel: CancellationToken::new(),
             transmit_slot: Some(slot),
             direct_tcp_writer: Some(Arc::new(direct)),

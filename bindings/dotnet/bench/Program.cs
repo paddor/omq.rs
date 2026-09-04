@@ -9,7 +9,8 @@ string mode = args[0], impl = args[1], role = args[2], endpoint = args[3];
 int size = int.Parse(args[4]); double seconds = double.Parse(args[5]); double warmup = double.Parse(args[6]);
 byte[] payload = new byte[size]; for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
 
-if (impl == "omq") RunOmq();
+if (impl == "omq") RunOmq(receiveInto: false);
+else if (impl == "omq-into") RunOmq(receiveInto: true);
 else if (impl == "omq-async") RunOmqAsync();
 else if (impl == "netmq") RunNetMq();
 else if (impl == "netmq-async") RunNetMqAsync();
@@ -23,7 +24,7 @@ void Result(long count, double elapsed, double p50 = 0)
 }
 bool Active(Stopwatch watch, double duration) => watch.Elapsed.TotalSeconds < duration;
 
-void RunOmq()
+void RunOmq(bool receiveInto)
 {
     using var context = new Context();
     using var socket = context.CreateSocket(mode == "pushpull" ? (role == "pull" ? SocketType.Pull : SocketType.Push) : (role == "rep" ? SocketType.Rep : SocketType.Req), new Omq.SocketOptions { Linger = 0, ReceiveTimeout = TimeSpan.FromMilliseconds(20), SendTimeout = TimeSpan.FromMilliseconds(1000) });
@@ -32,6 +33,15 @@ void RunOmq()
     if (mode == "pushpull")
     {
         if (role == "push") { while (true) { try { socket.Send(payload); } catch (OmqAgainException) { } } }
+        else if (receiveInto)
+        {
+            var buffer = new byte[size];
+            WaitFirstOmqInto(socket, buffer);
+            DrainOmqInto(socket, buffer, warmup);
+            var watch = Stopwatch.StartNew(); long count = 0;
+            while (Active(watch, seconds)) { try { ReceiveIntoExact(socket, buffer); count++; } catch (OmqAgainException) { } }
+            Result(count, watch.Elapsed.TotalSeconds);
+        }
         else
         {
             WaitFirstOmq(socket);
@@ -43,6 +53,15 @@ void RunOmq()
     }
     else if (role == "req")
     {
+        if (receiveInto)
+        {
+            var buffer = new byte[size];
+            DrainReqOmqInto(socket, buffer, warmup);
+            var intoWatch = Stopwatch.StartNew(); long intoCount = 0; var intoSamples = new List<double>();
+            while (Active(intoWatch, seconds)) { var one = Stopwatch.StartNew(); socket.Send(payload); ReceiveIntoExact(socket, buffer); intoSamples.Add(one.Elapsed.TotalMicroseconds); intoCount++; }
+            intoSamples.Sort(); Result(intoCount, intoWatch.Elapsed.TotalSeconds, intoSamples.Count == 0 ? 0 : intoSamples[intoSamples.Count / 2]);
+            return;
+        }
         DrainReqOmq(socket, warmup);
         var watch = Stopwatch.StartNew(); long count = 0; var samples = new List<double>();
         while (Active(watch, seconds)) { var one = Stopwatch.StartNew(); socket.Send(payload); socket.Receive(); samples.Add(one.Elapsed.TotalMicroseconds); count++; }
@@ -50,12 +69,44 @@ void RunOmq()
     }
     else
     {
+        if (receiveInto)
+        {
+            var buffer = new byte[size];
+            WaitFirstOmqInto(socket, buffer); socket.Send(payload);
+            DrainRepOmqInto(socket, buffer, warmup);
+            var intoWatch = Stopwatch.StartNew(); long intoCount = 0;
+            while (Active(intoWatch, seconds)) { try { ReceiveIntoExact(socket, buffer); socket.Send(payload); intoCount++; } catch (OmqAgainException) { } }
+            Result(intoCount, intoWatch.Elapsed.TotalSeconds);
+            return;
+        }
         WaitFirstOmq(socket); socket.Send(payload);
         DrainRepOmq(socket, warmup);
         var watch = Stopwatch.StartNew(); long count = 0;
         while (Active(watch, seconds)) { try { socket.Receive(); socket.Send(payload); count++; } catch (OmqAgainException) { } }
         Result(count, watch.Elapsed.TotalSeconds);
     }
+}
+
+void ReceiveIntoExact(Omq.Socket socket, byte[] buffer)
+{
+    int received = socket.ReceiveInto(buffer);
+    if (received != buffer.Length) throw new InvalidOperationException($"expected {buffer.Length} bytes, got {received}");
+}
+void DrainOmqInto(Omq.Socket socket, byte[] buffer, double duration)
+{
+    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { try { ReceiveIntoExact(socket, buffer); } catch (OmqAgainException) { } }
+}
+void WaitFirstOmqInto(Omq.Socket socket, byte[] buffer)
+{
+    while (true) { try { ReceiveIntoExact(socket, buffer); return; } catch (OmqAgainException) { } }
+}
+void DrainReqOmqInto(Omq.Socket socket, byte[] buffer, double duration)
+{
+    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { socket.Send(payload); try { ReceiveIntoExact(socket, buffer); } catch (OmqAgainException) { } }
+}
+void DrainRepOmqInto(Omq.Socket socket, byte[] buffer, double duration)
+{
+    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { try { ReceiveIntoExact(socket, buffer); socket.Send(payload); } catch (OmqAgainException) { } }
 }
 
 void DrainOmq(Omq.Socket socket, double duration)

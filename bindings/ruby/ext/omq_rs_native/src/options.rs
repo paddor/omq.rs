@@ -212,7 +212,6 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
                         .ok_or_else(|| RubyErr::arg("CURVE server requires curve_secretkey"))?,
                     "curve_secretkey",
                 )?;
-                validate_curve_keypair(&public, &secret)?;
                 opts.mechanism = omq_proto::MechanismSetup::CurveServer {
                     our_keypair: omq_proto::CurveKeypair { public, secret },
                     options: omq_proto::CurveServerOptions::default(),
@@ -236,7 +235,6 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
                         .ok_or_else(|| RubyErr::arg("CURVE client requires curve_secretkey"))?,
                     "curve_secretkey",
                 )?;
-                validate_curve_keypair(&public, &secret)?;
                 let server_public = parse_curve_public_key(
                     &server_key
                         .ok_or_else(|| RubyErr::arg("CURVE client requires curve_serverkey"))?,
@@ -253,7 +251,7 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
         "plain" => {
             if get_opt_bool_alias(hash, &["plain_server", "mechanism_server"])?.unwrap_or(false) {
                 opts.mechanism = omq_proto::MechanismSetup::PlainServer {
-                    authenticator: omq_proto::Authenticator::new(|_| true),
+                    authenticator: omq_proto::Authenticator::new(|_| false),
                 };
             } else {
                 let username =
@@ -294,18 +292,6 @@ fn curve_secret_key(bytes: &[u8], label: &str) -> RbResult<omq_proto::CurveSecre
         .map_err(|_| RubyErr::arg(format!("{label} must be raw bytes or Z85 ASCII")))?;
     omq_proto::CurveSecretKey::from_z85(z85)
         .map_err(|error| RubyErr::arg(format!("invalid {label}: {error}")))
-}
-
-#[cfg(feature = "curve")]
-fn validate_curve_keypair(
-    public: &omq_proto::CurvePublicKey,
-    secret: &omq_proto::CurveSecretKey,
-) -> RbResult<()> {
-    if secret.derive_public().as_bytes() == public.as_bytes() {
-        Ok(())
-    } else {
-        Err(RubyErr::arg("CURVE public and secret keys do not match"))
-    }
 }
 
 fn option_present(hash: VALUE, keys: &[&str]) -> RbResult<bool> {

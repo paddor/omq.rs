@@ -48,6 +48,7 @@ jobs:
               - 'bindings/pyomq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
+              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -56,11 +57,18 @@ jobs:
               - '.github/workflows/release-pyomq.yml'
             java:
               - 'bindings/java/**'
+              - 'omq-proto/**'
+              - 'omq-tokio/**'
+              - 'yring/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
               - '.github/workflows/ci.yml'
             go:
               - 'bindings/go/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
+              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -80,6 +88,7 @@ jobs:
               - 'omq-libzmq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
+              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -855,6 +864,8 @@ jobs:
         lua-test,
         ruby-lint,
         ruby-test,
+        dotnet-lint,
+        dotnet,
       ]
     runs-on: ubuntu-latest
     if: always()

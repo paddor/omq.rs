@@ -32,6 +32,10 @@ type NativeSocketOptions = {
 };
 
 type NativeRawMessage = Uint8Array | Uint8Array[];
+type NativeRoutedMessage = {
+  parts: Uint8Array[];
+  routingId: number;
+};
 type NativePackedMessages = {
   data: Uint8Array;
   partOffsets: Uint32Array;
@@ -52,27 +56,34 @@ type NativeSocket = {
   disconnect(endpoint: string): void;
   send(parts: Uint8Array[]): void;
   sendAsync(parts: Uint8Array[]): Promise<void>;
+  sendRoutedAsync(parts: Uint8Array[], routingId: number): Promise<void>;
   trySend(parts: Uint8Array[]): boolean;
+  trySendRouted(parts: Uint8Array[], routingId: number): boolean;
   trySendBuffer(payload: Buffer): boolean;
   trySendOne(payload: Uint8Array): boolean;
   sendSync(parts: Uint8Array[]): void;
+  sendRoutedSync(parts: Uint8Array[], routingId: number): void;
   sendBufferSync(payload: Buffer): void;
   sendOneSync(payload: Uint8Array): void;
   sendGroupSync(group: Uint8Array, payload: Uint8Array): void;
   recv(): Uint8Array[];
   recvRawSync(): Uint8Array | Uint8Array[];
   recvRaw(cancelId?: number): Promise<Uint8Array | Uint8Array[]>;
+  recvRoutedSync(): NativeRoutedMessage;
+  recvRouted(cancelId?: number): Promise<NativeRoutedMessage>;
   cancelRecv(cancelId: number): void;
   recvSync(): Uint8Array[];
   recvTimeout(timeoutMs: number): Uint8Array[] | null;
   tryRecv(): Uint8Array[] | null;
   tryRecvRaw(): Uint8Array | Uint8Array[] | null;
+  tryRecvRouted(): NativeRoutedMessage | null;
   recvRawManySync(max: number): NativeRawMessage[];
   tryRecvRawManySync(max: number): NativeRawMessage[];
   recvPackedManySync(max: number): NativePackedMessages;
   tryRecvPackedManySync(max: number): NativePackedMessages;
   waitConnectedSync(minPeers: number, timeoutMs: number): number;
   recvManySync(max: number, timeoutMs?: number): Uint8Array[][];
+  recvRoutedManySync(max: number, timeoutMs?: number): NativeRoutedMessage[];
   subscribe(prefix: Uint8Array): void;
   unsubscribe(prefix: Uint8Array): void;
   join(group: Uint8Array): void;
@@ -148,10 +159,10 @@ export interface SocketOptions {
   onMute?: "block" | "dropNewest" | "dropOldest";
   /** Workload hint used by the native transport. */
   workloadProfile?: "throughput" | "latency";
-  /** Enable LZ4 transport compression, optionally with a dictionary. */
-  lz4?: boolean | {
+  /** Configure a dictionary for `lz4+tcp://` or `lz4+ws://` endpoints. */
+  lz4?: {
     /** Static LZ4 dictionary bytes shared with peers. */
-    dictionary?: MessagePart;
+    dictionary: MessagePart;
   };
   /** PLAIN authentication options. */
   plain?: {
@@ -189,13 +200,15 @@ export interface RecvOptions {
   signal?: AbortSignal;
 }
 
-/** Immutable OMQ message wrapper with one or more frames. */
+/** OMQ message wrapper with one or more frames and optional routing metadata. */
 export class Message {
   private materializedParts?: Uint8Array[];
   private singlePart?: Uint8Array;
   private packedData?: Uint8Array;
   private packedOffset?: number;
   private packedLength?: number;
+  /** Opaque SERVER routing ID. Copy it from a request to its reply. */
+  routingId?: number;
 
   /** Create a message from one frame or a multipart frame array. */
   constructor(input: MessagePart | MessagePart[] = new Uint8Array()) {
@@ -355,6 +368,7 @@ export class Socket {
   readonly #context: Context;
   readonly #closeContextOnClose: boolean;
   readonly #recvPrefetch: number;
+  readonly #receivesRoutingId: boolean;
   #recvQueue: Message[] = [];
   #recvQueueOffset = 0;
   #nextRecvCancelId = 1;
@@ -367,6 +381,7 @@ export class Socket {
     this.#context = contextRef;
     this.#closeContextOnClose = context === undefined && options.ioThreads !== undefined;
     this.#recvPrefetch = recvPrefetchFor(socketType);
+    this.#receivesRoutingId = socketType === "SERVER";
     this.native = contextSocket(contextRef, socketType, options);
   }
 
@@ -401,7 +416,9 @@ export class Socket {
     if (pending === null) {
       return Promise.resolve();
     }
-    return this.native.sendAsync(pending);
+    return pending.routingId === undefined
+      ? this.native.sendAsync(pending.parts)
+      : this.native.sendRoutedAsync(pending.parts, pending.routingId);
   }
 
   /** Synchronously send one message. */
@@ -425,9 +442,11 @@ export class Socket {
     const abort = cancelId === undefined ? undefined : () => this.native.cancelRecv(cancelId);
     if (abort !== undefined) signal?.addEventListener("abort", abort, { once: true });
     try {
-      const pending = this.native.recvRaw(cancelId);
+      const pending = this.#receivesRoutingId
+        ? this.native.recvRouted(cancelId).then(messageFromRouted)
+        : this.native.recvRaw(cancelId).then(messageFromNative);
       if (signal?.aborted && cancelId !== undefined) this.native.cancelRecv(cancelId);
-      return messageFromNative(await pending);
+      return await pending;
     } catch (error) {
       if (signal?.aborted) throwAbortError();
       throw error;
@@ -458,6 +477,9 @@ export class Socket {
   /** Receive up to max messages synchronously. */
   recvManySync(max: number, timeoutMs?: number): Message[] {
     this.#checkOpen();
+    if (this.#receivesRoutingId) {
+      return this.native.recvRoutedManySync(max, timeoutMs).map(messageFromRouted);
+    }
     const messages: Message[] = [];
     while (messages.length < max) {
       const raw = this.#takeQueuedRaw();
@@ -526,6 +548,7 @@ export class Socket {
   #recvRawSync(): Message {
     const queued = this.#takeQueuedRaw();
     if (queued !== null) return queued;
+    if (this.#receivesRoutingId) return messageFromRouted(this.native.recvRoutedSync());
     if (this.#recvPrefetch <= 1) return messageFromNative(this.native.recvRawSync());
     this.#recvQueue = messagesFromPacked(this.native.recvPackedManySync(this.#recvPrefetch));
     this.#recvQueueOffset = 0;
@@ -535,6 +558,10 @@ export class Socket {
   #tryRecvRaw(): Message | null {
     const queued = this.#takeQueuedRaw();
     if (queued !== null) return queued;
+    if (this.#receivesRoutingId) {
+      const routed = this.native.tryRecvRouted();
+      return routed === null ? null : messageFromRouted(routed);
+    }
     if (this.#recvPrefetch <= 1) {
       const raw = this.native.tryRecvRaw();
       return raw === null ? null : messageFromNative(raw);
@@ -822,17 +849,28 @@ function normalizeOptions(options: SocketOptions): NativeSocketOptions {
     xpubNodrop: options.xpubNodrop,
     onMute: options.onMute,
     workloadProfile: options.workloadProfile,
-    compressionDictionary:
-      typeof options.lz4 === "object" && options.lz4.dictionary !== undefined
-        ? toBytes(options.lz4.dictionary)
-        : undefined,
+    compressionDictionary: lz4Dictionary(options.lz4),
     plain: options.plain,
     curve: options.curve,
   };
 }
 
+function lz4Dictionary(lz4: SocketOptions["lz4"]): Uint8Array | undefined {
+  if (lz4 === undefined) return undefined;
+  if (typeof lz4 !== "object" || lz4 === null || lz4.dictionary === undefined) {
+    throw new TypeError(
+      "LZ4 is enabled by an lz4+tcp:// or lz4+ws:// endpoint; the lz4 option only configures a dictionary",
+    );
+  }
+  return toBytes(lz4.dictionary);
+}
+
 function sendNativeSync(socket: NativeSocket, input: Message | MessagePart | MessagePart[]): void {
   if (input instanceof Message) {
+    if (input.routingId !== undefined) {
+      socket.sendRoutedSync(input.parts, checkedRoutingId(input.routingId));
+      return;
+    }
     if (input.length === 1) {
       sendSingleNativeSync(socket, input.part(0));
       return;
@@ -856,27 +894,39 @@ function sendNativeSync(socket: NativeSocket, input: Message | MessagePart | Mes
 function trySendNative(
   socket: NativeSocket,
   input: Message | MessagePart | MessagePart[],
-): Uint8Array[] | null {
+): { parts: Uint8Array[]; routingId?: number } | null {
   if (input instanceof Message) {
+    if (input.routingId !== undefined) {
+      const routingId = checkedRoutingId(input.routingId);
+      const parts = input.parts;
+      return socket.trySendRouted(parts, routingId) ? null : { parts, routingId };
+    }
     if (input.length === 1) {
       const part = input.part(0);
-      return trySendSingleNative(socket, part) ? null : [part];
+      return trySendSingleNative(socket, part) ? null : { parts: [part] };
     }
     const parts = input.parts;
-    return socket.trySend(parts) ? null : parts;
+    return socket.trySend(parts) ? null : { parts };
   }
 
   if (Array.isArray(input)) {
     if (input.length === 1) {
       const part = toBytes(input[0]);
-      return trySendSingleNative(socket, part) ? null : [part];
+      return trySendSingleNative(socket, part) ? null : { parts: [part] };
     }
     const parts = input.map(toBytes);
-    return socket.trySend(parts) ? null : parts;
+    return socket.trySend(parts) ? null : { parts };
   }
 
   const part = toBytes(input);
-  return trySendSingleNative(socket, part) ? null : [part];
+  return trySendSingleNative(socket, part) ? null : { parts: [part] };
+}
+
+function checkedRoutingId(routingId: number): number {
+  if (!Number.isInteger(routingId) || routingId <= 0 || routingId > 0xffff_ffff) {
+    throw new RangeError("routingId must be an integer from 1 through 4294967295");
+  }
+  return routingId;
 }
 
 function trySendSingleNative(socket: NativeSocket, input: Uint8Array): boolean {
@@ -901,6 +951,13 @@ function messageFromNative(nativeMessage: NativeRawMessage): Message {
   } else {
     (message as unknown as { singlePart?: Uint8Array }).singlePart = nativeMessage;
   }
+  return message;
+}
+
+function messageFromRouted(nativeMessage: NativeRoutedMessage): Message {
+  const message = Object.create(Message.prototype) as Message;
+  (message as unknown as { materializedParts?: Uint8Array[] }).materializedParts = nativeMessage.parts;
+  message.routingId = nativeMessage.routingId;
   return message;
 }
 

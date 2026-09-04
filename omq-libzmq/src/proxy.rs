@@ -98,7 +98,7 @@ impl ProxyCtx {
             control.clone(),
         ];
         for sock in sockets.into_iter().flatten() {
-            let _ = ensure_materialized(&sock);
+            ensure_materialized(&sock)?;
         }
 
         let same_socket = Arc::ptr_eq(&frontend, &backend);

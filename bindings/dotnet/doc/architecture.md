@@ -32,8 +32,10 @@ owned sockets after waking native operations.
 
 - Outbound spans, strings, and message frames are copied into temporary
   managed/native buffers before the C call.
-- Inbound frames are copied into managed `byte[]` values before each native
-  `zmq_msg_t` is closed.
+- `Receive` copies inbound frames into managed `byte[]` values before each
+  native `zmq_msg_t` is closed.
+- `ReceiveInto` pins the caller's span for the native call and writes into it
+  directly. Native code does not retain the pointer.
 - Multipart receive drains the complete native message while the socket lock
   is held, preserving frame order and routing ID.
 - No managed pointer is retained by native code after the call returns.

@@ -9,7 +9,10 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::{Authenticator, MechanismPeerInfo, MechanismStep, try_error_command};
+use super::{
+    AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo, MechanismStep,
+    try_error_command,
+};
 use crate::error::{Error, Result};
 use crate::proto::command::{self, Command, PeerProperties};
 use crate::proto::greeting::MechanismName;
@@ -39,7 +42,9 @@ enum PlainClientState {
 #[derive(Debug)]
 pub(crate) struct PlainServer {
     authenticator: Authenticator,
+    peer_address: Option<String>,
     our_props: PeerProperties,
+    authentication: Option<AuthenticationResult>,
     state: PlainServerState,
 }
 
@@ -52,10 +57,20 @@ enum PlainServerState {
 }
 
 impl PlainMechanism {
+    #[cfg(test)]
     pub(crate) fn new_server(authenticator: Authenticator) -> Self {
+        Self::new_server_with_peer_address(authenticator, None)
+    }
+
+    pub(crate) fn new_server_with_peer_address(
+        authenticator: Authenticator,
+        peer_address: Option<String>,
+    ) -> Self {
         Self::Server(PlainServer {
             authenticator,
+            peer_address,
             our_props: PeerProperties::default(),
+            authentication: None,
             state: PlainServerState::NotStarted,
         })
     }
@@ -154,15 +169,23 @@ impl PlainServer {
                     mechanism: MechanismName::PLAIN,
                     public_key: [0; 32],
                     identity: None,
+                    peer_address: self.peer_address.clone(),
                     username: Some(username),
                     password: Some(password),
                 };
-                if !self.authenticator.allow(&peer) {
-                    out.push(Command::Error {
-                        reason: "Authentication failed".into(),
-                    });
-                    return Err(Error::HandshakeFailed("PLAIN credentials rejected".into()));
+                let result = self.authenticator.authenticate(&peer);
+                if result.status != AuthenticationStatus::Success {
+                    if result.status != AuthenticationStatus::TemporaryFailure {
+                        out.push(Command::Error {
+                            reason: result.status.code().into(),
+                        });
+                    }
+                    return Err(Error::HandshakeFailed(format!(
+                        "PLAIN authentication failed with status {}",
+                        result.status.code()
+                    )));
                 }
+                self.authentication = Some(result);
                 self.state = PlainServerState::AwaitingInitiate;
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"WELCOME"),
@@ -173,7 +196,10 @@ impl PlainServer {
             (PlainServerState::AwaitingInitiate, Command::Unknown { name, body })
                 if name.as_ref() == b"INITIATE" =>
             {
-                let peer_properties = command::decode_properties(&body)?;
+                let mut peer_properties = command::decode_properties(&body)?;
+                if let Some(authentication) = self.authentication.take() {
+                    authentication.apply_to(&mut peer_properties);
+                }
                 let metadata = command::encode_properties(&self.our_props);
                 out.push(Command::Unknown {
                     name: Bytes::from_static(b"READY"),
@@ -192,14 +218,14 @@ impl PlainServer {
 }
 
 fn encode_hello(username: &str, password: &str) -> Result<Bytes> {
-    if username.len() > 255 {
+    if username.len() > 255 || !username.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(Error::HandshakeFailed(
-            "PLAIN username exceeds 255 bytes".into(),
+            "PLAIN username must contain at most 255 ASCII VCHAR bytes".into(),
         ));
     }
-    if password.len() > 255 {
+    if password.len() > 255 || !password.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(Error::HandshakeFailed(
-            "PLAIN password exceeds 255 bytes".into(),
+            "PLAIN password must contain at most 255 ASCII VCHAR bytes".into(),
         ));
     }
     let u = username.as_bytes();
@@ -222,19 +248,29 @@ fn decode_hello(body: &[u8]) -> Result<(String, String)> {
             "PLAIN HELLO truncated in username".into(),
         ));
     }
-    let username = std::str::from_utf8(&body[1..=ulen])
-        .map_err(|_| Error::HandshakeFailed("PLAIN username not UTF-8".into()))?
-        .to_string();
-    let pstart = 1 + ulen;
-    let plen = body[pstart] as usize;
-    if body.len() < pstart + 1 + plen {
+    let username_bytes = &body[1..=ulen];
+    if !username_bytes.iter().all(u8::is_ascii_graphic) {
         return Err(Error::HandshakeFailed(
-            "PLAIN HELLO truncated in password".into(),
+            "PLAIN username contains non-VCHAR bytes".into(),
         ));
     }
-    let password = std::str::from_utf8(&body[pstart + 1..pstart + 1 + plen])
-        .map_err(|_| Error::HandshakeFailed("PLAIN password not UTF-8".into()))?
-        .to_string();
+    let username =
+        String::from_utf8(username_bytes.to_vec()).expect("ASCII credentials are valid UTF-8");
+    let pstart = 1 + ulen;
+    let plen = body[pstart] as usize;
+    if body.len() != pstart + 1 + plen {
+        return Err(Error::HandshakeFailed(
+            "PLAIN HELLO has malformed password or trailing bytes".into(),
+        ));
+    }
+    let password_bytes = &body[pstart + 1..];
+    if !password_bytes.iter().all(u8::is_ascii_graphic) {
+        return Err(Error::HandshakeFailed(
+            "PLAIN password contains non-VCHAR bytes".into(),
+        ));
+    }
+    let password =
+        String::from_utf8(password_bytes.to_vec()).expect("ASCII credentials are valid UTF-8");
     Ok((username, password))
 }
 
@@ -267,6 +303,15 @@ mod tests {
     #[test]
     fn hello_rejects_truncated_password() {
         assert!(decode_hello(&[0, 5, b'x']).is_err());
+    }
+
+    #[test]
+    fn hello_rejects_non_vchar_and_trailing_bytes() {
+        assert!(encode_hello("has space", "secret").is_err());
+        let non_ascii = String::from_utf8(vec![b'p', 0xc3, 0xa4, b's', b's']).unwrap();
+        assert!(encode_hello("alice", &non_ascii).is_err());
+        assert!(decode_hello(b"\x01u\x01px").is_err());
+        assert!(decode_hello(b"\x01 \x01p").is_err());
     }
 
     #[test]
@@ -363,24 +408,87 @@ mod tests {
     }
 
     #[test]
-    fn auth_reject_sends_error() {
-        let mut server = PlainMechanism::new_server(Authenticator::new(|_| false));
-        let mut s_out = Vec::new();
+    fn authentication_failures_follow_zap_status_semantics() {
+        for (status, expected_error) in [
+            (AuthenticationStatus::TemporaryFailure, None),
+            (AuthenticationStatus::Denied, Some("400")),
+            (AuthenticationStatus::InternalError, Some("500")),
+        ] {
+            let mut server =
+                PlainMechanism::new_server(Authenticator::new_with_result(move |_| {
+                    AuthenticationResult {
+                        status,
+                        user_id: None,
+                        metadata: Vec::new(),
+                    }
+                }));
+            let mut out = Vec::new();
+            server
+                .start(
+                    &mut out,
+                    PeerProperties::default().with_socket_type(SocketType::Pull),
+                )
+                .unwrap();
+
+            let hello = Command::Unknown {
+                name: Bytes::from_static(b"HELLO"),
+                body: encode_hello("bad", "creds").unwrap(),
+            };
+            let err = server.on_command(hello, &mut out).unwrap_err();
+            assert!(matches!(err, Error::HandshakeFailed(_)));
+            match expected_error {
+                Some(expected) => {
+                    assert!(matches!(&out[..], [Command::Error { reason }] if reason == expected));
+                }
+                None => assert!(out.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_authentication_attaches_user_id_and_metadata() {
+        let mut server = PlainMechanism::new_server(Authenticator::new_with_result(|_| {
+            AuthenticationResult::allow()
+                .with_user_id(Bytes::from_static(b"alice"))
+                .with_metadata(vec![("Role".into(), Bytes::from_static(b"administrator"))])
+        }));
+        let mut out = Vec::new();
         server
             .start(
-                &mut s_out,
+                &mut out,
                 PeerProperties::default().with_socket_type(SocketType::Pull),
             )
             .unwrap();
-
-        let hello = Command::Unknown {
-            name: Bytes::from_static(b"HELLO"),
-            body: encode_hello("bad", "creds").unwrap(),
+        server
+            .on_command(
+                Command::Unknown {
+                    name: Bytes::from_static(b"HELLO"),
+                    body: encode_hello("alice", "secret").unwrap(),
+                },
+                &mut out,
+            )
+            .unwrap();
+        let mut client_properties = PeerProperties::default().with_socket_type(SocketType::Push);
+        client_properties.identity = Some(Bytes::from_static(b"client"));
+        let step = server
+            .on_command(
+                Command::Unknown {
+                    name: Bytes::from_static(b"INITIATE"),
+                    body: Bytes::from(command::encode_properties(&client_properties)),
+                },
+                &mut out,
+            )
+            .unwrap();
+        let MechanismStep::Complete { peer_properties } = step else {
+            panic!("expected completed handshake");
         };
-        let err = server.on_command(hello, &mut s_out).unwrap_err();
-        assert!(matches!(err, Error::HandshakeFailed(_)));
-        assert_eq!(s_out.len(), 1);
-        assert!(matches!(&s_out[0], Command::Error { .. }));
+        assert_eq!(
+            peer_properties.other,
+            vec![
+                ("User-Id".into(), Bytes::from_static(b"alice")),
+                ("Role".into(), Bytes::from_static(b"administrator")),
+            ]
+        );
     }
 
     #[test]

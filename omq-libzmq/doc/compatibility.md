@@ -72,6 +72,7 @@ promise:
 - `omq_async_task_cancel()` requests cancellation of that task;
 - `omq_async_task_free()` releases the returned task handle after completion.
 
-The async message encoding is an OMQ-specific length-table format. Bindings
-must use these functions only when linked against `omq-libzmq`; they must not
-assume they exist in upstream `libzmq`.
+The async message encoding is an OMQ-specific length-table format. Its routed
+form also carries a SERVER routing ID. Bindings must use these functions only
+when linked against `omq-libzmq`; they must not assume they exist in upstream
+`libzmq`.

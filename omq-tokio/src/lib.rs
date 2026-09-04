@@ -34,8 +34,7 @@ pub mod transport;
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
 pub use omq_proto::IpcPath;
-#[cfg(any(feature = "curve", feature = "plain"))]
-pub use omq_proto::{Authenticator, MechanismPeerInfo};
+pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use omq_proto::{

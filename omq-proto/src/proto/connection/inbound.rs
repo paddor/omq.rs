@@ -112,13 +112,14 @@ impl Connection {
         // CURVE/NULL ignore the greeting bytes after capture.
         // Pass both directions so the mechanism can compute the
         // transcript correctly regardless of role.
-        self.mechanism.start(
+        let result = self.mechanism.start(
             &mut cmds,
             our_props,
             &self.our_greeting,
             &self.peer_greeting,
-        )?;
+        );
         self.write_outbound_commands(&cmds)?;
+        result?;
         Ok(true)
     }
 
@@ -154,8 +155,9 @@ impl Connection {
     fn process_mechanism_command(&mut self, payload_bytes: Bytes) -> Result<()> {
         let cmd = decode_command_raw(payload_bytes)?;
         let mut cmds = Vec::new();
-        let step = self.mechanism.on_command(cmd, &mut cmds)?;
+        let result = self.mechanism.on_command(cmd, &mut cmds);
         self.write_outbound_commands(&cmds)?;
+        let step = result?;
         if let MechanismStep::Complete { peer_properties } = step {
             let peer_type = peer_properties
                 .socket_type

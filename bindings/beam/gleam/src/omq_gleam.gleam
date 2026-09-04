@@ -384,6 +384,14 @@ pub fn curve_keypair() -> Result(#(BitArray, BitArray), Error)
 @external(erlang, "omq_gleam_ffi", "curve_public")
 pub fn curve_public(secret: BitArray) -> Result(BitArray, Error)
 
+/// Configure a PLAIN server accepting one fixed credential pair.
+@external(erlang, "omq_gleam_ffi", "plain_server")
+pub fn configure_plain_server(
+  socket: Socket,
+  username: BitArray,
+  password: BitArray,
+) -> Result(Nil, Error)
+
 /// Return POLLIN constant.
 pub fn pollin() -> Int {
   1

@@ -50,8 +50,13 @@ LD_LIBRARY_PATH="$PWD/target/release" \
   python3 bindings/dotnet/scripts/update_perf.py
 ```
 
+Set `OMQ_BENCH_TASKSET=1` on Linux to pin each peer to a separate CPU set and
+reduce scheduler variance. Implementations are measured consecutively at each
+message size so comparisons see similar machine state.
+
 Use `--quick` for a short check. Throughput measures 16 B–32 KiB; latency
-measures 16 B–4 KiB. Results append to `~/.cache/omq.net/bindings.jsonl`.
+measures 16 B–4 KiB. OMQ.Net's `ReceiveInto` path is plotted as a separate
+series. Results append to `~/.cache/omq.net/bindings.jsonl`.
 Regenerate only the chart with:
 
 ```sh

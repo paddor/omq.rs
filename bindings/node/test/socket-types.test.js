@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { Dealer, Dish, Pair, Pull, Push, Radio, Router } = require("../dist");
+const { Client, Dealer, Dish, Message, Pair, Pull, Push, Radio, Router, Server } = require("../dist");
 
 test("PAIR sends both directions", async () => {
   const left = new Pair();
@@ -34,6 +34,25 @@ test("DEALER/ROUTER identity routing", async () => {
   } finally {
     dealer.close();
     router.close();
+  }
+});
+
+test("CLIENT/SERVER preserves routing IDs for replies", async () => {
+  const server = new Server();
+  const client = new Client();
+  try {
+    const endpoint = await server.bind("tcp://127.0.0.1:0");
+    await client.connect(endpoint);
+    await client.send("hello");
+    const incoming = await server.recv();
+    assert.ok(incoming.routingId > 0);
+    const reply = new Message("world");
+    reply.routingId = incoming.routingId;
+    await server.send(reply);
+    assert.equal((await client.recv()).string(), "world");
+  } finally {
+    client.close();
+    server.close();
   }
 });
 

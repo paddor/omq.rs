@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 use crate::context::{OmqContext, next_socket_id};
 use crate::error::{ETERM, fail, map_omq_err, set_errno};
 use crate::notify::{NotifyHandle, PlatformNotifyHandle, RecvNotify};
-use crate::opts::{LingerSetting, SocketOverlay};
+use crate::opts::{LingerSetting, MechanismOverlay, SocketOverlay};
 
 /// Rewrite `Host::Wildcard` to IPv6 unspecified (::) for dual-stack bind.
 fn ipv6_rewrite_wildcard(ep: Endpoint) -> Endpoint {
@@ -48,7 +48,6 @@ pub(crate) struct RecvConsumers {
 
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
-    #[expect(dead_code)]
     pub id: u64,
     pub ctx: Arc<OmqContext>,
     pub socket_type: SocketType,
@@ -79,6 +78,15 @@ pub(crate) struct OmqSocket {
     /// `pump` is filled by the recv pump task for second+ peers.
     /// Accessed only from the `zmq_recv` caller thread.
     pub recv_cons: crate::local_cell::LocalCell<Option<RecvConsumers>>,
+    /// Dedicated receive queue for ZAP-authenticated sockets. Each item keeps
+    /// the authenticated peer properties attached to its message.
+    pub authenticated_recv: crate::local_cell::LocalCell<
+        Option<tokio::sync::mpsc::Receiver<omq_tokio::engine::AuthenticatedRecvItem>>,
+    >,
+    /// Remaining frames and properties from a partially received
+    /// authenticated multipart message.
+    pub authenticated_recv_drain:
+        crate::local_cell::LocalCell<VecDeque<(Bytes, Arc<omq_tokio::proto::PeerProperties>)>>,
     /// The inner omq-tokio socket. Send+Sync, stored directly.
     pub inner: std::sync::OnceLock<Arc<omq_tokio::Socket>>,
     /// Backpressure: recv pump waits on this when the recv ring is full.
@@ -87,6 +95,8 @@ pub(crate) struct OmqSocket {
     pub recv_sink_config: std::sync::OnceLock<Arc<omq_tokio::engine::RecvSinkConfig>>,
     pub last_endpoint: Mutex<Option<String>>,
     pub notify: Arc<PlatformNotifyHandle>,
+    /// True for the REP socket bound to the reserved ZAP endpoint.
+    pub(crate) zap_handler: AtomicBool,
     pub bound_or_connected: AtomicBool,
     pub connect_count: AtomicUsize,
     /// Frozen inverse of `ZMQ_IMMEDIATE`, captured at first bind/connect.
@@ -101,6 +111,8 @@ impl OmqSocket {
         self.bypass_send.allow_thread_migration();
         self.bypass_recv.allow_thread_migration();
         self.recv_cons.allow_thread_migration();
+        self.authenticated_recv.allow_thread_migration();
+        self.authenticated_recv_drain.allow_thread_migration();
         self.queue_without_ready_peer.allow_thread_migration();
     }
 }
@@ -355,11 +367,14 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
         recv_cons: crate::local_cell::LocalCell::new(None),
+        authenticated_recv: crate::local_cell::LocalCell::new(None),
+        authenticated_recv_drain: crate::local_cell::LocalCell::new(VecDeque::new()),
         inner: std::sync::OnceLock::new(),
         recv_space: std::sync::OnceLock::new(),
         recv_sink_config: std::sync::OnceLock::new(),
         last_endpoint: Mutex::new(None),
         notify,
+        zap_handler: AtomicBool::new(false),
         bound_or_connected: AtomicBool::new(false),
         connect_count: AtomicUsize::new(0),
         queue_without_ready_peer: crate::local_cell::LocalCell::new(queue_without_ready_peer),
@@ -383,14 +398,116 @@ pub extern "C" fn omq_socket_allow_thread_migration(sock_ptr: *mut c_void) -> c_
     0
 }
 
+fn configure_zap_authentication(
+    sock: &Arc<OmqSocket>,
+    opts: &mut omq_tokio::Options,
+    mechanism: &MechanismOverlay,
+    zap_domain: &str,
+    zap_enforce: bool,
+    identity: &Bytes,
+) -> Result<bool, c_int> {
+    let server_mechanism = matches!(
+        mechanism,
+        MechanismOverlay::Null
+            | MechanismOverlay::PlainServer
+            | MechanismOverlay::CurveServer { .. }
+    );
+    if zap_enforce && zap_domain.is_empty() && server_mechanism {
+        return Err(libc::EINVAL);
+    }
+    let needs_zap = matches!(mechanism, MechanismOverlay::PlainServer)
+        || (!zap_domain.is_empty()
+            && matches!(
+                mechanism,
+                MechanismOverlay::Null | MechanismOverlay::CurveServer { .. }
+            ));
+    if !needs_zap {
+        return Ok(false);
+    }
+    if zap_domain.is_empty() {
+        return Err(libc::EINVAL);
+    }
+
+    let zap = Arc::clone(&sock.ctx.zap);
+    let timeout = opts
+        .handshake_timeout
+        .unwrap_or(std::time::Duration::from_secs(30));
+    let zap_domain = zap_domain.to_owned();
+    let identity = identity.clone();
+    let authenticator = omq_tokio::Authenticator::new_with_result(move |peer| {
+        zap.authorize(
+            &zap_domain,
+            peer.peer_address.as_deref().unwrap_or(""),
+            &identity,
+            peer,
+            timeout,
+        )
+    });
+    let setup = std::mem::replace(&mut opts.mechanism, omq_tokio::MechanismSetup::Null);
+    opts.mechanism = match setup {
+        omq_tokio::MechanismSetup::Null => omq_tokio::MechanismSetup::NullServer { authenticator },
+        omq_tokio::MechanismSetup::PlainServer { .. } => {
+            omq_tokio::MechanismSetup::PlainServer { authenticator }
+        }
+        omq_tokio::MechanismSetup::CurveServer {
+            our_keypair,
+            mut options,
+        } => {
+            options.authenticator = Some(authenticator);
+            omq_tokio::MechanismSetup::CurveServer {
+                our_keypair,
+                options,
+            }
+        }
+        other => other,
+    };
+    Ok(true)
+}
+
 /// Materialize the omq-tokio socket on the io thread with current overlay
 /// options, then start the recv pump. Called once on first bind/connect
 /// so that options set between `zmq_socket` and first bind/connect take
 /// effect.
-pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
-    if sock.ctx.io_context().is_none() {
-        return false;
+pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return Err(libc::EINVAL);
     }
+    let Some(ctx) = sock.ctx.io_context().cloned() else {
+        return Err(ETERM);
+    };
+    if sock.inner.get().is_some() {
+        return Ok(());
+    }
+    let (
+        mut opts,
+        recv_hwm,
+        queue_without_ready_peer,
+        mechanism,
+        zap_domain,
+        zap_enforce,
+        identity,
+    ) = {
+        let overlay = sock.overlay.lock().map_err(|_| ETERM)?;
+        (
+            overlay.to_options(),
+            overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize,
+            !overlay.immediate,
+            overlay.mechanism.clone(),
+            overlay.zap_domain.clone(),
+            overlay.zap_enforce_domain,
+            overlay.identity.clone(),
+        )
+    };
+    let needs_zap = configure_zap_authentication(
+        sock,
+        &mut opts,
+        &mechanism,
+        &zap_domain,
+        zap_enforce,
+        &identity,
+    )?;
+    opts.validate().map_err(|_| libc::EINVAL)?;
+
     // CAS guarantees exactly one thread wins the materialization race.
     if sock
         .bound_or_connected
@@ -401,17 +518,11 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
         while sock.inner.get().is_none() {
             std::hint::spin_loop();
         }
-        return true;
+        return Ok(());
     }
-    let Ok(overlay) = sock.overlay.lock() else {
-        return false;
-    };
-    let opts = overlay.to_options();
-    let recv_hwm = overlay.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
     // SAFETY: materialization runs before hot-path send ownership and freezes
     // bind/connect-scoped options for this socket.
-    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = !overlay.immediate;
-    drop(overlay);
+    *unsafe { sock.queue_without_ready_peer.get_unchecked() } = queue_without_ready_peer;
 
     let socket_type = sock.socket_type;
 
@@ -429,16 +540,24 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     let recv_space = Arc::new(StateSignal::new());
     let _ = sock.recv_space.set(recv_space.clone());
 
-    // Build the RecvSink::Yring for the driver's direct fast path.
+    // Build the direct receive sink. ZAP-authenticated sockets use a shared
+    // MPSC queue so every peer's authentication properties stay attached to
+    // its messages; the normal hot path retains the SPSC yring.
     let signal_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || recv_notify.signal());
-    let recv_sink = omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
-        producer: fast_prod,
-        signal: Box::new({
-            let f = signal_cb.clone();
-            move || f()
-        }),
-        space: recv_space.clone(),
-    });
+    let recv_sink = if needs_zap {
+        let (sink, receiver) = omq_tokio::engine::RecvSink::authenticated(cap, signal_cb.clone());
+        *unsafe { sock.authenticated_recv.get_unchecked() } = Some(receiver);
+        sink
+    } else {
+        omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
+            producer: fast_prod,
+            signal: Box::new({
+                let f = signal_cb.clone();
+                move || f()
+            }),
+            space: recv_space.clone(),
+        })
+    };
     let recv_sink_cfg = Arc::new(omq_tokio::engine::RecvSinkConfig::new(
         recv_sink,
         signal_cb,
@@ -450,9 +569,6 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
     // Enter the tokio runtime context so that Socket::new (which calls
     // tokio::spawn internally for its driver task) and the recv pump
     // spawn below are scheduled on the context's runtime.
-    let Some(ctx) = sock.ctx.io_context().cloned() else {
-        return false;
-    };
     let handle = ctx.handle().clone();
     let _guard = handle.enter();
 
@@ -471,7 +587,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> bool {
 
     let _ = sock.inner.set(inner);
     let _ = sock.recv_pump.set(recv_pump);
-    true
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -481,6 +597,10 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     }
     // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
+
+    if arc.zap_handler.swap(false, Ordering::AcqRel) {
+        arc.ctx.zap.unbind(arc.id);
+    }
 
     if let Some(h) = arc.recv_pump.get() {
         h.abort();
@@ -620,6 +740,21 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         Err(e) => return fail(e),
     };
 
+    if addr_str == crate::zap::ENDPOINT {
+        if let Err(error) = sock.ctx.zap.bind(sock) {
+            return fail(error);
+        }
+        sock.zap_handler.store(true, Ordering::Release);
+        sock.bound_or_connected.store(true, Ordering::Release);
+        if let Ok(mut ep) = sock.last_endpoint.lock() {
+            *ep = Some(addr_str);
+        }
+        return 0;
+    }
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return fail(libc::EINVAL);
+    }
+
     // ZMQ_IPV6: rewrite wildcard bind to IPv6 unspecified (dual-stack).
     let Ok(ov) = sock.overlay.lock() else {
         return fail(ETERM);
@@ -642,8 +777,8 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
         }
     }
 
-    if !ensure_materialized(sock) {
-        return fail(ETERM);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
     }
 
     let Some(inner) = sock.inner.get() else {
@@ -678,6 +813,13 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         Err(e) => return fail(e),
     };
 
+    if addr_str == crate::zap::ENDPOINT {
+        return fail(libc::EINVAL);
+    }
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return fail(libc::EINVAL);
+    }
+
     if sock.ctx.zero_io_threads() {
         if !zero_io_inproc_supported(sock, &endpoint) {
             return fail(libc::ENOTSUP);
@@ -692,8 +834,8 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         }
     }
 
-    if !ensure_materialized(sock) {
-        return fail(ETERM);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
     }
 
     let Some(inner) = sock.inner.get() else {
@@ -722,10 +864,19 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
-    let (sock, _addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
+    let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
         Ok(t) => t,
         Err(e) => return fail(e),
     };
+
+    if addr_str == crate::zap::ENDPOINT && sock.zap_handler.swap(false, Ordering::AcqRel) {
+        sock.ctx.zap.unbind(sock.id);
+        sock.bound_or_connected.store(false, Ordering::Release);
+        if let Ok(mut endpoint) = sock.last_endpoint.lock() {
+            *endpoint = None;
+        }
+        return 0;
+    }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
@@ -791,7 +942,9 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
         Ok(t) => t,
         Err(e) => return fail(e),
     };
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
@@ -805,7 +958,9 @@ pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -
         Ok(t) => t,
         Err(e) => return fail(e),
     };
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);
     };
@@ -841,7 +996,9 @@ pub extern "C" fn zmq_socket_monitor(
     let addr_str = addr_str.to_owned();
     let events_mask = events as u16;
 
-    ensure_materialized(sock);
+    if let Err(error) = ensure_materialized(sock) {
+        return fail(error);
+    }
 
     let Some(inner) = sock.inner.get() else {
         return fail(ETERM);

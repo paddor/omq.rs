@@ -84,8 +84,21 @@ public sealed class Socket : IDisposable
     public void Unsubscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Unsubscribe, prefix);
     /// Removes a UTF-8 subscription prefix.
     public void Unsubscribe(string prefix) => Unsubscribe(Encoding.UTF8.GetBytes(prefix));
-    /// Enables PLAIN server mode.
-    public void ConfigurePlainServer(string username = "", string password = "") { _ = username; _ = password; SetOption(SocketOption.PlainServer, 1); }
+    /// Configures a PLAIN server accepting one fixed credential pair.
+    public void ConfigurePlainServer(string username, string password)
+    {
+        lock (gate)
+        {
+            byte[] user = Encoding.UTF8.GetBytes(username);
+            byte[] pass = Encoding.UTF8.GetBytes(password);
+            unsafe
+            {
+                fixed (byte* userPtr = user)
+                fixed (byte* passPtr = pass)
+                    Errors.Check("plain_server", Native.omq_socket_set_plain_server_credentials(Require(), (IntPtr)userPtr, (nuint)user.Length, (IntPtr)passPtr, (nuint)pass.Length));
+            }
+        }
+    }
     /// Configures PLAIN client credentials.
     public void ConfigurePlainClient(string username, string password) { SetOption(SocketOption.PlainUsername, username); SetOption(SocketOption.PlainPassword, password); }
     /// Enables CURVE server mode with its secret key.
@@ -242,10 +255,10 @@ public sealed class Socket : IDisposable
         try { message = Receive(dontWait: true); return true; }
         catch (OmqAgainException) { message = null; return false; }
     }
-    /// Receives one frame into a caller-provided buffer.
-    public byte[] ReceiveInto(Span<byte> buffer, bool dontWait = false)
+    /// Receives one frame into a caller-provided buffer and returns the number of bytes copied.
+    public int ReceiveInto(Span<byte> buffer, bool dontWait = false)
     {
-        lock (gate) { byte[] copy = new byte[buffer.Length]; unsafe { fixed (byte* p = copy) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)copy.Length, dontWait ? 1 : 0); Errors.Check("recv", n); copy.AsSpan(0, n).CopyTo(buffer); return copy[..n]; } } }
+        lock (gate) { unsafe { fixed (byte* p = buffer) { int n = Native.zmq_recv(Require(), (IntPtr)p, (nuint)buffer.Length, dontWait ? 1 : 0); Errors.Check("recv", n); return Math.Min(n, buffer.Length); } } }
     }
     private static int Flags(bool more, bool dontWait) => (more ? 2 : 0) | (dontWait ? 1 : 0);
 

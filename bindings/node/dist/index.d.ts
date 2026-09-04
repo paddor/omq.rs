@@ -34,10 +34,10 @@ export interface SocketOptions {
     onMute?: "block" | "dropNewest" | "dropOldest";
     /** Workload hint used by the native transport. */
     workloadProfile?: "throughput" | "latency";
-    /** Enable LZ4 transport compression, optionally with a dictionary. */
-    lz4?: boolean | {
+    /** Configure a dictionary for `lz4+tcp://` or `lz4+ws://` endpoints. */
+    lz4?: {
         /** Static LZ4 dictionary bytes shared with peers. */
-        dictionary?: MessagePart;
+        dictionary: MessagePart;
     };
     /** PLAIN authentication options. */
     plain?: {
@@ -72,13 +72,15 @@ export interface RecvOptions {
     /** Abort signal used to cancel an async receive wait. */
     signal?: AbortSignal;
 }
-/** Immutable OMQ message wrapper with one or more frames. */
+/** OMQ message wrapper with one or more frames and optional routing metadata. */
 export declare class Message {
     private materializedParts?;
     private singlePart?;
     private packedData?;
     private packedOffset?;
     private packedLength?;
+    /** Opaque SERVER routing ID. Copy it from a request to its reply. */
+    routingId?: number;
     /** Create a message from one frame or a multipart frame array. */
     constructor(input?: MessagePart | MessagePart[]);
     /** Return input unchanged when already a message, otherwise wrap it. */

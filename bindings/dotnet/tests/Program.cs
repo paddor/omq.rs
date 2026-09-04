@@ -73,11 +73,29 @@ Check(received.Parts.Count == 2, "multipart part count mismatch");
 Check(received.Parts[0].SequenceEqual(new byte[] { 1, 2, 3 }), "multipart first part mismatch");
 Check(received.Parts[1].SequenceEqual(new byte[] { 4, 5 }), "multipart second part mismatch");
 
+byte[] largeFrame = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray();
+push.Send(largeFrame);
+byte[] shortBuffer = new byte[10];
+int copied = pull.ReceiveInto(shortBuffer);
+Check(copied == shortBuffer.Length, "ReceiveInto returned the untruncated frame length");
+Check(shortBuffer.SequenceEqual(largeFrame[..shortBuffer.Length]), "ReceiveInto truncated data mismatch");
+
 await push.SendAsync(Message.Text("async"));
 Check((await pull.ReceiveAsync()).ToString() == "async", "async message mismatch");
 await push.SendAsync(new Message([new ReadOnlyMemory<byte>([1, 2]), new ReadOnlyMemory<byte>([3, 4])]));
 var asyncMultipart = await pull.ReceiveAsync();
 Check(asyncMultipart.IsMultipart && asyncMultipart.Parts.Count == 2 && asyncMultipart.Parts[1].SequenceEqual(new byte[] { 3, 4 }), "async multipart mismatch");
+using var asyncServer = context.CreateSocket(SocketType.Server, new SocketOptions { Linger = 0 });
+using var asyncClient = context.CreateSocket(SocketType.Client, new SocketOptions { Linger = 0 });
+string asyncServerEndpoint = asyncServer.Bind("tcp://127.0.0.1:0");
+asyncClient.Connect(asyncServerEndpoint);
+await asyncClient.SendAsync(Message.Text("request"));
+Message asyncRequest = await asyncServer.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2));
+Check(asyncRequest.RoutingId != 0, "async SERVER request is missing a routing ID");
+Message asyncReply = Message.Text("reply");
+asyncReply.RoutingId = asyncRequest.RoutingId;
+await asyncServer.SendAsync(asyncReply);
+Check((await asyncClient.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2))).ToString() == "reply", "async SERVER reply mismatch");
 using (var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(20)))
 {
     bool observed = false;
@@ -85,15 +103,29 @@ using (var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(20)
     catch (OperationCanceledException) { observed = true; }
     Check(observed, "async receive cancellation mismatch");
 }
-var poller = new Poller(); poller.Add(pull);
+using var poller = new Poller(); poller.Add(pull);
 push.Send(Message.Text("poll"));
 Check(poller.Wait(TimeSpan.FromSeconds(1)).Count != 0, "poller did not report readable socket");
 Check(pull.Receive().ToString() == "poll", "poller message mismatch");
 Check(pull.Poll(TimeSpan.Zero).Count == 0, "socket poll should be empty");
+using (var zeroTimeoutGuard = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+{
+    Check((await poller.WaitAsync(TimeSpan.Zero, zeroTimeoutGuard.Token)).Count == 0,
+        "async zero-timeout poll should be empty");
+}
 var keys = Curve.GenerateKeyPair();
 Check(keys.PublicKey.Length == 40 && keys.SecretKey.Length == 40, "CURVE keypair mismatch");
 Check(Curve.PublicKey(keys.SecretKey) == keys.PublicKey, "CURVE public key mismatch");
 var serverKeys = Curve.GenerateKeyPair();
+var otherKeys = Curve.GenerateKeyPair();
+using (var invalidCurve = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 }))
+{
+    invalidCurve.ConfigureCurveClient(keys.PublicKey, otherKeys.SecretKey, serverKeys.PublicKey);
+    bool rejected = false;
+    try { invalidCurve.Connect("tcp://127.0.0.1:1"); }
+    catch (OmqException error) when (error.Errno == 22) { rejected = true; }
+    Check(rejected, "mismatched CURVE keypair should return EINVAL");
+}
 using var curveRep = context.CreateSocket(SocketType.Rep, new SocketOptions { Linger = 0 });
 using var curveReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 });
 curveRep.ConfigureCurveServer(serverKeys.PublicKey, serverKeys.SecretKey);
@@ -109,6 +141,18 @@ using var plainReq = context.CreateSocket(SocketType.Req, new SocketOptions { Li
 plainRep.ConfigurePlainServer("user", "pass");
 plainReq.ConfigurePlainClient("user", "pass");
 string plainEndpoint = plainRep.Bind("tcp://127.0.0.1:0");
+plainRep.SetOption(SocketOption.ReceiveTimeout, 300);
+using (var rejectedReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 }))
+{
+    rejectedReq.ConfigurePlainClient("user", "wrong");
+    rejectedReq.Connect(plainEndpoint);
+    rejectedReq.SendText("rejected");
+    bool rejected = false;
+    try { plainRep.Receive(); }
+    catch (OmqAgainException) { rejected = true; }
+    Check(rejected, "PLAIN server accepted wrong password");
+}
+plainRep.SetOption(SocketOption.ReceiveTimeout, -1);
 plainReq.Connect(plainEndpoint);
 plainReq.SendText("plain");
 Check(ReceiveEventually(plainRep).ToString() == "plain", "PLAIN request mismatch");

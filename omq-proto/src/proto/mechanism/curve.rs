@@ -265,8 +265,17 @@ impl CurveMechanism {
         Self::Client(CurveClient::new(our_keypair, server_public))
     }
 
+    #[cfg(test)]
     pub(crate) fn new_server(our_keypair: CurveKeypair, options: CurveServerOptions) -> Self {
-        Self::Server(CurveServer::new(our_keypair, options))
+        Self::new_server_with_peer_address(our_keypair, options, None)
+    }
+
+    pub(crate) fn new_server_with_peer_address(
+        our_keypair: CurveKeypair,
+        options: CurveServerOptions,
+        peer_address: Option<String>,
+    ) -> Self {
+        Self::Server(CurveServer::new(our_keypair, options, peer_address))
     }
 
     pub(crate) fn start(
@@ -623,6 +632,7 @@ pub(crate) struct CurveServer {
     cookie_lifetime: std::time::Duration,
     cookie_key: Option<CurveCookieKey>,
     authenticator: Option<super::Authenticator>,
+    peer_address: Option<String>,
     our_props: PeerProperties,
     out_counter: u64,
     state: CurveServerState,
@@ -657,7 +667,11 @@ impl std::fmt::Debug for CurveServerState {
 
 impl CurveServer {
     #[expect(clippy::needless_pass_by_value)]
-    fn new(our_keypair: CurveKeypair, options: CurveServerOptions) -> Self {
+    fn new(
+        our_keypair: CurveKeypair,
+        options: CurveServerOptions,
+        peer_address: Option<String>,
+    ) -> Self {
         let our_lt_secret = StaticSecret::from(*our_keypair.secret.as_bytes());
         let our_lt_public = PublicKey::from(*our_keypair.public.as_bytes());
         Self {
@@ -666,6 +680,7 @@ impl CurveServer {
             cookie_lifetime: options.cookie_lifetime,
             cookie_key: None,
             authenticator: options.authenticator,
+            peer_address,
             our_props: PeerProperties::default(),
             out_counter: 0,
             state: CurveServerState::Init,
@@ -707,7 +722,29 @@ impl CurveServer {
                 Ok(MechanismStep::Continue)
             }
             (b"INITIATE", CurveServerState::AwaitingInitiate) => {
-                let peer_props = self.parse_initiate(&body)?;
+                let (mut peer_props, peer_public_key) = self.parse_initiate(&body)?;
+                if let Some(auth) = &self.authenticator {
+                    let result = auth.authenticate(&super::MechanismPeerInfo {
+                        mechanism: crate::proto::greeting::MechanismName::CURVE,
+                        public_key: peer_public_key,
+                        identity: peer_props.identity.clone(),
+                        peer_address: self.peer_address.clone(),
+                        username: None,
+                        password: None,
+                    });
+                    if result.status != super::AuthenticationStatus::Success {
+                        if result.status != super::AuthenticationStatus::TemporaryFailure {
+                            out.push(Command::Error {
+                                reason: result.status.code().into(),
+                            });
+                        }
+                        return Err(Error::HandshakeFailed(format!(
+                            "CURVE authentication failed with status {}",
+                            result.status.code()
+                        )));
+                    }
+                    result.apply_to(&mut peer_props);
+                }
                 // parse_initiate transitions state to Done.
                 let ready = self.build_ready()?;
                 out.push(Command::Unknown {
@@ -790,7 +827,7 @@ impl CurveServer {
         body.freeze()
     }
 
-    fn parse_initiate(&mut self, body: &[u8]) -> Result<PeerProperties> {
+    fn parse_initiate(&mut self, body: &[u8]) -> Result<(PeerProperties, [u8; 32])> {
         if body.len() < 96 + 8 + 16 {
             return Err(Error::HandshakeFailed("CURVE INITIATE too short".into()));
         }
@@ -834,26 +871,11 @@ impl CurveServer {
 
         let props = decode_metadata(metadata)?;
 
-        if let Some(auth) = &self.authenticator {
-            let peer = super::MechanismPeerInfo {
-                mechanism: crate::proto::greeting::MechanismName::CURVE,
-                public_key: *cl.as_bytes(),
-                identity: props.identity.clone(),
-                username: None,
-                password: None,
-            };
-            if !auth.allow(&peer) {
-                return Err(Error::HandshakeFailed(
-                    "CURVE client public key not authorized".into(),
-                ));
-            }
-        }
-
         self.state = CurveServerState::Done {
             our_eph_secret: sn_secret,
             peer_eph_public: cp,
         };
-        Ok(props)
+        Ok((props, *cl.as_bytes()))
     }
 
     fn verify_vouch(

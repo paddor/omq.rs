@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Preserve SERVER routing IDs across receive and send operations.
+- Reject the ineffective `lz4: true` option. LZ4 is selected by the endpoint
+  scheme; the `lz4` option only configures a dictionary.
+
 ## [0.1.3] - 2026-08-23
 
 - Run asynchronous socket I/O on the shared Tokio runtime without blocking

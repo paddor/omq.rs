@@ -100,7 +100,12 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
         def close_and_reuse(fd: int) -> None:
             os.close(fd)
             if fd == old_fd and not replacement:
-                replacement.append(pull.recv_multipart())
+                replacement_waiter: Any = pull.recv_multipart()
+                if replacement_waiter._fd != old_fd:
+                    os.dup2(replacement_waiter._fd, old_fd)
+                    os.close(replacement_waiter._fd)
+                    replacement_waiter._fd = old_fd
+                replacement.append(replacement_waiter)
                 replacement_created.set()
 
         setattr(os_proxy, "close", close_and_reuse)

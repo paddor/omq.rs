@@ -133,10 +133,10 @@ Allowed action: npm publish
 Trigger CI release with a tag:
 
 ```sh
-git tag omq-node-v0.1.2
+git tag omq-node-v0.2.0
 ```
 
-Or run `.github/workflows/release-node.yml` with `version=0.1.2`.
+Or run `.github/workflows/release-node.yml` with `version=0.2.0`.
 
 Native jobs build platform addons named `omq_node.<platform>.node`.
 Package job copies them into `npm/<platform>/`, writes root
@@ -152,7 +152,7 @@ cp omq_node.linux-x64-gnu.node npm/linux-x64-gnu/
 npm pack ./npm/linux-x64-gnu --dry-run
 ```
 
-Use `npm run release:prepare -- 0.1.2 --dry-run` to validate metadata without
+Use `npm run release:prepare -- 0.2.0 --dry-run` to validate metadata without
 rewriting manifests.
 
 `npm run artifacts` expects every configured platform addon under `artifacts/`.

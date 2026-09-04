@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-04
+
+- Bundle `omq-libzmq` 0.5.16 with responsive peer control handling and the
+  latest receive-notifier fixes.
+
 ## [0.2.1] - 2026-08-23
 
 - Preserve `SERVER` routing IDs across native receive and send calls.

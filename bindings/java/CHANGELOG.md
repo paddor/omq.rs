@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.4]
+
+- Pass the transport peer address to PLAIN and CURVE authentication callbacks.
+- Reject CURVE public keys that do not match the configured secret key.
+- Bundle `omq-tokio` 0.22.0 and `omq-proto` 0.27.0.
+
 ## [0.3.3]
 
 - Unblock concurrent socket close when a PUSH or SCATTER sender is waiting for

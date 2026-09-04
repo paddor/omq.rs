@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-04
+
+- Add PLAIN username/password allowlists and authentication callbacks through
+  `plain_auth:` and `Socket#set_plain_auth`.
+- Expand authenticator peer metadata with transport address and PLAIN
+  credentials.
+- Require explicit PLAIN server policy; bare PLAIN server mode fails closed.
+- Reject CURVE public keys that do not match the configured secret key.
+- Require `omq-proto` 0.27.0 and `omq-tokio` 0.22.0.
+
 ## [0.1.2] - 2026-09-01
 
 - Route `Socket#try_recv` directly through the native nonblocking receive path.

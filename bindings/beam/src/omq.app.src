@@ -1,6 +1,6 @@
 {application, omq, [
     {description, "Erlang bindings for OMQ, a Rust ZeroMQ-compatible messaging stack"},
-    {vsn, "0.1.0"},
+    {vsn, "0.2.0"},
     {registered, []},
     {applications, [kernel, stdlib]},
     {modules, [omq, omq_nif]},
@@ -16,6 +16,7 @@
         "rebar.config",
         "rebar.lock",
         "README.md",
+        "CHANGELOG.md",
         "DEVELOPMENT.md",
         "doc/architecture.md"
     ]}

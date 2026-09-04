@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "omq-node"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "napi",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.21.4"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "bytes",

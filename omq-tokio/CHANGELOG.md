@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-04
+
+### Added
+
+- Fixed PLAIN credential allowlists, peer addresses in authentication
+  callbacks, and authenticated user metadata.
+- Soak coverage for control responsiveness while peer writes are stalled.
+
+### Changed
+
+- **Breaking:** `RecvSink` adds the `Authenticated` variant.
+- **Breaking:** `PeerDriverCommand` no longer carries `SendMessage` or
+  `SendEncoded`; peer data uses its separate channel.
+- Peer drivers use separate control and data channels, drain control first,
+  and bound data encoding and write progress by messages, bytes, and time.
+
+### Fixed
+
+- Keep peer removal, shutdown, and other control work responsive under heavy
+  traffic and stalled writes.
+- Validate CURVE public/secret keypair consistency centrally.
+
 ## [0.21.4] - 2026-08-23
 
 ### Added

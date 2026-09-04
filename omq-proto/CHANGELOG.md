@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-04
+
+### Added
+
+- Fixed username/password allowlists through
+  `Options::plain_server_credentials()`.
+- `Authenticator::new_with_result()` decisions with status, user ID, and
+  metadata, plus peer address and PLAIN credentials in callback input.
+- `MechanismSetup::NullServer` for NULL admission policies such as ZAP address
+  filtering.
+
+### Changed
+
+- **Breaking:** `MechanismPeerInfo` and `ConnectionConfig` expose additional
+  public `peer_address` fields.
+- PLAIN client credentials are validated as RFC 24 ASCII VCHAR strings with
+  the protocol's 255-byte limit.
+
+### Fixed
+
+- Reject CURVE configurations whose supplied public key does not match the
+  secret key.
+
 ## [0.26.1] - 2026-08-23
 
 ### Added

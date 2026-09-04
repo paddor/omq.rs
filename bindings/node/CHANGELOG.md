@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-04
+
 - Preserve SERVER routing IDs across receive and send operations.
 - Reject the ineffective `lz4: true` option. LZ4 is selected by the endpoint
   scheme; the `lz4` option only configures a dictionary.
+- Reject CURVE public keys that do not match the configured secret key.
+- Bundle `omq-tokio` 0.22.0 and `omq-proto` 0.27.0.
 
 ## [0.1.3] - 2026-08-23
 

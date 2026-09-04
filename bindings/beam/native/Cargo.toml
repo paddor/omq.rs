@@ -1,6 +1,6 @@
 [package]
 name = "omq_beam_native"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 license = "ISC"
@@ -23,5 +23,5 @@ ws = ["omq-tokio/ws"]
 
 [dependencies]
 bytes = "1.12.0"
-omq-tokio = { version = "0.21.4", default-features = false }
+omq-tokio = { version = "0.22.0", default-features = false }
 rustler = "0.38.0"

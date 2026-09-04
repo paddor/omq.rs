@@ -16,14 +16,14 @@ Benchmarks compare the three OMQ wrappers against `erlzmq` and `chumak`.
 Erlang:
 
 ```erlang
-{deps, [{omq, "0.1.0"}]}.
+{deps, [{omq, "0.2.0"}]}.
 ```
 
 Elixir:
 
 ```elixir
 def deps do
-  [{:omq_elixir, "~> 0.1"}]
+  [{:omq_elixir, "~> 0.2"}]
 end
 ```
 
@@ -31,7 +31,7 @@ Gleam:
 
 ```toml
 [dependencies]
-omq_gleam = ">= 0.1.0 and < 1.0.0"
+omq_gleam = ">= 0.2.0 and < 1.0.0"
 ```
 
 ## API Shape

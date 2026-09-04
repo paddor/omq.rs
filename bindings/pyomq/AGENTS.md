@@ -43,6 +43,8 @@ python scripts/update_perf.py --proxy-only --impl pyomq
 python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 ```
 
+Set `OMQ_BENCH_TASKSET=1` on Linux to pin each peer to a separate CPU set.
+
 Results in `~/.cache/omq/bindings.jsonl` (latest `run_id` per impl wins).
 Regenerates `doc/charts/bindings.svg` and the proxy table in `README.md`.
 Defaults are 3 measured rounds per size and implementation. Throughput uses

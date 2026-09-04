@@ -97,7 +97,7 @@ runs, on Linux only:
 | `miri` | `cargo miri test -p yring --features async`, nightly |
 | `fuzz-smoke` | parsers at 1M iters, socket actions at 200 |
 
-`.github/workflows/extended.yml` runs nightly at 03:00 UTC and on
+`.github/workflows/extended.yml` runs Sundays at 03:00 UTC and on
 `workflow_dispatch` (with `soak_duration_secs` / `fuzz_scale` inputs):
 the fuzz targets at 100M / 2000 iters, the soak suite in five groups,
 the `--ignored` stress tests, libzmq draft interop (`ws://`,

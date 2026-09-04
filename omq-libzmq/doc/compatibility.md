@@ -59,6 +59,11 @@ currently wired into backend behavior.
 `ZMQ_THREAD_SAFE` returns 0. Match libzmq discipline: one application thread per
 socket.
 
+Unnamed contexts use background thread names such as `OMQ0/IO/0`. Contexts
+configured with more than one IO thread also have an `OMQ0/Control` thread.
+`ZMQ_THREAD_NAME_PREFIX` replaces the generated `OMQ0` context name and must be
+set before creating a socket.
+
 ## OMQ extension API
 
 `libomq_zmq.so` also exports a small `omq_*` extension surface. These symbols

@@ -18,6 +18,9 @@ in other languages) to link against omq instead of libzmq.
 - **Cross-Platform:** Linux, macOS, Windows, BSD
 - **API Compatibility:** Drop-in ABI target with documented compatibility gaps
 
+See [WINDOWS.md](WINDOWS.md) for Windows targets, DLL linking, named-pipe IPC,
+and polling differences.
+
 `ZMQ_PLAIN_SERVER` selects the PLAIN mechanism and delegates admission to a
 context-local ZAP REP or ROUTER handler at `inproc://zeromq.zap.01`; without
 one, authentication fails closed. A non-empty `ZMQ_ZAP_DOMAIN` enables ZAP
@@ -26,7 +29,8 @@ matching mechanism ERROR. Successful user IDs and metadata are exposed by
 `zmq_msg_gets()` on received messages.
 
 `omq_socket_set_plain_server_credentials()` is the OMQ-specific fixed
-credential policy used by high-level bindings. `ZMQ_PLAIN_USERNAME` and
+credential allowlist used by high-level bindings. It accepts an array of
+`omq_plain_credential_t` values. `ZMQ_PLAIN_USERNAME` and
 `ZMQ_PLAIN_PASSWORD` remain client options.
 
 32-bit Linux support covers `i686-unknown-linux-gnu` and
@@ -74,6 +78,22 @@ Runnable C ZGuide suites live in [examples/zguide/](examples/zguide/):
 
 ```sh
 omq-libzmq/examples/zguide/run_all.sh
+```
+
+Standalone security examples live in [`examples/plain.c`](examples/plain.c)
+and [`examples/curve.c`](examples/curve.c). Build them from the repository
+root after building `omq-libzmq`:
+
+```sh
+for name in plain curve; do
+  cc -std=gnu11 -Wall -Wextra -Werror \
+    -I omq-libzmq/include "omq-libzmq/examples/$name.c" \
+    -L target/debug -Wl,-rpath,"$PWD/target/debug" -lomq_zmq \
+    -o "target/$name-example"
+done
+
+target/plain-example
+target/curve-example
 ```
 
 cppzmq users can use upstream cppzmq directly; see

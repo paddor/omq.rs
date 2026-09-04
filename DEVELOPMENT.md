@@ -399,6 +399,17 @@ GitHub releases. Configuration lives in `release-plz.toml`.
 
 ### Binding Releases
 
+Push binding tags one at a time with `push.followTags` disabled. GitHub does
+not create push events when one push creates more than three tags, and a local
+`push.followTags=true` setting can silently add other annotated tags.
+
+For workflow-backed releases, find and watch the run created for the tag:
+
+```sh
+gh run list --repo paddor/omq.rs --workflow WORKFLOW --branch TAG --limit 1
+gh run watch RUN_ID --repo paddor/omq.rs --exit-status
+```
+
 `pyomq` publishes to PyPI from `.github/workflows/release-pyomq.yml`.
 Prepare a release by bumping `bindings/pyomq/Cargo.toml` and
 `bindings/pyomq/pyproject.toml`, running `cargo update -p pyomq` inside
@@ -407,8 +418,7 @@ the PR is merged, push a tag:
 
 ```sh
 git tag -a pyomq-v0.21.0 -m "pyomq 0.21.0"
-git push origin pyomq-v0.21.0
-gh run watch --repo paddor/omq.rs --exit-status
+git -c push.followTags=false push origin pyomq-v0.21.0
 ```
 
 `omq-rs` publishes to RubyGems from
@@ -420,8 +430,7 @@ versions before pushing the Ruby tag. After the PR is merged, push a tag:
 
 ```sh
 git tag -a ruby-v0.2.0 -m "omq-rs 0.2.0"
-git push origin ruby-v0.2.0
-gh run watch --repo paddor/omq.rs --exit-status
+git -c push.followTags=false push origin ruby-v0.2.0
 ```
 
 `OMQ.java` publishes to Maven Central from
@@ -434,8 +443,7 @@ After the PR is merged, push a tag:
 
 ```sh
 git tag -a omq-java-v0.3.4 -m "OMQ.java 0.3.4"
-git push origin omq-java-v0.3.4
-gh run watch --repo paddor/omq.rs --exit-status
+git -c push.followTags=false push origin omq-java-v0.3.4
 ```
 
 The workflow publishes with `central.autoPublish=true` and waits until Central
@@ -447,19 +455,30 @@ module tag from `main`:
 
 ```sh
 git tag -a bindings/go/v0.1.2 -m "OMQ.go 0.1.2"
-git push origin bindings/go/v0.1.2
+git -c push.followTags=false push origin bindings/go/v0.1.2
 go list -m github.com/paddor/omq.rs/bindings/go@v0.1.2
 ```
 
 The public Go module proxy discovers the version from that tag.
 
 `OMQ.node` publishes to npm from `.github/workflows/release-node.yml`.
-Prepare a release by checking `bindings/node/package.json`,
-`bindings/node/npm/*/package.json`, and
-`bindings/node/scripts/prepare-release.js`. The workflow version comes from
-the tag or manual `workflow_dispatch` input, builds all platform native
-addons, packs platform packages, smoke-tests host tarballs, publishes
-platform packages first, then publishes the root package.
+Prepare a release by bumping `bindings/node/Cargo.toml`, its local package in
+`bindings/node/Cargo.lock`, the root `package.json` version, both root
+`package-lock.json` package versions, every `bindings/node/npm/*/package.json`
+version, and the changelog. Do not check root `optionalDependencies` into
+`package.json` or `package-lock.json`.
+`scripts/prepare-release.js` adds them after `npm ci` and after every platform
+package has been built. Validate the prepared tree with:
+
+```sh
+(cd bindings/node && npm ci)
+(cd bindings/node && npm run release:prepare -- VERSION --dry-run)
+```
+
+The workflow version comes from the tag or manual `workflow_dispatch` input.
+It builds all platform native addons, packs platform packages, smoke-tests
+host tarballs, publishes platform packages first, then publishes the root
+package.
 
 Publishing uses npm trusted publishing with GitHub Actions OIDC. No npm token
 secret is required by the workflow. In npm, configure a trusted publisher for
@@ -494,9 +513,8 @@ release. After the PR is merged and trusted publishers are configured, push a
 tag:
 
 ```sh
-git tag -a omq-node-v0.2.0 -m "OMQ.node 0.2.0"
-git push origin omq-node-v0.2.0
-gh run watch --repo paddor/omq.rs --exit-status
+git tag -a omq-node-v0.2.1 -m "OMQ.node 0.2.1"
+git -c push.followTags=false push origin omq-node-v0.2.1
 ```
 
 `OMQ.Net` publishes to NuGet from `.github/workflows/release-dotnet.yml`.
@@ -505,8 +523,7 @@ Prepare a release by bumping `bindings/dotnet/Omq.Net.csproj` and adding a
 
 ```sh
 git tag -a omq-dotnet-v0.2.0 -m "OMQ.Net 0.2.0"
-git push origin omq-dotnet-v0.2.0
-gh run watch --repo paddor/omq.rs --exit-status
+git -c push.followTags=false push origin omq-dotnet-v0.2.0
 ```
 
 `OMQ.lua` publishes to LuaRocks. Prepare a release by adding a versioned
@@ -515,7 +532,7 @@ same commit before uploading the rockspec:
 
 ```sh
 git tag -a omq-lua-v0.2.2 -m "OMQ.lua 0.2.2"
-git push origin omq-lua-v0.2.2
+git -c push.followTags=false push origin omq-lua-v0.2.2
 luarocks upload bindings/lua/omq-0.2.2-1.rockspec
 ```
 
@@ -531,7 +548,7 @@ merged, push a tag:
 
 ```sh
 git tag -a omq-zig-v0.1.0 -m "OMQ.zig 0.1.0"
-git push origin omq-zig-v0.1.0
+git -c push.followTags=false push origin omq-zig-v0.1.0
 ```
 
 ### Crates To Check

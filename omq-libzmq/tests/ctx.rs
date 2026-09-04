@@ -153,7 +153,7 @@ fn ctx_ext_int_options_roundtrip() {
 }
 
 #[test]
-fn ctx_ext_thread_name_prefix_is_accepted_noop() {
+fn ctx_ext_thread_name_prefix_roundtrips() {
     let ctx = zmq_ctx_new();
     let prefix = CString::new("omq").unwrap();
     assert_eq!(
@@ -177,9 +177,52 @@ fn ctx_ext_thread_name_prefix_is_accepted_noop() {
         ),
         0
     );
-    assert_eq!(len, 1);
-    assert_eq!(buf[0], 0);
+    assert_eq!(len, 4);
+    assert_eq!(&buf, b"omq\0");
 
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_int_thread_name_prefix_roundtrips() {
+    let ctx = zmq_ctx_new();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_THREAD_NAME_PREFIX, 42), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_THREAD_NAME_PREFIX), 42);
+
+    zmq_ctx_term(ctx);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ctx_thread_name_prefix_names_background_threads() {
+    let ctx = zmq_ctx_new();
+    let name = CString::new("threads").unwrap();
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), 0);
+    assert_eq!(
+        zmq_ctx_set_ext(
+            ctx,
+            ZMQ_THREAD_NAME_PREFIX,
+            name.as_ptr().cast(),
+            name.as_bytes_with_nul().len(),
+        ),
+        0
+    );
+    let sock = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!sock.is_null());
+    let endpoint = CString::new("inproc://thread-name-test").unwrap();
+    assert_eq!(zmq_bind(sock, endpoint.as_ptr()), 0);
+
+    let names = std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
+        .map(|name| name.trim().to_owned())
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|name| name == "threads/Control"));
+    assert!(names.iter().any(|name| name == "threads/IO/0"));
+    assert!(names.iter().any(|name| name == "threads/IO/1"));
+
+    zmq_close(sock);
     zmq_ctx_term(ctx);
 }
 
@@ -193,7 +236,44 @@ fn ctx_set_io_threads_rejects_negative_and_late_changes() {
     assert!(!sock.is_null());
     assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), -1);
     assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_THREAD_NAME_PREFIX, 2), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
     zmq_close(sock);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ctx_ext_thread_name_prefix_validates_input() {
+    let ctx = zmq_ctx_new();
+    let too_long = [b'x'; 17];
+    assert_eq!(
+        zmq_ctx_set_ext(
+            ctx,
+            ZMQ_THREAD_NAME_PREFIX,
+            too_long.as_ptr().cast(),
+            too_long.len(),
+        ),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    let embedded_nul = b"bad\0name";
+    assert_eq!(
+        zmq_ctx_set_ext(
+            ctx,
+            ZMQ_THREAD_NAME_PREFIX,
+            embedded_nul.as_ptr().cast(),
+            embedded_nul.len(),
+        ),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+
+    assert_eq!(
+        zmq_ctx_set_ext(ctx, ZMQ_THREAD_NAME_PREFIX, std::ptr::null(), 0),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EFAULT);
     zmq_ctx_term(ctx);
 }
 

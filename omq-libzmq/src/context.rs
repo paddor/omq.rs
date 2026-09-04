@@ -26,6 +26,7 @@ pub(crate) struct OmqContext {
     pub ipv6: AtomicBool,
     pub blocky: AtomicBool,
     pub zero_copy_recv: AtomicBool,
+    thread_name_prefix: Mutex<Option<String>>,
     /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
     pub(crate) inproc_binds: Mutex<FxHashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
     /// Pending inproc connect requests waiting for a bind.
@@ -73,6 +74,7 @@ impl OmqContext {
             ipv6: AtomicBool::new(false),
             blocky: AtomicBool::new(true),
             zero_copy_recv: AtomicBool::new(true),
+            thread_name_prefix: Mutex::new(None),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
             zap: Arc::new(crate::zap::ZapService::default()),
@@ -94,6 +96,7 @@ impl OmqContext {
             ipv6: AtomicBool::new(false),
             blocky: AtomicBool::new(true),
             zero_copy_recv: AtomicBool::new(true),
+            thread_name_prefix: Mutex::new(None),
             inproc_binds: Mutex::new(FxHashMap::default()),
             inproc_waiting: Mutex::new(FxHashMap::default()),
             zap: Arc::new(crate::zap::ZapService::default()),
@@ -120,12 +123,40 @@ impl OmqContext {
         if n <= 0 {
             return None;
         }
+        let thread_name_prefix = self
+            .thread_name_prefix
+            .lock()
+            .expect("thread name prefix poisoned");
         let ctx = self.ctx.get_or_init(|| {
-            omq_tokio::Context::with_config(omq_tokio::ContextConfig {
+            let config = omq_tokio::ContextConfig {
                 io_threads: n as usize,
-            })
+            };
+            match thread_name_prefix.as_deref() {
+                Some(prefix) => omq_tokio::Context::with_config_and_name(config, prefix),
+                None => omq_tokio::Context::with_config(config),
+            }
         });
         (!ctx.is_terminated()).then_some(ctx)
+    }
+
+    fn set_thread_name_prefix(&self, prefix: String) -> Result<(), ()> {
+        let mut stored = self
+            .thread_name_prefix
+            .lock()
+            .expect("thread name prefix poisoned");
+        if self.socket_count.load(Ordering::Acquire) != 0 || self.ctx.get().is_some() {
+            return Err(());
+        }
+        *stored = Some(prefix);
+        Ok(())
+    }
+
+    fn thread_name_prefix(&self) -> String {
+        self.thread_name_prefix
+            .lock()
+            .expect("thread name prefix poisoned")
+            .clone()
+            .unwrap_or_default()
     }
 
     pub(crate) fn is_effectively_terminated(&self) -> bool {
@@ -365,6 +396,11 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
         ZMQ_ZERO_COPY_RECV => {
             ctx.zero_copy_recv.store(value != 0, Ordering::Release);
         }
+        ZMQ_THREAD_NAME_PREFIX => {
+            if ctx.set_thread_name_prefix(value.to_string()).is_err() {
+                return crate::error::fail(libc::EINVAL);
+            }
+        }
         ZMQ_SOCKET_LIMIT => {}
         _ => return crate::error::fail(libc::EINVAL),
     }
@@ -384,6 +420,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
         ZMQ_MAX_MSGSZ => ctx.max_msg_size.load(Ordering::Relaxed) as c_int,
         ZMQ_MSG_T_SIZE => c_int::try_from(crate::msg::ZMQ_MSG_T_SIZE).unwrap_or(c_int::MAX),
         ZMQ_ZERO_COPY_RECV => c_int::from(ctx.zero_copy_recv.load(Ordering::Acquire)),
+        ZMQ_THREAD_NAME_PREFIX => ctx.thread_name_prefix().parse().unwrap_or(0),
         ZMQ_IPV6_CTX => c_int::from(ctx.ipv6.load(Ordering::Acquire)),
         ZMQ_BLOCKY => c_int::from(ctx.blocky.load(Ordering::Acquire)),
         _ => crate::error::fail(libc::EINVAL),
@@ -397,11 +434,31 @@ pub extern "C" fn zmq_ctx_set_ext(
     optval: *const c_void,
     optvallen: usize,
 ) -> c_int {
+    if ctx_ptr.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
     if option == ZMQ_THREAD_NAME_PREFIX {
-        if optval.is_null() && optvallen > 0 {
+        if optval.is_null() {
             return crate::error::fail(libc::EFAULT);
         }
-        return 0;
+        if optvallen == 0 || optvallen > 16 {
+            return crate::error::fail(libc::EINVAL);
+        }
+        // SAFETY: optval is non-null and optvallen describes the input bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
+        let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+        if bytes.is_empty() || bytes.contains(&0) {
+            return crate::error::fail(libc::EINVAL);
+        }
+        let Ok(prefix) = std::str::from_utf8(bytes) else {
+            return crate::error::fail(libc::EINVAL);
+        };
+        // SAFETY: ctx_ptr was checked above and belongs to this API.
+        let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
+        return match ctx.set_thread_name_prefix(prefix.to_owned()) {
+            Ok(()) => 0,
+            Err(()) => crate::error::fail(libc::EINVAL),
+        };
     }
     if optval.is_null() || optvallen < std::mem::size_of::<c_int>() {
         return crate::error::fail(libc::EINVAL);
@@ -418,8 +475,13 @@ pub extern "C" fn zmq_ctx_get_ext(
     optval: *mut c_void,
     optvallen: *mut usize,
 ) -> c_int {
+    if ctx_ptr.is_null() {
+        return crate::error::fail(libc::EFAULT);
+    }
     if option == ZMQ_THREAD_NAME_PREFIX {
-        return write_bytes(optval, optvallen, b"");
+        // SAFETY: ctx_ptr was checked above and belongs to this API.
+        let ctx = unsafe { &*(ctx_ptr.cast::<Arc<OmqContext>>()) };
+        return write_bytes(optval, optvallen, ctx.thread_name_prefix().as_bytes());
     }
     let value = zmq_ctx_get(ctx_ptr, option);
     if value == -1 && option != ZMQ_MAX_MSGSZ {

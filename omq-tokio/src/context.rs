@@ -18,6 +18,8 @@ use crate::Socket;
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
+static NEXT_CONTEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+
 /// Configuration for a [`Context`] that owns its own tokio runtime.
 ///
 /// ```
@@ -82,12 +84,17 @@ struct IoThreadPool {
 }
 
 impl IoThreadPool {
-    fn new(n: usize) -> Arc<Self> {
+    fn new_with_context_name(n: usize, context_name: Option<String>) -> Arc<Self> {
         assert!(n >= 1);
         let cancel = CancellationToken::new();
+        let id = NEXT_CONTEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        let context_name = context_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("OMQ{id}"));
         // Multi-IO contexts reserve runtime 0 for socket actors and blocking
         // control calls. The configured count applies to data runtimes.
         let runtime_count = if n > 1 { n + 1 } else { 1 };
+        let context_name = fit_context_name(&context_name, n);
         let mut threads = Vec::with_capacity(runtime_count);
         let mut joins = Vec::with_capacity(runtime_count);
         let mut primary_job_tx = None;
@@ -95,12 +102,13 @@ impl IoThreadPool {
         for i in 0..runtime_count {
             let (handle_tx, handle_rx) = mpsc::channel::<Handle>();
             let cancel_i = cancel.clone();
+            let thread_name = background_thread_name(context_name, runtime_count, i);
 
             let join = if i == 0 {
                 let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<BoxFuture>();
                 primary_job_tx = Some(job_tx);
                 thread::Builder::new()
-                    .name("omq-io-0".into())
+                    .name(thread_name)
                     .spawn(move || {
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
@@ -124,9 +132,8 @@ impl IoThreadPool {
                     })
                     .expect("omq: failed to spawn primary IO thread")
             } else {
-                let name = format!("omq-io-{i}");
                 thread::Builder::new()
-                    .name(name)
+                    .name(thread_name)
                     .spawn(move || {
                         let rt = build_current_thread_runtime();
                         let _ = handle_tx.send(rt.handle().clone());
@@ -197,6 +204,38 @@ impl IoThreadPool {
             }
         }
     }
+}
+
+fn background_thread_name(prefix: &str, runtime_count: usize, index: usize) -> String {
+    if runtime_count > 1 && index == 0 {
+        format!("{prefix}/Control")
+    } else {
+        let io_index = index.saturating_sub(usize::from(runtime_count > 1));
+        format!("{prefix}/IO/{io_index}")
+    }
+}
+
+fn fit_context_name(name: &str, io_threads: usize) -> &str {
+    let max_io_suffix = format!("/IO/{}", io_threads - 1).len();
+    let max_suffix = if io_threads > 1 {
+        max_io_suffix.max("/Control".len())
+    } else {
+        max_io_suffix
+    };
+    truncate_utf8(name, 15usize.saturating_sub(max_suffix))
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    &value[..end]
 }
 
 impl std::fmt::Debug for IoThreadPool {
@@ -442,11 +481,43 @@ impl Context {
     /// IO threads, this is equivalent to [`Context::current`] and requires an
     /// active tokio runtime.
     pub fn with_config(config: ContextConfig) -> Self {
+        Self::with_config_inner(config, None)
+    }
+
+    /// Create a context with one IO thread and a custom context name.
+    ///
+    /// For example, the name `orders` produces the background thread name
+    /// `orders/IO/0`.
+    pub fn with_name(name: impl Into<String>) -> Self {
+        Self::with_config_and_name(ContextConfig::default(), name)
+    }
+
+    /// Create a context with custom configuration and a custom context name.
+    ///
+    /// Data thread names use `<name>/IO/<index>`. Multi-IO contexts also use
+    /// `<name>/Control` for the internal control runtime. Without an explicit
+    /// name, contexts receive process-local names such as `OMQ0` and `OMQ1`.
+    /// Names are shortened at UTF-8 boundaries to fit Linux's 15-byte thread
+    /// name limit while retaining the role and IO index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is empty or contains a NUL byte.
+    pub fn with_config_and_name(config: ContextConfig, name: impl Into<String>) -> Self {
+        let name = name.into();
+        assert!(
+            !name.is_empty() && !name.contains('\0'),
+            "context name must be non-empty and contain no NUL byte"
+        );
+        Self::with_config_inner(config, Some(name))
+    }
+
+    fn with_config_inner(config: ContextConfig, context_name: Option<String>) -> Self {
         if config.io_threads == 0 {
             return Self::current();
         }
         let io_threads = config.io_threads;
-        let pool = IoThreadPool::new(io_threads);
+        let pool = IoThreadPool::new_with_context_name(io_threads, context_name);
         Self {
             inner: ContextCore::new(RuntimeOwnership::Owned { pool }, io_threads),
         }
@@ -680,25 +751,76 @@ fn build_current_thread_runtime() -> tokio::runtime::Runtime {
 
 #[cfg(test)]
 mod tests {
-    use super::IoThreadPool;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{IoThreadPool, fit_context_name};
+
+    fn thread_name(pool: &IoThreadPool, index: usize) -> String {
+        let (name_tx, name_rx) = mpsc::channel();
+        drop(pool.threads[index].handle.spawn(async move {
+            name_tx
+                .send(thread::current().name().unwrap().to_owned())
+                .unwrap();
+        }));
+        name_rx.recv_timeout(Duration::from_secs(1)).unwrap()
+    }
 
     #[test]
     fn single_io_thread_shares_control_runtime() {
-        let pool = IoThreadPool::new(1);
+        let pool = IoThreadPool::new_with_context_name(1, Some("single".to_owned()));
         assert_eq!(pool.threads.len(), 1);
         assert_eq!(pool.thread_count(), 1);
         assert_eq!(pool.assign_thread(), 0);
+        assert_eq!(thread_name(&pool, 0), "single/IO/0");
         pool.shutdown();
     }
 
     #[test]
     fn configured_count_excludes_control_runtime() {
-        let pool = IoThreadPool::new(3);
+        let pool = IoThreadPool::new_with_context_name(3, Some("multi".to_owned()));
         assert_eq!(pool.threads.len(), 4);
         assert_eq!(pool.thread_count(), 3);
         assert_eq!(pool.assign_thread(), 0);
         assert_eq!(pool.assign_thread(), 1);
         assert_eq!(pool.assign_thread(), 2);
+        assert_eq!(thread_name(&pool, 0), "multi/Control");
+        assert_eq!(thread_name(&pool, 1), "multi/IO/0");
+        assert_eq!(thread_name(&pool, 2), "multi/IO/1");
+        assert_eq!(thread_name(&pool, 3), "multi/IO/2");
         pool.shutdown();
+    }
+
+    #[test]
+    fn contexts_get_distinct_default_thread_names() {
+        let first = IoThreadPool::new_with_context_name(1, None);
+        let second = IoThreadPool::new_with_context_name(1, None);
+        assert_ne!(thread_name(&first, 0), thread_name(&second, 0));
+        assert!(thread_name(&first, 0).starts_with("OMQ"));
+        assert!(thread_name(&first, 0).ends_with("/IO/0"));
+        assert!(thread_name(&second, 0).starts_with("OMQ"));
+        assert!(thread_name(&second, 0).ends_with("/IO/0"));
+        first.shutdown();
+        second.shutdown();
+    }
+
+    #[test]
+    fn long_context_names_preserve_thread_role() {
+        let pool = IoThreadPool::new_with_context_name(3, Some("orders-service".to_owned()));
+        assert_eq!(fit_context_name("orders-service", 3), "orders-");
+        assert_eq!(thread_name(&pool, 0), "orders-/Control");
+        assert_eq!(thread_name(&pool, 1), "orders-/IO/0");
+        assert_eq!(thread_name(&pool, 3), "orders-/IO/2");
+        pool.shutdown();
+    }
+
+    #[test]
+    #[should_panic(expected = "context name must be non-empty and contain no NUL byte")]
+    fn explicit_context_name_rejects_nul() {
+        let _ = super::Context::with_config_and_name(
+            super::ContextConfig { io_threads: 1 },
+            "bad\0prefix",
+        );
     }
 }

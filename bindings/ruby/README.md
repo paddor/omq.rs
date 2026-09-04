@@ -94,9 +94,10 @@ an `OMQ::Rust::MechanismPeerInfo`, or `nil` to accept every valid CURVE client.
 Configure it before the first bind, connect, send, receive, or monitor call.
 `OMQ::Rust.curve_public(secret_key)` derives a public key.
 
-PLAIN uses `plain_server: true` on the server and `plain_username` plus
-`plain_password` on clients. PLAIN authenticates without encryption; use it
-only on trusted transports.
+PLAIN servers require an explicit policy. Pass fixed credentials with
+`plain_server: true, plain_auth: [["alice", "secret"]]`, or pass a callable as
+`plain_auth:`. Clients use `plain_username` plus `plain_password`. PLAIN
+authenticates without encryption; use it only on trusted transports.
 
 ## Compression
 

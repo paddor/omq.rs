@@ -2,9 +2,11 @@
 //!
 //! The repr must be exactly 64 bytes to match libzmq's ABI.
 //! Public alignment follows `zmq_msg_t`: pointer-sized, not always 8 bytes.
-//! kind values: 0=empty, 1=heap-alloc, 2=external-ptr, 3=bytes-arc (from recv).
+//! kind values: 0=empty, 1=heap-alloc, 2=external-ptr, 3=bytes-arc (from recv),
+//! 4=shared heap, 5=bytes plus authenticated peer properties.
 
 use std::ffi::{CStr, c_int};
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -15,6 +17,48 @@ const KIND_HEAP: u8 = 1;
 const KIND_EXTERNAL: u8 = 2;
 const KIND_BYTES: u8 = 3;
 const KIND_HEAP_SHARED: u8 = 4;
+const KIND_BYTES_METADATA: u8 = 5;
+
+#[derive(Clone, Debug)]
+struct ReceivedFrame {
+    bytes: Bytes,
+    properties: Arc<Vec<(String, Vec<u8>)>>,
+}
+
+impl ReceivedFrame {
+    fn new(bytes: Bytes, peer: &omq_tokio::proto::PeerProperties) -> Self {
+        let mut properties = Vec::with_capacity(peer.other.len() + 2);
+        if let Some(socket_type) = peer.socket_type {
+            properties.push(c_property("Socket-Type", socket_type.as_str().as_bytes()));
+        }
+        if let Some(identity) = &peer.identity {
+            properties.push(c_property("Identity", identity));
+        }
+        properties.extend(
+            peer.other
+                .iter()
+                .map(|(name, value)| c_property(name, value)),
+        );
+        Self {
+            bytes,
+            properties: Arc::new(properties),
+        }
+    }
+
+    fn property(&self, name: &[u8]) -> Option<*const libc::c_char> {
+        self.properties
+            .iter()
+            .find(|(candidate, _)| candidate.as_bytes() == name)
+            .map(|(_, value)| value.as_ptr().cast())
+    }
+}
+
+fn c_property(name: impl Into<String>, value: &[u8]) -> (String, Vec<u8>) {
+    let mut c_value = Vec::with_capacity(value.len() + 1);
+    c_value.extend_from_slice(value);
+    c_value.push(0);
+    (name.into(), c_value)
+}
 
 /// `zmq_msg_t` compatible repr: 64 bytes, C layout.
 ///
@@ -366,6 +410,13 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
                 drop(unsafe { Box::from_raw(boxed.cast::<Bytes>()) });
             }
         }
+        KIND_BYTES_METADATA => {
+            let boxed = r.boxed();
+            if !boxed.is_null() {
+                // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
+                drop(unsafe { Box::from_raw(boxed.cast::<ReceivedFrame>()) });
+            }
+        }
         _ => {}
     }
     r.clear();
@@ -419,6 +470,26 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
                 s.more(),
                 s.size(),
                 cloned.as_ptr().cast_mut(),
+                None,
+                std::ptr::null_mut(),
+                Box::into_raw(cloned).cast::<libc::c_void>(),
+                s.reserved_array(),
+            );
+        }
+        KIND_BYTES_METADATA => {
+            let boxed = s.boxed();
+            if boxed.is_null() {
+                return crate::error::fail(libc::EFAULT);
+            }
+            // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
+            let cloned = Box::new(unsafe { &*(boxed.cast::<ReceivedFrame>()) }.clone());
+            let data_ptr = cloned.bytes.as_ptr().cast_mut();
+            // SAFETY: dst was closed above and is ready for reinitialization.
+            unsafe { repr(dst) }.init_fields(
+                KIND_BYTES_METADATA,
+                s.more(),
+                s.size(),
+                data_ptr,
                 None,
                 std::ptr::null_mut(),
                 Box::into_raw(cloned).cast::<libc::c_void>(),
@@ -483,7 +554,7 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
             let r = unsafe { repr_ref(msg) };
             i32::from(matches!(
                 r.kind(),
-                KIND_EXTERNAL | KIND_BYTES | KIND_HEAP_SHARED
+                KIND_EXTERNAL | KIND_BYTES | KIND_HEAP_SHARED | KIND_BYTES_METADATA
             ))
         }
         5 => zmq_msg_routing_id(msg).cast_signed(),
@@ -525,7 +596,17 @@ pub extern "C" fn zmq_msg_gets(
     }
     // SAFETY: property is non-null (checked above); caller guarantees valid C string.
     let prop = unsafe { std::ffi::CStr::from_ptr(property) };
-    match prop.to_bytes() {
+    let name = prop.to_bytes();
+    // SAFETY: msg is non-null (checked above).
+    let repr = unsafe { repr_ref(msg) };
+    if repr.kind() == KIND_BYTES_METADATA && !repr.boxed().is_null() {
+        // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv.
+        let frame = unsafe { &*(repr.boxed().cast::<ReceivedFrame>()) };
+        if let Some(value) = frame.property(name) {
+            return value;
+        }
+    }
+    match name {
         b"Socket-Type" | b"Identity" | b"Routing-Id" | b"Peer-Address" => c"".as_ptr(),
         _ => {
             crate::error::set_errno(libc::EINVAL);
@@ -595,8 +676,6 @@ pub extern "C" fn zmq_msg_send(
     sock: *mut libc::c_void,
     flags: c_int,
 ) -> c_int {
-    use std::sync::Arc;
-
     if msg.is_null() || sock.is_null() {
         return crate::error::fail(libc::EFAULT);
     }
@@ -620,6 +699,9 @@ pub extern "C" fn zmq_msg_send(
     let bytes = if r.kind() == KIND_BYTES && !boxed.is_null() {
         // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv; non-null.
         unsafe { &*(boxed.cast::<Bytes>()) }.clone()
+    } else if r.kind() == KIND_BYTES_METADATA && !boxed.is_null() {
+        // SAFETY: boxed was created by Box::into_raw in zmq_msg_recv; non-null.
+        unsafe { &*(boxed.cast::<ReceivedFrame>()) }.bytes.clone()
     } else if r.ptr().is_null() && r.size() > 0 {
         return crate::error::fail(libc::EFAULT);
     } else {
@@ -707,23 +789,40 @@ pub extern "C" fn zmq_msg_recv(
     }
 
     let received = if sock.socket_type == omq_tokio::SocketType::Server {
-        crate::send_recv::pop_recv_server_message(sock, flags).map(|message| {
-            let routing_id = message.routing_id().unwrap_or(0);
-            let frame = message.part_bytes(0).unwrap_or_default();
-            (frame, false, routing_id)
-        })
+        crate::send_recv::pop_recv_server_message_with_properties(sock, flags).map(
+            |(message, properties)| {
+                let routing_id = message.routing_id().unwrap_or(0);
+                let frame = message.part_bytes(0).unwrap_or_default();
+                (frame, false, routing_id, properties)
+            },
+        )
     } else {
-        crate::send_recv::pop_recv_frame(sock, flags).map(|(frame, more)| (frame, more, 0))
+        crate::send_recv::pop_recv_frame_with_properties(sock, flags)
+            .map(|(frame, more, properties)| (frame, more, 0, properties))
     };
 
     match received {
-        Ok((frame, more, routing_id)) => {
+        Ok((frame, more, routing_id, properties)) => {
             zmq_msg_close(msg);
             let sz = frame.len();
             let mut reserved = [0; RESERVED_LEN];
             reserved[..4].copy_from_slice(&routing_id.to_le_bytes());
             // SAFETY: msg was just closed above and is ready for reinitialization.
-            if sz <= 128 {
+            if let Some(properties) = properties {
+                let boxed = Box::new(ReceivedFrame::new(frame, &properties));
+                let data_ptr = boxed.bytes.as_ptr().cast_mut();
+                // SAFETY: msg was just closed above and is ready for reinitialization.
+                unsafe { repr(msg) }.init_fields(
+                    KIND_BYTES_METADATA,
+                    u8::from(more),
+                    sz,
+                    data_ptr,
+                    None,
+                    std::ptr::null_mut(),
+                    Box::into_raw(boxed).cast::<libc::c_void>(),
+                    reserved,
+                );
+            } else if sz <= 128 {
                 // Small frame: malloc + memcpy (1 alloc) instead of
                 // Box<Bytes> (2 allocs: Bytes::copy_from_slice + Box::new).
                 let ptr = if sz > 0 {

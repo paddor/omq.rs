@@ -891,10 +891,7 @@ fn build_options(input: Option<NativeSocketOptions>) -> Result<Options> {
         let username = plain.username;
         let password = plain.password;
         if plain.server.unwrap_or(false) {
-            options = options.plain_server(move |peer| {
-                peer.username.as_deref() == Some(username.as_str())
-                    && peer.password.as_deref() == Some(password.as_str())
-            });
+            options = options.plain_server_credentials([(username, password)]);
         } else {
             options = options.plain_client(username, password);
         }

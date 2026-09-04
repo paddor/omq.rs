@@ -79,6 +79,7 @@ final class PlainTest {
                  return "PLAIN".equals(peer.mechanism().orElse(""))
                          && "alice".equals(peer.username().orElse(""))
                          && "secret".equals(peer.password().orElse(""))
+                         && "127.0.0.1".equals(peer.peerAddress().orElse(""))
                          && peer.identity().isEmpty();
              });
              Socket push = context.socket(SocketType.PUSH)

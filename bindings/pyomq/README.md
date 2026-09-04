@@ -61,6 +61,11 @@ await sock.close()
 
 Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
 
+PLAIN servers require an explicit policy before bind. Use fixed credentials
+with `pull.plain_server = 1; pull.set_plain_auth([("alice", "secret")])`, or
+pass a callable to `set_plain_auth`. Clients keep using `plain_username` and
+`plain_password`. PLAIN does not encrypt traffic.
+
 ## Performance
 
 See [COMPARISONS.md](https://github.com/paddor/omq.rs/blob/main/COMPARISONS.md) for full tables.

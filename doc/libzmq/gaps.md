@@ -149,14 +149,14 @@ down and reconnects.
 
 | Area | libzmq | omq.rs | Gap? |
 |------|--------|--------|------|
-| NULL | READY exchange + ZAP | READY exchange, no ZAP | **~** |
-| PLAIN | Username/password in HELLO | Username/password with authenticator callback | **=** |
-| CURVE (RFC 26) | Full, with ZAP | Full, inline authenticator | **=** |
-| ZAP protocol | Separate inproc socket | Not implemented; inline callback | **~** deliberate |
+| NULL | READY exchange + optional ZAP filtering | Same | **=** |
+| PLAIN | Username/password in HELLO, policy through ZAP | Same | **=** |
+| CURVE (RFC 26) | Full, with optional ZAP policy | Same; native API also supports inline authenticators | **=** |
+| ZAP protocol | Context-local inproc REP/ROUTER handler | Same application-facing protocol | **=** |
 | Socket type compat check | 18-type matrix | 18-type matrix | **=** |
 | Mechanism mismatch | EVENT + protocol_error | Error::HandshakeFailed | **=** |
 | CURVE nonce replay check | nonce <= previous -> INVALID_SEQUENCE | Nonce exhaustion check; replay? | **~** verify |
-| ZAP "300" silent disconnect | No ERROR sent to peer | N/A (no ZAP) | **N/A** |
+| ZAP "300" silent disconnect | No ERROR sent to peer | Same | **=** |
 
 ---
 
@@ -238,13 +238,11 @@ down and reconnects.
 
 ### Features
 
-- **ZAP:** Not implemented. Deliberate: inline authenticator callback
-  serves the same purpose without the inproc socket complexity.
 - **IPC peer credential filtering (SO_PEERCRED):** Cannot restrict IPC
   connections by UID/GID/PID.
 - **IPC wildcard address:** Cannot auto-generate a unique IPC path.
-- **TCP accept filters (allowlist):** Cannot restrict TCP connections by
-  source address.
+- **TCP accept filter socket option:** `ZMQ_TCP_ACCEPT_FILTER` is unsupported;
+  use a NULL ZAP domain for address-based admission policy.
 - **ROUTER handover:** Implemented. Always-on (libzmq gates behind
   `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with
   `DisconnectReason::Handover`. Applies to ROUTER and SERVER.

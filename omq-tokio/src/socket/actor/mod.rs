@@ -252,6 +252,7 @@ pub(crate) struct SocketDriver {
     spsc: super::recv::SpscHandles,
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
+    authenticated_recv_sink: Option<crate::engine::RecvSink>,
     subscribe_count: Arc<AtomicU64>,
     ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
@@ -282,6 +283,9 @@ impl SocketDriver {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
         let recv_strategy = RecvStrategy::for_socket_type(socket_type, recv_tx.clone());
+        let authenticated_recv_sink = recv_sink_config
+            .as_ref()
+            .and_then(|config| config.authenticated_sink());
         let recv_ip_rate_limiter = options
             .recv_ip_rate_limit
             .map(SharedIpRateLimiter::new)
@@ -317,6 +321,7 @@ impl SocketDriver {
             spsc,
             compression_pool: None,
             recv_sink_config,
+            authenticated_recv_sink,
             subscribe_count,
             ready_peer_count_shared,
             io_pool,

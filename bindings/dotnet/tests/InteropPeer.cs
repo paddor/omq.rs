@@ -12,7 +12,7 @@ if (security == "curve")
 }
 else if (security == "plain")
 {
-    if (role == "rep") socket.ConfigurePlainServer();
+    if (role == "rep") socket.ConfigurePlainServer("interop", "secret");
     else socket.ConfigurePlainClient("interop", "secret");
 }
 if (role == "rep") socket.Bind(endpoint); else socket.Connect(endpoint);

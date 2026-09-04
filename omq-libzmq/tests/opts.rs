@@ -50,6 +50,7 @@ const ZMQ_MECHANISM: i32 = 43;
 const ZMQ_PLAIN_SERVER: i32 = 44;
 const ZMQ_PLAIN_USERNAME: i32 = 45;
 const ZMQ_PLAIN_PASSWORD: i32 = 46;
+const ZMQ_ZAP_DOMAIN: i32 = 55;
 const ZMQ_CURVE_SERVER: i32 = 47;
 const ZMQ_CURVE_PUBLICKEY: i32 = 48;
 const ZMQ_CURVE_SECRETKEY: i32 = 49;
@@ -952,11 +953,25 @@ fn silent_noop_options_accepted() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
-    for opt in [4, 8, 9, 25, 55, 57, 61, 68, 74, 80, 92, 96, 97] {
+    for opt in [4, 8, 9, 25, 57, 61, 68, 74, 80, 92, 96, 97] {
         assert_eq!(set_i32(s, opt, 1), 0, "option {opt} should be accepted");
     }
 
     zmq_close(s);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn zap_options_roundtrip() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+
+    assert_eq!(set_bytes(socket, ZMQ_ZAP_DOMAIN, b"global"), 0);
+    let mut domain = [0u8; 16];
+    let len = get_bytes(socket, ZMQ_ZAP_DOMAIN, &mut domain);
+    assert_eq!(&domain[..len], b"global\0");
+
+    zmq_close(socket);
     zmq_ctx_term(ctx);
 }
 

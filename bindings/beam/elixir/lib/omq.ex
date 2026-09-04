@@ -274,6 +274,10 @@ defmodule OMQ do
   @doc "Derive CURVE public key from secret key."
   def curve_public(secret), do: call(:curve_public, [secret])
 
+  @doc "Configure a PLAIN server accepting one fixed credential pair."
+  def plain_server(socket, username, password),
+    do: call(:plain_server, [socket, username, password])
+
   @doc "Subscribe SUB or XSUB socket to prefix."
   def subscribe(socket, prefix), do: call(:subscribe, [socket, prefix])
 

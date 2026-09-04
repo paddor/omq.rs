@@ -118,6 +118,8 @@ pub struct OmqGoAuthPeer {
     public_key_len: usize,
     identity_data: *const u8,
     identity_len: usize,
+    peer_address_data: *const u8,
+    peer_address_len: usize,
     username_data: *const u8,
     username_len: usize,
     password_data: *const u8,
@@ -1506,6 +1508,7 @@ fn go_authenticate(callback_id: u64, peer: &MechanismPeerInfo) -> bool {
     let (mechanism_data, mechanism_len) = str_view(mechanism);
     let (public_key_data, public_key_len) = str_view(&public_key);
     let (identity_data, identity_len) = optional_bytes_view(peer.identity.as_deref());
+    let (peer_address_data, peer_address_len) = optional_str_view(peer.peer_address.as_deref());
     let (username_data, username_len) = optional_str_view(peer.username.as_deref());
     let (password_data, password_len) = optional_str_view(peer.password.as_deref());
 
@@ -1516,6 +1519,8 @@ fn go_authenticate(callback_id: u64, peer: &MechanismPeerInfo) -> bool {
         public_key_len,
         identity_data,
         identity_len,
+        peer_address_data,
+        peer_address_len,
         username_data,
         username_len,
         password_data,
@@ -2482,10 +2487,10 @@ pub extern "C" fn omq_go_socket_set_plain_server(
         let expected_password = str_from_c(password)?.to_string();
         Ok(set_socket_option(socket, move |options| {
             options.mechanism = MechanismSetup::PlainServer {
-                authenticator: Authenticator::new(move |peer| {
-                    peer.username.as_deref() == Some(expected_username.as_str())
-                        && peer.password.as_deref() == Some(expected_password.as_str())
-                }),
+                authenticator: Authenticator::plain_credentials([(
+                    expected_username,
+                    expected_password,
+                )]),
             };
         }))
     })();

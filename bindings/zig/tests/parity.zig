@@ -64,7 +64,7 @@ fn expectRecv(socket: *omq.Socket, expected: []const u8) !void {
 }
 
 fn configurePlain(server: *omq.Socket, client: *omq.Socket) !void {
-    try server.setPlainServer(true);
+    try server.setPlainServerCredentials("alice", "secret");
     try client.setPlainClient(allocator, "alice", "secret");
 }
 

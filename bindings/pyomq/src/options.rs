@@ -64,6 +64,8 @@ pub struct Overlay {
     pub plain_server: bool,
     pub plain_username: Option<String>,
     pub plain_password: Option<String>,
+    #[cfg(feature = "plain")]
+    pub plain_authenticator: Option<crate::auth::PlainAuthenticator>,
     pub curve_server: bool,
     pub curve_publickey: Option<Vec<u8>>,
     pub curve_secretkey: Option<Vec<u8>>,
@@ -104,6 +106,8 @@ impl Default for Overlay {
             plain_server: false,
             plain_username: None,
             plain_password: None,
+            #[cfg(feature = "plain")]
+            plain_authenticator: None,
             curve_server: false,
             curve_publickey: None,
             curve_secretkey: None,
@@ -155,7 +159,14 @@ impl Overlay {
         };
         #[cfg(feature = "plain")]
         if self.plain_server {
-            opts = opts.plain_server(|_| true);
+            let authenticator = self.plain_authenticator.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "PLAIN server requires explicit authentication via set_plain_auth",
+                )
+            })?;
+            opts.mechanism = backend::MechanismSetup::PlainServer {
+                authenticator: crate::auth::build_plain_authenticator(authenticator),
+            };
         } else if let (Some(u), Some(p)) = (&self.plain_username, &self.plain_password) {
             opts = opts.plain_client(u.clone(), p.clone());
         }
@@ -232,6 +243,8 @@ impl Overlay {
             plain_server: false,
             plain_username: None,
             plain_password: None,
+            #[cfg(feature = "plain")]
+            plain_authenticator: None,
             curve_server: false,
             curve_publickey: None,
             curve_secretkey: None,

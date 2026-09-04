@@ -123,6 +123,7 @@ impl ReceiveProfile {
 pub enum RecvSink {
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
+    Authenticated(AuthenticatedRecvSink),
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     Rep(RepRecvSink),
     Server(ServerRecvSink),
@@ -153,6 +154,36 @@ pub struct YringSink {
     pub producer: yring::Producer<RecvItem>,
     pub signal: Box<dyn Fn() + Send + Sync>,
     pub space: Arc<StateSignal>,
+}
+
+/// Message plus authenticated peer properties for compatibility layers that
+/// expose ZAP metadata on each received message.
+#[derive(Debug)]
+pub struct AuthenticatedRecvItem {
+    message: Message,
+    peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
+}
+
+impl AuthenticatedRecvItem {
+    pub fn into_parts(self) -> (Message, Arc<omq_proto::proto::command::PeerProperties>) {
+        (self.message, self.peer_properties)
+    }
+}
+
+/// Shared MPSC receive sink used only by authenticated libzmq sockets.
+#[derive(Clone)]
+pub struct AuthenticatedRecvSink {
+    sender: mpsc::Sender<AuthenticatedRecvItem>,
+    signal: Arc<dyn Fn() + Send + Sync>,
+    peer_properties: Option<Arc<omq_proto::proto::command::PeerProperties>>,
+}
+
+impl std::fmt::Debug for AuthenticatedRecvSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedRecvSink")
+            .field("peer_properties", &self.peer_properties)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Shared config for creating and recycling [`RecvSink::Yring`] instances.
@@ -210,7 +241,19 @@ impl RecvSinkConfig {
     }
 
     pub fn take_sink(&self) -> Option<RecvSink> {
-        self.slot.lock().unwrap().take()
+        let mut slot = self.slot.lock().unwrap();
+        if let Some(RecvSink::Authenticated(sink)) = slot.as_ref() {
+            return Some(RecvSink::Authenticated(sink.clone()));
+        }
+        slot.take()
+    }
+
+    pub(crate) fn authenticated_sink(&self) -> Option<RecvSink> {
+        let slot = self.slot.lock().unwrap();
+        let RecvSink::Authenticated(sink) = slot.as_ref()? else {
+            return None;
+        };
+        Some(RecvSink::Authenticated(sink.clone()))
     }
 
     #[allow(private_interfaces)]
@@ -231,6 +274,7 @@ impl std::fmt::Debug for RecvSink {
                 .debug_struct("Yring")
                 .field("producer", &y.producer)
                 .finish_non_exhaustive(),
+            Self::Authenticated(_) => f.debug_tuple("Authenticated").finish_non_exhaustive(),
             Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
             Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
             Self::Server(server) => f
@@ -302,6 +346,45 @@ impl YringSink {
 }
 
 impl RecvSink {
+    /// Create a shared authenticated receive sink. Every connection gets a
+    /// clone of the sender, so messages from all peers retain their own
+    /// handshake properties in one application-facing queue.
+    pub fn authenticated(
+        cap: usize,
+        signal: Arc<dyn Fn() + Send + Sync>,
+    ) -> (Self, mpsc::Receiver<AuthenticatedRecvItem>) {
+        let (sender, receiver) = mpsc::channel(cap);
+        (
+            Self::Authenticated(AuthenticatedRecvSink {
+                sender,
+                signal,
+                peer_properties: None,
+            }),
+            receiver,
+        )
+    }
+
+    fn set_peer_properties(
+        &mut self,
+        peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
+    ) {
+        match self {
+            Self::Authenticated(sink) => sink.peer_properties = Some(peer_properties),
+            Self::Rep(rep) => rep.sink.set_peer_properties(peer_properties),
+            Self::Server(server) => server.sink.set_peer_properties(peer_properties),
+            Self::Channel(_) | Self::Yring(_) | Self::Conflate(_) => {}
+        }
+    }
+
+    pub(crate) async fn send_authenticated(
+        &mut self,
+        message: Message,
+        peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
+    ) -> bool {
+        self.set_peer_properties(peer_properties);
+        self.send_plain(message).await
+    }
+
     pub(crate) fn rep(
         sink: RecvSink,
         pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
@@ -353,6 +436,25 @@ impl RecvSink {
                 }
                 Err(returned) => Some(returned.message),
             },
+            Self::Authenticated(sink) => {
+                let peer_properties = sink
+                    .peer_properties
+                    .clone()
+                    .expect("authenticated sink activated after handshake");
+                match sink.sender.try_send(AuthenticatedRecvItem {
+                    message: m,
+                    peer_properties,
+                }) {
+                    Ok(()) => {
+                        (sink.signal)();
+                        None
+                    }
+                    Err(
+                        mpsc::error::TrySendError::Full(item)
+                        | mpsc::error::TrySendError::Closed(item),
+                    ) => Some(item.message),
+                }
+            }
             Self::Conflate(slot) => {
                 let _ = slot.send_latest(m);
                 None
@@ -395,6 +497,25 @@ impl RecvSink {
                     (sink.signal)();
                     return true;
                 }
+            }
+            Self::Authenticated(sink) => {
+                let peer_properties = sink
+                    .peer_properties
+                    .clone()
+                    .expect("authenticated sink activated after handshake");
+                if sink
+                    .sender
+                    .send(AuthenticatedRecvItem {
+                        message: m,
+                        peer_properties,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                (sink.signal)();
+                true
             }
             Self::Conflate(slot) => slot.send_latest(m),
             Self::Rep(_) | Self::Server(_) => unreachable!("wrapped sink uses routed send"),
@@ -971,7 +1092,9 @@ where
                 handshake_deadline = None;
             }
 
-            if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
+            if !emit_connection_events(&mut connection, &peer_out, peer_id, recv_direct.as_mut())
+                .await
+            {
                 return Ok(());
             }
 
@@ -998,7 +1121,7 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    read_stream_input(
+                    let input = read_stream_input(
                         n,
                         &mut reader,
                         &mut connection,
@@ -1010,7 +1133,13 @@ where
                         &recv_pool,
                         &peer_out,
                         peer_id,
-                    ).await?;
+                    ).await;
+                    if let Err(error) = input {
+                        // Authentication failures may queue a mechanism ERROR.
+                        // Give it one best-effort flush before closing the peer.
+                        drain_writes(&mut writer, &mut connection).await.ok();
+                        return Err(error);
+                    }
                 }
 
                 res = async {
@@ -1038,7 +1167,9 @@ where
 
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
         loop {
-            if !emit_connection_events(&mut connection, &peer_out, peer_id).await {
+            if !emit_connection_events(&mut connection, &peer_out, peer_id, recv_direct.as_mut())
+                .await
+            {
                 return Ok(());
             }
             match drain_decoded_messages(
@@ -1111,7 +1242,7 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    read_stream_input(
+                    let input = read_stream_input(
                         n,
                         &mut reader,
                         &mut connection,
@@ -1123,7 +1254,11 @@ where
                         &recv_pool,
                         &peer_out,
                         peer_id,
-                    ).await?;
+                    ).await;
+                    if let Err(error) = input {
+                        drain_writes(&mut writer, &mut connection).await.ok();
+                        return Err(error);
+                    }
                 }
 
                 // Drain completed offloaded compressions and flush.
@@ -1230,8 +1365,17 @@ async fn emit_connection_events(
     connection: &mut Connection,
     peer_out: &mpsc::Sender<(u64, PeerEvent)>,
     peer_id: u64,
+    mut recv_direct: Option<&mut RecvSink>,
 ) -> bool {
     while let Some(ev) = connection.poll_event() {
+        if let Event::HandshakeSucceeded {
+            ref peer_properties,
+            ..
+        } = ev
+            && let Some(sink) = recv_direct.as_deref_mut()
+        {
+            sink.set_peer_properties(peer_properties.clone());
+        }
         if peer_out
             .send((peer_id, PeerEvent::Event(ev)))
             .await
@@ -3423,6 +3567,67 @@ mod tests {
             Event::HandshakeSucceeded { .. } => {}
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[cfg(feature = "plain")]
+    #[tokio::test]
+    async fn authentication_failure_flushes_mechanism_error_before_close() {
+        let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
+        let server_connection = Connection::new(
+            ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                omq_proto::MechanismSetup::PlainServer {
+                    authenticator: omq_proto::Authenticator::new(|_| false),
+                },
+            ),
+        );
+        let client_connection = Connection::new(
+            ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+                omq_proto::MechanismSetup::PlainClient {
+                    username: "alice".into(),
+                    password: "wrong".into(),
+                },
+            ),
+        );
+        let (server_inbox_tx, server_inbox_rx) = mpsc::channel(16);
+        let (client_inbox_tx, client_inbox_rx) = mpsc::channel(16);
+        let (server_events_tx, _server_events_rx) = mpsc::channel(16);
+        let (client_events_tx, mut client_events_rx) = mpsc::channel(16);
+
+        let server = ConnectionDriver::new(
+            server_stream,
+            server_connection,
+            server_inbox_rx,
+            server_events_tx,
+            0,
+            CancellationToken::new(),
+        );
+        let client = ConnectionDriver::new(
+            client_stream,
+            client_connection,
+            client_inbox_rx,
+            client_events_tx,
+            1,
+            CancellationToken::new(),
+        );
+        let server_task = tokio::spawn(async move { server.run().await });
+        let client_task = tokio::spawn(async move { client.run().await });
+        let _inboxes = (server_inbox_tx, client_inbox_tx);
+
+        let reason = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((_, PeerEvent::Closed { error: Some(error) })) =
+                    client_events_rx.recv().await
+                {
+                    break error;
+                }
+            }
+        })
+        .await
+        .expect("client did not receive the authentication failure");
+        assert_eq!(reason, "PLAIN peer sent ERROR: 400");
+
+        assert!(server_task.await.unwrap().is_err());
+        assert!(client_task.await.unwrap().is_err());
     }
 
     /// When READY + ERROR arrive in the same TCP read, `handle_input`

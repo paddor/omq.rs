@@ -441,16 +441,16 @@ impl Options {
             ref password,
         } = self.mechanism
         {
-            if username.len() > 255 {
+            if username.len() > 255 || !username.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(crate::error::Error::Config(format!(
-                    "PLAIN username length {} exceeds 255-byte limit",
-                    username.len()
+                    "PLAIN username must contain at most 255 ASCII VCHAR bytes, got {} bytes",
+                    username.len(),
                 )));
             }
-            if password.len() > 255 {
+            if password.len() > 255 || !password.bytes().all(|byte| byte.is_ascii_graphic()) {
                 return Err(crate::error::Error::Config(format!(
-                    "PLAIN password length {} exceeds 255-byte limit",
-                    password.len()
+                    "PLAIN password must contain at most 255 ASCII VCHAR bytes, got {} bytes",
+                    password.len(),
                 )));
             }
         }
@@ -743,6 +743,23 @@ impl Options {
         self
     }
 
+    /// Configure this socket as a PLAIN server accepting an allowlist of
+    /// exact username + password pairs. No encryption is applied; use on
+    /// trusted networks only.
+    #[cfg(feature = "plain")]
+    #[must_use]
+    pub fn plain_server_credentials<I, U, P>(mut self, credentials: I) -> Self
+    where
+        I: IntoIterator<Item = (U, P)>,
+        U: Into<String>,
+        P: Into<String>,
+    {
+        self.mechanism = MechanismSetup::PlainServer {
+            authenticator: Authenticator::plain_credentials(credentials),
+        };
+        self
+    }
+
     /// Configure this socket as a PLAIN client with the given
     /// credentials. The server's authenticator decides admission.
     #[cfg(feature = "plain")]
@@ -949,6 +966,64 @@ impl KeepAlive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn fixed_plain_credentials_match_exactly() {
+        let options =
+            Options::default().plain_server_credentials([("alice", "secret"), ("bob", "hunter2")]);
+        let MechanismSetup::PlainServer { authenticator } = options.mechanism else {
+            panic!("expected PLAIN server");
+        };
+        let peer = |username: &str, password: &str| MechanismPeerInfo {
+            mechanism: crate::proto::MechanismName::PLAIN,
+            public_key: [0; 32],
+            identity: None,
+            peer_address: None,
+            username: Some(username.to_owned()),
+            password: Some(password.to_owned()),
+        };
+
+        assert_eq!(
+            authenticator.authenticate(&peer("alice", "secret")).status,
+            crate::AuthenticationStatus::Success
+        );
+        assert_eq!(
+            authenticator.authenticate(&peer("bob", "hunter2")).status,
+            crate::AuthenticationStatus::Success
+        );
+        assert_eq!(
+            authenticator
+                .authenticate(&peer("mallory", "secret"))
+                .status,
+            crate::AuthenticationStatus::Denied
+        );
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn plain_client_credentials_require_rfc_24_vchar() {
+        assert!(Options::default().plain_client("", "").validate().is_ok());
+        assert!(
+            Options::default()
+                .plain_client("alice", "!secret~")
+                .validate()
+                .is_ok()
+        );
+        for (username, password) in [
+            ("has space", "secret"),
+            ("alice", "line\nbreak"),
+            ("alice", "\u{e9}"),
+            (&"x".repeat(256), "secret"),
+        ] {
+            assert!(
+                Options::default()
+                    .plain_client(username, password)
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn defaults_are_per_socket_hwm_block() {

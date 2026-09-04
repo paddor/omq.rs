@@ -15,7 +15,8 @@ func TestPlainServerAuthCallbackTCP(t *testing.T) {
 		case seen <- peer:
 		default:
 		}
-		return peer.Mechanism == "PLAIN" && peer.Username == "alice" && peer.Password == "secret"
+		return peer.Mechanism == "PLAIN" && peer.Username == "alice" && peer.Password == "secret" &&
+			peer.PeerAddress == "127.0.0.1"
 	}))
 	if err != nil {
 		t.Fatal(err)

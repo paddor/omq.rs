@@ -16,8 +16,8 @@ public final class PeerInfo {
     private final int zmtpMajor;
     private final int zmtpMinor;
 
-    PeerInfo(String mechanism, String publicKey, byte[] identity, String username, String password) {
-        this(mechanism, publicKey, identity, username, password, -1, null, null, -1, -1);
+    PeerInfo(String mechanism, String publicKey, byte[] identity, String username, String password, String peerAddress) {
+        this(mechanism, publicKey, identity, username, password, -1, peerAddress, null, -1, -1);
     }
 
     PeerInfo(

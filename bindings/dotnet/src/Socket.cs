@@ -84,8 +84,21 @@ public sealed class Socket : IDisposable
     public void Unsubscribe(ReadOnlySpan<byte> prefix) => SetOption(SocketOption.Unsubscribe, prefix);
     /// Removes a UTF-8 subscription prefix.
     public void Unsubscribe(string prefix) => Unsubscribe(Encoding.UTF8.GetBytes(prefix));
-    /// Enables PLAIN server mode.
-    public void ConfigurePlainServer(string username = "", string password = "") { _ = username; _ = password; SetOption(SocketOption.PlainServer, 1); }
+    /// Configures a PLAIN server accepting one fixed credential pair.
+    public void ConfigurePlainServer(string username, string password)
+    {
+        lock (gate)
+        {
+            byte[] user = Encoding.UTF8.GetBytes(username);
+            byte[] pass = Encoding.UTF8.GetBytes(password);
+            unsafe
+            {
+                fixed (byte* userPtr = user)
+                fixed (byte* passPtr = pass)
+                    Errors.Check("plain_server", Native.omq_socket_set_plain_server_credentials(Require(), (IntPtr)userPtr, (nuint)user.Length, (IntPtr)passPtr, (nuint)pass.Length));
+            }
+        }
+    }
     /// Configures PLAIN client credentials.
     public void ConfigurePlainClient(string username, string password) { SetOption(SocketOption.PlainUsername, username); SetOption(SocketOption.PlainPassword, password); }
     /// Enables CURVE server mode with its secret key.

@@ -178,17 +178,37 @@ class FeaturesTest < Minitest::Test
   end
 
   def test_plain_push_pull
-    pull = socket(:pull, recv_timeout: 2, plain_server: true)
+    pull = socket(
+      :pull,
+      recv_timeout: 2,
+      plain_server: true,
+      plain_auth: [%w[alice secret], %w[bob hunter2]],
+    )
     endpoint = tcp_endpoint(pull)
-    push = socket(:push, plain_username: "alice", plain_password: "secret")
+    push = socket(:push, plain_username: "bob", plain_password: "hunter2")
     push.connect(endpoint).wait_for_peer(timeout: 2)
 
     push << "plain"
     assert_equal ["plain"], pull.recv
   end
 
+  def test_plain_auth_allowlist_validation
+    invalid = [
+      [["missing-password"]],
+      [["has space", "secret"]],
+      [["alice", "line\nbreak"]],
+      [["alice", "\u00E9"]],
+      [["x" * 256, "secret"]],
+    ]
+    invalid.each do |credentials|
+      assert_raises(ArgumentError, TypeError) do
+        socket(:pull, plain_server: true, plain_auth: credentials)
+      end
+    end
+  end
+
   def test_plain_req_rep
-    rep = socket(:rep, recv_timeout: 2, plain_server: true)
+    rep = socket(:rep, recv_timeout: 2, plain_server: true, plain_auth: [%w[alice secret]])
     endpoint = tcp_endpoint(rep)
     req = socket(
       :req,
@@ -205,7 +225,7 @@ class FeaturesTest < Minitest::Test
   end
 
   def test_plain_pub_sub
-    pub = socket(:pub, plain_server: true)
+    pub = socket(:pub, plain_server: true, plain_auth: [%w[alice secret]])
     endpoint = tcp_endpoint(pub)
     sub = socket(
       :sub,
@@ -221,13 +241,44 @@ class FeaturesTest < Minitest::Test
   end
 
   def test_plain_multipart
-    pull = socket(:pull, recv_timeout: 2, plain_server: true)
+    pull = socket(
+      :pull,
+      recv_timeout: 2,
+      plain_server: true,
+      plain_auth: [%w[alice secret]],
+    )
     endpoint = tcp_endpoint(pull)
     push = socket(:push, plain_username: "alice", plain_password: "secret")
     push.connect(endpoint).wait_for_peer(timeout: 2)
 
     push.send("a", "bb", "ccc")
     assert_equal %w[a bb ccc], pull.recv
+  end
+
+  def test_plain_server_requires_auth_policy
+    pull = socket(:pull, plain_server: true)
+    error = assert_raises(RuntimeError) { tcp_endpoint(pull) }
+    assert_match(/explicit authentication/, error.message)
+  end
+
+  def test_plain_auth_callback_receives_credentials
+    seen = []
+    pull = socket(
+      :pull,
+      recv_timeout: 2,
+      plain_server: true,
+      plain_auth: proc do |peer|
+        seen << [peer.username, peer.password, peer.peer_address]
+        peer.username == "alice" && peer.password == "secret"
+      end,
+    )
+    endpoint = tcp_endpoint(pull)
+    push = socket(:push, plain_username: "alice", plain_password: "secret")
+    push.connect(endpoint).wait_for_peer(timeout: 2)
+
+    push << "authenticated"
+    assert_equal ["authenticated"], pull.recv
+    assert_equal [["alice", "secret", "127.0.0.1"]], seen
   end
 
   def test_zstd_custom_level_and_dictionary

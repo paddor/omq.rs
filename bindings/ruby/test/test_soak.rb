@@ -66,7 +66,9 @@ class SoakTest < Minitest::Test
       pubsub: pub_sub,
       lz4: push_pull("lz4+tcp://127.0.0.1:0"),
       zstd: push_pull("zstd+tcp://127.0.0.1:0"),
-      plain: push_pull("tcp://127.0.0.1:0", pull: { plain_server: true }, push: {
+      plain: push_pull("tcp://127.0.0.1:0", pull: {
+        plain_server: true, plain_auth: [%w[soak secret]]
+      }, push: {
         plain_username: "soak", plain_password: "secret"
       }),
       curve: curve_push_pull,

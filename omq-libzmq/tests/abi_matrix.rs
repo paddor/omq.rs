@@ -46,6 +46,10 @@ const FUNCTION_MATRIX: &[FunctionEntry] = &[
         status: FunctionStatus::Extension,
     },
     FunctionEntry {
+        name: "omq_socket_set_plain_server_credentials",
+        status: FunctionStatus::Extension,
+    },
+    FunctionEntry {
         name: "zmq_atomic_counter_dec",
         status: FunctionStatus::Implemented,
     },
@@ -905,11 +909,7 @@ const SOCKET_OPTION_MATRIX: &[SocketOptionEntry] = &[
         SetStatus::AcceptedNoop,
         GetStatus::CompatDefault,
     ),
-    opt(
-        "ZMQ_ZAP_DOMAIN",
-        SetStatus::AcceptedNoop,
-        GetStatus::CompatDefault,
-    ),
+    opt("ZMQ_ZAP_DOMAIN", SetStatus::RoundTrip, GetStatus::RoundTrip),
     opt(
         "ZMQ_ZAP_ENFORCE_DOMAIN",
         SetStatus::AcceptedNoop,
@@ -1102,8 +1102,8 @@ fn option_status_counts_are_stable() {
             .or_insert(0) += 1;
     }
 
-    assert_eq!(counts.get("RoundTrip/RoundTrip"), Some(&44));
-    assert_eq!(counts.get("AcceptedNoop/CompatDefault"), Some(&55));
+    assert_eq!(counts.get("RoundTrip/RoundTrip"), Some(&45));
+    assert_eq!(counts.get("AcceptedNoop/CompatDefault"), Some(&54));
     assert_eq!(counts.get("AcceptedNoop/State"), Some(&8));
     assert_eq!(counts.get("Command/WriteOnly"), Some(&2));
 }

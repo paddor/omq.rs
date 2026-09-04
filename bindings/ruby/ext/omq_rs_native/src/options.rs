@@ -251,7 +251,7 @@ fn apply_mechanism(hash: VALUE, mech_type: &str, opts: &mut omq_tokio::Options) 
         "plain" => {
             if get_opt_bool_alias(hash, &["plain_server", "mechanism_server"])?.unwrap_or(false) {
                 opts.mechanism = omq_proto::MechanismSetup::PlainServer {
-                    authenticator: omq_proto::Authenticator::new(|_| true),
+                    authenticator: omq_proto::Authenticator::new(|_| false),
                 };
             } else {
                 let username =

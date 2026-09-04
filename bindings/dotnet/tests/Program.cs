@@ -141,6 +141,18 @@ using var plainReq = context.CreateSocket(SocketType.Req, new SocketOptions { Li
 plainRep.ConfigurePlainServer("user", "pass");
 plainReq.ConfigurePlainClient("user", "pass");
 string plainEndpoint = plainRep.Bind("tcp://127.0.0.1:0");
+plainRep.SetOption(SocketOption.ReceiveTimeout, 300);
+using (var rejectedReq = context.CreateSocket(SocketType.Req, new SocketOptions { Linger = 0 }))
+{
+    rejectedReq.ConfigurePlainClient("user", "wrong");
+    rejectedReq.Connect(plainEndpoint);
+    rejectedReq.SendText("rejected");
+    bool rejected = false;
+    try { plainRep.Receive(); }
+    catch (OmqAgainException) { rejected = true; }
+    Check(rejected, "PLAIN server accepted wrong password");
+}
+plainRep.SetOption(SocketOption.ReceiveTimeout, -1);
 plainReq.Connect(plainEndpoint);
 plainReq.SendText("plain");
 Check(ReceiveEventually(plainRep).ToString() == "plain", "PLAIN request mismatch");

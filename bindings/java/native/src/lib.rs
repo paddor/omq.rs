@@ -1179,6 +1179,10 @@ fn mechanism_peer_info_object<'local>(
         Some(identity) => JObject::from(env.byte_array_from_slice(identity).map_err(jni_error)?),
         None => JObject::null(),
     };
+    let peer_address = match &peer.peer_address {
+        Some(address) => JObject::from(env.new_string(address).map_err(jni_error)?),
+        None => JObject::null(),
+    };
     let username = match &peer.username {
         Some(username) => JObject::from(env.new_string(username).map_err(jni_error)?),
         None => JObject::null(),
@@ -1190,13 +1194,14 @@ fn mechanism_peer_info_object<'local>(
 
     env.new_object(
         "io/omq/PeerInfo",
-        "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;)V",
+        "(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
         &[
             JValue::Object(&mechanism),
             JValue::Object(&public_key),
             JValue::Object(&identity),
             JValue::Object(&username),
             JValue::Object(&password),
+            JValue::Object(&peer_address),
         ],
     )
     .map_err(jni_error)
@@ -3374,10 +3379,10 @@ pub extern "system" fn Java_io_omq_Native_socketSetPlainServer(
             let expected_password = java_string(env, password)?;
             socket.set_option(move |options| {
                 options.mechanism = MechanismSetup::PlainServer {
-                    authenticator: Authenticator::new(move |peer| {
-                        peer.username.as_deref() == Some(expected_username.as_str())
-                            && peer.password.as_deref() == Some(expected_password.as_str())
-                    }),
+                    authenticator: Authenticator::plain_credentials([(
+                        expected_username,
+                        expected_password,
+                    )]),
                 };
             })
         })();

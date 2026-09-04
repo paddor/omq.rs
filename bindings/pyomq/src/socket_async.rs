@@ -397,6 +397,11 @@ impl AsyncSocket {
         crate::auth::set_curve_auth_impl(&self.inner, auth)
     }
 
+    #[cfg(feature = "plain")]
+    fn set_plain_auth(&self, auth: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::auth::set_plain_auth_impl(&self.inner, auth)
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────
 
     #[pyo3(signature = (linger=None))]

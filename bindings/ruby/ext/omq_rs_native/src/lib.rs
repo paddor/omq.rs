@@ -1,4 +1,4 @@
-#[cfg(feature = "curve")]
+#[cfg(any(feature = "curve", feature = "plain"))]
 mod auth;
 mod error;
 mod notify;

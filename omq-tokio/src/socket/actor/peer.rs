@@ -291,6 +291,27 @@ impl SocketDriver {
                 if self.handle_legacy_subscribe(peer_id, &msg) {
                     return;
                 }
+                if self.authenticated_recv_sink.is_some() {
+                    let message = if self.type_state_needs_transform() {
+                        let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg);
+                        wrapped.and_then(|wrapped| {
+                            self.type_state
+                                .lock()
+                                .expect("type_state")
+                                .post_recv(self.socket_type, wrapped)
+                                .ok()
+                                .flatten()
+                        })
+                    } else {
+                        self.recv_strategy.wrap_for_transform(peer_id, msg)
+                    };
+                    if let Some(message) = message
+                        && !self.deliver_authenticated(peer_id, message).await
+                    {
+                        self.begin_close(None, Some(Duration::ZERO));
+                    }
+                    return;
+                }
                 if self.type_state_needs_transform() {
                     let wrapped = self.recv_strategy.wrap_for_transform(peer_id, msg);
                     let Some(wrapped) = wrapped else { return };
@@ -418,7 +439,8 @@ impl SocketDriver {
                     prefix: prefix.clone(),
                 });
                 if self.socket_type == SocketType::XPub {
-                    let _ = self.recv_tx.send(xpub_notification(0x01, &prefix)).await;
+                    self.deliver_xpub_notification(peer_id, xpub_notification(0x01, &prefix))
+                        .await;
                 }
             }
             Command::Cancel(prefix) => {
@@ -427,7 +449,8 @@ impl SocketDriver {
                     prefix: prefix.clone(),
                 });
                 if self.socket_type == SocketType::XPub {
-                    let _ = self.recv_tx.send(xpub_notification(0x00, &prefix)).await;
+                    self.deliver_xpub_notification(peer_id, xpub_notification(0x00, &prefix))
+                        .await;
                 }
             }
             Command::Join(group) => {
@@ -463,6 +486,33 @@ impl SocketDriver {
                 subscribe_count.fetch_add(1, Ordering::Release);
             }
         }));
+    }
+
+    async fn deliver_authenticated(&mut self, peer_id: u64, message: Message) -> bool {
+        let Some(peer_properties) = self
+            .peers
+            .get(&peer_id)
+            .and_then(|peer| peer.info.as_ref())
+            .map(|info| info.peer_properties.clone())
+        else {
+            return false;
+        };
+        self.authenticated_recv_sink
+            .as_mut()
+            .expect("authenticated receive sink configured")
+            .send_authenticated(message, peer_properties)
+            .await
+    }
+
+    async fn deliver_xpub_notification(&mut self, peer_id: u64, message: Message) {
+        let delivered = if self.authenticated_recv_sink.is_some() {
+            self.deliver_authenticated(peer_id, message).await
+        } else {
+            self.recv_tx.send(message).await.is_ok()
+        };
+        if !delivered {
+            self.begin_close(None, Some(Duration::ZERO));
+        }
     }
 
     /// Handle legacy ZMTP 3.0 subscribe/cancel (single-frame message with

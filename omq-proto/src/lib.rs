@@ -36,8 +36,9 @@ pub use options::{
     KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options, ReconnectPolicy, WorkloadProfile,
 };
 pub use proto::mechanism::MechanismSetup;
-#[cfg(any(feature = "curve", feature = "plain"))]
-pub use proto::mechanism::{Authenticator, MechanismPeerInfo};
+pub use proto::mechanism::{
+    AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo,
+};
 #[cfg(feature = "curve")]
 pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use proto::{SocketType, is_compatible};

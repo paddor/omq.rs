@@ -28,8 +28,10 @@ pub struct RustSocket {
     materialized: RwLock<Option<Materialized>>,
     closed: AtomicBool,
     linger: Mutex<Option<std::time::Duration>>,
-    #[cfg(feature = "curve")]
+    #[cfg(any(feature = "curve", feature = "plain"))]
     auth_worker: Mutex<Option<crate::auth::AuthWorker>>,
+    #[cfg(feature = "plain")]
+    plain_auth_configured: AtomicBool,
 }
 
 unsafe impl Send for RustSocket {}
@@ -71,7 +73,7 @@ unsafe extern "C" fn rust_socket_mark(ptr: *mut c_void) {
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let socket = unsafe { &*ptr.cast::<RustSocket>() };
-        #[cfg(feature = "curve")]
+        #[cfg(any(feature = "curve", feature = "plain"))]
         if let Some(worker) = socket.auth_worker.lock().unwrap().as_ref() {
             unsafe {
                 rb_sys::rb_gc_mark(worker.callback());
@@ -139,8 +141,10 @@ fn rust_socket_new_impl(class: VALUE, type_str: VALUE) -> RbResult<VALUE> {
                 materialized: RwLock::new(None),
                 closed: AtomicBool::new(false),
                 linger: Mutex::new(None),
-                #[cfg(feature = "curve")]
+                #[cfg(any(feature = "curve", feature = "plain"))]
                 auth_worker: Mutex::new(None),
+                #[cfg(feature = "plain")]
+                plain_auth_configured: AtomicBool::new(false),
             }),
             rust_socket_data_type(),
         )
@@ -206,6 +210,95 @@ fn set_curve_authenticator(
     Ok(())
 }
 
+#[cfg(feature = "plain")]
+fn set_plain_authenticator(
+    rb_self: &RustSocket,
+    authenticator: omq_proto::Authenticator,
+    mut worker: Option<crate::auth::AuthWorker>,
+) -> RbResult<()> {
+    if rb_self.materialized.read().unwrap().is_some() {
+        if let Some(worker) = worker.take() {
+            worker.stop();
+        }
+        return Err(RubyErr::runtime(
+            "PLAIN authentication must be configured before bind or connect",
+        ));
+    }
+
+    let mut options_guard = rb_self.options.lock().unwrap();
+    let options = options_guard
+        .as_mut()
+        .ok_or_else(|| RubyErr::runtime("socket options not configured"))?;
+    if let omq_proto::MechanismSetup::PlainServer {
+        authenticator: configured,
+    } = &mut options.mechanism
+    {
+        *configured = authenticator;
+    } else {
+        drop(options_guard);
+        if let Some(worker) = worker.take() {
+            worker.stop();
+        }
+        return Err(RubyErr::runtime(
+            "PLAIN authentication requires a PLAIN server socket",
+        ));
+    }
+    drop(options_guard);
+
+    let previous = rb_self.auth_worker.lock().unwrap().take();
+    if let Some(previous) = previous {
+        previous.stop();
+    }
+    *rb_self.auth_worker.lock().unwrap() = worker;
+    rb_self.plain_auth_configured.store(true, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(feature = "plain")]
+unsafe extern "C" fn rust_socket_set_plain_auth_credentials(
+    rb_self: VALUE,
+    credentials: VALUE,
+) -> VALUE {
+    rb::wrap(|| {
+        let rb_self = unsafe { rust_socket_ref(rb_self)? };
+        let count = rb::array_len(credentials)?;
+        let mut allowlist = Vec::with_capacity(count);
+        for index in 0..count {
+            let pair = rb::array_entry(credentials, index)?;
+            if rb::array_len(pair)? != 2 {
+                return Err(RubyErr::arg(
+                    "each PLAIN credential must be a [username, password] pair",
+                ));
+            }
+            let username = rb::value_to_string(rb::array_entry(pair, 0)?)?;
+            let password = rb::value_to_string(rb::array_entry(pair, 1)?)?;
+            if username.len() > 255
+                || password.len() > 255
+                || !username.bytes().all(|byte| byte.is_ascii_graphic())
+                || !password.bytes().all(|byte| byte.is_ascii_graphic())
+            {
+                return Err(RubyErr::arg(
+                    "PLAIN credentials must contain at most 255 ASCII VCHAR bytes",
+                ));
+            }
+            allowlist.push((username, password));
+        }
+        let authenticator = omq_proto::Authenticator::plain_credentials(allowlist);
+        set_plain_authenticator(rb_self, authenticator, None)?;
+        Ok(rb::qnil())
+    })
+}
+
+#[cfg(feature = "plain")]
+unsafe extern "C" fn rust_socket_set_plain_auth_callback(rb_self: VALUE, callback: VALUE) -> VALUE {
+    rb::wrap(|| {
+        let rb_self = unsafe { rust_socket_ref(rb_self)? };
+        let (authenticator, worker) = crate::auth::callback(callback)?;
+        set_plain_authenticator(rb_self, authenticator, Some(worker))?;
+        Ok(rb::qnil())
+    })
+}
+
 #[cfg(feature = "curve")]
 unsafe extern "C" fn rust_socket_set_curve_auth_keys(rb_self: VALUE, keys: VALUE) -> VALUE {
     rb::wrap(|| {
@@ -248,6 +341,25 @@ fn rust_socket_materialize_impl(rb_self: &RustSocket) -> RbResult<()> {
     let mut slot = rb_self.materialized.write().unwrap();
     if slot.is_some() {
         return Ok(());
+    }
+
+    #[cfg(feature = "plain")]
+    if rb_self
+        .options
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|options| {
+            matches!(
+                options.mechanism,
+                omq_proto::MechanismSetup::PlainServer { .. }
+            )
+        })
+        && !rb_self.plain_auth_configured.load(Ordering::Acquire)
+    {
+        return Err(RubyErr::runtime(
+            "PLAIN server requires explicit authentication via set_plain_auth",
+        ));
     }
 
     let opts = rb_self.options.lock().unwrap().take().unwrap_or_default();
@@ -774,13 +886,15 @@ unsafe extern "C" fn rust_socket_leave(rb_self: VALUE, group: VALUE) -> VALUE {
 
 fn rust_socket_close_impl(rb_self: &RustSocket, wait_for_auth_worker: bool) {
     rb_self.closed.store(true, Ordering::Relaxed);
-    #[cfg(feature = "curve")]
-    let worker = rb_self.auth_worker.lock().unwrap().take();
-    if let Some(worker) = worker {
-        if wait_for_auth_worker {
-            worker.stop();
-        } else {
-            worker.request_stop();
+    #[cfg(any(feature = "curve", feature = "plain"))]
+    {
+        let worker = rb_self.auth_worker.lock().unwrap().take();
+        if let Some(worker) = worker {
+            if wait_for_auth_worker {
+                worker.stop();
+            } else {
+                worker.request_stop();
+            }
         }
     }
     let mat = rb_self.materialized.write().unwrap().take();
@@ -933,6 +1047,19 @@ pub fn register(native: VALUE) -> RbResult<()> {
                 rust_socket_set_curve_auth_callback,
             )?;
             rb::define_method_0(class, c"clear_curve_auth", rust_socket_clear_curve_auth)?;
+        }
+        #[cfg(feature = "plain")]
+        {
+            rb::define_method_1(
+                class,
+                c"set_plain_auth_credentials",
+                rust_socket_set_plain_auth_credentials,
+            )?;
+            rb::define_method_1(
+                class,
+                c"set_plain_auth_callback",
+                rust_socket_set_plain_auth_callback,
+            )?;
         }
         rb::define_method_0(class, c"materialize", rust_socket_materialize)?;
         rb::define_method_1(class, c"bind", rust_socket_bind)?;

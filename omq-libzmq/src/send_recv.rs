@@ -86,6 +86,22 @@ pub(crate) enum SendMessageAttempt {
 pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Message>, c_int> {
     use std::sync::atomic::Ordering;
 
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return sock
+            .ctx
+            .zap
+            .try_recv_message(sock.id)
+            .map(|message| message.map(omq_tokio::Message::multipart));
+    }
+
+    if authenticated_recv_configured(sock) {
+        let item = try_recv_authenticated_message(sock)?;
+        if item.is_some() {
+            mark_external_recv(sock);
+        }
+        return Ok(item.map(|item| item.into_parts().0));
+    }
+
     if sock.drain_nonempty.load(Ordering::Relaxed) {
         let Ok(mut drain) = sock.recv_drain.lock() else {
             return Err(ETERM);
@@ -150,6 +166,13 @@ pub(crate) fn try_send_message(
     sock: &Arc<OmqSocket>,
     msg: omq_tokio::Message,
 ) -> Result<SendMessageAttempt, c_int> {
+    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+        let response: Vec<Bytes> = (0..msg.len())
+            .filter_map(|index| msg.part_bytes(index))
+            .collect();
+        sock.ctx.zap.respond(sock.id, &response)?;
+        return Ok(SendMessageAttempt::Sent);
+    }
     if msg.len() == 1 {
         crate::socket::adopt_pending_bypass_send(sock);
         if sock
@@ -190,6 +213,24 @@ pub(crate) fn try_send_message(
         Err(omq_tokio::TrySendError::Full(msg)) => Ok(SendMessageAttempt::Full(msg)),
         Err(omq_tokio::TrySendError::Closed) => Err(ETERM),
         Err(omq_tokio::TrySendError::Error(e)) => Err(map_omq_err(&e)),
+    }
+}
+
+fn send_zap_bytes(sock: &OmqSocket, data: &[u8], flags: c_int, ret_len: c_int) -> c_int {
+    if !sock.ctx.zap.can_send(sock.id) {
+        return fail(crate::error::EFSM);
+    }
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let accum = unsafe { sock.send_accum.get() };
+    if flags & ZMQ_SNDMORE != 0 {
+        accum.push(Bytes::copy_from_slice(data));
+        return ret_len;
+    }
+    let mut response = std::mem::take(accum);
+    response.push(Bytes::copy_from_slice(data));
+    match sock.ctx.zap.respond(sock.id, &response) {
+        Ok(()) => ret_len,
+        Err(error) => fail(error),
     }
 }
 
@@ -336,6 +377,10 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
         return fail(libc::EMSGSIZE);
     }
 
+    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+        return send_zap_bytes(sock, data, flags, ret_len);
+    }
+
     // XSUB: intercept subscription frames.
     if sock.socket_type == omq_tokio::SocketType::XSub && !data.is_empty() {
         if let Err(error) = crate::socket::ensure_materialized(sock) {
@@ -438,6 +483,15 @@ pub(crate) fn send_message(
         .load(std::sync::atomic::Ordering::Relaxed);
     if max > 0 && msg.byte_len() > max as usize {
         return fail(libc::EMSGSIZE);
+    }
+    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+        let response: Vec<Bytes> = (0..msg.len())
+            .filter_map(|index| msg.part_bytes(index))
+            .collect();
+        return match sock.ctx.zap.respond(sock.id, &response) {
+            Ok(()) => ret_len,
+            Err(error) => fail(error),
+        };
     }
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     if flags & ZMQ_SNDMORE != 0 {
@@ -608,6 +662,24 @@ pub extern "C" fn zmq_recviov(
 fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags: c_int) -> c_int {
     use std::sync::atomic::Ordering;
 
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return zmq_recv_via_frame(sock, buf, buf_len, flags);
+    }
+
+    if authenticated_recv_configured(sock) {
+        return match pop_recv_frame_with_properties(sock, flags) {
+            Ok((frame, _, _)) => {
+                let frame_len = frame.len();
+                copy_to_buf(buf, buf_len, &frame);
+                match checked_c_int_len(frame_len) {
+                    Ok(size) => size,
+                    Err(error) => fail(error),
+                }
+            }
+            Err(error) => fail(error),
+        };
+    }
+
     // Inproc bypass fast path: copy from byte ring directly into user
     // buffer. Zero intermediate Bytes allocation.
     crate::socket::adopt_pending_bypass_recv(sock);
@@ -696,7 +768,7 @@ fn recv_msg_to_buf(
     let data = m.get(start).unwrap_or(&[]);
     copy_to_buf(buf, buf_len, data);
     stash_remaining_parts(sock, m, start);
-    mark_external_req_recv(sock);
+    mark_external_recv(sock);
     match checked_c_int_len(data.len()) {
         Ok(n) => n,
         Err(e) => fail(e),
@@ -732,9 +804,100 @@ fn signal_recv_space_if_full(sock: &OmqSocket, released_full_slot: bool) {
     }
 }
 
+fn pop_zap_frame(sock: &OmqSocket, rcvtimeo: i64, dontwait: bool) -> Result<(Bytes, bool), c_int> {
+    if let Some(frame) = sock.ctx.zap.try_recv_frame(sock.id)? {
+        return Ok(frame);
+    }
+    if dontwait {
+        return Err(libc::EAGAIN);
+    }
+    block_recv_result(sock, rcvtimeo, || sock.ctx.zap.try_recv_frame(sock.id))
+}
+
+pub(crate) fn authenticated_recv_configured(sock: &OmqSocket) -> bool {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    unsafe { sock.authenticated_recv.get() }.is_some()
+}
+
+pub(crate) fn authenticated_recv_has_data(sock: &OmqSocket) -> bool {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let queued = unsafe { sock.authenticated_recv.get() }
+        .as_ref()
+        .is_some_and(|receiver| !receiver.is_empty());
+    // SAFETY: same socket-thread invariant as above.
+    queued || !unsafe { sock.authenticated_recv_drain.get() }.is_empty()
+}
+
+pub(crate) fn authenticated_recv_has_more(sock: &OmqSocket) -> bool {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    !unsafe { sock.authenticated_recv_drain.get() }.is_empty()
+}
+
+fn try_recv_authenticated_message(
+    sock: &OmqSocket,
+) -> Result<Option<omq_tokio::engine::AuthenticatedRecvItem>, c_int> {
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let Some(receiver) = (unsafe { sock.authenticated_recv.get() }).as_mut() else {
+        return Err(ETERM);
+    };
+    match receiver.try_recv() {
+        Ok(item) => Ok(Some(item)),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(ETERM),
+    }
+}
+
+fn pop_authenticated_message(
+    sock: &OmqSocket,
+    flags: c_int,
+) -> Result<omq_tokio::engine::AuthenticatedRecvItem, c_int> {
+    let rcvtimeo = sock.rcvtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(item) = try_recv_authenticated_message(sock)? {
+        return Ok(item);
+    }
+    if flags & ZMQ_DONTWAIT != 0 || rcvtimeo == 0 {
+        return Err(libc::EAGAIN);
+    }
+    block_recv_result(sock, rcvtimeo, || try_recv_authenticated_message(sock))
+}
+
+/// Pop one frame while retaining ZAP properties for `zmq_msg_gets`.
+pub(crate) fn pop_recv_frame_with_properties(
+    sock: &OmqSocket,
+    flags: c_int,
+) -> Result<(Bytes, bool, Option<Arc<omq_tokio::proto::PeerProperties>>), c_int> {
+    if !authenticated_recv_configured(sock) {
+        return pop_recv_frame(sock, flags).map(|(frame, more)| (frame, more, None));
+    }
+
+    // SAFETY: libzmq sockets are accessed by at most one application thread.
+    let drain = unsafe { sock.authenticated_recv_drain.get() };
+    if let Some((frame, properties)) = drain.pop_front() {
+        return Ok((frame, !drain.is_empty(), Some(properties)));
+    }
+
+    let item = pop_authenticated_message(sock, flags)?;
+    let (message, properties) = item.into_parts();
+    let start = msg_start_index(sock, &message);
+    let frame = message.part_bytes(start).unwrap_or_default();
+    for index in start + 1..message.len() {
+        if let Some(part) = message.part_bytes(index) {
+            drain.push_back((part, properties.clone()));
+        }
+    }
+    mark_external_recv(sock);
+    Ok((frame, !drain.is_empty(), Some(properties)))
+}
+
 /// Pop one frame from the socket, honoring flags/timeout.
 pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
     use std::sync::atomic::Ordering;
+
+    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
+    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
+    if sock.zap_handler.load(Ordering::Acquire) {
+        return pop_zap_frame(sock, rcvtimeo, dontwait);
+    }
 
     // Drain leftover frames from a partially-consumed multipart message.
     if sock.drain_nonempty.load(Ordering::Relaxed) {
@@ -750,9 +913,6 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         }
         sock.drain_nonempty.store(false, Ordering::Relaxed);
     }
-
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
 
     // Inproc bypass path: peek from byte ring, wrap in Bytes.
     // Used by zmq_msg_recv (which needs an owned Bytes).
@@ -785,7 +945,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
             let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
             let bytes = Bytes::copy_from_slice(slice);
             bypass.advance(len);
-            mark_external_req_recv(sock);
+            mark_external_recv(sock);
             return Ok((bytes, false));
         }
         if dontwait {
@@ -831,7 +991,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
                 let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
                 let bytes = Bytes::copy_from_slice(slice);
                 bypass.advance(len);
-                mark_external_req_recv(sock);
+                mark_external_recv(sock);
                 return Ok(Some((bytes, false)));
             }
             if bypass.pipe.closed.load(Ordering::Acquire) {
@@ -876,6 +1036,24 @@ pub(crate) fn pop_recv_server_message(
     })
 }
 
+pub(crate) fn pop_recv_server_message_with_properties(
+    sock: &OmqSocket,
+    flags: c_int,
+) -> Result<
+    (
+        omq_tokio::Message,
+        Option<Arc<omq_tokio::proto::PeerProperties>>,
+    ),
+    c_int,
+> {
+    if authenticated_recv_configured(sock) {
+        let item = pop_authenticated_message(sock, flags)?;
+        let (message, properties) = item.into_parts();
+        return Ok((message, Some(properties)));
+    }
+    pop_recv_server_message(sock, flags).map(|message| (message, None))
+}
+
 /// Zero-alloc recv for the inproc bypass: peek from byte ring,
 /// copy directly into the user's buffer, advance.
 fn recv_bypass_direct(
@@ -914,7 +1092,7 @@ fn recv_bypass_direct(
         let data = popped.message.get(start).unwrap_or(&[]);
         copy_to_buf(buf, buf_len, data);
         stash_remaining_parts(sock, &popped.message, start);
-        mark_external_req_recv(sock);
+        mark_external_recv(sock);
         return checked_c_int_len(data.len());
     }
 
@@ -1026,7 +1204,7 @@ fn try_recv_bypass_or_yring(
             }
         }
         bypass.advance(len);
-        mark_external_req_recv(sock);
+        mark_external_recv(sock);
         return checked_c_int_len(len).map(Some);
     }
     // SAFETY: libzmq sockets are accessed by at most one application thread.
@@ -1039,7 +1217,7 @@ fn try_recv_bypass_or_yring(
         let frame_len = data.len();
         copy_to_buf(buf, buf_len, data);
         stash_remaining_parts(sock, &popped.message, start);
-        mark_external_req_recv(sock);
+        mark_external_recv(sock);
         return checked_c_int_len(frame_len).map(Some);
     }
     if bypass
@@ -1098,11 +1276,16 @@ fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
     0
 }
 
-fn mark_external_req_recv(sock: &OmqSocket) {
-    if sock.socket_type == omq_tokio::SocketType::Req
-        && let Some(inner) = sock.inner.get()
-    {
-        inner.mark_req_reply_received_for_external_recv();
+fn mark_external_recv(sock: &OmqSocket) {
+    let Some(inner) = sock.inner.get() else {
+        return;
+    };
+    match sock.socket_type {
+        omq_tokio::SocketType::Req => inner.mark_req_reply_received_for_external_recv(),
+        omq_tokio::SocketType::Rep if authenticated_recv_configured(sock) => {
+            inner.mark_rep_request_received_for_external_recv();
+        }
+        _ => {}
     }
 }
 
@@ -1129,7 +1312,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
     let start = msg_start_index(sock, msg);
     if nparts <= 1 && start == 0 {
         let head = msg.part_bytes(0).unwrap_or_default();
-        mark_external_req_recv(sock);
+        mark_external_recv(sock);
         return Ok((head, false));
     }
 
@@ -1148,7 +1331,7 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
         }
     }
 
-    mark_external_req_recv(sock);
+    mark_external_recv(sock);
     Ok((head, remaining < nparts))
 }
 

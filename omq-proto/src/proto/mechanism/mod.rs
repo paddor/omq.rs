@@ -33,6 +33,9 @@ pub enum MechanismSetup {
     /// NULL: no encryption, no peer authentication.
     #[default]
     Null,
+    /// NULL server side with an admission callback. This is primarily used
+    /// by compatibility layers that implement ZAP address filtering.
+    NullServer { authenticator: Authenticator },
     /// CURVE server side: this socket accepts incoming CURVE clients
     /// authenticated against `our_keypair.public`. Server-specific
     /// CURVE behavior lives in `options`; each connection still gets
@@ -63,7 +66,7 @@ impl MechanismSetup {
     /// Wire-level mechanism name for the greeting.
     pub fn wire_name(&self) -> MechanismName {
         match self {
-            Self::Null => MechanismName::NULL,
+            Self::Null | Self::NullServer { .. } => MechanismName::NULL,
             #[cfg(feature = "curve")]
             Self::CurveServer { .. } | Self::CurveClient { .. } => MechanismName::CURVE,
             #[cfg(feature = "plain")]
@@ -74,7 +77,7 @@ impl MechanismSetup {
     /// Whether this mechanism installs a per-frame crypto transform (CURVE).
     pub fn has_frame_transform(&self) -> bool {
         match self {
-            Self::Null => false,
+            Self::Null | Self::NullServer { .. } => false,
             #[cfg(feature = "curve")]
             Self::CurveServer { .. } | Self::CurveClient { .. } => true,
             #[cfg(feature = "plain")]
@@ -95,29 +98,38 @@ impl MechanismSetup {
             Self::CurveServer { our_keypair, .. } | Self::CurveClient { our_keypair, .. } => {
                 Some(&our_keypair.secret)
             }
-            Self::Null => None,
+            Self::Null | Self::NullServer { .. } => None,
             #[cfg(feature = "plain")]
             Self::PlainServer { .. } | Self::PlainClient { .. } => None,
         }
     }
 
-    pub(crate) fn build(self) -> SecurityMechanism {
+    pub(crate) fn build(self, peer_address: Option<String>) -> SecurityMechanism {
+        #[cfg(not(feature = "plain"))]
+        let _ = peer_address;
         match self {
             Self::Null => SecurityMechanism::Null(NullMechanism::new()),
+            Self::NullServer { authenticator } => {
+                SecurityMechanism::Null(NullMechanism::new_server(authenticator, peer_address))
+            }
             #[cfg(feature = "curve")]
             Self::CurveServer {
                 our_keypair,
                 options,
-            } => SecurityMechanism::Curve(CurveMechanism::new_server(our_keypair, options)),
+            } => SecurityMechanism::Curve(CurveMechanism::new_server_with_peer_address(
+                our_keypair,
+                options,
+                peer_address,
+            )),
             #[cfg(feature = "curve")]
             Self::CurveClient {
                 our_keypair,
                 server_public,
             } => SecurityMechanism::Curve(CurveMechanism::new_client(our_keypair, server_public)),
             #[cfg(feature = "plain")]
-            Self::PlainServer { authenticator } => {
-                SecurityMechanism::Plain(PlainMechanism::new_server(authenticator))
-            }
+            Self::PlainServer { authenticator } => SecurityMechanism::Plain(
+                PlainMechanism::new_server_with_peer_address(authenticator, peer_address),
+            ),
             #[cfg(feature = "plain")]
             Self::PlainClient { username, password } => {
                 SecurityMechanism::Plain(PlainMechanism::new_client(username, password))
@@ -202,8 +214,8 @@ fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
     )))
 }
 
-/// Information passed to an [`Authenticator`] callback after a
-/// security mechanism has cryptographically verified the peer.
+/// Information passed to an [`Authenticator`] callback during a server-side
+/// security handshake.
 #[derive(Debug, Clone)]
 pub struct MechanismPeerInfo {
     /// Which mechanism produced this peer info. Lets a single
@@ -214,36 +226,142 @@ pub struct MechanismPeerInfo {
     pub public_key: [u8; 32],
     /// Peer's routing identity from the READY metadata.
     pub identity: Option<Bytes>,
+    /// Remote transport address, when available.
+    pub peer_address: Option<String>,
     /// PLAIN username. `None` for encrypting mechanisms.
     pub username: Option<String>,
     /// PLAIN password. `None` for encrypting mechanisms.
     pub password: Option<String>,
 }
 
-/// Server-side admission callback shared by every encrypting
-/// mechanism (CURVE). Invoked once per handshake after
-/// vouch verification, before READY is sent. Returning `false`
-/// rejects the client; the handshake aborts. `Arc`-wrapped so the
-/// closure can be cloned through `MechanismSetup`.
+/// Result of a server-side authentication decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthenticationStatus {
+    /// Authentication succeeded.
+    Success,
+    /// Authentication cannot currently be completed. The peer is disconnected
+    /// without a mechanism `ERROR` command.
+    TemporaryFailure,
+    /// Credentials were rejected.
+    Denied,
+    /// The authentication service failed.
+    InternalError,
+}
+
+impl AuthenticationStatus {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Success => "200",
+            Self::TemporaryFailure => "300",
+            Self::Denied => "400",
+            Self::InternalError => "500",
+        }
+    }
+}
+
+/// Authentication decision plus properties attached to the authenticated
+/// connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticationResult {
+    /// Authentication outcome.
+    pub status: AuthenticationStatus,
+    /// Optional application user identity. `Some` may contain an empty value
+    /// when a protocol explicitly supplied an empty user-id field.
+    pub user_id: Option<Bytes>,
+    /// Additional authenticated connection properties.
+    pub metadata: Vec<(String, Bytes)>,
+}
+
+impl AuthenticationResult {
+    #[must_use]
+    pub const fn allow() -> Self {
+        Self {
+            status: AuthenticationStatus::Success,
+            user_id: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn deny() -> Self {
+        Self {
+            status: AuthenticationStatus::Denied,
+            user_id: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_user_id(mut self, user_id: impl Into<Bytes>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Vec<(String, Bytes)>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub(crate) fn apply_to(self, properties: &mut PeerProperties) {
+        if let Some(user_id) = self.user_id {
+            properties.add("User-Id", user_id);
+        }
+        properties.other.extend(self.metadata);
+    }
+}
+
+/// Server-side admission callback for NULL, PLAIN, and CURVE. Invoked once per
+/// handshake, after credentials are available and before READY completes.
+/// `Arc`-wrapped so the closure can be cloned through `MechanismSetup`.
 #[derive(Clone)]
-pub struct Authenticator(
-    #[cfg_attr(
-        not(any(feature = "curve", feature = "plain")),
-        allow(dead_code, reason = "only non-NULL mechanisms call allow()")
-    )]
-    Arc<dyn Fn(&MechanismPeerInfo) -> bool + Send + Sync>,
-);
+pub struct Authenticator(Arc<dyn Fn(&MechanismPeerInfo) -> AuthenticationResult + Send + Sync>);
 
 impl Authenticator {
     pub fn new<F>(f: F) -> Self
     where
         F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
     {
+        Self(Arc::new(move |peer| {
+            if f(peer) {
+                AuthenticationResult::allow()
+            } else {
+                AuthenticationResult::deny()
+            }
+        }))
+    }
+
+    /// Create an authenticator that returns connection properties as well as
+    /// an admission decision.
+    pub fn new_with_result<F>(f: F) -> Self
+    where
+        F: Fn(&MechanismPeerInfo) -> AuthenticationResult + Send + Sync + 'static,
+    {
         Self(Arc::new(f))
     }
 
-    #[cfg(any(feature = "curve", feature = "plain"))]
-    pub(crate) fn allow(&self, peer: &MechanismPeerInfo) -> bool {
+    /// Admit any exact PLAIN username + password pair in an allowlist.
+    #[cfg(feature = "plain")]
+    pub fn plain_credentials<I, U, P>(credentials: I) -> Self
+    where
+        I: IntoIterator<Item = (U, P)>,
+        U: Into<String>,
+        P: Into<String>,
+    {
+        let credentials: Vec<(String, String)> = credentials
+            .into_iter()
+            .map(|(username, password)| (username.into(), password.into()))
+            .collect();
+        Self::new(move |peer| {
+            credentials.iter().any(|(username, password)| {
+                peer.username.as_deref() == Some(username.as_str())
+                    && peer.password.as_deref() == Some(password.as_str())
+            })
+        })
+    }
+
+    pub(crate) fn authenticate(&self, peer: &MechanismPeerInfo) -> AuthenticationResult {
         (self.0)(peer)
     }
 }
@@ -318,10 +436,7 @@ impl SecurityMechanism {
     ) -> Result<()> {
         let _ = (our_greeting, peer_greeting);
         match self {
-            Self::Null(m) => {
-                m.start(out, our_props);
-                Ok(())
-            }
+            Self::Null(m) => m.start(out, our_props),
             #[cfg(feature = "curve")]
             Self::Curve(m) => m.start(out, our_props),
             #[cfg(feature = "plain")]
@@ -422,6 +537,9 @@ impl FrameTransform {
 #[derive(Debug)]
 pub(crate) struct NullMechanism {
     state: NullState,
+    authenticator: Option<Authenticator>,
+    peer_address: Option<String>,
+    authentication: Option<AuthenticationResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,12 +553,47 @@ impl NullMechanism {
     pub(crate) fn new() -> Self {
         Self {
             state: NullState::NotStarted,
+            authenticator: None,
+            peer_address: None,
+            authentication: None,
         }
     }
 
-    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) {
+    pub(crate) fn new_server(authenticator: Authenticator, peer_address: Option<String>) -> Self {
+        Self {
+            state: NullState::NotStarted,
+            authenticator: Some(authenticator),
+            peer_address,
+            authentication: None,
+        }
+    }
+
+    fn start(&mut self, out: &mut Vec<Command>, our_props: PeerProperties) -> Result<()> {
+        if let Some(authenticator) = &self.authenticator {
+            let result = authenticator.authenticate(&MechanismPeerInfo {
+                mechanism: MechanismName::NULL,
+                public_key: [0; 32],
+                identity: None,
+                peer_address: self.peer_address.clone(),
+                username: None,
+                password: None,
+            });
+            if result.status != AuthenticationStatus::Success {
+                if result.status != AuthenticationStatus::TemporaryFailure {
+                    out.push(Command::Error {
+                        reason: result.status.code().into(),
+                    });
+                }
+                return Err(Error::HandshakeFailed(format!(
+                    "NULL authentication failed with status {}",
+                    result.status.code()
+                )));
+            }
+            self.authentication = Some(result);
+        }
         out.push(Command::Ready(our_props));
         self.state = NullState::AwaitingReady;
+        Ok(())
     }
 
     fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
@@ -448,7 +601,10 @@ impl NullMechanism {
             return Err(err);
         }
         match (self.state, cmd) {
-            (NullState::AwaitingReady, Command::Ready(props)) => {
+            (NullState::AwaitingReady, Command::Ready(mut props)) => {
+                if let Some(authentication) = self.authentication.take() {
+                    authentication.apply_to(&mut props);
+                }
                 self.state = NullState::Done;
                 Ok(MechanismStep::Complete {
                     peer_properties: props,
@@ -460,12 +616,15 @@ impl NullMechanism {
             (NullState::AwaitingReady, Command::Unknown { name, body })
                 if name.as_ref() == b"READY" =>
             {
-                let props = super::command::decode(prepend_name(b"READY", &body)).and_then(
+                let mut props = super::command::decode(prepend_name(b"READY", &body)).and_then(
                     |c| match c {
                         Command::Ready(p) => Ok(p),
                         _ => Err(Error::HandshakeFailed("READY parse mismatch".into())),
                     },
                 )?;
+                if let Some(authentication) = self.authentication.take() {
+                    authentication.apply_to(&mut props);
+                }
                 self.state = NullState::Done;
                 Ok(MechanismStep::Complete {
                     peer_properties: props,
@@ -494,7 +653,8 @@ mod tests {
         m.start(
             &mut out,
             PeerProperties::default().with_socket_type(SocketType::Push),
-        );
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], Command::Ready(_)));
         assert_eq!(m.state, NullState::AwaitingReady);
@@ -504,7 +664,7 @@ mod tests {
     fn null_accepts_peer_ready() {
         let mut m = NullMechanism::new();
         let mut out = Vec::new();
-        m.start(&mut out, PeerProperties::default());
+        m.start(&mut out, PeerProperties::default()).unwrap();
         out.clear();
         let step = m
             .on_command(
@@ -525,7 +685,7 @@ mod tests {
     fn null_rejects_non_ready() {
         let mut m = NullMechanism::new();
         let mut out = Vec::new();
-        m.start(&mut out, PeerProperties::default());
+        m.start(&mut out, PeerProperties::default()).unwrap();
         out.clear();
         let err = m
             .on_command(Command::Subscribe(bytes::Bytes::default()), &mut out)
@@ -537,7 +697,7 @@ mod tests {
     fn null_surfaces_error_reason() {
         let mut m = NullMechanism::new();
         let mut out = Vec::new();
-        m.start(&mut out, PeerProperties::default());
+        m.start(&mut out, PeerProperties::default()).unwrap();
         out.clear();
         let err = m
             .on_command(

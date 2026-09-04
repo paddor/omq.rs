@@ -49,6 +49,8 @@ pub(crate) struct SocketOverlay {
     pub tcp_keepalive_idle: Option<Duration>,
     pub tcp_keepalive_intvl: Option<Duration>,
     pub mechanism: MechanismOverlay,
+    pub zap_domain: String,
+    pub zap_enforce_domain: bool,
     pub sndbuf: Option<usize>,
     pub rcvbuf: Option<usize>,
     pub xpub_verbose: bool,
@@ -95,6 +97,8 @@ impl Default for SocketOverlay {
             tcp_keepalive_idle: None,
             tcp_keepalive_intvl: None,
             mechanism: MechanismOverlay::Null,
+            zap_domain: String::new(),
+            zap_enforce_domain: false,
             sndbuf: None,
             rcvbuf: None,
             xpub_verbose: false,
@@ -126,6 +130,10 @@ pub(crate) enum MechanismOverlay {
     #[default]
     Null,
     PlainServer,
+    PlainServerCredentials {
+        username: String,
+        password: String,
+    },
     PlainClient {
         username: String,
         password: String,
@@ -181,8 +189,18 @@ impl SocketOverlay {
         let mechanism = match &self.mechanism {
             MechanismOverlay::Null => MechanismSetup::Null,
             MechanismOverlay::PlainServer => MechanismSetup::PlainServer {
-                authenticator: omq_tokio::Authenticator::new(|_| true),
+                // Replaced with the context's ZAP authenticator during socket
+                // materialization. Keep detached overlays fail-closed.
+                authenticator: omq_tokio::Authenticator::new(|_| false),
             },
+            MechanismOverlay::PlainServerCredentials { username, password } => {
+                MechanismSetup::PlainServer {
+                    authenticator: omq_tokio::Authenticator::plain_credentials([(
+                        username.clone(),
+                        password.clone(),
+                    )]),
+                }
+            }
             MechanismOverlay::PlainClient { username, password } => MechanismSetup::PlainClient {
                 username: username.clone(),
                 password: password.clone(),
@@ -459,6 +477,9 @@ pub extern "C" fn zmq_setsockopt(
             if optval.is_null() {
                 return crate::error::fail(libc::EFAULT);
             }
+            if optvallen > 255 {
+                return crate::error::fail(libc::EINVAL);
+            }
             // SAFETY: optval is non-null (checked above); optvallen bytes are readable.
             let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
             lock_overlay!(sock_arc).identity = Bytes::copy_from_slice(bytes);
@@ -671,7 +692,10 @@ pub extern "C" fn zmq_setsockopt(
             let mut ov = lock_overlay!(sock_arc);
             if v != 0 {
                 ov.mechanism = MechanismOverlay::PlainServer;
-            } else if matches!(ov.mechanism, MechanismOverlay::PlainServer) {
+            } else if matches!(
+                ov.mechanism,
+                MechanismOverlay::PlainServer | MechanismOverlay::PlainServerCredentials { .. }
+            ) {
                 ov.mechanism = MechanismOverlay::Null;
             }
         }
@@ -679,6 +703,9 @@ pub extern "C" fn zmq_setsockopt(
             let Some(s) = read_string(optval, optvallen) else {
                 return fail(libc::EINVAL);
             };
+            if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
+                return fail(libc::EINVAL);
+            }
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { username, .. } => *username = s,
@@ -694,6 +721,9 @@ pub extern "C" fn zmq_setsockopt(
             let Some(s) = read_string(optval, optvallen) else {
                 return fail(libc::EINVAL);
             };
+            if s.len() > 255 || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
+                return fail(libc::EINVAL);
+            }
             let mut ov = lock_overlay!(sock_arc);
             match &mut ov.mechanism {
                 MechanismOverlay::PlainClient { password, .. } => *password = s,
@@ -862,6 +892,21 @@ pub extern "C" fn zmq_setsockopt(
             };
             lock_overlay!(sock_arc).wss_trust_system = v != 0;
         }
+        ZMQ_ZAP_DOMAIN => {
+            let Some(domain) = read_string(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            if domain.len() > 255 || !domain.is_ascii() {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).zap_domain = domain;
+        }
+        ZMQ_ZAP_ENFORCE_DOMAIN => {
+            let Some(value) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            lock_overlay!(sock_arc).zap_enforce_domain = value != 0;
+        }
         #[expect(clippy::match_same_arms)]
         ZMQ_AFFINITY
         | ZMQ_RATE
@@ -875,7 +920,6 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_TCP_ACCEPT_FILTER
         | ZMQ_ROUTER_RAW
         | ZMQ_MECHANISM
-        | ZMQ_ZAP_DOMAIN
         | ZMQ_TOS
         | ZMQ_IPC_FILTER_PID
         | ZMQ_IPC_FILTER_UID
@@ -903,7 +947,6 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE
         | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
         | ZMQ_BINDTODEVICE
-        | ZMQ_ZAP_ENFORCE_DOMAIN
         | ZMQ_LOOPBACK_FASTPATH
         | ZMQ_METADATA
         | ZMQ_MULTICAST_LOOP
@@ -931,6 +974,70 @@ pub extern "C" fn zmq_setsockopt(
         | ZMQ_NORM_PUSH => {}
         _ => return crate::error::fail(libc::EINVAL),
     }
+    0
+}
+
+/// Configure one fixed PLAIN server credential pair.
+///
+/// This is an OMQ extension. Standard `ZMQ_PLAIN_USERNAME` and
+/// `ZMQ_PLAIN_PASSWORD` remain client-only options, while
+/// `ZMQ_PLAIN_SERVER` uses ZAP.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_socket_set_plain_server_credentials(
+    sock: *mut libc::c_void,
+    username: *const u8,
+    username_len: usize,
+    password: *const u8,
+    password_len: usize,
+) -> c_int {
+    if sock.is_null()
+        || (username.is_null() && username_len != 0)
+        || (password.is_null() && password_len != 0)
+    {
+        return fail(libc::EFAULT);
+    }
+    if username_len > 255 || password_len > 255 {
+        return fail(libc::EINVAL);
+    }
+    // SAFETY: non-null pointers are caller-provided readable buffers of the
+    // corresponding length. Empty inputs never dereference their pointer.
+    let username = if username_len == 0 {
+        ""
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(username, username_len) };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return fail(libc::EINVAL);
+        };
+        if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return fail(libc::EINVAL);
+        }
+        text
+    };
+    let password = if password_len == 0 {
+        ""
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(password, password_len) };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return fail(libc::EINVAL);
+        };
+        if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return fail(libc::EINVAL);
+        }
+        text
+    };
+    // SAFETY: `sock` is non-null and must be a live handle returned by
+    // `zmq_socket`, matching the rest of this C API.
+    let socket = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+    if socket
+        .bound_or_connected
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return fail(libc::EINVAL);
+    }
+    lock_overlay!(socket).mechanism = MechanismOverlay::PlainServerCredentials {
+        username: username.to_owned(),
+        password: password.to_owned(),
+    };
     0
 }
 
@@ -1019,9 +1126,18 @@ pub extern "C" fn zmq_getsockopt(
             write_bytes(optval, optvallen, &ov.identity)
         }
         ZMQ_RCVMORE => {
-            let more = sock_arc
-                .drain_nonempty
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let more = if sock_arc
+                .zap_handler
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                sock_arc.ctx.zap.has_more(sock_arc.id)
+            } else if crate::send_recv::authenticated_recv_configured(sock_arc) {
+                crate::send_recv::authenticated_recv_has_more(sock_arc)
+            } else {
+                sock_arc
+                    .drain_nonempty
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
             write_i32(optval, optvallen, i32::from(more))
         }
         ZMQ_TYPE => {
@@ -1063,9 +1179,16 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable
             crate::socket::adopt_pending_bypass_recv(sock_arc);
-            let drain_nonempty = sock_arc
-                .drain_nonempty
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let drain_nonempty = if sock_arc
+                .zap_handler
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                sock_arc.ctx.zap.has_input(sock_arc.id)
+            } else {
+                sock_arc
+                    .drain_nonempty
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
             // SAFETY: libzmq sockets are accessed by at most one application thread.
             let recv_cons_has_data = unsafe { sock_arc.recv_cons.get() }
                 .as_ref()
@@ -1074,7 +1197,12 @@ pub extern "C" fn zmq_getsockopt(
             let bypass_recv_has_data = unsafe { sock_arc.bypass_recv.get() }
                 .as_ref()
                 .is_some_and(|br| !br.is_empty());
-            let has_data = drain_nonempty || recv_cons_has_data || bypass_recv_has_data;
+            let authenticated_recv_has_data =
+                crate::send_recv::authenticated_recv_has_data(sock_arc);
+            let has_data = drain_nonempty
+                || recv_cons_has_data
+                || bypass_recv_has_data
+                || authenticated_recv_has_data;
             if has_data {
                 events |= ZMQ_POLLIN;
             }
@@ -1216,7 +1344,9 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_MECHANISM => {
             let v = match lock_overlay!(sock_arc).mechanism {
                 MechanismOverlay::Null => ZMQ_NULL,
-                MechanismOverlay::PlainServer | MechanismOverlay::PlainClient { .. } => ZMQ_PLAIN,
+                MechanismOverlay::PlainServer
+                | MechanismOverlay::PlainServerCredentials { .. }
+                | MechanismOverlay::PlainClient { .. } => ZMQ_PLAIN,
                 MechanismOverlay::CurveServer { .. } | MechanismOverlay::CurveClient { .. } => {
                     ZMQ_CURVE
                 }
@@ -1226,7 +1356,7 @@ pub extern "C" fn zmq_getsockopt(
         ZMQ_PLAIN_SERVER => {
             let v = matches!(
                 lock_overlay!(sock_arc).mechanism,
-                MechanismOverlay::PlainServer
+                MechanismOverlay::PlainServer | MechanismOverlay::PlainServerCredentials { .. }
             );
             write_i32(optval, optvallen, i32::from(v))
         }
@@ -1342,6 +1472,15 @@ pub extern "C" fn zmq_getsockopt(
             optvallen,
             i32::from(lock_overlay!(sock_arc).wss_trust_system),
         ),
+        ZMQ_ZAP_DOMAIN => {
+            let overlay = lock_overlay!(sock_arc);
+            write_string(optval, optvallen, overlay.zap_domain.as_bytes())
+        }
+        ZMQ_ZAP_ENFORCE_DOMAIN => write_i32(
+            optval,
+            optvallen,
+            i32::from(lock_overlay!(sock_arc).zap_enforce_domain),
+        ),
         ZMQ_IPV4ONLY => write_i32(optval, optvallen, i32::from(!lock_overlay!(sock_arc).ipv6)),
         ZMQ_MULTICAST_MAXTPDU => write_i32(optval, optvallen, 1500),
         ZMQ_USE_FD => write_i32(optval, optvallen, -1),
@@ -1367,7 +1506,6 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_VMCI_CONNECT_TIMEOUT
         | ZMQ_GSSAPI_PRINCIPAL_NAMETYPE
         | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
-        | ZMQ_ZAP_ENFORCE_DOMAIN
         | ZMQ_LOOPBACK_FASTPATH
         | ZMQ_MULTICAST_LOOP
         | ZMQ_ROUTER_NOTIFY
@@ -1388,7 +1526,6 @@ pub extern "C" fn zmq_getsockopt(
         | ZMQ_NORM_NUM_AUTOPARITY
         | ZMQ_NORM_PUSH => write_i32(optval, optvallen, 0),
         ZMQ_TCP_ACCEPT_FILTER
-        | ZMQ_ZAP_DOMAIN
         | ZMQ_SOCKS_PROXY
         | ZMQ_CONNECT_ROUTING_ID
         | ZMQ_GSSAPI_PRINCIPAL

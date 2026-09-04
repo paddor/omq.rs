@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-04
+
+- Keep generated platform package dependencies out of the checked-in root
+  manifest and lockfile so release jobs can run `npm ci` before packaging.
+
 ## [0.2.0] - 2026-09-04
 
 - Preserve SERVER routing IDs across receive and send operations.

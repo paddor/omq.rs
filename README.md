@@ -63,7 +63,8 @@ not depend on libzmq, libsodium, or a C compiler.
 [Full compression transport benchmarks (LZ4 and Zstd)](BENCHMARKS_COMPRESSION.md)
 </details>
 
-[Full comparison charts](COMPARISONS.md)
+[Full comparison charts](COMPARISONS.md) |
+[Other protocol comparisons](PROTOCOL_COMPARISONS.md)
 
 ## The hard parts
 
@@ -201,6 +202,8 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 ## Further reading
 
 - [COMPARISONS.md](COMPARISONS.md): cross-implementation comparison charts.
+- [PROTOCOL_COMPARISONS.md](PROTOCOL_COMPARISONS.md): throughput and
+  request/reply-like latency against other messaging and RPC protocols.
 - [BENCHMARKS_COMPRESSION.md](BENCHMARKS_COMPRESSION.md): lz4+tcp
   throughput on bandwidth-limited links.
 - [doc/architecture.md](doc/architecture.md): architecture and tokio

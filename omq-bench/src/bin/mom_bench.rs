@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 #[path = "mom_bench/grpc.rs"]
 pub mod grpc;
+#[path = "mom_bench/iggy.rs"]
+mod iggy;
 #[path = "mom_bench/kafka.rs"]
 mod kafka;
 #[path = "mom_bench/nats.rs"]
@@ -22,11 +24,19 @@ mod redis;
 const CHART_SIZES: &[usize] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
+const LATENCY_SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Mode {
+    Throughput,
+    Latency,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Role {
     Coordinator,
     Producer,
+    Responder,
 }
 
 #[derive(Parser)]
@@ -34,14 +44,23 @@ struct Args {
     #[arg(long = "impl", required = true)]
     pub(crate) impls: Vec<String>,
 
-    #[arg(long, default_value_t = default_sizes())]
-    pub(crate) sizes: String,
+    #[arg(long)]
+    pub(crate) sizes: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = Mode::Throughput)]
+    mode: Mode,
 
     #[arg(long, default_value_t = 3.0)]
     pub(crate) duration: f64,
 
     #[arg(long, default_value_t = 1.0)]
     pub(crate) warmup: f64,
+
+    #[arg(long, default_value_t = 5000)]
+    pub(crate) latency_iterations: u64,
+
+    #[arg(long, default_value_t = 500)]
+    pub(crate) latency_warmup: u64,
 
     #[arg(long, default_value = "mom-rust-20260901")]
     pub(crate) run_id: String,
@@ -73,6 +92,9 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:19092")]
     pub(crate) kafka_url: String,
 
+    #[arg(long, default_value = "iggy://iggy:iggy@127.0.0.1:8090")]
+    pub(crate) iggy_url: String,
+
     #[arg(long)]
     pub(crate) grpc_port_file: Option<PathBuf>,
 }
@@ -83,6 +105,28 @@ pub(crate) struct BenchResult {
     pub(crate) pull_cpu_time: f64,
     pub(crate) push_cpu_time: f64,
     pub(crate) broker_cpu_time: Option<f64>,
+}
+
+pub(crate) struct LatencyResult {
+    p50_us: f64,
+    p99_us: f64,
+    p999_us: f64,
+    max_us: f64,
+    elapsed: f64,
+    req_cpu_time: f64,
+    rep_cpu_time: f64,
+    broker_cpu_time: Option<f64>,
+}
+
+pub(crate) struct LatencyMeter {
+    responder: Option<std::process::Child>,
+    impl_name: &'static str,
+    rtts_ns: Vec<u64>,
+    start: Option<Instant>,
+    req_cpu_start: Option<f64>,
+    rep_cpu_start: Option<f64>,
+    broker_start_pid: Option<u32>,
+    broker_cpu_start: Option<f64>,
 }
 
 pub(crate) struct CpuWindow {
@@ -117,6 +161,107 @@ impl CpuWindow {
         let start = self.cpu_start.unwrap_or(self_cpu_secs()?);
         Ok(self_cpu_secs()? - start)
     }
+}
+
+impl LatencyMeter {
+    pub(crate) fn new(
+        impl_name: &'static str,
+        iterations: u64,
+        responder: std::process::Child,
+    ) -> Result<Self> {
+        Ok(Self {
+            responder: Some(responder),
+            impl_name,
+            rtts_ns: Vec::with_capacity(usize::try_from(iterations)?),
+            start: None,
+            req_cpu_start: None,
+            rep_cpu_start: None,
+            broker_start_pid: None,
+            broker_cpu_start: None,
+        })
+    }
+
+    pub(crate) fn responder_mut(&mut self) -> &mut std::process::Child {
+        self.responder.as_mut().expect("responder present")
+    }
+
+    pub(crate) fn begin(&mut self) -> Result<()> {
+        let responder_pid = self.responder_mut().id();
+        self.rep_cpu_start = Some(process_cpu_secs(responder_pid)?);
+        self.req_cpu_start = Some(self_cpu_secs()?);
+        self.broker_start_pid = broker_pid(self.impl_name);
+        self.broker_cpu_start = self
+            .broker_start_pid
+            .and_then(|pid| process_cpu_secs(pid).ok());
+        self.start = Some(Instant::now());
+        Ok(())
+    }
+
+    pub(crate) fn record(&mut self, elapsed: Duration) -> Result<()> {
+        self.rtts_ns.push(u64::try_from(elapsed.as_nanos())?);
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<LatencyResult> {
+        if self.rtts_ns.is_empty() {
+            bail!("latency run produced no samples");
+        }
+        let start = self.start.context("latency meter not started")?;
+        let elapsed = start.elapsed().as_secs_f64();
+        let requester_cpu_time =
+            self_cpu_secs()? - self.req_cpu_start.context("request CPU start")?;
+        let responder = self.responder_mut();
+        if let Some(status) = responder.try_wait()? {
+            bail!("responder exited early: {status}");
+        }
+        let responder_cpu_time =
+            process_cpu_secs(responder.id())? - self.rep_cpu_start.context("response CPU start")?;
+        let broker_cpu_time = self
+            .broker_start_pid
+            .zip(self.broker_cpu_start)
+            .and_then(|(pid, cpu_start)| process_cpu_secs(pid).ok().map(|end| end - cpu_start));
+
+        self.rtts_ns.sort_unstable();
+        let p50_us = percentile_us(&self.rtts_ns, 50.0);
+        let tail_us = percentile_us(&self.rtts_ns, 99.0);
+        let tail_999_us = percentile_us(&self.rtts_ns, 99.9);
+        let max_us = self.rtts_ns.last().copied().unwrap_or_default() as f64 / 1000.0;
+        stop_child(&mut self.responder);
+
+        Ok(LatencyResult {
+            p50_us,
+            p99_us: tail_us,
+            p999_us: tail_999_us,
+            max_us,
+            elapsed,
+            req_cpu_time: requester_cpu_time,
+            rep_cpu_time: responder_cpu_time,
+            broker_cpu_time,
+        })
+    }
+}
+
+impl Drop for LatencyMeter {
+    fn drop(&mut self) {
+        stop_child(&mut self.responder);
+    }
+}
+
+fn stop_child(child: &mut Option<std::process::Child>) {
+    if let Some(mut child) = child.take() {
+        if child.try_wait().is_ok_and(|status| status.is_none()) {
+            child.kill().ok();
+        }
+        child.wait().ok();
+    }
+}
+
+fn percentile_us(sorted: &[u64], percentile: f64) -> f64 {
+    let mut index = (sorted.len() as f64 * percentile / 100.0) as usize;
+    if index >= sorted.len() {
+        index = sorted.len() - 1;
+    }
+    sorted[index] as f64 / 1000.0
 }
 
 fn default_sizes() -> String {
@@ -162,6 +307,37 @@ fn append_row(run_id: &str, impl_name: &str, size: usize, r: &BenchResult) -> Re
     Ok(())
 }
 
+fn append_latency_row(
+    run_id: &str,
+    impl_name: &str,
+    size: usize,
+    iterations: u64,
+    r: &LatencyResult,
+) -> Result<()> {
+    let path = cache_path();
+    std::fs::create_dir_all(path.parent().expect("cache parent"))?;
+    let row = json!({
+        "run_id": run_id,
+        "impl": impl_name,
+        "kind": "latency",
+        "transport": "tcp",
+        "msg_size": u64::try_from(size)?,
+        "p50_us": r.p50_us,
+        "p99_us": r.p99_us,
+        "p999_us": r.p999_us,
+        "max_us": r.max_us,
+        "iterations": iterations,
+        "elapsed": r.elapsed,
+        "cpu_time": r.req_cpu_time + r.rep_cpu_time,
+        "req_cpu_time": r.req_cpu_time,
+        "broker_cpu_time": r.broker_cpu_time,
+    });
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{row}")?;
+    file.sync_data()?;
+    Ok(())
+}
+
 pub(crate) fn write_push_cpu(path: &Path, cpu_time: f64) -> Result<()> {
     std::fs::write(path, json!({ "push_cpu_time": cpu_time }).to_string())?;
     Ok(())
@@ -184,6 +360,22 @@ fn wait_for_file(path: &Path) {
 pub(crate) fn write_marker(path: &Path) -> Result<()> {
     std::fs::write(path, b"1")?;
     Ok(())
+}
+
+pub(crate) async fn wait_for_marker(path: &Path, child: &mut std::process::Child) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("responder exited before ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!("responder readiness timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 pub(crate) fn stop_requested(stop_file: &Path, sent: u64, check_every: u64) -> bool {
@@ -218,6 +410,7 @@ fn broker_container(impl_name: &str) -> Option<&'static str> {
         "rabbitmq" => Some("omq-bench-rabbit"),
         "kafka" => Some("omq-bench-redpanda"),
         "redis-streams" => Some("omq-bench-redis"),
+        "iggy" => Some("omq-bench-iggy"),
         _ => None,
     }
 }
@@ -242,10 +435,40 @@ pub(crate) fn spawn_producer(
     token: &str,
     files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
+    spawn_worker(args, impl_name, Role::Producer, size, token, files)
+}
+
+pub(crate) fn spawn_responder(
+    args: &Args,
+    impl_name: &str,
+    size: usize,
+    token: &str,
+    files: ProducerFiles<'_>,
+) -> Result<std::process::Child> {
+    spawn_worker(args, impl_name, Role::Responder, size, token, files)
+}
+
+fn spawn_worker(
+    args: &Args,
+    impl_name: &str,
+    role: Role,
+    size: usize,
+    token: &str,
+    files: ProducerFiles<'_>,
+) -> Result<std::process::Child> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("--role")
-        .arg("producer")
+        .arg(match role {
+            Role::Producer => "producer",
+            Role::Responder => "responder",
+            Role::Coordinator => "coordinator",
+        })
+        .arg("--mode")
+        .arg(match args.mode {
+            Mode::Throughput => "throughput",
+            Mode::Latency => "latency",
+        })
         .arg("--impl")
         .arg(impl_name)
         .arg("--sizes")
@@ -270,6 +493,8 @@ pub(crate) fn spawn_producer(
         .arg(&args.redis_url)
         .arg("--kafka-url")
         .arg(&args.kafka_url)
+        .arg("--iggy-url")
+        .arg(&args.iggy_url)
         .stdout(Stdio::null());
     if let Some(path) = files.grpc_port {
         cmd.arg("--grpc-port-file").arg(path);
@@ -279,7 +504,7 @@ pub(crate) fn spawn_producer(
 
 async fn run_producer(args: &Args) -> Result<()> {
     let impl_name = args.impls.first().context("impl missing")?;
-    let size = args.sizes.parse::<usize>()?;
+    let size = args.sizes.as_deref().context("size missing")?.parse()?;
     let token = args.token.as_deref().context("token missing")?;
     let start_file = args.start_file.as_deref().context("start file missing")?;
     let stop_file = args.stop_file.as_deref().context("stop file missing")?;
@@ -298,9 +523,32 @@ async fn run_producer(args: &Args) -> Result<()> {
         "rabbitmq" => rabbit::producer(&args.rabbitmq_url, token, size, warmup, stop_file).await?,
         "kafka" => kafka::producer(&args.kafka_url, token, size, warmup, stop_file)?,
         "redis-streams" => redis::producer(&args.redis_url, token, size, warmup, stop_file)?,
+        "iggy" => iggy::producer(&args.iggy_url, token, size, warmup, stop_file).await?,
         other => bail!("unknown impl {other}"),
     };
     write_push_cpu(result_file, cpu_time)
+}
+
+async fn run_responder(args: &Args) -> Result<()> {
+    let impl_name = args.impls.first().context("impl missing")?;
+    let size = args.sizes.as_deref().context("size missing")?.parse()?;
+    let token = args.token.as_deref().context("token missing")?;
+    let ready_file = args.start_file.as_deref().context("ready file missing")?;
+    match impl_name.as_str() {
+        "grpc-rust" => {
+            let port_file = args
+                .grpc_port_file
+                .as_deref()
+                .context("gRPC port file missing")?;
+            grpc::producer(size, ready_file, port_file).await
+        }
+        "nats" => nats::responder(&args.nats_url, token, size, ready_file).await,
+        "rabbitmq" => rabbit::responder(&args.rabbitmq_url, token, size, ready_file).await,
+        "kafka" => kafka::responder(&args.kafka_url, token, size, ready_file).await,
+        "redis-streams" => redis::responder(&args.redis_url, token, size, ready_file),
+        "iggy" => iggy::responder(&args.iggy_url, token, size, ready_file).await,
+        other => bail!("unknown impl {other}"),
+    }
 }
 
 pub(crate) async fn measure_receive<F, Fut>(
@@ -367,12 +615,24 @@ pub(crate) fn clean_paths(paths: &(PathBuf, PathBuf, PathBuf)) -> Result<()> {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if args.role == Role::Producer {
-        return run_producer(&args).await;
+    match args.role {
+        Role::Producer => return run_producer(&args).await,
+        Role::Responder => return run_responder(&args).await,
+        Role::Coordinator => {}
     }
 
+    let default_sizes = match args.mode {
+        Mode::Throughput => default_sizes(),
+        Mode::Latency => LATENCY_SIZES
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    };
     let sizes = args
         .sizes
+        .as_deref()
+        .unwrap_or(&default_sizes)
         .split(',')
         .filter(|s| !s.is_empty())
         .map(str::parse::<usize>)
@@ -384,26 +644,62 @@ async fn main() -> Result<()> {
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
                 uuid::Uuid::new_v4().simple()
             );
-            let result = match impl_name.as_str() {
-                "nats" => nats::bench(&args, &token, size).await?,
-                "grpc-rust" => grpc::bench(&args, &token, size).await?,
-                "rabbitmq" => rabbit::bench(&args, &token, size).await?,
-                "kafka" => kafka::bench(&args, &token, size).await?,
-                "redis-streams" => redis::bench(&args, &token, size).await?,
-                other => bail!("unknown impl {other}"),
-            };
-            append_row(&args.run_id, impl_name, size, &result)?;
-            let msgs_s = result.count as f64 / result.elapsed;
-            let mbps = result.count as f64 * size as f64 / result.elapsed / 1_000_000.0;
-            let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
-                format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
-            });
-            println!(
-                "{impl_name:13} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
-                result.push_cpu_time / result.elapsed * 100.0,
-                broker_cpu,
-                result.pull_cpu_time / result.elapsed * 100.0
-            );
+            match args.mode {
+                Mode::Throughput => {
+                    let result = match impl_name.as_str() {
+                        "nats" => nats::bench(&args, &token, size).await?,
+                        "grpc-rust" => grpc::bench(&args, &token, size).await?,
+                        "rabbitmq" => rabbit::bench(&args, &token, size).await?,
+                        "kafka" => kafka::bench(&args, &token, size).await?,
+                        "redis-streams" => redis::bench(&args, &token, size).await?,
+                        "iggy" => iggy::bench(&args, &token, size).await?,
+                        other => bail!("unknown impl {other}"),
+                    };
+                    append_row(&args.run_id, impl_name, size, &result)?;
+                    let msgs_s = result.count as f64 / result.elapsed;
+                    let mbps = result.count as f64 * size as f64 / result.elapsed / 1_000_000.0;
+                    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
+                        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
+                    });
+                    println!(
+                        "{impl_name:13} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
+                        result.push_cpu_time / result.elapsed * 100.0,
+                        broker_cpu,
+                        result.pull_cpu_time / result.elapsed * 100.0
+                    );
+                }
+                Mode::Latency => {
+                    let result = match impl_name.as_str() {
+                        "nats" => nats::latency(&args, &token, size).await?,
+                        "grpc-rust" => grpc::latency(&args, &token, size).await?,
+                        "rabbitmq" => rabbit::latency(&args, &token, size).await?,
+                        "kafka" => kafka::latency(&args, &token, size).await?,
+                        "redis-streams" => redis::latency(&args, &token, size).await?,
+                        "iggy" => iggy::latency(&args, &token, size).await?,
+                        other => bail!("unknown impl {other}"),
+                    };
+                    append_latency_row(
+                        &args.run_id,
+                        impl_name,
+                        size,
+                        args.latency_iterations,
+                        &result,
+                    )?;
+                    let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
+                        format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
+                    });
+                    println!(
+                        "{impl_name:13} {size:8} B  p50={:9.1} us  p99={:9.1} us  p99.9={:9.1} us  max={:9.1} us  req_cpu={:.0}%{} rep_cpu={:.0}%",
+                        result.p50_us,
+                        result.p99_us,
+                        result.p999_us,
+                        result.max_us,
+                        result.req_cpu_time / result.elapsed * 100.0,
+                        broker_cpu,
+                        result.rep_cpu_time / result.elapsed * 100.0,
+                    );
+                }
+            }
         }
     }
     Ok(())

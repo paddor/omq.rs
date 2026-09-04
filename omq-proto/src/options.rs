@@ -743,9 +743,12 @@ impl Options {
         self
     }
 
-    /// Configure this socket as a PLAIN server accepting an allowlist of
-    /// exact username + password pairs. No encryption is applied; use on
-    /// trusted networks only.
+    /// Configure this socket as a PLAIN server accepting exact, case-sensitive
+    /// username/password pairs.
+    ///
+    /// An empty allowlist denies every client. PLAIN provides authentication,
+    /// not encryption. Use it only over a trusted or separately encrypted
+    /// transport.
     #[cfg(feature = "plain")]
     #[must_use]
     pub fn plain_server_credentials<I, U, P>(mut self, credentials: I) -> Self

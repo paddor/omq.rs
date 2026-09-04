@@ -83,7 +83,9 @@ pub use util::{
 };
 
 // The opts module exports setsockopt/getsockopt directly as C symbols.
-pub use opts::{omq_socket_set_plain_server_credentials, zmq_getsockopt, zmq_setsockopt};
+pub use opts::{
+    OmqPlainCredential, omq_socket_set_plain_server_credentials, zmq_getsockopt, zmq_setsockopt,
+};
 
 const _: () = assert!(std::mem::size_of::<msg::OmqMsgRepr>() == 64);
 const _: () = assert!(std::mem::align_of::<msg::OmqMsgRepr>() == std::mem::align_of::<usize>());

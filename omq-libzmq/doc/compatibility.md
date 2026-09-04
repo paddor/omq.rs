@@ -59,7 +59,7 @@ currently wired into backend behavior.
 `ZMQ_THREAD_SAFE` returns 0. Match libzmq discipline: one application thread per
 socket.
 
-## OMQ-internal API
+## OMQ extension API
 
 `libomq_zmq.so` also exports a small `omq_*` extension surface. These symbols
 are not part of upstream libzmq and are not covered by the compatibility
@@ -71,6 +71,9 @@ promise:
   the OMQ Tokio runtime and invokes a caller-supplied C callback on completion;
 - `omq_async_task_cancel()` requests cancellation of that task;
 - `omq_async_task_free()` releases the returned task handle after completion.
+- `omq_socket_set_plain_server_credentials()` configures a copied, fixed PLAIN
+  username/password allowlist before bind/connect. Each field is limited to
+  255 ASCII VCHAR bytes. An empty allowlist denies every client.
 
 The async message encoding is an OMQ-specific length-table format. Its routed
 form also carries a SERVER routing ID. Bindings must use these functions only

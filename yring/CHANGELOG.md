@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Always inline the internal ring pop helper so callers can eliminate
+  intermediate payload-sized return buffers.
+
 ## [0.3.14] - 2026-08-16
 
 ### Added

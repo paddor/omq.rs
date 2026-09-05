@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-09-05
+
 ### Changed
 
 - Always inline the internal ring pop helper so callers can eliminate

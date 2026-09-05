@@ -158,7 +158,13 @@ impl<T> Ring<T> {
         cursor == self.head.0.load(Ordering::Acquire)
     }
 
-    #[inline]
+    // Fold the Option into the caller's return value instead of copying a
+    // payload-sized return buffer through this internal helper.
+    #[expect(
+        clippy::inline_always,
+        reason = "profiling shows payload copies through out-of-line pop returns"
+    )]
+    #[inline(always)]
     pub(crate) fn pop(&self, head: &mut Cursor, cached_tail: Cursor) -> Option<T> {
         if *head == cached_tail {
             return None;

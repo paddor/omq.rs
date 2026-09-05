@@ -1,6 +1,6 @@
 [package]
 name = "omq-tokio"
-version = "0.22.0"
+version = "0.22.1"
 edition.workspace = true
 rust-version.workspace = true
 autotests = false
@@ -35,7 +35,7 @@ bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.27.0", default-features = false }
-yring = { path = "../yring", version = "0.3.14" }
+yring = { path = "../yring", version = "0.3.15" }
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"

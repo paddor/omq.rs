@@ -291,6 +291,46 @@ The Iggy benchmark uses its TCP transport at
 `omq-bench-iggy` so broker CPU usage is included. Override the endpoint with
 `--iggy-url`.
 
+The MOM client processes use current-thread Tokio runtimes. The Iggy adapter
+uses Rust SDK 0.10 with server 0.8. Its `structured-v1` payload corpus varies
+order metadata and repeats structured attributes, not a single repeated byte.
+Throughput rotates eight prebuilt batches of at most 1,000 records or 1 MiB;
+latency rotates 1,024 records with one outstanding echo. This is compressible
+synthetic data, not a production trace. Throughput verifies contiguous offsets
+across warmup and measurement. Latency responders shut down normally after the
+final CPU snapshot; failed or timed-out shutdown rejects the run.
+
+`--iggy-commit` labels the requested completion profile; it does not configure
+the server. For pinned server 0.8, use matching server settings:
+
+| Profile | Server setting | Client operation |
+| --- | --- | --- |
+| `accepted` | Default save threshold, partition fsync off | Await send |
+| `buffered-inline` | Save threshold 1, partition fsync off | Await send |
+| `fsync-inline` | Save threshold 1, partition fsync on | Await send |
+| `buffered` / `fsync` | Any save threshold | Send, then explicit flush RPC |
+
+The inline profiles require
+`IGGY_SYSTEM_PARTITION_MESSAGES_REQUIRED_TO_SAVE=1` and
+`IGGY_SYSTEM_PARTITION_ENFORCE_FSYNC=false` or `true`, respectively. Verify the
+effective configuration in the server startup log. Save threshold 1 causes
+each send batch to be written before its response, not one write per record
+inside a batch. Keep other defaults unless documenting a tuning experiment.
+Neither Iggy server nor SDK source is modified by these profiles.
+
+The explicit-flush profiles are diagnostic. They add an RPC and allow a
+consumer poll between send and flush, so their echo latency does not establish
+equivalent written/durable delivery timing. `accepted` also does not prove a
+memory-only boundary if server configuration makes send write or synchronize.
+
+Example buffered run, after configuring the server:
+
+```sh
+cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
+  --impl iggy --iggy-commit buffered-inline --mode latency --sizes 128,1024 \
+  --latency-warmup 500 --latency-iterations 5000 --run-id iggy-buffered-RUN
+```
+
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts

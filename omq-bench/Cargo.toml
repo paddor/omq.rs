@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 publish = false
 build = "build.rs"
-default-run = "omq-bench"
+default-run = "omq_bench"
 
 [[bin]]
 name = "omq_bench"

@@ -20,6 +20,8 @@ mod nats;
 mod rabbit;
 #[path = "mom_bench/redis.rs"]
 mod redis;
+#[path = "mom_bench/workload.rs"]
+mod workload;
 
 const CHART_SIZES: &[usize] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
@@ -37,6 +39,29 @@ enum Role {
     Coordinator,
     Producer,
     Responder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum IggyCommit {
+    Accepted,
+    Buffered,
+    Fsync,
+    /// Server must save during every send with partition fsync disabled.
+    BufferedInline,
+    /// Server must save during every send with partition fsync enabled.
+    FsyncInline,
+}
+
+impl IggyCommit {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Buffered => "buffered",
+            Self::Fsync => "fsync",
+            Self::BufferedInline => "buffered-inline",
+            Self::FsyncInline => "fsync-inline",
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -94,6 +119,9 @@ struct Args {
 
     #[arg(long, default_value = "iggy://iggy:iggy@127.0.0.1:8090")]
     pub(crate) iggy_url: String,
+
+    #[arg(long, value_enum, default_value_t = IggyCommit::Accepted)]
+    pub(crate) iggy_commit: IggyCommit,
 
     #[arg(long)]
     pub(crate) grpc_port_file: Option<PathBuf>,
@@ -203,6 +231,31 @@ impl LatencyMeter {
     }
 
     pub(crate) fn finish(mut self) -> Result<LatencyResult> {
+        let result = self.snapshot()?;
+        stop_child(&mut self.responder);
+        Ok(result)
+    }
+
+    pub(crate) async fn finish_gracefully(mut self, stop_file: &Path) -> Result<LatencyResult> {
+        let result = self.snapshot()?;
+        write_marker(stop_file)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.responder_mut().try_wait()? {
+                if !status.success() {
+                    bail!("responder shutdown failed: {status}");
+                }
+                self.responder.take();
+                return Ok(result);
+            }
+            if Instant::now() >= deadline {
+                bail!("responder shutdown timed out");
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn snapshot(&mut self) -> Result<LatencyResult> {
         if self.rtts_ns.is_empty() {
             bail!("latency run produced no samples");
         }
@@ -226,8 +279,6 @@ impl LatencyMeter {
         let tail_us = percentile_us(&self.rtts_ns, 99.0);
         let tail_999_us = percentile_us(&self.rtts_ns, 99.9);
         let max_us = self.rtts_ns.last().copied().unwrap_or_default() as f64 / 1000.0;
-        stop_child(&mut self.responder);
-
         Ok(LatencyResult {
             p50_us,
             p99_us: tail_us,
@@ -283,6 +334,14 @@ fn cache_path() -> PathBuf {
     base.join("omq").join("comparisons.jsonl")
 }
 
+fn result_impl_name(args: &Args, impl_name: &str) -> String {
+    if impl_name == "iggy" {
+        format!("iggy-{}", args.iggy_commit.label())
+    } else {
+        impl_name.to_owned()
+    }
+}
+
 fn append_row(run_id: &str, impl_name: &str, size: usize, r: &BenchResult) -> Result<()> {
     let path = cache_path();
     std::fs::create_dir_all(path.parent().expect("cache parent"))?;
@@ -299,7 +358,8 @@ fn append_row(run_id: &str, impl_name: &str, size: usize, r: &BenchResult) -> Re
         "elapsed": r.elapsed,
         "push_cpu_time": r.push_cpu_time,
         "pull_cpu_time": r.pull_cpu_time,
-        "broker_cpu_time": r.broker_cpu_time
+        "broker_cpu_time": r.broker_cpu_time,
+        "payload_shape": (impl_name.starts_with("iggy")).then_some(workload::NAME),
     });
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(f, "{row}")?;
@@ -331,6 +391,7 @@ fn append_latency_row(
         "cpu_time": r.req_cpu_time + r.rep_cpu_time,
         "req_cpu_time": r.req_cpu_time,
         "broker_cpu_time": r.broker_cpu_time,
+        "payload_shape": (impl_name.starts_with("iggy")).then_some(workload::NAME),
     });
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{row}")?;
@@ -495,6 +556,12 @@ fn spawn_worker(
         .arg(&args.kafka_url)
         .arg("--iggy-url")
         .arg(&args.iggy_url)
+        .arg("--iggy-commit")
+        .arg(args.iggy_commit.label())
+        .arg("--latency-iterations")
+        .arg(args.latency_iterations.to_string())
+        .arg("--latency-warmup")
+        .arg(args.latency_warmup.to_string())
         .stdout(Stdio::null());
     if let Some(path) = files.grpc_port {
         cmd.arg("--grpc-port-file").arg(path);
@@ -523,7 +590,17 @@ async fn run_producer(args: &Args) -> Result<()> {
         "rabbitmq" => rabbit::producer(&args.rabbitmq_url, token, size, warmup, stop_file).await?,
         "kafka" => kafka::producer(&args.kafka_url, token, size, warmup, stop_file)?,
         "redis-streams" => redis::producer(&args.redis_url, token, size, warmup, stop_file)?,
-        "iggy" => iggy::producer(&args.iggy_url, token, size, warmup, stop_file).await?,
+        "iggy" => {
+            iggy::producer(
+                &args.iggy_url,
+                token,
+                size,
+                warmup,
+                stop_file,
+                args.iggy_commit,
+            )
+            .await?
+        }
         other => bail!("unknown impl {other}"),
     };
     write_push_cpu(result_file, cpu_time)
@@ -546,7 +623,23 @@ async fn run_responder(args: &Args) -> Result<()> {
         "rabbitmq" => rabbit::responder(&args.rabbitmq_url, token, size, ready_file).await,
         "kafka" => kafka::responder(&args.kafka_url, token, size, ready_file).await,
         "redis-streams" => redis::responder(&args.redis_url, token, size, ready_file),
-        "iggy" => iggy::responder(&args.iggy_url, token, size, ready_file).await,
+        "iggy" => {
+            let stop_file = args.stop_file.as_deref().context("stop file missing")?;
+            let iterations = args
+                .latency_warmup
+                .checked_add(args.latency_iterations)
+                .context("latency iteration count overflow")?;
+            iggy::responder(
+                &args.iggy_url,
+                token,
+                size,
+                ready_file,
+                stop_file,
+                iterations,
+                args.iggy_commit,
+            )
+            .await
+        }
         other => bail!("unknown impl {other}"),
     }
 }
@@ -612,7 +705,7 @@ pub(crate) fn clean_paths(paths: &(PathBuf, PathBuf, PathBuf)) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
     match args.role {
@@ -638,6 +731,7 @@ async fn main() -> Result<()> {
         .map(str::parse::<usize>)
         .collect::<Result<Vec<_>, _>>()?;
     for impl_name in &args.impls {
+        let result_impl_name = result_impl_name(&args, impl_name);
         for &size in &sizes {
             let token = format!(
                 "{}-{}",
@@ -655,14 +749,14 @@ async fn main() -> Result<()> {
                         "iggy" => iggy::bench(&args, &token, size).await?,
                         other => bail!("unknown impl {other}"),
                     };
-                    append_row(&args.run_id, impl_name, size, &result)?;
+                    append_row(&args.run_id, &result_impl_name, size, &result)?;
                     let msgs_s = result.count as f64 / result.elapsed;
                     let mbps = result.count as f64 * size as f64 / result.elapsed / 1_000_000.0;
                     let broker_cpu = result.broker_cpu_time.map_or(String::new(), |v| {
                         format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
                     });
                     println!(
-                        "{impl_name:13} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
+                        "{result_impl_name:16} {size:8} B  {msgs_s:12.0} msg/s  {mbps:10.1} MB/s  snd_cpu={:.0}%{} rcv_cpu={:.0}%",
                         result.push_cpu_time / result.elapsed * 100.0,
                         broker_cpu,
                         result.pull_cpu_time / result.elapsed * 100.0
@@ -680,7 +774,7 @@ async fn main() -> Result<()> {
                     };
                     append_latency_row(
                         &args.run_id,
-                        impl_name,
+                        &result_impl_name,
                         size,
                         args.latency_iterations,
                         &result,
@@ -689,7 +783,7 @@ async fn main() -> Result<()> {
                         format!(" broker_cpu={:.0}%", v / result.elapsed * 100.0)
                     });
                     println!(
-                        "{impl_name:13} {size:8} B  p50={:9.1} us  p99={:9.1} us  p99.9={:9.1} us  max={:9.1} us  req_cpu={:.0}%{} rep_cpu={:.0}%",
+                        "{result_impl_name:16} {size:8} B  p50={:9.1} us  p99={:9.1} us  p99.9={:9.1} us  max={:9.1} us  req_cpu={:.0}%{} rep_cpu={:.0}%",
                         result.p50_us,
                         result.p99_us,
                         result.p999_us,

@@ -1,9 +1,8 @@
 use super::common::{
-    self, C_GRPC, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_NATS, C_OMQ_1T, C_OMQ_2T,
+    self, C_GRPC, C_IGGY, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_NATS, C_OMQ_1T, C_OMQ_2T,
     C_OMQ_3T, C_OMQ_CT, C_OMQ_MT, C_OMQ_SPIN, C_R0Z, C_RABBITMQ, C_REDIS, C_RZMQ_IOURING, C_TMQ,
-    C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
+    C_ZMQRS, Impl, draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_brokered_with_versions,
-    C_IGGY, draw_latency_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };

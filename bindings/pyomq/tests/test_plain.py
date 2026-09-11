@@ -2,9 +2,8 @@
 
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def _plain_server_client(server_sock, client_sock):
@@ -21,7 +20,8 @@ def test_plain_push_pull_tcp(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     try:
         _plain_server_client(pull, push)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello over plain")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -42,7 +42,8 @@ def test_plain_fixed_policy_accepts_each_allowlist_entry(tcp_endpoint):
         pull.set_plain_auth([("alice", "secret"), ("bob", "hunter2")])
         push.plain_username = b"bob"
         push.plain_password = b"hunter2"
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"second credential")
         pull.rcvtimeo = 5000
@@ -86,7 +87,8 @@ def test_plain_fixed_policy_rejects_wrong_password(tcp_endpoint):
         pull.set_plain_auth([("alice", "secret")])
         push.plain_username = b"alice"
         push.plain_password = b"wrong"
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"blocked")
         pull.rcvtimeo = 300
@@ -142,7 +144,8 @@ def test_plain_server_callback_receives_credentials(tcp_endpoint):
         pull.set_plain_auth(authenticate)
         push.plain_username = b"alice"
         push.plain_password = b"secret"
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"authenticated")
         pull.rcvtimeo = 5000
@@ -161,7 +164,8 @@ def test_plain_req_rep_tcp(tcp_endpoint):
     req = ctx.socket(zmq.REQ)
     try:
         _plain_server_client(rep, req)
-        ep = rep.bind(tcp_endpoint)
+        rep.bind(tcp_endpoint)
+        ep = rep.last_endpoint
         req.connect(ep)
         req.setsockopt(zmq.SNDTIMEO, 5000)
         rep.setsockopt(zmq.RCVTIMEO, 5000)
@@ -183,7 +187,8 @@ def test_plain_pub_sub_tcp(tcp_endpoint):
     sub = ctx.socket(zmq.SUB)
     try:
         _plain_server_client(pub, sub)
-        ep = pub.bind(tcp_endpoint)
+        pub.bind(tcp_endpoint)
+        ep = pub.last_endpoint
         sub.setsockopt(zmq.SUBSCRIBE, b"hot/")
         sub.connect(ep)
         sub.setsockopt(zmq.RCVTIMEO, 5000)
@@ -204,7 +209,8 @@ def test_plain_multipart_tcp(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     try:
         _plain_server_client(pull, push)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_multipart([b"a", b"bb", b"ccc"])
         pull.setsockopt(zmq.RCVTIMEO, 5000)

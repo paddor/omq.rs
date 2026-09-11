@@ -13,6 +13,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Added
 
+- pyomq RADIO/DISH now exposes groups as pyzmq-style metadata: pass
+  `group=` when sending and read `Frame.group` when receiving.
 - Tokio byte-stream sockets can enforce hard per-connection and aggregate
   per-IP receive token buckets with `Options::recv_rate_limit()` and
   `Options::recv_ip_rate_limit()`. Offending connections are disconnected.

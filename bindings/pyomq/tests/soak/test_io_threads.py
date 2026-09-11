@@ -33,7 +33,8 @@ ctx = zmq.Context(io_threads=IO_THREADS)
 # --- PUSH/PULL throughput ---
 pull = ctx.socket(zmq.PULL)
 push = ctx.socket(zmq.PUSH)
-ep = pull.bind("tcp://127.0.0.1:0")
+pull.bind("tcp://127.0.0.1:0")
+ep = pull.last_endpoint
 push.connect(ep)
 push.setsockopt(zmq.SNDTIMEO, 5000)
 pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -90,7 +91,8 @@ tput = recvd / elapsed if elapsed > 0 else 0
 # --- REQ/REP latency ---
 rep = ctx.socket(zmq.REP)
 req = ctx.socket(zmq.REQ)
-ep2 = rep.bind("tcp://127.0.0.1:0")
+rep.bind("tcp://127.0.0.1:0")
+ep2 = rep.last_endpoint
 req.connect(ep2)
 rep.setsockopt(zmq.RCVTIMEO, 5000)
 rep.setsockopt(zmq.SNDTIMEO, 5000)
@@ -140,6 +142,7 @@ def test_io_threads_variants():
             text=True,
             timeout=per_variant + 30,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            check=False,
         )
         print(f"  stdout: {result.stdout.strip()}")
         if result.stderr.strip():

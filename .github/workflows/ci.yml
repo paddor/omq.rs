@@ -759,7 +759,7 @@ jobs:
       - name: formatting
         if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
-        run: .venv/bin/ruff format .
+        run: .venv/bin/ruff format --check .
       - name: linting
         if: matrix.kind == 'pyomq' && needs.changes.outputs.run_pyomq == 'true'
         working-directory: bindings/pyomq
@@ -770,6 +770,8 @@ jobs:
         run: |
           .venv/bin/ty check . --python-platform linux
           .venv/bin/ty check . --python-platform win32
+          .venv/bin/pyright --pythonpath .venv/bin/python --pythonplatform Linux python
+          .venv/bin/pyright --pythonpath .venv/bin/python --pythonplatform Windows python
 
   pyomq-test:
     name: pyomq-test
@@ -780,7 +782,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - python-version: "3.11"
+          - python-version: "3.12"
             os: ubuntu-latest
           - python-version: "3.14"
             os: ubuntu-latest

@@ -16,6 +16,7 @@ mod peer_info;
 mod runtime;
 mod socket;
 mod socket_async;
+mod tracker;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use pyo3::prelude::*;
+#[cfg(feature = "curve")]
+use pyo3::types::PyBytes;
 
 /// Extractor that accepts either a sync `Socket` or an `AsyncSocket`,
 /// yielding the shared `SocketInner`.
@@ -55,6 +58,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<socket::Monitor>()?;
     m.add_class::<socket::Socket>()?;
     m.add_class::<socket_async::AsyncSocket>()?;
+    m.add_class::<socket_async::PendingSend>()?;
+    m.add_class::<tracker::ReleaseToken>()?;
     m.add_function(wrap_pyfunction!(backend_name, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
@@ -159,18 +164,18 @@ fn native_proxy(
 
 #[cfg(feature = "curve")]
 #[pyfunction]
-fn curve_keypair(py: Python<'_>) -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
+fn curve_keypair(py: Python<'_>) -> PyResult<(Bound<'_, PyBytes>, Bound<'_, PyBytes>)> {
     let kp = omq_proto::CurveKeypair::generate();
     let pub_z85 = kp.public.to_z85();
     let sec_z85 = kp.secret.to_z85();
-    let pub_bytes = pyo3::types::PyBytes::new(py, pub_z85.as_bytes());
-    let sec_bytes = pyo3::types::PyBytes::new(py, sec_z85.as_bytes());
-    Ok((pub_bytes.into_any(), sec_bytes.into_any()))
+    let pub_bytes = PyBytes::new(py, pub_z85.as_bytes());
+    let sec_bytes = PyBytes::new(py, sec_z85.as_bytes());
+    Ok((pub_bytes, sec_bytes))
 }
 
 #[cfg(feature = "curve")]
 #[pyfunction]
-fn curve_public<'py>(py: Python<'py>, secret_z85: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+fn curve_public<'py>(py: Python<'py>, secret_z85: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let secret_str = std::str::from_utf8(secret_z85).map_err(|_| {
         pyo3::exceptions::PyValueError::new_err("secret key must be valid UTF-8 Z85")
     })?;
@@ -178,7 +183,7 @@ fn curve_public<'py>(py: Python<'py>, secret_z85: &[u8]) -> PyResult<Bound<'py, 
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let pk = sk.derive_public();
     let pub_z85 = pk.to_z85();
-    Ok(pyo3::types::PyBytes::new(py, pub_z85.as_bytes()).into_any())
+    Ok(PyBytes::new(py, pub_z85.as_bytes()))
 }
 
 #[pyfunction]

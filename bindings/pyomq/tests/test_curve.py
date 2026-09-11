@@ -2,9 +2,8 @@
 
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 @pytest.mark.skipif(not zmq.has("curve"), reason="curve feature not compiled")
@@ -86,7 +85,8 @@ def test_curve_push_pull_tcp(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     try:
         _curve_server_client(pull, push)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello over curve")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -104,7 +104,8 @@ def test_curve_req_rep_tcp(tcp_endpoint):
     req = ctx.socket(zmq.REQ)
     try:
         _curve_server_client(rep, req)
-        ep = rep.bind(tcp_endpoint)
+        rep.bind(tcp_endpoint)
+        ep = rep.last_endpoint
         req.connect(ep)
         req.setsockopt(zmq.SNDTIMEO, 5000)
         rep.setsockopt(zmq.RCVTIMEO, 5000)
@@ -126,7 +127,8 @@ def test_curve_pub_sub_tcp(tcp_endpoint):
     sub = ctx.socket(zmq.SUB)
     try:
         _curve_server_client(pub, sub)
-        ep = pub.bind(tcp_endpoint)
+        pub.bind(tcp_endpoint)
+        ep = pub.last_endpoint
         sub.setsockopt(zmq.SUBSCRIBE, b"hot/")
         sub.connect(ep)
         sub.setsockopt(zmq.RCVTIMEO, 5000)
@@ -147,7 +149,8 @@ def test_curve_multipart_tcp(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     try:
         _curve_server_client(pull, push)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_multipart([b"a", b"bb", b"ccc"])
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -171,7 +174,8 @@ def test_curve_bad_serverkey_rejects(tcp_endpoint):
         pull.curve_server = 1
         pull.curve_publickey = server_pub
         pull.curve_secretkey = server_sec
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
 
         push.curve_serverkey = wrong_pub
         push.curve_publickey = client_pub

@@ -8,7 +8,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 
@@ -19,7 +18,8 @@ def test_req_rep_cycles():
     ctx = zmq.Context()
     rep = ctx.socket(zmq.REP)
     req = ctx.socket(zmq.REQ)
-    ep = rep.bind(tcp_ep())
+    rep.bind(tcp_ep())
+    ep = rep.last_endpoint
     req.connect(ep)
     rep.setsockopt(zmq.RCVTIMEO, 100)
     rep.setsockopt(zmq.SNDTIMEO, 5000)

@@ -2,8 +2,8 @@
 
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
-from pyomq.testing import rust_thread_send_via_share_key
 import pytest
+from pyomq.testing import rust_thread_send_via_share_key
 
 
 def test_two_contexts_same_inproc_name():

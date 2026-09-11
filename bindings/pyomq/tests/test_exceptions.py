@@ -2,16 +2,16 @@
 
 import errno
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def test_again_on_rcvtimeo(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.Again):
             pull.recv()
@@ -32,7 +32,8 @@ def test_again_errno(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.Again) as exc_info:
             pull.recv()
@@ -46,7 +47,8 @@ def test_closed_socket_raises_context_terminated(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.close()
         with pytest.raises(zmq.ContextTerminated):
             pull.recv()
@@ -58,7 +60,8 @@ def test_context_terminated_errno(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.close()
         with pytest.raises(zmq.ContextTerminated) as exc_info:
             pull.recv()
@@ -90,7 +93,8 @@ def test_zmqerror_catches_subclasses(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.ZMQError):
             pull.recv()
@@ -103,7 +107,8 @@ def test_zmqbaseerror_catches_all(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.setsockopt(zmq.RCVTIMEO, 50)
         with pytest.raises(zmq.error.ZMQBaseError):
             pull.recv()

@@ -9,9 +9,8 @@ the binding to a working peer.
 import socket as stdsocket
 import time
 
-import pytest
-
 import pyomq
+import pytest
 
 ALL_TYPES = [
     pyomq.PAIR,
@@ -68,7 +67,8 @@ def test_pub_sub():
     ctx = pyomq.Context()
     pub = ctx.socket(pyomq.PUB)
     sub = ctx.socket(pyomq.SUB)
-    ep = pub.bind("tcp://127.0.0.1:0")
+    pub.bind("tcp://127.0.0.1:0")
+    ep = pub.last_endpoint
     sub.connect(ep)
     sub.subscribe(b"")
     time.sleep(0.05)
@@ -92,7 +92,8 @@ def test_xpub_xsub():
     ctx = pyomq.Context()
     xpub = ctx.socket(pyomq.XPUB)
     xsub = ctx.socket(pyomq.XSUB)
-    ep = xpub.bind("tcp://127.0.0.1:0")
+    xpub.bind("tcp://127.0.0.1:0")
+    ep = xpub.last_endpoint
     xsub.connect(ep)
     xsub.subscribe(b"")
     # Drain the subscribe notification at XPUB. RFC says it surfaces as
@@ -261,13 +262,19 @@ def test_radio_dish_udp_with_groups():
     time.sleep(0.05)
 
     # Drop: not in joined groups.
-    radio.send_multipart([b"news", b"ignored"])
+    radio.send(b"ignored", group="news")
     # Deliver.
-    radio.send_multipart([b"weather", b"sunny"])
+    radio.send(b"sunny", group="weather")
 
     dish.setsockopt(pyomq.RCVTIMEO, 500)
-    parts = dish.recv_multipart()
-    assert parts == [b"weather", b"sunny"]
+    assert dish.recv() == b"sunny"
+
+    frame = pyomq.Frame(b"cloudy")
+    frame.group = "weather"
+    radio.send(frame)
+    received = dish.recv(copy=False)
+    assert bytes(received) == b"cloudy"
+    assert received.group == "weather"
 
     dish.leave(b"weather")
     radio.close()
@@ -291,12 +298,16 @@ def test_radio_dish_helpers_accept_str_groups():
         radio.connect(ep)
         time.sleep(0.05)
 
-        radio.send_multipart([b"weather", b"sunny"])
+        radio.send_multipart([b"sunny"], group="weather")
         dish.setsockopt(pyomq.RCVTIMEO, 500)
-        assert dish.recv_multipart() == [b"weather", b"sunny"]
+        assert dish.recv_multipart() == [b"sunny"]
+        with pytest.raises(ValueError, match="RADIO requires a group"):
+            radio.send(b"no-group")
+        with pytest.raises(ValueError, match="RADIO requires"):
+            radio.send_multipart([b"weather", b"raw-group"])
 
         dish.leave("weather")
-        radio.send_multipart([b"weather", b"ignored"])
+        radio.send_multipart([b"ignored"], group="weather")
         try:
             msg = dish.recv_multipart()
         except pyomq.Again:
@@ -313,11 +324,12 @@ def test_stream_raw_tcp():
     """STREAM socket accepts raw TCP and echoes data back."""
     ctx = pyomq.Context()
     stream = ctx.socket(pyomq.STREAM)
-    ep = stream.bind("tcp://127.0.0.1:0")
+    stream.bind("tcp://127.0.0.1:0")
+    ep = stream.last_endpoint
     stream.setsockopt(pyomq.RCVTIMEO, 1000)
 
     raw = stdsocket.socket(stdsocket.AF_INET, stdsocket.SOCK_STREAM)
-    host, port = ep.replace("tcp://", "").split(":")
+    host, port = ep.decode().replace("tcp://", "").split(":")
     raw.connect((host, int(port)))
     raw.sendall(b"hello")
 

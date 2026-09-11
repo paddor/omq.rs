@@ -5,6 +5,7 @@ distribution when the expected count is reached.
 
     python sink.py [sink_ep] [expected_count]
 """
+
 import sys
 from collections import defaultdict
 

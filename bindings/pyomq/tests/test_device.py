@@ -13,8 +13,10 @@ def test_device_forwards_messages(tcp_endpoint):
     sender = ctx.socket(zmq.PUSH)
     receiver = ctx.socket(zmq.PULL)
     try:
-        fe_ep = frontend.bind(tcp_endpoint)
-        be_ep = backend.bind("tcp://127.0.0.1:0")
+        frontend.bind(tcp_endpoint)
+        fe_ep = frontend.last_endpoint
+        backend.bind("tcp://127.0.0.1:0")
+        be_ep = backend.last_endpoint
 
         sender.connect(fe_ep)
         receiver.connect(be_ep)

@@ -8,7 +8,6 @@ import random
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 TOPICS = [b"fast.", b"slow.", b"all.", b"rare."]
@@ -21,7 +20,8 @@ def test_pub_sub_churn():
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDTIMEO, 100)
-    ep = pub.bind(tcp_ep())
+    pub.bind(tcp_ep())
+    ep = pub.last_endpoint
 
     subs: list = []
     pub_count = 0

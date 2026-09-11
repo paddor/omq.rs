@@ -10,7 +10,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 NUM_SUBS = 4
@@ -25,7 +24,8 @@ def test_pub_sub_throughput():
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDHWM, 1000)
-    ep = pub.bind(tcp_ep())
+    pub.bind(tcp_ep())
+    ep = pub.last_endpoint
 
     subs = []
     for i in range(NUM_SUBS):

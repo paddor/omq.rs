@@ -57,8 +57,7 @@ def load_jsonl():
 def append_jsonl(rows):
     os.makedirs(os.path.dirname(JSONL_FILE), exist_ok=True)
     with open(JSONL_FILE, "a") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+        f.writelines(json.dumps(r) + "\n" for r in rows)
 
 
 def save_results(
@@ -375,6 +374,7 @@ def _run_subprocess(code, label, timeout=None, retries=None):
             capture_output=True,
             text=True,
             timeout=timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"{label} timeout after {timeout}s") from error
@@ -1150,6 +1150,7 @@ sys.stdout.flush(); os._exit(0)
             capture_output=True,
             text=True,
             timeout=LATENCY_TIMEOUT_S,
+            check=False,
         )
         if r.returncode != 0:
             return 0.0
@@ -1229,6 +1230,7 @@ except Exception:
             capture_output=True,
             text=True,
             timeout=duration + 10,
+            check=False,
         )
         if r.returncode != 0:
             return 0.0
@@ -1668,10 +1670,14 @@ def build_proxy_table():
         [
             "|                    | pyomq     | pyzmq     | ratio     |",
             "|--------------------|----------:|----------:|----------:|",
-            f"| PUSH/PULL msg/s    | {fmt_rate(pp_omq):>9} "
-            f"| {fmt_rate(pp_pz):>9} | **{pp_ratio:.2f}x** |",
-            f"| REQ/REP rt/s       | {fmt_int(rr_omq) + '/s':>9} "
-            f"| {fmt_int(rr_pz) + '/s':>9} | **{rr_ratio:.2f}x** |",
+            (
+                f"| PUSH/PULL msg/s    | {fmt_rate(pp_omq):>9} "
+                f"| {fmt_rate(pp_pz):>9} | **{pp_ratio:.2f}x** |"
+            ),
+            (
+                f"| REQ/REP rt/s       | {fmt_int(rr_omq) + '/s':>9} "
+                f"| {fmt_int(rr_pz) + '/s':>9} | **{rr_ratio:.2f}x** |"
+            ),
         ]
     )
 

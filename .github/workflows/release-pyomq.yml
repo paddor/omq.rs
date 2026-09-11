@@ -113,21 +113,24 @@ jobs:
           path: bindings/pyomq/dist
 
   smoke-test:
-    name: Smoke test (x86_64 wheel)
+    name: Smoke test (x86_64 wheel, Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     needs: [linux]
     timeout-minutes: 20
+    strategy:
+      matrix:
+        python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@v7
         with:
           name: wheels-linux-x86_64-auto
           path: dist
       - run: pip install dist/*.whl pytest 'pytest-asyncio>=1.4.0' 'pytest-timeout>=2.4'
-      - run: pytest bindings/pyomq/tests/test_basic.py bindings/pyomq/tests/test_curve.py bindings/pyomq/tests/test_plain.py -v --timeout=60 --timeout-method=thread
+      - run: pytest bindings/pyomq/tests/test_basic.py bindings/pyomq/tests/test_curve.py bindings/pyomq/tests/test_plain.py bindings/pyomq/tests/test_tracking.py bindings/pyomq/tests/test_wheel_contract.py -v --timeout=60 --timeout-method=thread
 
   smoke-test-macos:
     name: Smoke test macOS (${{ matrix.platform.target }} wheel)

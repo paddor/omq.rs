@@ -9,7 +9,6 @@ import errno
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 
@@ -35,7 +34,8 @@ def test_reconnect_storm():
     push.setsockopt(zmq.RECONNECT_IVL, 10)
 
     pull = _new_pull(ctx)
-    ep = pull.bind(tcp_ep())
+    pull.bind(tcp_ep())
+    ep = pull.last_endpoint
     push.connect(ep)
 
     start = time.monotonic()

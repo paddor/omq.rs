@@ -8,7 +8,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 MSG_SIZE = 1024 * 1024
@@ -23,7 +22,8 @@ def test_large_message_throughput():
     push = ctx.socket(zmq.PUSH)
     pull.setsockopt(zmq.RCVHWM, 4)
     push.setsockopt(zmq.SNDHWM, 4)
-    ep = pull.bind(tcp_ep())
+    pull.bind(tcp_ep())
+    ep = pull.last_endpoint
     push.connect(ep)
     push.setsockopt(zmq.SNDTIMEO, 5000)
     pull.setsockopt(zmq.RCVTIMEO, 5000)

@@ -5,6 +5,7 @@ PUB socket downstream. Runs until interrupted.
 
     python proxy.py [upstream] [downstream]
 """
+
 import sys
 
 import pyomq as zmq

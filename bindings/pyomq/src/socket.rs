@@ -13,6 +13,7 @@ use bytes::Bytes;
 use omq_proto::TrySendError;
 use omq_proto::error::Error as PError;
 use omq_tokio::MonitorEvent;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 use tokio::task::JoinHandle;
@@ -41,6 +42,24 @@ static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
 fn deadline_after(timeout: Duration) -> Option<Instant> {
     Instant::now().checked_add(timeout)
+}
+
+pub(crate) fn split_dish_message(msg: omq_tokio::Message) -> PyResult<(String, Bytes)> {
+    let mut parts = msg.iter();
+    let group = parts
+        .next()
+        .ok_or_else(|| PyValueError::new_err("DISH received a message without a group"))?;
+    let body = parts
+        .next()
+        .ok_or_else(|| PyValueError::new_err("DISH received a message without a body"))?;
+    if parts.next().is_some() {
+        return Err(PyValueError::new_err(
+            "DISH received a multipart group message",
+        ));
+    }
+    let group = String::from_utf8(group.to_vec())
+        .map_err(|_| PyValueError::new_err("DISH received a non-UTF-8 group"))?;
+    Ok((group, body))
 }
 
 #[cfg(unix)]
@@ -106,6 +125,7 @@ pub(crate) struct SocketInner {
     pub sndbuf: Mutex<SendBuffer>,
     pub rxbuf: Mutex<Vec<Bytes>>,
     pub rxmsgs: Mutex<Vec<omq_tokio::Message>>,
+    pub pending_sends: Mutex<Vec<std::sync::Weak<crate::socket_async::PendingMessage>>>,
     pub materialized: std::sync::RwLock<Option<Materialized>>,
     pub blocking_materialized: std::sync::RwLock<Option<BlockingMaterialized>>,
     closed: AtomicBool,
@@ -129,6 +149,7 @@ impl SocketInner {
             sndbuf: Mutex::new(SendBuffer::default()),
             rxbuf: Mutex::new(Vec::new()),
             rxmsgs: Mutex::new(Vec::new()),
+            pending_sends: Mutex::new(Vec::new()),
             materialized: std::sync::RwLock::new(None),
             blocking_materialized: std::sync::RwLock::new(None),
             closed: AtomicBool::new(false),
@@ -344,6 +365,7 @@ impl SocketInner {
             state.recv_ready.force_wake();
             state.send_ready.force_wake();
         }
+        self.clear_buffers();
         materialized
     }
 
@@ -357,7 +379,24 @@ impl SocketInner {
             std::mem::forget(materialized);
             return None;
         }
+        self.clear_buffers();
         materialized
+    }
+
+    fn clear_buffers(&self) {
+        // Python buffer-release callbacks may reenter the socket. Move owners
+        // out of every lock before dropping them.
+        let parts = std::mem::take(&mut self.sndbuf.lock().unwrap().parts);
+        let received = std::mem::take(&mut *self.rxbuf.lock().unwrap());
+        let messages = std::mem::take(&mut *self.rxmsgs.lock().unwrap());
+        let pending_sends = std::mem::take(&mut *self.pending_sends.lock().unwrap());
+        for pending in pending_sends {
+            if let Some(pending) = pending.upgrade() {
+                let message = pending.lock().unwrap().take();
+                drop(message);
+            }
+        }
+        drop((parts, received, messages));
     }
 
     pub fn close_linger(&self, linger: Option<i64>) -> Option<Duration> {
@@ -468,7 +507,7 @@ impl Monitor {
     }
 }
 
-fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyAny>> {
+fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     match ev {
         MonitorEvent::Listening { endpoint } => {
@@ -532,7 +571,7 @@ fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bo
             d.set_item("event", "unknown")?;
         }
     }
-    Ok(d.into_any())
+    Ok(d)
 }
 
 #[pymethods]
@@ -543,13 +582,13 @@ impl Monitor {
     /// Returns a dict with at minimum `{"event": "<name>"}` plus
     /// event-specific keys (`endpoint`, `connection_id`, etc.).
     #[pyo3(signature = (timeout_ms = -1))]
-    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyAny>> {
+    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         let ev = py.detach(|| {
             if timeout_ms < 0 {
@@ -568,13 +607,13 @@ impl Monitor {
 
     /// Try to receive without blocking. Raises `zmq.Again` if no event
     /// is available.
-    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         match self.rx.try_recv() {
             Ok(ev) => monitor_event_to_dict(py, &ev),
@@ -665,40 +704,160 @@ impl Socket {
         dispatch::blocking_unit(&self.inner, py, move |s| s.disconnect(ep))
     }
 
-    #[pyo3(signature = (payload, flags = 0, copy = true))]
+    #[pyo3(signature = (payload, flags = 0, copy = true, track = false))]
     fn send(
         &self,
         py: Python<'_>,
         payload: &Bound<'_, PyAny>,
         flags: i32,
         copy: bool,
-    ) -> PyResult<()> {
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            let Some(group) = conversions::group_from_pyany(payload) else {
+                return Err(PyValueError::new_err(
+                    "RADIO requires a group; pass group= or set Frame.group",
+                ));
+            };
+            if flags & crate::constants::SNDMORE != 0 {
+                return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+            }
+            let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+            self.send_message(py, omq_tokio::Message::with_group(group, bytes))?;
+            return Ok(tracker);
+        }
         let routing_id = conversions::routing_id_from_pyany(payload);
-        let bytes = conversions::bytes_from_pyany(payload, copy)?;
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
-            return Ok(());
+            return Ok(tracker);
         };
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.send_message(py, msg)
+        self.send_message(py, msg)?;
+        Ok(tracker)
     }
 
-    #[pyo3(signature = (parts, flags = 0, copy = true))]
+    #[pyo3(signature = (payload, group, flags = 0, copy = true, track = false))]
+    fn _send_with_group(
+        &self,
+        py: Python<'_>,
+        payload: &Bound<'_, PyAny>,
+        group: String,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "group is only valid on RADIO sockets",
+            ));
+        }
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+        }
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+        self.send_message(py, omq_tokio::Message::with_group(group, bytes))?;
+        Ok(tracker)
+    }
+
+    #[pyo3(signature = (payload, routing_id, flags = 0, copy = true, track = false))]
+    fn _send_with_routing(
+        &self,
+        py: Python<'_>,
+        payload: &Bound<'_, PyAny>,
+        routing_id: u32,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+        let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
+            return Ok(tracker);
+        };
+        if routing_id != 0 {
+            msg = msg.with_routing_id(routing_id);
+        }
+        self.send_message(py, msg)?;
+        Ok(tracker)
+    }
+
+    #[pyo3(signature = (parts, flags = 0, copy = true, track = false))]
     fn send_multipart(
         &self,
         py: Python<'_>,
         parts: &Bound<'_, PyAny>,
         flags: i32,
         copy: bool,
-    ) -> PyResult<()> {
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "RADIO requires send(..., group=...) or send_multipart(..., group=...)",
+            ));
+        }
         let _ = flags;
-        let msg = conversions::message_from_pylist(parts, copy)?;
-        self.send_message(py, msg)
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        self.send_message(py, msg)?;
+        Ok(tracker)
+    }
+
+    #[pyo3(signature = (parts, group, flags = 0, copy = true, track = false))]
+    fn _send_multipart_with_group(
+        &self,
+        py: Python<'_>,
+        parts: &Bound<'_, PyAny>,
+        group: String,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "group is only valid on RADIO sockets",
+            ));
+        }
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+        }
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        if msg.len() != 1 {
+            return Err(PyValueError::new_err(
+                "RADIO group send requires exactly one message part",
+            ));
+        }
+        let body = msg.part_bytes(0).expect("one-part message has a body");
+        self.send_message(py, omq_tokio::Message::with_group(group, body))?;
+        Ok(tracker)
+    }
+
+    #[pyo3(signature = (parts, routing_id, flags = 0, copy = true, track = false))]
+    fn _send_multipart_with_routing(
+        &self,
+        py: Python<'_>,
+        parts: &Bound<'_, PyAny>,
+        routing_id: u32,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let _ = flags;
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        self.send_message(py, msg.with_routing_id(routing_id))?;
+        Ok(tracker)
     }
 
     #[pyo3(signature = (flags = 0))]
     fn recv<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyBytes>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Dish) {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            let (_, body) = split_dish_message(msg)?;
+            return Ok(PyBytes::new(py, &body));
+        }
         if let Some(head) = self.inner.pop_rxbuf_head() {
             return Ok(PyBytes::new(py, &head));
         }
@@ -721,6 +880,18 @@ impl Socket {
 
     #[pyo3(signature = (flags = 0))]
     fn recv_frame<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, Frame>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Dish) {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            let (group, body) = split_dish_message(msg)?;
+            return Bound::new(
+                py,
+                Frame::from_bytes_more_routing_group(body, false, 0, group),
+            );
+        }
         if let Some((head, more)) = self.inner.pop_rxbuf_head_with_more() {
             return Bound::new(py, Frame::from_bytes_more(head, more));
         }
@@ -745,6 +916,15 @@ impl Socket {
 
     #[pyo3(signature = (flags = 0))]
     fn recv_multipart<'py>(&self, py: Python<'py>, flags: i32) -> PyResult<Bound<'py, PyList>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Dish) {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            let (_, body) = split_dish_message(msg)?;
+            return PyList::new(py, [PyBytes::new(py, &body)]);
+        }
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
             return PyList::new(py, leftover.into_iter().map(|b| PyBytes::new(py, &b)));
@@ -763,6 +943,19 @@ impl Socket {
         py: Python<'py>,
         flags: i32,
     ) -> PyResult<Bound<'py, PyList>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Dish) {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            let (group, body) = split_dish_message(msg)?;
+            let frame = Bound::new(
+                py,
+                Frame::from_bytes_more_routing_group(body, false, 0, group),
+            )?;
+            return PyList::new(py, [frame]);
+        }
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
             return conversions::frames_to_pylist(py, leftover);

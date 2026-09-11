@@ -2,10 +2,9 @@
 
 import asyncio
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
+import pytest
 
 
 @pytest.mark.asyncio
@@ -16,7 +15,8 @@ async def test_async_send_completes_after_drain(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     try:
         push.setsockopt(pyomq.SNDHWM, 2)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         await asyncio.sleep(0.1)
 
@@ -44,7 +44,8 @@ async def test_async_send_does_not_block_event_loop(tcp_endpoint):
     pull = ctx.socket(pyomq.PULL)
     try:
         push.setsockopt(pyomq.SNDHWM, 1)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         await asyncio.sleep(0.1)
 

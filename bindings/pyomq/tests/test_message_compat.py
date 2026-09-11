@@ -1,5 +1,7 @@
 """Message, Frame, MessageTracker compat classes."""
 
+from threading import Event
+
 import pyomq as zmq
 
 
@@ -58,10 +60,10 @@ def test_message_tracker_done():
 
 
 def test_message_tracker_pending():
-    t = zmq.MessageTracker(_pending=True)
+    t = zmq.MessageTracker(Event())
     assert t.done is False
     try:
-        t.wait()
+        t.wait(0)
         assert False, "should have raised NotDone"
     except zmq.NotDone:
         pass

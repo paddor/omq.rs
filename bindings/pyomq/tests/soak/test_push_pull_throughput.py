@@ -7,7 +7,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 
@@ -18,7 +17,8 @@ def test_push_pull_sustained():
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
-    ep = pull.bind(tcp_ep())
+    pull.bind(tcp_ep())
+    ep = pull.last_endpoint
     push.connect(ep)
     push.setsockopt(zmq.SNDTIMEO, 2000)
     pull.setsockopt(zmq.RCVTIMEO, 2000)

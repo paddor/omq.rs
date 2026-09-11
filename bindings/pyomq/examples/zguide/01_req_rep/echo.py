@@ -4,6 +4,7 @@ Single-process demo: REP server echoes messages back to a REQ client.
 
     python echo.py [endpoint]
 """
+
 import sys
 import threading
 import time

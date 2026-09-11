@@ -3,13 +3,25 @@
 ## Purpose
 
 PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python: sync
-(`pyomq`) and async (`pyomq.asyncio`). Stable ABI (`abi3-py311`,
-Python 3.11+) via maturin. Release workflow publishes Linux wheels and
+(`pyomq`) and async (`pyomq.asyncio`). Stable ABI (`abi3-py312`,
+Python 3.12+) via maturin. Release workflow publishes Linux wheels and
 an sdist. Windows pyomq support is pending.
 
 See [`doc/architecture.md`](../../doc/architecture.md) for internals:
 threading model, queue relay, send/recv paths, zero-copy conversions,
 proxy, authentication, error mapping, and known limitations.
+
+## Python native stub maintenance
+
+The native Python API is defined in `python/pyomq/_native.pyi` and is
+maintained manually. Treat this stub as the authoritative contract for
+`pyomq._native`.
+
+When a Rust-exported symbol changes in `src/lib.rs`—including any new
+`#[pyfunction]`, `#[pymodule_export]`, or `#[pyclass]` member—the stub
+must be kept in sync in the same change. Do not assume PyO3's generated
+information is complete enough to serve as a final API contract for the
+Python binding.
 
 ## Build / test / lint
 

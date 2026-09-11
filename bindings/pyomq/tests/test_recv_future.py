@@ -8,14 +8,47 @@ import threading
 import types
 from typing import Any
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
+import pytest
 
 
 async def _await(value):
     return await value
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix fd readiness path only")
+@pytest.mark.parametrize("fails", [False, True])
+def test_completed_future_releases_fd_while_retained(fails):
+    read_fd, write_fd = os.pipe()
+
+    def receive():
+        if fails:
+            raise RuntimeError("closed")
+        return b"received"
+
+    pending = zmq_async._RecvFuture(receive, read_fd)
+    try:
+        assert pending.done()
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+        if fails:
+            with pytest.raises(RuntimeError, match="closed"):
+                pending.result()
+        else:
+            assert pending.result() == b"received"
+    finally:
+        os.close(write_fd)
+        if pending._fd >= 0:
+            os.close(pending._fd)
+            pending._fd = -1
+
+
+def test_untracked_receives_do_not_allocate_closure_cells():
+    # Capturing self in a tracked-only closure still allocates a cell on
+    # every ordinary receive. Keep that work off the measured hot path.
+    assert not zmq_async.Socket.recv.__code__.co_cellvars
+    assert not zmq_async.Socket.recv_multipart.__code__.co_cellvars
 
 
 @pytest.mark.asyncio
@@ -24,7 +57,8 @@ async def test_recv_future_await(tcp_endpoint):
     push = ctx.socket(pyomq.PUSH)
     pull = ctx.socket(pyomq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"await-test")
         msg = await pull.recv()
@@ -41,7 +75,8 @@ async def test_recv_future_fast_path(tcp_endpoint):
     push = ctx.socket(pyomq.PUSH)
     pull = ctx.socket(pyomq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"fast")
         await asyncio.sleep(0.1)
@@ -59,7 +94,8 @@ async def test_recv_future_done_transitions(tcp_endpoint):
     push = ctx.socket(pyomq.PUSH)
     pull = ctx.socket(pyomq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         fut = pull.recv()
@@ -67,6 +103,8 @@ async def test_recv_future_done_transitions(tcp_endpoint):
         push.send(b"done-test")
         msg = await fut
         assert msg == b"done-test"
+        assert fut.done()
+        assert fut.result() == b"done-test"
     finally:
         push.close()
         pull.close()
@@ -74,12 +112,13 @@ async def test_recv_future_done_transitions(tcp_endpoint):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix fd readiness path only")
 @pytest.mark.asyncio
-async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch):
+async def test_canceled_read_preserves_message_and_reused_fd(tcp_endpoint, monkeypatch):
     ctx = zmq_async.Context()
     push = ctx.socket(pyomq.PUSH)
     pull = ctx.socket(pyomq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         pending: Any = pull.recv_multipart()
@@ -92,6 +131,7 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
         assert ready
 
         replacement: list[Any] = []
+        recovered = []
         replacement_created = asyncio.Event()
         real_os = zmq_async.os
         os_proxy = types.ModuleType("os")
@@ -100,6 +140,7 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
         def close_and_reuse(fd: int) -> None:
             os.close(fd)
             if fd == old_fd and not replacement:
+                recovered.append(pull._sock._try_recv_multipart())
                 replacement_waiter: Any = pull.recv_multipart()
                 if replacement_waiter._fd != old_fd:
                     os.dup2(replacement_waiter._fd, old_fd)
@@ -108,11 +149,12 @@ async def test_cancelled_read_does_not_close_reused_fd(tcp_endpoint, monkeypatch
                 replacement.append(replacement_waiter)
                 replacement_created.set()
 
-        setattr(os_proxy, "close", close_and_reuse)
+        os_proxy.__dict__["close"] = close_and_reuse
         monkeypatch.setattr(zmq_async, "os", os_proxy)
 
         asyncio.get_running_loop().call_soon(pending_task.cancel)
         await replacement_created.wait()
+        assert recovered == [[b"raced"]]
         assert replacement[0]._fd == old_fd
 
         replacement_task = asyncio.create_task(_await(replacement[0]))
@@ -135,7 +177,8 @@ async def test_windows_cancelled_recv_does_not_stall_replacement(tcp_endpoint):
     push = ctx.socket(pyomq.PUSH)
     pull = ctx.socket(pyomq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         for index in range(200):

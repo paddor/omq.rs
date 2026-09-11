@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Complete native type stubs and shared buffer, connection, and monitor types.
+- Consumer typing tests for ty, mypy, and pyright, plus native stub checks.
+- Real buffer-lifetime tracking for frames and sync, async, and shadow sends.
+- pyzmq-style bind/connect scope managers, `recv_into()`, `routing_id` send
+  keywords, and public `Context(shadow=...)` construction.
+
+### Changed
+
+- Raise the Python minimum from 3.11 to 3.12 and use `abi3-py312` wheels.
+- Match pyzmq public keyword names for endpoints, subscriptions, multipart
+  sends, socket-option strings, `curve_public()`, and `strerror()`.
+- Accept contiguous buffer-protocol objects, including multibyte formats,
+  consistently across send APIs. Reject strided buffers and implicit text
+  conversion; use `send_string()` for text.
+- Match pyzmq's copied-send and tracked-frame return contracts.
+- Reduce tracked-send wrapper allocations, especially for multipart messages.
+
+### Fixed
+
+- Preserve converted multipart messages and one-shot iterables across async
+  and shadow send backpressure. Release pending buffers on cancel and close.
+- Correct receive overloads, option descriptors, callback and factory types,
+  byte endpoints, and the `ZMQStream` import cycle.
+- Honor per-send stream callbacks and pass their message parts and tracker.
+- Preserve queued messages when an asyncio receive is canceled before its
+  readiness callback runs.
+- Release completed future descriptors even when callers retain the future
+  after polling `done()`.
+
 ## [0.21.0] - 2026-09-04
 
 ### Added

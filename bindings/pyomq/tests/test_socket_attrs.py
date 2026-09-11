@@ -1,8 +1,7 @@
 """Socket attribute-style option access (pyzmq compat)."""
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def test_linger_attr():

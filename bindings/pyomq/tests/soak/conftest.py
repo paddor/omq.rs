@@ -2,7 +2,6 @@
 
 import os
 import time
-from typing import List, Tuple
 
 
 def soak_duration() -> float:

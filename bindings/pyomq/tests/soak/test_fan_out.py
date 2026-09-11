@@ -10,7 +10,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 NUM_SUBS = 16
@@ -24,7 +23,8 @@ def test_fan_out():
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDHWM, 500)
-    ep = pub.bind(tcp_ep())
+    pub.bind(tcp_ep())
+    ep = pub.last_endpoint
 
     subs = []
     for _ in range(NUM_SUBS):

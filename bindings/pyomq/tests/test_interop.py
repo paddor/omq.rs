@@ -69,7 +69,8 @@ def test_pyomq_push_pyzmq_pull(endpoint):
 def test_pyzmq_push_pyomq_pull(endpoint):
     ctx = pyomq.Context()
     pull = ctx.socket(pyomq.PULL)
-    ep = pull.bind(endpoint)
+    pull.bind(endpoint)
+    ep = pull.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
@@ -89,7 +90,8 @@ def test_pyzmq_push_pyomq_pull(endpoint):
 def test_pyomq_pub_pyzmq_sub(endpoint):
     ctx = pyomq.Context()
     pub = ctx.socket(pyomq.PUB)
-    ep = pub.bind(endpoint)
+    pub.bind(endpoint)
+    ep = pub.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         sub = py_ctx.socket(zmq_pyzmq.SUB)
@@ -163,7 +165,8 @@ def test_pyomq_req_pyzmq_rep(endpoint):
 def test_pyzmq_req_pyomq_rep(endpoint):
     ctx = pyomq.Context()
     rep = ctx.socket(pyomq.REP)
-    ep = rep.bind(endpoint)
+    rep.bind(endpoint)
+    ep = rep.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         req = py_ctx.socket(zmq_pyzmq.REQ)
@@ -212,7 +215,8 @@ def test_pyomq_dealer_pyzmq_router(endpoint):
 def test_pyzmq_dealer_pyomq_router(endpoint):
     ctx = pyomq.Context()
     router = ctx.socket(pyomq.ROUTER)
-    ep = router.bind(endpoint)
+    router.bind(endpoint)
+    ep = router.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         dealer = py_ctx.socket(zmq_pyzmq.DEALER)
@@ -267,7 +271,8 @@ def test_pyomq_xpub_pyzmq_xsub(endpoint):
     legacy 3.0 0x01-prefix message form pyzmq XSUB emits."""
     ctx = pyomq.Context()
     xpub = ctx.socket(pyomq.XPUB)
-    ep = xpub.bind(endpoint)
+    xpub.bind(endpoint)
+    ep = xpub.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         xsub = py_ctx.socket(zmq_pyzmq.XSUB)

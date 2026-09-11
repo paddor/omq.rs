@@ -1,8 +1,7 @@
 """Compression transport smoke tests."""
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 pytestmark = pytest.mark.skipif(not zmq.has("zstd"), reason="zstd feature not compiled")
 

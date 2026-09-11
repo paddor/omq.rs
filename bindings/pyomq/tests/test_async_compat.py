@@ -1,9 +1,8 @@
 """Async wrapper parity tests."""
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
+import pytest
 
 
 async def test_async_again_exception(tcp_endpoint):

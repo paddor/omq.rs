@@ -4,10 +4,9 @@ import asyncio
 import sys
 import time
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
+import pytest
 
 pytestmark = pytest.mark.event_loop("selector", "proactor")
 
@@ -343,7 +342,7 @@ async def test_async_close_wakes_pending_recv(tcp_endpoint):
         recv_task = pull.recv()
         await asyncio.sleep(0.05)
         pull.close()
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa B017
             await recv_task
-    except Exception:
+    except Exception:  # noqa S110
         pass

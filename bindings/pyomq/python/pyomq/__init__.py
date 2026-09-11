@@ -23,156 +23,158 @@ import pickle
 import select as _select
 import sys
 import threading
+import types
 import weakref
+from collections.abc import Callable, Iterable, Iterator
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Callable,
-    cast,
     Final,
-    Iterable,
-    Iterator,
     Literal,
-    Protocol,
     Self,
+    cast,
     overload,
 )
 
-from . import _native  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
-from . import error as error  # noqa: F401
-
-from ._native import (  # type: ignore[attr-defined]  # ty:ignore[unresolved-import]
-    backend_name,
-    version,
-    Frame,
-    # Socket types
-    PAIR,
-    PUB,
-    SUB,
-    REQ,
-    REP,
-    DEALER,
-    ROUTER,
-    PULL,
-    PUSH,
-    XPUB,
-    XSUB,
-    STREAM,
-    # Draft socket types (RFC 41 / 48 / 49 / 51 + PEER)
-    SERVER,
-    CLIENT,
-    RADIO,
-    DISH,
-    GATHER,
-    SCATTER,
-    PEER,
-    CHANNEL,
+from . import _native
+from . import error as error
+from ._native import (
     # Option constants
     AFFINITY,
-    IDENTITY,
-    SUBSCRIBE,
-    UNSUBSCRIBE,
-    RCVMORE,
-    TYPE,
-    LINGER,
-    RECONNECT_IVL,
-    RECONNECT_IVL_MAX,
     BACKLOG,
-    MAXMSGSIZE,
-    SNDHWM,
-    RCVHWM,
-    RCVTIMEO,
-    SNDTIMEO,
-    ROUTER_MANDATORY,
-    IMMEDIATE,
-    IPV6,
-    HEARTBEAT_IVL,
-    HEARTBEAT_TTL,
-    HEARTBEAT_TIMEOUT,
-    HANDSHAKE_IVL,
+    CHANNEL,
+    CLIENT,
     CONFLATE,
-    TCP_KEEPALIVE,
-    TCP_KEEPALIVE_IDLE,
-    TCP_KEEPALIVE_CNT,
-    TCP_KEEPALIVE_INTVL,
-    SNDMORE,
-    NOBLOCK,
-    DONTWAIT,
-    # CURVE option ids
-    CURVE_SERVER,
     CURVE_PUBLICKEY,
     CURVE_SECRETKEY,
+    # CURVE option ids
+    CURVE_SERVER,
     CURVE_SERVERKEY,
+    DEALER,
+    DISH,
+    DONTWAIT,
+    GATHER,
+    HANDSHAKE_IVL,
+    HEARTBEAT_IVL,
+    HEARTBEAT_TIMEOUT,
+    HEARTBEAT_TTL,
+    IDENTITY,
+    IMMEDIATE,
+    IPV6,
+    LINGER,
+    MAXMSGSIZE,
+    NOBLOCK,
+    OMQ_COMPRESSION_AUTO_TRAIN,
+    OMQ_COMPRESSION_DICT,
+    OMQ_COMPRESSION_LEVEL,
     # omq-specific options
     OMQ_ON_MUTE,
-    OMQ_COMPRESSION_LEVEL,
-    OMQ_COMPRESSION_DICT,
-    OMQ_COMPRESSION_AUTO_TRAIN,
     OMQ_ON_MUTE_BLOCK,
     OMQ_ON_MUTE_DROP_NEWEST,
     OMQ_ON_MUTE_DROP_OLDEST,
+    # Socket types
+    PAIR,
+    PEER,
+    PUB,
+    PULL,
+    PUSH,
+    RADIO,
+    RCVHWM,
+    RCVMORE,
+    RCVTIMEO,
+    RECONNECT_IVL,
+    RECONNECT_IVL_MAX,
+    REP,
+    REQ,
+    ROUTER,
+    ROUTER_MANDATORY,
+    SCATTER,
+    # Draft socket types (RFC 41 / 48 / 49 / 51 + PEER)
+    SERVER,
+    SNDHWM,
+    SNDMORE,
+    SNDTIMEO,
+    STREAM,
+    SUB,
+    SUBSCRIBE,
+    TCP_KEEPALIVE,
+    TCP_KEEPALIVE_CNT,
+    TCP_KEEPALIVE_IDLE,
+    TCP_KEEPALIVE_INTVL,
+    TYPE,
+    UNSUBSCRIBE,
+    XPUB,
+    XSUB,
+    Frame,
+    backend_name,
+    version,
 )
-
-from .error import (  # noqa: F401  re-exports
-    ZMQBaseError,
-    ZMQError,
+from .error import (
     Again,
     ContextTerminated,
-    ZMQBindError,
-    ZMQVersionError,
     InterruptedSystemCall,
+    ZMQBaseError,
+    ZMQBindError,
+    ZMQError,
+    ZMQVersionError,
+)
+from .error import (
     NotImplementedError as ZMQNotImplementedError,
 )
 
+if TYPE_CHECKING:
+    from .asyncio import Socket as AsyncSocket
+
 # ── Constants ─────────────────────────────────────────────────────────
 
-POLLIN: Final[int] = 1
-POLLOUT: Final[int] = 2
-POLLERR: Final[int] = 4
-POLLPRI: Final[int] = 32
-HWM: Final[int] = 1
+POLLIN: Final = 1
+POLLOUT: Final = 2
+POLLERR: Final = 4
+POLLPRI: Final = 32
+HWM: Final = 1
 
 # Windows specific constants
 _IS_WINDOWS: Final[bool] = sys.platform == "win32"
-_WAKEUP_MODE_NONE: Final[int] = 0
-_WAKEUP_MODE_ASYNC: Final[int] = 1
-_WAKEUP_MODE_SYNC: Final[int] = 2
+_WAKEUP_MODE_NONE: Final = 0
+_WAKEUP_MODE_ASYNC: Final = 1
+_WAKEUP_MODE_SYNC: Final = 2
 
-ROUTING_ID: Final[int] = 5
-LAST_ENDPOINT: Final[int] = 32
-FD: Final[int] = 14
-EVENTS: Final[int] = 15
-MECHANISM: Final[int] = 43
-SNDBUF: Final[int] = 11
-RCVBUF: Final[int] = 12
-RATE: Final[int] = 8
-CONNECT_TIMEOUT: Final[int] = 79
-XPUB_VERBOSE: Final[int] = 40
-PROBE_ROUTER: Final[int] = 51
-REQ_CORRELATE: Final[int] = 52
-REQ_RELAXED: Final[int] = 53
-ROUTER_HANDOVER: Final[int] = 56
-IPV4ONLY: Final[int] = 31
-TCP_ACCEPT_FILTER: Final[int] = 38
-TCP_MAXRT: Final[int] = 80
-MULTICAST_HOPS: Final[int] = 25
-RECOVERY_IVL: Final[int] = 9
-RECONNECT_STOP: Final[int] = 109
-PLAIN_SERVER: Final[int] = 44
-PLAIN_USERNAME: Final[int] = 45
-PLAIN_PASSWORD: Final[int] = 46
-ZAP_DOMAIN: Final[int] = 55
+ROUTING_ID: Final = 5
+LAST_ENDPOINT: Final = 32
+FD: Final = 14
+EVENTS: Final = 15
+MECHANISM: Final = 43
+SNDBUF: Final = 11
+RCVBUF: Final = 12
+RATE: Final = 8
+CONNECT_TIMEOUT: Final = 79
+XPUB_VERBOSE: Final = 40
+PROBE_ROUTER: Final = 51
+REQ_CORRELATE: Final = 52
+REQ_RELAXED: Final = 53
+ROUTER_HANDOVER: Final = 56
+IPV4ONLY: Final = 31
+TCP_ACCEPT_FILTER: Final = 38
+TCP_MAXRT: Final = 80
+MULTICAST_HOPS: Final = 25
+RECOVERY_IVL: Final = 9
+RECONNECT_STOP: Final = 109
+PLAIN_SERVER: Final = 44
+PLAIN_USERNAME: Final = 45
+PLAIN_PASSWORD: Final = 46
+ZAP_DOMAIN: Final = 55
 
-FORWARDER: Final[int] = 2
-QUEUE: Final[int] = 3
-STREAMER: Final[int] = 1
+FORWARDER: Final = 2
+QUEUE: Final = 3
+STREAMER: Final = 1
 
-NULL: Final[int] = 0
-PLAIN: Final[int] = 1
-CURVE: Final[int] = 2
+NULL: Final = 0
+PLAIN: Final = 1
+CURVE: Final = 2
 
-ETERM: Final[int] = 156384765
-ENOTSOCK: Final[int] = 108
-COPY_THRESHOLD: Final[int] = 65536
+ETERM: Final = 156384765
+ENOTSOCK: Final = 108
+COPY_THRESHOLD: Final = 65536
 
 # errno constants (pyzmq exposes these at top level)
 EAGAIN: Final[int] = _errno.EAGAIN
@@ -196,6 +198,20 @@ EADDRNOTAVAIL: Final[int] = _errno.EADDRNOTAVAIL
 __version__: Final[str] = version()
 zmq_version_info: Final[tuple[int, int, int]] = (4, 3, 4)
 
+from ._tracker import MessageTracker, NotDone
+from ._typing import (
+    AuthCallback,
+    ConnectionInfo,
+    CurveAuth,
+    FutureResult,
+    MonitorEvent,
+    PlainAuth,
+    Sendable,
+    _BytesOption,
+    _IntOption,
+)
+
+SENDABLE_TYPES = Sendable
 
 # ── Top-level functions ──────────────────────────────────────────────
 
@@ -205,7 +221,7 @@ def strerror(errnum: int) -> str:
 
 
 def zmq_version() -> str:
-    return "%d.%d.%d" % zmq_version_info
+    return "{:d}.{:d}.{:d}".format(*zmq_version_info)
 
 
 def pyomq_version() -> str:
@@ -273,134 +289,92 @@ _TYPE_NAMES: Final[dict[int, str]] = {
 # ── MessageTracker / Message / Frame (pyzmq compat) ─────────────────
 
 
-class NotDone(ZMQBaseError):
-    pass
-
-
-class MessageTracker:
-    """Tracks the delivery status of a message (pyzmq compatibility)."""
-
-    done: bool
-
-    def __init__(self, *args: Any, _pending: bool = False, **kwargs: Any) -> None:
-        self.done = not _pending
-
-    def wait(self, timeout: int | None = None) -> None:
-        if not self.done:
-            raise NotDone
-
-
 Message = Frame
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
 
 
-class _NativeSocket(Protocol):
-    """Protocol for native socket implementation (sync or async)."""
-
-    def getsockopt(self, option: int) -> Any: ...
-
-    def setsockopt(self, option: int, value: Any) -> Any: ...
-
-    def bind(self, endpoint: str | bytes) -> str | bytes: ...
-
-    def connect(self, endpoint: str | bytes) -> None: ...
-
-    def unbind(self, endpoint: str | bytes) -> None: ...
-
-    def disconnect(self, endpoint: str | bytes) -> None: ...
-
-    def subscribe(self, prefix: bytes | str) -> None: ...
-
-    def unsubscribe(self, prefix: bytes | str) -> None: ...
-
-    def join(self, group: bytes | str) -> None: ...
-
-    def leave(self, group: bytes | str) -> None: ...
-
-    def monitor(self) -> Any: ...
-
-    def connections(self) -> Any: ...
-
-    def connection_info(self, connection_id: int) -> Any: ...
-
-    def set_curve_auth(self, auth: Any) -> Any: ...
-
-    def set_plain_auth(self, auth: Any) -> Any:
-        """Configure a PLAIN server allowlist or callback before socket use."""
-        ...
-
-    def close(self, linger: int | None = None) -> None: ...
-
-
 # Socket option descriptor for IDE autocomplete support
-class _SocketOptionDescriptor:
+class _SocketOptionDescriptor[T]:
     """Descriptor for socket options providing IDE autocomplete."""
 
     def __init__(self, option_code: int) -> None:
         self.option_code = option_code
 
-    def __get__(self, obj: Any, objtype: type[Any] | None = None) -> Any:
+    @overload
+    def __get__(self, obj: None, objtype: type[object] | None = None) -> Self: ...
+
+    @overload
+    def __get__(
+        self, obj: _SocketOptionsBase, objtype: type[object] | None = None
+    ) -> T: ...
+
+    def __get__(
+        self, obj: _SocketOptionsBase | None, objtype: type[object] | None = None
+    ) -> T | Self:
         if obj is None:
             return self
         if self.option_code == LAST_ENDPOINT:
-            return obj._last_endpoint
-        return obj.getsockopt(self.option_code)
+            return cast(T, obj._last_endpoint)
+        return cast(T, obj.getsockopt(self.option_code))
 
-    def __set__(self, obj: Any, value: Any) -> None:
-        obj.setsockopt(self.option_code, value)
+    def __set__(self, obj: _SocketOptionsBase, value: T) -> None:
+        obj.setsockopt(self.option_code, cast(int | bytes, value))
 
 
 class _SocketOptionsBase:
     """Base class with socket option descriptors and shared methods."""
 
     # Attributes (subclasses must define these)
-    _sock: _NativeSocket
+    # Concrete subclasses initialize and narrow these private handles. Shared
+    # methods never replace them with a different socket or context kind.
+    _sock: _native.Socket | _native.AsyncSocket
     _context: Context
+
     _closed: bool
-    _last_endpoint: bytes | str | None
+    _last_endpoint: bytes | None
 
     # Socket options
-    affinity = _SocketOptionDescriptor(AFFINITY)
-    identity = _SocketOptionDescriptor(IDENTITY)
-    routing_id = _SocketOptionDescriptor(ROUTING_ID)
-    rcvmore = _SocketOptionDescriptor(RCVMORE)
-    sndhwm = _SocketOptionDescriptor(SNDHWM)
-    rcvhwm = _SocketOptionDescriptor(RCVHWM)
-    linger = _SocketOptionDescriptor(LINGER)
-    reconnect_ivl = _SocketOptionDescriptor(RECONNECT_IVL)
-    reconnect_ivl_max = _SocketOptionDescriptor(RECONNECT_IVL_MAX)
-    backlog = _SocketOptionDescriptor(BACKLOG)
-    maxmsgsize = _SocketOptionDescriptor(MAXMSGSIZE)
-    rcvtimeo = _SocketOptionDescriptor(RCVTIMEO)
-    sndtimeo = _SocketOptionDescriptor(SNDTIMEO)
-    ipv6 = _SocketOptionDescriptor(IPV6)
-    immediate = _SocketOptionDescriptor(IMMEDIATE)
-    router_mandatory = _SocketOptionDescriptor(ROUTER_MANDATORY)
-    tcp_keepalive = _SocketOptionDescriptor(TCP_KEEPALIVE)
-    tcp_keepalive_idle = _SocketOptionDescriptor(TCP_KEEPALIVE_IDLE)
-    tcp_keepalive_cnt = _SocketOptionDescriptor(TCP_KEEPALIVE_CNT)
-    tcp_keepalive_intvl = _SocketOptionDescriptor(TCP_KEEPALIVE_INTVL)
-    heartbeat_ivl = _SocketOptionDescriptor(HEARTBEAT_IVL)
-    heartbeat_ttl = _SocketOptionDescriptor(HEARTBEAT_TTL)
-    heartbeat_timeout = _SocketOptionDescriptor(HEARTBEAT_TIMEOUT)
-    handshake_ivl = _SocketOptionDescriptor(HANDSHAKE_IVL)
-    conflate = _SocketOptionDescriptor(CONFLATE)
-    curve_server = _SocketOptionDescriptor(CURVE_SERVER)
-    curve_publickey = _SocketOptionDescriptor(CURVE_PUBLICKEY)
-    curve_secretkey = _SocketOptionDescriptor(CURVE_SECRETKEY)
-    curve_serverkey = _SocketOptionDescriptor(CURVE_SERVERKEY)
-    on_mute = _SocketOptionDescriptor(OMQ_ON_MUTE)
-    compression_level = _SocketOptionDescriptor(OMQ_COMPRESSION_LEVEL)
-    compression_dict = _SocketOptionDescriptor(OMQ_COMPRESSION_DICT)
-    compression_auto_train = _SocketOptionDescriptor(OMQ_COMPRESSION_AUTO_TRAIN)
-    sndbuf = _SocketOptionDescriptor(SNDBUF)
-    rcvbuf = _SocketOptionDescriptor(RCVBUF)
-    mechanism = _SocketOptionDescriptor(MECHANISM)
-    plain_server = _SocketOptionDescriptor(PLAIN_SERVER)
-    plain_username = _SocketOptionDescriptor(PLAIN_USERNAME)
-    plain_password = _SocketOptionDescriptor(PLAIN_PASSWORD)
+    affinity = _SocketOptionDescriptor[int](AFFINITY)
+    identity = _SocketOptionDescriptor[bytes](IDENTITY)
+    routing_id = _SocketOptionDescriptor[bytes](ROUTING_ID)
+    rcvmore = _SocketOptionDescriptor[int](RCVMORE)
+    sndhwm = _SocketOptionDescriptor[int](SNDHWM)
+    rcvhwm = _SocketOptionDescriptor[int](RCVHWM)
+    linger = _SocketOptionDescriptor[int](LINGER)
+    reconnect_ivl = _SocketOptionDescriptor[int](RECONNECT_IVL)
+    reconnect_ivl_max = _SocketOptionDescriptor[int](RECONNECT_IVL_MAX)
+    backlog = _SocketOptionDescriptor[int](BACKLOG)
+    maxmsgsize = _SocketOptionDescriptor[int](MAXMSGSIZE)
+    rcvtimeo = _SocketOptionDescriptor[int](RCVTIMEO)
+    sndtimeo = _SocketOptionDescriptor[int](SNDTIMEO)
+    ipv6 = _SocketOptionDescriptor[int](IPV6)
+    immediate = _SocketOptionDescriptor[int](IMMEDIATE)
+    router_mandatory = _SocketOptionDescriptor[int](ROUTER_MANDATORY)
+    tcp_keepalive = _SocketOptionDescriptor[int](TCP_KEEPALIVE)
+    tcp_keepalive_idle = _SocketOptionDescriptor[int](TCP_KEEPALIVE_IDLE)
+    tcp_keepalive_cnt = _SocketOptionDescriptor[int](TCP_KEEPALIVE_CNT)
+    tcp_keepalive_intvl = _SocketOptionDescriptor[int](TCP_KEEPALIVE_INTVL)
+    heartbeat_ivl = _SocketOptionDescriptor[int](HEARTBEAT_IVL)
+    heartbeat_ttl = _SocketOptionDescriptor[int](HEARTBEAT_TTL)
+    heartbeat_timeout = _SocketOptionDescriptor[int](HEARTBEAT_TIMEOUT)
+    handshake_ivl = _SocketOptionDescriptor[int](HANDSHAKE_IVL)
+    conflate = _SocketOptionDescriptor[int](CONFLATE)
+    curve_server = _SocketOptionDescriptor[int](CURVE_SERVER)
+    curve_publickey = _SocketOptionDescriptor[bytes](CURVE_PUBLICKEY)
+    curve_secretkey = _SocketOptionDescriptor[bytes](CURVE_SECRETKEY)
+    curve_serverkey = _SocketOptionDescriptor[bytes](CURVE_SERVERKEY)
+    on_mute = _SocketOptionDescriptor[int](OMQ_ON_MUTE)
+    compression_level = _SocketOptionDescriptor[int](OMQ_COMPRESSION_LEVEL)
+    compression_dict = _SocketOptionDescriptor[bytes](OMQ_COMPRESSION_DICT)
+    compression_auto_train = _SocketOptionDescriptor[int](OMQ_COMPRESSION_AUTO_TRAIN)
+    sndbuf = _SocketOptionDescriptor[int](SNDBUF)
+    rcvbuf = _SocketOptionDescriptor[int](RCVBUF)
+    mechanism = _SocketOptionDescriptor[int](MECHANISM)
+    plain_server = _SocketOptionDescriptor[int](PLAIN_SERVER)
+    plain_username = _SocketOptionDescriptor[bytes](PLAIN_USERNAME)
+    plain_password = _SocketOptionDescriptor[bytes](PLAIN_PASSWORD)
 
     # ── Shared properties ────────────────────────────────────────────
 
@@ -417,22 +391,37 @@ class _SocketOptionsBase:
         return self._sock.getsockopt(TYPE)
 
     @property
-    def last_endpoint(self) -> bytes | str | None:
+    def last_endpoint(self) -> bytes | None:
         return self._last_endpoint
 
     @property
-    def underlying(self) -> _SocketOptionsBase:
+    def underlying(self) -> Self:
         return self
 
     # ── Options ──────────────────────────────────────────────────────
 
-    def setsockopt(self, option: int, value: Any) -> Any:
+    def setsockopt(self, option: int, value: int | bytes) -> None:
         try:
             return self._sock.setsockopt(option, value)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def getsockopt(self, option: int) -> Any:
+    @overload
+    def getsockopt(self, option: _BytesOption) -> bytes: ...
+
+    @overload
+    def getsockopt(self, option: Literal[32]) -> bytes | None: ...
+
+    @overload
+    def getsockopt(
+        self,
+        option: _IntOption,
+    ) -> int: ...
+
+    @overload
+    def getsockopt(self, option: int) -> int | bytes | None: ...
+
+    def getsockopt(self, option: int) -> int | bytes | None:
         if option == LAST_ENDPOINT:
             return self._last_endpoint
         try:
@@ -440,15 +429,30 @@ class _SocketOptionsBase:
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def set(self, option: int, value: Any) -> Any:
+    def set(self, option: int, value: int | bytes) -> None:
         return self.setsockopt(option, value)
 
-    def get(self, option: int) -> Any:
+    @overload
+    def get(self, option: _BytesOption) -> bytes: ...
+
+    @overload
+    def get(self, option: Literal[32]) -> bytes | None: ...
+
+    @overload
+    def get(
+        self,
+        option: _IntOption,
+    ) -> int: ...
+
+    @overload
+    def get(self, option: int) -> int | bytes | None: ...
+
+    def get(self, option: int) -> int | bytes | None:
         return self.getsockopt(option)
 
     def setsockopt_string(
         self, option: int, value: str, encoding: str = "utf-8"
-    ) -> Any:
+    ) -> None:
         return self.setsockopt(option, value.encode(encoding))
 
     def getsockopt_string(self, option: int, encoding: str = "utf-8") -> str:
@@ -468,7 +472,12 @@ class _BaseSocket(_SocketOptionsBase):
 
     """
 
-    def set_curve_auth(self, auth: Any) -> Any:
+    _closed: bool
+    _pid: int
+    _binds: list[str | bytes]
+    _connects: list[str | bytes]
+
+    def set_curve_auth(self, auth: CurveAuth) -> None:
         try:
             return self._sock.set_curve_auth(auth)
         except _native.ZMQError as e:
@@ -476,7 +485,7 @@ class _BaseSocket(_SocketOptionsBase):
         except AttributeError:
             raise ZMQNotImplementedError("curve feature not compiled")
 
-    def set_plain_auth(self, auth: Any) -> Any:
+    def set_plain_auth(self, auth: PlainAuth) -> None:
         """Configure PLAIN server admission before first socket use.
 
         Pass an iterable of exact ``(username, password)`` pairs or a callable
@@ -511,11 +520,14 @@ class _BaseSocket(_SocketOptionsBase):
     @overload
     def bind(self, endpoint: bytes) -> bytes: ...
 
-    def bind(self, endpoint):
+    def bind(self, endpoint: str | bytes) -> str | bytes:
+        as_bytes = isinstance(endpoint, bytes)
+        if isinstance(endpoint, bytes):
+            endpoint = endpoint.decode("utf-8")
         try:
             ep = self._sock.bind(self._context._namespace_inproc(endpoint))
             self._last_endpoint = ep.encode() if isinstance(ep, str) else ep
-            return ep
+            return ep.encode("utf-8") if as_bytes else ep
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -543,12 +555,16 @@ class _BaseSocket(_SocketOptionsBase):
             raise error.from_native(e) from None
 
     def unbind(self, endpoint: str | bytes) -> None:
+        if isinstance(endpoint, bytes):
+            endpoint = endpoint.decode("utf-8")
         try:
             return self._sock.unbind(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def disconnect(self, endpoint: str | bytes) -> None:
+        if isinstance(endpoint, bytes):
+            endpoint = endpoint.decode("utf-8")
         try:
             return self._sock.disconnect(self._context._namespace_inproc(endpoint))
         except _native.ZMQError as e:
@@ -586,13 +602,13 @@ class _BaseSocket(_SocketOptionsBase):
 
     # ── Monitoring ───────────────────────────────────────────────────
 
-    def monitor(self) -> Any:
+    def monitor(self) -> _native.Monitor:
         return self._sock.monitor()
 
-    def connections(self) -> Any:
+    def connections(self) -> list[ConnectionInfo]:
         return self._sock.connections()
 
-    def connection_info(self, connection_id: int) -> Any:
+    def connection_info(self, connection_id: int) -> ConnectionInfo | None:
         return self._sock.connection_info(connection_id)
 
     # ── Lifecycle ────────────────────────────────────────────────────
@@ -608,7 +624,12 @@ class _BaseSocket(_SocketOptionsBase):
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args: Any) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> bool:
         self.close()
         return False
 
@@ -631,13 +652,9 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     _sock: _native.Socket
     _context: Context
-    _closed: bool
-    _pid: int
-    _binds: list[str | bytes]
-    _connects: list[str | bytes]
 
     def __init__(self, _sock: _native.Socket, _context: Context) -> None:
-        self._sock = _sock
+        self._sock = _sock  # pyright: ignore[reportIncompatibleVariableOverride]
         self._context = _context
         self._closed = False
         self._last_endpoint = None
@@ -649,7 +666,15 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         return cls
 
     @classmethod
-    def shadow(cls, socket: Any) -> Socket | _ShadowSocket:
+    @overload
+    def shadow[S: Socket](cls, socket: S) -> S: ...
+
+    @classmethod
+    @overload
+    def shadow(cls, socket: AsyncSocket) -> _ShadowSocket: ...
+
+    @classmethod
+    def shadow(cls, socket: Socket | AsyncSocket) -> Socket | _ShadowSocket:
         from . import asyncio as _zmq_async
 
         if isinstance(socket, _zmq_async.Socket):
@@ -664,18 +689,15 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send(
         self,
-        data: Any,
+        data: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
         try:
-            self._sock.send(data, flags, copy)
+            return self._sock.send(data, flags, copy, track)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
-        if track:
-            return MessageTracker(_pending=True)
-        return None
 
     @overload
     def recv(
@@ -684,8 +706,16 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     @overload
     def recv(
-        self, flags: int = 0, copy: Literal[False] = False, track: bool = False
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
     ) -> Frame: ...
+
+    @overload
+    def recv(self, flags: int, copy: Literal[False], track: bool = False) -> Frame: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> bytes | Frame: ...
 
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
@@ -693,33 +723,56 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         try:
             if copy:
                 return self._sock.recv(flags)
-            return self._sock.recv_frame(flags)
+            frame = self._sock.recv_frame(flags)
+            if track:
+                frame._track_received()
+            return frame
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
     def send_multipart(
         self,
-        parts: Iterable[Any],
+        parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
-        parts = [p.encode("utf-8") if isinstance(p, str) else p for p in parts]
         try:
-            self._sock.send_multipart(parts, flags, copy)
+            return self._sock.send_multipart(parts, flags, copy, track)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
-        if track:
-            return MessageTracker(_pending=True)
-        return None
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> list[bytes]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
+    ) -> list[Frame]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int, copy: Literal[False], track: bool = False
+    ) -> list[Frame]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> list[bytes] | list[Frame]: ...
 
     def recv_multipart(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> list[bytes | Frame]:
+    ) -> list[bytes] | list[Frame]:
         try:
             if copy:
                 return self._sock.recv_multipart(flags)
-            return self._sock.recv_multipart_frames(flags)
+            frames = self._sock.recv_multipart_frames(flags)
+            if track:
+                for frame in frames:
+                    frame._track_received()
+            return frames
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -749,10 +802,10 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
     def recv_pyobj(self, flags: int = 0) -> Any:
         return pickle.loads(self.recv(flags))
 
-    def send_serialized(
+    def send_serialized[T](
         self,
-        msg: Any,
-        serialize: Callable[[Any], list[bytes]],
+        msg: T,
+        serialize: Callable[[T], Iterable[SENDABLE_TYPES]],
         flags: int = 0,
         copy: bool = True,
         **kwargs: Any,
@@ -760,12 +813,39 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         frames = serialize(msg)
         return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
-    def recv_serialized(
+    @overload
+    def recv_serialized[T](
         self,
-        deserialize: Callable[[list[bytes]], Any],
+        deserialize: Callable[[list[bytes]], T],
+        flags: int = 0,
+        copy: Literal[True] = True,
+    ) -> T: ...
+
+    @overload
+    def recv_serialized[T](
+        self,
+        deserialize: Callable[[list[Frame]], T],
+        flags: int = 0,
+        *,
+        copy: Literal[False],
+    ) -> T: ...
+
+    @overload
+    def recv_serialized[T](
+        self, deserialize: Callable[[list[Frame]], T], flags: int, copy: Literal[False]
+    ) -> T: ...
+
+    @overload
+    def recv_serialized[T](
+        self,
+        deserialize: Callable[[list[bytes] | list[Frame]], T],
         flags: int = 0,
         copy: bool = True,
-    ) -> Any:
+    ) -> T: ...
+
+    def recv_serialized[T](
+        self, deserialize: Callable[[Any], T], flags: int = 0, copy: bool = True
+    ) -> T:
         frames = self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
@@ -791,7 +871,7 @@ class _ShadowSocket(_SocketOptionsBase):
 
     """
 
-    _async_socket: Any  # pyomq.asyncio.Socket
+    _async_socket: AsyncSocket
     _native: _native.AsyncSocket
     _context: Context
     _closed: bool
@@ -800,13 +880,13 @@ class _ShadowSocket(_SocketOptionsBase):
     _recv_wakeup_event: threading.Event
     _send_wakeup_event: threading.Event
 
-    def __init__(self, async_socket: Any) -> None:
+    def __init__(self, async_socket: AsyncSocket) -> None:
         self._async_socket = async_socket
         self._native = async_socket._sock
         self._context = async_socket._context
         self._closed = False
         self._last_endpoint = async_socket._last_endpoint
-        if _IS_WINDOWS:
+        if sys.platform == "win32":
             self._recv_waiter_pending = False
             self._send_waiter_pending = False
             self._recv_wakeup_event = async_socket._recv_wakeup_event
@@ -825,28 +905,58 @@ class _ShadowSocket(_SocketOptionsBase):
         return self._native.getsockopt(TYPE)
 
     @property
-    def underlying(self) -> _ShadowSocket:
+    def underlying(self) -> Self:
         return self
 
-    def getsockopt(self, option: int) -> Any:
+    @overload
+    def getsockopt(self, option: _BytesOption) -> bytes: ...
+
+    @overload
+    def getsockopt(self, option: Literal[32]) -> bytes | None: ...
+
+    @overload
+    def getsockopt(
+        self,
+        option: _IntOption,
+    ) -> int: ...
+
+    @overload
+    def getsockopt(self, option: int) -> int | bytes | None: ...
+
+    def getsockopt(self, option: int) -> int | bytes | None:
         try:
             return self._native.getsockopt(option)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def setsockopt(self, option: int, value: Any) -> Any:
+    def setsockopt(self, option: int, value: int | bytes) -> None:
         try:
             return self._native.setsockopt(option, value)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
-    def set(self, option: int, value: Any) -> Any:
+    def set(self, option: int, value: int | bytes) -> None:
         return self.setsockopt(option, value)
 
-    def get(self, option: int) -> Any:
+    @overload
+    def get(self, option: _BytesOption) -> bytes: ...
+
+    @overload
+    def get(self, option: Literal[32]) -> bytes | None: ...
+
+    @overload
+    def get(
+        self,
+        option: _IntOption,
+    ) -> int: ...
+
+    @overload
+    def get(self, option: int) -> int | bytes | None: ...
+
+    def get(self, option: int) -> int | bytes | None:
         return self.getsockopt(option)
 
-    if _IS_WINDOWS:
+    if sys.platform == "win32":
 
         def _register_wakeup_hooks(self) -> None:
             self._async_socket._register_wakeup_hooks()
@@ -855,7 +965,7 @@ class _ShadowSocket(_SocketOptionsBase):
         def _register_wakeup_hooks(self) -> None:
             return None
 
-    if _IS_WINDOWS:
+    if sys.platform == "win32":
 
         def _blocking_recv(self, try_fn: Callable[[], Any]) -> Any:
             if self._recv_waiter_pending:
@@ -929,47 +1039,90 @@ class _ShadowSocket(_SocketOptionsBase):
             finally:
                 os.close(fd)
 
+    @overload
+    def recv(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> bytes: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
+    ) -> Frame: ...
+
+    @overload
+    def recv(self, flags: int, copy: Literal[False], track: bool = False) -> Frame: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> bytes | Frame: ...
+
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame:
         if copy:
             return self._blocking_recv(self._native._try_recv)
-        return self._blocking_recv(self._native._try_recv_frame)
+        frame = self._blocking_recv(self._native._try_recv_frame)
+        if track:
+            frame._track_received()
+        return frame
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> list[bytes]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
+    ) -> list[Frame]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int, copy: Literal[False], track: bool = False
+    ) -> list[Frame]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> list[bytes] | list[Frame]: ...
 
     def recv_multipart(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> list[bytes | Frame]:
+    ) -> list[bytes] | list[Frame]:
         if copy:
             return self._blocking_recv(self._native._try_recv_multipart)
-        return self._blocking_recv(self._native._try_recv_multipart_frames)
+        frames = self._blocking_recv(self._native._try_recv_multipart_frames)
+        if track:
+            for frame in frames:
+                frame._track_received()
+        return frames
 
     def send(
         self,
-        data: Any,
+        data: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
-        self._blocking_send(lambda: self._native.send(data, flags, copy))
-        if track:
-            return MessageTracker(_pending=True)
-        return None
+        return self._blocking_send(lambda: self._native.send(data, flags, copy, track))
 
     def send_multipart(
         self,
-        parts: list[Any],
+        parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
     ) -> MessageTracker | None:
-        self._blocking_send(lambda: self._native.send_multipart(parts, flags, copy))
-        if track:
-            return MessageTracker(_pending=True)
-        return None
+        return self._blocking_send(
+            lambda: self._native.send_multipart(parts, flags, copy, track)
+        )
 
-    if _IS_WINDOWS:
+    if sys.platform == "win32":
 
-        def _blocking_send(self, send_fn: Callable[[], None]) -> None:
+        def _blocking_send(
+            self, send_fn: Callable[[], MessageTracker | None]
+        ) -> MessageTracker | None:
             if self._send_waiter_pending:
                 raise RuntimeError(
                     "cannot have more than one pending send waiter on a shadow socket"
@@ -981,27 +1134,30 @@ class _ShadowSocket(_SocketOptionsBase):
             )
             try:
                 try:
-                    send_fn()
-                    return
+                    return send_fn()
                 except _native.ZMQError as e:
                     if getattr(e, "errno", None) != _errno.EAGAIN:
                         raise error.from_native(e) from None
+                    if hasattr(e, "_pending_send"):
+                        send_fn = e._pending_send.retry
 
                 while True:
                     self._send_wakeup_event.clear()
                     try:
-                        send_fn()
-                        return
+                        return send_fn()
                     except _native.ZMQError as e:
                         if getattr(e, "errno", None) != _errno.EAGAIN:
                             raise error.from_native(e) from None
+                        if hasattr(e, "_pending_send"):
+                            send_fn = e._pending_send.retry
                     self._send_wakeup_event.wait()
                     try:
-                        send_fn()
-                        return
+                        return send_fn()
                     except _native.ZMQError as e:
                         if getattr(e, "errno", None) != _errno.EAGAIN:
                             raise error.from_native(e) from None
+                        if hasattr(e, "_pending_send"):
+                            send_fn = e._pending_send.retry
             finally:
                 self._send_waiter_pending = False
                 self._async_socket._clear_wakeup_modes(
@@ -1009,22 +1165,26 @@ class _ShadowSocket(_SocketOptionsBase):
                 )
     else:
 
-        def _blocking_send(self, send_fn: Callable[[], None]) -> None:
+        def _blocking_send(
+            self, send_fn: Callable[[], MessageTracker | None]
+        ) -> MessageTracker | None:
             try:
-                send_fn()
-                return
+                return send_fn()
             except _native.ZMQError as e:
                 if getattr(e, "errno", None) != _errno.EAGAIN:
                     raise error.from_native(e) from None
+                if hasattr(e, "_pending_send"):
+                    send_fn = e._pending_send.retry
 
             fd = self._native._send_fd()
             try:
                 try:
-                    send_fn()
-                    return
+                    return send_fn()
                 except _native.ZMQError as e:
                     if getattr(e, "errno", None) != _errno.EAGAIN:
                         raise error.from_native(e) from None
+                    if hasattr(e, "_pending_send"):
+                        send_fn = e._pending_send.retry
 
                 while True:
                     _select.select([fd], [], [])
@@ -1033,11 +1193,12 @@ class _ShadowSocket(_SocketOptionsBase):
                     except OSError:
                         pass
                     try:
-                        send_fn()
-                        return
+                        return send_fn()
                     except _native.ZMQError as e:
                         if getattr(e, "errno", None) != _errno.EAGAIN:
                             raise error.from_native(e) from None
+                        if hasattr(e, "_pending_send"):
+                            send_fn = e._pending_send.retry
             finally:
                 os.close(fd)
 
@@ -1091,7 +1252,7 @@ class Context(metaclass=_ContextMeta):
             _shadow_ctx._ctx_id if _shadow_ctx is not None else next(_next_ctx_id)
         )
 
-    def _namespace_inproc(self, endpoint: str | bytes) -> str | bytes:
+    def _namespace_inproc[T: (str, bytes)](self, endpoint: T) -> T:
         # `inproc://` names are scoped by the native context core. Keep the
         # user endpoint unchanged so LAST_ENDPOINT and errors match input.
         return endpoint
@@ -1102,6 +1263,16 @@ class Context(metaclass=_ContextMeta):
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @overload
+    def socket(
+        self, socket_type: int, socket_class: None = None, **kwargs: Any
+    ) -> Socket: ...
+
+    @overload
+    def socket[S: Socket](
+        self, socket_type: int, socket_class: type[S], **kwargs: Any
+    ) -> S: ...
 
     def socket(
         self,
@@ -1141,7 +1312,7 @@ class Context(metaclass=_ContextMeta):
         obj._closed = False
         obj._sockets = weakref.WeakSet()
         obj._ctx_id = next(_next_ctx_id)
-        return cast(Self, obj)
+        return obj
 
     @classmethod
     def instance(cls, io_threads: int = 1) -> Self:
@@ -1172,10 +1343,15 @@ class Context(metaclass=_ContextMeta):
         if not self._closed:
             self.term()
 
-    def __enter__(self) -> Context:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args: Any) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> bool:
         self.term()
         return False
 
@@ -1286,11 +1462,16 @@ def device(device_type: int, frontend: Socket, backend: Socket) -> None:
     proxy(frontend, backend)
 
 
-# ── ZMQStream re-export ─────────────────────────────────────────────
+from .zmqstream import ZMQStream
 
-from .zmqstream import ZMQStream  # noqa: E402
-
-__all__ = [
+__all__ = [  # noqa: RUF022
+    "AuthCallback",
+    "CurveAuth",
+    "PlainAuth",
+    "FutureResult",
+    "Sendable",
+    "ConnectionInfo",
+    "MonitorEvent",
     "Context",
     "Socket",
     "Poller",
@@ -1458,16 +1639,25 @@ __all__ = [
 # pyzmq supports ZMQError(errno, msg) which sets .errno on the instance.
 # The native _native.ZMQError doesn't. Patch __init__ so ipykernel's
 # mock-based tests and heartbeat code can construct ZMQError(errno, msg).
-_orig_zmqerror_init = _native.ZMQError.__init__
+_orig_zmqerror_init = cast(Callable[..., None], _native.ZMQError.__init__)
 
 
-def _zmqerror_init(self, *args, **kwargs):
-    if args and isinstance(args[0], int):
-        _orig_zmqerror_init(self, args[1] if len(args) > 1 else "")
-        self.errno = args[0]
-        self.strerror = args[1] if len(args) > 1 else ""
-    else:
-        _orig_zmqerror_init(self, *args, **kwargs)
+def _zmqerror_init(
+    self: ZMQError, errno: int | str | None = None, msg: str | None = None
+) -> None:
+    if isinstance(errno, str):
+        if msg is not None:
+            raise TypeError("message specified twice")
+        msg, errno = errno, None
+    elif errno is not None and not isinstance(errno, int):
+        raise TypeError("errno must be an integer or None")
+    if msg is not None and not isinstance(msg, str):
+        raise TypeError("msg must be a string or None")
+    self.errno = errno
+    self.strerror = (
+        msg if msg is not None else (strerror(errno) if errno is not None else "")
+    )
+    _orig_zmqerror_init(self, self.strerror)
 
 
 _native.ZMQError.__init__ = _zmqerror_init

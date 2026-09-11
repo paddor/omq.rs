@@ -2,9 +2,8 @@
 
 import errno
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def test_again_on_rcvtimeo(tcp_endpoint):

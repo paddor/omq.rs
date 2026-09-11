@@ -5,9 +5,8 @@ import select
 import sys
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning"

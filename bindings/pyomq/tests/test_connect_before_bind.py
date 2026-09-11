@@ -8,11 +8,9 @@ with PUSH/PULL, REQ/REP, and PAIR.
 import errno
 import time
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 BIND_DELAYS = [0, 0.05, 0.25]
 TCP_BIND_RETRIES = 20

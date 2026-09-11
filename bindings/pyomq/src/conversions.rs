@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use omq_proto::message::Message;
-use pyo3::buffer::PyBuffer;
+use pyo3::buffer::PyUntypedBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -51,13 +51,13 @@ impl AsRef<[u8]> for PyBytesOwner {
 /// backing storage as `&[u8]`.
 ///
 /// SAFETY:
-/// - `PyBuffer<u8>` pins the exporter according to Python's buffer
+/// - `PyUntypedBuffer` pins the exporter according to Python's buffer
 ///   protocol until release/drop.
-/// - We only construct this for C-contiguous `u8` buffers.
+/// - We only construct this for contiguous buffers, viewed as raw bytes.
 /// - `copy=False` callers are responsible for not mutating the backing
 ///   object until the send completes, matching PyZMQ's zero-copy contract.
 struct PyBufferOwner {
-    _buffer: PyBuffer<u8>,
+    _buffer: PyUntypedBuffer,
     ptr: *const u8,
     len: usize,
 }
@@ -73,7 +73,7 @@ impl AsRef<[u8]> for PyBufferOwner {
 
 /// Build a `Bytes` from a Python bytes-like object. Immutable `bytes`
 /// use zero-copy ownership. Buffer-protocol objects copy by default,
-/// and use zero-copy ownership for C-contiguous `u8` buffers only when
+/// and use zero-copy ownership for contiguous buffers only when
 /// the caller requested `copy=False`.
 pub fn bytes_from_pyany(b: &Bound<'_, PyAny>, copy: bool) -> PyResult<Bytes> {
     if let Ok(frame) = b.cast::<Frame>() {
@@ -82,18 +82,64 @@ pub fn bytes_from_pyany(b: &Bound<'_, PyAny>, copy: bool) -> PyResult<Bytes> {
     if let Ok(pb) = b.cast::<PyBytes>() {
         return Ok(Bytes::from_owner(PyBytesOwner::from_pybytes(pb)));
     }
-    if let Ok(buffer) = PyBuffer::<u8>::get(b) {
-        if !copy && buffer.as_slice(b.py()).is_some() {
-            return Ok(Bytes::from_owner(PyBufferOwner {
-                ptr: buffer.buf_ptr().cast(),
-                len: buffer.len_bytes(),
-                _buffer: buffer,
-            }));
-        }
-        return Ok(Bytes::from(buffer.to_vec(b.py())?));
+    let buffer = PyUntypedBuffer::get(b)?;
+    if !buffer.is_c_contiguous() && !buffer.is_fortran_contiguous() {
+        return Err(pyo3::exceptions::PyBufferError::new_err(
+            "buffer must be contiguous",
+        ));
     }
-    let view: &[u8] = b.extract()?;
+    if buffer.len_bytes() == 0 {
+        return Ok(Bytes::new());
+    }
+    if !copy {
+        return Ok(Bytes::from_owner(PyBufferOwner {
+            ptr: buffer.buf_ptr().cast(),
+            len: buffer.len_bytes(),
+            _buffer: buffer,
+        }));
+    }
+    // SAFETY: the export pins a contiguous allocation; the GIL remains held
+    // for this copy. Interpret raw bytes independently of element format.
+    let view =
+        unsafe { std::slice::from_raw_parts(buffer.buf_ptr().cast::<u8>(), buffer.len_bytes()) };
     Ok(Bytes::copy_from_slice(view))
+}
+
+pub(crate) fn payload_with_tracker(
+    b: &Bound<'_, PyAny>,
+    copy: bool,
+    track: bool,
+) -> PyResult<(Bytes, Option<Py<PyAny>>)> {
+    let (data, source) = payload_with_completion(b, copy, track)?;
+    let tracker = source
+        .map(|source| crate::tracker::from_source(b.py(), source))
+        .transpose()?;
+    Ok((data, tracker))
+}
+
+/// Raw buffers contribute tokens; Frames contribute their existing trackers.
+fn payload_with_completion(
+    b: &Bound<'_, PyAny>,
+    copy: bool,
+    track: bool,
+) -> PyResult<(Bytes, Option<Py<PyAny>>)> {
+    if let Ok(frame) = b.cast::<Frame>() {
+        let frame = frame.borrow();
+        let tracker = frame.tracker_clone(b.py());
+        if track && tracker.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Not a tracked message",
+            ));
+        }
+        return Ok((frame.bytes_clone(), tracker));
+    }
+    let data = bytes_from_pyany(b, copy)?;
+    if track && !copy {
+        let (data, token) = crate::tracker::track_buffer(b.py(), data)?;
+        Ok((data, Some(token.into_any())))
+    } else {
+        Ok((data, None))
+    }
 }
 
 pub fn routing_id_from_pyany(b: &Bound<'_, PyAny>) -> u32 {
@@ -103,25 +149,40 @@ pub fn routing_id_from_pyany(b: &Bound<'_, PyAny>) -> u32 {
 }
 
 /// Build a multipart `Message` from a Python list/tuple of bytes-like.
-pub fn message_from_pylist(parts: &Bound<'_, PyAny>, copy: bool) -> PyResult<Message> {
+pub fn message_from_pylist(
+    parts: &Bound<'_, PyAny>,
+    copy: bool,
+    track: bool,
+) -> PyResult<(Message, Option<Py<PyAny>>)> {
     let it = parts.try_iter()?;
     let mut collected = Vec::new();
     let mut routing_id = 0;
+    let mut trackers = Vec::new();
     for part in it {
         let part = part?;
         routing_id = routing_id.max(routing_id_from_pyany(&part));
-        collected.push(bytes_from_pyany(&part, copy)?);
+        let (data, tracker) = payload_with_completion(&part, copy, track)?;
+        collected.push(data);
+        if let Some(tracker) = tracker {
+            trackers.push(tracker);
+        }
     }
     let message = match collected.len() {
         0 => Message::new(),
         1 => Message::single(collected.into_iter().next().unwrap()),
         _ => Message::multipart(collected),
     };
-    Ok(if routing_id == 0 {
+    let message = if routing_id == 0 {
         message
     } else {
         message.with_routing_id(routing_id)
-    })
+    };
+    let tracker = if track && !copy && trackers.is_empty() {
+        Some(crate::tracker::finished(parts.py())?)
+    } else {
+        crate::tracker::aggregate(parts.py(), trackers)?
+    };
+    Ok((message, tracker))
 }
 
 /// Return a Python list of bytes - one per message frame.

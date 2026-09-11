@@ -9,9 +9,8 @@ the binding to a working peer.
 import socket as stdsocket
 import time
 
-import pytest
-
 import pyomq
+import pytest
 
 ALL_TYPES = [
     pyomq.PAIR,

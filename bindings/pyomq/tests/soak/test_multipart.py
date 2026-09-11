@@ -15,8 +15,6 @@ import threading
 import time
 
 import pyomq as zmq
-from typing import List
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 FRAME_B = 128

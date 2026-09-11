@@ -2,11 +2,9 @@
 
 import asyncio
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 # ── CURVE ────────────────────────────────────────────────────────────
 

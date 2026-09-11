@@ -35,7 +35,7 @@ def test_rep_accepts_reply_while_client_closes(tcp_endpoint):
         try:
             for _ in range(21):
                 rep.send(rep.recv())
-        except Exception as error:  # noqa: BLE001 - preserve thread failure
+        except Exception as error:
             failure.append(error)
 
     server = threading.Thread(target=serve)

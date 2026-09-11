@@ -10,7 +10,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 NUM_CHANNELS = 4

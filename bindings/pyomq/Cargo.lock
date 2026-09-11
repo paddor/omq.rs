@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.22.0"
+version = "0.22.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.14"
+version = "0.3.16"
 dependencies = [
  "atomic-waker",
  "futures-core",

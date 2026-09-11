@@ -2,9 +2,8 @@
 
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def _plain_server_client(server_sock, client_sock):

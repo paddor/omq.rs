@@ -106,6 +106,7 @@ pub(crate) struct SocketInner {
     pub sndbuf: Mutex<SendBuffer>,
     pub rxbuf: Mutex<Vec<Bytes>>,
     pub rxmsgs: Mutex<Vec<omq_tokio::Message>>,
+    pub pending_sends: Mutex<Vec<std::sync::Weak<crate::socket_async::PendingMessage>>>,
     pub materialized: std::sync::RwLock<Option<Materialized>>,
     pub blocking_materialized: std::sync::RwLock<Option<BlockingMaterialized>>,
     closed: AtomicBool,
@@ -129,6 +130,7 @@ impl SocketInner {
             sndbuf: Mutex::new(SendBuffer::default()),
             rxbuf: Mutex::new(Vec::new()),
             rxmsgs: Mutex::new(Vec::new()),
+            pending_sends: Mutex::new(Vec::new()),
             materialized: std::sync::RwLock::new(None),
             blocking_materialized: std::sync::RwLock::new(None),
             closed: AtomicBool::new(false),
@@ -344,6 +346,7 @@ impl SocketInner {
             state.recv_ready.force_wake();
             state.send_ready.force_wake();
         }
+        self.clear_buffers();
         materialized
     }
 
@@ -357,7 +360,24 @@ impl SocketInner {
             std::mem::forget(materialized);
             return None;
         }
+        self.clear_buffers();
         materialized
+    }
+
+    fn clear_buffers(&self) {
+        // Python buffer-release callbacks may reenter the socket. Move owners
+        // out of every lock before dropping them.
+        let parts = std::mem::take(&mut self.sndbuf.lock().unwrap().parts);
+        let received = std::mem::take(&mut *self.rxbuf.lock().unwrap());
+        let messages = std::mem::take(&mut *self.rxmsgs.lock().unwrap());
+        let pending_sends = std::mem::take(&mut *self.pending_sends.lock().unwrap());
+        for pending in pending_sends {
+            if let Some(pending) = pending.upgrade() {
+                let message = pending.lock().unwrap().take();
+                drop(message);
+            }
+        }
+        drop((parts, received, messages));
     }
 
     pub fn close_linger(&self, linger: Option<i64>) -> Option<Duration> {
@@ -468,7 +488,7 @@ impl Monitor {
     }
 }
 
-fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyAny>> {
+fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     match ev {
         MonitorEvent::Listening { endpoint } => {
@@ -532,7 +552,7 @@ fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bo
             d.set_item("event", "unknown")?;
         }
     }
-    Ok(d.into_any())
+    Ok(d)
 }
 
 #[pymethods]
@@ -543,13 +563,13 @@ impl Monitor {
     /// Returns a dict with at minimum `{"event": "<name>"}` plus
     /// event-specific keys (`endpoint`, `connection_id`, etc.).
     #[pyo3(signature = (timeout_ms = -1))]
-    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyAny>> {
+    fn recv<'py>(&self, py: Python<'py>, timeout_ms: i64) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         let ev = py.detach(|| {
             if timeout_ms < 0 {
@@ -568,13 +588,13 @@ impl Monitor {
 
     /// Try to receive without blocking. Raises `zmq.Again` if no event
     /// is available.
-    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_nowait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let n = self.lagged.swap(0, Ordering::Relaxed);
         if n > 0 {
             let d = PyDict::new(py);
             d.set_item("event", "lagged")?;
             d.set_item("count", n)?;
-            return Ok(d.into_any());
+            return Ok(d);
         }
         match self.rx.try_recv() {
             Ok(ev) => monitor_event_to_dict(py, &ev),
@@ -665,36 +685,40 @@ impl Socket {
         dispatch::blocking_unit(&self.inner, py, move |s| s.disconnect(ep))
     }
 
-    #[pyo3(signature = (payload, flags = 0, copy = true))]
+    #[pyo3(signature = (payload, flags = 0, copy = true, track = false))]
     fn send(
         &self,
         py: Python<'_>,
         payload: &Bound<'_, PyAny>,
         flags: i32,
         copy: bool,
-    ) -> PyResult<()> {
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let routing_id = conversions::routing_id_from_pyany(payload);
-        let bytes = conversions::bytes_from_pyany(payload, copy)?;
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
-            return Ok(());
+            return Ok(tracker);
         };
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.send_message(py, msg)
+        self.send_message(py, msg)?;
+        Ok(tracker)
     }
 
-    #[pyo3(signature = (parts, flags = 0, copy = true))]
+    #[pyo3(signature = (parts, flags = 0, copy = true, track = false))]
     fn send_multipart(
         &self,
         py: Python<'_>,
         parts: &Bound<'_, PyAny>,
         flags: i32,
         copy: bool,
-    ) -> PyResult<()> {
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let _ = flags;
-        let msg = conversions::message_from_pylist(parts, copy)?;
-        self.send_message(py, msg)
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        self.send_message(py, msg)?;
+        Ok(tracker)
     }
 
     #[pyo3(signature = (flags = 0))]

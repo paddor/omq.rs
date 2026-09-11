@@ -140,6 +140,7 @@ def test_io_threads_variants():
             text=True,
             timeout=per_variant + 30,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            check=False,
         )
         print(f"  stdout: {result.stdout.strip()}")
         if result.stderr.strip():

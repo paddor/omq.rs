@@ -14,6 +14,7 @@
 //! dispatch helpers (block on a tokio oneshot).
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use omq_proto::error::Error as PError;
@@ -32,6 +33,91 @@ use crate::socket::SocketInner;
 #[pyclass(module = "pyomq._native")]
 pub struct AsyncSocket {
     pub(crate) inner: Arc<SocketInner>,
+}
+
+/// Allocated only after queue backpressure. Owns the fully converted message.
+pub(crate) type PendingMessage = Mutex<Option<omq_proto::Message>>;
+
+#[pyclass(module = "pyomq._native")]
+pub(crate) struct PendingSend {
+    inner: Arc<SocketInner>,
+    message: Arc<PendingMessage>,
+    tracker: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PendingSend {
+    fn retry(&mut self) -> PyResult<Option<Py<PyAny>>> {
+        self.inner.materialize()?;
+        let guard = self.inner.materialized.read().unwrap();
+        let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+        let mut pending = self.message.lock().unwrap();
+        let message = pending
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("send already completed"))?;
+        match materialized
+            .send_prod
+            .lock()
+            .unwrap()
+            .push_and_flush(message)
+        {
+            Ok(()) => Ok(self.tracker.take()),
+            Err(message) => {
+                *pending = Some(message);
+                Err(timeout_err())
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        let message = self.message.lock().unwrap().take();
+        self.tracker.take();
+        // Releasing a Python exporter can close the socket and revisit this
+        // pending entry, so the message lock must already be released.
+        drop(message);
+    }
+}
+
+fn submit(
+    py: Python<'_>,
+    inner: &Arc<SocketInner>,
+    message: omq_proto::Message,
+    tracker: Option<Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    inner.materialize()?;
+    let guard = inner.materialized.read().unwrap();
+    let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+    match materialized
+        .send_prod
+        .lock()
+        .unwrap()
+        .push_and_flush(message)
+    {
+        Ok(()) => Ok(tracker),
+        Err(message) => {
+            let message = Arc::new(Mutex::new(Some(message)));
+            let mut pending_sends = inner.pending_sends.lock().unwrap();
+            if pending_sends.len() == pending_sends.capacity() {
+                pending_sends.retain(|pending| pending.strong_count() != 0);
+                // Leave room for another live set. Sweeping on every insert,
+                // or reclaiming only one slot at a time, makes bursts quadratic.
+                let live = pending_sends.len();
+                pending_sends.reserve(live);
+            }
+            pending_sends.push(Arc::downgrade(&message));
+            let pending = Py::new(
+                py,
+                PendingSend {
+                    inner: inner.clone(),
+                    message,
+                    tracker,
+                },
+            )?;
+            let error = timeout_err();
+            error.value(py).setattr("_pending_send", pending)?;
+            Err(error)
+        }
+    }
 }
 
 impl AsyncSocket {
@@ -76,38 +162,36 @@ impl AsyncSocket {
 
     // ── Send (sync push into yring) ─────────────────────────────────
 
-    #[pyo3(signature = (payload, flags = 0, copy = true))]
-    fn send(&self, payload: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
+    #[pyo3(signature = (payload, flags = 0, copy = true, track = false))]
+    fn send(
+        &self,
+        payload: &Bound<'_, PyAny>,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let routing_id = conversions::routing_id_from_pyany(payload);
-        let bytes = conversions::bytes_from_pyany(payload, copy)?;
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
-            return Ok(());
+            return Ok(tracker);
         };
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard.as_ref().unwrap();
-        let mut prod = materialized.send_prod.lock().unwrap();
-        match prod.push_and_flush(msg) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(timeout_err()),
-        }
+        submit(payload.py(), &self.inner, msg, tracker)
     }
 
-    #[pyo3(signature = (parts, flags = 0, copy = true))]
-    fn send_multipart(&self, parts: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
+    #[pyo3(signature = (parts, flags = 0, copy = true, track = false))]
+    fn send_multipart(
+        &self,
+        parts: &Bound<'_, PyAny>,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let _ = flags;
-        let msg = conversions::message_from_pylist(parts, copy)?;
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard.as_ref().unwrap();
-        let mut prod = materialized.send_prod.lock().unwrap();
-        match prod.push_and_flush(msg) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(timeout_err()),
-        }
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        submit(parts.py(), &self.inner, msg, tracker)
     }
 
     // ── Recv (try-poll + readiness fd for async notification) ────────

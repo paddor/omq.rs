@@ -4,9 +4,8 @@ import os
 import threading
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 ATTEMPTS = 3
 MIN_RATE = 650_000

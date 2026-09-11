@@ -9,7 +9,6 @@ import threading
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, inproc_ep, soak_duration
 
 MSG_SIZE = 64

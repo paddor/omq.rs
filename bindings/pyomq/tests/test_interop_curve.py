@@ -17,9 +17,8 @@ zmq_pyzmq = pytest.importorskip("zmq")
 pytestmark = pytest.mark.event_loop("selector")
 
 
-from zmq.auth.thread import ThreadAuthenticator
-
 import pyomq
+from zmq.auth.thread import ThreadAuthenticator
 
 _skip_no_curve = pytest.mark.skipif(
     not pyomq.has("curve"), reason="curve feature not compiled"

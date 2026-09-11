@@ -1,9 +1,7 @@
 """CURVE client authentication tests."""
 
-import pytest
-
 import pyomq as zmq
-
+import pytest
 
 pytestmark = pytest.mark.skipif(
     not zmq.has("curve"), reason="curve feature not compiled"

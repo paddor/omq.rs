@@ -8,7 +8,7 @@ version = "0.21.0"
 description = "Python binding for omq.rs (Rust libzmq port). Drop-in pyzmq replacement on the common path."
 readme = "README.md"
 license = { text = "ISC" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Patrik Wenger", email = "paddor@gmail.com" }]
 keywords = ["zeromq", "omq", "messaging", "pyzmq", "zmq"]
 classifiers = [
@@ -33,8 +33,8 @@ test = [
     "pyzmq>=25",
     "tornado>=6",
 ]
-lint = ["ruff==0.15.22"]
-type-check = ["ty==0.0.63"]
+lint = ["ruff==0.16.6"]
+type-check = ["ty==0.0.63", "mypy>=1.19", "pyright>=1.1.400"]
 dev = [
   { include-group = "test" },
   { include-group = "lint" },
@@ -52,15 +52,20 @@ addopts = "--ignore=tests/soak"
 timeout = 60
 timeout_method = "thread"
 
+[tool.ruff.lint]
+ignore = ["BLE001"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E402", "E702", "F401", "F841"]
+# Shared private aliases are consumed by the native stub and both facades.
+"python/pyomq/_typing.py" = ["PYI047"]
 
 [tool.ty.src]
-exclude = ["tests/soak/**"]
+exclude = ["tests/soak/**", "tests/typing/narrowing.py"]
 
 [tool.maturin]
 # Stable ABI - one wheel covers all supported Python versions.
-features = ["pyo3/abi3-py311", "plain", "curve", "lz4", "zstd"]
+features = ["pyo3/abi3-py312", "plain", "curve", "lz4", "zstd"]
 # The native module lives at pyomq._native; pyomq itself is a pure
 # Python package re-exporting from it.
 module-name = "pyomq._native"

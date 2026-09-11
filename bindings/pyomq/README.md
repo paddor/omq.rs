@@ -21,6 +21,8 @@ port. Drop-in pyzmq replacement on the common path.
 
 ## Install
 
+Requires Python **3.12+**. Wheels use the `cp312-abi3` stable ABI.
+
 ```sh
 uv pip install pyomq
 uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
@@ -54,12 +56,49 @@ import pyomq.asyncio as zmq_async
 
 ctx = zmq_async.Context()
 sock = ctx.socket(pyomq.PUSH)
-await sock.connect("tcp://127.0.0.1:5555")
+sock.connect("tcp://127.0.0.1:5555")
 await sock.send(b"hello")
-await sock.close()
+sock.close()
 ```
 
 Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
+
+### Buffers, tracking, and types
+
+`send()` accepts `pyomq.Sendable`: buffer-protocol objects and `Frame`.
+`send_multipart()` also accepts generators of these values. Buffers must
+be contiguous; multidimensional and multibyte buffers are sent as raw bytes.
+Use `send_string()` for text. `__bytes__` alone does not make an object sendable.
+
+With `copy=False, track=True`, sends return a `MessageTracker`; asyncio
+sends resolve to that tracker when awaited. `tracker.done` and
+`tracker.wait(timeout)` indicate when borrowed buffers are no longer in use,
+not peer delivery. Timeouts are in seconds; `wait()` raises `NotDone` when
+the deadline expires. Do not
+mutate borrowed data before completion. Keeping a zero-copy `Frame`, an
+exported view, or an inproc receiver's frame alive can delay completion.
+Multipart tracking covers every part. Copied buffer sends return `None`,
+even with `track=True`. Sending a `Frame` returns its own tracker; requesting
+tracking on an untracked frame raises `ValueError`.
+
+`wait()` blocks its calling thread. In asyncio code, awaiting `send()` only
+waits for queue admission. Use `await asyncio.to_thread(tracker.wait)` when
+you need buffer completion without blocking the event loop.
+
+Python-defined buffer exporters may run `__release_buffer__` on an I/O
+thread. Release callbacks must not make blocking socket or context calls:
+those calls can deadlock the I/O thread. Use `copy=True` for such exporters
+or hand their cleanup work to an application thread. This limitation also
+applies when tracking is disabled.
+
+Tracking adds bookkeeping only when requested. For repeated sends of unchanged
+data, a tracked `Frame` reuses its tracking state across sends. Its tracker
+still cannot finish until the frame and every outstanding user release it.
+
+The package includes native stubs and precise sync/async receive overloads.
+`copy=False` returns `Frame` values, and a runtime boolean yields the union
+of byte and frame result types. Serialization callbacks retain their return
+types; socket options, authentication policies, and monitor events are typed.
 
 PLAIN servers require an explicit policy before bind. Use fixed credentials
 with `pull.plain_server = 1; pull.set_plain_auth([("alice", "secret")])`, or

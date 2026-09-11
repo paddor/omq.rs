@@ -1712,12 +1712,19 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     }
 
     let chunk = read_buf.split().freeze();
-    read_buf.reserve(read_buf_target.saturating_sub(read_buf.capacity()));
     if let Err(e) = connection.handle_input(chunk) {
         emit_connection_events_best_effort(connection, peer_out, peer_id).await;
         return Err(e);
     }
-    handle_large_messages(connection, reader, config, last_input, recv_pool).await
+    handle_large_messages(connection, reader, config, last_input, recv_pool).await?;
+    // Parsing (and copying any large-frame prefix into its pooled payload)
+    // can release the split chunk. Reserve afterward so BytesMut can reclaim
+    // that allocation instead of replacing it while the chunk still owns it.
+    // Retain the existing adaptive refill policy: the target is a growth hint,
+    // not a minimum spare-capacity promise after every partial read. Requiring
+    // the full target here replaces buffers still shared by decoded metadata.
+    read_buf.reserve(read_buf_target.saturating_sub(read_buf.capacity()));
+    Ok(())
 }
 
 fn handle_pre_activation_inbox_command(
@@ -1929,10 +1936,10 @@ impl RecvBufPool {
         let mut pool = self.inner.lock().expect("recv buf pool");
         if let Some(mut buf) = pool.buffers.pop() {
             pool.retained_bytes = pool.retained_bytes.saturating_sub(buf.capacity());
-            if buf.capacity() < capacity {
-                buf.reserve(capacity - buf.capacity());
-            }
             buf.clear();
+            if buf.capacity() < capacity {
+                buf.reserve(capacity);
+            }
             return buf;
         }
         BytesMut::with_capacity(capacity)
@@ -2509,6 +2516,15 @@ mod tests {
     }
 
     #[test]
+    fn recv_buf_pool_grows_before_returning_a_larger_lease() {
+        let pool = RecvBufPool::new();
+        pool.give(BytesMut::with_capacity(128 * 1024));
+        let buffer = pool.take(192 * 1024);
+        assert!(buffer.is_empty());
+        assert!(buffer.capacity() >= 192 * 1024);
+    }
+
+    #[test]
     fn recv_buf_pool_caps_total_retained_bytes() {
         const BUFFER_BYTES: usize = 1024 * 1024;
 
@@ -3072,6 +3088,52 @@ mod tests {
         let msg = pull.poll_message().expect("large message decoded");
         assert_eq!(msg.part_bytes(0).unwrap().as_ref(), payload.as_slice());
         assert_eq!(reader.pos, reader.data.len());
+    }
+
+    #[tokio::test]
+    async fn read_stream_reuses_prefix_buffer_after_large_frame_consumes_it() {
+        let (mut push, mut pull) = ready_push_pull_connections();
+        let payload = vec![0x5a; 1024 * 1024];
+        push.send_message(&Message::single(Bytes::from(payload.clone())))
+            .unwrap();
+        let wire = Bytes::from(drain_transmit(&mut push));
+        let mut read_buf = BytesMut::with_capacity(READ_BUF_MAX);
+        read_buf.extend_from_slice(&wire[..READ_BUF_MAX]);
+        let original = read_buf.as_ptr();
+        let mut target = READ_BUF_MAX;
+        let mut full_reads = 0;
+        let mut reader = ScriptedReader::new(wire.slice(READ_BUF_MAX..), [4093, 65537, 8191]);
+        let config = PeerDriverConfig {
+            large_message_threshold: 128 * 1024,
+            ..PeerDriverConfig::default()
+        };
+        let mut last_input = Instant::now();
+        let pool = RecvBufPool::new();
+        let (events, _receiver) = mpsc::channel(8);
+        read_stream_input(
+            READ_BUF_MAX,
+            &mut reader,
+            &mut pull,
+            &mut read_buf,
+            &mut target,
+            &mut full_reads,
+            &config,
+            &mut last_input,
+            &pool,
+            &events,
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(read_buf.is_empty());
+        assert!(read_buf.capacity() >= target);
+        assert_eq!(
+            read_buf.as_ptr(),
+            original,
+            "released prefix allocation should be reused"
+        );
+        let message = pull.poll_message().expect("complete large frame");
+        assert_eq!(message.part_bytes(0).unwrap().as_ref(), payload);
     }
 
     #[tokio::test]

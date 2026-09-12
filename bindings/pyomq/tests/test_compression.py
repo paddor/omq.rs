@@ -1,8 +1,7 @@
 """Compression transport smoke tests."""
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 pytestmark = pytest.mark.skipif(not zmq.has("zstd"), reason="zstd feature not compiled")
 
@@ -31,7 +30,8 @@ def test_zstd_push_pull_custom_level(tcp_endpoint):
         pull.rcvtimeo = 2000
         push.compression_level = 1
         assert push.compression_level == 1
-        ep = pull.bind(_zstd(tcp_endpoint))
+        pull.bind(_zstd(tcp_endpoint))
+        ep = pull.last_endpoint
         push.connect(ep)
         msg = _payload(1, 4096)
         push.send(msg)
@@ -51,7 +51,8 @@ def test_zstd_push_pull_static_dict(tcp_endpoint):
         push.compression_level = 1
         push.compression_dict = ZSTD_DICT
         assert push.compression_dict == ZSTD_DICT
-        ep = pull.bind(_zstd(tcp_endpoint))
+        pull.bind(_zstd(tcp_endpoint))
+        ep = pull.last_endpoint
         push.connect(ep)
         msg = _payload(2)
         push.send(msg)
@@ -70,7 +71,8 @@ def test_zstd_push_pull_auto_train(tcp_endpoint):
         pull.rcvtimeo = 2000
         push.compression_auto_train = 1
         assert push.compression_auto_train == 1
-        ep = pull.bind(_zstd(tcp_endpoint))
+        pull.bind(_zstd(tcp_endpoint))
+        ep = pull.last_endpoint
         push.connect(ep)
         messages = [_payload(i) for i in range(130)]
         for msg in messages:

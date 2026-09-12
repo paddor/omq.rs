@@ -2,11 +2,9 @@
 
 import asyncio
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 # ── Context.shadow ──────────────────────────────────────────────────
 
@@ -64,7 +62,8 @@ async def test_context_shadow_async_creates_sync_native_socket(inproc_endpoint):
         assert type(pull._sock) is zmq._native.Socket
 
         pull.setsockopt(zmq.RCVTIMEO, 1000)
-        ep = pull.bind(inproc_endpoint)
+        pull.bind(inproc_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         await push.send(b"hello")
         assert pull.recv() == b"hello"
@@ -88,7 +87,8 @@ async def test_async_context_shadow_sync_creates_async_native_socket(inproc_endp
         assert type(pull) is zmq_async.Socket
         assert type(pull._sock) is zmq._native.AsyncSocket
 
-        ep = pull.bind(inproc_endpoint)
+        pull.bind(inproc_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello")
         assert await asyncio.wait_for(pull.recv(), timeout=1.0) == b"hello"
@@ -134,7 +134,8 @@ async def test_shadow_recv(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello")
 
@@ -153,7 +154,8 @@ async def test_shadow_recv_multipart(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_multipart([b"a", b"b"])
 
@@ -172,7 +174,8 @@ async def test_shadow_send(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         shadow = zmq.Socket.shadow(push)

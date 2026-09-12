@@ -13,6 +13,8 @@ pub struct Frame {
     data: Bytes,
     more: bool,
     routing_id: u32,
+    group: Option<String>,
+    tracker: Option<Py<PyAny>>,
 }
 
 impl Frame {
@@ -21,6 +23,8 @@ impl Frame {
             data,
             more: false,
             routing_id: 0,
+            group: None,
+            tracker: None,
         }
     }
 
@@ -29,6 +33,8 @@ impl Frame {
             data,
             more,
             routing_id: 0,
+            group: None,
+            tracker: None,
         }
     }
 
@@ -37,6 +43,23 @@ impl Frame {
             data,
             more,
             routing_id,
+            group: None,
+            tracker: None,
+        }
+    }
+
+    pub(crate) fn from_bytes_more_routing_group(
+        data: Bytes,
+        more: bool,
+        routing_id: u32,
+        group: String,
+    ) -> Self {
+        Self {
+            data,
+            more,
+            routing_id,
+            group: Some(group),
+            tracker: None,
         }
     }
 
@@ -47,6 +70,14 @@ impl Frame {
     pub(crate) fn routing_id_value(&self) -> u32 {
         self.routing_id
     }
+
+    pub(crate) fn group_value(&self) -> Option<String> {
+        self.group.clone()
+    }
+
+    pub(crate) fn tracker_clone(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.tracker.as_ref().map(|tracker| tracker.clone_ref(py))
+    }
 }
 
 #[pymethods]
@@ -54,19 +85,36 @@ impl Frame {
     #[new]
     #[pyo3(signature = (data=None, track=false, copy=None, copy_threshold=None))]
     fn new(
+        py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         track: bool,
         copy: Option<bool>,
         copy_threshold: Option<usize>,
     ) -> PyResult<Self> {
-        let _ = (track, copy, copy_threshold);
-        match data {
-            Some(data) => Ok(Self::from_bytes(crate::conversions::bytes_from_pyany(
-                data,
-                copy.unwrap_or(true),
-            )?)),
-            None => Ok(Self::from_bytes(Bytes::new())),
+        let mut frame = if let Some(data) = data {
+            let mut bytes = crate::conversions::bytes_from_pyany(data, false)?;
+            let copy = copy.unwrap_or(bytes.len() < copy_threshold.unwrap_or(65_536));
+            if copy {
+                bytes = Bytes::copy_from_slice(&bytes);
+            }
+            let mut frame = Self::from_bytes(bytes);
+            if track {
+                if copy {
+                    frame.tracker = Some(crate::tracker::finished(py)?);
+                } else {
+                    let (data, tracker) = crate::tracker::track(py, frame.data)?;
+                    frame.data = data;
+                    frame.tracker = Some(tracker);
+                }
+            }
+            frame
+        } else {
+            Self::from_bytes(Bytes::new())
+        };
+        if track && frame.tracker.is_none() {
+            frame.tracker = Some(crate::tracker::finished(py)?);
         }
+        Ok(frame)
     }
 
     #[getter]
@@ -95,8 +143,26 @@ impl Frame {
     }
 
     #[getter]
+    fn group(&self) -> Option<String> {
+        self.group.clone()
+    }
+
+    #[setter]
+    fn set_group(&mut self, group: Option<String>) {
+        self.group = group;
+    }
+
+    #[getter]
     fn tracker<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        py.None().bind(py).clone()
+        self.tracker.as_ref().map_or_else(
+            || py.None().bind(py).clone(),
+            |tracker| tracker.bind(py).clone(),
+        )
+    }
+
+    fn _track_received(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.tracker = Some(crate::tracker::finished(py)?);
+        Ok(())
     }
 
     fn __bytes__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {

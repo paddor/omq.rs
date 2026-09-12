@@ -35,7 +35,8 @@ async def test_async_pyomq_push_to_pyzmq_pull(tcp_endpoint):
 async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(pyomq.PULL)
-    ep = pull.bind(tcp_endpoint)
+    pull.bind(tcp_endpoint)
+    ep = pull.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         push = py_ctx.socket(zmq_pyzmq.PUSH)
@@ -52,7 +53,8 @@ async def test_async_pyzmq_push_to_pyomq_pull(tcp_endpoint):
 async def test_async_pyomq_pub_to_pyzmq_sub(tcp_endpoint):
     ctx = zmq_async.Context()
     pub = ctx.socket(pyomq.PUB)
-    ep = pub.bind(tcp_endpoint)
+    pub.bind(tcp_endpoint)
+    ep = pub.last_endpoint
     try:
         py_ctx = zmq_pyzmq.Context.instance()
         sub = py_ctx.socket(zmq_pyzmq.SUB)

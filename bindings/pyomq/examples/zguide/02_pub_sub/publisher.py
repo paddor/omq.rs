@@ -6,6 +6,7 @@ runs until interrupted.
 
     python publisher.py [endpoint] [count]
 """
+
 import sys
 import time
 

@@ -13,10 +13,12 @@ def test_poll_returns_ready(tcp_endpoint):
     pull2 = ctx.socket(zmq.PULL)
     push2 = ctx.socket(zmq.PUSH)
     try:
-        ep = pull1.bind(tcp_endpoint)
+        pull1.bind(tcp_endpoint)
+        ep = pull1.last_endpoint
         push1.connect(ep)
 
-        ep2 = pull2.bind(tcp_endpoint)
+        pull2.bind(tcp_endpoint)
+        ep2 = pull2.last_endpoint
         push2.connect(ep2)
 
         push1.send(b"only-one")
@@ -43,7 +45,8 @@ def test_poll_timeout_empty(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         poller = zmq.Poller()
         poller.register(pull, zmq.POLLIN)
         events = poller.poll(timeout=50)
@@ -98,10 +101,12 @@ def test_poll_multiple_ready(tcp_endpoint):
     push2 = ctx.socket(zmq.PUSH)
     pull2 = ctx.socket(zmq.PULL)
     try:
-        ep = pull1.bind(tcp_endpoint)
+        pull1.bind(tcp_endpoint)
+        ep = pull1.last_endpoint
         push1.connect(ep)
 
-        ep2 = pull2.bind(tcp_endpoint)
+        pull2.bind(tcp_endpoint)
+        ep2 = pull2.last_endpoint
         push2.connect(ep2)
 
         push1.send(b"msg1")
@@ -136,7 +141,8 @@ def test_register_unregister(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello")
         time.sleep(0.02)
@@ -158,7 +164,8 @@ def test_modify_flags(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello")
         time.sleep(0.02)
@@ -186,7 +193,8 @@ def test_poll_no_busywait(tcp_endpoint):
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         poller = zmq.Poller()
         poller.register(pull, zmq.POLLIN)
 

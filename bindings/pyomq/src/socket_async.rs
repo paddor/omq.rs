@@ -14,11 +14,13 @@
 //! dispatch helpers (block on a tokio oneshot).
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use omq_proto::error::Error as PError;
 
 use crate::error::timeout_err;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyType};
 
@@ -27,11 +29,96 @@ use crate::dispatch;
 use crate::error::map_err;
 use crate::frame::Frame;
 use crate::runtime::ContextInner;
-use crate::socket::SocketInner;
+use crate::socket::{SocketInner, split_dish_message};
 
 #[pyclass(module = "pyomq._native")]
 pub struct AsyncSocket {
     pub(crate) inner: Arc<SocketInner>,
+}
+
+/// Allocated only after queue backpressure. Owns the fully converted message.
+pub(crate) type PendingMessage = Mutex<Option<omq_proto::Message>>;
+
+#[pyclass(module = "pyomq._native")]
+pub(crate) struct PendingSend {
+    inner: Arc<SocketInner>,
+    message: Arc<PendingMessage>,
+    tracker: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PendingSend {
+    fn retry(&mut self) -> PyResult<Option<Py<PyAny>>> {
+        self.inner.materialize()?;
+        let guard = self.inner.materialized.read().unwrap();
+        let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+        let mut pending = self.message.lock().unwrap();
+        let message = pending
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("send already completed"))?;
+        match materialized
+            .send_prod
+            .lock()
+            .unwrap()
+            .push_and_flush(message)
+        {
+            Ok(()) => Ok(self.tracker.take()),
+            Err(message) => {
+                *pending = Some(message);
+                Err(timeout_err())
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        let message = self.message.lock().unwrap().take();
+        self.tracker.take();
+        // Releasing a Python exporter can close the socket and revisit this
+        // pending entry, so the message lock must already be released.
+        drop(message);
+    }
+}
+
+fn submit(
+    py: Python<'_>,
+    inner: &Arc<SocketInner>,
+    message: omq_proto::Message,
+    tracker: Option<Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    inner.materialize()?;
+    let guard = inner.materialized.read().unwrap();
+    let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+    match materialized
+        .send_prod
+        .lock()
+        .unwrap()
+        .push_and_flush(message)
+    {
+        Ok(()) => Ok(tracker),
+        Err(message) => {
+            let message = Arc::new(Mutex::new(Some(message)));
+            let mut pending_sends = inner.pending_sends.lock().unwrap();
+            if pending_sends.len() == pending_sends.capacity() {
+                pending_sends.retain(|pending| pending.strong_count() != 0);
+                // Leave room for another live set. Sweeping on every insert,
+                // or reclaiming only one slot at a time, makes bursts quadratic.
+                let live = pending_sends.len();
+                pending_sends.reserve(live);
+            }
+            pending_sends.push(Arc::downgrade(&message));
+            let pending = Py::new(
+                py,
+                PendingSend {
+                    inner: inner.clone(),
+                    message,
+                    tracker,
+                },
+            )?;
+            let error = timeout_err();
+            error.value(py).setattr("_pending_send", pending)?;
+            Err(error)
+        }
+    }
 }
 
 impl AsyncSocket {
@@ -76,44 +163,161 @@ impl AsyncSocket {
 
     // ── Send (sync push into yring) ─────────────────────────────────
 
-    #[pyo3(signature = (payload, flags = 0, copy = true))]
-    fn send(&self, payload: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
+    #[pyo3(signature = (payload, flags = 0, copy = true, track = false))]
+    fn send(
+        &self,
+        payload: &Bound<'_, PyAny>,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            let Some(group) = conversions::group_from_pyany(payload) else {
+                return Err(PyValueError::new_err(
+                    "RADIO requires a group; pass group= or set Frame.group",
+                ));
+            };
+            if flags & crate::constants::SNDMORE != 0 {
+                return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+            }
+            let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+            return submit(
+                payload.py(),
+                &self.inner,
+                omq_tokio::Message::with_group(group, bytes),
+                tracker,
+            );
+        }
         let routing_id = conversions::routing_id_from_pyany(payload);
-        let bytes = conversions::bytes_from_pyany(payload, copy)?;
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
-            return Ok(());
+            return Ok(tracker);
         };
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard.as_ref().unwrap();
-        let mut prod = materialized.send_prod.lock().unwrap();
-        match prod.push_and_flush(msg) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(timeout_err()),
-        }
+        submit(payload.py(), &self.inner, msg, tracker)
     }
 
-    #[pyo3(signature = (parts, flags = 0, copy = true))]
-    fn send_multipart(&self, parts: &Bound<'_, PyAny>, flags: i32, copy: bool) -> PyResult<()> {
-        let _ = flags;
-        let msg = conversions::message_from_pylist(parts, copy)?;
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard.as_ref().unwrap();
-        let mut prod = materialized.send_prod.lock().unwrap();
-        match prod.push_and_flush(msg) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(timeout_err()),
+    #[pyo3(signature = (payload, group, flags = 0, copy = true, track = false))]
+    fn _send_with_group(
+        &self,
+        payload: &Bound<'_, PyAny>,
+        group: String,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "group is only valid on RADIO sockets",
+            ));
         }
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+        }
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+        submit(
+            payload.py(),
+            &self.inner,
+            omq_tokio::Message::with_group(group, bytes),
+            tracker,
+        )
+    }
+
+    #[pyo3(signature = (payload, routing_id, flags = 0, copy = true, track = false))]
+    fn _send_with_routing(
+        &self,
+        payload: &Bound<'_, PyAny>,
+        routing_id: u32,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
+        let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
+            return Ok(tracker);
+        };
+        if routing_id != 0 {
+            msg = msg.with_routing_id(routing_id);
+        }
+        submit(payload.py(), &self.inner, msg, tracker)
+    }
+
+    #[pyo3(signature = (parts, flags = 0, copy = true, track = false))]
+    fn send_multipart(
+        &self,
+        parts: &Bound<'_, PyAny>,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "RADIO requires send(..., group=...) or send_multipart(..., group=...)",
+            ));
+        }
+        let _ = flags;
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        submit(parts.py(), &self.inner, msg, tracker)
+    }
+
+    #[pyo3(signature = (parts, group, flags = 0, copy = true, track = false))]
+    fn _send_multipart_with_group(
+        &self,
+        parts: &Bound<'_, PyAny>,
+        group: String,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
+            return Err(PyValueError::new_err(
+                "group is only valid on RADIO sockets",
+            ));
+        }
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+        }
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        if msg.len() != 1 {
+            return Err(PyValueError::new_err(
+                "RADIO group send requires exactly one message part",
+            ));
+        }
+        let body = msg.part_bytes(0).expect("one-part message has a body");
+        submit(
+            parts.py(),
+            &self.inner,
+            omq_tokio::Message::with_group(group, body),
+            tracker,
+        )
+    }
+
+    #[pyo3(signature = (parts, routing_id, flags = 0, copy = true, track = false))]
+    fn _send_multipart_with_routing(
+        &self,
+        parts: &Bound<'_, PyAny>,
+        routing_id: u32,
+        flags: i32,
+        copy: bool,
+        track: bool,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let _ = flags;
+        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        submit(
+            parts.py(),
+            &self.inner,
+            msg.with_routing_id(routing_id),
+            tracker,
+        )
     }
 
     // ── Recv (try-poll + readiness fd for async notification) ────────
 
     #[pyo3(name = "_try_recv")]
     fn try_recv<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let dish = matches!(self.inner.socket_type, omq_tokio::SocketType::Dish);
         if let Some(head) = self.inner.pop_rxbuf_head() {
             return Ok(PyBytes::new(py, &head).into_any());
         }
@@ -125,6 +329,10 @@ impl AsyncSocket {
         let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
+            if dish {
+                let (_, body) = split_dish_message(msg)?;
+                return Ok(PyBytes::new(py, &body).into_any());
+            }
             let mut parts: Vec<Bytes> = msg.iter().collect();
             let head = if parts.is_empty() {
                 Bytes::new()
@@ -142,6 +350,7 @@ impl AsyncSocket {
 
     #[pyo3(name = "_try_recv_frame")]
     fn try_recv_frame<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let dish = matches!(self.inner.socket_type, omq_tokio::SocketType::Dish);
         if let Some((head, more)) = self.inner.pop_rxbuf_head_with_more() {
             return Ok(Bound::new(py, Frame::from_bytes_more(head, more))?.into_any());
         }
@@ -153,6 +362,14 @@ impl AsyncSocket {
         let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
+            if dish {
+                let (group, body) = split_dish_message(msg)?;
+                return Ok(Bound::new(
+                    py,
+                    Frame::from_bytes_more_routing_group(body, false, 0, group),
+                )?
+                .into_any());
+            }
             let routing_id = msg.routing_id().unwrap_or(0);
             let mut parts: Vec<Bytes> = msg.iter().collect();
             let head = if parts.is_empty() {
@@ -172,6 +389,7 @@ impl AsyncSocket {
 
     #[pyo3(name = "_try_recv_multipart")]
     fn try_recv_multipart<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let dish = matches!(self.inner.socket_type, omq_tokio::SocketType::Dish);
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
             return Ok(
@@ -186,6 +404,10 @@ impl AsyncSocket {
         let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
+            if dish {
+                let (_, body) = split_dish_message(msg)?;
+                return Ok(PyList::new(py, [PyBytes::new(py, &body)])?.into_any());
+            }
             Ok(conversions::parts_to_pylist(py, msg)?.into_any())
         } else {
             Ok(py.None().bind(py).clone())
@@ -194,6 +416,7 @@ impl AsyncSocket {
 
     #[pyo3(name = "_try_recv_multipart_frames")]
     fn try_recv_multipart_frames<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let dish = matches!(self.inner.socket_type, omq_tokio::SocketType::Dish);
         let leftover = self.inner.take_rxbuf();
         if !leftover.is_empty() {
             return Ok(conversions::frames_to_pylist(py, leftover)?.into_any());
@@ -206,6 +429,14 @@ impl AsyncSocket {
         let mut cons = materialized.recv_cons.lock().unwrap();
         if let Some(msg) = cons.prefetch_and_pop() {
             materialized.recv_space.notify_changed();
+            if dish {
+                let (group, body) = split_dish_message(msg)?;
+                let frame = Bound::new(
+                    py,
+                    Frame::from_bytes_more_routing_group(body, false, 0, group),
+                )?;
+                return Ok(PyList::new(py, [frame])?.into_any());
+            }
             Ok(conversions::message_to_frame_list(py, msg)?.into_any())
         } else {
             Ok(py.None().bind(py).clone())

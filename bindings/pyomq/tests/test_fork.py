@@ -5,9 +5,8 @@ import select
 import sys
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning"
@@ -56,7 +55,8 @@ def test_socket_works_after_fork():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     push.setsockopt(zmq.SNDTIMEO, FORK_TIMEOUT_MS)
-    ep = push.bind("tcp://127.0.0.1:0")
+    push.bind("tcp://127.0.0.1:0")
+    ep = push.last_endpoint
 
     r, w = os.pipe()
     pid = os.fork()  # ty: ignore[unresolved-attribute, unused-ignore-comment, unused-ignore-comment]
@@ -88,7 +88,8 @@ def test_pre_materialized_socket_works_after_fork():
     pull = ctx.socket(zmq.PULL)
     push.setsockopt(zmq.SNDTIMEO, FORK_TIMEOUT_MS)
     pull.setsockopt(zmq.RCVTIMEO, FORK_TIMEOUT_MS)
-    ep = pull.bind("tcp://127.0.0.1:0")
+    pull.bind("tcp://127.0.0.1:0")
+    ep = pull.last_endpoint
     push.connect(ep)
 
     # Materialize by sending a message before fork.

@@ -1,9 +1,8 @@
 """Async wrapper parity tests."""
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
+import pytest
 
 
 async def test_async_again_exception(tcp_endpoint):
@@ -12,7 +11,8 @@ async def test_async_again_exception(tcp_endpoint):
     ctx = zmq_async.Context()
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         pull.close()
         with pytest.raises(zmq.ContextTerminated):
             await pull.recv()
@@ -25,7 +25,8 @@ async def test_async_send_recv_string(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_string("hello")
         assert await pull.recv_string() == "hello"
@@ -39,7 +40,8 @@ async def test_async_send_recv_json(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_json({"k": 1})
         assert await pull.recv_json() == {"k": 1}
@@ -53,7 +55,8 @@ async def test_async_send_recv_pyobj(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_pyobj([1, 2, 3])
         assert await pull.recv_pyobj() == [1, 2, 3]
@@ -134,7 +137,8 @@ async def test_async_send_recv_serialized(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         def ser(msg):

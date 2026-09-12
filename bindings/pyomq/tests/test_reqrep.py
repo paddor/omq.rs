@@ -10,7 +10,8 @@ def test_req_rep_roundtrip(tcp_endpoint):
     rep = ctx.socket(zmq.REP)
     req = ctx.socket(zmq.REQ)
     try:
-        ep = rep.bind(tcp_endpoint)
+        rep.bind(tcp_endpoint)
+        ep = rep.last_endpoint
         req.connect(ep)
         req.send(b"ping")
         assert rep.recv() == b"ping"
@@ -28,14 +29,15 @@ def test_rep_accepts_reply_while_client_closes(tcp_endpoint):
     rep.setsockopt(zmq.RCVTIMEO, 1_000)
     rep.setsockopt(zmq.SNDTIMEO, 1_000)
     rep.setsockopt(zmq.LINGER, 0)
-    endpoint = rep.bind(tcp_endpoint)
+    rep.bind(tcp_endpoint)
+    endpoint = rep.last_endpoint
     failure = []
 
     def serve():
         try:
             for _ in range(21):
                 rep.send(rep.recv())
-        except Exception as error:  # noqa: BLE001 - preserve thread failure
+        except Exception as error:
             failure.append(error)
 
     server = threading.Thread(target=serve)
@@ -65,7 +67,8 @@ def test_dealer_router_identity_routes_back(tcp_endpoint):
     dealer = ctx.socket(zmq.DEALER)
     try:
         dealer.setsockopt(zmq.IDENTITY, b"client-A")
-        ep = router.bind(tcp_endpoint)
+        router.bind(tcp_endpoint)
+        ep = router.last_endpoint
         dealer.connect(ep)
         # DEALER sends; ROUTER recv exposes the identity as the first frame.
         dealer.send(b"hello")

@@ -15,8 +15,6 @@ import threading
 import time
 
 import pyomq as zmq
-from typing import List
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 FRAME_B = 128
@@ -58,7 +56,8 @@ def test_multipart_push_pull():
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     push = ctx.socket(zmq.PUSH)
-    ep = pull.bind(tcp_ep())
+    pull.bind(tcp_ep())
+    ep = pull.last_endpoint
     push.connect(ep)
     push.setsockopt(zmq.SNDTIMEO, 5000)
     pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -137,7 +136,8 @@ def test_multipart_dealer_router():
     ctx = zmq.Context()
     router = ctx.socket(zmq.ROUTER)
     dealer = ctx.socket(zmq.DEALER)
-    ep = router.bind(tcp_ep())
+    router.bind(tcp_ep())
+    ep = router.last_endpoint
     dealer.setsockopt(zmq.IDENTITY, b"soak-client")
     dealer.connect(ep)
     dealer.setsockopt(zmq.SNDTIMEO, 5000)

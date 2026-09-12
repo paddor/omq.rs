@@ -1,10 +1,8 @@
 """pyzmq-compatible API surface tests."""
 
-import pytest
-
 import pyomq as zmq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 # ── Serialization methods ────────────────────────────────────────────
 
@@ -14,7 +12,8 @@ def test_send_recv_string(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_string("hello")
         assert pull.recv_string() == "hello"
@@ -29,7 +28,8 @@ def test_send_recv_string_encoding(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_string("héllo", encoding="utf-16")
         assert pull.recv_string(encoding="utf-16") == "héllo"
@@ -44,7 +44,8 @@ def test_send_recv_json(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_json({"k": 1, "arr": [2, 3]})
         assert pull.recv_json() == {"k": 1, "arr": [2, 3]}
@@ -59,7 +60,8 @@ def test_send_recv_json_kwargs(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_json({"b": 2, "a": 1}, sort_keys=True)
         raw = pull.recv()
@@ -75,7 +77,8 @@ def test_send_recv_pyobj(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_pyobj([1, 2, 3])
         assert pull.recv_pyobj() == [1, 2, 3]
@@ -92,7 +95,8 @@ def test_send_recv_pyobj_protocol(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_pyobj({"x": 42}, protocol=2)
         raw = pull.recv()
@@ -179,7 +183,8 @@ def test_copy_false_recv_returns_frame():
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind("tcp://127.0.0.1:0")
+        pull.bind("tcp://127.0.0.1:0")
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello")
         frame = pull.recv(copy=False)
@@ -200,13 +205,14 @@ def test_copy_false_multipart_recv_returns_frames():
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind("tcp://127.0.0.1:0")
+        pull.bind("tcp://127.0.0.1:0")
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_multipart([b"a", b"bb", b"ccc"])
         frames = pull.recv_multipart(copy=False)
         assert [bytes(frame) for frame in frames] == [b"a", b"bb", b"ccc"]
         assert all(isinstance(frame, zmq.Frame) for frame in frames)
-        assert [getattr(frame, "more") for frame in frames] == [True, True, False]
+        assert [frame.more for frame in frames] == [True, True, False]
     finally:
         push.close()
         pull.close()
@@ -220,8 +226,10 @@ def test_copy_false_frames_can_be_rerouted():
     broker_out = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep_in = broker_in.bind("tcp://127.0.0.1:0")
-        ep_out = pull.bind("tcp://127.0.0.1:0")
+        broker_in.bind("tcp://127.0.0.1:0")
+        ep_in = broker_in.last_endpoint
+        pull.bind("tcp://127.0.0.1:0")
+        ep_out = pull.last_endpoint
         push.connect(ep_in)
         broker_out.connect(ep_out)
         push.send_multipart([b"route", b"body"])
@@ -240,7 +248,8 @@ def test_send_accepts_bytearray_buffer(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(bytearray(b"hello"))
         assert pull.recv() == b"hello"
@@ -255,7 +264,8 @@ def test_send_copies_mutable_buffer_by_default(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         data = bytearray(b"hello")
         push.send(data)
@@ -272,7 +282,8 @@ def test_send_accepts_memoryview_buffer_copy_false(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(memoryview(b"hello"), copy=False)
         assert pull.recv() == b"hello"
@@ -292,7 +303,8 @@ def test_send_multipart_accepts_buffer_parts(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send_multipart([bytearray(b"meta"), memoryview(b"payload")], copy=False)
         assert pull.recv_multipart() == [b"meta", b"payload"]
@@ -302,17 +314,18 @@ def test_send_multipart_accepts_buffer_parts(tcp_endpoint):
         ctx.term()
 
 
-def test_send_accepts_noncontiguous_numpy_array_copy_false(tcp_endpoint):
+def test_send_rejects_noncontiguous_numpy_array_copy_false(tcp_endpoint):
     np = pytest.importorskip("numpy")
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         data = np.arange(16, dtype=np.uint8)[::2]
-        push.send(data, copy=False)
-        assert pull.recv() == data.tobytes()
+        with pytest.raises(BufferError):
+            push.send(data, copy=False)
     finally:
         push.close()
         pull.close()
@@ -325,7 +338,8 @@ def test_send_accepts_numpy_uint8_array_copy_false(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         data = np.arange(12, dtype=np.uint8).reshape((2, 2, 3))
         push.send(data, copy=False)
@@ -341,7 +355,8 @@ def test_copy_false_send_accepted():
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind("tcp://127.0.0.1:0")
+        pull.bind("tcp://127.0.0.1:0")
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"hello", copy=False)
         assert pull.recv() == b"hello"
@@ -351,15 +366,16 @@ def test_copy_false_send_accepted():
         ctx.term()
 
 
-def test_track_true_send_returns_tracker():
+def test_track_true_copied_send_returns_none():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind("tcp://127.0.0.1:0")
+        pull.bind("tcp://127.0.0.1:0")
+        ep = pull.last_endpoint
         push.connect(ep)
         tracker = push.send(b"hello", track=True)
-        assert isinstance(tracker, zmq.MessageTracker)
+        assert tracker is None
         assert pull.recv() == b"hello"
     finally:
         push.close()
@@ -470,7 +486,8 @@ def test_send_recv_serialized(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
 
         def my_serialize(msg):
@@ -549,7 +566,8 @@ def test_socket_poll_ready(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"data")
         import time
@@ -681,11 +699,12 @@ def test_select_ready(tcp_endpoint):
     push = ctx.socket(zmq.PUSH)
     pull = ctx.socket(zmq.PULL)
     try:
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"sel")
         time.sleep(0.05)
-        rready, wready, xready = zmq.select([pull], [], [], timeout=1.0)
+        rready, _wready, _xready = zmq.select([pull], [], [], timeout=1.0)
         assert pull in rready
     finally:
         push.close()
@@ -824,8 +843,10 @@ def test_proxy_req_rep(tcp_endpoint):
     client.rcvtimeo = 2000
 
     try:
-        fe_ep = frontend.bind(tcp_endpoint)
-        be_ep = backend.bind(tcp_endpoint)
+        frontend.bind(tcp_endpoint)
+        fe_ep = frontend.last_endpoint
+        backend.bind(tcp_endpoint)
+        be_ep = backend.last_endpoint
         worker.connect(be_ep)
         client.connect(fe_ep)
 
@@ -864,8 +885,10 @@ def test_proxy_req_rep_two_clients_preserves_routes(tcp_endpoint):
     client_b.rcvtimeo = 2000
 
     try:
-        fe_ep = frontend.bind(tcp_endpoint)
-        be_ep = backend.bind(tcp_endpoint)
+        frontend.bind(tcp_endpoint)
+        fe_ep = frontend.last_endpoint
+        backend.bind(tcp_endpoint)
+        be_ep = backend.last_endpoint
         worker.connect(be_ep)
         client_a.connect(fe_ep)
         client_b.connect(fe_ep)
@@ -912,9 +935,12 @@ def test_proxy_with_capture(tcp_endpoint):
     client = ctx.socket(zmq.REQ)
 
     try:
-        fe_ep = frontend.bind(tcp_endpoint)
-        be_ep = backend.bind(tcp_endpoint)
-        cap_ep = capture_recv.bind(tcp_endpoint)
+        frontend.bind(tcp_endpoint)
+        fe_ep = frontend.last_endpoint
+        backend.bind(tcp_endpoint)
+        be_ep = backend.last_endpoint
+        capture_recv.bind(tcp_endpoint)
+        cap_ep = capture_recv.last_endpoint
         capture.connect(cap_ep)
         worker.connect(be_ep)
         client.connect(fe_ep)
@@ -959,9 +985,12 @@ def test_proxy_steerable(tcp_endpoint):
     controller = ctx.socket(zmq.PUSH)
 
     try:
-        fe_ep = frontend.bind(tcp_endpoint)
-        be_ep = backend.bind(tcp_endpoint)
-        ctrl_ep = control.bind(tcp_endpoint)
+        frontend.bind(tcp_endpoint)
+        fe_ep = frontend.last_endpoint
+        backend.bind(tcp_endpoint)
+        be_ep = backend.last_endpoint
+        control.bind(tcp_endpoint)
+        ctrl_ep = control.last_endpoint
         sender.connect(fe_ep)
         receiver.connect(be_ep)
         controller.connect(ctrl_ep)

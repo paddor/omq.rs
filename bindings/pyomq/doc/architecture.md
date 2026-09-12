@@ -1,7 +1,7 @@
 # pyomq Architecture
 
 PyO3 binding for `omq-tokio`. Drop-in pyzmq API for Python (sync and
-async). Single stable-ABI wheel (`abi3-py311`, Python 3.11+) via maturin.
+async). Single stable-ABI wheel (`abi3-py312`, Python 3.12+) via maturin.
 
 ## Source layout
 
@@ -410,18 +410,34 @@ Python `bytes`. `bytes(frame)` and `frame.bytes` still allocate a Python
 `bytes` object on demand. `frame.buffer` returns a memoryview directly
 over the immutable Rust `Bytes` storage via the Python buffer protocol.
 
-Other buffer types (`bytearray`, `memoryview`) go through
-`copy_from_slice` because their contents can be mutated from Python.
+Other contiguous buffer types (`bytearray`, `memoryview`, multibyte arrays)
+go through `copy_from_slice` by default. With `copy=False`, a `PyUntypedBuffer`
+export pins their storage until the last native owner releases it. Strided
+buffers are rejected, including with `copy=True`.
+
+Buffer exports are currently released on the thread dropping the last native
+owner, including I/O threads. Python-defined `__release_buffer__` callbacks
+must not make blocking socket/context calls there. That preexisting limitation
+also affects untracked zero-copy sends. Such exporters can use `copy=True` or
+schedule their cleanup on an application thread.
 
 ## MessageTracker
 
-pyzmq's `track=True` tracks whether the zero-copy send buffer has
-been flushed to the wire (so the caller knows when it's safe to
-mutate the buffer). pyomq copies mutable Python buffers on send, so the
-buffer is always safe to reuse immediately. Received `Frame`/`Message`
-objects use immutable `Bytes` storage and can be re-sent without copying.
-`send(track=True)` returns a `MessageTracker` that reports done
-immediately.
+Tracking follows buffer ownership, not queue admission or delivery. Tracked
+zero-copy sends wrap `Bytes` in an owner whose final drop releases the Python
+export before notifying a condition variable. The Python tracker owns only
+completion tokens or existing Frame trackers, never the payload. Multipart
+conversion builds one Python tracker over all parts without intermediate
+per-buffer Python trackers. No token or tracking synchronization is allocated
+for untracked sends. `wait()` releases the GIL; a single token handles its own
+timeout, while aggregates share one monotonic deadline across all sources.
+
+Copied buffer sends return `None`. Sending a `Frame` returns its own tracker;
+tracking an untracked frame is an error. Tracked receive frames have completed
+trackers, but an inproc frame or exported view can still keep the original
+sender's tracker pending. Async queue backpressure allocates a `PendingSend`
+that retains the converted message across retries, so generators are consumed
+once. Cancellation and socket close release these retained messages.
 
 jupyter-client's `Session.send()` shadows async sockets to sync
 (`zmq.Socket.shadow(stream.underlying)`) before calling

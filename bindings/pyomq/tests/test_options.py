@@ -3,9 +3,8 @@
 import threading
 import time
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 def _push():

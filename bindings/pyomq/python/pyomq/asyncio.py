@@ -23,22 +23,29 @@ import pickle
 import select as _select
 import sys
 import threading
+import types
 import weakref
 from collections import deque
-from typing import Any, Awaitable, Callable, Final
-from . import _native  # type: ignore[attr-defined]
-from . import error
-from . import Context as _SyncContext
-from . import _next_ctx_id
+from collections.abc import Callable, Generator, Iterable
+from typing import Any, Final, Literal, Self, cast, overload
+
 from . import (
-    LINGER,
     _TYPE_NAMES,
+    LINGER,
     POLLIN,
     POLLOUT,
+    SENDABLE_TYPES,
+    Frame,
+    MessageTracker,
     _BaseSocket,
+    _copy_received_into,
+    _native,  # type: ignore[attr-defined]
+    _next_ctx_id,
+    error,
 )
+from . import Context as _SyncContext
+from ._typing import FutureResult
 
-_IS_WINDOWS = sys.platform == "win32"
 _WAKEUP_MODE_NONE = 0
 _WAKEUP_MODE_ASYNC = 1
 _WAKEUP_MODE_SYNC = 2
@@ -47,7 +54,7 @@ _WAKEUP_MODE_SYNC = 2
 def _resolved_future(result: Any) -> asyncio.Future[Any]:
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[Any] = loop.create_future()
-    fut.set_result(result)
+    fut.set_result(None if result is _SEND_DONE else result)
     return fut
 
 
@@ -56,14 +63,19 @@ _MISSING: Final[object] = object()
 
 
 class _DoneFuture:
-    """Lightweight awaitable that resolves immediately to None."""
+    """Immediate send completion; the untracked None instance is shared."""
 
-    def __await__(self) -> Any:
-        return
+    __slots__ = ("_value",)
+
+    def __init__(self, value: MessageTracker | None = None) -> None:
+        self._value = value
+
+    def __await__(self) -> Generator[Any, None, MessageTracker | None]:
+        return self._value
         yield  # makes this a generator
 
-    def result(self) -> None:
-        return None
+    def result(self) -> MessageTracker | None:
+        return self._value
 
     def done(self) -> bool:
         return True
@@ -72,14 +84,51 @@ class _DoneFuture:
 _SEND_DONE: Final[_DoneFuture] = _DoneFuture()
 
 
+class _CleanupFuture(asyncio.Future[Any]):
+    def __init__(
+        self, *, loop: asyncio.AbstractEventLoop, cleanup: Callable[[], None]
+    ) -> None:
+        super().__init__(loop=loop)
+        self._cleanup = cleanup
+
+    def set_cleanup(self, cleanup: Callable[[], None]) -> None:
+        self._cleanup = cleanup
+
+    def cancel(self, msg: Any = None) -> bool:
+        cancelled = super().cancel(msg)
+        if cancelled:
+            self._cleanup()
+        return cancelled
+
+
 class _WindowsWaiter:
     """One loop-owned Windows readiness waiter."""
 
-    __slots__ = ("future", "try_fn")
+    __slots__ = ("cleanup", "future", "try_fn")
 
-    def __init__(self, future: asyncio.Future[Any], try_fn: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        future: asyncio.Future[Any],
+        try_fn: Callable[[], Any],
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         self.future = future
         self.try_fn = try_fn
+        self.cleanup = cleanup
+
+    def release(self) -> None:
+        if self.cleanup is not None:
+            cleanup, self.cleanup = self.cleanup, None
+            cleanup()
+
+    def cancel(self) -> None:
+        self.release()
+        self.future.cancel()
+
+    def fail(self, exc: Exception) -> None:
+        self.release()
+        if not self.future.done():
+            self.future.set_exception(exc)
 
     def __call__(self) -> bool:
         future = self.future
@@ -92,26 +141,43 @@ class _WindowsWaiter:
                 future.set_exception(error)
             return True
         if result is not None and not future.done():
-            future.set_result(result)
+            future.set_result(None if result is _SEND_DONE else result)
             return True
         return False
 
 
-class _RecvFuture:
+class _RecvFuture[T]:
     """Supports both ``await fut`` (event-loop) and ``fut.result()`` (blocking)."""
 
-    __slots__ = ("_try_fn", "_fd", "_result", "_exception")
+    __slots__ = ("_cleanup", "_exception", "_fd", "_result", "_try_fn")
 
     _try_fn: Callable[[], Any]
     _fd: int
     _result: Any
-    _exception: Exception | None
+    _exception: BaseException | None
 
-    def __init__(self, try_fn: Callable[[], Any], fd: int) -> None:
+    def __init__(
+        self,
+        try_fn: Callable[[], Any],
+        fd: int,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         self._try_fn = try_fn
         self._fd = fd
         self._result = _MISSING
         self._exception = None
+        self._cleanup = cleanup
+
+    def _finish(self) -> None:
+        fd, self._fd = self._fd, -1
+        cleanup, self._cleanup = self._cleanup, None
+        if fd >= 0:
+            os.close(fd)
+        if cleanup is not None:
+            cleanup()
+
+    def __del__(self) -> None:
+        self._finish()
 
     def done(self) -> bool:
         if self._result is not _MISSING or self._exception is not None:
@@ -120,17 +186,19 @@ class _RecvFuture:
             r = self._try_fn()
         except Exception as e:
             self._exception = e
+            self._finish()
             return True
         if r is not None:
             self._result = r
+            self._finish()
             return True
         return False
 
-    def result(self) -> Any:
+    def result(self) -> T:
         if self._exception is not None:
             raise self._exception
         if self._result is not _MISSING:
-            return self._result
+            return cast(T, None if self._result is _SEND_DONE else self._result)
         try:
             while True:
                 _select.select([self._fd], [], [])
@@ -145,20 +213,15 @@ class _RecvFuture:
                     raise
                 if r is not None:
                     self._result = r
-                    return r
+                    return cast(T, None if r is _SEND_DONE else r)
         finally:
-            if self._fd >= 0:
-                os.close(self._fd)
-                self._fd = -1
+            self._finish()
 
-    def __await__(self) -> Any:
+    def __await__(self) -> Generator[Any, None, T]:
         if self.done():
-            if self._fd >= 0:
-                os.close(self._fd)
-                self._fd = -1
             if self._exception is not None:
                 raise self._exception
-            return self._result
+            return cast(T, None if self._result is _SEND_DONE else self._result)
 
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
@@ -167,8 +230,10 @@ class _RecvFuture:
         try_fn = self._try_fn
 
         def _on_readable() -> None:
-            # Check fut.done() before closing. After cancellation,
-            # _on_cancel owns the descriptor.
+            # A queued callback may run after cancellation. Do not consume
+            # a message or touch a descriptor now owned by _on_cancel.
+            if fut.done():
+                return
             try:
                 os.read(fd, 8)
             except OSError:
@@ -191,7 +256,7 @@ class _RecvFuture:
                     return
                 loop.remove_reader(fd)
                 os.close(fd)
-                fut.set_result(r)
+                fut.set_result(None if r is _SEND_DONE else r)
 
         def _on_cancel(f: asyncio.Future[Any]) -> None:
             if f.cancelled():
@@ -200,7 +265,14 @@ class _RecvFuture:
 
         fut.add_done_callback(_on_cancel)
         loop.add_reader(fd, _on_readable)
-        return (yield from fut.__await__())
+        try:
+            self._result = yield from fut.__await__()
+            return cast(T, self._result)
+        except BaseException as exc:
+            self._exception = exc
+            raise
+        finally:
+            self._finish()
 
 
 class Socket(_BaseSocket):
@@ -217,11 +289,11 @@ class Socket(_BaseSocket):
     _wakeup_registered: bool
 
     def _init_socket_state(self, _sock: _native.AsyncSocket, _context: Context) -> None:
-        self._sock = _sock
-        self._context = _context
+        self._sock = _sock  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._context = _context  # pyright: ignore[reportIncompatibleVariableOverride]
         self._closed = False
-        self._last_endpoint = None
-        if _IS_WINDOWS:
+        self._last_endpoint = b""
+        if sys.platform == "win32":
             self._loop = None
             self._recv_waiters = deque()
             self._send_waiters = deque()
@@ -236,51 +308,151 @@ class Socket(_BaseSocket):
         st = _TYPE_NAMES.get(self.socket_type, str(self.socket_type))
         return f"<pyomq.asyncio.Socket(pyomq.{st}) at {id(self):#x}>"
 
+    def close(self, linger: int | None = None) -> None:
+        if not self._closed and sys.platform == "win32":
+            for waiter in tuple(self._recv_waiters) + tuple(self._send_waiters):
+                waiter.fail(error.ZMQError("socket closed"))
+            self._recv_waiters.clear()
+            self._send_waiters.clear()
+        super().close(linger)
+
+    @property
+    def context(self) -> Context:
+        return self._context
+
     def send(
         self,
-        data: Any,
+        data: SENDABLE_TYPES,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-    ) -> Awaitable[Any | None]:
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> FutureResult[MessageTracker | None]:
         try:
-            self._sock.send(data, flags, copy)
+            if group is not None:
+                if routing_id is not None:
+                    raise ValueError("routing_id and group are mutually exclusive")
+                result = self._sock._send_with_group(data, group, flags, copy, track)
+            elif routing_id is None:
+                result = self._sock.send(data, flags, copy, track)
+            else:
+                result = self._sock._send_with_routing(
+                    data, routing_id, flags, copy, track
+                )
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
-                return self._send_with_backpressure(data, flags, copy)
+                return self._send_with_backpressure(e._pending_send)
             raise error.from_native(e) from None
-        return _SEND_DONE
+        return _SEND_DONE if result is None else _DoneFuture(result)
+
+    @overload
+    def recv(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> FutureResult[bytes]: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
+    ) -> FutureResult[Frame]: ...
+
+    @overload
+    def recv(
+        self, flags: int, copy: Literal[False], track: bool = False
+    ) -> FutureResult[Frame]: ...
+
+    @overload
+    def recv(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> FutureResult[bytes | Frame]: ...
 
     def recv(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> Awaitable[bytes | Any]:
-        if not copy:
+    ) -> FutureResult[bytes | Frame]:
+        if copy:
+            return self._add_recv_event(self._sock._try_recv)
+        if not track:
             return self._add_recv_event(self._sock._try_recv_frame)
-        return self._add_recv_event(self._sock._try_recv)
+        return self._add_recv_event(self._try_recv_tracked_frame)
+
+    def _try_recv_tracked_frame(self) -> Frame | None:
+        # Keep tracking outside recv(): even an unused closure makes Python
+        # allocate a cell for self on every untracked fast-path receive.
+        result = self._sock._try_recv_frame()
+        if result is not None:
+            result._track_received()
+        return result
 
     def send_multipart(
         self,
-        parts: list[Any],
+        msg_parts: Iterable[SENDABLE_TYPES],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
-    ) -> Awaitable[Any | None]:
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> FutureResult[MessageTracker | None]:
         try:
-            self._sock.send_multipart(parts, flags, copy)
+            if group is not None:
+                if routing_id is not None:
+                    raise ValueError("routing_id and group are mutually exclusive")
+                result = self._sock._send_multipart_with_group(
+                    msg_parts, group, flags, copy, track
+                )
+            elif routing_id is None:
+                result = self._sock.send_multipart(msg_parts, flags, copy, track)
+            else:
+                result = self._sock._send_multipart_with_routing(
+                    msg_parts, routing_id, flags, copy, track
+                )
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
-                return self._send_multipart_with_backpressure(parts, flags, copy)
+                return self._send_with_backpressure(e._pending_send)
             raise error.from_native(e) from None
-        return _SEND_DONE
+        return _SEND_DONE if result is None else _DoneFuture(result)
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: Literal[True] = True, track: bool = False
+    ) -> FutureResult[list[bytes]]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, *, copy: Literal[False], track: bool = False
+    ) -> FutureResult[list[Frame]]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int, copy: Literal[False], track: bool = False
+    ) -> FutureResult[list[Frame]]: ...
+
+    @overload
+    def recv_multipart(
+        self, flags: int = 0, copy: bool = True, track: bool = False
+    ) -> FutureResult[list[bytes] | list[Frame]]: ...
 
     def recv_multipart(
         self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> Awaitable[list[bytes] | list[Any]]:
-        if not copy:
+    ) -> FutureResult[list[bytes] | list[Frame]]:
+        if copy:
+            return self._add_recv_event(self._sock._try_recv_multipart)
+        if not track:
             return self._add_recv_event(self._sock._try_recv_multipart_frames)
-        return self._add_recv_event(self._sock._try_recv_multipart)
+        return self._add_recv_event(self._try_recv_tracked_frames)
 
-    if _IS_WINDOWS:
+    def _try_recv_tracked_frames(self) -> list[Frame] | None:
+        result = self._sock._try_recv_multipart_frames()
+        if result is not None:
+            for frame in result:
+                frame._track_received()
+        return result
+
+    async def recv_into(
+        self, buffer: Any, /, *, nbytes: int = 0, flags: int = 0
+    ) -> int:
+        return _copy_received_into(buffer, await self.recv(flags), nbytes)
+
+    if sys.platform == "win32":
 
         def _register_wakeup_hooks(self) -> None:
             if not self._wakeup_registered:
@@ -378,6 +550,7 @@ class Socket(_BaseSocket):
             waiters: deque[_WindowsWaiter],
             set_mode: Callable[[], None],
             clear_mode: Callable[[], None],
+            cleanup: Callable[[], None] | None = None,
         ) -> asyncio.Future[Any]:
             """Register a Windows waiter that resolves when try_fn returns
             non-None. try_fn must return None when not ready and raise on
@@ -395,12 +568,19 @@ class Socket(_BaseSocket):
                 return _resolved_future(result)
 
             self._register_wakeup_hooks()
-            fut: asyncio.Future[Any] = loop.create_future()
-            waiter = _WindowsWaiter(fut, try_fn)
+            fut: asyncio.Future[Any]
+            if cleanup is None:
+                fut = loop.create_future()
+            else:
+                fut = _CleanupFuture(loop=loop, cleanup=cleanup)
+            waiter = _WindowsWaiter(fut, try_fn, cleanup)
+            if isinstance(fut, _CleanupFuture):
+                fut.set_cleanup(waiter.release)
 
             def _on_cancel(done: asyncio.Future[Any]) -> None:
                 if not done.cancelled():
                     return
+                waiter.release()
                 try:
                     waiters.remove(waiter)
                 except ValueError:
@@ -441,42 +621,25 @@ class Socket(_BaseSocket):
             )
 
         def _send_with_backpressure(
-            self, data: Any, flags: int, copy: bool
-        ) -> asyncio.Future[Any]:
-            def try_send() -> bool | None:
+            self, pending: _native.PendingSend
+        ) -> asyncio.Future[MessageTracker | None]:
+            def try_send():
                 try:
-                    self._sock.send(data, flags, copy)
-                    return True
+                    result = pending.retry()
+                    return _SEND_DONE if result is None else result
                 except _native.ZMQError as e:
-                    if e.errno == _errno.EAGAIN:
+                    if e.errno == _EAGAIN:
                         return None
                     raise error.from_native(e) from None
 
-            return self._add_waitable(
+            future = self._add_waitable(
                 try_send,
                 self._send_waiters,
                 lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
                 lambda: self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
+                pending.cancel,
             )
-
-        def _send_multipart_with_backpressure(
-            self, parts: list[Any], flags: int, copy: bool
-        ) -> asyncio.Future[Any]:
-            def try_send() -> bool | None:
-                try:
-                    self._sock.send_multipart(parts, flags, copy)
-                    return True
-                except _native.ZMQError as e:
-                    if e.errno == _errno.EAGAIN:
-                        return None
-                    raise error.from_native(e) from None
-
-            return self._add_waitable(
-                try_send,
-                self._send_waiters,
-                lambda: self._set_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
-                lambda: self._clear_wakeup_modes(send_mode=_WAKEUP_MODE_ASYNC),
-            )
+            return future
     else:
 
         def _add_recv_event(
@@ -504,42 +667,26 @@ class Socket(_BaseSocket):
             return _RecvFuture(try_fn, fd)
 
         def _send_with_backpressure(
-            self, data: Any, flags: int, copy: bool
-        ) -> _RecvFuture:
+            self, pending: _native.PendingSend
+        ) -> _RecvFuture[MessageTracker | None]:
             fd = self._sock._send_fd()
 
-            def try_send() -> bool | None:
+            def try_send():
                 try:
-                    self._sock.send(data, flags, copy)
-                    return True
+                    result = pending.retry()
+                    return _SEND_DONE if result is None else result
                 except _native.ZMQError as e:
                     if e.errno == _EAGAIN:
                         return None
-                    raise
+                    raise error.from_native(e) from None
 
-            return _RecvFuture(try_send, fd)
-
-        def _send_multipart_with_backpressure(
-            self, parts: list[Any], flags: int, copy: bool
-        ) -> _RecvFuture:
-            fd = self._sock._send_fd()
-
-            def try_send() -> bool | None:
-                try:
-                    self._sock.send_multipart(parts, flags, copy)
-                    return True
-                except _native.ZMQError as e:
-                    if e.errno == _EAGAIN:
-                        return None
-                    raise
-
-            return _RecvFuture(try_send, fd)
+            return _RecvFuture(try_send, fd, pending.cancel)
 
     # ── Serialization helpers ────────────────────────────────────────
 
     def send_string(
         self, u: str, flags: int = 0, encoding: str = "utf-8"
-    ) -> Awaitable[Any | None]:
+    ) -> FutureResult[MessageTracker | None]:
         return self.send(u.encode(encoding), flags)
 
     async def recv_string(self, flags: int = 0, encoding: str = "utf-8") -> str:
@@ -547,7 +694,7 @@ class Socket(_BaseSocket):
 
     def send_json(
         self, obj: Any, flags: int = 0, **kwargs: Any
-    ) -> Awaitable[Any | None]:
+    ) -> FutureResult[MessageTracker | None]:
         return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
 
     async def recv_json(self, flags: int = 0, **kwargs: Any) -> Any:
@@ -555,29 +702,56 @@ class Socket(_BaseSocket):
 
     def send_pyobj(
         self, obj: Any, flags: int = 0, protocol: int = -1
-    ) -> Awaitable[Any | None]:
+    ) -> FutureResult[MessageTracker | None]:
         return self.send(pickle.dumps(obj, protocol), flags)
 
     async def recv_pyobj(self, flags: int = 0) -> Any:
         return pickle.loads(await self.recv(flags))
 
-    def send_serialized(
+    def send_serialized[T](
         self,
-        msg: Any,
-        serialize: Callable[[Any], list[bytes | str]],
+        msg: T,
+        serialize: Callable[[T], Iterable[SENDABLE_TYPES]],
         flags: int = 0,
         copy: bool = True,
         **kwargs: Any,
-    ) -> Awaitable[Any | None]:
+    ) -> FutureResult[MessageTracker | None]:
         frames = serialize(msg)
         return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
 
-    async def recv_serialized(
+    @overload
+    async def recv_serialized[T](
         self,
-        deserialize: Callable[[list[bytes]], Any],
+        deserialize: Callable[[list[bytes]], T],
+        flags: int = 0,
+        copy: Literal[True] = True,
+    ) -> T: ...
+
+    @overload
+    async def recv_serialized[T](
+        self,
+        deserialize: Callable[[list[Frame]], T],
+        flags: int = 0,
+        *,
+        copy: Literal[False],
+    ) -> T: ...
+
+    @overload
+    async def recv_serialized[T](
+        self, deserialize: Callable[[list[Frame]], T], flags: int, copy: Literal[False]
+    ) -> T: ...
+
+    @overload
+    async def recv_serialized[T](
+        self,
+        deserialize: Callable[[list[bytes] | list[Frame]], T],
         flags: int = 0,
         copy: bool = True,
-    ) -> Any:
+    ) -> T: ...
+
+    async def recv_serialized[T](
+        self, deserialize: Callable[[Any], T], flags: int = 0, copy: bool = True
+    ) -> T:
         frames = await self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
@@ -600,10 +774,15 @@ class Socket(_BaseSocket):
                 return mask
         return 0
 
-    async def __aenter__(self) -> Socket:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *args: Any) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: types.TracebackType | None = None,
+    ) -> bool:
         self.close()
         return False
 
@@ -653,7 +832,9 @@ class Poller:
 class Context(_SyncContext):
     """Async context for creating ZMQ sockets."""
 
-    _socket_class: type | None = None
+    # Preserve the public runtime inheritance while replacing the sync
+    # constructor, native storage, and socket factory with async equivalents.
+    _socket_class: type | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
     _ctx: _native.AsyncContext
     _is_shadow: bool
     _closed: bool
@@ -661,8 +842,23 @@ class Context(_SyncContext):
     _ctx_id: int
 
     def __init__(
-        self, io_threads: int = 1, *, _shadow_ctx: _SyncContext | None = None
+        self,
+        io_threads: int | _SyncContext = 1,
+        shadow: _SyncContext | int = 0,
+        *,
+        _shadow_ctx: _SyncContext | None = None,
     ) -> None:
+        if isinstance(io_threads, _SyncContext):
+            if shadow != 0 or _shadow_ctx is not None:
+                raise TypeError("shadow context specified more than once")
+            shadow = io_threads
+            io_threads = 1
+        if shadow != 0:
+            if _shadow_ctx is not None:
+                raise TypeError("shadow context specified more than once")
+            if not isinstance(shadow, _SyncContext):
+                raise TypeError("shadow must be a pyomq Context")
+            _shadow_ctx = shadow
         if _shadow_ctx is not None:
             if isinstance(_shadow_ctx._ctx, _native.Context):
                 self._ctx = _native.AsyncContext.shadow_sync(_shadow_ctx._ctx)
@@ -670,10 +866,10 @@ class Context(_SyncContext):
                 self._ctx = _shadow_ctx._ctx
             self._is_shadow = True
         else:
-            self._ctx = _native.AsyncContext(io_threads)
+            self._ctx = _native.AsyncContext(io_threads)  # pyright: ignore[reportIncompatibleVariableOverride]
             self._is_shadow = False
         self._closed = False
-        self._sockets = weakref.WeakSet()
+        self._sockets = weakref.WeakSet()  # pyright: ignore[reportIncompatibleVariableOverride]
         self._ctx_id = (
             _shadow_ctx._ctx_id if _shadow_ctx is not None else next(_next_ctx_id)
         )
@@ -682,7 +878,17 @@ class Context(_SyncContext):
     def closed(self) -> bool:
         return self._closed
 
+    @overload
     def socket(
+        self, socket_type: int, socket_class: None = None, **kwargs: Any
+    ) -> Socket: ...
+
+    @overload
+    def socket[S: Socket](
+        self, socket_type: int, socket_class: type[S], **kwargs: Any
+    ) -> S: ...
+
+    def socket(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         socket_type: int,
         socket_class: type[Socket] | None = None,
@@ -694,7 +900,7 @@ class Context(_SyncContext):
         s._sock = native
         s._context = self
         s._closed = False
-        s._last_endpoint = None
+        s._last_endpoint = b""
         s._pid = os.getpid()
         s._binds = []
         s._connects = []
@@ -703,7 +909,7 @@ class Context(_SyncContext):
         return s
 
     @classmethod
-    def from_share_key(cls, key: int) -> Context:
+    def from_share_key(cls, key: int) -> Self:
         obj = object.__new__(cls)
         obj._ctx = _native.AsyncContext.from_share_key(key)
         obj._is_shadow = True
@@ -734,14 +940,19 @@ class Context(_SyncContext):
         if not self._closed:
             self.term()
 
-    def __enter__(self) -> Context:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args: Any) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> bool:
         self.term()
         return False
 
 
 Context._socket_class = Socket
 
-__all__ = ["Context", "Socket", "Poller"]
+__all__ = ["Context", "Poller", "Socket"]

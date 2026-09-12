@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real buffer-lifetime tracking for frames and sync, async, and shadow sends.
 - pyzmq-style bind/connect scope managers, `recv_into()`, `routing_id` send
   keywords, and public `Context(shadow=...)` construction.
+- RADIO/DISH groups as pyzmq-style metadata: pass `group=` when sending and
+  read `Frame.group` when receiving.
 
 ### Changed
 

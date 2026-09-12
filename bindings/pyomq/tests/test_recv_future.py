@@ -247,7 +247,7 @@ def test_windows_schedule_failure_releases_native_claim():
             self.complete_calls += 1
 
     native = NativeSpy()
-    sock = object.__new__(zmq_async.Socket)
+    sock: Any = object.__new__(zmq_async.Socket)
     sock._sock = native
     sock._loop = ClosingLoop()
     sock._closed = True

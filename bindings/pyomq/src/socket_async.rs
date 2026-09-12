@@ -189,6 +189,9 @@ impl AsyncSocket {
             );
         }
         let routing_id = conversions::routing_id_from_pyany(payload);
+        if routing_id != 0 && flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("routing_id send cannot use SNDMORE"));
+        }
         let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(tracker);
@@ -234,6 +237,9 @@ impl AsyncSocket {
         copy: bool,
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("routing_id send cannot use SNDMORE"));
+        }
         let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(tracker);
@@ -253,12 +259,14 @@ impl AsyncSocket {
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
         if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
-            return Err(PyValueError::new_err(
-                "RADIO requires send(..., group=...) or send_multipart(..., group=...)",
-            ));
+            if flags & crate::constants::SNDMORE != 0 {
+                return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+            }
+            let (msg, tracker) = conversions::radio_message_from_pyiterable(parts, copy, track)?;
+            return submit(parts.py(), &self.inner, msg, tracker);
         }
         let _ = flags;
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         submit(parts.py(), &self.inner, msg, tracker)
     }
 
@@ -279,7 +287,7 @@ impl AsyncSocket {
         if flags & crate::constants::SNDMORE != 0 {
             return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
         }
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         if msg.len() != 1 {
             return Err(PyValueError::new_err(
                 "RADIO group send requires exactly one message part",
@@ -304,7 +312,7 @@ impl AsyncSocket {
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
         let _ = flags;
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         submit(
             parts.py(),
             &self.inner,

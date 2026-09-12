@@ -9,20 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import pyomq
 
-from . import SENDABLE_TYPES
-from ._typing import _BytesOption, _IntOption
+from ._typing import Sendable, _BytesOption, _IntOption
 
 if TYPE_CHECKING:
     from tornado.ioloop import IOLoop
 
-type SendCallback = Callable[
-    [list[SENDABLE_TYPES], pyomq.MessageTracker | None], object
-]
+type SendCallback = Callable[[Sequence[Sendable], pyomq.MessageTracker | None], object]
 
 
 def _get_IOLoop() -> type[IOLoop]:
@@ -75,9 +72,7 @@ class ZMQStream:
         copy: bool = True,
     ) -> None: ...
 
-    def on_recv(
-        self, callback: Callable[[Any], object] | None, copy: bool = True
-    ) -> None:
+    def on_recv(self, callback, copy=True):
         """Set a callback to be invoked when messages are received."""
         self._recv_callback = callback
         self._recv_copy = copy
@@ -100,7 +95,7 @@ class ZMQStream:
 
     def send(
         self,
-        msg: SENDABLE_TYPES,
+        msg: Sendable,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -117,7 +112,7 @@ class ZMQStream:
 
     def send_multipart(
         self,
-        msg_list: Iterable[SENDABLE_TYPES],
+        msg_list: Sequence[Sendable],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -127,16 +122,14 @@ class ZMQStream:
         """Send a multipart message."""
         if callback is None:
             callback = self._send_callback
-        # Materialize one-shot iterables only when a callback needs them too.
-        callback_parts = None if callback is None else list(msg_list)
         result = self.socket.send_multipart(
-            msg_list if callback_parts is None else callback_parts,
+            msg_list,
             flags=flags,
             copy=copy,
             track=track,
         )
-        if callback is not None and callback_parts is not None:
-            callback(callback_parts, result)
+        if callback is not None:
+            callback(msg_list, result)
         return result
 
     def flush(self, flag: int = 3, limit: int | None = None) -> None:

@@ -83,6 +83,13 @@ async def test_async_radio_dish_groups():
 
         await radio.send_multipart([b"cloudy"], group="weather")
         assert await dish.recv_multipart() == [b"cloudy"]
+
+        multipart_frame = pyomq.Frame(b"rainy")
+        multipart_frame.group = "weather"
+        await radio.send_multipart([multipart_frame])
+        assert await dish.recv() == b"rainy"
+        with pytest.raises(ValueError, match="cannot use SNDMORE"):
+            radio.send(multipart_frame, pyomq.SNDMORE)
     finally:
         radio.close()
         dish.close()

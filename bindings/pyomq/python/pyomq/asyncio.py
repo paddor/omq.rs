@@ -34,17 +34,16 @@ from . import (
     LINGER,
     POLLIN,
     POLLOUT,
-    SENDABLE_TYPES,
     Frame,
     MessageTracker,
     _BaseSocket,
     _copy_received_into,
-    _native,  # type: ignore[attr-defined]
+    _native,
     _next_ctx_id,
     error,
 )
 from . import Context as _SyncContext
-from ._typing import FutureResult
+from ._typing import FutureResult, Sendable
 
 _WAKEUP_MODE_NONE = 0
 _WAKEUP_MODE_ASYNC = 1
@@ -275,11 +274,9 @@ class _RecvFuture[T]:
             self._finish()
 
 
-class Socket(_BaseSocket):
+class Socket(_BaseSocket[_native.AsyncSocket, "Context"]):
     """Async ZMQ socket wrapper."""
 
-    _sock: _native.AsyncSocket
-    _context: Context
     _closed: bool
     _loop: asyncio.AbstractEventLoop | None
     _recv_waiters: deque[_WindowsWaiter]
@@ -289,8 +286,8 @@ class Socket(_BaseSocket):
     _wakeup_registered: bool
 
     def _init_socket_state(self, _sock: _native.AsyncSocket, _context: Context) -> None:
-        self._sock = _sock  # pyright: ignore[reportIncompatibleVariableOverride]
-        self._context = _context  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._sock = _sock
+        self._context = _context
         self._closed = False
         self._last_endpoint = b""
         if sys.platform == "win32":
@@ -316,13 +313,9 @@ class Socket(_BaseSocket):
             self._send_waiters.clear()
         super().close(linger)
 
-    @property
-    def context(self) -> Context:
-        return self._context
-
     def send(
         self,
-        data: SENDABLE_TYPES,
+        data: Sendable,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -334,12 +327,12 @@ class Socket(_BaseSocket):
                 if routing_id is not None:
                     raise ValueError("routing_id and group are mutually exclusive")
                 result = self._sock._send_with_group(data, group, flags, copy, track)
-            elif routing_id is None:
-                result = self._sock.send(data, flags, copy, track)
-            else:
+            elif routing_id is not None:
                 result = self._sock._send_with_routing(
                     data, routing_id, flags, copy, track
                 )
+            else:
+                result = self._sock.send(data, flags, copy, track)
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
                 return self._send_with_backpressure(e._pending_send)
@@ -366,9 +359,7 @@ class Socket(_BaseSocket):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> FutureResult[bytes | Frame]: ...
 
-    def recv(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> FutureResult[bytes | Frame]:
+    def recv(self, flags=0, copy=True, track=False):
         if copy:
             return self._add_recv_event(self._sock._try_recv)
         if not track:
@@ -385,7 +376,7 @@ class Socket(_BaseSocket):
 
     def send_multipart(
         self,
-        msg_parts: Iterable[SENDABLE_TYPES],
+        msg_parts: Iterable[Sendable],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -399,12 +390,12 @@ class Socket(_BaseSocket):
                 result = self._sock._send_multipart_with_group(
                     msg_parts, group, flags, copy, track
                 )
-            elif routing_id is None:
-                result = self._sock.send_multipart(msg_parts, flags, copy, track)
-            else:
+            elif routing_id is not None:
                 result = self._sock._send_multipart_with_routing(
                     msg_parts, routing_id, flags, copy, track
                 )
+            else:
+                result = self._sock.send_multipart(msg_parts, flags, copy, track)
         except _native.ZMQError as e:
             if e.errno == _EAGAIN:
                 return self._send_with_backpressure(e._pending_send)
@@ -431,9 +422,7 @@ class Socket(_BaseSocket):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> FutureResult[list[bytes] | list[Frame]]: ...
 
-    def recv_multipart(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> FutureResult[list[bytes] | list[Frame]]:
+    def recv_multipart(self, flags=0, copy=True, track=False):
         if copy:
             return self._add_recv_event(self._sock._try_recv_multipart)
         if not track:
@@ -450,7 +439,7 @@ class Socket(_BaseSocket):
     async def recv_into(
         self, buffer: Any, /, *, nbytes: int = 0, flags: int = 0
     ) -> int:
-        return _copy_received_into(buffer, await self.recv(flags), nbytes)
+        return _copy_received_into(buffer, await self.recv(flags, copy=False), nbytes)
 
     if sys.platform == "win32":
 
@@ -606,7 +595,7 @@ class Socket(_BaseSocket):
 
             return fut
 
-        def _add_recv_event(self, try_fn: Callable[[], Any]) -> asyncio.Future[Any]:
+        def _add_recv_event(self, try_fn: Callable[[], Any]) -> FutureResult[Any]:
             def safe_try() -> Any:
                 try:
                     return try_fn()
@@ -642,9 +631,7 @@ class Socket(_BaseSocket):
             return future
     else:
 
-        def _add_recv_event(
-            self, try_fn: Callable[[], Any]
-        ) -> asyncio.Future[Any] | _RecvFuture:
+        def _add_recv_event(self, try_fn: Callable[[], Any]) -> FutureResult[Any]:
             # Fast path: message already available, no event loop needed.
             try:
                 result = try_fn()
@@ -686,38 +673,88 @@ class Socket(_BaseSocket):
 
     def send_string(
         self, u: str, flags: int = 0, encoding: str = "utf-8"
-    ) -> FutureResult[MessageTracker | None]:
-        return self.send(u.encode(encoding), flags)
+    ) -> FutureResult[None]:
+        return cast(FutureResult[None], self.send(u.encode(encoding), flags))
 
     async def recv_string(self, flags: int = 0, encoding: str = "utf-8") -> str:
         return (await self.recv(flags)).decode(encoding)
 
-    def send_json(
-        self, obj: Any, flags: int = 0, **kwargs: Any
-    ) -> FutureResult[MessageTracker | None]:
-        return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
+    def send_json(self, obj: Any, flags: int = 0, **kwargs: Any) -> FutureResult[None]:
+        return cast(
+            FutureResult[None],
+            self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags),
+        )
 
     async def recv_json(self, flags: int = 0, **kwargs: Any) -> Any:
         return json.loads(await self.recv(flags), **kwargs)
 
     def send_pyobj(
         self, obj: Any, flags: int = 0, protocol: int = -1
-    ) -> FutureResult[MessageTracker | None]:
-        return self.send(pickle.dumps(obj, protocol), flags)
+    ) -> FutureResult[None]:
+        return cast(FutureResult[None], self.send(pickle.dumps(obj, protocol), flags))
 
     async def recv_pyobj(self, flags: int = 0) -> Any:
         return pickle.loads(await self.recv(flags))
 
+    @overload
     def send_serialized[T](
         self,
         msg: T,
-        serialize: Callable[[T], Iterable[SENDABLE_TYPES]],
+        serialize: Callable[[T], Iterable[Sendable]],
+        flags: int,
+        copy: Literal[False],
+        *,
+        track: Literal[True],
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> FutureResult[MessageTracker]: ...
+
+    @overload
+    def send_serialized[T](
+        self,
+        msg: T,
+        serialize: Callable[[T], Iterable[Sendable]],
+        flags: int = 0,
+        *,
+        copy: Literal[False],
+        track: Literal[True],
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> FutureResult[MessageTracker]: ...
+
+    @overload
+    def send_serialized[T](
+        self,
+        msg: T,
+        serialize: Callable[[T], Iterable[Sendable]],
         flags: int = 0,
         copy: bool = True,
-        **kwargs: Any,
-    ) -> FutureResult[MessageTracker | None]:
+        *,
+        track: bool = False,
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> FutureResult[MessageTracker | None]: ...
+
+    def send_serialized(
+        self,
+        msg,
+        serialize,
+        flags=0,
+        copy=True,
+        *,
+        track=False,
+        routing_id=None,
+        group=None,
+    ):
         frames = serialize(msg)
-        return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
+        return self.send_multipart(
+            frames,
+            flags=flags,
+            copy=copy,
+            track=track,
+            routing_id=routing_id,
+            group=group,
+        )
 
     @overload
     async def recv_serialized[T](
@@ -749,9 +786,7 @@ class Socket(_BaseSocket):
         copy: bool = True,
     ) -> T: ...
 
-    async def recv_serialized[T](
-        self, deserialize: Callable[[Any], T], flags: int = 0, copy: bool = True
-    ) -> T:
+    async def recv_serialized(self, deserialize, flags=0, copy=True):
         frames = await self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 

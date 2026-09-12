@@ -25,7 +25,7 @@ import sys
 import threading
 import types
 import weakref
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Buffer, Callable, Iterable, Iterator
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -212,8 +212,6 @@ from ._typing import (
     _IntOption,
 )
 
-SENDABLE_TYPES = Sendable
-
 # ── Top-level functions ──────────────────────────────────────────────
 
 
@@ -330,7 +328,7 @@ class _SocketContext[S: _SocketScope]:
             self.socket.disconnect(self.addr)
 
 
-def _copy_received_into(buffer: Any, data: bytes, nbytes: int) -> int:
+def _copy_received_into(buffer: Any, data: Buffer, nbytes: int) -> int:
     view = memoryview(buffer)
     if view.readonly:
         raise TypeError("recv_into() requires a writable buffer")
@@ -338,9 +336,10 @@ def _copy_received_into(buffer: Any, data: bytes, nbytes: int) -> int:
         target = view.cast("B")
     except TypeError as e:
         raise BufferError("recv_into() requires a contiguous buffer") from e
+    source = memoryview(data).cast("B")
     limit = target.nbytes if nbytes == 0 else min(nbytes, target.nbytes)
-    target[: min(len(data), limit)] = data[:limit]
-    return len(data)
+    target[: min(source.nbytes, limit)] = source[:limit]
+    return source.nbytes
 
 
 # ── Socket wrapper ───────────────────────────────────────────────────
@@ -374,14 +373,21 @@ class _SocketOptionDescriptor[T]:
         obj.setsockopt(self.option_code, cast(int | bytes, value))
 
 
-class _SocketOptionsBase:
+class _SocketOwnerContext(Protocol):
+    def _namespace_inproc[T: (str, bytes)](self, endpoint: T) -> T: ...
+
+
+class _SocketOptionsBase[
+    NativeSocketT: (_native.Socket, _native.AsyncSocket),
+    SocketContextT: _SocketOwnerContext,
+]:
     """Base class with socket option descriptors and shared methods."""
 
     # Attributes (subclasses must define these)
     # Concrete subclasses initialize and narrow these private handles. Shared
     # methods never replace them with a different socket or context kind.
-    _sock: _native.Socket | _native.AsyncSocket
-    _context: Context
+    _sock: NativeSocketT
+    _context: SocketContextT
 
     _closed: bool
     _last_endpoint: bytes
@@ -434,7 +440,7 @@ class _SocketOptionsBase:
         return self._closed
 
     @property
-    def context(self) -> Context:
+    def context(self) -> SocketContextT:
         return self._context
 
     @property
@@ -516,7 +522,10 @@ class _SocketOptionsBase:
     get_string = getsockopt_string
 
 
-class _BaseSocket(_SocketOptionsBase):
+class _BaseSocket[
+    NativeSocketT: (_native.Socket, _native.AsyncSocket),
+    SocketContextT: _SocketOwnerContext,
+](_SocketOptionsBase[NativeSocketT, SocketContextT]):
     """Base class for Socket and asyncio.Socket.
 
     Split from _SocketOptionsBase since _ShadowSocket has a smaller API.
@@ -706,14 +715,11 @@ class _SocketMeta(type):
         return False
 
 
-class Socket(_BaseSocket, metaclass=_SocketMeta):
+class Socket(_BaseSocket[_native.Socket, "Context"], metaclass=_SocketMeta):
     """Synchronous ZMQ socket wrapper."""
 
-    _sock: _native.Socket
-    _context: Context
-
     def __init__(self, _sock: _native.Socket, _context: Context) -> None:
-        self._sock = _sock  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._sock = _sock
         self._context = _context
         self._closed = False
         self._last_endpoint = b""
@@ -748,7 +754,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send(
         self,
-        data: SENDABLE_TYPES,
+        data: Sendable,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -760,9 +766,11 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
                 if routing_id is not None:
                     raise ValueError("routing_id and group are mutually exclusive")
                 return self._sock._send_with_group(data, group, flags, copy, track)
-            if routing_id is None:
-                return self._sock.send(data, flags, copy, track)
-            return self._sock._send_with_routing(data, routing_id, flags, copy, track)
+            if routing_id is not None:
+                return self._sock._send_with_routing(
+                    data, routing_id, flags, copy, track
+                )
+            return self._sock.send(data, flags, copy, track)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -784,9 +792,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame: ...
 
-    def recv(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> bytes | Frame:
+    def recv(self, flags=0, copy=True, track=False):
         try:
             if copy:
                 return self._sock.recv(flags)
@@ -799,7 +805,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 
     def send_multipart(
         self,
-        msg_parts: Iterable[SENDABLE_TYPES],
+        msg_parts: Iterable[Sendable],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -813,11 +819,11 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
                 msg_parts, group, flags, copy, track
             )
         try:
-            if routing_id is None:
-                return self._sock.send_multipart(msg_parts, flags, copy, track)
-            return self._sock._send_multipart_with_routing(
-                msg_parts, routing_id, flags, copy, track
-            )
+            if routing_id is not None:
+                return self._sock._send_multipart_with_routing(
+                    msg_parts, routing_id, flags, copy, track
+                )
+            return self._sock.send_multipart(msg_parts, flags, copy, track)
         except _native.ZMQError as e:
             raise error.from_native(e) from None
 
@@ -841,9 +847,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> list[bytes] | list[Frame]: ...
 
-    def recv_multipart(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> list[bytes] | list[Frame]:
+    def recv_multipart(self, flags=0, copy=True, track=False):
         try:
             if copy:
                 return self._sock.recv_multipart(flags)
@@ -856,44 +860,90 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
             raise error.from_native(e) from None
 
     def recv_into(self, buffer: Any, /, *, nbytes: int = 0, flags: int = 0) -> int:
-        return _copy_received_into(buffer, self.recv(flags), nbytes)
+        try:
+            return self._sock.recv_into(buffer, nbytes, flags)
+        except _native.ZMQError as e:
+            raise error.from_native(e) from None
 
     # ── Serialization helpers ────────────────────────────────────────
 
-    def send_string(
-        self, u: str, flags: int = 0, encoding: str = "utf-8"
-    ) -> MessageTracker | None:
-        return self.send(u.encode(encoding), flags)
+    def send_string(self, u: str, flags: int = 0, encoding: str = "utf-8") -> None:
+        return cast(None, self.send(u.encode(encoding), flags))
 
     def recv_string(self, flags: int = 0, encoding: str = "utf-8") -> str:
         return self.recv(flags).decode(encoding)
 
-    def send_json(
-        self, obj: Any, flags: int = 0, **kwargs: Any
-    ) -> MessageTracker | None:
-        return self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags)
+    def send_json(self, obj: Any, flags: int = 0, **kwargs: Any) -> None:
+        return cast(None, self.send(json.dumps(obj, **kwargs).encode("utf-8"), flags))
 
     def recv_json(self, flags: int = 0, **kwargs: Any) -> Any:
         return json.loads(self.recv(flags), **kwargs)
 
-    def send_pyobj(
-        self, obj: Any, flags: int = 0, protocol: int = -1
-    ) -> MessageTracker | None:
-        return self.send(pickle.dumps(obj, protocol), flags)
+    def send_pyobj(self, obj: Any, flags: int = 0, protocol: int = -1) -> None:
+        return cast(None, self.send(pickle.dumps(obj, protocol), flags))
 
     def recv_pyobj(self, flags: int = 0) -> Any:
         return pickle.loads(self.recv(flags))
 
+    @overload
     def send_serialized[T](
         self,
         msg: T,
-        serialize: Callable[[T], Iterable[SENDABLE_TYPES]],
+        serialize: Callable[[T], Iterable[Sendable]],
+        flags: int,
+        copy: Literal[False],
+        *,
+        track: Literal[True],
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> MessageTracker: ...
+
+    @overload
+    def send_serialized[T](
+        self,
+        msg: T,
+        serialize: Callable[[T], Iterable[Sendable]],
+        flags: int = 0,
+        *,
+        copy: Literal[False],
+        track: Literal[True],
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> MessageTracker: ...
+
+    @overload
+    def send_serialized[T](
+        self,
+        msg: T,
+        serialize: Callable[[T], Iterable[Sendable]],
         flags: int = 0,
         copy: bool = True,
-        **kwargs: Any,
-    ) -> MessageTracker | None:
+        *,
+        track: bool = False,
+        routing_id: int | None = None,
+        group: str | None = None,
+    ) -> MessageTracker | None: ...
+
+    def send_serialized(
+        self,
+        msg,
+        serialize,
+        flags=0,
+        copy=True,
+        *,
+        track=False,
+        routing_id=None,
+        group=None,
+    ):
         frames = serialize(msg)
-        return self.send_multipart(frames, flags=flags, copy=copy, **kwargs)
+        return self.send_multipart(
+            frames,
+            flags=flags,
+            copy=copy,
+            track=track,
+            routing_id=routing_id,
+            group=group,
+        )
 
     @overload
     def recv_serialized[T](
@@ -925,9 +975,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
         copy: bool = True,
     ) -> T: ...
 
-    def recv_serialized[T](
-        self, deserialize: Callable[[Any], T], flags: int = 0, copy: bool = True
-    ) -> T:
+    def recv_serialized(self, deserialize, flags=0, copy=True):
         frames = self.recv_multipart(flags=flags, copy=copy)
         return deserialize(frames)
 
@@ -944,7 +992,7 @@ class Socket(_BaseSocket, metaclass=_SocketMeta):
 # ── Shadow socket (sync recv bridge over async handle) ──────────────
 
 
-class _ShadowSocket(_SocketOptionsBase):
+class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
     """Blocking recv bridge over an async socket's native handle.
 
     Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
@@ -1182,7 +1230,7 @@ class _ShadowSocket(_SocketOptionsBase):
 
     def send(
         self,
-        data: SENDABLE_TYPES,
+        data: Sendable,
         flags: int = 0,
         copy: bool = True,
         track: bool = False,
@@ -1207,7 +1255,7 @@ class _ShadowSocket(_SocketOptionsBase):
 
     def send_multipart(
         self,
-        msg_parts: Iterable[SENDABLE_TYPES],
+        msg_parts: Iterable[Sendable],
         flags: int = 0,
         copy: bool = True,
         track: bool = False,

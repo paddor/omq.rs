@@ -727,6 +727,9 @@ impl Socket {
             return Ok(tracker);
         }
         let routing_id = conversions::routing_id_from_pyany(payload);
+        if routing_id != 0 && flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("routing_id send cannot use SNDMORE"));
+        }
         let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(tracker);
@@ -771,6 +774,9 @@ impl Socket {
         copy: bool,
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
+        if flags & crate::constants::SNDMORE != 0 {
+            return Err(PyValueError::new_err("routing_id send cannot use SNDMORE"));
+        }
         let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
         let Some(mut msg) = self.inner.build_or_buffer(bytes, flags) else {
             return Ok(tracker);
@@ -792,12 +798,15 @@ impl Socket {
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
         if matches!(self.inner.socket_type, omq_tokio::SocketType::Radio) {
-            return Err(PyValueError::new_err(
-                "RADIO requires send(..., group=...) or send_multipart(..., group=...)",
-            ));
+            if flags & crate::constants::SNDMORE != 0 {
+                return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
+            }
+            let (msg, tracker) = conversions::radio_message_from_pyiterable(parts, copy, track)?;
+            self.send_message(py, msg)?;
+            return Ok(tracker);
         }
         let _ = flags;
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         self.send_message(py, msg)?;
         Ok(tracker)
     }
@@ -820,7 +829,7 @@ impl Socket {
         if flags & crate::constants::SNDMORE != 0 {
             return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
         }
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         if msg.len() != 1 {
             return Err(PyValueError::new_err(
                 "RADIO group send requires exactly one message part",
@@ -842,7 +851,7 @@ impl Socket {
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
         let _ = flags;
-        let (msg, tracker) = conversions::message_from_pylist(parts, copy, track)?;
+        let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
         self.send_message(py, msg.with_routing_id(routing_id))?;
         Ok(tracker)
     }
@@ -876,6 +885,40 @@ impl Socket {
             self.inner.store_rxbuf(parts);
         }
         Ok(PyBytes::new(py, &head))
+    }
+
+    #[pyo3(signature = (buffer, nbytes = 0, flags = 0))]
+    fn recv_into(
+        &self,
+        py: Python<'_>,
+        buffer: &Bound<'_, PyAny>,
+        nbytes: usize,
+        flags: i32,
+    ) -> PyResult<usize> {
+        let data = if matches!(self.inner.socket_type, omq_tokio::SocketType::Dish) {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            split_dish_message(msg)?.1
+        } else if let Some(head) = self.inner.pop_rxbuf_head() {
+            head
+        } else {
+            let msg = if flags & crate::constants::NOBLOCK != 0 {
+                self.try_recv_message()?
+            } else {
+                self.recv_message(py)?
+            };
+            let mut parts = msg.iter();
+            let head = parts.next().unwrap_or_default();
+            let remainder: Vec<_> = parts.collect();
+            if !remainder.is_empty() {
+                self.inner.store_rxbuf(remainder);
+            }
+            head
+        };
+        conversions::copy_into_pybuffer(buffer, &data, nbytes)
     }
 
     #[pyo3(signature = (flags = 0))]

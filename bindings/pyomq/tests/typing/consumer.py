@@ -2,7 +2,7 @@
 
 import asyncio
 from array import array
-from collections.abc import Buffer, Iterable
+from collections.abc import Buffer, Iterable, Sequence
 from typing import assert_type
 
 import pyomq as zmq
@@ -75,6 +75,11 @@ def sync_api(copy: bool, option: int, buffer: Buffer) -> None:
     assert_type(sock.recv_serialized(decode_frames, 0, False), str)
     assert_type(sock.recv_serialized(decode_dynamic, copy=copy), float)
     assert_type(sock.send_serialized(42, encode), zmq.MessageTracker | None)
+    assert_type(
+        sock.send_serialized(42, encode, copy=False, track=True),
+        zmq.MessageTracker,
+    )
+    assert_type(sock.send_string("typed"), None)
     for data in [
         buffer,
         b"bytes",
@@ -156,6 +161,11 @@ async def async_api(copy: bool) -> None:
     assert_type(await sock.recv_serialized(decode_frames, 0, False), str)
     assert_type(await sock.recv_serialized(decode_dynamic, copy=copy), float)
     assert_type(await sock.send_serialized(42, encode), zmq.MessageTracker | None)
+    assert_type(
+        await sock.send_serialized(42, encode, copy=False, track=True),
+        zmq.MessageTracker,
+    )
+    assert_type(await sock.send_string("typed"), None)
     shadow = zmq.Socket.shadow(sock)
     assert_type(shadow.recv(), bytes)
     assert_type(shadow.recv(copy=False), zmq.Frame)
@@ -174,8 +184,8 @@ def stream_api(sock: zmq.Socket, copy: bool) -> None:
     stream.on_recv(decode_frames, copy=False)
     stream.on_recv(decode_dynamic, copy=copy)
     assert_type(stream.send(b"x"), zmq.MessageTracker | None)
-    stream.send_multipart((part for part in [b"x"]), callback=sent)
+    stream.send_multipart([b"x"], callback=sent)
 
 
-def sent(parts: list[zmq.Sendable], tracker: zmq.MessageTracker | None) -> None:
+def sent(parts: Sequence[zmq.Sendable], tracker: zmq.MessageTracker | None) -> None:
     pass

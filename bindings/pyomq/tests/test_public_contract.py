@@ -98,6 +98,11 @@ def test_recv_into_matches_pyzmq_copy_contract():
         push.send(b"hello")
         assert pull.recv_into(target, nbytes=2) == 5
         assert target[:2] == b"he"
+        storage = bytearray(5)
+        target_view = memoryview(storage)[1:4]
+        push.send(b"world")
+        assert pull.recv_into(target_view) == 5
+        assert storage == b"\x00wor\x00"
 
 
 def test_context_shadow_constructor_contract():
@@ -121,6 +126,16 @@ def test_routing_id_keyword_contract():
         client.connect(endpoint)
         client.send(b"ping")
         request = server.recv(copy=False)
+        reply = zmq.Frame(b"pong")
+        reply.routing_id = request.routing_id
+        with pytest.raises(ValueError, match="cannot use SNDMORE"):
+            server.send(reply, zmq.SNDMORE)
+
+        conflicting = zmq.Frame(b"wrong route")
+        conflicting.routing_id = request.routing_id + 1
+        with pytest.raises(ValueError, match="conflicting routing IDs"):
+            server.send_multipart([reply, conflicting])
+
         server.send_multipart(msg_parts=[b"pong"], routing_id=request.routing_id)
         assert client.recv() == b"pong"
 
@@ -159,7 +174,7 @@ async def test_stream_callbacks_receive_parts_and_tracker():
         assert called == [("default", [b"first"], tracker)]
         assert pull.recv() == b"first"
         tracker = stream.send_multipart(
-            (part for part in [b"second", b"third"]),
+            [b"second", b"third"],
             copy=False,
             track=True,
             callback=lambda parts, tracker: called.append(("override", parts, tracker)),
@@ -178,7 +193,7 @@ async def test_stream_callbacks_receive_parts_and_tracker():
         stream.send(b"fourth", callback=FalseyCallback())
         assert called[-1] == ("falsey", [b"fourth"], None)
         assert pull.recv() == b"fourth"
-        stream.send_multipart(iter([b"fifth"]), callback=FalseyCallback())
+        stream.send_multipart([b"fifth"], callback=FalseyCallback())
         assert called[-1] == ("falsey", [b"fifth"], None)
         assert pull.recv_multipart() == [b"fifth"]
         stream.close()

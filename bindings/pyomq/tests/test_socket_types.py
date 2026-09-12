@@ -276,6 +276,25 @@ def test_radio_dish_udp_with_groups():
     assert bytes(received) == b"cloudy"
     assert received.group == "weather"
 
+    multipart_frame = pyomq.Frame(b"rainy")
+    multipart_frame.group = "weather"
+    radio.send_multipart([multipart_frame])
+    assert dish.recv() == b"rainy"
+
+    overridden_frame = pyomq.Frame(b"windy")
+    overridden_frame.group = "news"
+    radio.send_multipart([overridden_frame], group="weather")
+    overridden = dish.recv(copy=False)
+    assert bytes(overridden) == b"windy"
+    assert overridden.group == "weather"
+
+    other_frame = pyomq.Frame(b"snowy")
+    other_frame.group = "skiing"
+    with pytest.raises(ValueError, match="exactly one message part"):
+        radio.send_multipart([multipart_frame, other_frame])
+    with pytest.raises(ValueError, match="cannot use SNDMORE"):
+        radio.send(multipart_frame, pyomq.SNDMORE)
+
     dish.leave(b"weather")
     radio.close()
     dish.close()

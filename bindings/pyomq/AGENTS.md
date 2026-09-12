@@ -51,6 +51,7 @@ Bench machine: i7-8700B, performance governor, turbo off.
 maturin develop --release
 python scripts/update_perf.py                # full (pyomq + pyzmq)
 python scripts/update_perf.py --impl pyomq   # reuse latest pyzmq baseline
+python scripts/update_perf.py --recv-into-only
 python scripts/update_perf.py --proxy-only --impl pyomq
 python scripts/update_perf.py --chart-only   # regenerate SVG from JSONL
 ```

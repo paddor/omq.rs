@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn panicking_owner_does_not_partially_remove_a_counted_frame() {
+    fn removing_a_counted_frame_does_not_borrow_owner_storage() {
         use std::sync::atomic::AtomicBool;
 
         struct Owner(AtomicBool);
@@ -277,13 +277,12 @@ mod tests {
         ]);
         assert_eq!(parts.byte_len(), 9);
         owner.0.store(true, Ordering::Relaxed);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parts.remove(1)));
-        assert!(result.is_err());
-        owner.0.store(false, Ordering::Relaxed);
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts.byte_len(), 9);
-        assert_eq!(parts.remove(1).as_slice(), b"body");
+        let payload = parts.remove(1);
+        assert_eq!(parts.len(), 1);
         assert_eq!(parts.byte_len(), 5);
+        assert_eq!(payload.len(), 4);
+        owner.0.store(false, Ordering::Relaxed);
+        assert_eq!(payload.as_slice(), b"body");
     }
 
     #[test]

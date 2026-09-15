@@ -128,7 +128,7 @@ impl Payload {
             PayloadInner::Empty => 0,
             PayloadInner::Inline { len, .. } => *len as usize,
             PayloadInner::Single(b) => b.len(),
-            PayloadInner::Shared(owner) => owner.as_ref().len(),
+            PayloadInner::Shared(owner) => owner.len(),
         }
     }
 

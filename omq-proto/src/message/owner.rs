@@ -6,7 +6,8 @@ use std::sync::Arc;
 ///
 /// Unlike `Bytes::from_owner`, constructing a payload from this owner needs no
 /// new owner allocation. A bounded pool can override `release` to reclaim its
-/// unique slot. Payload bytes must remain unchanged while borrowed or shared.
+/// unique slot. Payload bytes and their length must remain unchanged while
+/// borrowed or shared. The payload captures the length at construction.
 pub trait PayloadOwner: AsRef<[u8]> + Send + Sync + 'static {
     /// Release one payload reference, not necessarily the last reference.
     ///
@@ -21,23 +22,35 @@ pub trait PayloadOwner: AsRef<[u8]> + Send + Sync + 'static {
 }
 
 #[derive(Clone)]
-pub(super) struct SharedOwner(Option<Arc<dyn PayloadOwner>>);
+pub(super) struct SharedOwner {
+    owner: Option<Arc<dyn PayloadOwner>>,
+    len: usize,
+}
 
 impl SharedOwner {
     pub(super) fn new(owner: Arc<dyn PayloadOwner>) -> Self {
-        Self(Some(owner))
+        let len = owner.as_ref().as_ref().len();
+        Self {
+            owner: Some(owner),
+            len,
+        }
+    }
+
+    #[inline]
+    pub(super) fn len(&self) -> usize {
+        self.len
     }
 }
 
 impl AsRef<[u8]> for SharedOwner {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_deref().expect("live payload owner").as_ref()
+        self.owner.as_deref().expect("live payload owner").as_ref()
     }
 }
 
 impl Drop for SharedOwner {
     fn drop(&mut self) {
-        self.0.take().expect("live payload owner").release();
+        self.owner.take().expect("live payload owner").release();
     }
 }
 
@@ -60,6 +73,38 @@ mod tests {
     impl PayloadOwner for Owner {
         fn release(self: Arc<Self>) {
             self.releases.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn length_queries_and_clones_do_not_borrow_owner_storage() {
+        struct CountedOwner {
+            bytes: Vec<u8>,
+            borrows: Arc<AtomicUsize>,
+        }
+        impl AsRef<[u8]> for CountedOwner {
+            fn as_ref(&self) -> &[u8] {
+                self.borrows.fetch_add(1, Ordering::Relaxed);
+                &self.bytes
+            }
+        }
+        impl PayloadOwner for CountedOwner {}
+
+        for size in [0, 1, 128, 8192] {
+            let borrows = Arc::new(AtomicUsize::new(0));
+            let payload = Payload::from_shared_owner(Arc::new(CountedOwner {
+                bytes: vec![7; size],
+                borrows: borrows.clone(),
+            }));
+            assert_eq!(borrows.load(Ordering::Relaxed), 1);
+            for _ in 0..32 {
+                assert_eq!(payload.len(), size);
+                assert_eq!(payload.is_empty(), size == 0);
+                assert_eq!(payload.clone().len(), size);
+            }
+            assert_eq!(borrows.load(Ordering::Relaxed), 1);
+            assert_eq!(payload.as_slice(), vec![7; size]);
+            assert_eq!(borrows.load(Ordering::Relaxed), 2);
         }
     }
 

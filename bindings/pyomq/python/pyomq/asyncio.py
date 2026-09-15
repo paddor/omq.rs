@@ -864,17 +864,8 @@ class Poller:
         return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
 
 
-class Context(_SyncContext):
+class Context(_SyncContext[Socket]):
     """Async context for creating ZMQ sockets."""
-
-    # Preserve the public runtime inheritance while replacing the sync
-    # constructor, native storage, and socket factory with async equivalents.
-    _socket_class: type | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
-    _ctx: _native.AsyncContext
-    _is_shadow: bool
-    _closed: bool
-    _sockets: weakref.WeakSet[Socket]
-    _ctx_id: int
 
     def __init__(
         self,
@@ -901,10 +892,10 @@ class Context(_SyncContext):
                 self._ctx = _shadow_ctx._ctx
             self._is_shadow = True
         else:
-            self._ctx = _native.AsyncContext(io_threads)  # pyright: ignore[reportIncompatibleVariableOverride]
+            self._ctx = _native.AsyncContext(io_threads)
             self._is_shadow = False
         self._closed = False
-        self._sockets = weakref.WeakSet()  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._sockets = weakref.WeakSet()
         self._ctx_id = (
             _shadow_ctx._ctx_id if _shadow_ctx is not None else next(_next_ctx_id)
         )
@@ -913,25 +904,10 @@ class Context(_SyncContext):
     def closed(self) -> bool:
         return self._closed
 
-    @overload
-    def socket(
-        self, socket_type: int, socket_class: None = None, **kwargs: Any
-    ) -> Socket: ...
-
-    @overload
-    def socket[S: Socket](
-        self, socket_type: int, socket_class: type[S], **kwargs: Any
-    ) -> S: ...
-
-    def socket(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        socket_type: int,
-        socket_class: type[Socket] | None = None,
-        **kwargs: Any,
-    ) -> Socket:  # ty: ignore
-        native = self._ctx.socket(socket_type)
+    def _new_socket(self, socket_type, socket_class):
+        native = cast(_native.AsyncContext, self._ctx).socket(socket_type)
         cls = socket_class or Socket
-        s = object.__new__(cls)
+        s = cast(Any, object.__new__(cls))
         s._sock = native
         s._context = self
         s._closed = False
@@ -940,7 +916,6 @@ class Context(_SyncContext):
         s._binds = []
         s._connects = []
         s._init_socket_state(native, self)
-        self._sockets.add(s)
         return s
 
     @classmethod
@@ -987,7 +962,5 @@ class Context(_SyncContext):
         self.term()
         return False
 
-
-Context._socket_class = Socket
 
 __all__ = ["Context", "Poller", "Socket"]

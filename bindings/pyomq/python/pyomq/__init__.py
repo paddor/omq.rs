@@ -708,7 +708,7 @@ class _SocketMeta(type):
         return False
 
 
-class Socket(_BaseSocket[_native.Socket, "Context"], metaclass=_SocketMeta):
+class Socket(_BaseSocket[_native.Socket, "Context[Socket]"], metaclass=_SocketMeta):
     """Synchronous ZMQ socket wrapper."""
 
     def __init__(self, _sock: _native.Socket, _context: Context) -> None:
@@ -985,7 +985,7 @@ class Socket(_BaseSocket[_native.Socket, "Context"], metaclass=_SocketMeta):
 # ── Shadow socket (sync recv bridge over async handle) ──────────────
 
 
-class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
+class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context[Socket]"]):
     """Blocking recv bridge over an async socket's native handle.
 
     Returned by Socket.shadow() when given a pyomq.asyncio.Socket.
@@ -1373,24 +1373,32 @@ class _ContextMeta(type):
         cls._instance = None
 
 
-class Context(metaclass=_ContextMeta):
+class Context[SocketT: _BaseSocket[Any, Any]](metaclass=_ContextMeta):
     """Synchronous ZMQ context."""
 
     _instance: Context | None
     _instance_lock: threading.Lock
-    _socket_class: type[Socket] | None = None  # set after Socket is defined
-    _ctx: _native.Context
+    _ctx: _native.Context | _native.AsyncContext
     _is_shadow: bool
     _closed: bool
-    _sockets: weakref.WeakSet[Socket]
+    _sockets: weakref.WeakSet[SocketT]
     _ctx_id: int
+
+    @overload
+    def __init__(self: Context[Socket], io_threads: int = 1): ...
+
+    @overload
+    def __init__(self: Context[Socket], io_threads: Context[Any], /): ...
+
+    @overload
+    def __init__(self: Context[Socket], *, shadow: Context[Any] | int): ...
 
     def __init__(
         self,
-        io_threads: int | Context = 1,
-        shadow: Context | int = 0,
+        io_threads: int | Context[Any] = 1,
+        shadow: Context[Any] | int = 0,
         *,
-        _shadow_ctx: Context | None = None,
+        _shadow_ctx: Context[Any] | None = None,
     ) -> None:
         if isinstance(io_threads, Context):
             if shadow != 0 or _shadow_ctx is not None:
@@ -1423,9 +1431,6 @@ class Context(metaclass=_ContextMeta):
         # user endpoint unchanged so LAST_ENDPOINT and errors match input.
         return endpoint
 
-    def __class_getitem__(cls, item: Any) -> type[Context]:
-        return cls
-
     @property
     def closed(self) -> bool:
         return self._closed
@@ -1433,36 +1438,36 @@ class Context(metaclass=_ContextMeta):
     @overload
     def socket(
         self, socket_type: int, socket_class: None = None, **kwargs: Any
-    ) -> Socket: ...
+    ) -> SocketT: ...
 
     @overload
-    def socket[S: Socket](
+    def socket[S: _BaseSocket[Any, Any]](
         self, socket_type: int, socket_class: type[S], **kwargs: Any
     ) -> S: ...
 
-    def socket(
-        self,
-        socket_type: int,
-        socket_class: type[Socket] | None = None,
-        **kwargs: Any,
-    ) -> Socket:
-        native = self._ctx.socket(socket_type)
+    def socket(self, socket_type, socket_class=None, **kwargs):
+        s = self._new_socket(socket_type, socket_class)
+        self._sockets.add(s)
+        return s
+
+    def _new_socket(self, socket_type, socket_class):
+        native = cast(_native.Context, self._ctx).socket(socket_type)
         cls = socket_class or Socket
-        s = object.__new__(cls)
+        s = cast(Any, object.__new__(cls))
         s._sock = native
         s._context = self
         s._closed = False
         s._last_endpoint = b""
         s._pid = os.getpid()
-        self._sockets.add(s)
         return s
 
     @classmethod
-    def shadow(cls, address: Context | int) -> Self:
+    def shadow(cls, address: Context[Any] | int) -> Self:
+        context_class = cast(Any, cls)
         if isinstance(address, Context):
-            return cls(_shadow_ctx=address)
+            return context_class(_shadow_ctx=address)
         if isinstance(address, int):
-            return cls(_shadow_ctx=cls.instance())
+            return context_class(_shadow_ctx=cls.instance())
         raise TypeError(f"expected Context or int, got {type(address).__name__}")
 
     def share_key(self) -> int:
@@ -1484,7 +1489,7 @@ class Context(metaclass=_ContextMeta):
     def instance(cls, io_threads: int = 1) -> Self:
         with cls._instance_lock:
             if cls._instance is None or cls._instance._closed:
-                cls._instance = cls(io_threads)
+                cls._instance = cast(Any, cls)(io_threads)
             return cast(Self, cls._instance)
 
     def term(self) -> None:
@@ -1520,9 +1525,6 @@ class Context(metaclass=_ContextMeta):
     ) -> bool:
         self.term()
         return False
-
-
-Context._socket_class = Socket
 
 
 # ── Poller ───────────────────────────────────────────────────────────

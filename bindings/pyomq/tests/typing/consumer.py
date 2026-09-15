@@ -18,7 +18,7 @@ class AsyncSocket(azmq.Socket):
     pass
 
 
-class SyncContext(zmq.Context):
+class SyncContext(zmq.Context[zmq.Socket]):
     pass
 
 
@@ -45,9 +45,10 @@ def encode(value: int) -> Iterable[zmq.Sendable]:
 def sync_api(copy: bool, option: int, buffer: Buffer) -> None:
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PAIR)
+    assert_type(ctx, zmq.Context[zmq.Socket])
     assert_type(sock, zmq.Socket)
     assert_type(ctx.socket(zmq.PAIR, SyncSocket), SyncSocket)
-    assert_type(zmq.Context(shadow=ctx), zmq.Context)
+    assert_type(zmq.Context(shadow=ctx), zmq.Context[zmq.Socket])
     assert_type(SyncContext.instance(), SyncContext)
     assert_type(SyncContext.from_share_key(1), SyncContext)
     with SyncContext() as subclass:
@@ -56,7 +57,7 @@ def sync_api(copy: bool, option: int, buffer: Buffer) -> None:
         assert_type(sub_socket, SyncSocket)
         assert_type(sub_socket.underlying, SyncSocket)
         assert_type(zmq.Socket.shadow(sub_socket), SyncSocket)
-    assert_type(sock.context, zmq.Context)
+    assert_type(sock.context, zmq.Context[zmq.Socket])
     with sock.bind(b"inproc://typed") as bound:
         assert_type(bound, zmq.Socket)
     with sock.connect(b"inproc://typed") as connected:

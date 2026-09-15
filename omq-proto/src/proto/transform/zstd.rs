@@ -327,11 +327,10 @@ impl ZstdDecoder {
     }
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        let mut out = Message::new();
-        let parts = msg.into_parts_payload();
+        let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
         let mut budget_left = self.max_message_size;
-        for (idx, part) in parts.into_iter().enumerate() {
+        for (idx, part) in parts.iter_mut().enumerate() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
@@ -343,9 +342,9 @@ impl ZstdDecoder {
                 SENTINEL_PLAIN => {
                     let body_len = bytes.len() - 4;
                     take_budget(&mut budget_left, body_len)?;
-                    out.push_part_payload(Payload::from_bytes(bytes.slice(4..)));
+                    *part = Payload::from_bytes(bytes.slice(4..));
                 }
-                ZSTD_MAGIC => out.push_part_payload(self.decode_zstd(&bytes, &mut budget_left)?),
+                ZSTD_MAGIC => *part = self.decode_zstd(&bytes, &mut budget_left)?,
                 ZDICT_MAGIC => {
                     if multipart || idx != 0 {
                         return Err(Error::Protocol(
@@ -366,7 +365,7 @@ impl ZstdDecoder {
                 _ => return Err(Error::Protocol("unknown zstd sentinel".into())),
             }
         }
-        Ok(Some(out))
+        Ok(Some(Message::from_parts(parts)))
     }
 
     fn decode_zstd(&mut self, bytes: &Bytes, budget: &mut Option<usize>) -> Result<Payload> {
@@ -417,6 +416,39 @@ fn decompress_err(e: &zrip::DecompressError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
+        let pool = crate::MessagePool::new(1, 4);
+        let plain = Message::multipart([
+            Bytes::from_static(b"small"),
+            Bytes::new(),
+            Bytes::from(vec![7; 2048]),
+        ]);
+        let wire = ZstdEncoder::new().encode(&plain).unwrap().remove(0);
+        let wire = pool.multipart(wire.iter());
+        let crate::message::MessageInner::Multi(parts) = &wire.inner else {
+            panic!("multipart")
+        };
+        let pointer = parts.as_ptr();
+        assert_ne!(wire.byte_len(), plain.byte_len());
+        let decoded = ZstdDecoder::new().decode(wire).unwrap().unwrap();
+        let crate::message::MessageInner::Multi(parts) = &decoded.inner else {
+            panic!("multipart")
+        };
+        assert_eq!(parts.as_ptr(), pointer);
+        assert_eq!(
+            decoded.iter().collect::<Vec<_>>(),
+            plain.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(decoded.byte_len(), plain.byte_len());
+        drop(decoded);
+        let reused = pool.multipart(["a", "", "b"]);
+        let crate::message::MessageInner::Multi(parts) = &reused.inner else {
+            panic!("multipart")
+        };
+        assert_eq!(parts.as_ptr(), pointer);
+    }
 
     fn trained_dict() -> Bytes {
         let samples: Vec<&[u8]> = (0..200)

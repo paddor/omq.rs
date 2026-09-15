@@ -79,6 +79,7 @@ fn closed_peer_pipe_is_not_a_closed_socket() {
 #[test]
 fn full_peer_retry_preserves_all_frames_and_metadata() {
     let large = Bytes::from(vec![0x5a; 4096]);
+    let pool = omq_proto::MessagePool::new(4, 4);
     for identity in [Bytes::new(), Bytes::from_static(b"id")] {
         let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
         let mut send = IdentitySend::new(SocketType::Peer, &options);
@@ -94,6 +95,7 @@ fn full_peer_retry_preserves_all_frames_and_metadata() {
             Message::with_prefix(Bytes::new(), Message::single("tiny")),
             Message::with_prefix(Bytes::new(), Message::single(large.clone())),
             Message::multipart([Bytes::new(), large.clone(), Bytes::new()]),
+            pool.multipart([Bytes::new(), large.clone(), Bytes::new()]),
         ];
         for body in bodies {
             for routing_id in [None, Some(42)] {

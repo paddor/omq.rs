@@ -174,25 +174,25 @@ be added incrementally.
 `Payload` and `Message` are small-value enums optimized for common single-part
 traffic.
 
-```rust
-enum PayloadInner {
-    Empty,
-    Inline { len: u8, data: [u8; 62] },
-    Single(Bytes),
-}
-
-enum MessageInner {
-    Empty,
-    Inline { len: u8, data: [u8; 71] },
-    Single(Payload),
-    Multi(Vec<Payload>),
-}
-```
-
 `Payload` is 64 B and stores up to 62 B inline. `Message` is 64 B and stores up
 to 55 B inline, avoiding heap allocation and refcount traffic for small
-messages. Larger single-part messages use `Bytes`; multipart messages use
-`Vec<Payload>`.
+messages. Larger payloads use `Bytes` or an existing `Arc<PayloadOwner>`.
+Shared owners avoid allocating a new owner block when constructing or cloning
+a payload. Borrowing remains allocation-free; explicitly converting a shared
+owner to `Bytes` allocates an adapter, without copying its contents. Empty
+payloads retain their explicitly supplied owners too.
+
+Multipart messages own a frame table. An optional `MessagePool` preallocates
+and reuses these tables, including through routing and prefix changes. Its
+cache is bounded; exhaustion allocates normally and oversized tables are not
+retained. It does not bound all in-flight messages or their payload bytes.
+Applications needing bounded record storage must separately manage owner
+lifetimes and admission. Table return drops payload owners before taking the
+cache lock, so application release callbacks do not run under that lock.
+`Options::recv_message_pool` opts native byte-stream sockets into the same
+table reuse across their connections. It is disabled by default; inproc already
+transfers owned messages directly. A multipart table caches its total payload
+length and invalidates that sum whenever the table is mutably accessed.
 
 ### Receive buffers
 

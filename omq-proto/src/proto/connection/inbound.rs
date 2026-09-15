@@ -303,9 +303,9 @@ impl Connection {
             self.messages.push_back(msg);
         } else {
             self.pending_parts.push(payload);
-            let parts = std::mem::take(&mut self.pending_parts);
+            let parts = self.pending_parts.take();
             self.pending_size = 0;
-            let msg = Message::from_payloads_vec(parts);
+            let msg = Message::from_parts(parts);
             self.messages.push_back(msg);
         }
         Ok(true)

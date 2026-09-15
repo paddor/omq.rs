@@ -27,7 +27,9 @@ pub mod type_state;
 pub use endpoint::IpcPath;
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
 pub use error::{Error, Result, TrySendError};
-pub use message::{Frame, FrameFlags, Message, MessageIter, PartCountError, generated_identity};
+pub use message::{
+    Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, generated_identity,
+};
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
     PeerCommandKind, PeerIdent, PeerInfo,

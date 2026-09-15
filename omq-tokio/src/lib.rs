@@ -39,8 +39,8 @@ pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, M
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 pub use omq_proto::{
     Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, KeepAlive, MechanismConfig,
-    MechanismSetup, Message, MessageIter, OnMute, Options, PartCountError, ReconnectPolicy, Result,
-    SocketType, TrySendError, is_compatible,
+    MechanismSetup, Message, MessageIter, MessagePool, OnMute, Options, PartCountError,
+    ReconnectPolicy, Result, SocketType, TrySendError, is_compatible,
 };
 
 // Sub-modules of omq_proto are re-exported under their original

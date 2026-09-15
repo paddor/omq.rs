@@ -108,7 +108,7 @@ impl TypeState {
         }
         parts.remove(0);
         self.req_awaiting_reply = false;
-        Some(Message::from_payloads_vec(parts))
+        Some(Message::from_parts(parts))
     }
 
     /// Transform the incoming message per the socket type. Returns:
@@ -126,7 +126,7 @@ impl TypeState {
                 }
                 parts.remove(0);
                 self.req_awaiting_reply = false;
-                Ok(Some(Message::from_payloads_vec(parts)))
+                Ok(Some(Message::from_parts(parts)))
             }
             SocketType::Dish => {
                 if msg.len() != 2 {
@@ -146,7 +146,7 @@ impl TypeState {
                 let mut parts = parts;
                 parts.drain(..=delim_idx);
                 self.rep_envelope = Some(envelope);
-                Ok(Some(Message::from_payloads_vec(parts)))
+                Ok(Some(Message::from_parts(parts)))
             }
             _ => Ok(Some(msg)),
         }

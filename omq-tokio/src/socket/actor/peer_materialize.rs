@@ -322,6 +322,9 @@ fn build_codec(
     leftover: bytes::Bytes,
 ) -> Option<ZmtpConnection> {
     let mut codec = ZmtpConnection::new(connection_config(socket, stream, peer_ident, is_server));
+    if let Some(pool) = &socket.options.recv_message_pool {
+        codec = codec.recv_message_pool(pool);
+    }
     if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
         return None;
     }

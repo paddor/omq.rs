@@ -98,6 +98,11 @@ pub struct Options {
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
+    /// Optional native byte-stream multipart frame-table cache. Shared across
+    /// this socket's connections; payload bytes and in-flight messages are not
+    /// bounded by this cache. Exhaustion allocates normally. Default: disabled.
+    pub recv_message_pool: Option<crate::message::MessagePool>,
+
     /// Per-connection receive token bucket. `None` disables it.
     ///
     /// The tokio byte-stream backend counts complete application messages
@@ -330,6 +335,7 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            recv_message_pool: None,
             recv_rate_limit: None,
             recv_ip_rate_limit: None,
             linger: Some(Duration::ZERO),
@@ -493,6 +499,13 @@ impl Options {
     /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Recycle native byte-stream receive frame tables through this bounded pool.
+    #[must_use]
+    pub fn recv_message_pool(mut self, pool: crate::message::MessagePool) -> Self {
+        self.recv_message_pool = Some(pool);
         self
     }
 

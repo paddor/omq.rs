@@ -128,6 +128,7 @@ pub enum RecvSink {
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     Rep(RepRecvSink),
     Server(ServerRecvSink),
+    Peer(crate::socket::peer_recv::PeerRecvSink),
 }
 
 /// REP's latency receive path: perform identity/envelope handling in the
@@ -278,6 +279,7 @@ impl std::fmt::Debug for RecvSink {
             Self::Authenticated(_) => f.debug_tuple("Authenticated").finish_non_exhaustive(),
             Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
             Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
+            Self::Peer(_) => f.debug_tuple("Peer").finish_non_exhaustive(),
             Self::Server(server) => f
                 .debug_struct("Server")
                 .field("routing_id", &server.routing_id)
@@ -373,7 +375,7 @@ impl RecvSink {
             Self::Authenticated(sink) => sink.peer_properties = Some(peer_properties),
             Self::Rep(rep) => rep.sink.set_peer_properties(peer_properties),
             Self::Server(server) => server.sink.set_peer_properties(peer_properties),
-            Self::Channel(_) | Self::Yring(_) | Self::Conflate(_) => {}
+            Self::Channel(_) | Self::Yring(_) | Self::Conflate(_) | Self::Peer(_) => {}
         }
     }
 
@@ -407,7 +409,7 @@ impl RecvSink {
 
     fn is_yring(&self) -> bool {
         match self {
-            Self::Yring(_) => true,
+            Self::Yring(_) | Self::Peer(_) => true,
             Self::Server(server) => server.sink.is_yring(),
             _ => false,
         }
@@ -426,6 +428,7 @@ impl RecvSink {
 
     async fn try_send_plain(&mut self, m: Message) -> Option<Message> {
         match self {
+            Self::Peer(_) => unreachable!("PEER lanes never fall back through the actor"),
             Self::Channel(pipe) => {
                 let _ = pipe.send(m).await;
                 None
@@ -467,6 +470,11 @@ impl RecvSink {
 
     async fn send_plain(&mut self, m: Message) -> bool {
         match self {
+            Self::Peer(sink) => {
+                let alive = sink.push(m);
+                sink.flush();
+                alive
+            }
             Self::Channel(pipe) => pipe.send(m).await.is_ok(),
             Self::Yring(sink) => {
                 let mut msg = m;
@@ -523,7 +531,7 @@ impl RecvSink {
         }
     }
 
-    async fn send(&mut self, m: Message) -> bool {
+    pub(crate) async fn send(&mut self, m: Message) -> bool {
         if let Self::Rep(rep) = self {
             let Some((envelope, body)) = crate::routing::split_rep_request(&m) else {
                 return true;
@@ -548,6 +556,9 @@ impl RecvSink {
         pending_yring_flush: &mut bool,
     ) -> bool {
         if defer_yring_flush {
+            if let Self::Peer(sink) = self {
+                return sink.push(m);
+            }
             if let Self::Yring(sink) = self {
                 return sink.send_deferred(m, pending_yring_flush).await;
             }
@@ -563,12 +574,31 @@ impl RecvSink {
     }
 
     fn flush_deferred(&mut self, pending_yring_flush: &mut bool) {
-        if let Self::Yring(sink) = self {
+        if let Self::Peer(sink) = self {
+            sink.flush();
+        } else if let Self::Yring(sink) = self {
             sink.flush_pending(pending_yring_flush);
         } else if let Self::Server(server) = self
             && let Self::Yring(sink) = server.sink.as_mut()
         {
             sink.flush_pending(pending_yring_flush);
+        }
+    }
+
+    pub(crate) fn peer_blocked(&self) -> bool {
+        matches!(self, Self::Peer(sink) if sink.blocked())
+    }
+
+    pub(crate) fn retry_peer_pending(&mut self) -> bool {
+        match self {
+            Self::Peer(sink) => sink.retry_pending(),
+            _ => true,
+        }
+    }
+
+    pub(crate) async fn peer_space_ready(&mut self) {
+        if let Self::Peer(sink) = self {
+            sink.ready().await;
         }
     }
 }
@@ -675,6 +705,9 @@ pub enum PeerDriverCommand {
     /// Allow application messages to flow after the socket actor has accepted
     /// this peer as ready.
     ActivateDataPlane,
+    /// Install a socket-selected receive sink before activating application
+    /// traffic. Used for identity-routed PEER lanes after handshake.
+    ActivateWithRecvSink(RecvSink),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
     /// Initiate clean shutdown.
@@ -1229,6 +1262,7 @@ where
             .unwrap_or(0);
         let mut hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
         let mut hb_ping_sent = false;
+        let mut was_recv_blocked = false;
 
         loop {
             if handshake_deadline.is_some() && connection.is_ready() {
@@ -1256,6 +1290,7 @@ where
                     match handle_pre_activation_inbox_command(
                         cmd,
                         &mut connection,
+                        &mut recv_direct,
                     )? {
                         PreActivationStep::Continue => {}
                         PreActivationStep::Activate => break,
@@ -1310,7 +1345,9 @@ where
             loop {
                 match inbox.try_recv() {
                     Ok(cmd) => {
-                        if handle_inbox_command(Some(cmd), &mut connection)? == DriverStep::Close {
+                        if handle_inbox_command(Some(cmd), &mut connection, &mut recv_direct)?
+                            == DriverStep::Close
+                        {
                             return Ok(());
                         }
                     }
@@ -1399,6 +1436,13 @@ where
             let want_write =
                 !pending_write.is_empty() || connection.has_pending_transmit() || !eq.is_empty();
             let can_accept_data = outbound_work_idle(&pending_write, &eq, &connection, &outbound);
+            let recv_blocked = recv_direct.as_ref().is_some_and(RecvSink::peer_blocked);
+            // A PONG can be behind application bytes we intentionally stopped
+            // reading. Local backpressure is not evidence of a dead peer.
+            if recv_blocked || was_recv_blocked {
+                last_input = Instant::now();
+            }
+            was_recv_blocked = recv_blocked;
 
             tokio::select! {
                 biased;
@@ -1410,7 +1454,7 @@ where
                 }
 
                 cmd = inbox.recv() => {
-                    if handle_inbox_command(cmd, &mut connection)? == DriverStep::Close {
+                    if handle_inbox_command(cmd, &mut connection, &mut recv_direct)? == DriverStep::Close {
                         return Ok(());
                     }
                 },
@@ -1438,7 +1482,9 @@ where
                     );
                 }
 
-                res = reader.read_buf(&mut read_buf) => {
+                () = async { recv_direct.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
+
+                res = reader.read_buf(&mut read_buf), if !recv_blocked => {
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
@@ -1532,7 +1578,13 @@ where
                 // peer has no data to send, so last_input stays at
                 // handshake time until the first PONG arrives.
                 () = sleep_until_opt(hb_deadline), if hb_deadline.is_some() => {
-                    if hb_ping_sent && last_input.elapsed() > hb_timeout {
+                    if recv_blocked && !can_accept_data {
+                        // Keep liveness traffic when writable, but never queue
+                        // more PINGs behind a stalled outbound write.
+                        hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
+                        continue;
+                    }
+                    if !recv_blocked && hb_ping_sent && last_input.elapsed() > hb_timeout {
                         return Err(Error::Timeout);
                     }
                     let ping = Command::Ping {
@@ -1606,6 +1658,14 @@ async fn drain_decoded_messages(
     peer_id: u64,
     rate_limiters: ReceiveRateLimiters<'_>,
 ) -> Result<DriverStep> {
+    if let Some(sink) = recv_direct.as_mut() {
+        if !sink.retry_peer_pending() {
+            return Ok(DriverStep::Close);
+        }
+        if sink.peer_blocked() {
+            return Ok(DriverStep::Continue);
+        }
+    }
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
     let mut recv_batch_time = None;
@@ -1651,6 +1711,10 @@ async fn drain_decoded_messages(
             return Ok(DriverStep::Close);
         }
         let budget_remains = budget.account(msg_bytes);
+        if recv_direct.as_ref().is_some_and(RecvSink::peer_blocked) {
+            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+            return Ok(DriverStep::Continue);
+        }
         let time_check = budget.msgs().is_multiple_of(32);
         if !budget_remains
             || (time_check
@@ -1730,9 +1794,14 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
 fn handle_pre_activation_inbox_command(
     cmd: Option<PeerDriverCommand>,
     connection: &mut Connection,
+    recv_direct: &mut Option<RecvSink>,
 ) -> Result<PreActivationStep> {
     match cmd {
         Some(PeerDriverCommand::ActivateDataPlane) => Ok(PreActivationStep::Activate),
+        Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => {
+            *recv_direct = Some(sink);
+            Ok(PreActivationStep::Activate)
+        }
         Some(PeerDriverCommand::SendCommand(c)) => {
             connection.send_command(&c)?;
             Ok(PreActivationStep::Continue)
@@ -1744,9 +1813,13 @@ fn handle_pre_activation_inbox_command(
 fn handle_inbox_command(
     cmd: Option<PeerDriverCommand>,
     connection: &mut Connection,
+    _recv_direct: &mut Option<RecvSink>,
 ) -> Result<DriverStep> {
     match cmd {
         Some(PeerDriverCommand::ActivateDataPlane) => Ok(DriverStep::Continue),
+        Some(PeerDriverCommand::ActivateWithRecvSink(_)) => Err(Error::Protocol(
+            "receive sink cannot change after activation".into(),
+        )),
         Some(PeerDriverCommand::SendCommand(c)) => {
             connection.send_command(&c)?;
             Ok(DriverStep::Continue)
@@ -4105,6 +4178,63 @@ mod tests {
         assert!(push.is_ready());
         assert!(pull.is_ready());
         (push, pull)
+    }
+
+    #[tokio::test]
+    async fn full_peer_queue_bounds_pending_delivery_and_leaves_decoder_remainder_in_place() {
+        let (mut sender, mut connection) = ready_push_pull_connections();
+        for _ in 0..100 {
+            sender
+                .send_message(&Message::single(Bytes::from(vec![0; 512])))
+                .unwrap();
+        }
+        let wire = drain_transmit(&mut sender);
+        assert!(wire.len() < READ_BUF_MAX);
+        connection.handle_input(Bytes::from(wire)).unwrap();
+        let mut limits = crate::PeerRecvConfig::new(1);
+        limits.max_messages_per_lane = 16;
+        let (mut routes, mut receivers) =
+            crate::socket::peer_recv::PeerRecvRoutes::new(limits, 16).unwrap();
+        let sink = routes
+            .register(Bytes::from_static(b"peer"), CancellationToken::new())
+            .unwrap();
+        let mut sink = Some(RecvSink::Peer(sink));
+        let (events, _rx) = mpsc::channel(1);
+        for _ in 0..8 {
+            assert_eq!(
+                drain_decoded_messages(
+                    &mut connection,
+                    &mut None,
+                    ReceiveProfile::Throughput,
+                    &mut sink,
+                    &events,
+                    0,
+                    ReceiveRateLimiters {
+                        connection: &mut None,
+                        ip: None
+                    },
+                )
+                .await
+                .unwrap(),
+                DriverStep::Continue
+            );
+            assert!(sink.as_ref().unwrap().peer_blocked());
+        }
+        let mut queued = Vec::new();
+        assert_eq!(
+            receivers[0].try_recv_many_into(100, &mut queued).unwrap(),
+            16
+        );
+        // Only one additional message left the decoder for pending admission.
+        // Repeated driver turns under backpressure consume no further input.
+        let mut remaining = 0;
+        let mut bytes = 0;
+        while let Some(message) = connection.poll_message() {
+            remaining += 1;
+            bytes += message.max_message_size_len();
+            assert!(remaining <= 100 && bytes < READ_BUF_MAX);
+        }
+        assert_eq!(remaining, 83);
     }
 
     fn feed_fragmented_input(connection: &mut Connection, wire: &Bytes, end: usize) {

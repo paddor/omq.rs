@@ -29,6 +29,8 @@ use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
 
+mod peer;
+
 enum SendRetry {
     Full(Message, Option<Arc<StateSignal>>),
 }
@@ -58,7 +60,10 @@ impl PeerTarget {
                 Err(tokio::sync::mpsc::error::TrySendError::Full(PeerDriverData::SendMessage(
                     m,
                 ))) => Err(SendPipeError::Full(m)),
-                Err(_) => Err(SendPipeError::Closed(Message::default())),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(
+                    PeerDriverData::SendMessage(m),
+                )) => Err(SendPipeError::Closed(m)),
+                Err(_) => unreachable!("message send cannot return encoded data"),
             },
         }
     }
@@ -75,7 +80,7 @@ impl PeerTarget {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.is_empty(),
             Self::Direct(target) => target.is_empty(),
-            Self::Inbox(_) => true,
+            Self::Inbox(tx) => tx.capacity() == tx.max_capacity(),
         }
     }
 }
@@ -84,10 +89,16 @@ impl PeerTarget {
 pub(crate) struct Submitter {
     inner: Arc<Mutex<IdentityInner>>,
     router_mandatory: bool,
+    peer: Option<Arc<peer::PeerRoutes>>,
+    lanes: peer::SenderLanes,
 }
 
 impl Submitter {
     pub(crate) fn shutdown(&self) {
+        if let Some(peer) = &self.peer {
+            peer.shutdown();
+            return;
+        }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.closed = true;
         g.peers.clear();
@@ -98,6 +109,9 @@ impl Submitter {
         &self,
         mut msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        if let Some(peer) = &self.peer {
+            return peer.try_send(msg, self.router_mandatory, &self.lanes);
+        }
         let Some(identity) = msg.part_slice(0) else {
             return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
         };
@@ -146,28 +160,46 @@ impl Submitter {
             return Err(Error::Unroutable);
         }
         let identity = msg.pop_front_payload().expect("nonempty message");
-
+        let mut retry = self.try_send_to(identity.as_slice(), msg)?;
         loop {
-            let retry = self.try_send_to(identity.as_slice(), msg)?;
             match retry {
                 Ok(()) => return Ok(()),
                 Err(SendRetry::Full(returned, space)) => {
-                    msg = returned;
-                    let Some(space) = space else {
-                        tokio::task::yield_now().await;
-                        continue;
-                    };
-                    let seen = space.generation();
-                    let changed = space.changed_after(seen);
-                    tokio::pin!(changed);
-                    match self.try_send_to(identity.as_slice(), msg)? {
-                        Ok(()) => return Ok(()),
-                        Err(SendRetry::Full(returned, _)) => msg = returned,
-                    }
-                    changed.await;
+                    retry = self
+                        .retry_full(identity.as_slice(), returned, space)
+                        .await?;
                 }
             }
         }
+    }
+
+    async fn retry_full(
+        &self,
+        identity: &[u8],
+        msg: Message,
+        space: Option<Arc<StateSignal>>,
+    ) -> Result<core::result::Result<(), SendRetry>> {
+        let Some(space) = space else {
+            tokio::task::yield_now().await;
+            return self.try_send_to(identity, msg);
+        };
+        let seen = space.generation();
+        let changed = space.changed_after(seen);
+        tokio::pin!(changed);
+        let Err(SendRetry::Full(returned, next_space)) = self.try_send_to(identity, msg)? else {
+            return Ok(Ok(()));
+        };
+        if !next_space
+            .as_ref()
+            .is_some_and(|next| Arc::ptr_eq(&space, next))
+        {
+            // Handover may have notified the old queue before we captured its
+            // generation. Never wait there after retrying a replacement queue.
+            tokio::task::yield_now().await;
+            return Ok(Err(SendRetry::Full(returned, next_space)));
+        }
+        changed.await;
+        self.try_send_to(identity, returned)
     }
 
     pub(crate) async fn send_server(&self, mut msg: Message) -> Result<()> {
@@ -213,6 +245,10 @@ impl Submitter {
     }
 
     pub(crate) async fn wait_send_progress(&self, msg: &Message) {
+        if let Some(peer) = &self.peer {
+            peer.wait_send_progress(msg, &self.lanes).await;
+            return;
+        }
         let Some(identity) = msg.part_slice(0) else {
             tokio::task::yield_now().await;
             return;
@@ -318,6 +354,9 @@ impl Submitter {
         identity: &[u8],
         msg: Message,
     ) -> Result<core::result::Result<(), SendRetry>> {
+        if let Some(peer) = &self.peer {
+            return peer.try_send_to(identity, msg, self.router_mandatory, &self.lanes);
+        }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         if g.closed {
             return Err(Error::Closed);
@@ -389,6 +428,7 @@ pub(crate) struct IdentitySend {
     router_mandatory: bool,
     latency_profile: bool,
     rep_latency: bool,
+    peer: Option<Arc<peer::PeerRoutes>>,
 }
 
 #[derive(Debug)]
@@ -434,6 +474,7 @@ impl IdentitySend {
             router_mandatory: options.router_mandatory,
             latency_profile,
             rep_latency: socket_type == SocketType::Rep && latency_profile,
+            peer: (socket_type == SocketType::Peer).then(|| Arc::new(peer::PeerRoutes::new())),
         }
     }
 
@@ -441,15 +482,17 @@ impl IdentitySend {
         Submitter {
             inner: self.inner.clone(),
             router_mandatory: self.router_mandatory,
+            peer: self.peer.clone(),
+            lanes: peer::SenderLanes::default(),
         }
     }
 
     pub(crate) fn needs_peer_send_pipe(&self) -> bool {
-        !self.latency_profile
+        self.peer.is_some() || !self.latency_profile
     }
 
     pub(crate) fn needs_transmit_slot(&self) -> bool {
-        self.latency_profile
+        self.peer.is_none() && self.latency_profile
     }
 
     #[expect(clippy::needless_pass_by_value)]
@@ -476,6 +519,10 @@ impl IdentitySend {
             PeerTarget::Inbox(handle.data_inbox.clone())
         };
 
+        if let Some(peer) = &self.peer {
+            peer.insert(peer_id, identity, target);
+            return;
+        }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.peers.insert(
             peer_id,
@@ -496,16 +543,27 @@ impl IdentitySend {
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
+        if let Some(peer) = &self.peer {
+            peer.remove(peer_id);
+            return;
+        }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.remove_peer(peer_id);
     }
 
     pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {
+        if let Some(peer) = &self.peer {
+            return peer.peer_for_identity(identity);
+        }
         let g = self.inner.lock().expect("identity inner poisoned");
         g.identity_to_peer.get(identity).copied()
     }
 
     pub(crate) fn shutdown(&self) {
+        if let Some(peer) = &self.peer {
+            peer.shutdown();
+            return;
+        }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.closed = true;
         g.peers.clear();
@@ -513,6 +571,9 @@ impl IdentitySend {
     }
 
     pub(crate) fn is_drained(&self) -> bool {
+        if let Some(peer) = &self.peer {
+            return peer.is_drained();
+        }
         let g = self.inner.lock().expect("identity inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
     }

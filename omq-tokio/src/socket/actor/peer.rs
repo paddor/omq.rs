@@ -374,7 +374,10 @@ impl SocketDriver {
         {
             self.evict_peer_for_handover(old_id);
         }
-        let (handle, route_id, subs_replay, peer_ident, io_thread, became_ready) = {
+        let Some(activation) = self.receive_activation(peer_id, &identity) else {
+            return;
+        };
+        let (handle, route_id, subs_replay, peer_ident, io_thread, became_ready, ready_event) = {
             let Some(p) = self.peers.get_mut(&peer_id) else {
                 return;
             };
@@ -390,10 +393,10 @@ impl SocketDriver {
                 zmtp_version: (3, peer_minor),
             };
             p.info = Some(info.clone());
-            self.monitor.publish(MonitorEvent::HandshakeSucceeded {
+            let ready_event = MonitorEvent::HandshakeSucceeded {
                 endpoint: p.endpoint.clone(),
                 peer: info,
-            });
+            };
             (
                 p.handle.clone(),
                 p.route_id,
@@ -401,21 +404,9 @@ impl SocketDriver {
                 p.ident.clone(),
                 p.io_thread,
                 became_ready,
+                ready_event,
             )
         };
-        if became_ready {
-            self.ready_peer_count_shared
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        }
-        if handle
-            .inbox
-            .send(crate::engine::PeerDriverCommand::ActivateDataPlane)
-            .await
-            .is_err()
-        {
-            let _ = PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::PeerClosed);
-            return;
-        }
         self.send_strategy.connection_added(
             peer_id,
             route_id,
@@ -426,7 +417,50 @@ impl SocketDriver {
         );
         self.recv_strategy.connection_added(peer_id, identity);
         PeerLifecycle::new(self).update_send_ring();
+        if became_ready {
+            self.ready_peer_count_shared
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        self.monitor.publish(ready_event);
+        // Replies must be routable before a different I/O/application thread
+        // can observe readiness or the first incoming message.
+        if handle.inbox.send(activation).await.is_err() {
+            let _ = PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::PeerClosed);
+            return;
+        }
         self.replay_state_to_peer(&handle, subs_replay).await;
+    }
+
+    fn receive_activation(
+        &mut self,
+        peer_id: u64,
+        identity: &bytes::Bytes,
+    ) -> Option<crate::engine::PeerDriverCommand> {
+        let Some(routes) = &mut self.peer_recv_routes else {
+            return Some(crate::engine::PeerDriverCommand::ActivateDataPlane);
+        };
+        let peer = self.peers.get(&peer_id)?;
+        match routes.register(identity.clone(), peer.handle.cancel.clone()) {
+            Ok(sink) => Some(crate::engine::PeerDriverCommand::ActivateWithRecvSink(
+                crate::engine::RecvSink::Peer(sink),
+            )),
+            Err(error) => {
+                if let Some(mut peer) =
+                    PeerLifecycle::new(self).remove_peer(peer_id, DisconnectReason::LocalClose)
+                {
+                    self.monitor.publish(MonitorEvent::HandshakeFailed {
+                        endpoint: peer.endpoint.clone(),
+                        peer_ident: peer.ident.clone(),
+                        reason: error.to_string(),
+                    });
+                    peer.handle.cancel.cancel();
+                    if let Some(task) = peer.task.take() {
+                        task.abort();
+                    }
+                }
+                None
+            }
+        }
     }
 
     async fn handle_peer_command(&mut self, peer_id: u64, cmd: omq_proto::proto::Command) {
@@ -680,11 +714,19 @@ pub(super) async fn inproc_peer_driver(
         }
 
         loop {
+            if recv_sink.as_mut().is_some_and(|sink| !sink.retry_peer_pending()) {
+                return;
+            }
+            let recv_blocked = recv_sink.as_ref().is_some_and(crate::engine::RecvSink::peer_blocked);
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
                 cmd = inbox.recv() => match cmd {
                     Some(PeerDriverCommand::ActivateDataPlane) => {
+                        data_plane_active = true;
+                    }
+                    Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => {
+                        recv_sink = Some(sink);
                         data_plane_active = true;
                     }
                     Some(PeerDriverCommand::SendCommand(c)) => {
@@ -725,7 +767,8 @@ pub(super) async fn inproc_peer_driver(
                         return;
                     }
                 },
-                frame = in_rx.recv(), if data_plane_active => match frame {
+                () = async { recv_sink.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
+                frame = in_rx.recv(), if data_plane_active && !recv_blocked => match frame {
                     Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
                             && m.max_message_size_len() > max
@@ -733,6 +776,10 @@ pub(super) async fn inproc_peer_driver(
                             return;
                         }
                         let m = match recv_sink.as_mut() {
+                            Some(sink @ crate::engine::RecvSink::Peer(_)) => {
+                                if !sink.send(m).await { return; }
+                                None
+                            }
                             Some(sink) => sink.try_send(m).await,
                             None => Some(m),
                         };

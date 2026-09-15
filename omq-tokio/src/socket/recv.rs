@@ -431,6 +431,7 @@ pub(crate) fn recv_pipe(
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
+    pub peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
     pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
@@ -443,11 +444,24 @@ pub(crate) struct SpscHandles {
 }
 
 impl SpscHandles {
+    pub(crate) fn init_peer_recv(
+        &mut self,
+        hwm: usize,
+        max_message_size: Option<usize>,
+    ) -> super::peer_recv::PeerRecvRoutes {
+        let (routes, receive) =
+            super::peer_recv::PeerRecvRoutes::ordinary(hwm, self, max_message_size)
+                .expect("default PEER receive limits");
+        self.peer_recv = Some(Arc::new(Mutex::new(receive)));
+        routes
+    }
+
     pub(crate) fn new(blocking_recv_waker: Arc<BlockingRecvWaker>, conflate_recv: bool) -> Self {
         let recv_signal = Arc::new(DataSignal::new());
         let conflate_slot = conflate_recv
             .then(|| ConflateRecvSlot::new(recv_signal.clone(), blocking_recv_waker.clone()));
         Self {
+            peer_recv: None,
             consumers: Arc::new(RwLock::new(Vec::new())),
             consumer_generation: Arc::new(AtomicU64::new(0)),
             send_ring: Arc::new(ArcSwapOption::empty()),
@@ -486,6 +500,7 @@ impl SpscHandles {
 /// pipe, returning messages one at a time.
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
+    peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: SpscConsumers,
     /// Per-TCP-peer yring consumers. Actor appends on handshake.
@@ -711,6 +726,7 @@ impl SpscAwareRecv {
         latency: bool,
     ) -> Self {
         Self {
+            peer_recv: handles.peer_recv,
             consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
             consumer_generation: handles.consumer_generation,
@@ -872,11 +888,21 @@ impl SpscAwareRecv {
     }
 
     fn buffered_sources_empty(&self) -> bool {
+        if let Some(peer) = &self.peer_recv {
+            return peer.lock().expect("PEER receive poisoned").is_empty();
+        }
         let guard = self.drain_state.lock().unwrap();
         Self::state_is_empty(&guard) && self.conflate_slot_empty()
     }
 
     fn try_drain(&self) -> DrainResult {
+        if let Some(peer) = &self.peer_recv {
+            return match peer.lock().expect("PEER receive poisoned").try_recv() {
+                Ok(message) => DrainResult::Message(message),
+                Err(Error::Closed) => DrainResult::Closed,
+                Err(_) => DrainResult::Empty,
+            };
+        }
         if let Some(msg) = self.take_conflate_message() {
             return DrainResult::Message(msg);
         }
@@ -1102,7 +1128,9 @@ impl SpscAwareRecv {
             tokio::pin!(pipe_ready);
             tokio::pin!(activated);
 
-            if self.consumer_generation.load(Ordering::Acquire) > 0 || self.conflate_slot.is_some()
+            if self.peer_recv.is_some()
+                || self.consumer_generation.load(Ordering::Acquire) > 0
+                || self.conflate_slot.is_some()
             {
                 match self.try_drain() {
                     DrainResult::Message(msg) => return Ok(msg),
@@ -1141,6 +1169,12 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        if let Some(peer) = &self.peer_recv {
+            return peer
+                .lock()
+                .expect("PEER receive poisoned")
+                .try_recv_many_into(max, out);
+        }
         let start_len = out.len();
         if max == 0 {
             return Ok(0);
@@ -1227,6 +1261,9 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn shutdown(&self) {
+        if let Some(peer) = &self.peer_recv {
+            peer.lock().expect("PEER receive poisoned").shutdown();
+        }
         {
             let mut state = self.drain_state.lock().unwrap();
             while state.recv_consumer.prefetch() > 0 {

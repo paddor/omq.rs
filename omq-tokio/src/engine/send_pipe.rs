@@ -42,12 +42,14 @@ impl ConflateState {
 
 #[derive(Debug)]
 enum SendPipeProducerInner {
+    Peer(super::peer_send::Producer),
     Queue(yring::Producer<Message>),
     Conflate(Arc<ConflateState>),
 }
 
 #[derive(Debug)]
 enum SendPipeConsumerInner {
+    Peer(super::peer_send::Consumer),
     Queue(yring::Consumer<Message>),
     Conflate(Arc<ConflateState>),
 }
@@ -114,9 +116,74 @@ pub(crate) fn send_pipe_with_mode(
     )
 }
 
+pub(crate) fn peer_send_pipe(
+    capacity: usize,
+    max_message_size: Option<usize>,
+) -> (SendPipeProducer, SendPipeConsumer) {
+    let data_signal = Arc::new(DataSignal::new());
+    let space_available = Arc::new(StateSignal::new());
+    let above_lwm = Arc::new(AtomicBool::new(false));
+    let (producer, consumer) = super::peer_send::channel(
+        capacity,
+        max_message_size,
+        data_signal.clone(),
+        space_available.clone(),
+    );
+    (
+        SendPipeProducer {
+            inner: SendPipeProducerInner::Peer(producer),
+            data_signal: data_signal.clone(),
+            space_available: space_available.clone(),
+            above_lwm: above_lwm.clone(),
+        },
+        SendPipeConsumer {
+            inner: SendPipeConsumerInner::Peer(consumer),
+            data_signal,
+            space_available,
+            above_lwm,
+        },
+    )
+}
+
 impl SendPipeProducer {
+    pub(crate) fn register_peer_lane(&self) -> Option<Self> {
+        let SendPipeProducerInner::Peer(peer) = &self.inner else {
+            return None;
+        };
+        peer.register().map(|producer| Self {
+            inner: SendPipeProducerInner::Peer(producer),
+            data_signal: self.data_signal.clone(),
+            space_available: self.space_available.clone(),
+            above_lwm: self.above_lwm.clone(),
+        })
+    }
+
+    pub(crate) fn peer_max_bytes(&self) -> Option<usize> {
+        match &self.inner {
+            SendPipeProducerInner::Peer(peer) => Some(peer.max_bytes()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn peer_registration_ready(&self) -> bool {
+        match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.registration_ready(),
+            _ => !self.is_alive() || self.is_below_lwm(),
+        }
+    }
+
+    pub(crate) fn registration_space(&self) -> Arc<StateSignal> {
+        match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.registration_space(),
+            _ => self.space_available.clone(),
+        }
+    }
+
     #[inline]
     pub(crate) fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
+        if let SendPipeProducerInner::Peer(peer) = &mut self.inner {
+            return peer.try_send(msg);
+        }
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             return self.try_send_conflate(msg);
         };
@@ -147,7 +214,7 @@ impl SendPipeProducer {
             let Some(msg) = messages.pop_front() else {
                 return Ok(0);
             };
-            return self.try_send_conflate(msg).map(|()| 1);
+            return self.try_send(msg).map(|()| 1);
         };
         if producer.is_consumer_dropped() {
             let Some(msg) = messages.pop_front() else {
@@ -210,6 +277,7 @@ impl SendPipeProducer {
     #[inline]
     pub(crate) fn is_alive(&self) -> bool {
         match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.alive(),
             SendPipeProducerInner::Queue(producer) => !producer.is_consumer_dropped(),
             SendPipeProducerInner::Conflate(state) => {
                 !state.consumer_dropped.load(Ordering::Acquire)
@@ -219,6 +287,7 @@ impl SendPipeProducer {
 
     pub(crate) fn is_empty(&self) -> bool {
         match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.is_empty(),
             SendPipeProducerInner::Queue(producer) => producer.is_empty(),
             SendPipeProducerInner::Conflate(state) => {
                 state.slot.lock().expect("conflate send pipe").is_none()
@@ -228,6 +297,7 @@ impl SendPipeProducer {
 
     pub(crate) fn is_below_lwm(&self) -> bool {
         match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.ready(),
             SendPipeProducerInner::Queue(producer) => {
                 producer.len() <= producer.capacity() / SEND_PIPE_LWM_DIVISOR
             }
@@ -236,13 +306,17 @@ impl SendPipeProducer {
     }
 
     pub(crate) fn space_available(&self) -> Arc<StateSignal> {
-        self.space_available.clone()
+        match &self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.space(),
+            _ => self.space_available.clone(),
+        }
     }
 }
 
 impl Drop for SendPipeProducer {
     fn drop(&mut self) {
         match &mut self.inner {
+            SendPipeProducerInner::Peer(_) => {}
             SendPipeProducerInner::Queue(producer) => producer.close(),
             SendPipeProducerInner::Conflate(state) => {
                 state.producer_dropped.store(true, Ordering::Release);
@@ -265,6 +339,7 @@ impl SendPipeConsumer {
 
     pub(crate) fn is_empty(&self) -> bool {
         match &self.inner {
+            SendPipeConsumerInner::Peer(peer) => peer.is_empty(),
             SendPipeConsumerInner::Queue(consumer) => consumer.is_empty(),
             SendPipeConsumerInner::Conflate(state) => {
                 state.slot.lock().expect("conflate send pipe").is_none()
@@ -285,6 +360,11 @@ impl SendPipeConsumer {
             above_lwm,
         } = self;
         data_signal.begin_drain();
+        if let SendPipeConsumerInner::Peer(peer) = inner {
+            let count = peer.drain_into(batch, max_msgs, max_bytes);
+            data_signal.clear_after(peer.is_empty());
+            return count;
+        }
         let SendPipeConsumerInner::Queue(consumer) = inner else {
             let SendPipeConsumerInner::Conflate(state) = inner else {
                 unreachable!("send pipe consumer inner must be queue or conflate")
@@ -337,6 +417,7 @@ impl SendPipeConsumer {
 
     pub(crate) fn is_disconnected(&self) -> bool {
         match &self.inner {
+            SendPipeConsumerInner::Peer(peer) => peer.is_disconnected(),
             SendPipeConsumerInner::Queue(consumer) => consumer.is_disconnected(),
             SendPipeConsumerInner::Conflate(state) => {
                 state.producer_dropped.load(Ordering::Acquire)
@@ -349,6 +430,7 @@ impl SendPipeConsumer {
 impl Drop for SendPipeConsumer {
     fn drop(&mut self) {
         match &mut self.inner {
+            SendPipeConsumerInner::Peer(peer) => peer.close(),
             SendPipeConsumerInner::Queue(consumer) => consumer.close(),
             SendPipeConsumerInner::Conflate(state) => {
                 state.consumer_dropped.store(true, Ordering::Release);

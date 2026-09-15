@@ -47,7 +47,7 @@ pub(crate) fn spawn(
                 () = child_cancel.cancelled() => break,
                 cmd = inbox_rx.recv() => match cmd {
                     Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
-                    Some(PeerDriverCommand::Close) | None => break,
+                    Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) | None => break,
                 },
                 written = async {
                     let data = pending.as_ref().unwrap();

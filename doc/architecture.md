@@ -144,6 +144,35 @@ Stateless sends bypass the actor through `SendSubmitter`. REQ/REP still check
 shared type state before submit. Plain recv paths bypass the actor when no
 identity, group, or subscription post-processing is needed.
 
+Native PEER receives use independently bounded per-connection yrings.
+Ordinary `Socket::recv()` fair-drains one shared application receiver; concurrent
+calls serialize only that drain. `Socket::peer_recv_lanes(PeerRecvConfig)` transfers
+receives to exclusive application receivers before bind/connect. The actor assigns
+each handshake identity to a fixed receiver, preserved across reconnects. Move
+each receiver to its application thread and use ordinary socket clones for sends
+and control. Receive assignment creates no threads and does not change send
+semantics. TCP, IPC, and inproc share these semantics.
+
+A receive worker bounds queued messages, payload bytes plus per-frame slot
+storage, and allocated peer rings, including retired generations until both halves release ownership.
+Defaults: 128 peer rings, 8192 messages, and 64 MiB per worker. Each connection's
+ring capacity is the receive HWM rounded to a power of two, with a minimum of 16.
+The worker budget deliberately couples peers assigned to that worker; distinct
+workers have independent budgets. Decoder buffers, transport buffers, and one
+pending decoded message per connection are additional. PEER defaults its maximum
+message size to 64 MiB when no explicit limit is configured. Ring descriptors,
+frame tables, and backing storage retained by payload slices add overhead beyond
+charged bytes. Caller-owned payload storage is outside socket budgets.
+
+A full receive queue pauses inbound data only: outgoing replies, close commands,
+and cancellation continue. Heartbeat receive timeout accounting pauses while OMQ
+deliberately stops reading. Dropping a worker receiver closes its peers, including
+idle peers. Identity handover invalidates unread old-generation messages before
+replacement traffic becomes observable. Ordinary disconnects leave already queued
+messages readable. Socket close ends receive admission independently of send
+linger. Heartbeat traffic continues when outbound space allows; sustained transport
+backpressure can still trigger the remote endpoint's own timeout policy.
+
 ### Caller-driven exclusive sockets
 
 `omq_tokio::exclusive::Socket` is an opt-in alternative for latency-sensitive,
@@ -302,6 +331,36 @@ lane regardless of the runtime's thread count.
 Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
 identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
 recv preserves per-peer ordering while rotating across peers.
+
+PEER send routing publishes immutable identity tables using ArcSwap. Connect,
+disconnect, and shutdown serialize table updates. Each `Socket` clone lazily
+registers and reuses its own fanring producer per destination. Hot sends lock
+only that clone's producer for that destination; concurrently sharing one clone
+remains safe. Application threads enqueue raw messages. The connection's existing
+I/O task fair-drains all its producers, then frames, compresses, and writes.
+There is no socket-wide payload FIFO or additional dispatcher task.
+
+FIFO holds for sequential sends through one clone to one destination. There is
+no order between concurrent sends or between distinct clones. Backpressure and
+cancellation retain the existing `send` and `try_send` interfaces: failed admission
+returns the intact message through `try_send`; canceling an uncompleted send
+consumes no capacity. Queued sends survive dropping their socket clone.
+
+Each connection admits at most 64 application producer rings plus an empty
+registration ring. Retired rings count until the consumer reclaims them. Ring
+capacity is `min(send_hwm, 64)`, rounded to a power of two, minimum one. All
+producers together share the connection's send HWM and a byte budget (payload
+plus frame slots) of `max(64 MiB, max_message_size)`. This prevents clones from
+multiplying queued payload allowance; descriptors have a separate bound of 65 times the ring
+capacity. Registration exhaustion backpressures until a producer retires. These
+per-connection budgets deliberately couple that connection's senders. Driver
+batches and wire buffers are additional, bounded by their count/byte drain limits
+and maximum message size. A locally oversized PEER send returns a protocol error.
+
+Retirement clears cached producers before publishing replacement routes, then
+wakes blocked senders. Cached old routing tables retain no producer queues;
+coordinated fanring teardown releases unread payloads even while send handles
+remain alive. Stale disconnect events cannot remove a replacement route.
 
 ## Proxy
 

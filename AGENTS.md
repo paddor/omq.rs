@@ -71,7 +71,10 @@ a stateless `DirectTcpWriter` for one immediate nonblocking write from
 the slot arena; partial writes stay in `PeerTransmitSlot` and are
 flushed by the driver. Recv bypass: `ConnectionDriver`
 pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
-go through actor for identity routing. PUB fan-out lane workers
+go through actor for identity routing. PEER uses per-connection receive rings
+for both ordinary receives and `PeerRecvLane` handles. Outbound PEER traffic uses
+per-clone/per-destination fanring producers consumed by the connection I/O task.
+PUB fan-out lane workers
 (`LaneWorker`) use split channels: a `yring` control channel
 (drained unconditionally) and a `yring` data channel (drained up to
 `DrainBudget::WORKER`). All producer-to-consumer signaling uses

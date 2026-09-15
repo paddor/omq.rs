@@ -220,7 +220,7 @@ class ZMQStream:
     @overload
     def getsockopt(self, opt: int) -> int | bytes | None: ...
 
-    def getsockopt(self, opt: int) -> int | bytes | None:
+    def getsockopt(self, opt):
         """Get a socket option."""
         return self.socket.getsockopt(opt)
 

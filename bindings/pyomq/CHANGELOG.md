@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Complete native type stubs and shared buffer, connection, and monitor types.
-- Consumer typing tests for ty, mypy, and pyright, plus native stub checks.
+- Consumer typing tests for ty, mypy, and pyright, plus `mypy.stubtest`
+  validation of `_native.pyi` against the extension runtime.
 - Real buffer-lifetime tracking for frames and sync, async, and shadow sends.
 - pyzmq-style bind/connect scope managers, `recv_into()`, `routing_id` send
   keywords, and public `Context(shadow=...)` construction.

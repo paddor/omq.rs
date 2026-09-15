@@ -40,7 +40,6 @@ from typing import (
 from . import _native
 from . import error as error
 from ._native import (
-    # Option constants
     AFFINITY,
     BACKLOG,
     CHANNEL,
@@ -48,7 +47,6 @@ from ._native import (
     CONFLATE,
     CURVE_PUBLICKEY,
     CURVE_SECRETKEY,
-    # CURVE option ids
     CURVE_SERVER,
     CURVE_SERVERKEY,
     DEALER,
@@ -68,12 +66,10 @@ from ._native import (
     OMQ_COMPRESSION_AUTO_TRAIN,
     OMQ_COMPRESSION_DICT,
     OMQ_COMPRESSION_LEVEL,
-    # omq-specific options
     OMQ_ON_MUTE,
     OMQ_ON_MUTE_BLOCK,
     OMQ_ON_MUTE_DROP_NEWEST,
     OMQ_ON_MUTE_DROP_OLDEST,
-    # Socket types
     PAIR,
     PEER,
     PUB,
@@ -90,7 +86,6 @@ from ._native import (
     ROUTER,
     ROUTER_MANDATORY,
     SCATTER,
-    # Draft socket types (RFC 41 / 48 / 49 / 51 + PEER)
     SERVER,
     SNDHWM,
     SNDMORE,
@@ -360,9 +355,7 @@ class _SocketOptionDescriptor[T]:
         self, obj: _SocketOptionsBase, objtype: type[object] | None = None
     ) -> T: ...
 
-    def __get__(
-        self, obj: _SocketOptionsBase | None, objtype: type[object] | None = None
-    ) -> T | Self:
+    def __get__(self, obj, objtype=None):
         if obj is None:
             return self
         if self.option_code == LAST_ENDPOINT:
@@ -478,7 +471,7 @@ class _SocketOptionsBase[
     @overload
     def getsockopt(self, option: int) -> int | bytes | None: ...
 
-    def getsockopt(self, option: int) -> int | bytes | None:
+    def getsockopt(self, option):
         if option == LAST_ENDPOINT:
             return self._last_endpoint
         try:
@@ -504,7 +497,7 @@ class _SocketOptionsBase[
     @overload
     def get(self, option: int) -> int | bytes | None: ...
 
-    def get(self, option: int) -> int | bytes | None:
+    def get(self, option):
         return self.getsockopt(option)
 
     def setsockopt_string(
@@ -580,7 +573,7 @@ class _BaseSocket[
     @overload
     def bind(self, addr: bytes) -> _SocketContext[Self]: ...
 
-    def bind(self, addr: str | bytes) -> _SocketContext[Self]:
+    def bind(self, addr):
         endpoint = addr
         if isinstance(endpoint, bytes):
             endpoint = endpoint.decode("utf-8")
@@ -739,7 +732,7 @@ class Socket(_BaseSocket[_native.Socket, "Context"], metaclass=_SocketMeta):
     def shadow(cls, socket: AsyncSocket) -> _ShadowSocket: ...
 
     @classmethod
-    def shadow(cls, socket: Socket | AsyncSocket) -> Socket | _ShadowSocket:
+    def shadow(cls, socket):
         from . import asyncio as _zmq_async
 
         if isinstance(socket, _zmq_async.Socket):
@@ -1053,7 +1046,7 @@ class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
     @overload
     def getsockopt(self, option: int) -> int | bytes | None: ...
 
-    def getsockopt(self, option: int) -> int | bytes | None:
+    def getsockopt(self, option):
         try:
             return self._native.getsockopt(option)
         except _native.ZMQError as e:
@@ -1083,7 +1076,7 @@ class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
     @overload
     def get(self, option: int) -> int | bytes | None: ...
 
-    def get(self, option: int) -> int | bytes | None:
+    def get(self, option):
         return self.getsockopt(option)
 
     if sys.platform == "win32":
@@ -1187,9 +1180,7 @@ class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> bytes | Frame: ...
 
-    def recv(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> bytes | Frame:
+    def recv(self, flags=0, copy=True, track=False):
         if copy:
             return self._blocking_recv(self._native._try_recv)
         frame = self._blocking_recv(self._native._try_recv_frame)
@@ -1217,9 +1208,7 @@ class _ShadowSocket(_SocketOptionsBase[_native.AsyncSocket, "Context"]):
         self, flags: int = 0, copy: bool = True, track: bool = False
     ) -> list[bytes] | list[Frame]: ...
 
-    def recv_multipart(
-        self, flags: int = 0, copy: bool = True, track: bool = False
-    ) -> list[bytes] | list[Frame]:
+    def recv_multipart(self, flags=0, copy=True, track=False):
         if copy:
             return self._blocking_recv(self._native._try_recv_multipart)
         frames = self._blocking_recv(self._native._try_recv_multipart_frames)

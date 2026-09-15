@@ -2,7 +2,7 @@
 
 ## Workspace layout
 
-Five-crate Cargo workspace; `bindings/` is excluded and built
+Four-crate Cargo workspace; `bindings/` is excluded and built
 out-of-tree (maturin etc.).
 
 - **`omq-proto`** -- sans-I/O ZMTP 3.x core. Codec (`Connection`),
@@ -11,8 +11,6 @@ out-of-tree (maturin etc.).
   (lz4), endpoint parsing, options, subscription matcher. No async, no I/O.
 - **`omq-tokio`** -- multi-thread tokio backend. **Default backend.**
   Works on Linux, macOS, and Windows.
-- **`yring`** -- bounded SPSC ring buffer for inproc transport based on
-  libzmq's `ypipe_t`. One atomic per batch.
 - **`omq-libzmq`** -- libzmq-compatible C interface (`libomq_zmq`
   dynamic/static library). Drop-in replacement: ships `zmq.h`,
   implements the `zmq_*` API.
@@ -20,6 +18,10 @@ out-of-tree (maturin etc.).
   cross-implementation peers and reads/writes append-only JSONL data in
   `~/.cache/omq/`.
 - **`bindings/pyomq`** -- PyO3 wrapper over `omq-tokio`.
+
+The queue crates `yring` and `fanring` are external dependencies maintained
+in [fanring.rs](https://github.com/paddor/fanring.rs). Queue tests, Loom,
+Miri, and queue releases belong to that workspace.
 
 `omq-tokio` re-exports `omq-proto`'s public API. Its public `Socket` API
 is covered by `tests/coverage_matrix.rs`.
@@ -121,6 +123,8 @@ Lints: `missing_debug_implementations` = **deny**,
 
 - Rust 2024 edition, MSRV **1.93**. ASCII-only source.
 - `main` branch is protected. All changes go through PRs.
+- Commit messages describe OMQ changes and checks only. Do not mention
+  downstream applications.
 
 **Readability off the hot path.** Outside the hot path, prefer
 simple, readable code over clever abstractions. Maintainability

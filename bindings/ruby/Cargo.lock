@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.22.0"
+version = "0.22.2"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1385,7 +1385,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.14"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31a91641eed4a631bd04c32edcdb1bed67c11db023c86a0a6ada528375d4135d"
 dependencies = [
  "atomic-waker",
  "futures-core",

@@ -4,7 +4,6 @@ members = [
     "omq-proto",
     "omq-tokio",
     "omq-libzmq",
-    "yring",
 ]
 default-members = ["omq-proto", "omq-tokio"]
 # Bindings live in their own subtree. Each is its own build root - Python's

@@ -369,7 +369,8 @@ transport, then verifies control-driven close remains bounded.
 Loom covers the race windows that would lose these wakeups:
 `omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, `StateSignal`
 generation checks, pipe-space release, and route waits that race with peer
-activation. `yring/tests/loom.rs` covers the lower-level SPSC cursor ordering,
+activation. The [yring Loom suite](https://github.com/paddor/fanring.rs/blob/main/yring/tests/loom.rs)
+covers the lower-level SPSC cursor ordering,
 wraparound, producer drop, async `push_async` wakeups, and upper-layer
 readiness patterns built on the ring.
 

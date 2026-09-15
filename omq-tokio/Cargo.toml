@@ -35,7 +35,7 @@ bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
 omq-proto = { path = "../omq-proto", version = "0.27.0", default-features = false }
-yring = { path = "../yring", version = "0.3.16" }
+yring = "0.3.16"
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"

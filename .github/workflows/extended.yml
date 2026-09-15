@@ -1,7 +1,7 @@
 name: extended
 
 # Long-running or expensive suites that would dominate PR CI. `ci.yml`
-# carries the short versions (fuzz smoke, pyzmq interop, loom, miri).
+# carries the short versions (fuzz smoke and pyzmq interop).
 
 on:
   schedule:
@@ -248,37 +248,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hang-forensics-interop-libzmq-draft
-          path: target/hang-forensics
-          if-no-files-found: ignore
-
-  miri-seeds:
-    name: miri (yring, many seeds)
-    if: github.repository == 'paddor/omq.rs'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    # No -D warnings: nightly adds lints on its own schedule.
-    env:
-      RUSTFLAGS: ""
-      MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..16
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly # falls back if nightly lacks miri
-        with:
-          components: miri
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - run: cargo miri setup
-      - name: miri test
-        run: |
-          bash scripts/ci-run-with-forensics.sh "miri yring many seeds" 6900 -- \
-            cargo miri nextest run --profile extended-miri -p yring \
-            --features async
-      - name: upload hang forensics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hang-forensics-miri-seeds
           path: target/hang-forensics
           if-no-files-found: ignore

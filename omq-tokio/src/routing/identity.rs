@@ -98,16 +98,14 @@ impl Submitter {
         &self,
         mut msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
-        let retry = msg.clone();
-        if msg.is_empty() {
+        let Some(identity) = msg.part_slice(0) else {
             return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
-        }
-        let identity = msg.pop_front().unwrap();
+        };
         let mut g = self.inner.lock().expect("identity inner poisoned");
         if g.closed {
             return Err(omq_proto::error::TrySendError::Closed);
         }
-        let Some(&id) = g.identity_to_peer.get(&identity) else {
+        let Some(&id) = g.identity_to_peer.get(identity) else {
             if self.router_mandatory {
                 return Err(omq_proto::error::TrySendError::Error(Error::Unroutable));
             }
@@ -119,9 +117,19 @@ impl Submitter {
             }
             return Ok(());
         };
+        let routing_id = msg.routing_id();
+        let identity = msg
+            .pop_front_payload()
+            .expect("routing frame checked above");
         match peer.target.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(SendPipeError::Full(_)) => Err(omq_proto::error::TrySendError::Full(retry)),
+            Err(SendPipeError::Full(body)) => {
+                let mut returned = Message::with_prefix(identity.as_bytes(), body);
+                if let Some(id) = routing_id {
+                    returned = returned.with_routing_id(id);
+                }
+                Err(omq_proto::error::TrySendError::Full(returned))
+            }
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
                 if self.router_mandatory {
@@ -137,10 +145,10 @@ impl Submitter {
         if msg.is_empty() {
             return Err(Error::Unroutable);
         }
-        let identity = msg.pop_front().unwrap();
+        let identity = msg.pop_front_payload().expect("nonempty message");
 
         loop {
-            let retry = self.try_send_to(&identity, msg)?;
+            let retry = self.try_send_to(identity.as_slice(), msg)?;
             match retry {
                 Ok(()) => return Ok(()),
                 Err(SendRetry::Full(returned, space)) => {
@@ -152,7 +160,7 @@ impl Submitter {
                     let seen = space.generation();
                     let changed = space.changed_after(seen);
                     tokio::pin!(changed);
-                    match self.try_send_to(&identity, msg)? {
+                    match self.try_send_to(identity.as_slice(), msg)? {
                         Ok(()) => return Ok(()),
                         Err(SendRetry::Full(returned, _)) => msg = returned,
                     }
@@ -205,24 +213,52 @@ impl Submitter {
     }
 
     pub(crate) async fn wait_send_progress(&self, msg: &Message) {
-        let Some(identity) = msg.part_bytes(0) else {
+        let Some(identity) = msg.part_slice(0) else {
             tokio::task::yield_now().await;
             return;
         };
-        let identity = Bytes::copy_from_slice(identity.as_ref());
-        let notified = {
+        let waiting = {
             let g = self.inner.lock().expect("identity inner poisoned");
             g.identity_to_peer
-                .get(&identity)
+                .get(identity)
                 .and_then(|id| g.peers.get(id))
-                .and_then(|peer| peer.target.space_available())
+                .and_then(|peer| {
+                    peer.target.space_available().map(|signal| {
+                        (
+                            signal,
+                            matches!(peer.target, PeerTarget::Pipe(_) | PeerTarget::RepInproc(_)),
+                        )
+                    })
+                })
         };
-        if let Some(notified) = notified {
+        if let Some((notified, true)) = &waiting {
+            notified
+                .wait_until(|| self.peer_pipe_ready(identity, notified))
+                .await;
+        } else if let Some((notified, false)) = waiting {
             let seen = notified.generation();
             notified.changed_after(seen).await;
         } else {
             tokio::task::yield_now().await;
         }
+    }
+
+    fn peer_pipe_ready(&self, identity: &[u8], waiting: &Arc<StateSignal>) -> bool {
+        let g = self.inner.lock().expect("identity inner poisoned");
+        let peer = g
+            .identity_to_peer
+            .get(identity)
+            .and_then(|id| g.peers.get(id));
+        let Some(IdentityPeer {
+            target: PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe),
+            ..
+        }) = peer
+        else {
+            return true;
+        };
+        // A replaced/removed pipe wakes its old signal on drop. Retry routing
+        // instead of parking on that old generation after a reconnect.
+        !Arc::ptr_eq(waiting, &pipe.space_available()) || !pipe.is_alive() || pipe.is_below_lwm()
     }
 
     pub(crate) async fn send_rep(
@@ -279,7 +315,7 @@ impl Submitter {
 
     fn try_send_to(
         &self,
-        identity: &Bytes,
+        identity: &[u8],
         msg: Message,
     ) -> Result<core::result::Result<(), SendRetry>> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
@@ -448,7 +484,15 @@ impl IdentitySend {
                 target,
             },
         );
-        g.identity_to_peer.insert(identity, peer_id);
+        if let Some(previous) = g.identity_to_peer.insert(identity, peer_id)
+            && previous != peer_id
+            && let Some(signal) = g
+                .peers
+                .get(&previous)
+                .and_then(|peer| peer.target.space_available())
+        {
+            signal.notify_changed();
+        }
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -514,116 +558,4 @@ impl IdentityRecv {
 }
 
 #[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-
-    use super::*;
-    use crate::engine::send_pipe;
-
-    #[test]
-    fn throughput_identity_uses_peer_pipe_not_transmit_slot() {
-        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
-        let send = IdentitySend::new(SocketType::Router, &options);
-
-        assert!(send.needs_peer_send_pipe());
-        assert!(!send.needs_transmit_slot());
-    }
-
-    #[test]
-    fn latency_identity_uses_transmit_slot_not_peer_pipe() {
-        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
-        let send = IdentitySend::new(SocketType::Rep, &options);
-
-        assert!(!send.needs_peer_send_pipe());
-        assert!(send.needs_transmit_slot());
-    }
-
-    #[test]
-    fn try_send_reports_full_and_preserves_routing_frame() {
-        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
-        let mut send = IdentitySend::new(SocketType::Rep, &options);
-        let submitter = send.submitter();
-
-        let (pipe_tx, _pipe_rx) = send_pipe(1);
-        let handle = PeerDriverHandle {
-            inbox: tokio::sync::mpsc::channel(1).0,
-            data_inbox: tokio::sync::mpsc::channel(1).0,
-            cancel: tokio_util::sync::CancellationToken::new(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
-        };
-        send.connection_added(1, handle, Bytes::from_static(b"id"), false);
-
-        submitter
-            .try_send(Message::multipart([
-                Bytes::from_static(b"id"),
-                Bytes::from_static(b"one"),
-            ]))
-            .unwrap();
-
-        let returned = match submitter.try_send(Message::multipart([
-            Bytes::from_static(b"id"),
-            Bytes::from_static(b"two"),
-        ])) {
-            Err(omq_proto::error::TrySendError::Full(msg)) => msg,
-            other => panic!("expected Full, got {other:?}"),
-        };
-
-        assert_eq!(returned.part_bytes(0).unwrap(), &b"id"[..]);
-        assert_eq!(returned.part_bytes(1).unwrap(), &b"two"[..]);
-    }
-
-    #[test]
-    fn closed_peer_pipe_is_not_a_closed_socket() {
-        let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
-        let mut send = IdentitySend::new(SocketType::Peer, &options);
-        let submitter = send.submitter();
-        let (pipe_tx, pipe_rx) = send_pipe(1);
-        drop(pipe_rx);
-        send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
-
-        submitter
-            .try_send(Message::multipart([
-                Bytes::from_static(b"id"),
-                Bytes::from_static(b"body"),
-            ]))
-            .unwrap();
-
-        assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
-    }
-
-    #[tokio::test]
-    async fn closed_peer_pipe_is_unroutable_when_mandatory() {
-        let options = Options::default()
-            .workload_profile(omq_proto::WorkloadProfile::Throughput)
-            .router_mandatory(true);
-        let mut send = IdentitySend::new(SocketType::Router, &options);
-        let submitter = send.submitter();
-        let (pipe_tx, pipe_rx) = send_pipe(1);
-        drop(pipe_rx);
-        send.connection_added(1, peer_handle(pipe_tx), Bytes::from_static(b"id"), false);
-
-        let error = submitter
-            .send(Message::multipart([
-                Bytes::from_static(b"id"),
-                Bytes::from_static(b"body"),
-            ]))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, Error::Unroutable));
-        assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
-    }
-
-    fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
-        PeerDriverHandle {
-            inbox: tokio::sync::mpsc::channel(1).0,
-            data_inbox: tokio::sync::mpsc::channel(1).0,
-            cancel: tokio_util::sync::CancellationToken::new(),
-            transmit_slot: None,
-            direct_tcp_writer: None,
-            send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
-        }
-    }
-}
+mod tests;

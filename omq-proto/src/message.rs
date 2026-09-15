@@ -656,6 +656,15 @@ impl Message {
 
     /// Remove and return the first part as `Bytes`.
     pub fn pop_front(&mut self) -> Option<Bytes> {
+        self.pop_front_payload().map(|payload| match payload.inner {
+            PayloadInner::Single(bytes) => bytes,
+            _ => payload.as_bytes(),
+        })
+    }
+
+    /// Remove the first part without materializing inline bytes on the heap.
+    /// Large payloads retain their existing backing storage.
+    pub fn pop_front_payload(&mut self) -> Option<Payload> {
         match std::mem::replace(&mut self.inner, MessageInner::Empty) {
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => None,
             MessageInner::Inline { len, data } => {
@@ -664,21 +673,21 @@ impl Message {
                         len: len & !INLINE_DELIMITED_FLAG,
                         data,
                     };
-                    Some(Bytes::new())
+                    Some(Payload::new())
                 } else {
-                    Some(Bytes::copy_from_slice(&data[..len as usize]))
+                    Some(Payload::from_slice(&data[..len as usize]))
                 }
             }
-            MessageInner::Single(p) => Some(p.as_bytes()),
+            MessageInner::Single(p) => Some(p),
             MessageInner::EmptyDelimitedBytes(p) => {
                 self.inner = MessageInner::Single(Payload::from_bytes(p));
-                Some(Bytes::new())
+                Some(Payload::new())
             }
             MessageInner::Multi(mut v) => {
                 if v.is_empty() {
                     return None;
                 }
-                let first = v.remove(0).as_bytes();
+                let first = v.remove(0);
                 self.inner = match v.len() {
                     0 => MessageInner::Empty,
                     1 => MessageInner::Single(v.into_iter().next().unwrap()),
@@ -687,14 +696,14 @@ impl Message {
                 Some(first)
             }
             MessageInner::RoutedInline { len, data, .. } => {
-                Some(Bytes::copy_from_slice(&data[..usize::from(len)]))
+                Some(Payload::from_slice(&data[..usize::from(len)]))
             }
-            MessageInner::RoutedBytes { data, .. } => Some(data),
+            MessageInner::RoutedBytes { data, .. } => Some(Payload::from_bytes(data)),
             MessageInner::RoutedMulti { mut parts, .. } => {
                 if parts.is_empty() {
                     return None;
                 }
-                let first = parts.remove(0).as_bytes();
+                let first = parts.remove(0);
                 self.inner = Self::from_payloads_vec(parts).inner;
                 Some(first)
             }
@@ -704,9 +713,16 @@ impl Message {
     /// Construct a multi-part message with `prefix` prepended to `body`'s
     /// parts. Used by identity-routing sockets (ROUTER/REP) to prepend the
     /// peer identity frame.
-    pub fn with_prefix(prefix: Bytes, body: Self) -> Self {
+    pub fn with_prefix(prefix: Bytes, mut body: Self) -> Self {
         if prefix.is_empty() {
             return body.prepend_empty_delimiter();
+        }
+        if let MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } =
+            &mut body.inner
+        {
+            parts.insert(0, Payload::from_bytes(prefix));
+            let _ = body.take_routing_id();
+            return body;
         }
         let mut parts = Vec::with_capacity(1 + body.len());
         parts.push(Payload::from_bytes(prefix));
@@ -935,9 +951,16 @@ impl Message {
             MessageInner::Empty => Self {
                 inner: MessageInner::Single(empty),
             },
+            MessageInner::Inline { len, data } if len & INLINE_DELIMITED_FLAG != 0 => Self {
+                inner: MessageInner::Multi(vec![
+                    empty,
+                    Payload::from_bytes(Bytes::new()),
+                    Payload::from_slice(&data[..(len & !INLINE_DELIMITED_FLAG) as usize]),
+                ]),
+            },
             MessageInner::Inline { len, data } => Self {
                 inner: MessageInner::Inline {
-                    len: (len & !INLINE_DELIMITED_FLAG) | INLINE_DELIMITED_FLAG,
+                    len: len | INLINE_DELIMITED_FLAG,
                     data,
                 },
             },
@@ -945,7 +968,11 @@ impl Message {
                 inner: MessageInner::EmptyDelimitedBytes(p.as_bytes()),
             },
             MessageInner::EmptyDelimitedBytes(p) => Self {
-                inner: MessageInner::Multi(vec![empty, Payload::from_bytes(p)]),
+                inner: MessageInner::Multi(vec![
+                    empty,
+                    Payload::from_bytes(Bytes::new()),
+                    Payload::from_bytes(p),
+                ]),
             },
             MessageInner::Multi(mut v) => {
                 v.insert(0, empty);
@@ -1517,6 +1544,25 @@ mod tests {
     }
 
     #[test]
+    fn message_pop_front_payload_keeps_inline_and_shared_storage() {
+        let large = Bytes::from(vec![3; 128]);
+        for mut message in [
+            Message::from_slice(b"id"),
+            Message::multipart([Bytes::from_static(b"id"), large.clone()]),
+            Message::from_slice(b"id").with_routing_id(7),
+        ] {
+            let first = message.pop_front_payload().unwrap();
+            assert_eq!(first.as_slice(), b"id");
+            assert!(matches!(first.inner, PayloadInner::Inline { .. }));
+            if let Some(body) = message.pop_front_payload() {
+                assert_eq!(body.as_slice().as_ptr(), large.as_ptr());
+            }
+            assert!(message.is_empty());
+            assert!(message.pop_front_payload().is_none());
+        }
+    }
+
+    #[test]
     fn message_part_bytes() {
         let m = Message::multipart(["a", "b", "c"]);
         assert_eq!(m.part_bytes(0).unwrap(), &b"a"[..]);
@@ -1596,6 +1642,55 @@ mod tests {
         let body = Message::multipart(["", "data"]);
         let m = Message::with_prefix(Bytes::from_static(b"id"), body);
         assert_eq!(m, Message::multipart([&b"id"[..], &b""[..], &b"data"[..]]));
+    }
+
+    #[test]
+    fn message_with_prefix_reuses_multipart_storage() {
+        for routed in [false, true] {
+            for prefix in [Bytes::new(), Bytes::from_static(b"id")] {
+                let mut parts = Vec::with_capacity(3);
+                parts.extend([Payload::from_slice(b""), Payload::from_slice(b"data")]);
+                let storage = parts.as_ptr();
+                let mut body = Message::from_payloads_vec(parts);
+                if routed {
+                    body = body.with_routing_id(42);
+                }
+                let message = Message::with_prefix(prefix.clone(), body);
+                let (MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. }) =
+                    &message.inner
+                else {
+                    panic!("expected multipart storage");
+                };
+                assert_eq!(parts.as_ptr(), storage);
+                assert_eq!(message.part_slice(0), Some(prefix.as_ref()));
+                assert_eq!(message.part_slice(1), Some(b"".as_slice()));
+                assert_eq!(message.part_slice(2), Some(b"data".as_slice()));
+                // Preserve the existing routing-metadata behavior of with_prefix.
+                assert_eq!(
+                    message.routing_id(),
+                    (routed && prefix.is_empty()).then_some(42)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn message_repeated_empty_prefix_preserves_every_frame() {
+        for payload in [
+            Bytes::new(),
+            Bytes::from_static(b"small"),
+            Bytes::from(vec![7; 128]),
+        ] {
+            let mut message = Message::single(payload.clone());
+            for count in 1..=4 {
+                message = Message::with_prefix(Bytes::new(), message);
+                assert_eq!(message.len(), count + 1);
+                for index in 0..count {
+                    assert_eq!(message.part_slice(index), Some(b"".as_slice()));
+                }
+                assert_eq!(message.part_slice(count), Some(payload.as_ref()));
+            }
+        }
     }
 
     #[test]

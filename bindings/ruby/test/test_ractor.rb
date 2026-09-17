@@ -4,6 +4,7 @@ require_relative "test_helper"
 
 class RactorTest < Minitest::Test
   def setup
+    skip "Ruby 4.0+ Ractor API required" if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("4.0")
     skip "Ractor API required" unless defined?(Ractor)
   end
 

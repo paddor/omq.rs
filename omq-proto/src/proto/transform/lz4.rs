@@ -451,11 +451,10 @@ impl Lz4Decoder {
     }
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        let mut out = Message::new();
-        let parts = msg.into_parts_payload();
+        let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
         let mut budget_left = self.max_message_size;
-        for (idx, part) in parts.into_iter().enumerate() {
+        for (idx, part) in parts.iter_mut().enumerate() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
                 return Err(Error::Protocol(
@@ -467,23 +466,23 @@ impl Lz4Decoder {
                 SENTINEL_PLAIN => {
                     let body_len = bytes.len() - 4;
                     take_budget(&mut budget_left, body_len)?;
-                    out.push_part_payload(Payload::from_bytes(bytes.slice(4..)));
+                    *part = Payload::from_bytes(bytes.slice(4..));
                 }
                 SENTINEL_LZ4B => {
-                    out.push_part_payload(decode_lz4b(
+                    *part = decode_lz4b(
                         &bytes[4..],
                         self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
-                    )?);
+                    )?;
                 }
                 SENTINEL_LZ4M => {
-                    out.push_part_payload(decode_lz4m(
+                    *part = decode_lz4m(
                         &bytes[4..],
                         self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
-                    )?);
+                    )?;
                 }
                 SENTINEL_LZ4D => {
                     if multipart || idx != 0 {
@@ -506,7 +505,7 @@ impl Lz4Decoder {
                 }
             }
         }
-        Ok(Some(out))
+        Ok(Some(Message::from_parts(parts)))
     }
 }
 
@@ -622,6 +621,39 @@ fn decode_lz4m(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pooled_decode_preserves_table_and_invalidates_wire_byte_count() {
+        let pool = crate::MessagePool::new(1, 4);
+        let plain = Message::multipart([
+            Bytes::from_static(b"small"),
+            Bytes::new(),
+            Bytes::from(vec![7; 2048]),
+        ]);
+        let wire = Lz4Encoder::new().encode(&plain).unwrap().remove(0);
+        let wire = pool.multipart(wire.iter());
+        let crate::message::MessageInner::Multi(parts) = &wire.inner else {
+            panic!("multipart")
+        };
+        let pointer = parts.as_ptr();
+        assert_ne!(wire.byte_len(), plain.byte_len());
+        let decoded = Lz4Decoder::new().decode(wire).unwrap().unwrap();
+        let crate::message::MessageInner::Multi(parts) = &decoded.inner else {
+            panic!("multipart")
+        };
+        assert_eq!(parts.as_ptr(), pointer);
+        assert_eq!(
+            decoded.iter().collect::<Vec<_>>(),
+            plain.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(decoded.byte_len(), plain.byte_len());
+        drop(decoded);
+        let reused = pool.multipart(["a", "", "b"]);
+        let crate::message::MessageInner::Multi(parts) = &reused.inner else {
+            panic!("multipart")
+        };
+        assert_eq!(parts.as_ptr(), pointer);
+    }
 
     #[expect(clippy::needless_pass_by_value)]
     fn rt(msg: Message) -> Message {

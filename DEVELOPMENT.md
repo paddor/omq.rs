@@ -23,7 +23,6 @@ Lints: `missing_debug_implementations` = **deny**,
 ```sh
 cargo test -p omq-tokio
 cargo test -p omq-proto
-cargo test -p yring
 cargo test -p omq-tokio --test omq_req_rep -- some_test_name
 ./scripts/test-cppzmq.sh
 ```
@@ -36,32 +35,28 @@ cargo test -p omq-tokio --features curve     --test omq_curve
 cargo test -p omq-tokio --features lz4       --test omq_lz4_tcp --test omq_lz4_pub_sub
 ```
 
-Miri target for unsafe internals:
-
-```sh
-cargo +nightly miri test -p yring --features async
-```
-
-Roughly two minutes for the 30 tests. Miri can also interpret for a
-foreign target, which is how to reproduce a CI failure from a
-different host:
-
-```sh
-cargo +nightly miri test -p yring --features async \
-  --target x86_64-unknown-linux-gnu
-```
-
 Loom checks:
 
 ```sh
 cargo test -p omq-tokio --test omq_loom_signal
-RUSTFLAGS="--cfg loom" cargo test -p yring --features async --test loom
 ```
 
 The `omq-tokio` Loom test models `StateSignal` and `DataSignal` lost-wake
-races. The `yring` Loom suite is behind `cfg(loom)` and covers SPSC cursor
-ordering, wraparound, producer drop, async `push_async` wakeups, and upper-layer
-readiness patterns.
+races. The reusable queue crates are maintained in
+[fanring.rs](https://github.com/paddor/fanring.rs). Run their unit tests,
+Loom models, and Miri checks in that workspace.
+
+For coordinated local changes, override published queue dependencies explicitly:
+
+```sh
+cargo --config 'patch.crates-io.yring.path="../fanring/yring"' \
+  --config 'patch.crates-io.fanring.path="../fanring"' \
+  test -p omq-tokio
+```
+
+Keep these overrides local. Registry dependencies must be published before OMQ
+CI or packaging can resolve them without overrides. Refresh binding lockfiles
+against the registry after publishing a new queue version.
 
 Full sweep:
 
@@ -97,15 +92,13 @@ runs, on Linux only:
 |-----|------|
 | `interop` | pyzmq NULL/STREAM + PLAIN + CURVE |
 | `cppzmq` | `cppzmq` API tests against `libomq_zmq` |
-| `loom` | `yring` loom suite under `--cfg loom`, release |
-| `miri` | `cargo miri test -p yring --features async`, nightly |
 | `fuzz-smoke` | parsers at 1M iters, socket actions at 200 |
 
 `.github/workflows/extended.yml` runs Sundays at 03:00 UTC and on
 `workflow_dispatch` (with `soak_duration_secs` / `fuzz_scale` inputs):
 the fuzz targets at 100M / 2000 iters, the soak suite in five groups,
 the `--ignored` stress tests, libzmq draft interop (`ws://`,
-RADIO/DISH, and draft socket types), and Miri under `-Zmiri-many-seeds`.
+RADIO/DISH, and draft socket types).
 
 The interop tests skip when their peer is missing so local runs stay
 green without pyzmq or the libzmq helper binaries. CI sets
@@ -566,4 +559,4 @@ git -c push.followTags=false push origin omq-zig-v0.1.0
 
 ### Crates To Check
 
-`omq-proto`, `yring`, `omq-tokio`, `omq-libzmq`, `pyomq`.
+`omq-proto`, `omq-tokio`, `omq-libzmq`, `pyomq`.

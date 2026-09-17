@@ -109,7 +109,7 @@ pub(crate) fn spawn_radio_sender(
                 () = cancel.cancelled() => break,
                 cmd = inbox_rx.recv(), if control_open => match cmd {
                     Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
-                    Some(PeerDriverCommand::Close) => break,
+                    Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) => break,
                     None => control_open = false,
                 },
                 result = async {

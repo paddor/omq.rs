@@ -30,7 +30,7 @@ libc = "0.2"
 flume = { version = "0.12", default-features = false, features = ["async", "select"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 futures-core = { version = "0.3", default-features = false }
-yring = { path = "../../yring", features = ["async"] }
+yring = { version = "0.3.17", features = ["async"] }
 
 # PyO3 stable ABI: one wheel covers Python 3.11+.
 pyo3 = { version = "0.29.0", features = ["abi3-py311", "extension-module"] }

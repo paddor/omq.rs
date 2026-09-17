@@ -27,7 +27,9 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::message::{FrameFlags, Message, Payload};
+#[cfg(any(feature = "curve", test))]
+use crate::message::Payload;
+use crate::message::{FrameFlags, Message, MessagePool, Parts};
 
 use super::chunked_buf::ChunkedInputBuf;
 #[cfg(test)]
@@ -235,7 +237,7 @@ pub struct Connection {
     out_bytes_total: usize,
     events: VecDeque<Event>,
     messages: VecDeque<Message>,
-    pending_parts: Vec<Payload>,
+    pending_parts: Parts,
     pending_size: usize,
     /// WebSocket role for this connection. `None` = ZMTP byte-stream.
     /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
@@ -273,7 +275,7 @@ impl Connection {
             out_bytes_total: 0,
             events: VecDeque::new(),
             messages: VecDeque::new(),
-            pending_parts: Vec::new(),
+            pending_parts: Vec::new().into(),
             pending_size: 0,
             #[cfg(feature = "ws")]
             ws_role,
@@ -290,6 +292,16 @@ impl Connection {
         }
         conn.queue_greeting();
         conn
+    }
+
+    /// Recycle received multipart tables through an application-selected pool.
+    /// Already assembled parts are moved without changing framing or ownership.
+    #[must_use]
+    pub fn recv_message_pool(mut self, pool: &MessagePool) -> Self {
+        let mut parts = pool.take();
+        parts.extend(self.pending_parts.drain(..));
+        self.pending_parts = parts;
+        self
     }
 
     /// Initialize the connection in ZWS mode: skip the greeting,
@@ -453,6 +465,43 @@ mod tests {
             frame::encode_frame(&f, &mut wire);
         }
         c.handle_input(wire.freeze())
+    }
+
+    #[test]
+    fn received_multipart_tables_recycle_without_retaining_payloads() {
+        let mut connection = ready_connection(None).recv_message_pool(&MessagePool::new(2, 4));
+        let mut pointers = std::collections::HashSet::new();
+        for _ in 0..64 {
+            feed_data_frames(
+                &mut connection,
+                &[(true, b"a"), (true, b""), (false, b"bc")],
+            )
+            .unwrap();
+            let message = connection.poll_message().unwrap();
+            assert_eq!(message.byte_len(), 3);
+            let parts = message.into_parts_payload();
+            pointers.insert(parts.as_ptr());
+            assert_eq!(parts.len(), 3);
+            assert!(parts[1].is_empty());
+        }
+        assert_eq!(pointers.len(), 2, "one active table and one returned table");
+    }
+
+    #[test]
+    fn changing_receive_pool_preserves_partial_message_and_held_output() {
+        let mut connection = ready_connection(None);
+        feed_data_frames(&mut connection, &[(true, b"first")]).unwrap();
+        connection = connection.recv_message_pool(&MessagePool::new(1, 4));
+        feed_data_frames(&mut connection, &[(true, b""), (false, b"last")]).unwrap();
+        let held = connection.poll_message().unwrap();
+        for _ in 0..4 {
+            feed_data_frames(&mut connection, &[(true, b"new"), (false, b"data")]).unwrap();
+            drop(connection.poll_message().unwrap());
+        }
+        drop(connection);
+        assert_eq!(held.part_slice(0), Some(b"first".as_slice()));
+        assert_eq!(held.part_slice(1), Some(b"".as_slice()));
+        assert_eq!(held.part_slice(2), Some(b"last".as_slice()));
     }
 
     #[cfg(feature = "ws")]

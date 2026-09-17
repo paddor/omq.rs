@@ -165,6 +165,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+ "loom",
 ]
 
 [[package]]
@@ -299,6 +300,19 @@ name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+
+[[package]]
+name = "fanring"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88d35d159f23886d1b4dbc5e2d6dbeba758b5650908d21cfd5e99f0350dcc95f"
+dependencies = [
+ "arc-swap",
+ "atomic-waker",
+ "concurrent-queue",
+ "loom",
+ "yring",
+]
 
 [[package]]
 name = "fiat-crypto"
@@ -651,11 +665,12 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.22.0"
+version = "0.22.2"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "fanring",
  "futures",
  "libc",
  "omq-proto",
@@ -1385,7 +1400,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.14"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c054fc88ec1358a6452273e36e4bff59a34dc4045573972c02eda89dbae1677"
 dependencies = [
  "atomic-waker",
  "futures-core",

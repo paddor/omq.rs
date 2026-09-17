@@ -101,11 +101,6 @@ omq_cargo_with_rust_tools() {
     RUSTC="$OMQ_RUSTC" RUSTDOC="$OMQ_RUSTDOC" exec omq_cargo "$@"
 }
 
-omq_cargo_with_loom() {
-    export RUSTFLAGS="--cfg loom ${RUSTFLAGS:-}"
-    omq_cargo_with_rust_tools "$@"
-}
-
 # Run a function in the background, keeping at most $jobs parallel workers.
 # Usage: par <func> [args...]
 _par_pids=()
@@ -363,7 +358,6 @@ else
 fi
 
 if [[ "${OMQ_LOOM:-}" == "1" ]]; then
-    run omq_cargo_with_loom test -p yring --features async --test loom
     run omq_cargo_with_rust_tools test -p omq-tokio --test omq_loom_signal
 else
     echo "skip: OMQ_LOOM=1"

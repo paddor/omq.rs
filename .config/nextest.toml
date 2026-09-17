@@ -14,17 +14,6 @@ inherits = "ci"
 # Keep nextest above that so the wrapper owns real hang diagnostics.
 slow-timeout = { period = "30m", terminate-after = 6, grace-period = "10s" }
 
-[profile.default-miri]
-slow-timeout = { period = "120s", terminate-after = 3, grace-period = "10s" }
-fail-fast = false
-failure-output = "immediate-final"
-status-level = "slow"
-final-status-level = "slow"
-
-[profile.extended-miri]
-inherits = "default-miri"
-slow-timeout = { period = "20m", terminate-after = 1, grace-period = "10s" }
-
 [[profile.ci.overrides]]
 filter = 'package(omq-tokio) and binary(omq_zstd_tcp) and test(/pub_sub_zstd_io_lane_(send|try_send)_auto_train_dict_for_late_subscriber/)'
 threads-required = "num-test-threads"

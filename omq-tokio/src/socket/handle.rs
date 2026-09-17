@@ -48,10 +48,16 @@ pub use omq_proto::error::TrySendError;
 /// so concurrent `recv` calls from different tasks are safe. Each
 /// message is delivered to exactly one caller. `send` goes through
 /// a per-socket `SendSubmitter` that serializes internally, so
-/// concurrent `send` calls are also safe.
+/// concurrent `send` calls are also safe. PEER socket clones own separate
+/// producer lanes per destination. Sequential sends through one clone preserve
+/// FIFO per destination; concurrent sends and distinct clones have no relative
+/// order. PEER bounds producer registrations and aggregate per-connection queued
+/// payloads. Receive ownership can be split using [`Socket::peer_recv_lanes`];
+/// this is independent of cloning sockets for sending.
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: Arc<Inner>,
+    send_submitter: SendSubmitter,
 }
 
 #[derive(Debug)]
@@ -61,6 +67,7 @@ struct Inner {
     cancel: CancellationToken,
     linger: Option<std::time::Duration>,
     recv_rx: SpscAwareRecv,
+    peer_recv_lanes: Arc<AtomicBool>,
     monitor: MonitorPublisher,
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
@@ -156,11 +163,14 @@ impl Socket {
 
     fn new_inner(
         socket_type: SocketType,
-        options: Options,
+        mut options: Options,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         io_pool: &crate::context::IoPoolHandle,
         inproc_registry: Arc<InprocRegistry>,
     ) -> Self {
+        if socket_type == SocketType::Peer && options.max_message_size.is_none() {
+            options.max_message_size = Some(crate::engine::peer_send::DEFAULT_MAX_BYTES);
+        }
         options
             .validate()
             .expect("Options::validate failed in Socket::new");
@@ -198,14 +208,16 @@ impl Socket {
                     | SocketType::Dealer
                     | SocketType::Gather
             );
-        let spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+        let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+        let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
+            .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let rep_pending = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
         let ready_peer_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let driver = SocketDriver::new(
+        let mut driver = SocketDriver::new(
             socket_type,
             options,
             cmd_rx,
@@ -223,8 +235,10 @@ impl Socket {
             io_pool.clone(),
             inproc_registry,
         );
+        driver.peer_recv_routes = peer_recv_routes;
         let actor_task = spawn_driver(driver, io_pool);
         Self {
+            send_submitter: send_submitter.clone(),
             inner: Arc::new(Inner {
                 socket_type,
                 cmd_tx,
@@ -237,6 +251,7 @@ impl Socket {
                     spsc,
                     latency_profile,
                 ),
+                peer_recv_lanes: Arc::new(AtomicBool::new(false)),
                 monitor,
                 send_submitter,
                 type_state,
@@ -263,6 +278,41 @@ impl Socket {
     /// The socket type.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
+    }
+
+    /// Split PEER receives into exclusive, identity-routed application lanes.
+    /// Call once, before any bind or connect. Normal `recv` methods then reject
+    /// calls; sending and socket addressing stay unchanged. Configuration is
+    /// static for this socket's lifetime. See [`super::PeerRecvConfig`].
+    pub async fn peer_recv_lanes(
+        &self,
+        config: super::PeerRecvConfig,
+    ) -> Result<Vec<super::PeerRecvLane>> {
+        let (ack, reply) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(SocketCommand::PeerRecvLanes {
+                config,
+                enabled: self.inner.peer_recv_lanes.clone(),
+                ack,
+            })
+            .await
+            .map_err(|_| Error::Closed)?;
+        let mut lanes = reply.await.map_err(|_| Error::Closed)??;
+        for lane in &mut lanes {
+            lane.socket = Some(self.clone());
+        }
+        Ok(lanes)
+    }
+
+    fn check_recv_mode(&self) -> Result<()> {
+        if self.inner.peer_recv_lanes.load(Ordering::Acquire) {
+            Err(Error::Protocol(
+                "PEER receives belong to the configured receive lanes".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     #[doc(hidden)]
@@ -367,7 +417,7 @@ impl Socket {
                     }
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.inner.send_submitter.send(msg).await;
+                let result = self.send_submitter.send(msg).await;
                 if result.is_err() {
                     self.inner
                         .req_awaiting_reply
@@ -392,12 +442,12 @@ impl Socket {
                     .lock()
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)?;
-                self.inner.send_submitter.send(msg).await
+                self.send_submitter.send(msg).await
             }
-            SocketType::Server => self.inner.send_submitter.send_server(msg).await,
+            SocketType::Server => self.send_submitter.send_server(msg).await,
             SocketType::Router | SocketType::Peer | SocketType::Stream => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                self.inner.send_submitter.send(msg).await
+                self.send_submitter.send(msg).await
             }
             SocketType::XSub => self.send_xsub_raw_command(&msg).await,
             _ => {
@@ -431,7 +481,7 @@ impl Socket {
                     )));
                 }
                 let msg = Message::with_prefix(Bytes::new(), msg);
-                let result = self.inner.send_submitter.try_send(msg);
+                let result = self.send_submitter.try_send(msg);
                 if result.is_err() {
                     self.inner
                         .req_awaiting_reply
@@ -461,13 +511,13 @@ impl Socket {
                     .expect("type_state")
                     .pre_send(self.inner.socket_type, msg)
                     .map_err(TrySendError::Error)?;
-                self.inner.send_submitter.try_send(msg)
+                self.send_submitter.try_send(msg)
             }
-            SocketType::Server => self.inner.send_submitter.try_send_server(msg),
+            SocketType::Server => self.send_submitter.try_send_server(msg),
             SocketType::Router => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                self.inner.send_submitter.try_send(msg)
+                self.send_submitter.try_send(msg)
             }
             SocketType::XSub => self.try_send_xsub_raw_command(msg),
             _ => {
@@ -476,7 +526,7 @@ impl Socket {
                 match self.inner.recv_rx.try_push_spsc_or_full(msg) {
                     SpscPush::Sent => Ok(()),
                     SpscPush::Full { msg, .. } => Err(TrySendError::Full(msg)),
-                    SpscPush::Unavailable(msg) => self.inner.send_submitter.try_send(msg),
+                    SpscPush::Unavailable(msg) => self.send_submitter.try_send(msg),
                 }
             }
         }
@@ -534,7 +584,7 @@ impl Socket {
         if self.inner.recv_rx.wait_for_spsc_space_async(msg).await {
             return;
         }
-        self.inner.send_submitter.wait_send_progress(msg).await;
+        self.send_submitter.wait_send_progress(msg).await;
     }
 
     pub(crate) fn same_socket(&self, other: &Self) -> bool {
@@ -544,6 +594,7 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
+        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let mut msg = self.inner.recv_rx.recv().await?;
@@ -592,6 +643,7 @@ impl Socket {
     /// Blocking receive for sync callers. The calling thread registers
     /// itself and parks until data arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
+        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let mut msg = self.inner.recv_rx.blocking_recv()?;
@@ -641,6 +693,7 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
+        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let Some(mut msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
@@ -695,6 +748,7 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
+        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let Some(mut msg) = self
@@ -757,6 +811,7 @@ impl Socket {
 
     /// Blocking receive with a timeout for sync callers.
     pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
+        self.check_recv_mode()?;
         let now = std::time::Instant::now();
         let Some(deadline) = now.checked_add(timeout) else {
             return self.blocking_recv();
@@ -914,6 +969,7 @@ impl Socket {
 
     /// Try to receive up to `max` ready messages into `out` without blocking.
     pub fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        self.check_recv_mode()?;
         if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             if max == 0 {
                 return Ok(0);
@@ -928,6 +984,7 @@ impl Socket {
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
+        self.check_recv_mode()?;
         if self.inner.socket_type == SocketType::Req {
             loop {
                 let mut msg = self.inner.recv_rx.try_recv()?;
@@ -1231,7 +1288,7 @@ impl Socket {
             Some(Ok(res)) => res,
             Some(Err(_)) | None => Ok(()),
         };
-        self.inner.send_submitter.shutdown();
+        self.send_submitter.shutdown();
         self.inner.recv_rx.shutdown();
         let actor_task = self.inner.actor_task.lock().unwrap().take();
         if let Some(task) = actor_task
@@ -1369,7 +1426,7 @@ impl Socket {
             match self.inner.recv_rx.try_push_spsc_or_full(msg) {
                 SpscPush::Sent => return Ok(()),
                 SpscPush::Unavailable(returned) => {
-                    return self.inner.send_submitter.send(returned).await;
+                    return self.send_submitter.send(returned).await;
                 }
                 SpscPush::Full {
                     msg: returned,
@@ -1383,7 +1440,7 @@ impl Socket {
                     match self.inner.recv_rx.try_push_spsc_or_full(msg) {
                         SpscPush::Sent => return Ok(()),
                         SpscPush::Unavailable(returned) => {
-                            return self.inner.send_submitter.send(returned).await;
+                            return self.send_submitter.send(returned).await;
                         }
                         SpscPush::Full { msg: returned, .. } => {
                             changed.await;

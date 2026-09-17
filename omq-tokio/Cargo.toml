@@ -34,8 +34,9 @@ soak = []
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
+fanring = { version = "0.3.5", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.27.0", default-features = false }
-yring = { path = "../yring", version = "0.3.16" }
+yring = "0.3.17"
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"
@@ -81,6 +82,10 @@ path = "src/bin/perf_verify.rs"
 [[example]]
 name = "pub_sub_lz4"
 required-features = ["lz4"]
+
+[[test]]
+name = "peer_recv_lanes"
+path = "tests/peer_recv_lanes.rs"
 
 [[bench]]
 name = "exclusive_latency"

@@ -81,7 +81,7 @@ OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput.
   to drive `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`, `CLIENT`, or `SERVER`
   directly from the caller task.
 - The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are assigned to IO lanes automatically.
-- Memory-safe Rust for the public crates. `unsafe` is isolated and checked with Miri.
+- The Rust protocol and async backend crates forbid `unsafe` code.
 - Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.
 
 ## Usage
@@ -142,14 +142,13 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
 ## Workspace
 
-Five Cargo workspace crates plus language bindings.
+Four Cargo workspace crates plus language bindings.
 
 | Crate | What it does | Unsafe policy |
 |-------|--------------|---------------|
 | [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions | `#![forbid(unsafe_code)]` |
 | [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) | `#![forbid(unsafe_code)]` |
 | [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) | Unsafe C ABI boundary |
-| [`yring`](yring/) | Bounded SPSC ring buffer with ypipe-style batched flush / prefetch | Unsafe ring core, Miri-tested |
 | [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
 | [`OMQ.Net`](bindings/dotnet/) | .NET binding (managed wrapper over omq-libzmq) | P/Invoke/native ABI boundary |
@@ -178,9 +177,7 @@ covered by integration tests. The suite is layered:
   safety, compression (lz4), PLAIN / CURVE auth, mechanism reconnect,
   large-message throughput, multi-socket, inproc cross-thread,
   WebSocket throughput and reconnect. Soak runs sample RSS and FD counts.
-- **Loom** coverage for `yring` SPSC memory ordering, async wakeups, and
-  `omq-tokio` signal race windows.
-- **Miri** on `yring`.
+- **Loom** coverage for `omq-tokio` signal race windows.
 - **Release semver review** through `release-plz`.
 
 ```sh

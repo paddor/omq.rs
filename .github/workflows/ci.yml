@@ -49,7 +49,6 @@ jobs:
               - 'bindings/pyomq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -60,7 +59,6 @@ jobs:
               - 'bindings/java/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -69,7 +67,6 @@ jobs:
               - 'bindings/go/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -79,7 +76,6 @@ jobs:
               - 'omq-libzmq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -89,7 +85,6 @@ jobs:
               - 'omq-libzmq/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -99,7 +94,6 @@ jobs:
               - 'bindings/ruby/**'
               - 'omq-proto/**'
               - 'omq-tokio/**'
-              - 'yring/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -574,51 +568,6 @@ jobs:
       - name: package smoke
         run: ./scripts/test-libzmq-packaging.sh
 
-  loom:
-    name: loom (yring)
-    needs: [changes, linux-gate]
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # omq-tokio's loom_signal test needs no cfg and runs in `test`.
-    # RUSTFLAGS replaces the workflow-level value, so repeat -D warnings.
-    env:
-      RUSTFLAGS: --cfg loom -D warnings
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - name: loom model check
-        run: cargo nextest run --profile ci -p yring --features async --test loom --release
-
-  miri:
-    name: miri (yring)
-    needs: [changes, linux-gate]
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # yring holds the only Miri-checkable unsafe: omq-proto is
-    # forbid(unsafe_code) and omq-tokio's tests are real socket I/O.
-    # No -D warnings: nightly adds lints on its own schedule.
-    env:
-      RUSTFLAGS: ""
-      MIRIFLAGS: -Zmiri-disable-isolation
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly # falls back if nightly lacks miri
-        with:
-          components: miri
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - run: cargo miri setup
-      - name: miri test
-        run: cargo miri nextest run -p yring --features async
-
   fuzz-smoke:
     name: fuzz smoke
     needs: [changes, linux-gate]
@@ -690,14 +639,12 @@ jobs:
               omq-tokio/zstd
             )
             cross check --target ${{ matrix.target }} \
-              -p yring -p omq-proto -p omq-tokio -p omq-libzmq \
+              -p omq-proto -p omq-tokio -p omq-libzmq \
               --features "${features[*]}" \
               --lib --bins
           else
             cross check --target ${{ matrix.target }} --workspace --all-targets --all-features
           fi
-      - name: yring tests
-        run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p yring --all-features
       - name: tokio tcp smoke tests
         if: matrix.target != 'armv7-unknown-linux-gnueabihf'
         run: bash scripts/ci-cross-test-timeout.sh ${{ matrix.target }} -p omq-tokio --test omq_tcp_smoke
@@ -879,8 +826,6 @@ jobs:
         compression,
         interop,
         cppzmq,
-        loom,
-        miri,
         fuzz-smoke,
         linux-32bit,
         lint,

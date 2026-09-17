@@ -322,6 +322,9 @@ fn build_codec(
     leftover: bytes::Bytes,
 ) -> Option<ZmtpConnection> {
     let mut codec = ZmtpConnection::new(connection_config(socket, stream, peer_ident, is_server));
+    if let Some(pool) = &socket.options.recv_message_pool {
+        codec = codec.recv_message_pool(pool);
+    }
     if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
         return None;
     }
@@ -550,7 +553,11 @@ fn make_send_pipe(
     } else {
         (socket.options.send_hwm.max(1) as usize, SendPipeMode::Queue)
     };
-    let (send_pipe, send_pipe_rx) = crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode);
+    let (send_pipe, send_pipe_rx) = if socket.socket_type == SocketType::Peer {
+        crate::engine::peer_send_pipe(pipe_cap, socket.options.max_message_size)
+    } else {
+        crate::engine::send_pipe_with_mode(pipe_cap, pipe_mode)
+    };
     (
         Some(Arc::new(Mutex::new(Some(send_pipe)))),
         Some(send_pipe_rx),

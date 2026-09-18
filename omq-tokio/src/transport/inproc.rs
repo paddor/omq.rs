@@ -28,6 +28,7 @@ use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::proto::SocketType;
 
 use crate::engine::signal::{DataSignal, StateSignal};
+use crate::socket::fanin::{Fanin, Producer};
 use crate::socket::recv::RecvItem;
 
 /// Sender-side SPSC state for inproc fast path.
@@ -73,7 +74,7 @@ impl BlockingSpace {
 pub struct InprocTx {
     // Async sockets may move between runtime worker threads. Serialize access
     // while retaining the SPSC ring's single active producer.
-    pub(crate) producer: ParkingMutex<yring::Producer<RecvItem>>,
+    pub(crate) producer: ParkingMutex<InprocProducer>,
     pub(crate) recv_signal: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
     pub max_message_size: Option<usize>,
@@ -82,7 +83,53 @@ pub struct InprocTx {
     pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
 }
 
+#[derive(Debug)]
+pub(crate) enum InprocProducer {
+    Yring(yring::Producer<RecvItem>),
+    Fanin(Producer),
+}
+impl InprocProducer {
+    pub(crate) fn is_full(&mut self) -> bool {
+        match self {
+            Self::Yring(p) => p.is_full(),
+            Self::Fanin(p) => p.is_full(),
+        }
+    }
+    pub(crate) fn is_consumer_dropped(&self) -> bool {
+        match self {
+            Self::Yring(p) => p.is_consumer_dropped(),
+            Self::Fanin(p) => p.is_closed(),
+        }
+    }
+    pub(crate) fn push_and_flush(&mut self, item: RecvItem) -> std::result::Result<(), RecvItem> {
+        match self {
+            Self::Yring(p) => p.push_and_flush(item),
+            Self::Fanin(p) => p.try_send(item),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecvConfig {
+    pub signal: Arc<DataSignal>,
+    pub blocking: Arc<crate::socket::recv::BlockingRecvWaker>,
+    pub max_message_size: Option<usize>,
+    pub fanin: Option<Arc<Fanin>>,
+}
+
 impl InprocTx {
+    fn fanin(producer: Producer, recv: RecvConfig) -> Arc<Self> {
+        Arc::new(Self {
+            space_notify: producer.space(),
+            blocking_space: producer.blocking_space(),
+            producer: ParkingMutex::new(InprocProducer::Fanin(producer)),
+            recv_signal: recv.signal,
+            recv_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            max_message_size: recv.max_message_size,
+            blocking_recv_waker: recv.blocking,
+        })
+    }
+
     pub(crate) fn wait_for_space(&self) {
         self.blocking_space
             .wait_until(|| self.producer.lock().is_full());
@@ -141,6 +188,7 @@ pub struct InprocConn {
     pub peer: InprocPeerSnapshot,
     pub tx: Option<Arc<InprocTx>>,
     pub rx: Option<Arc<InprocRx>>,
+    pub(crate) recv_fanin: Option<Arc<InprocTx>>,
 }
 
 /// Default per-direction inflight-message capacity. Holds whole
@@ -159,6 +207,7 @@ struct InprocConnectRequest {
     connector_recv_signal: Arc<DataSignal>,
     connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     connector_max_message_size: Option<usize>,
+    connector_fanin: Option<Arc<Fanin>>,
     accept_ack: oneshot::Sender<InprocAck>,
 }
 
@@ -166,6 +215,7 @@ type InprocAck = (
     InprocPeerSnapshot,
     Option<Arc<InprocTx>>,
     Option<Arc<InprocRx>>,
+    Option<Arc<InprocTx>>,
 );
 
 #[derive(Debug)]
@@ -208,6 +258,7 @@ pub(crate) fn bind(
     recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
+    fanin: Option<Arc<Fanin>>,
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
     let binding_id = registry.next_binding_id();
@@ -233,6 +284,7 @@ pub(crate) fn bind(
         recv_signal,
         blocking_recv_waker,
         max_message_size,
+        fanin,
         incoming: rx,
     })
 }
@@ -244,6 +296,7 @@ pub(crate) async fn connect_with_max_message_size(
     recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
+    fanin: Option<Arc<Fanin>>,
 ) -> Result<InprocConn> {
     let req_tx = {
         let reg = registry.binds.lock().expect("inproc registry poisoned");
@@ -263,6 +316,7 @@ pub(crate) async fn connect_with_max_message_size(
         connector_recv_signal: recv_signal,
         connector_blocking_recv_waker: blocking_recv_waker,
         connector_max_message_size: max_message_size,
+        connector_fanin: fanin,
         accept_ack: ack_tx,
     };
 
@@ -270,7 +324,7 @@ pub(crate) async fn connect_with_max_message_size(
         .send(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let (listener_snapshot, tx, rx) = ack_rx
+    let (listener_snapshot, tx, rx, recv_fanin) = ack_rx
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
@@ -278,6 +332,7 @@ pub(crate) async fn connect_with_max_message_size(
         out: c2l_tx,
         in_rx: l2c_rx,
         peer: listener_snapshot,
+        recv_fanin,
         tx,
         rx,
     })
@@ -294,6 +349,7 @@ pub struct InprocListener {
     recv_signal: Arc<DataSignal>,
     blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
     max_message_size: Option<usize>,
+    fanin: Option<Arc<Fanin>>,
     incoming: mpsc::Receiver<InprocConnectRequest>,
 }
 
@@ -310,7 +366,6 @@ impl InprocListener {
 
     /// Accept the next incoming connector. Returns the connector's
     /// snapshot via the `InprocConn`. Acks back our own snapshot.
-    #[expect(clippy::needless_return)]
     pub async fn accept(&mut self) -> Result<InprocConn> {
         let req = self.incoming.recv().await.ok_or(Error::Closed)?;
         let InprocConnectRequest {
@@ -320,69 +375,87 @@ impl InprocListener {
             connector_recv_signal,
             connector_blocking_recv_waker,
             connector_max_message_size,
+            connector_fanin,
             accept_ack,
         } = req;
         if !is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
-            let _ = accept_ack.send((self.snapshot.clone(), None, None));
+            let _ = accept_ack.send((self.snapshot.clone(), None, None, None));
             return Ok(InprocConn {
                 out: listener_to_connector_tx,
                 in_rx: connector_to_listener_rx,
                 peer: connector,
                 tx: None,
                 rx: None,
+                recv_fanin: None,
             });
         }
-        {
-            let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
-            let listener_is_recv = is_recv_side(self.snapshot.socket_type);
-            let ring_recv_signal = if listener_is_recv {
-                self.recv_signal.clone()
+        let listener_is_recv = is_recv_side(self.snapshot.socket_type);
+        let recv = if listener_is_recv {
+            RecvConfig {
+                signal: self.recv_signal.clone(),
+                blocking: self.blocking_recv_waker.clone(),
+                max_message_size: self.max_message_size,
+                fanin: self.fanin.clone(),
+            }
+        } else {
+            RecvConfig {
+                signal: connector_recv_signal,
+                blocking: connector_blocking_recv_waker,
+                max_message_size: connector_max_message_size,
+                fanin: connector_fanin,
+            }
+        };
+        let (tx, rx) = inproc_pipe(recv)?;
+        let recv_fanin = rx.is_none().then(|| tx.clone());
+        let (listener_tx, listener_rx, listener_fanin, connector_tx, connector_rx, connector_fanin) =
+            if listener_is_recv {
+                (None, rx, recv_fanin, Some(tx), None, None)
             } else {
-                connector_recv_signal
+                (Some(tx), None, None, None, rx, recv_fanin)
             };
-            let mms = if listener_is_recv {
-                self.max_message_size
-            } else {
-                connector_max_message_size
-            };
-            let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let blocking_space = Arc::new(BlockingSpace::new());
-            let tx = Arc::new(InprocTx {
-                producer: ParkingMutex::new(p),
-                recv_signal: ring_recv_signal,
-                recv_ready: ready.clone(),
-                max_message_size: mms,
-                space_notify: Arc::new(StateSignal::new()),
-                blocking_space: blocking_space.clone(),
-                blocking_recv_waker: if listener_is_recv {
-                    Arc::clone(&self.blocking_recv_waker)
-                } else {
-                    Arc::clone(&connector_blocking_recv_waker)
-                },
-            });
-            let rx = Arc::new(InprocRx {
-                consumer: Mutex::new(c),
-                batch_remaining: std::sync::atomic::AtomicUsize::new(0),
-                recv_signal: tx.recv_signal.clone(),
-                recv_ready: ready,
-                space_notify: tx.space_notify.clone(),
-                blocking_space,
-            });
-            let (listener_tx, listener_rx, connector_tx, connector_rx) = if listener_is_recv {
-                (None, Some(rx.clone()), Some(tx.clone()), None)
-            } else {
-                (Some(tx.clone()), None, None, Some(rx.clone()))
-            };
-            let _ = accept_ack.send((self.snapshot.clone(), connector_tx, connector_rx));
-            return Ok(InprocConn {
-                out: listener_to_connector_tx,
-                in_rx: connector_to_listener_rx,
-                peer: connector,
-                tx: listener_tx,
-                rx: listener_rx,
-            });
-        }
+        let _ = accept_ack.send((
+            self.snapshot.clone(),
+            connector_tx,
+            connector_rx,
+            connector_fanin,
+        ));
+        Ok(InprocConn {
+            out: listener_to_connector_tx,
+            in_rx: connector_to_listener_rx,
+            peer: connector,
+            tx: listener_tx,
+            rx: listener_rx,
+            recv_fanin: listener_fanin,
+        })
     }
+}
+
+fn inproc_pipe(recv: RecvConfig) -> Result<(Arc<InprocTx>, Option<Arc<InprocRx>>)> {
+    if let Some(fanin) = &recv.fanin {
+        let producer = fanin.register().ok_or(Error::Closed)?;
+        return Ok((InprocTx::fanin(producer, recv), None));
+    }
+    let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let blocking_space = Arc::new(BlockingSpace::new());
+    let tx = Arc::new(InprocTx {
+        producer: ParkingMutex::new(InprocProducer::Yring(p)),
+        recv_signal: recv.signal,
+        recv_ready: ready.clone(),
+        max_message_size: recv.max_message_size,
+        space_notify: Arc::new(StateSignal::new()),
+        blocking_space: blocking_space.clone(),
+        blocking_recv_waker: recv.blocking,
+    });
+    let rx = Arc::new(InprocRx {
+        consumer: Mutex::new(c),
+        batch_remaining: std::sync::atomic::AtomicUsize::new(0),
+        recv_signal: tx.recv_signal.clone(),
+        recv_ready: ready,
+        space_notify: tx.space_notify.clone(),
+        blocking_space,
+    });
+    Ok((tx, Some(rx)))
 }
 
 impl Drop for InprocListener {
@@ -446,6 +519,7 @@ mod tests {
             notify(),
             waker(),
             None,
+            None,
         )
         .unwrap();
         let n = notify();
@@ -457,6 +531,7 @@ mod tests {
                 snap(SocketType::Push),
                 n,
                 waker(),
+                None,
                 None,
             )
             .await
@@ -497,6 +572,7 @@ mod tests {
             notify(),
             waker(),
             None,
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -506,6 +582,7 @@ mod tests {
                 snap(SocketType::Pair),
                 notify(),
                 waker(),
+                None,
                 None
             ),
             Err(Error::InvalidEndpoint(_))
@@ -521,6 +598,7 @@ mod tests {
                 snap(SocketType::Push),
                 notify(),
                 waker(),
+                None,
                 None,
             )
             .await,
@@ -539,6 +617,7 @@ mod tests {
                 notify(),
                 waker(),
                 None,
+                None,
             )
             .unwrap();
         }
@@ -548,6 +627,7 @@ mod tests {
             snap(SocketType::Pair),
             notify(),
             waker(),
+            None,
             None,
         )
         .unwrap();

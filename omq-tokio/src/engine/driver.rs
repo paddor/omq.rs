@@ -124,6 +124,7 @@ impl ReceiveProfile {
 pub enum RecvSink {
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
     Yring(YringSink),
+    Fanin(crate::socket::fanin::Sink),
     Authenticated(AuthenticatedRecvSink),
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
     Rep(RepRecvSink),
@@ -279,6 +280,7 @@ impl std::fmt::Debug for RecvSink {
             Self::Authenticated(_) => f.debug_tuple("Authenticated").finish_non_exhaustive(),
             Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
             Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
+            Self::Fanin(_) => f.debug_tuple("Fanin").finish_non_exhaustive(),
             Self::Peer(_) => f.debug_tuple("Peer").finish_non_exhaustive(),
             Self::Server(server) => f
                 .debug_struct("Server")
@@ -375,7 +377,11 @@ impl RecvSink {
             Self::Authenticated(sink) => sink.peer_properties = Some(peer_properties),
             Self::Rep(rep) => rep.sink.set_peer_properties(peer_properties),
             Self::Server(server) => server.sink.set_peer_properties(peer_properties),
-            Self::Channel(_) | Self::Yring(_) | Self::Conflate(_) | Self::Peer(_) => {}
+            Self::Channel(_)
+            | Self::Yring(_)
+            | Self::Conflate(_)
+            | Self::Peer(_)
+            | Self::Fanin(_) => {}
         }
     }
 
@@ -409,7 +415,7 @@ impl RecvSink {
 
     fn is_yring(&self) -> bool {
         match self {
-            Self::Yring(_) | Self::Peer(_) => true,
+            Self::Yring(_) | Self::Peer(_) | Self::Fanin(_) => true,
             Self::Server(server) => server.sink.is_yring(),
             _ => false,
         }
@@ -428,6 +434,10 @@ impl RecvSink {
 
     async fn try_send_plain(&mut self, m: Message) -> Option<Message> {
         match self {
+            Self::Fanin(sink) => {
+                let _ = sink.push(m);
+                None
+            }
             Self::Peer(_) => unreachable!("PEER lanes never fall back through the actor"),
             Self::Channel(pipe) => {
                 let _ = pipe.send(m).await;
@@ -470,6 +480,7 @@ impl RecvSink {
 
     async fn send_plain(&mut self, m: Message) -> bool {
         match self {
+            Self::Fanin(sink) => sink.push(m),
             Self::Peer(sink) => {
                 let alive = sink.push(m);
                 sink.flush();
@@ -556,6 +567,10 @@ impl RecvSink {
         pending_yring_flush: &mut bool,
     ) -> bool {
         if defer_yring_flush {
+            if let Self::Fanin(sink) = self {
+                *pending_yring_flush = true;
+                return sink.push_deferred(m);
+            }
             if let Self::Peer(sink) = self {
                 return sink.push(m);
             }
@@ -574,7 +589,12 @@ impl RecvSink {
     }
 
     fn flush_deferred(&mut self, pending_yring_flush: &mut bool) {
-        if let Self::Peer(sink) = self {
+        if let Self::Fanin(sink) = self {
+            if *pending_yring_flush {
+                sink.flush();
+                *pending_yring_flush = false;
+            }
+        } else if let Self::Peer(sink) = self {
             sink.flush();
         } else if let Self::Yring(sink) = self {
             sink.flush_pending(pending_yring_flush);
@@ -586,17 +606,25 @@ impl RecvSink {
     }
 
     pub(crate) fn peer_blocked(&self) -> bool {
-        matches!(self, Self::Peer(sink) if sink.blocked())
+        match self {
+            Self::Peer(sink) => sink.blocked(),
+            Self::Fanin(sink) => sink.blocked(),
+            _ => false,
+        }
     }
 
     pub(crate) fn retry_peer_pending(&mut self) -> bool {
         match self {
             Self::Peer(sink) => sink.retry_pending(),
+            Self::Fanin(sink) => sink.retry_pending(),
             _ => true,
         }
     }
 
     pub(crate) async fn peer_space_ready(&mut self) {
+        if let Self::Fanin(sink) = self {
+            sink.ready().await;
+        }
         if let Self::Peer(sink) = self {
             sink.ready().await;
         }

@@ -426,6 +426,9 @@ impl SocketDriver {
                             enabled.store(true, std::sync::atomic::Ordering::Release);
                             // Wake any ordinary recv already waiting on an unused socket.
                             self.recv_tx.close();
+                            if let Some(fanin) = &self.spsc.fanin {
+                                fanin.close();
+                            }
                             lanes
                         })
                 };
@@ -514,6 +517,9 @@ impl SocketDriver {
         self.close_ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
         self.recv_tx.close();
+        if let Some(fanin) = &self.spsc.fanin {
+            fanin.close();
+        }
         if let Some(routes) = &self.peer_recv_routes {
             routes.close_receive();
         }

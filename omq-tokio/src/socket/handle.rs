@@ -199,17 +199,12 @@ impl Socket {
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool);
         let send_submitter = send_strategy.submitter();
-        let conflate_recv = options.conflate
-            && matches!(
-                socket_type,
-                SocketType::Pull
-                    | SocketType::Sub
-                    | SocketType::XSub
-                    | SocketType::Dish
-                    | SocketType::Dealer
-                    | SocketType::Gather
-            );
-        let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+        let mut spsc = recv_handles(
+            socket_type,
+            &options,
+            recv_sink_config.is_none(),
+            blocking_recv_waker,
+        );
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
@@ -1410,6 +1405,33 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
         }
     };
     Ok((command, Bytes::copy_from_slice(prefix)))
+}
+
+fn recv_handles(
+    socket_type: SocketType,
+    options: &Options,
+    native: bool,
+    blocking_recv_waker: Arc<super::recv::BlockingRecvWaker>,
+) -> SpscHandles {
+    let conflate_recv = options.conflate
+        && matches!(
+            socket_type,
+            SocketType::Pull
+                | SocketType::Sub
+                | SocketType::XSub
+                | SocketType::Dish
+                | SocketType::Dealer
+                | SocketType::Gather
+        );
+    let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+    if supports_recv_batching(socket_type) && !conflate_recv && native {
+        spsc.fanin = Some(super::fanin::Fanin::new(
+            options.recv_hwm.max(16) as usize,
+            spsc.recv_signal.clone(),
+            spsc.blocking_recv_waker.clone(),
+        ));
+    }
+    spsc
 }
 
 fn supports_recv_batching(t: SocketType) -> bool {

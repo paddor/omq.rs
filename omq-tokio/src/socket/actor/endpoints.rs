@@ -316,9 +316,7 @@ impl SocketDriver {
             &self.inproc_registry,
             &endpoint,
             &snapshot,
-            &self.spsc.recv_signal,
-            &self.spsc.blocking_recv_waker,
-            self.options.max_message_size,
+            &self.spsc.inproc_config(self.options.max_message_size),
             #[cfg(feature = "ws")]
             &self.options.wss_tls,
         )
@@ -380,9 +378,7 @@ impl SocketDriver {
         let monitor_ep = endpoint.clone();
         let tx_for_delay = tx.clone();
         let snapshot = self.inproc_snapshot();
-        let recv_signal = self.spsc.recv_signal.clone();
-        let blocking_recv_waker = self.spsc.blocking_recv_waker.clone();
-        let max_message_size = self.options.max_message_size;
+        let recv = self.spsc.inproc_config(self.options.max_message_size);
         let inproc_registry = self.inproc_registry.clone();
         #[cfg(feature = "ws")]
         let wss_tls = self.options.wss_tls.clone();
@@ -396,9 +392,7 @@ impl SocketDriver {
                         &inproc_registry,
                         &ep_for_dial,
                         &snapshot,
-                        &recv_signal,
-                        &blocking_recv_waker,
-                        max_message_size,
+                        &recv,
                         #[cfg(feature = "ws")]
                         WsConnectOptions {
                             wss_tls: &wss_tls,

@@ -34,7 +34,8 @@ soak = []
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
-fanring = { version = "0.3.5", features = ["async"] }
+# Strict receive rotation is currently provided by the sibling checkout.
+fanring = { version = "0.3.5", path = "../../fanring", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.27.0", default-features = false }
 yring = "0.3.17"
 arc-swap = "1.7.1"

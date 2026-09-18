@@ -8,6 +8,7 @@
 
 pub(crate) mod actor;
 pub(crate) mod dispatch;
+pub(crate) mod fanin;
 pub mod handle;
 pub mod monitor;
 pub(crate) mod peer_recv;

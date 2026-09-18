@@ -41,8 +41,11 @@ fn cpu_seconds() -> f64 {
         assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
         usage.assume_init()
     };
-    (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64
-        + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64 / 1e6
+    #[cfg(target_vendor = "apple")]
+    let micros = f64::from(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+    #[cfg(not(target_vendor = "apple"))]
+    let micros = (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64;
+    (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64 + micros / 1e6
 }
 
 #[cfg(not(unix))]

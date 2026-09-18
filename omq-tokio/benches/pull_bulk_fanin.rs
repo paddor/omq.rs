@@ -1,5 +1,6 @@
 //! Separate-process TCP bulk receive. Run the executable with WRITERS SIZE SECONDS.
 //! Defaults: 1/4/8 writers, 16/53 bytes, five measured seconds after one warmup second.
+//! Set `OMQ_BENCH_RECV_BATCHING=1` to enable relaxed bulk receive ordering.
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -53,7 +54,8 @@ fn run(writers: usize, size: usize, seconds: u64) {
     assert!((1..=255).contains(&writers));
     assert!((9..=omq_tokio::message::MAX_INLINE_MESSAGE).contains(&size));
     let ctx = Context::new();
-    let pull = ctx.blocking_socket(SocketType::Pull, options());
+    let recv_batching = std::env::var("OMQ_BENCH_RECV_BATCHING").is_ok_and(|value| value == "1");
+    let pull = ctx.blocking_socket(SocketType::Pull, options().recv_batching(recv_batching));
     let endpoint = pull.bind("tcp://127.0.0.1:0".parse().unwrap()).unwrap();
     let mut children = Writers(Vec::new());
     for id in 0..writers {
@@ -116,7 +118,7 @@ fn run(writers: usize, size: usize, seconds: u64) {
             let total: u64 = counts.iter().sum();
             assert!(counts.iter().all(|&count| count > 0));
             println!(
-                "writers={writers} size={size} msg_s={:.0} cpu_pct={:.1} msg_call={:.2} per_writer={counts:?}",
+                "writers={writers} size={size} recv_batching={recv_batching} msg_s={:.0} cpu_pct={:.1} msg_call={:.2} per_writer={counts:?}",
                 total as f64 / elapsed,
                 cpu / elapsed * 100.0,
                 total as f64 / calls as f64

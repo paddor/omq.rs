@@ -192,6 +192,7 @@ impl Socket {
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
         let recv_hwm = options.recv_hwm.max(16) as usize;
         let driver_linger = options.linger;
+        let recv_batching = options.recv_batching && supports_recv_batching(socket_type);
         let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
@@ -250,6 +251,7 @@ impl Socket {
                     recv_pipe_space,
                     spsc,
                     latency_profile,
+                    recv_batching,
                 ),
                 peer_recv_lanes: Arc::new(AtomicBool::new(false)),
                 monitor,
@@ -1408,6 +1410,13 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
         }
     };
     Ok((command, Bytes::copy_from_slice(prefix)))
+}
+
+fn supports_recv_batching(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Pull | SocketType::Gather | SocketType::Sub | SocketType::XSub
+    )
 }
 
 /// Validate frame count for socket types that enforce a fixed count but whose

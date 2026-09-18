@@ -29,6 +29,9 @@ pub(crate) type SpscActivated = Arc<StateSignal>;
 
 const RECV_BATCH_MESSAGES: usize = 256;
 const RECV_BATCH_BYTES: usize = 2 * 1024 * 1024;
+// Scheduling quanta, not part of the public recv_batching contract.
+const RECV_BURST_MESSAGES: usize = 64;
+const RECV_BURST_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -526,6 +529,8 @@ pub(crate) struct SpscAwareRecv {
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
     drain_state: Mutex<DrainState>,
+    /// Opt-in receive scheduling for bulk calls only.
+    recv_batching: bool,
     /// Waker for blocking `recv()` callers.
     blocking_recv_waker: Arc<BlockingRecvWaker>,
 }
@@ -564,6 +569,7 @@ enum RecvSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DrainLimit {
     One,
+    Burst,
     Budget,
 }
 
@@ -639,6 +645,9 @@ fn drain_peer_consumer<F: FnMut()>(
                 released
             }
             DrainLimit::Budget => drain_yring(&mut consumer, batch, &mut remaining, budget) > 0,
+            DrainLimit::Burst => {
+                drain_yring_limited::<true>(&mut consumer, batch, &mut remaining, budget) > 0
+            }
         };
         (None, released)
     };
@@ -676,13 +685,27 @@ fn drain_yring(
     batch_remaining: &mut usize,
     budget: &mut DrainBudget,
 ) -> usize {
+    drain_yring_limited::<false>(consumer, batch, batch_remaining, budget)
+}
+
+fn drain_yring_limited<const BURST: bool>(
+    consumer: &mut yring::Consumer<RecvItem>,
+    batch: &mut VecDeque<Message>,
+    batch_remaining: &mut usize,
+    budget: &mut DrainBudget,
+) -> usize {
     let mut drained = 0;
-    while !budget.exhausted() {
+    let mut burst = DrainBudget::new(RECV_BURST_MESSAGES, RECV_BURST_BYTES);
+    while !budget.exhausted() && (!BURST || !burst.exhausted()) {
         let (item, _) = drain_yring_one(consumer, batch_remaining);
         let Some(item) = item else {
             break;
         };
-        let _ = budget.account(item.size_class.budget_bytes());
+        let bytes = item.size_class.budget_bytes();
+        let _ = budget.account(bytes);
+        if BURST {
+            let _ = burst.account(bytes);
+        }
         batch.push_back(item.message);
         drained += 1;
     }
@@ -724,8 +747,10 @@ impl SpscAwareRecv {
         recv_pipe_space: Arc<StateSignal>,
         handles: SpscHandles,
         latency: bool,
+        recv_batching: bool,
     ) -> Self {
         Self {
+            recv_batching,
             peer_recv: handles.peer_recv,
             consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
@@ -1008,7 +1033,11 @@ impl SpscAwareRecv {
         let source_count = inproc_len + tcp_len + 1;
         let peer_source_count = inproc_len + tcp_len;
         let limit = if !latency && peer_source_count > 1 {
-            DrainLimit::One
+            if bulk && self.recv_batching {
+                DrainLimit::Burst
+            } else {
+                DrainLimit::One
+            }
         } else {
             DrainLimit::Budget
         };
@@ -1016,8 +1045,9 @@ impl SpscAwareRecv {
             let start = state.recv_cursor % source_count;
             let before = budget.msgs();
             // One logical round-robin space covers all sources. Bulk calls
-            // repeat fair rounds with one aggregate budget, never waiting for
-            // arrivals. Advance the cursor even when a limit cuts a round short.
+            // repeat fair rounds (bounded bursts when opted in) with one
+            // aggregate budget, never waiting for arrivals. Advance the cursor
+            // even when a limit cuts a round short.
             for offset in 0..source_count {
                 if result.is_some() || budget.exhausted() {
                     break;
@@ -1081,6 +1111,14 @@ impl SpscAwareRecv {
                 }
                 DrainLimit::Budget => {
                     drain_yring(
+                        &mut state.recv_consumer,
+                        &mut state.batch,
+                        &mut state.recv_batch_remaining,
+                        budget,
+                    ) > 0
+                }
+                DrainLimit::Burst => {
+                    drain_yring_limited::<true>(
                         &mut state.recv_consumer,
                         &mut state.batch,
                         &mut state.recv_batch_remaining,
@@ -1482,7 +1520,7 @@ mod tests {
         let (pipe, consumer, notify, space) = recv_pipe(capacity, waker);
         handles.consumer_generation.store(1, Ordering::Release);
         (
-            SpscAwareRecv::new(consumer, notify, space, handles, latency),
+            SpscAwareRecv::new(consumer, notify, space, handles, latency, false),
             producers,
             pipe,
         )
@@ -1529,6 +1567,120 @@ mod tests {
             assert_eq!(out[0].part_slice(0).unwrap()[0], 3);
             assert_eq!(out[1].part_slice(0).unwrap()[0], 0);
         }
+    }
+
+    #[test]
+    fn bulk_batching_bursts_without_changing_single_receive_order() {
+        for latency in [false, true] {
+            let (mut recv, mut producers, _pipe) = bulk_receiver(4, 128, latency);
+            recv.recv_batching = true;
+            preload(&mut producers, 100, 53);
+            let mut out = Vec::with_capacity(256);
+            let allocation = out.as_ptr();
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 256);
+            for (index, message) in out.iter().enumerate() {
+                let payload = message.part_slice(0).unwrap();
+                assert_eq!(
+                    (payload[0], payload[1]),
+                    ((index / 64) as u8, (index % 64) as u8)
+                );
+                let address = std::ptr::from_ref(message) as usize;
+                assert!(
+                    (address..address + size_of::<Message>())
+                        .contains(&(payload.as_ptr() as usize))
+                );
+            }
+            assert_eq!(out.as_ptr(), allocation);
+            // Bulk staging must not leave a burst behind for ordinary recv().
+            for seq in 64..68 {
+                for peer in 0..4 {
+                    let message = recv.try_recv().unwrap();
+                    assert_eq!(&message.part_slice(0).unwrap()[..2], &[peer, seq]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_batching_partial_calls_rotate_release_slots_and_drain_disconnected_peers() {
+        for latency in [false, true] {
+            let (mut recv, mut producers, _pipe) = bulk_receiver(4, 128, latency);
+            recv.recv_batching = true;
+            preload(&mut producers, 128, 53);
+            let mut out = Vec::with_capacity(256);
+            for (peer, producer) in producers.iter_mut().enumerate() {
+                out.clear();
+                assert_eq!(recv.try_recv_many_into(3, &mut out).unwrap(), 3);
+                for (seq, message) in out.iter().enumerate() {
+                    assert_eq!(
+                        &message.part_slice(0).unwrap()[..2],
+                        &[peer as u8, seq as u8]
+                    );
+                }
+                // The caller limit cut this peer's prefetched window short.
+                for seq in 128..131 {
+                    producer
+                        .push(RecvItem::new(Message::from_slice(&[peer as u8, seq])))
+                        .unwrap();
+                }
+                assert!(
+                    producer
+                        .push(RecvItem::new(Message::from_slice(b"full")))
+                        .is_err()
+                );
+                producer.flush();
+            }
+            drop(producers);
+            let mut next = [3_u8; 4];
+            for _ in 0..2 {
+                out.clear();
+                assert_eq!(recv.try_recv_many_into(300, &mut out).unwrap(), 256);
+                for message in &out {
+                    let payload = message.part_slice(0).unwrap();
+                    let peer = usize::from(payload[0]);
+                    assert_eq!(payload[1], next[peer]);
+                    next[peer] += 1;
+                }
+            }
+            assert_eq!(next, [131; 4]);
+            assert!(matches!(
+                recv.try_recv_many_into(1, &mut out),
+                Err(omq_proto::Error::WouldBlock)
+            ));
+        }
+    }
+
+    #[test]
+    fn bulk_batching_bounds_per_peer_and_aggregate_byte_work() {
+        let (mut recv, mut producers, _pipe) = bulk_receiver(2, 64, false);
+        recv.recv_batching = true;
+        preload(&mut producers, 64, 32_768);
+        let mut out = Vec::new();
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 32);
+        // Medium size-class accounting is 64 KiB per message: four per
+        // 256 KiB burst, 32 per 2 MiB call, even across multiple rounds.
+        for (index, message) in out.iter().enumerate() {
+            assert_eq!(
+                usize::from(message.part_slice(0).unwrap()[0]),
+                index / 4 % 2
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_batching_hot_peer_yields_to_newly_ready_peer() {
+        let (mut recv, mut producers, _pipe) = bulk_receiver(2, 512, false);
+        recv.recv_batching = true;
+        preload(&mut producers[..1], 400, 16);
+        let mut out = Vec::new();
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 256);
+        producers[1]
+            .push(RecvItem::new(Message::from_slice(b"quiet")))
+            .unwrap();
+        producers[1].flush();
+        out.clear();
+        assert_eq!(recv.try_recv_many_into(1, &mut out).unwrap(), 1);
+        assert_eq!(out[0].part_slice(0).unwrap(), b"quiet");
     }
 
     #[test]
@@ -1604,23 +1756,26 @@ mod tests {
 
     #[test]
     fn bulk_oversized_and_multipart_messages_stay_atomic() {
-        let (recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
-        let huge = Message::from_slice(&vec![7; RECV_BATCH_BYTES + 1]);
-        let multipart = Message::multipart([vec![1; 40_000], vec![2; 40_000]]);
-        producers[0].push(RecvItem::new(huge.clone())).unwrap();
-        producers[0]
-            .push(RecvItem::new(Message::from_slice(b"next")))
-            .unwrap();
-        producers[0].flush();
-        producers[1].push(RecvItem::new(multipart.clone())).unwrap();
-        producers[1].flush();
-        let mut out = Vec::new();
-        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
-        assert_eq!(out.pop().unwrap(), huge);
-        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
-        assert_eq!(out.pop().unwrap(), multipart);
-        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
-        assert_eq!(out.pop().unwrap().part_slice(0).unwrap(), b"next");
+        for batching in [false, true] {
+            let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
+            recv.recv_batching = batching;
+            let huge = Message::from_slice(&vec![7; RECV_BATCH_BYTES + 1]);
+            let multipart = Message::multipart([vec![1; 40_000], vec![2; 40_000]]);
+            producers[0].push(RecvItem::new(huge.clone())).unwrap();
+            producers[0]
+                .push(RecvItem::new(Message::from_slice(b"next")))
+                .unwrap();
+            producers[0].flush();
+            producers[1].push(RecvItem::new(multipart.clone())).unwrap();
+            producers[1].flush();
+            let mut out = Vec::new();
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap(), huge);
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap(), multipart);
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap().part_slice(0).unwrap(), b"next");
+        }
     }
 
     #[tokio::test]
@@ -1735,7 +1890,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bulk_empty_drain_racing_arrival_keeps_receive_wakeup() {
-        let (recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
+        for batching in [false, true] {
+            check_bulk_wakeup(batching).await;
+        }
+    }
+
+    async fn check_bulk_wakeup(batching: bool) {
+        let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
+        recv.recv_batching = batching;
         let signal = recv.recv_signal.clone();
         let sender = tokio::spawn(async move {
             for seq in 0_u32..2000 {

@@ -98,6 +98,15 @@ pub struct Options {
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
 
+    /// Allow receive batching to relax cross-connection message ordering.
+    ///
+    /// Defaults to false. Currently applies to bulk receives on PULL, GATHER,
+    /// SUB, and XSUB; single-message receives are unchanged. Bursts are bounded
+    /// internally, but their size and scheduling are implementation details.
+    /// Per-connection FIFO and multipart atomicity are preserved. This does
+    /// not wait for additional messages to fill a batch.
+    pub recv_batching: bool,
+
     /// Optional native byte-stream multipart frame-table cache. Shared across
     /// this socket's connections; payload bytes and in-flight messages are not
     /// bounded by this cache. Exhaustion allocates normally. Default: disabled.
@@ -335,6 +344,7 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            recv_batching: false,
             recv_message_pool: None,
             recv_rate_limit: None,
             recv_ip_rate_limit: None,
@@ -499,6 +509,14 @@ impl Options {
     /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Allow bounded per-connection bursts when receiving batches.
+    /// See [`Self::recv_batching`] for supported socket types and semantics.
+    #[must_use]
+    pub fn recv_batching(mut self, enabled: bool) -> Self {
+        self.recv_batching = enabled;
         self
     }
 
@@ -1046,6 +1064,7 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.send_hwm, 1000);
         assert_eq!(o.recv_hwm, 1000);
+        assert!(!o.recv_batching);
         assert_eq!(o.recv_rate_limit, None);
         assert_eq!(o.recv_ip_rate_limit, None);
         assert_eq!(o.linger, Some(Duration::ZERO));
@@ -1216,6 +1235,7 @@ mod tests {
             .workload_profile(WorkloadProfile::Latency)
             .send_hwm(42)
             .recv_hwm(99)
+            .recv_batching(true)
             .linger(Duration::from_secs(5))
             .identity("router-id")
             .heartbeat_interval(Duration::from_secs(1))
@@ -1227,6 +1247,7 @@ mod tests {
         assert_eq!(o.send_hwm, 42);
         assert_eq!(o.workload_profile, Some(WorkloadProfile::Latency));
         assert_eq!(o.recv_hwm, 99);
+        assert!(o.recv_batching);
         assert_eq!(o.linger, Some(Duration::from_secs(5)));
         assert_eq!(o.identity, &b"router-id"[..]);
         assert_eq!(o.heartbeat_interval, Some(Duration::from_secs(1)));

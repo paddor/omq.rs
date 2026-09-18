@@ -27,6 +27,232 @@ fn inproc_ep(name: &str) -> Endpoint {
     }
 }
 
+#[tokio::test]
+async fn async_bulk_waits_only_for_first_and_is_cancel_safe() {
+    use omq_tokio::options::WorkloadProfile;
+
+    for batching in [false, true] {
+        for profile in [WorkloadProfile::Latency, WorkloadProfile::Throughput] {
+            for (receiver, sender) in [
+                (SocketType::Pull, SocketType::Push),
+                (SocketType::Gather, SocketType::Scatter),
+                (SocketType::Dealer, SocketType::Dealer),
+                (SocketType::Pair, SocketType::Pair),
+                (SocketType::Channel, SocketType::Channel),
+            ] {
+                for tcp in [false, true] {
+                    let ctx = Context::current();
+                    let options = Options::default()
+                        .workload_profile(profile)
+                        .recv_batching(batching);
+                    let pull = ctx.socket(receiver, options.clone());
+                    let push = ctx.socket(sender, options);
+                    let ep = if tcp {
+                        tcp_loopback(0)
+                    } else {
+                        inproc_ep("async-bulk")
+                    };
+                    let ep = pull.bind(ep).await.unwrap();
+                    push.connect(ep).await.unwrap();
+                    pull.wait_connected(1, Duration::from_secs(2))
+                        .await
+                        .unwrap();
+                    let mut out = vec![Message::from_slice(b"existing")];
+                    assert_eq!(pull.recv_many_into(0, &mut out).await.unwrap(), 0);
+                    {
+                        let waiting = pull.recv_many_into(256, &mut out);
+                        tokio::pin!(waiting);
+                        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                        assert!(
+                            std::future::Future::poll(waiting.as_mut(), &mut task).is_pending()
+                        );
+                    }
+                    assert_eq!(out.len(), 1);
+                    push.send(Message::from_slice(b"first")).await.unwrap();
+                    assert_eq!(
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            pull.recv_many_into(256, &mut out)
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                        1
+                    );
+                    assert_eq!(out[1].part_slice(0).unwrap(), b"first");
+                    push.send(Message::from_slice(b"second")).await.unwrap();
+                    let messages =
+                        tokio::time::timeout(Duration::from_secs(2), pull.recv_many(256))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(messages, [Message::from_slice(b"second")]);
+                    assert!(matches!(
+                        pull.try_recv_many_into(256, &mut out),
+                        Err(Error::WouldBlock)
+                    ));
+                    push.close().await.unwrap();
+                    pull.close().await.unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn async_bulk_req_rep_preserves_alternation() {
+    let ctx = Context::current();
+    let req = ctx.socket(SocketType::Req, Options::default());
+    let rep = ctx.socket(SocketType::Rep, Options::default());
+    let ep = rep.bind(inproc_ep("bulk-req-rep")).await.unwrap();
+    req.connect(ep).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..2 {
+            req.send(Message::from_slice(b"question")).await.unwrap();
+            assert_eq!(
+                rep.recv_many(256).await.unwrap(),
+                [Message::from_slice(b"question")]
+            );
+            rep.send(Message::from_slice(b"answer")).await.unwrap();
+            assert_eq!(
+                req.recv_many(256).await.unwrap(),
+                [Message::from_slice(b"answer")]
+            );
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn pull_recv_batching_is_opt_in_and_leaves_recv_order_unchanged() {
+    for enabled in [false, true] {
+        let ctx = Context::current();
+        let pull = ctx.socket(SocketType::Pull, Options::default().recv_batching(enabled));
+        let ep = pull.bind(inproc_ep("recv-batching")).await.unwrap();
+        let mut pushes = Vec::new();
+        for _ in 0..4 {
+            let push = ctx.socket(SocketType::Push, Options::default());
+            push.connect(ep.clone()).await.unwrap();
+            pushes.push(push);
+        }
+        pull.wait_connected(4, Duration::from_secs(2))
+            .await
+            .unwrap();
+        for (peer, push) in pushes.iter().enumerate() {
+            for seq in 0..32 {
+                push.send(Message::from_slice(&[peer as u8, seq]))
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            let message = pull.recv().await.unwrap();
+            let payload = message.part_slice(0).unwrap();
+            assert_eq!(payload[1], 0);
+            assert!(!order.contains(&payload[0]));
+            order.push(payload[0]);
+        }
+        let mut out = Vec::new();
+        assert_eq!(pull.try_recv_many_into(8, &mut out).unwrap(), 8);
+        for (index, message) in out.iter().enumerate() {
+            let payload = message.part_slice(0).unwrap();
+            assert_eq!(payload[0], order[if enabled { 0 } else { index % 4 }]);
+            assert_eq!(
+                usize::from(payload[1]),
+                1 + if enabled { index } else { index / 4 }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn recv_batching_supported_types_preserve_fifo_and_subscription_filtering() {
+    for (receiver, sender) in [
+        (SocketType::Pull, SocketType::Push),
+        (SocketType::Gather, SocketType::Scatter),
+        (SocketType::Sub, SocketType::XPub),
+        (SocketType::XSub, SocketType::XPub),
+    ] {
+        for tcp in [false, true] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let ctx = Context::current();
+                let pull = ctx.socket(receiver, Options::default().recv_batching(true));
+                let subscription = sender == SocketType::XPub;
+                if subscription {
+                    pull.subscribe("A").await.unwrap();
+                }
+                let endpoint = || {
+                    if tcp {
+                        tcp_loopback(0)
+                    } else {
+                        inproc_ep("batching-types")
+                    }
+                };
+                let ep = if subscription {
+                    None
+                } else {
+                    Some(pull.bind(endpoint()).await.unwrap())
+                };
+                let mut senders = Vec::new();
+                for _ in 0..4 {
+                    let push = ctx.socket(sender, Options::default());
+                    if let Some(ep) = &ep {
+                        push.connect(ep.clone()).await.unwrap();
+                    } else {
+                        let bound = push.bind(endpoint()).await.unwrap();
+                        pull.connect(bound).await.unwrap();
+                    }
+                    if subscription {
+                        assert_eq!(push.recv().await.unwrap().part_slice(0).unwrap(), b"\x01A");
+                    }
+                    senders.push(push);
+                }
+                pull.wait_connected(4, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                let mut next = [0_u8; 4];
+                let mut out = Vec::with_capacity(256);
+                // Keep pub/sub below its drop-on-mute capacity. This checks
+                // receive ordering and filtering, not publisher backpressure.
+                for round in 0..4 {
+                    for seq in round * 32..(round + 1) * 32 {
+                        for (peer, push) in senders.iter().enumerate() {
+                            if subscription {
+                                push.send(Message::from_slice(b"filtered")).await.unwrap();
+                            }
+                            push.send(Message::from_slice(&[b'A', peer as u8, seq]))
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    let mut count = 0;
+                    while count < 128 {
+                        out.clear();
+                        count += pull.recv_many_into(256, &mut out).await.unwrap();
+                        for message in &out {
+                            let payload = message.part_slice(0).unwrap();
+                            assert_eq!(payload[0], b'A');
+                            let peer = usize::from(payload[1]);
+                            assert_eq!(payload[2], next[peer]);
+                            next[peer] += 1;
+                        }
+                    }
+                }
+                assert_eq!(next, [128; 4]);
+                out.clear();
+                assert!(matches!(
+                    pull.try_recv_many_into(256, &mut out),
+                    Err(Error::WouldBlock)
+                ));
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{receiver:?} tcp={tcp}: {error}"));
+        }
+    }
+}
+
 // ---- Owned-runtime tests (plain #[test], no tokio) ----------------------
 
 #[test]

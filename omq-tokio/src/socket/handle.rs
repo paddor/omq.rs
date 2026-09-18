@@ -192,23 +192,19 @@ impl Socket {
         let (cmd_tx, cmd_rx) = mpsc::channel(options.send_hwm.max(16) as usize);
         let recv_hwm = options.recv_hwm.max(16) as usize;
         let driver_linger = options.linger;
+        let recv_batching = options.recv_batching && supports_recv_batching(socket_type);
         let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
         let monitor = MonitorPublisher::new();
         let send_strategy = SendStrategy::for_socket_type(socket_type, &options, io_pool);
         let send_submitter = send_strategy.submitter();
-        let conflate_recv = options.conflate
-            && matches!(
-                socket_type,
-                SocketType::Pull
-                    | SocketType::Sub
-                    | SocketType::XSub
-                    | SocketType::Dish
-                    | SocketType::Dealer
-                    | SocketType::Gather
-            );
-        let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+        let mut spsc = recv_handles(
+            socket_type,
+            &options,
+            recv_sink_config.is_none(),
+            blocking_recv_waker,
+        );
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
@@ -250,6 +246,7 @@ impl Socket {
                     recv_pipe_space,
                     spsc,
                     latency_profile,
+                    recv_batching,
                 ),
                 peer_recv_lanes: Arc::new(AtomicBool::new(false)),
                 monitor,
@@ -861,6 +858,31 @@ impl Socket {
         }
     }
 
+    /// Receive up to `max` messages, waiting only for the first one.
+    /// Subsequent messages are drained without waiting, within the receive
+    /// work budget. REQ/REP return at most one message per call.
+    pub async fn recv_many(&self, max: usize) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(max);
+        self.recv_many_into(max, &mut messages).await?;
+        Ok(messages)
+    }
+
+    /// Append up to `max` messages to reusable storage, waiting only for the
+    /// first message. A zero limit leaves `out` unchanged. Canceling the wait
+    /// consumes nothing; once the first message arrives, draining never awaits.
+    pub async fn recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        match self.try_recv_many_into(max, out) {
+            Err(Error::WouldBlock) => {}
+            result => return result,
+        }
+        let start_len = out.len();
+        out.push(self.recv().await?);
+        self.try_recv_many_after_first(max, start_len, out)
+    }
+
     pub(crate) fn blocking_recv_many(&self, max: usize) -> Result<Vec<Message>> {
         let mut messages = Vec::with_capacity(max);
         self.blocking_recv_many_into(max, &mut messages)?;
@@ -874,6 +896,10 @@ impl Socket {
     ) -> Result<usize> {
         if max == 0 {
             return Ok(0);
+        }
+        match self.try_recv_many_into(max, out) {
+            Err(Error::WouldBlock) => {}
+            result => return result,
         }
         let start_len = out.len();
         out.push(self.blocking_recv()?);
@@ -936,6 +962,10 @@ impl Socket {
         if max == 0 {
             return Ok(0);
         }
+        match self.try_recv_many_into(max, out) {
+            Err(Error::WouldBlock) => {}
+            result => return result,
+        }
         let start_len = out.len();
         out.push(self.blocking_recv_timeout(timeout)?);
         self.try_recv_many_after_first(max, start_len, out)
@@ -948,15 +978,12 @@ impl Socket {
         out: &mut Vec<Message>,
     ) -> Result<usize> {
         let appended = out.len() - start_len;
-        if appended >= max {
-            return Ok(appended);
-        }
         if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             return Ok(appended);
         }
-        match self.try_recv_many_into(max - appended, out) {
+        match self.inner.recv_rx.try_recv_many_after_first(max, out) {
             Ok(n) => Ok(appended + n),
-            Err(Error::WouldBlock) => Ok(appended),
+            Err(Error::WouldBlock | Error::Closed) => Ok(appended),
             Err(error) => Err(error),
         }
     }
@@ -1378,6 +1405,40 @@ fn xsub_raw_command(msg: &Message) -> Result<(XSubRawCommand, Bytes)> {
         }
     };
     Ok((command, Bytes::copy_from_slice(prefix)))
+}
+
+fn recv_handles(
+    socket_type: SocketType,
+    options: &Options,
+    native: bool,
+    blocking_recv_waker: Arc<super::recv::BlockingRecvWaker>,
+) -> SpscHandles {
+    let conflate_recv = options.conflate
+        && matches!(
+            socket_type,
+            SocketType::Pull
+                | SocketType::Sub
+                | SocketType::XSub
+                | SocketType::Dish
+                | SocketType::Dealer
+                | SocketType::Gather
+        );
+    let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
+    if supports_recv_batching(socket_type) && !conflate_recv && native {
+        spsc.fanin = Some(super::fanin::Fanin::new(
+            options.recv_hwm.max(16) as usize,
+            spsc.recv_signal.clone(),
+            spsc.blocking_recv_waker.clone(),
+        ));
+    }
+    spsc
+}
+
+fn supports_recv_batching(t: SocketType) -> bool {
+    matches!(
+        t,
+        SocketType::Pull | SocketType::Gather | SocketType::Sub | SocketType::XSub
+    )
 }
 
 /// Validate frame count for socket types that enforce a fixed count but whose

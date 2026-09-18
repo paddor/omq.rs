@@ -74,6 +74,10 @@ impl RecvItem {
         }
     }
 
+    pub(crate) fn budget_bytes(&self) -> usize {
+        self.size_class.budget_bytes()
+    }
+
     pub fn into_message(self) -> Message {
         self.message
     }
@@ -431,6 +435,7 @@ pub(crate) fn recv_pipe(
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
+    pub fanin: Option<Arc<super::fanin::Fanin>>,
     pub peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
     pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
@@ -444,6 +449,18 @@ pub(crate) struct SpscHandles {
 }
 
 impl SpscHandles {
+    pub(crate) fn inproc_config(
+        &self,
+        max_message_size: Option<usize>,
+    ) -> crate::transport::inproc::RecvConfig {
+        crate::transport::inproc::RecvConfig {
+            signal: self.recv_signal.clone(),
+            blocking: self.blocking_recv_waker.clone(),
+            max_message_size,
+            fanin: self.fanin.clone(),
+        }
+    }
+
     pub(crate) fn init_peer_recv(
         &mut self,
         hwm: usize,
@@ -461,6 +478,7 @@ impl SpscHandles {
         let conflate_slot = conflate_recv
             .then(|| ConflateRecvSlot::new(recv_signal.clone(), blocking_recv_waker.clone()));
         Self {
+            fanin: None,
             peer_recv: None,
             consumers: Arc::new(RwLock::new(Vec::new())),
             consumer_generation: Arc::new(AtomicU64::new(0)),
@@ -500,6 +518,7 @@ impl SpscHandles {
 /// pipe, returning messages one at a time.
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
+    fanin: Option<Arc<super::fanin::Fanin>>,
     peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: SpscConsumers,
@@ -526,6 +545,8 @@ pub(crate) struct SpscAwareRecv {
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
     drain_state: Mutex<DrainState>,
+    /// Opt-in receive scheduling for bulk calls only.
+    recv_batching: bool,
     /// Waker for blocking `recv()` callers.
     blocking_recv_waker: Arc<BlockingRecvWaker>,
 }
@@ -682,7 +703,8 @@ fn drain_yring(
         let Some(item) = item else {
             break;
         };
-        let _ = budget.account(item.size_class.budget_bytes());
+        let bytes = item.size_class.budget_bytes();
+        let _ = budget.account(bytes);
         batch.push_back(item.message);
         drained += 1;
     }
@@ -724,8 +746,11 @@ impl SpscAwareRecv {
         recv_pipe_space: Arc<StateSignal>,
         handles: SpscHandles,
         latency: bool,
+        recv_batching: bool,
     ) -> Self {
         Self {
+            recv_batching,
+            fanin: handles.fanin,
             peer_recv: handles.peer_recv,
             consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
@@ -888,6 +913,10 @@ impl SpscAwareRecv {
     }
 
     fn buffered_sources_empty(&self) -> bool {
+        // Fanring returns directly, without application-side staging.
+        if self.fanin.is_some() {
+            return true;
+        }
         if let Some(peer) = &self.peer_recv {
             return peer.lock().expect("PEER receive poisoned").is_empty();
         }
@@ -896,6 +925,13 @@ impl SpscAwareRecv {
     }
 
     fn try_drain(&self) -> DrainResult {
+        if let Some(fanin) = &self.fanin {
+            return match fanin.try_recv() {
+                Ok(message) => DrainResult::Message(message),
+                Err(Error::Closed) => DrainResult::Closed,
+                Err(_) => DrainResult::Empty,
+            };
+        }
         if let Some(peer) = &self.peer_recv {
             return match peer.lock().expect("PEER receive poisoned").try_recv() {
                 Ok(message) => DrainResult::Message(message),
@@ -927,7 +963,8 @@ impl SpscAwareRecv {
             drop(guard);
             return DrainResult::Message(msg);
         }
-        let (latency_result, has_disconnected) = self.drain_sources(state);
+        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
+        let (latency_result, has_disconnected) = self.drain_sources(state, &mut budget, false);
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
@@ -993,48 +1030,59 @@ impl SpscAwareRecv {
         .message
     }
 
-    fn drain_sources(&self, state: &mut DrainState) -> (Option<Message>, bool) {
+    fn drain_sources(
+        &self,
+        state: &mut DrainState,
+        budget: &mut DrainBudget,
+        bulk: bool,
+    ) -> (Option<Message>, bool) {
         let mut result = None;
         let mut has_disconnected = false;
-        let mut budget = DrainBudget::new(RECV_BATCH_MESSAGES, RECV_BATCH_BYTES);
+        let latency = state.latency && !bulk;
         let inproc_len = state.inproc.len();
         let tcp_len = state.tcp.len();
         let source_count = inproc_len + tcp_len + 1;
         let peer_source_count = inproc_len + tcp_len;
-        let limit = if !state.latency && peer_source_count > 1 {
+        let limit = if !latency && peer_source_count > 1 {
             DrainLimit::One
         } else {
             DrainLimit::Budget
         };
-        let start = state.recv_cursor % source_count;
-
-        // One logical round-robin space covers all sources. This prevents a
-        // perpetually busy inproc or stream peer from consuming every batch.
-        for offset in 0..source_count {
-            if result.is_some() || (!state.latency && budget.exhausted()) {
+        loop {
+            let start = state.recv_cursor % source_count;
+            let before = budget.msgs();
+            // One logical round-robin space covers all sources. Bulk calls
+            // repeat fair rounds with one aggregate budget, never waiting for
+            // arrivals. Advance the cursor even when a limit cuts a round short.
+            for offset in 0..source_count {
+                if result.is_some() || budget.exhausted() {
+                    break;
+                }
+                let source = (start + offset) % source_count;
+                state.recv_cursor = (source + 1) % source_count;
+                let outcome = match recv_source_at(source, inproc_len, tcp_len) {
+                    RecvSource::Inproc(index) => drain_peer_source(
+                        PeerSource::Inproc(&state.inproc[index]),
+                        latency,
+                        &mut state.batch,
+                        budget,
+                        limit,
+                    ),
+                    RecvSource::Stream(index) => drain_peer_source(
+                        PeerSource::Stream(&state.tcp[index]),
+                        latency,
+                        &mut state.batch,
+                        budget,
+                        limit,
+                    ),
+                    RecvSource::Shared => self.drain_shared_source(state, budget, limit, latency),
+                };
+                result = outcome.message;
+                has_disconnected |= outcome.disconnected;
+            }
+            if !bulk || budget.exhausted() || budget.msgs() == before {
                 break;
             }
-            let source = (start + offset) % source_count;
-            state.recv_cursor = (source + 1) % source_count;
-            let outcome = match recv_source_at(source, inproc_len, tcp_len) {
-                RecvSource::Inproc(index) => drain_peer_source(
-                    PeerSource::Inproc(&state.inproc[index]),
-                    state.latency,
-                    &mut state.batch,
-                    &mut budget,
-                    limit,
-                ),
-                RecvSource::Stream(index) => drain_peer_source(
-                    PeerSource::Stream(&state.tcp[index]),
-                    state.latency,
-                    &mut state.batch,
-                    &mut budget,
-                    limit,
-                ),
-                RecvSource::Shared => self.drain_shared_source(state, &mut budget, limit),
-            };
-            result = outcome.message;
-            has_disconnected |= outcome.disconnected;
         }
         (result, has_disconnected)
     }
@@ -1044,8 +1092,9 @@ impl SpscAwareRecv {
         state: &mut DrainState,
         budget: &mut DrainBudget,
         limit: DrainLimit,
+        latency: bool,
     ) -> SourceDrain {
-        if state.latency {
+        if latency {
             let (item, released) =
                 drain_yring_one(&mut state.recv_consumer, &mut state.recv_batch_remaining);
             if released {
@@ -1097,6 +1146,28 @@ impl SpscAwareRecv {
             })
     }
 
+    /// A fair round can leave a prefetched window partly consumed. Publish
+    /// those slots before returning a bulk result so blocked producers resume.
+    fn release_partial_batches(&self, state: &mut DrainState) {
+        for peer in &state.inproc {
+            if peer.batch_remaining.load(Ordering::Relaxed) > 0 {
+                peer.consumer.lock().unwrap().release();
+                peer.space_notify.notify_changed();
+                peer.blocking_space.notify();
+            }
+        }
+        for peer in &state.tcp {
+            if peer.batch_remaining.load(Ordering::Relaxed) > 0 {
+                peer.consumer.lock().unwrap().release();
+                peer.space.notify_changed();
+            }
+        }
+        if state.recv_batch_remaining > 0 {
+            state.recv_consumer.release();
+            self.recv_pipe_space.notify_changed();
+        }
+    }
+
     fn cleanup_disconnected(&self) {
         self.consumers
             .write()
@@ -1128,7 +1199,8 @@ impl SpscAwareRecv {
             tokio::pin!(pipe_ready);
             tokio::pin!(activated);
 
-            if self.peer_recv.is_some()
+            if self.fanin.is_some()
+                || self.peer_recv.is_some()
                 || self.consumer_generation.load(Ordering::Acquire) > 0
                 || self.conflate_slot.is_some()
             {
@@ -1169,6 +1241,36 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        let budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
+        self.try_recv_many_into_budget(max, out, budget)
+    }
+
+    pub(crate) fn try_recv_many_after_first(
+        &self,
+        max: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
+        let first = out.last().expect("first message already received");
+        if !budget.account(RecvSizeClass::for_message(first).budget_bytes()) {
+            self.release_partial_batches(&mut self.drain_state.lock().unwrap());
+            return Ok(0);
+        }
+        self.try_recv_many_into_budget(max - 1, out, budget)
+    }
+
+    fn try_recv_many_into_budget(
+        &self,
+        max: usize,
+        out: &mut Vec<Message>,
+        mut budget: DrainBudget,
+    ) -> Result<usize> {
+        if let Some(fanin) = &self.fanin {
+            if max == 0 {
+                return Ok(0);
+            }
+            return fanin.recv_into(out, budget, self.recv_batching);
+        }
         if let Some(peer) = &self.peer_recv {
             return peer
                 .lock()
@@ -1179,40 +1281,25 @@ impl SpscAwareRecv {
         if max == 0 {
             return Ok(0);
         }
-
         if let Some(msg) = self.take_conflate_message() {
+            let _ = budget.account(RecvSizeClass::for_message(&msg).budget_bytes());
             out.push(msg);
-            if out.len() - start_len == max {
-                return Ok(max);
+            if budget.exhausted() {
+                return Ok(out.len() - start_len);
             }
         }
 
         let mut guard = self.drain_state.lock().unwrap();
-        while out.len() - start_len < max {
+        while !budget.exhausted() {
             let Some(msg) = guard.batch.pop_front() else {
                 break;
             };
+            let _ = budget.account(RecvSizeClass::for_message(&msg).budget_bytes());
             out.push(msg);
         }
-        if out.len() - start_len == max {
-            return Ok(max);
-        }
-
-        if guard.latency {
-            drop(guard);
-            while out.len() - start_len < max {
-                match self.try_drain() {
-                    DrainResult::Message(msg) => out.push(msg),
-                    DrainResult::Closed if out.len() == start_len => return Err(Error::Closed),
-                    DrainResult::Closed | DrainResult::Empty => break,
-                }
-            }
-            let drained = out.len() - start_len;
-            return if drained == 0 {
-                Err(Error::WouldBlock)
-            } else {
-                Ok(drained)
-            };
+        if budget.exhausted() {
+            self.release_partial_batches(&mut guard);
+            return Ok(out.len() - start_len);
         }
 
         self.recv_signal.begin_drain();
@@ -1220,17 +1307,16 @@ impl SpscAwareRecv {
         self.refresh_snapshot(&mut guard);
 
         if let Some(msg) = self.take_conflate_message() {
+            let _ = budget.account(RecvSizeClass::for_message(&msg).budget_bytes());
             out.push(msg);
         }
 
         let state = &mut *guard;
-        let (_latency_result, has_disconnected) = self.drain_sources(state);
-        while out.len() - start_len < max {
-            let Some(msg) = state.batch.pop_front() else {
-                break;
-            };
-            out.push(msg);
+        let (_, has_disconnected) = self.drain_sources(state, &mut budget, true);
+        while let Some(message) = state.batch.pop_front() {
+            out.push(message);
         }
+        self.release_partial_batches(state);
 
         let pipe_disconnected = state.recv_consumer.is_disconnected();
         let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
@@ -1261,6 +1347,9 @@ impl SpscAwareRecv {
     }
 
     pub(crate) fn shutdown(&self) {
+        if let Some(fanin) = &self.fanin {
+            fanin.close();
+        }
         if let Some(peer) = &self.peer_recv {
             peer.lock().expect("PEER receive poisoned").shutdown();
         }
@@ -1391,6 +1480,7 @@ mod tests {
         SpscHandles, TcpYringConsumer, drain_yring, drain_yring_one, drain_yring_one_into_batch,
         recv_source_at,
     };
+    use super::{SpscAwareRecv, recv_pipe};
     use omq_proto::Message;
     use omq_proto::flow::DrainBudget;
     use std::sync::Arc;
@@ -1409,6 +1499,84 @@ mod tests {
         )
     }
 
+    fn bulk_receiver(
+        peers: usize,
+        capacity: usize,
+        latency: bool,
+    ) -> (
+        SpscAwareRecv,
+        Vec<yring::Producer<RecvItem>>,
+        Arc<super::SharedRecvPipe>,
+    ) {
+        let waker = BlockingRecvWaker::new();
+        let handles = SpscHandles::new(waker.clone(), false);
+        let mut producers = Vec::new();
+        for id in 0..peers {
+            let (producer, consumer) = yring::spsc(capacity);
+            producers.push(producer);
+            handles
+                .tcp_consumers
+                .write()
+                .unwrap()
+                .push(Arc::new(TcpYringConsumer {
+                    consumer: std::sync::Mutex::new(consumer),
+                    batch_remaining: AtomicUsize::new(0),
+                    space: Arc::new(crate::engine::signal::StateSignal::new()),
+                    peer_id: id as u64,
+                }));
+        }
+        let (pipe, consumer, notify, space) = recv_pipe(capacity, waker);
+        handles.consumer_generation.store(1, Ordering::Release);
+        (
+            SpscAwareRecv::new(consumer, notify, space, handles, latency, false),
+            producers,
+            pipe,
+        )
+    }
+
+    fn preload(producers: &mut [yring::Producer<RecvItem>], count: usize, size: usize) {
+        for (id, producer) in producers.iter_mut().enumerate() {
+            for seq in 0..count {
+                let mut payload = vec![id as u8; size];
+                payload[1] = seq as u8;
+                producer
+                    .push(RecvItem::new(Message::from_slice(&payload)))
+                    .unwrap();
+            }
+            producer.flush();
+        }
+    }
+
+    #[test]
+    fn bulk_preloaded_fanin_drains_multiple_fair_rounds() {
+        for latency in [false, true] {
+            let (recv, mut producers, _pipe) = bulk_receiver(4, 128, latency);
+            preload(&mut producers, 100, 53);
+            let mut out = Vec::with_capacity(300);
+            let allocation = out.as_ptr();
+            assert_eq!(recv.try_recv_many_into(259, &mut out).unwrap(), 256);
+            for (index, msg) in out.iter().enumerate() {
+                let payload = msg.part_slice(0).unwrap();
+                assert_eq!(
+                    (payload[0], payload[1]),
+                    ((index % 4) as u8, (index / 4) as u8)
+                );
+                let address = std::ptr::from_ref(msg) as usize;
+                assert!(
+                    (address..address + size_of::<Message>())
+                        .contains(&(payload.as_ptr() as usize))
+                );
+            }
+            assert_eq!(allocation, out.as_ptr());
+            out.clear();
+            assert_eq!(recv.try_recv_many_into(3, &mut out).unwrap(), 3);
+            out.clear();
+            assert_eq!(recv.try_recv_many_into(5, &mut out).unwrap(), 5);
+            assert_eq!(out[0].part_slice(0).unwrap()[0], 3);
+            assert_eq!(out[1].part_slice(0).unwrap()[0], 0);
+        }
+    }
+
     #[test]
     fn remove_empty_tcp_consumer_drops_empty_peer_ring() {
         let handles = SpscHandles::new(BlockingRecvWaker::new(), false);
@@ -1419,6 +1587,254 @@ mod tests {
 
         assert!(handles.tcp_consumers.read().unwrap().is_empty());
         assert_eq!(handles.consumer_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn bulk_releases_partial_windows_and_notifies_space() {
+        for latency in [false, true] {
+            let (recv, mut producers, _pipe) = bulk_receiver(4, 4, latency);
+            preload(&mut producers, 4, 16);
+            let peers = recv.tcp_consumers.read().unwrap().clone();
+            let generations: Vec<_> = peers.iter().map(|p| p.space.generation()).collect();
+            let mut out = Vec::new();
+            assert_eq!(recv.try_recv_many_into(5, &mut out).unwrap(), 5);
+            for (id, producer) in producers.iter_mut().enumerate() {
+                assert!(peers[id].space.generation() > generations[id]);
+                for _ in 0..if id == 0 { 2 } else { 1 } {
+                    producer
+                        .push(RecvItem::new(Message::from_slice(b"new")))
+                        .unwrap();
+                }
+                assert!(
+                    producer
+                        .push(RecvItem::new(Message::from_slice(b"full")))
+                        .is_err()
+                );
+                producer.flush();
+            }
+            out.clear();
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 16);
+        }
+    }
+
+    #[test]
+    fn bulk_byte_budget_spans_rounds_and_cached_messages() {
+        for latency in [false, true] {
+            let (recv, mut producers, _pipe) = bulk_receiver(2, 128, latency);
+            preload(&mut producers[..1], 100, 53);
+            preload(&mut producers[1..], 100, 32_768);
+            let mut out = Vec::new();
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 64);
+            assert_eq!(
+                out.iter().map(Message::byte_len).sum::<usize>(),
+                32 * (53 + 32_768)
+            );
+            out.clear();
+            out.push(recv.try_recv().unwrap());
+            assert_eq!(recv.try_recv_many_after_first(256, &mut out).unwrap(), 63);
+            assert_eq!(out.len(), 64);
+        }
+    }
+
+    #[test]
+    fn bulk_first_message_exhausting_limit_still_releases_its_slot() {
+        let (recv, mut producers, _pipe) = bulk_receiver(2, 4, true);
+        preload(&mut producers, 4, 16);
+        let mut out = vec![recv.try_recv().unwrap()];
+        assert_eq!(recv.try_recv_many_after_first(1, &mut out).unwrap(), 0);
+        producers[0]
+            .push(RecvItem::new(Message::from_slice(b"released")))
+            .unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn bulk_oversized_and_multipart_messages_stay_atomic() {
+        for batching in [false, true] {
+            let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
+            recv.recv_batching = batching;
+            let huge = Message::from_slice(&vec![7; RECV_BATCH_BYTES + 1]);
+            let multipart = Message::multipart([vec![1; 40_000], vec![2; 40_000]]);
+            producers[0].push(RecvItem::new(huge.clone())).unwrap();
+            producers[0]
+                .push(RecvItem::new(Message::from_slice(b"next")))
+                .unwrap();
+            producers[0].flush();
+            producers[1].push(RecvItem::new(multipart.clone())).unwrap();
+            producers[1].flush();
+            let mut out = Vec::new();
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap(), huge);
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap(), multipart);
+            assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+            assert_eq!(out.pop().unwrap().part_slice(0).unwrap(), b"next");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_hot_peer_does_not_starve_newly_ready_peer_or_shared_pipe() {
+        let (recv, mut producers, pipe) = bulk_receiver(2, 512, false);
+        preload(&mut producers[..1], 400, 16);
+        let mut out = Vec::new();
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 256);
+        producers[1]
+            .push(RecvItem::new(Message::from_slice(b"quiet")))
+            .unwrap();
+        producers[1].flush();
+        pipe.send(Message::from_slice(b"shared")).await.unwrap();
+        out.clear();
+        assert_eq!(recv.try_recv_many_into(2, &mut out).unwrap(), 2);
+        assert_eq!(out[0].part_slice(0).unwrap(), b"quiet");
+        assert_eq!(out[1].part_slice(0).unwrap(), b"shared");
+    }
+
+    #[test]
+    fn bulk_disconnect_drains_unread_data_then_accepts_new_peer() {
+        let (recv, mut producers, pipe) = bulk_receiver(4, 4, false);
+        preload(&mut producers, 4, 16);
+        drop(producers);
+        let mut out = vec![Message::from_slice(b"existing")];
+        assert_eq!(recv.try_recv_many_into(3, &mut out).unwrap(), 3);
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 13);
+        assert_eq!(recv.try_recv_many_into(0, &mut out).unwrap(), 0);
+        assert!(matches!(
+            recv.try_recv_many_into(1, &mut out),
+            Err(omq_proto::Error::WouldBlock)
+        ));
+        let (mut producer, peer) = tcp_consumer(99);
+        producer
+            .push(RecvItem::new(Message::from_slice(b"reconnected")))
+            .unwrap();
+        producer.flush();
+        recv.tcp_consumers.write().unwrap().push(peer);
+        recv.consumer_generation.fetch_add(1, Ordering::Release);
+        drop(producer);
+        pipe.close();
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 1);
+        assert_eq!(out.last().unwrap().part_slice(0).unwrap(), b"reconnected");
+        assert!(matches!(
+            recv.try_recv_many_into(1, &mut out),
+            Err(omq_proto::Error::Closed)
+        ));
+        assert_eq!(out.len(), 18);
+    }
+
+    #[tokio::test]
+    async fn bulk_shared_pipe_releases_partial_batch_and_preserves_partial_success() {
+        let (recv, _producers, pipe) = bulk_receiver(0, 4, false);
+        for _ in 0..4 {
+            pipe.send(Message::from_slice(b"queued")).await.unwrap();
+        }
+        let mut out = Vec::new();
+        assert_eq!(recv.try_recv_many_into(1, &mut out).unwrap(), 1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pipe.send(Message::from_slice(b"released")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        pipe.close();
+        assert_eq!(recv.try_recv_many_into(256, &mut out).unwrap(), 4);
+        assert!(matches!(
+            recv.try_recv_many_into(1, &mut out),
+            Err(omq_proto::Error::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bulk_fair_rounds_include_inproc_stream_and_shared_sources() {
+        let (recv, mut producers, pipe) = bulk_receiver(2, 4, false);
+        let peer = recv.tcp_consumers.write().unwrap().remove(0);
+        let peer = Arc::try_unwrap(peer).unwrap();
+        let inproc = Arc::new(crate::transport::inproc::InprocRx {
+            consumer: peer.consumer,
+            batch_remaining: peer.batch_remaining,
+            recv_signal: recv.recv_signal.clone(),
+            recv_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            space_notify: peer.space,
+            blocking_space: Arc::new(crate::transport::inproc::BlockingSpace::new()),
+        });
+        let generation = inproc.space_notify.generation();
+        recv.consumers.write().unwrap().push(inproc.clone());
+        preload(&mut producers, 4, 16);
+        for seq in 0..4 {
+            pipe.send(Message::from_slice(&[2, seq])).await.unwrap();
+        }
+        let mut out = Vec::new();
+        assert_eq!(recv.try_recv_many_into(5, &mut out).unwrap(), 5);
+        assert!(inproc.space_notify.generation() > generation);
+        // Both peer rings released two consumed slots from partial windows.
+        for producer in &mut producers {
+            for _ in 0..2 {
+                producer
+                    .push(RecvItem::new(Message::from_slice(b"new")))
+                    .unwrap();
+            }
+        }
+        assert_eq!(recv.try_recv_many_into(7, &mut out).unwrap(), 7);
+        for (index, msg) in out.iter().enumerate() {
+            assert_eq!(
+                &msg.part_slice(0).unwrap()[..2],
+                &[(index % 3) as u8, (index / 3) as u8]
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bulk_empty_drain_racing_arrival_keeps_receive_wakeup() {
+        for batching in [false, true] {
+            check_bulk_wakeup(batching).await;
+        }
+    }
+
+    async fn check_bulk_wakeup(batching: bool) {
+        let (mut recv, mut producers, _pipe) = bulk_receiver(2, 4, false);
+        recv.recv_batching = batching;
+        let signal = recv.recv_signal.clone();
+        let sender = tokio::spawn(async move {
+            for seq in 0_u32..2000 {
+                let peer = seq as usize % 2;
+                let mut item = RecvItem::new(Message::from_slice(&seq.to_le_bytes()));
+                loop {
+                    match producers[peer].push(item) {
+                        Ok(()) => break,
+                        Err(returned) => item = returned,
+                    }
+                    tokio::task::yield_now().await;
+                }
+                producers[peer].flush();
+                signal.mark();
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut seen = vec![false; 2000];
+            let mut count = 0;
+            let mut out = Vec::with_capacity(7);
+            while count < 2000 {
+                out.clear();
+                if matches!(
+                    recv.try_recv_many_into(7, &mut out),
+                    Err(omq_proto::Error::WouldBlock)
+                ) {
+                    out.push(recv.recv().await.unwrap());
+                    recv.try_recv_many_after_first(7, &mut out).ok();
+                }
+                for message in &out {
+                    let seq = u32::from_le_bytes(message.part_slice(0).unwrap().try_into().unwrap())
+                        as usize;
+                    assert!(!seen[seq]);
+                    seen[seq] = true;
+                    count += 1;
+                }
+                tokio::task::yield_now().await;
+            }
+            sender.await.unwrap();
+        })
+        .await
+        .expect("lost receive or space wakeup");
     }
 
     #[test]

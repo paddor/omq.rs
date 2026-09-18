@@ -776,7 +776,7 @@ pub(super) async fn inproc_peer_driver(
                             return;
                         }
                         let m = match recv_sink.as_mut() {
-                            Some(sink @ crate::engine::RecvSink::Peer(_)) => {
+                            Some(sink @ (crate::engine::RecvSink::Peer(_) | crate::engine::RecvSink::Fanin(_))) => {
                                 if !sink.send(m).await { return; }
                                 None
                             }

@@ -155,6 +155,41 @@ pub(super) fn spawn_byte_stream_connection(
     spawn_wire_task(socket, peer_id, io_thread, peer_driver);
 }
 
+fn inproc_sink(
+    socket: &mut SocketDriver,
+    peer_id: u64,
+    recv_fanin: Option<Arc<crate::transport::inproc::InprocTx>>,
+) -> Option<crate::engine::RecvSink> {
+    let mut recv_sink = take_inproc_recv_sink(socket).or_else(|| {
+        socket
+            .spsc
+            .conflate_slot
+            .as_ref()
+            .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
+    });
+    if recv_sink.is_none() {
+        recv_sink = recv_fanin
+            .map(|producer| {
+                crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::shared(producer))
+            })
+            .or_else(|| {
+                socket.spsc.fanin.as_ref()?.register().map(|producer| {
+                    crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer))
+                })
+            });
+    }
+    if socket.socket_type == SocketType::Server {
+        let sink = recv_sink
+            .take()
+            .unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
+        recv_sink = Some(crate::engine::RecvSink::server(
+            sink,
+            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+        ));
+    }
+    recv_sink
+}
+
 pub(super) fn spawn_inproc_peer(
     socket: &mut SocketDriver,
     conn: InprocConn,
@@ -186,25 +221,11 @@ pub(super) fn spawn_inproc_peer(
         out,
         in_rx,
         peer: _peer,
+        recv_fanin,
         tx,
         rx,
     } = conn;
-    let mut recv_sink = take_inproc_recv_sink(socket).or_else(|| {
-        socket
-            .spsc
-            .conflate_slot
-            .as_ref()
-            .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
-    });
-    if socket.socket_type == SocketType::Server {
-        let sink = recv_sink
-            .take()
-            .unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
-        recv_sink = Some(crate::engine::RecvSink::server(
-            sink,
-            server_routing_id(peer_id).expect("SERVER peer ID checked"),
-        ));
-    }
+    let recv_sink = inproc_sink(socket, peer_id, recv_fanin);
     let io_thread = socket.io_pool.assign_thread();
 
     socket.peers.insert(
@@ -633,6 +654,11 @@ fn attach_yring_recv_bypass(
         .as_ref()
         .and_then(|cfg| cfg.take_sink())
         .unwrap_or_else(|| {
+            if let Some(fanin) = &socket.spsc.fanin {
+                return crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+                    fanin.register().expect("live receive socket"),
+                ));
+            }
             let cap = socket.options.recv_hwm.max(16) as usize;
             let (prod, cons) = yring::spsc(cap);
             let recv_signal = socket.spsc.recv_signal.clone();

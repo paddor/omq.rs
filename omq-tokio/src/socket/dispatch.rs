@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
+#[cfg(test)]
 use crate::engine::signal::DataSignal;
 
 /// Caller-side TCP writer for the latency profile. It uses a duplicated
@@ -410,9 +411,7 @@ pub(super) async fn bind_any(
     inproc_registry: &std::sync::Arc<inproc_transport::InprocRegistry>,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_signal: &std::sync::Arc<DataSignal>,
-    blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
-    max_message_size: Option<usize>,
+    recv: &inproc_transport::RecvConfig,
     #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
@@ -450,9 +449,10 @@ pub(super) async fn bind_any(
                 inproc_registry.clone(),
                 name,
                 snapshot.clone(),
-                recv_signal.clone(),
-                blocking_recv_waker.clone(),
-                max_message_size,
+                recv.signal.clone(),
+                recv.blocking.clone(),
+                recv.max_message_size,
+                recv.fanin.clone(),
             )?);
             let resolved = listener.local_endpoint().clone();
             Ok(BoundListener {
@@ -524,9 +524,7 @@ pub(super) async fn connect_any(
     inproc_registry: &inproc_transport::InprocRegistry,
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
-    recv_signal: &std::sync::Arc<DataSignal>,
-    blocking_recv_waker: &std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
-    max_message_size: Option<usize>,
+    recv: &inproc_transport::RecvConfig,
     #[cfg(feature = "ws")] ws_options: WsConnectOptions<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
@@ -572,9 +570,10 @@ pub(super) async fn connect_any(
                 inproc_registry,
                 name,
                 snapshot.clone(),
-                recv_signal.clone(),
-                blocking_recv_waker.clone(),
-                max_message_size,
+                recv.signal.clone(),
+                recv.blocking.clone(),
+                recv.max_message_size,
+                recv.fanin.clone(),
             )
             .await?;
             Ok(AnyConn::Inproc {
@@ -644,9 +643,12 @@ mod tests {
             &inproc_registry,
             endpoint,
             &snapshot(),
-            &recv_signal(),
-            &blocking_recv_waker(),
-            None,
+            &inproc_transport::RecvConfig {
+                signal: recv_signal(),
+                blocking: blocking_recv_waker(),
+                max_message_size: None,
+                fanin: None,
+            },
             #[cfg(feature = "ws")]
             &wss_tls,
         )

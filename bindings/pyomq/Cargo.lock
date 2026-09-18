@@ -203,9 +203,9 @@ dependencies = [
 
 [[package]]
 name = "fanring"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88d35d159f23886d1b4dbc5e2d6dbeba758b5650908d21cfd5e99f0350dcc95f"
+checksum = "596987ccf4bfc8adcf4c70ebf61c515c50f3768d973da94192b8a0148fbaec5b"
 dependencies = [
  "arc-swap",
  "atomic-waker",

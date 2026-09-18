@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-19
+
+### Added
+
+- Opt-in fair, batched socket receives for bulk workloads.
+
+### Changed
+
+- Move queue ownership to fanring 0.3.6 and improve fair receive scheduling.
+- Isolate cloned PEER senders and route PEER receive lanes per connection.
+- Reuse receive buffers after large-frame parsing.
+
+### Breaking
+
+- Public socket and message types no longer implement `UnwindSafe`.
+- Public enum additions require downstream exhaustive matches to add a
+  wildcard arm.
+
 ## [0.22.2] - 2026-09-08
 
 ### Changed

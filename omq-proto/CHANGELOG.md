@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-19
+
+### Added
+
+- Opt-in batched receive configuration for bulk consumers.
+
+### Changed
+
+- Reuse bounded message tables, shared payload owners, and identity storage to
+  reduce allocation in the receive path.
+- `Message` and related payload types no longer implement `UnwindSafe`.
+
+### Breaking
+
+- `Options` gained public receive-batching fields. Update downstream struct
+  literals to include the new fields or construct options with `Default`.
+
 ## [0.27.0] - 2026-09-04
 
 ### Added

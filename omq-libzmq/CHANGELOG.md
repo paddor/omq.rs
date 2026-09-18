@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-09-19
+
+### Changed
+
+- Update the queue runtime used by the bundled tokio backend.
+
 ## [0.5.18] - 2026-09-08
 
 ### Changed

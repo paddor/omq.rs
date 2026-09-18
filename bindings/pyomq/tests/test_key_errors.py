@@ -1,8 +1,7 @@
 """Verify bad key data raises ValueError (not panic) on first I/O."""
 
-import pytest
-
 import pyomq as zmq
+import pytest
 
 
 @pytest.mark.skipif(not zmq.has("curve"), reason="curve not compiled")

@@ -4,6 +4,7 @@ Connects to the broker's ROUTER frontend, sends requests, prints replies.
 
     python client.py [frontend] [n_requests]
 """
+
 import sys
 
 import pyomq as zmq

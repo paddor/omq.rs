@@ -1,9 +1,7 @@
 """CURVE client authentication tests."""
 
-import pytest
-
 import pyomq as zmq
-
+import pytest
 
 pytestmark = pytest.mark.skipif(
     not zmq.has("curve"), reason="curve feature not compiled"
@@ -33,7 +31,8 @@ def test_curve_auth_allowed_keys_accept(tcp_endpoint):
     try:
         client_pub = _setup_curve(pull, push)
         pull.set_curve_auth([client_pub])
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"allowed")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -52,7 +51,8 @@ def test_curve_auth_allowed_keys_reject(tcp_endpoint):
         _setup_curve(pull, push)
         other_pub, _ = zmq.curve_keypair()
         pull.set_curve_auth([other_pub])
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"should not arrive")
         pull.setsockopt(zmq.RCVTIMEO, 1000)
@@ -71,7 +71,8 @@ def test_curve_auth_callback_accept(tcp_endpoint):
     try:
         client_pub = _setup_curve(pull, push)
         pull.set_curve_auth(lambda peer: peer.public_key == client_pub)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"callback ok")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -89,7 +90,8 @@ def test_curve_auth_callback_reject(tcp_endpoint):
     try:
         _setup_curve(pull, push)
         pull.set_curve_auth(lambda peer: False)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"rejected")
         pull.setsockopt(zmq.RCVTIMEO, 1000)
@@ -108,7 +110,8 @@ def test_curve_auth_none_accepts_all(tcp_endpoint):
     try:
         _setup_curve(pull, push)
         pull.set_curve_auth(None)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"open")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -132,7 +135,8 @@ def test_curve_auth_callback_receives_z85_key(tcp_endpoint):
             return True
 
         pull.set_curve_auth(auth)
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"probe")
         pull.setsockopt(zmq.RCVTIMEO, 5000)
@@ -163,7 +167,8 @@ def test_curve_auth_callback_receives_identity(tcp_endpoint):
             return peer.public_key == client_pub and peer.identity == b"client-one"
 
         router.set_curve_auth(auth)
-        ep = router.bind(tcp_endpoint)
+        router.bind(tcp_endpoint)
+        ep = router.last_endpoint
         dealer.connect(ep)
         dealer.send(b"probe")
         router.setsockopt(zmq.RCVTIMEO, 5000)

@@ -5,6 +5,7 @@ prefix. Exits on END sentinel.
 
     python worker.py [vent_ep] [sink_ep] [worker_id]
 """
+
 import sys
 
 import pyomq as zmq

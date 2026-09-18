@@ -5,6 +5,7 @@ worker-ID prefix. Runs until interrupted.
 
     python worker.py [backend] [id]
 """
+
 import sys
 
 import pyomq as zmq

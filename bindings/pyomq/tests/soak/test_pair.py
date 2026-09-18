@@ -10,7 +10,6 @@ import struct
 import time
 
 import pyomq as zmq
-
 from conftest import ResourceMonitor, soak_duration, tcp_ep
 
 
@@ -25,7 +24,8 @@ def test_pair_bidirectional():
     a.setsockopt(zmq.RCVTIMEO, 1)
     b.setsockopt(zmq.SNDTIMEO, 1000)
     b.setsockopt(zmq.RCVTIMEO, 1)
-    ep = a.bind(tcp_ep())
+    a.bind(tcp_ep())
+    ep = a.last_endpoint
     b.connect(ep)
 
     time.sleep(0.1)

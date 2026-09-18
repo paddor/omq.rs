@@ -149,11 +149,15 @@ pub(crate) fn set_plain_auth_impl(inner: &SocketInner, auth: &Bound<'_, PyAny>) 
     let policy = if auth.is_callable() {
         PlainAuthenticator::Callback(auth.clone().unbind())
     } else {
-        let credentials: Vec<(String, String)> = auth.extract().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err(
-                "set_plain_auth expects an iterable of (username, password) pairs or a callable",
-            )
-        })?;
+        let credentials: Vec<(String, String)> = auth
+            .try_iter()
+            .and_then(|items| items.map(|item| item?.extract()).collect())
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(concat!(
+                    "set_plain_auth expects an iterable of ",
+                    "(username, password) pairs or a callable",
+                ))
+            })?;
         for (username, password) in &credentials {
             if username.len() > 255
                 || password.len() > 255

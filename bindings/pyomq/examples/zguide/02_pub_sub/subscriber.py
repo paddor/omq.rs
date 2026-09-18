@@ -5,6 +5,7 @@ matching messages. If count is given, exits after that many messages.
 
     python subscriber.py [endpoint] [topic] [count]
 """
+
 import sys
 
 import pyomq as zmq

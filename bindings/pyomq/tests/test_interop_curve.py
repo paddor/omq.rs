@@ -17,9 +17,8 @@ zmq_pyzmq = pytest.importorskip("zmq")
 pytestmark = pytest.mark.event_loop("selector")
 
 
-from zmq.auth.thread import ThreadAuthenticator
-
 import pyomq
+from zmq.auth.thread import ThreadAuthenticator
 
 _skip_no_curve = pytest.mark.skipif(
     not pyomq.has("curve"), reason="curve feature not compiled"
@@ -39,7 +38,8 @@ def test_pyomq_curve_server_pyzmq_curve_client_push_pull(tcp_endpoint):
     pull.curve_server = 1
     pull.curve_publickey = server_pub
     pull.curve_secretkey = server_sec
-    ep = pull.bind(tcp_endpoint)
+    pull.bind(tcp_endpoint)
+    ep = pull.last_endpoint
 
     py_ctx = zmq_pyzmq.Context.instance()
     push = py_ctx.socket(zmq_pyzmq.PUSH)
@@ -67,7 +67,8 @@ def test_pyomq_curve_server_pyzmq_curve_client_req_rep(tcp_endpoint):
     rep.curve_server = 1
     rep.curve_publickey = server_pub
     rep.curve_secretkey = server_sec
-    ep = rep.bind(tcp_endpoint)
+    rep.bind(tcp_endpoint)
+    ep = rep.last_endpoint
 
     py_ctx = zmq_pyzmq.Context.instance()
     req = py_ctx.socket(zmq_pyzmq.REQ)

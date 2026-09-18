@@ -2,11 +2,9 @@
 
 import asyncio
 
-import pytest
-
 import pyomq
 import pyomq.asyncio as zmq_async
-
+import pytest
 
 # ── CURVE ────────────────────────────────────────────────────────────
 
@@ -30,7 +28,8 @@ async def test_async_curve_auth_allowed_keys(tcp_endpoint):
         push.curve_publickey = client_pub
         push.curve_secretkey = client_sec
 
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"async-curve-ok")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
@@ -59,7 +58,8 @@ async def test_async_curve_auth_callback(tcp_endpoint):
         push.curve_publickey = client_pub
         push.curve_secretkey = client_sec
 
-        ep = pull.bind(tcp_endpoint)
+        pull.bind(tcp_endpoint)
+        ep = pull.last_endpoint
         push.connect(ep)
         push.send(b"async-curve-cb")
         pull.setsockopt(pyomq.RCVTIMEO, 5000)
@@ -96,7 +96,8 @@ async def test_async_curve_auth_callback_receives_identity(tcp_endpoint):
         dealer.curve_publickey = client_pub
         dealer.curve_secretkey = client_sec
 
-        ep = router.bind(tcp_endpoint)
+        router.bind(tcp_endpoint)
+        ep = router.last_endpoint
         dealer.connect(ep)
         dealer.send(b"async-probe")
         msg = await asyncio.wait_for(router.recv_multipart(), timeout=5.0)

@@ -144,7 +144,7 @@ impl SocketInner {
     /// child. The `pthread_atfork` child handler increments `FORK_GEN`;
     /// we detect the mismatch here and re-materialize.
     pub fn materialize(&self) -> PyResult<()> {
-        if self.closed.load(Ordering::Relaxed) {
+        if self.closed.load(Ordering::Relaxed) || self.ctx.is_terminated() {
             return Err(map_err(omq_proto::error::Error::Closed));
         }
         let fork_gen = FORK_GEN.load(Ordering::Relaxed);
@@ -204,7 +204,7 @@ impl SocketInner {
     }
 
     pub fn materialize_blocking(&self) -> PyResult<()> {
-        if self.closed.load(Ordering::Relaxed) {
+        if self.closed.load(Ordering::Relaxed) || self.ctx.is_terminated() {
             return Err(map_err(omq_proto::error::Error::Closed));
         }
         let fork_gen = FORK_GEN.load(Ordering::Relaxed);

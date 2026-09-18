@@ -139,6 +139,16 @@ impl ContextInner {
             .is_some_and(|rt| rt.pid == std::process::id() && !rt.ctx.is_terminated())
     }
 
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.terminated.load(Ordering::Acquire)
+            || self
+                .state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|rt| rt.ctx.is_terminated())
+    }
+
     pub fn runtime_handle(&self) -> PyResult<Handle> {
         self.ensure_runtime()
     }

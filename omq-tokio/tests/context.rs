@@ -27,6 +27,96 @@ fn inproc_ep(name: &str) -> Endpoint {
     }
 }
 
+#[tokio::test]
+async fn async_bulk_waits_only_for_first_and_is_cancel_safe() {
+    use omq_tokio::options::WorkloadProfile;
+
+    for profile in [WorkloadProfile::Latency, WorkloadProfile::Throughput] {
+        for (receiver, sender) in [
+            (SocketType::Pull, SocketType::Push),
+            (SocketType::Gather, SocketType::Scatter),
+            (SocketType::Dealer, SocketType::Dealer),
+            (SocketType::Pair, SocketType::Pair),
+            (SocketType::Channel, SocketType::Channel),
+        ] {
+            for tcp in [false, true] {
+                let ctx = Context::current();
+                let options = Options::default().workload_profile(profile);
+                let pull = ctx.socket(receiver, options.clone());
+                let push = ctx.socket(sender, options);
+                let ep = if tcp {
+                    tcp_loopback(0)
+                } else {
+                    inproc_ep("async-bulk")
+                };
+                let ep = pull.bind(ep).await.unwrap();
+                push.connect(ep).await.unwrap();
+                pull.wait_connected(1, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                let mut out = vec![Message::from_slice(b"existing")];
+                assert_eq!(pull.recv_many_into(0, &mut out).await.unwrap(), 0);
+                {
+                    let waiting = pull.recv_many_into(256, &mut out);
+                    tokio::pin!(waiting);
+                    let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(std::future::Future::poll(waiting.as_mut(), &mut task).is_pending());
+                }
+                assert_eq!(out.len(), 1);
+                push.send(Message::from_slice(b"first")).await.unwrap();
+                assert_eq!(
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        pull.recv_many_into(256, &mut out)
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    1
+                );
+                assert_eq!(out[1].part_slice(0).unwrap(), b"first");
+                push.send(Message::from_slice(b"second")).await.unwrap();
+                let messages = tokio::time::timeout(Duration::from_secs(2), pull.recv_many(256))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(messages, [Message::from_slice(b"second")]);
+                assert!(matches!(
+                    pull.try_recv_many_into(256, &mut out),
+                    Err(Error::WouldBlock)
+                ));
+                push.close().await.unwrap();
+                pull.close().await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn async_bulk_req_rep_preserves_alternation() {
+    let ctx = Context::current();
+    let req = ctx.socket(SocketType::Req, Options::default());
+    let rep = ctx.socket(SocketType::Rep, Options::default());
+    let ep = rep.bind(inproc_ep("bulk-req-rep")).await.unwrap();
+    req.connect(ep).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..2 {
+            req.send(Message::from_slice(b"question")).await.unwrap();
+            assert_eq!(
+                rep.recv_many(256).await.unwrap(),
+                [Message::from_slice(b"question")]
+            );
+            rep.send(Message::from_slice(b"answer")).await.unwrap();
+            assert_eq!(
+                req.recv_many(256).await.unwrap(),
+                [Message::from_slice(b"answer")]
+            );
+        }
+    })
+    .await
+    .unwrap();
+}
+
 // ---- Owned-runtime tests (plain #[test], no tokio) ----------------------
 
 #[test]

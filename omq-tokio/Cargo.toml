@@ -96,6 +96,10 @@ name = "push_pull"
 harness = false
 
 [[bench]]
+name = "pull_bulk_fanin"
+harness = false
+
+[[bench]]
 name = "inproc_threads"
 harness = false
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-19
+
+### Changed
+
+- Bundle the current OMQ core release.
+
 ## [0.1.0] - 2026-09-04
 
 - First release of the Zig 0.16 binding backed by `omq-libzmq`.

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-19
+
+### Changed
+
+- Bundle the current OMQ core release.
+
 ## [0.2.2] - 2026-09-04
 
 - Bundle `omq-libzmq` 0.5.16 with responsive peer control handling and the

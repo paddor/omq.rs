@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-19
+
+### Changed
+
+- Bundle the current OMQ core release.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

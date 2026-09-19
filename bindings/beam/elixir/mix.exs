@@ -4,7 +4,7 @@ defmodule Omq.MixProject do
   def project do
     [
       app: :omq_elixir,
-      version: "0.2.0",
+      version: "0.2.1",
       elixir: "~> 1.16",
       description: description(),
       package: package(),

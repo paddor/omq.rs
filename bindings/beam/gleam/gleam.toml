@@ -1,5 +1,5 @@
 name = "omq_gleam"
-version = "0.2.0"
+version = "0.2.1"
 description = "Gleam wrapper for OMQ.beam, backed by the Erlang OMQ NIF package."
 licences = ["ISC"]
 target = "erlang"

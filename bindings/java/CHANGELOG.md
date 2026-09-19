@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-19
+
+### Changed
+
+- Bundle the current OMQ core release.
+
 ## [0.3.4]
 
 - Pass the transport peer address to PLAIN and CURVE authentication callbacks.

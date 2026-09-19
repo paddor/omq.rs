@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-19
 ### Added
 
 - Complete native type stubs and shared buffer, connection, and monitor types.

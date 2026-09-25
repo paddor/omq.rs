@@ -9,16 +9,26 @@ use omq_proto::{
     flow::DrainBudget,
 };
 
-use super::recv::{BlockingRecvWaker, RecvItem};
+use super::recv::{BlockingRecvWaker, RECV_BATCH_MESSAGES, RecvItem};
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::transport::inproc::BlockingSpace;
 
 #[derive(Debug)]
 pub(crate) struct Fanin {
     registrar: Mutex<mpsc::Sender<RecvItem>>,
-    receiver: Mutex<Option<mpsc::Receiver<RecvItem>>>,
+    receiver: Mutex<Option<RecvState>>,
     signal: Arc<DataSignal>,
     blocking: Arc<BlockingRecvWaker>,
+}
+
+/// The receiver plus retained scratch for bulk drains.
+#[derive(Debug)]
+struct RecvState {
+    rx: mpsc::Receiver<RecvItem>,
+    /// Bulk windows land here and move into the caller's vector in one
+    /// conversion pass before the call returns, so no message is staged
+    /// on the application side between calls.
+    scratch: Vec<RecvItem>,
 }
 
 impl Fanin {
@@ -27,10 +37,13 @@ impl Fanin {
         signal: Arc<DataSignal>,
         blocking: Arc<BlockingRecvWaker>,
     ) -> Arc<Self> {
-        let (sender, receiver) = mpsc::channel(capacity);
+        let (sender, rx) = mpsc::channel(capacity);
         Arc::new(Self {
             registrar: Mutex::new(sender),
-            receiver: Mutex::new(Some(receiver)),
+            receiver: Mutex::new(Some(RecvState {
+                rx,
+                scratch: Vec::with_capacity(RECV_BATCH_MESSAGES),
+            })),
             signal,
             blocking,
         })
@@ -58,25 +71,17 @@ impl Fanin {
         batching: bool,
     ) -> Result<usize> {
         let mut guard = self.receiver.lock().unwrap();
-        let receiver = guard.as_mut().ok_or(Error::Closed)?;
+        let state = guard.as_mut().ok_or(Error::Closed)?;
         let start = out.len();
         self.signal.begin_drain();
-        while !budget.exhausted() {
-            let result = if batching {
-                receiver.try_recv()
-            } else {
-                receiver.try_recv_fair()
-            };
-            let Ok(item) = result else {
-                if self.signal.clear_after(true) {
-                    self.blocking.wake();
-                }
-                break;
-            };
-            let _ = budget.account(item.budget_bytes());
-            out.push(item.into_message());
+        let observed_empty = if batching {
+            Self::drain_bulk(state, out, &mut budget)
+        } else {
+            Self::drain_fair(&mut state.rx, out, &mut budget)
+        };
+        if observed_empty && self.signal.clear_after(true) {
+            self.blocking.wake();
         }
-        receiver.release_consumed();
         let count = out.len() - start;
         if count == 0 {
             Err(Error::WouldBlock)
@@ -85,9 +90,53 @@ impl Fanin {
         }
     }
 
+    /// Rotate sender lanes after every message. Returns whether the channel
+    /// was observed empty.
+    fn drain_fair(
+        rx: &mut mpsc::Receiver<RecvItem>,
+        out: &mut Vec<Message>,
+        budget: &mut DrainBudget,
+    ) -> bool {
+        let mut observed_empty = false;
+        while !budget.exhausted() {
+            let Ok(item) = rx.try_recv_fair() else {
+                observed_empty = true;
+                break;
+            };
+            let _ = budget.account(item.budget_bytes());
+            out.push(item.into_message());
+        }
+        rx.release_consumed();
+        observed_empty
+    }
+
+    /// Move whole per-connection windows at once, admitting messages while
+    /// the budget lasts. The message that exhausts the budget is still
+    /// delivered, as in the fair drain. Returns whether the channel was
+    /// observed empty.
+    fn drain_bulk(state: &mut RecvState, out: &mut Vec<Message>, budget: &mut DrainBudget) -> bool {
+        let limit = budget.remaining_msgs();
+        let mut rejected = false;
+        let result = state
+            .rx
+            .try_recv_batch_into_while(&mut state.scratch, limit, |item| {
+                if budget.exhausted() {
+                    rejected = true;
+                    return false;
+                }
+                let _ = budget.account(item.budget_bytes());
+                true
+            });
+        out.extend(state.scratch.drain(..).map(RecvItem::into_message));
+        match result {
+            Ok(received) => received < limit && !rejected,
+            Err(_) => true,
+        }
+    }
+
     pub(crate) fn try_recv(&self) -> Result<Message> {
         let mut guard = self.receiver.lock().unwrap();
-        let receiver = guard.as_mut().ok_or(Error::Closed)?;
+        let receiver = &mut guard.as_mut().ok_or(Error::Closed)?.rx;
         self.signal.begin_drain();
         let result = receiver.try_recv_fair();
         receiver.release_consumed();
@@ -350,6 +399,88 @@ mod tests {
                 .try_send(RecvItem::new(Message::from_slice(b"new")))
                 .unwrap();
             assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), b"new");
+        }
+    }
+
+    #[test]
+    fn batching_bulk_drain_keeps_per_sender_bursts_and_retains_scratch() {
+        let queue = queue(64);
+        let mut senders: Vec<_> = (0..2).map(|_| queue.register().unwrap()).collect();
+        let mut out = Vec::with_capacity(256);
+        for round in 0..2u8 {
+            for (peer, sender) in senders.iter_mut().enumerate() {
+                for seq in 0..64u8 {
+                    sender
+                        .try_send(RecvItem::new(Message::from_slice(&[
+                            peer as u8, round, seq,
+                        ])))
+                        .unwrap();
+                }
+            }
+            out.clear();
+            assert_eq!(
+                queue
+                    .recv_into(&mut out, DrainBudget::new(256, 2 * 1024 * 1024), true)
+                    .unwrap(),
+                128
+            );
+            // One 64-message burst per lane, FIFO within each lane.
+            for (index, message) in out.iter().enumerate() {
+                let bytes = message.part_slice(0).unwrap();
+                assert_eq!(bytes, &[(index / 64) as u8, round, (index % 64) as u8]);
+            }
+            let scratch_capacity = queue
+                .receiver
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .scratch
+                .capacity();
+            assert_eq!(
+                scratch_capacity, RECV_BATCH_MESSAGES,
+                "scratch is retained as is"
+            );
+            // Slots were released before returning.
+            for sender in &mut senders {
+                assert!(!sender.is_full());
+            }
+        }
+    }
+
+    #[test]
+    fn batching_bulk_drain_clears_signal_only_on_observed_empty() {
+        let queue = queue(32);
+        let mut sender = queue.register().unwrap();
+        for seq in 0..8u8 {
+            sender
+                .try_send(RecvItem::new(Message::from_slice(&[seq])))
+                .unwrap();
+        }
+        assert!(!queue.signal.is_idle());
+        let mut out = Vec::new();
+        // The budget stops the drain with data left: the signal stays armed.
+        assert_eq!(
+            queue
+                .recv_into(&mut out, DrainBudget::new(4, 2 * 1024 * 1024), true)
+                .unwrap(),
+            4
+        );
+        assert!(!queue.signal.is_idle());
+        // Draining to empty clears it.
+        assert_eq!(
+            queue
+                .recv_into(&mut out, DrainBudget::new(256, 2 * 1024 * 1024), true)
+                .unwrap(),
+            4
+        );
+        assert!(queue.signal.is_idle());
+        assert!(matches!(
+            queue.recv_into(&mut out, DrainBudget::new(256, 2 * 1024 * 1024), true),
+            Err(Error::WouldBlock)
+        ));
+        for (seq, message) in out.iter().enumerate() {
+            assert_eq!(message.part_slice(0).unwrap(), &[seq as u8]);
         }
     }
 

@@ -27,7 +27,7 @@ pub(crate) type SpscRecvSignal = Arc<DataSignal>;
 /// any `recv()` that's blocked so it re-drains with the updated list.
 pub(crate) type SpscActivated = Arc<StateSignal>;
 
-const RECV_BATCH_MESSAGES: usize = 256;
+pub(crate) const RECV_BATCH_MESSAGES: usize = 256;
 const RECV_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

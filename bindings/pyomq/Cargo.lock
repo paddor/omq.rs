@@ -204,8 +204,6 @@ dependencies = [
 [[package]]
 name = "fanring"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "596987ccf4bfc8adcf4c70ebf61c515c50f3768d973da94192b8a0148fbaec5b"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -1167,9 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c054fc88ec1358a6452273e36e4bff59a34dc4045573972c02eda89dbae1677"
+version = "0.3.18"
 dependencies = [
  "atomic-waker",
  "futures-core",

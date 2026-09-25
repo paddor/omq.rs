@@ -144,6 +144,14 @@ Stateless sends bypass the actor through `SendSubmitter`. REQ/REP still check
 shared type state before submit. Plain recv paths bypass the actor when no
 identity, group, or subscription post-processing is needed.
 
+`PULL`, `GATHER`, `SUB`, and `XSUB` receive through a socket-owned fanring MPSC
+channel: each connection driver owns a sender lane, and only the application
+drains. Receives rotate lanes after every message by default. With
+`Options::recv_batching`, bulk receives move whole per-connection windows at
+once under the same message and byte budgets; the byte budget runs as an
+admission predicate on the queued values, so no message is staged on the
+application side between calls.
+
 Native PEER receives use independently bounded per-connection yrings.
 Ordinary `Socket::recv()` fair-drains one shared application receiver; concurrent
 calls serialize only that drain. `Socket::peer_recv_lanes(PeerRecvConfig)` transfers

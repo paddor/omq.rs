@@ -10,6 +10,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 - Tokio direct TCP receives reuse bounded buffers through 8 MiB without
   zero-filling payload memory or extending pool lifetime past connection close.
+- Tokio `recv_batching` bulk receives move whole per-connection windows at
+  once, under the same message and byte budgets as before.
 
 ### Added
 

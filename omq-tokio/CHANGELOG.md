@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(deps)* Bump `fanring` to 0.3.7 and `yring` to 0.3.18 for
+  `try_recv_batch_into_while` and `pop_into_while`.
+- `recv_batching` bulk receives move whole per-connection windows at once.
+
 ### Fixed
 
 - `DataSignal` fences in `mark` and `begin_drain`, so a producer that skips

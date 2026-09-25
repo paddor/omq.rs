@@ -106,6 +106,21 @@ struct LaneEndpoint {
     peer_count: usize,
 }
 
+/// Lane 0's input. Every `Socket` clone sends through this one producer
+/// under the `FanOutLanes::distributor` mutex.
+///
+/// NOTE: A lock-free variant was tried and rejected (2026-09). It gave each
+/// `Socket` clone its own fanring MPSC sender lane into lane 0, published
+/// with `try_send_unsignaled`, and had lane 0 scan all clone lanes. A
+/// compression dictionary switch was ordered by a generation counter that
+/// each clone lane forwarded. Measured against this mutex on 6 cores, the
+/// rate delivered to subscribers did not improve (flat to -10%, worse with
+/// more sender threads than cores). Only the caller-side drop rate on a full
+/// lane went up. It cost about 1200 changed lines, two new fanring APIs,
+/// lost FIFO order between clones, and needed a new blocking-clone
+/// semantic. Sockets are rarely shared across threads, and an uncontended
+/// mutex is cheap. Revisit only with a workload where this lock is the
+/// profiled bottleneck.
 struct LaneDistributor {
     tx: yring::Producer<LaneData>,
     signal: Arc<DataSignal>,

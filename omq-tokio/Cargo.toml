@@ -114,6 +114,11 @@ path = "benches/pub_sub.rs"
 harness = false
 
 [[bench]]
+name = "omq_pub_clone_senders"
+path = "benches/pub_clone_senders.rs"
+harness = false
+
+[[bench]]
 name = "omq_req_rep"
 path = "benches/req_rep.rs"
 harness = false

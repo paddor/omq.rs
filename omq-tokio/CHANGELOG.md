@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xpub_nodrop` sends waiting for lane space wake up when the lane worker
+  exits during close.
 - `DataSignal` fences in `mark` and `begin_drain`, so a producer that skips
   its wake because the signal is pending cannot leave its message unseen by
   a consumer that then parks.

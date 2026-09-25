@@ -128,6 +128,8 @@ pub(super) struct FanOutLanes {
     state: Mutex<FanOutLaneState>,
     active_flags: Arc<Vec<AtomicBool>>,
     distributor: Mutex<LaneDistributor>,
+    /// Set when lane 0's worker has returned; nothing drains after that.
+    distributor_exited: Arc<AtomicBool>,
     mute_policy: FanOutMutePolicy,
 }
 
@@ -184,6 +186,8 @@ struct LaneWorker {
     encoder: Option<MessageEncoder>,
     distribution_targets: Vec<LaneDistributionTarget>,
     active_flags: Option<Arc<Vec<AtomicBool>>>,
+    /// Set when `run` returns.
+    exited: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for LaneWorker {
@@ -198,6 +202,7 @@ impl std::fmt::Debug for LaneWorker {
 }
 
 impl FanOutLanes {
+    #[expect(clippy::too_many_lines)]
     pub(super) fn spawn(
         options: &Options,
         mode: FanOutMode,
@@ -257,6 +262,7 @@ impl FanOutLanes {
         }
 
         // Build endpoints (ctrl only) and spawn workers.
+        let distributor_exited = Arc::new(AtomicBool::new(false));
         let mut dist_rx = Some(dist_rx);
         let mut dist_signal = Some(dist_signal);
         let mut dist_space = Some(dist_space);
@@ -276,7 +282,6 @@ impl FanOutLanes {
                 let (rx, sig, space) = secondary_data.remove(0);
                 (rx, sig, space, Vec::new(), None)
             };
-
             io_pool.spawn_on(
                 i,
                 LaneWorker {
@@ -294,6 +299,11 @@ impl FanOutLanes {
                     encoder: None,
                     distribution_targets: dist_targets,
                     active_flags: flags,
+                    exited: if i == 0 {
+                        Arc::clone(&distributor_exited)
+                    } else {
+                        Arc::default()
+                    },
                 }
                 .run(),
             );
@@ -307,6 +317,7 @@ impl FanOutLanes {
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
             distributor: Mutex::new(distributor),
+            distributor_exited,
             mute_policy,
         })
     }
@@ -520,6 +531,12 @@ impl FanOutLanes {
                 }
             };
             wait.0.changed_after(wait.1).await;
+            // The worker sets this flag before its final space wake. Nothing
+            // drains the ring after that: drop the message, as a closed
+            // socket does.
+            if self.distributor_exited.load(Ordering::Acquire) {
+                return;
+            }
         }
     }
 
@@ -570,9 +587,12 @@ impl FanOutLanes {
         }
     }
 
+    /// Whether no accepted data or control command is still queued. Once
+    /// lane 0's worker has exited, nothing can drain, so queued data no
+    /// longer counts.
     pub(super) fn is_empty(&self) -> bool {
         let dist = self.distributor.lock().expect("distributor poisoned");
-        let dist_empty = dist.tx.is_empty();
+        let dist_empty = dist.tx.is_empty() || self.distributor_exited.load(Ordering::Acquire);
         drop(dist);
         dist_empty
             && self
@@ -594,9 +614,7 @@ impl LaneWorker {
 
             // 1. ALL control commands, unconditionally.
             if self.drain_control() {
-                self.flush_touched(&mut touched);
-                self.peers.clear();
-                self.subscribe_all_count = 0;
+                self.stop(&mut touched);
                 return;
             }
 
@@ -628,22 +646,16 @@ impl LaneWorker {
                     // control drain. Drain once more after observing data so
                     // subscriptions and compression updates apply first.
                     if self.drain_control() {
-                        self.flush_touched(&mut touched);
-                        self.peers.clear();
-                        self.subscribe_all_count = 0;
+                        self.stop(&mut touched);
                         return;
                     }
                     if self.distribute_batch(&batch).await {
-                        self.flush_touched(&mut touched);
-                        self.peers.clear();
-                        self.subscribe_all_count = 0;
+                        self.stop(&mut touched);
                         return;
                     }
                     for data in &batch {
                         if self.handle_data(data, &mut touched).await {
-                            self.flush_touched(&mut touched);
-                            self.peers.clear();
-                            self.subscribe_all_count = 0;
+                            self.stop(&mut touched);
                             return;
                         }
                     }
@@ -666,16 +678,12 @@ impl LaneWorker {
 
                 if !batch.is_empty() {
                     if self.drain_control() {
-                        self.flush_touched(&mut touched);
-                        self.peers.clear();
-                        self.subscribe_all_count = 0;
+                        self.stop(&mut touched);
                         return;
                     }
                     for data in &batch {
                         if self.handle_data(data, &mut touched).await {
-                            self.flush_touched(&mut touched);
-                            self.peers.clear();
-                            self.subscribe_all_count = 0;
+                            self.stop(&mut touched);
                             return;
                         }
                     }
@@ -692,6 +700,17 @@ impl LaneWorker {
                 () = self.data_signal.ready() => {}
             }
         }
+    }
+
+    /// Final bookkeeping when the worker returns: deliver what was framed,
+    /// drop peer state, and wake senders waiting for ring space so they
+    /// observe the exit instead of waiting forever.
+    fn stop(&mut self, touched: &mut SmallVec<[u64; 32]>) {
+        self.flush_touched(touched);
+        self.peers.clear();
+        self.subscribe_all_count = 0;
+        self.exited.store(true, Ordering::Release);
+        self.notify_data_space();
     }
 
     fn finish_data_drain(&self, drained: bool) -> bool {
@@ -1340,6 +1359,7 @@ mod tests {
                 space: data_space.clone(),
                 pending_compression: None,
             }),
+            distributor_exited: Arc::new(AtomicBool::new(false)),
             mute_policy: FanOutMutePolicy::Block,
         };
 
@@ -1367,6 +1387,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nodrop_dispatch_returns_when_worker_exits_before_dropping_ring() {
+        let (data_tx, data_rx) = yring::spsc::<LaneData>(1);
+        let data_space = Arc::new(crate::engine::signal::StateSignal::new());
+        let lanes = FanOutLanes {
+            state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
+            active_flags: Arc::new(vec![AtomicBool::new(false)]),
+            distributor: Mutex::new(LaneDistributor {
+                tx: data_tx,
+                signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                space: data_space.clone(),
+                pending_compression: None,
+            }),
+            distributor_exited: Arc::new(AtomicBool::new(false)),
+            mute_policy: FanOutMutePolicy::Block,
+        };
+        lanes.try_dispatch(test_dispatch("one")).unwrap();
+
+        let send_second = lanes.dispatch(test_dispatch("two"));
+        tokio::pin!(send_second);
+        tokio::select! {
+            () = &mut send_second => panic!("dispatch completed while ring stayed full"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+
+        // The worker's exit: flag, then the final space wake. The ring stays
+        // full because nothing drains it anymore.
+        lanes
+            .distributor_exited
+            .store(true, std::sync::atomic::Ordering::Release);
+        data_space.notify_changed();
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
+            .await
+            .expect("dispatch kept waiting on a ring nothing drains");
+        assert!(
+            lanes.is_empty(),
+            "an exited worker leaves nothing to linger on"
+        );
+        drop(data_rx);
+    }
+
+    #[tokio::test]
     async fn empty_data_drain_clears_stale_signal() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
         let (_ctrl_tx, ctrl_rx) = yring::spsc(4);
@@ -1386,6 +1447,7 @@ mod tests {
             encoder: None,
             distribution_targets: Vec::new(),
             active_flags: None,
+            exited: Arc::new(AtomicBool::new(false)),
         };
 
         data_signal.mark();
@@ -1416,6 +1478,7 @@ mod tests {
                 space: Arc::new(crate::engine::signal::StateSignal::new()),
                 pending_compression: None,
             }),
+            distributor_exited: Arc::new(AtomicBool::new(false)),
             mute_policy: FanOutMutePolicy::Block,
         };
         #[cfg(feature = "lz4")]
@@ -1451,6 +1514,7 @@ mod tests {
                 space: Arc::new(crate::engine::signal::StateSignal::new()),
                 pending_compression: None,
             }),
+            distributor_exited: Arc::new(AtomicBool::new(false)),
             mute_policy: FanOutMutePolicy::Block,
         };
         #[cfg(feature = "lz4")]
@@ -1532,6 +1596,7 @@ mod tests {
             encoder: None,
             distribution_targets: Vec::new(),
             active_flags: None,
+            exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
 
@@ -1587,6 +1652,7 @@ mod tests {
             ))),
             distribution_targets: Vec::new(),
             active_flags: None,
+            exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
 
@@ -1657,6 +1723,7 @@ mod tests {
             encoder: None,
             distribution_targets: Vec::new(),
             active_flags: None,
+            exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
 
@@ -1681,6 +1748,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             distributor: test_distributor(),
+            distributor_exited: Arc::new(AtomicBool::new(false)),
             mute_policy: FanOutMutePolicy::DropNewest,
         }
     }

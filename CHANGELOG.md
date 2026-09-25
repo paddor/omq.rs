@@ -23,6 +23,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Tokio `xpub_nodrop` sends waiting for fan-out lane space no longer wait
+  forever when the lane worker exits during close.
 - Tokio data-ready signaling can no longer strand the last queued message of
   a burst. A producer that found the signal pending skipped its wake, and
   without a full fence on both sides the consumer could read a stale queue

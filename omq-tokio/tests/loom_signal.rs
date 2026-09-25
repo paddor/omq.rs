@@ -1,6 +1,6 @@
 #![cfg(target_pointer_width = "64")]
 
-use loom::sync::atomic::{AtomicBool, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, fence};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 
@@ -95,6 +95,125 @@ impl ModelDataSignal {
 
     fn ready(&self) -> bool {
         self.state.lock().unwrap().state != 0
+    }
+}
+
+/// `DataSignal` with the atomics and orderings of `engine/signal.rs`.
+///
+/// `ModelDataSignal` above serializes every transition through a mutex, so
+/// it cannot show races between the ring tail and the signal state. This
+/// model keeps both as independent atomics, as the real code does.
+#[derive(Debug)]
+struct AtomicDataSignal {
+    state: AtomicU8,
+    /// `true` models the current code. `false` models the protocol without
+    /// the sequentially consistent fences, which can strand an item.
+    fenced: bool,
+}
+
+impl AtomicDataSignal {
+    const IDLE: u8 = 0;
+    const PENDING: u8 = 1;
+    const DRAINING: u8 = 2;
+    const DIRTY: u8 = 3;
+
+    fn new(state: u8, fenced: bool) -> Self {
+        Self {
+            state: AtomicU8::new(state),
+            fenced,
+        }
+    }
+
+    /// Returns `true` when the mark fired a wake.
+    fn mark(&self) -> bool {
+        if self.fenced {
+            fence(Ordering::SeqCst);
+        }
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            match state {
+                Self::IDLE => match self.state.compare_exchange(
+                    Self::IDLE,
+                    Self::PENDING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(next) => state = next,
+                },
+                Self::PENDING | Self::DIRTY => return false,
+                Self::DRAINING => match self.state.compare_exchange(
+                    Self::DRAINING,
+                    Self::DIRTY,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return false,
+                    Err(next) => state = next,
+                },
+                _ => unreachable!("invalid data signal state"),
+            }
+        }
+    }
+
+    fn begin_drain(&self) {
+        if self.state.load(Ordering::Acquire) == Self::PENDING {
+            let _ = self.state.compare_exchange(
+                Self::PENDING,
+                Self::DRAINING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        if self.fenced {
+            fence(Ordering::SeqCst);
+        }
+    }
+
+    fn clear_after(&self, is_empty: bool) {
+        if !is_empty {
+            self.rearm();
+            return;
+        }
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            match state {
+                Self::DRAINING => match self.state.compare_exchange(
+                    Self::DRAINING,
+                    Self::IDLE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return,
+                    Err(next) => state = next,
+                },
+                Self::DIRTY => {
+                    self.rearm();
+                    return;
+                }
+                Self::PENDING | Self::IDLE => return,
+                _ => unreachable!("invalid data signal state"),
+            }
+        }
+    }
+
+    fn rearm(&self) {
+        let mut state = self.state.load(Ordering::Acquire);
+        while state != Self::PENDING {
+            match self.state.compare_exchange(
+                state,
+                Self::PENDING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(next) => state = next,
+            }
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Self::IDLE
     }
 }
 
@@ -710,4 +829,58 @@ fn pipe_wait_tracks_space_and_route_activation() {
             "pipe wait must wake on either pipe space or route activation"
         );
     });
+}
+
+/// A producer that publishes with a release store and then finds the
+/// signal already pending skips its wake. The consumer must still see that
+/// item before it parks, or the item waits for the next send.
+#[test]
+fn data_signal_skipped_mark_cannot_strand_published_item() {
+    loom::model(|| data_signal_skipped_mark_model(true));
+}
+
+/// Without the fences the same handoff loses the item. This keeps the
+/// model above honest: it must be able to observe the race it rules out.
+#[test]
+#[should_panic(expected = "consumer parked without a wake")]
+fn data_signal_without_fences_can_strand_published_item() {
+    loom::model(|| data_signal_skipped_mark_model(false));
+}
+
+fn data_signal_skipped_mark_model(fenced: bool) {
+    {
+        // One item is published and marked. The consumer has not drained.
+        let tail = Arc::new(AtomicUsize::new(1));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::PENDING, fenced));
+
+        let producer = {
+            let tail = tail.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                // yring flush, then DataSignal::mark.
+                tail.store(2, Ordering::Release);
+                signal.mark();
+            })
+        };
+
+        // Lane worker: drain passes until the signal lets it park.
+        let mut consumed = 0;
+        for _ in 0..3 {
+            signal.begin_drain();
+            consumed = tail.load(Ordering::Acquire);
+            let is_empty = tail.load(Ordering::Acquire) == consumed;
+            signal.clear_after(is_empty);
+            if signal.is_idle() {
+                break;
+            }
+        }
+        let parked = signal.is_idle();
+
+        producer.join().unwrap();
+        // A parked consumer with no pending wake must have seen every item.
+        assert!(
+            !(parked && signal.is_idle() && consumed < 2),
+            "item 2 is published but the consumer parked without a wake"
+        );
+    }
 }

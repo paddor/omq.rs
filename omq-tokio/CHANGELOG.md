@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `DataSignal` fences in `mark` and `begin_drain`, so a producer that skips
+  its wake because the signal is pending cannot leave its message unseen by
+  a consumer that then parks.
+
 ## [0.23.0] - 2026-09-19
 
 ### Added

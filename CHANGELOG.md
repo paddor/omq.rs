@@ -21,6 +21,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Tokio data-ready signaling can no longer strand the last queued message of
+  a burst. A producer that found the signal pending skipped its wake, and
+  without a full fence on both sides the consumer could read a stale queue
+  and park. `DataSignal` now fences in `mark` and `begin_drain`.
 - Async inproc `PUSH` sends remain safe when a task moves between runtime
   worker threads or cloned socket handles send concurrently.
 

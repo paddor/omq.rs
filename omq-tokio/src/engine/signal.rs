@@ -12,8 +12,15 @@
 //!   [`DataSignal::clear_after`] after draining. A mark that races with
 //!   the drain moves the signal to `DIRTY`, so a stale empty read still
 //!   rearms the signal.
+//! - A mark that finds the signal already pending skips its wake. Its item
+//!   must then be visible to the consumer's next drain. That is a
+//!   store-then-load on each side (item then state, state then item), so
+//!   both sides need a sequentially consistent fence: `mark` before reading
+//!   the state, `begin_drain` after writing it. Release and acquire alone
+//!   let both loads read stale values, and the consumer parks with the item
+//!   queued (`tests/loom_signal.rs`).
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering, fence};
 
 use tokio::sync::Notify;
 
@@ -41,6 +48,9 @@ impl DataSignal {
     /// Wakes one waiter only on the idle-to-pending transition.
     #[inline]
     pub(crate) fn mark(&self) {
+        // Order the caller's publication before the state read. See the
+        // module docs.
+        fence(Ordering::SeqCst);
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             match state {
@@ -74,12 +84,14 @@ impl DataSignal {
     /// Consumer: enter a drain pass.
     #[inline]
     pub(crate) fn begin_drain(&self) {
-        if self.state.load(Ordering::Acquire) != PENDING {
-            return;
+        if self.state.load(Ordering::Acquire) == PENDING {
+            let _ =
+                self.state
+                    .compare_exchange(PENDING, DRAINING, Ordering::AcqRel, Ordering::Acquire);
         }
-        let _ = self
-            .state
-            .compare_exchange(PENDING, DRAINING, Ordering::AcqRel, Ordering::Acquire);
+        // Order the state write before the drain's reads. See the module
+        // docs.
+        fence(Ordering::SeqCst);
     }
 
     /// Consumer: clear after draining.

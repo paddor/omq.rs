@@ -405,7 +405,12 @@ Data-ready paths use `DataSignal`, a small atomic state machine plus `Notify`.
 `mark()` fires `notify_one` only on the idle-to-pending transition. The consumer
 calls `begin_drain()` before draining and `clear_after(is_empty)` afterward. A
 producer mark that races with drain clear moves the signal to `DIRTY`, so
-readiness survives stale empty observations. `reschedule()` fires
+readiness survives stale empty observations. A producer that finds the
+signal already pending skips its wake, so its item must be visible to the
+consumer's next drain. That handoff is a store-then-load on both sides, so
+`mark()` and `begin_drain()` each issue a sequentially consistent fence;
+release and acquire alone let both sides read stale values and strand the
+item. `reschedule()` fires
 unconditionally for budget-interrupted drains where the consumer already knows
 data remains. Wire slots, send pipes, drop queues, and lane workers all use
 `DataSignal`.
@@ -426,7 +431,8 @@ hide control behind data queue depth or an uninterruptible full-buffer drain.
 transport, then verifies control-driven close remains bounded.
 
 Loom covers the race windows that would lose these wakeups:
-`omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, `StateSignal`
+`omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, the fenced
+skip-when-pending handoff (and shows the race without the fences), `StateSignal`
 generation checks, pipe-space release, and route waits that race with peer
 activation. The [yring Loom suite](https://github.com/paddor/fanring.rs/blob/main/yring/tests/loom.rs)
 covers the lower-level SPSC cursor ordering,

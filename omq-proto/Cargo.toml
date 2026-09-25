@@ -55,7 +55,8 @@ features = ["std", "frame", "dict_builder"]
 optional = true
 
 [[bench]]
-name = "mechanism_frame"
+name = "omq_mechanism_frame"
+path = "benches/mechanism_frame.rs"
 harness = false
 required-features = ["curve"]
 

@@ -517,6 +517,82 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
     });
 }
 
+/// Two send futures share one PEER producer. The first has already observed
+/// a full ring and registered the bridge waker. The second can observe the
+/// consumer's released slot before fanring delivers the capacity wake.
+fn peer_shared_sender_capacity_handoff_model(relay_ready: bool, parked: bool) {
+    let full = Arc::new(AtomicBool::new(true));
+    let waiting = Arc::new(AtomicBool::new(true));
+    let registered = Arc::new(Mutex::new(true));
+    let signal = Arc::new(ModelStateSignal::new());
+    let seen = signal.generation();
+    if parked {
+        assert!(!signal.register_and_check(seen));
+    }
+    let consumer = {
+        let full = full.clone();
+        let waiting = waiting.clone();
+        let registered = registered.clone();
+        let signal = signal.clone();
+        thread::spawn(move || {
+            // fanring publishes credits before notifying its single waiter.
+            full.store(false, Ordering::Release);
+            let wake = std::mem::replace(&mut *registered.lock().unwrap(), false);
+            if wake {
+                // peer_send::SpaceWake::wake
+                waiting.store(false, Ordering::Release);
+                signal.notify_changed();
+            }
+        })
+    };
+    let sender = {
+        let waiting = waiting.clone();
+        let registered = registered.clone();
+        let signal = signal.clone();
+        thread::spawn(move || {
+            // peer_send::Producer::try_send, serialized with the first
+            // caller by the lane mutex. Both calls use the same bridge waker.
+            let was_waiting = waiting.load(Ordering::Acquire);
+            waiting.store(true, Ordering::Release);
+            if full.load(Ordering::Acquire) {
+                *registered.lock().unwrap() = true;
+                if full.load(Ordering::Acquire) {
+                    return;
+                }
+            }
+            // fanring::Sender::poll_ready cancels its registration on Ready.
+            *registered.lock().unwrap() = false;
+            waiting.store(false, Ordering::Release);
+            if relay_ready && was_waiting {
+                signal.notify_changed();
+            }
+        })
+    };
+
+    consumer.join().unwrap();
+    sender.join().unwrap();
+    // Cover a caller already parked and one not yet polling changed_after.
+    // Registration racing with notify is covered independently above.
+    let observed = !parked && signal.register_and_check(seen);
+    assert!(
+        observed || signal.has_woken_waiter(),
+        "shared sender parked after another caller canceled its capacity wake"
+    );
+}
+
+#[test]
+fn peer_shared_sender_capacity_handoff_wakes_existing_waiters() {
+    for parked in [false, true] {
+        loom::model(move || peer_shared_sender_capacity_handoff_model(true, parked));
+    }
+}
+
+#[test]
+#[should_panic(expected = "shared sender parked")]
+fn peer_shared_sender_without_capacity_handoff_can_lose_wake() {
+    loom::model(|| peer_shared_sender_capacity_handoff_model(false, true));
+}
+
 #[test]
 fn blocking_recv_cancel_registration_cannot_lose_cancel_wake() {
     loom::model(|| {

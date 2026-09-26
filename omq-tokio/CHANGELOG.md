@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent sends sharing one PEER socket handle no longer strand a sender
+  when another caller observes ring capacity before its wake is delivered.
 - Concurrent parked PEER receives hand off coalesced batch wakes, including
   cancellation, without per-message wakes on the single-consumer path.
 - Receive admission failure no longer evicts the current PEER connection

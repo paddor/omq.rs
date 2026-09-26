@@ -3958,7 +3958,13 @@ mod tests {
         server_cancel.cancel();
         assert!(stopped.is_ok(), "Close was trapped behind a stalled write");
 
-        let _ = server_task.await;
+        // No actor drains server events here. Release a queued message so the
+        // driver can report Closed even when that one-slot channel is full.
+        drop(server_events_rx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server teardown stalled")
+            .expect("server driver panicked");
     }
 
     #[tokio::test]

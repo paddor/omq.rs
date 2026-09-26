@@ -185,6 +185,7 @@ impl Producer {
         self.waiting_budget = false;
         let bytes = message.max_message_size_len();
         self.waiting_bytes = bytes;
+        let was_waiting = self.ring_space.waiting.load(Ordering::Acquire);
         self.ring_space.waiting.store(true, Ordering::Release);
         if self
             .sender
@@ -196,6 +197,14 @@ impl Producer {
             return Err(SendPipeError::Full(message));
         }
         self.ring_space.waiting.store(false, Ordering::Release);
+        if was_waiting {
+            // Multiple send futures may share this producer. fanring's
+            // poll_ready cancels its single waker when it observes capacity,
+            // possibly before the consumer delivers the wake for that slot.
+            // Relay readiness to callers already waiting on our ring signal;
+            // otherwise this caller can cancel their only remaining wake.
+            self.space.notify_changed();
+        }
         self.waiting_budget = true;
         if !self.ready()
             || self
@@ -310,6 +319,37 @@ mod tests {
             Arc::new(DataSignal::new()),
             Arc::new(StateSignal::new()),
         )
+    }
+
+    #[test]
+    fn ready_sends_do_not_broadcast_ring_capacity() {
+        let (mut sender, mut receiver) = queue(4);
+        let signal = sender.space();
+        let generation = signal.generation();
+        let mut out = Vec::new();
+        for _ in 0..16 {
+            sender.try_send(Message::single("x")).unwrap();
+            assert_eq!(receiver.drain_into(&mut out, 1, 1024), 1);
+        }
+        assert_eq!(signal.generation(), generation);
+    }
+
+    #[test]
+    fn delivered_capacity_wake_does_not_need_another_broadcast() {
+        let (mut sender, mut receiver) = queue(1);
+        sender.try_send(Message::single("first")).unwrap();
+        assert!(matches!(
+            sender.try_send(Message::single("blocked")),
+            Err(SendPipeError::Full(_))
+        ));
+        let signal = sender.space();
+        let generation = signal.generation();
+        assert!(!sender.ready());
+        assert_eq!(receiver.drain_into(&mut Vec::new(), 1, 1024), 1);
+        assert!(sender.ready());
+        assert_eq!(signal.generation(), generation + 1);
+        sender.try_send(Message::single("next")).unwrap();
+        assert_eq!(signal.generation(), generation + 1);
     }
 
     #[test]

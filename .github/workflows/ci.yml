@@ -428,6 +428,14 @@ jobs:
       - name: cargo nextest (zstd, macOS)
         if: runner.os == 'macOS'
         run: cargo nextest run --profile ci -p omq-tokio --features zstd --test-threads=1
+      - name: PEER shared-sender stress (macOS)
+        if: runner.os == 'macOS'
+        # Reuse the zstd test binary. This capacity-wake race first surfaced
+        # on ARM64; one-slot and batched queues must both keep making progress.
+        run: >-
+          cargo nextest run --profile ci -p omq-tokio --features zstd
+          --test peer_recv --test-threads=1 --stress-count 1000 --fail-fast
+          -E 'test(=socket_clones_and_concurrently_shared_handle_preserve_sender_fifo)'
       - name: cargo nextest (lz4+ws endpoint)
         run: cargo nextest run --profile ci -p omq-proto --features "lz4 ws" --test omq_proto_endpoint
       - name: cargo nextest (lz4+ws)

@@ -27,7 +27,7 @@ pub(crate) type SpscRecvSignal = Arc<DataSignal>;
 /// any `recv()` that's blocked so it re-drains with the updated list.
 pub(crate) type SpscActivated = Arc<StateSignal>;
 
-const RECV_BATCH_MESSAGES: usize = 256;
+pub(crate) const RECV_BATCH_MESSAGES: usize = 256;
 const RECV_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,7 +436,7 @@ pub(crate) fn recv_pipe(
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
     pub fanin: Option<Arc<super::fanin::Fanin>>,
-    pub peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
+    pub peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
     pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
@@ -466,9 +466,7 @@ impl SpscHandles {
         hwm: usize,
         max_message_size: Option<usize>,
     ) -> super::peer_recv::PeerRecvRoutes {
-        let (routes, receive) =
-            super::peer_recv::PeerRecvRoutes::ordinary(hwm, self, max_message_size)
-                .expect("default PEER receive limits");
+        let (routes, receive) = super::peer_recv::PeerRecvRoutes::new(hwm, self, max_message_size);
         self.peer_recv = Some(Arc::new(Mutex::new(receive)));
         routes
     }
@@ -519,7 +517,7 @@ impl SpscHandles {
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
     fanin: Option<Arc<super::fanin::Fanin>>,
-    peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
+    peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: SpscConsumers,
     /// Per-TCP-peer yring consumers. Actor appends on handshake.
@@ -1191,6 +1189,11 @@ impl SpscAwareRecv {
                 DrainResult::Empty => {}
             }
 
+            if self.take_peer_yield_pending() {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
             let recv_ready = self.recv_signal.ready();
             let pipe_ready = self.recv_pipe_notify.ready();
             let activated_seen = self.activated.generation();
@@ -1210,6 +1213,15 @@ impl SpscAwareRecv {
                     DrainResult::Empty => {}
                 }
 
+                if self.take_peer_yield_pending() {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+
+                let _peer_waiter = self
+                    .peer_recv
+                    .as_deref()
+                    .map(super::peer_recv::PeerReceiver::wait);
                 tokio::select! {
                     biased;
                     () = &mut recv_ready => continue,
@@ -1232,6 +1244,14 @@ impl SpscAwareRecv {
         }
     }
 
+    fn take_peer_yield_pending(&self) -> bool {
+        self.peer_recv.as_ref().is_some_and(|peer| {
+            peer.lock()
+                .expect("PEER receive poisoned")
+                .take_yield_pending()
+        })
+    }
+
     pub(crate) fn try_recv(&self) -> Result<Message> {
         match self.try_drain() {
             DrainResult::Message(msg) => Ok(msg),
@@ -1250,6 +1270,12 @@ impl SpscAwareRecv {
         max: usize,
         out: &mut Vec<Message>,
     ) -> Result<usize> {
+        if let Some(peer) = &self.peer_recv {
+            return peer
+                .lock()
+                .expect("PEER receive poisoned")
+                .try_recv_many_after_first(max, out);
+        }
         let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
         let first = out.last().expect("first message already received");
         if !budget.account(RecvSizeClass::for_message(first).budget_bytes()) {

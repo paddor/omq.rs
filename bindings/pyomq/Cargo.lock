@@ -203,9 +203,9 @@ dependencies = [
 
 [[package]]
 name = "fanring"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "596987ccf4bfc8adcf4c70ebf61c515c50f3768d973da94192b8a0148fbaec5b"
+checksum = "b1a77573cda392ec06cdcb8e4033ea298b8b120242ed38734f7718119b41e756"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -425,9 +425,9 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.11.5"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f15da938fe56acadf8dd510f4bfaaf53deb9051361fc3d71ddeba2e0f12fc48"
+checksum = "8aec7f2070089db97a0ddf7b0e476bff6b31fc875ba223e20f49aa1f92628891"
 dependencies = [
  "lz4rip-core",
  "lz4rip-decode",
@@ -436,24 +436,24 @@ dependencies = [
 
 [[package]]
 name = "lz4rip-core"
-version = "0.5.5"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fc4edb61fcaf1cdad24ac2982eff7af4417ef463c33bcf5c42ba549abd8b96"
+checksum = "edb50206b4d66e3ec849d2e7ac9257d79c19733c435909a0a46cbb34f9ec7107"
 
 [[package]]
 name = "lz4rip-decode"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60d65bfd4c032fefcf8c18fb5f8d9958f4925146845db16dbc9d416f1566b9bf"
+checksum = "d89c54c126f2acb3979c7d8fc9482506d6371438f514f2e83ef96ede9b585594"
 dependencies = [
  "lz4rip-core",
 ]
 
 [[package]]
 name = "lz4rip-encode"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a4e226501cf35f6f17d82f4384668c39477ea1ce40ff1d74369fb68ab8b6957"
+checksum = "cfb1db4505b7d5cc32a0550981e1731ff4f0b22d749f37c9b94664177d3bd53f"
 dependencies = [
  "lz4rip-core",
 ]
@@ -1167,9 +1167,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c054fc88ec1358a6452273e36e4bff59a34dc4045573972c02eda89dbae1677"
+checksum = "7ad40d31fd5e9026696958c858f08ff1b11bd441ead80a328e133a9761db498c"
 dependencies = [
  "atomic-waker",
  "futures-core",
@@ -1198,9 +1198,9 @@ dependencies = [
 
 [[package]]
 name = "zrip"
-version = "0.8.6"
+version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ef05d0a0abfcffec1d7dabdbd73373fef2b5838c20dc86ad8b6b6ee1a48a3cb"
+checksum = "2c88b6ef5b1c4cde86608d46c08b11dca39c82d372fda6a8731c0fbec47febe5"
 dependencies = [
  "zrip-core",
  "zrip-decode",
@@ -1209,24 +1209,24 @@ dependencies = [
 
 [[package]]
 name = "zrip-core"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0122e5712041938e8a1a4db57975da142f9b9cd1aab24cf8a94bb2ce4b79774"
+checksum = "6dec95be8c75252532ba0ef5e738d9da26a6f51ad52cb45f4ed90c89979727c1"
 
 [[package]]
 name = "zrip-decode"
-version = "0.8.6"
+version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a21823fd3263a53b26c082461bd411006652fa3e0d7842c5bac552ac5498bab"
+checksum = "f9386a88930b83ca35c0d703b9767987eacb7c8f24c1d1a9a02f8471e2ebf0c5"
 dependencies = [
  "zrip-core",
 ]
 
 [[package]]
 name = "zrip-encode"
-version = "0.8.5"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5df1e3a40c73ef22d3ac48ac5cdb56a20d0f56ad00b56575bc515a990862e8c"
+checksum = "b657fa83287fe6799596e53540a7b1f179ca34ffd8589d5c576a5b8a1bcc4260"
 dependencies = [
  "zrip-core",
 ]

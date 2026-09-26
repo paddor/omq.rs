@@ -1,34 +1,42 @@
-//! Connection-owned receive producer. A full lane pauses only reading; the
+//! Connection-owned receive producer. A full queue pauses only reading; the
 //! connection driver still services replies, control commands and cancellation.
 
-use super::{Arc, LaneShared, Message, Ordering, QueueState, QueuedMessage};
+use std::task::{Context, Waker};
+
+use super::{Arc, Coordinated, Message, Ordering, QueueState, RecvItem, RecvShared, mpsc};
 
 #[derive(Debug)]
 pub(crate) struct PeerRecvSink {
-    producer: yring::Producer<QueuedMessage>,
+    producer: Option<mpsc::Sender<RecvItem, Coordinated>>,
+    waker: Waker,
     state: Arc<QueueState>,
-    lane: Arc<LaneShared>,
+    shared: Arc<RecvShared>,
     pending: Option<Message>,
     dirty: bool,
 }
 
 impl PeerRecvSink {
     pub(super) fn new(
-        producer: yring::Producer<QueuedMessage>,
+        producer: mpsc::Sender<RecvItem, Coordinated>,
         state: Arc<QueueState>,
-        lane: Arc<LaneShared>,
+        shared: Arc<RecvShared>,
     ) -> Self {
         Self {
-            producer,
+            producer: Some(producer),
+            waker: Waker::from(state.clone()),
             state,
-            lane,
+            shared,
             pending: None,
             dirty: false,
         }
     }
 
     fn alive(&self) -> bool {
-        self.state.current.load(Ordering::Acquire) && !self.producer.is_consumer_dropped()
+        self.state.current.load(Ordering::Acquire)
+            && self
+                .producer
+                .as_ref()
+                .is_some_and(|producer| !producer.is_disconnected())
     }
 
     pub(crate) fn blocked(&self) -> bool {
@@ -40,29 +48,34 @@ impl PeerRecvSink {
             self.pending.is_none(),
             "drain must stop at a full PEER queue"
         );
-        if !self.alive() || self.lane.budget.oversize(&message) {
+        if !self.alive() || self.shared.budget.oversize(&message) {
             return false;
         }
         // Socket close stops application admission immediately, but outbound
         // messages may still drain during linger. Receiver drop cancels the
         // peer separately; merely starting socket close must not do that.
-        if self.lane.closed.load(Ordering::Acquire) {
+        if self.shared.closed.load(Ordering::Acquire) {
             return true;
         }
-        if self.producer.is_full() {
+        let producer = self.producer.as_mut().expect("live receive producer");
+        if producer.is_full() {
             self.pending = Some(message);
             return true;
         }
-        let message = match self.lane.budget.reserve(message) {
+        let message = match self.shared.budget.reserve(message) {
             Ok(message) => message,
             Err(message) => {
                 self.pending = Some(message);
                 return true;
             }
         };
-        match self.producer.push(message) {
+        match producer.try_send(RecvItem {
+            body: message,
+            state: self.state.clone(),
+        }) {
             Ok(()) => self.dirty = true,
-            Err(message) => self.pending = Some(message.into_message()),
+            Err(mpsc::TrySendError::Full(item)) => self.pending = Some(item.body.into_message()),
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
         }
         true
     }
@@ -82,33 +95,32 @@ impl PeerRecvSink {
 
     pub(crate) fn flush(&mut self) {
         if self.dirty {
-            let flushed = self.producer.flush_and_check();
             self.dirty = false;
-            if matches!(
-                flushed,
-                yring::FlushResult::Flushed {
-                    was_empty: true,
-                    ..
-                }
-            ) {
-                self.lane.mark();
-            }
+            // Coordinated fanring publishes each entry. External notification
+            // remains one coalesced mark per driver batch, never per push.
+            self.shared.mark();
         }
     }
 
     pub(crate) async fn ready(&mut self) {
+        self.flush();
         let seen = self.state.space.generation();
-        let budget_seen = self.lane.budget.space.generation();
-        if self.lane.closed.load(Ordering::Acquire) {
+        let budget_seen = self.shared.budget.space.generation();
+        if self.shared.closed.load(Ordering::Acquire) || !self.alive() {
             return;
         }
-        if self.alive() && self.producer.is_full() {
-            self.state.space.changed_after(seen).await;
-        } else if self.alive()
-            && let Some(message) = &self.pending
-            && !self.lane.budget.room(message.max_message_size_len())
+        if self
+            .producer
+            .as_mut()
+            .expect("live receive producer")
+            .poll_ready(&mut Context::from_waker(&self.waker))
+            .is_pending()
         {
-            self.lane.budget.space.changed_after(budget_seen).await;
+            self.state.space.changed_after(seen).await;
+        } else if let Some(message) = &self.pending
+            && !self.shared.budget.room(message.max_message_size_len())
+        {
+            self.shared.budget.space.changed_after(budget_seen).await;
         }
     }
 }
@@ -116,11 +128,12 @@ impl PeerRecvSink {
 impl Drop for PeerRecvSink {
     fn drop(&mut self) {
         self.flush();
-        self.producer.close();
-        // Release the unqueued payload before the final QueueState drop can
-        // return this connection's allocation allowance.
+        // Publish disconnect before the external wake, so receive can retire
+        // an empty ring without needing another connection to send data.
+        self.producer.take();
+        // Release the unqueued payload before waking the application.
         self.pending.take();
         self.state.space.notify_changed();
-        self.lane.mark();
+        self.shared.mark();
     }
 }

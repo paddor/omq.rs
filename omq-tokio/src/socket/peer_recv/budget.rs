@@ -1,7 +1,8 @@
-//! Shared lane admission limits. Ownership returns capacity even on cancellation
+//! Socket-wide receive admission limits. Ownership returns capacity even on cancellation
 //! or queue destruction; no per-message allocation, just an Arc count.
 
-use super::{Arc, AtomicUsize, Message, Ordering, StateSignal};
+use super::{Arc, Message, Ordering, StateSignal};
+use std::sync::atomic::AtomicUsize;
 
 #[derive(Debug)]
 pub(super) struct Budget {
@@ -25,6 +26,10 @@ pub(super) struct QueuedMessage {
 }
 
 impl QueuedMessage {
+    pub(super) fn byte_len(&self) -> usize {
+        self.message.max_message_size_len()
+    }
+
     pub(super) fn into_message(self) -> Message {
         self.message
     }

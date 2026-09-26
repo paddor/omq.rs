@@ -274,9 +274,9 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "fanring"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "596987ccf4bfc8adcf4c70ebf61c515c50f3768d973da94192b8a0148fbaec5b"
+checksum = "b1a77573cda392ec06cdcb8e4033ea298b8b120242ed38734f7718119b41e756"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -517,9 +517,9 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.11.6"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab11c655199025ef9fff504d7905ea46877da7377c908eca012273e6992453c0"
+checksum = "8aec7f2070089db97a0ddf7b0e476bff6b31fc875ba223e20f49aa1f92628891"
 dependencies = [
  "lz4rip-core",
  "lz4rip-decode",
@@ -528,24 +528,24 @@ dependencies = [
 
 [[package]]
 name = "lz4rip-core"
-version = "0.5.5"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fc4edb61fcaf1cdad24ac2982eff7af4417ef463c33bcf5c42ba549abd8b96"
+checksum = "edb50206b4d66e3ec849d2e7ac9257d79c19733c435909a0a46cbb34f9ec7107"
 
 [[package]]
 name = "lz4rip-decode"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60d65bfd4c032fefcf8c18fb5f8d9958f4925146845db16dbc9d416f1566b9bf"
+checksum = "d89c54c126f2acb3979c7d8fc9482506d6371438f514f2e83ef96ede9b585594"
 dependencies = [
  "lz4rip-core",
 ]
 
 [[package]]
 name = "lz4rip-encode"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a4e226501cf35f6f17d82f4384668c39477ea1ce40ff1d74369fb68ab8b6957"
+checksum = "cfb1db4505b7d5cc32a0550981e1731ff4f0b22d749f37c9b94664177d3bd53f"
 dependencies = [
  "lz4rip-core",
 ]
@@ -1352,9 +1352,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c054fc88ec1358a6452273e36e4bff59a34dc4045573972c02eda89dbae1677"
+checksum = "7ad40d31fd5e9026696958c858f08ff1b11bd441ead80a328e133a9761db498c"
 dependencies = [
  "loom",
 ]

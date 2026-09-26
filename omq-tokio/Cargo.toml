@@ -34,9 +34,9 @@ soak = []
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
-fanring = { version = "0.3.6", features = ["async"] }
+fanring = { version = "0.3.7", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.28.0", default-features = false }
-yring = "0.3.17"
+yring = "0.3.18"
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"
@@ -84,60 +84,78 @@ name = "pub_sub_lz4"
 required-features = ["lz4"]
 
 [[test]]
-name = "peer_recv_lanes"
-path = "tests/peer_recv_lanes.rs"
+name = "peer_recv"
+path = "tests/peer_recv.rs"
 
 [[bench]]
-name = "exclusive_latency"
+name = "omq_exclusive_latency"
+path = "benches/exclusive_latency.rs"
 harness = false
 
 [[bench]]
-name = "push_pull"
+name = "omq_push_pull"
+path = "benches/push_pull.rs"
 harness = false
 
 [[bench]]
-name = "pull_bulk_fanin"
+name = "omq_pull_bulk_fanin"
+path = "benches/pull_bulk_fanin.rs"
 harness = false
 
 [[bench]]
-name = "inproc_threads"
+name = "omq_inproc_threads"
+path = "benches/inproc_threads.rs"
 harness = false
 
 [[bench]]
-name = "pub_sub"
+name = "omq_pub_sub"
+path = "benches/pub_sub.rs"
 harness = false
 
 [[bench]]
-name = "req_rep"
+name = "omq_pub_clone_senders"
+path = "benches/pub_clone_senders.rs"
 harness = false
 
 [[bench]]
-name = "router_dealer"
+name = "omq_req_rep"
+path = "benches/req_rep.rs"
 harness = false
 
 [[bench]]
-name = "pair"
+name = "omq_router_dealer"
+path = "benches/router_dealer.rs"
 harness = false
 
 [[bench]]
-name = "push_pull_fanout"
+name = "omq_pair"
+path = "benches/pair.rs"
 harness = false
 
 [[bench]]
-name = "latency"
+name = "omq_push_pull_fanout"
+path = "benches/push_pull_fanout.rs"
 harness = false
 
 [[bench]]
-name = "client_server_latency"
+name = "omq_latency"
+path = "benches/latency.rs"
 harness = false
 
 [[bench]]
-name = "mechanism"
+name = "omq_client_server_latency"
+path = "benches/client_server_latency.rs"
+harness = false
+
+[[bench]]
+name = "omq_mechanism"
+path = "benches/mechanism.rs"
 harness = false
 required-features = ["plain"]
 
 [[bench]]
-name = "compression"
+name = "omq_compression"
+path = "benches/compression.rs"
 harness = false
 
 [[test]]

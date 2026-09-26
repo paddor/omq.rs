@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -12,6 +13,50 @@ const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
 
 static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
 static REAPER_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Use Cargo's artifact paths, including configured target directories/triples.
+pub(crate) fn build_compression_peers(feature: &str) -> [PathBuf; 2] {
+    const NAMES: [&str; 2] = ["omq_bench_peer_blocking", "omq_bench_peer_tokio"];
+    eprintln!("  building compression peers ({feature})...");
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "omq-tokio",
+            "--bin",
+            NAMES[0],
+            "--bin",
+            NAMES[1],
+            "--features",
+            feature,
+            "--message-format=json-render-diagnostics",
+        ])
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("failed to run cargo build");
+    assert!(output.status.success(), "compression peer build failed");
+    let messages: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("invalid Cargo build message"))
+        .collect();
+    NAMES.map(|name| {
+        messages
+            .iter()
+            .find_map(|message| executable_artifact(message, name))
+            .unwrap_or_else(|| panic!("Cargo did not report executable for {name}"))
+    })
+}
+
+fn executable_artifact(message: &serde_json::Value, name: &str) -> Option<PathBuf> {
+    if message["reason"] != "compiler-artifact" || message["target"]["name"] != name {
+        return None;
+    }
+    message["executable"].as_str().map(PathBuf::from)
+}
 
 fn live_procs() -> &'static Mutex<HashMap<u32, Instant>> {
     LIVE_PROCS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -135,13 +180,13 @@ impl ProcessGuard {
     /// Wait for the process to finish, returning stdout contents.
     pub(crate) fn wait_with_output(&mut self, timeout: Duration) -> Option<String> {
         let child = self.child.as_mut()?;
-        if let Ok(Some(_)) = child.wait_timeout(timeout) {
+        if let Ok(Some(status)) = child.wait_timeout(timeout) {
             let mut out = String::new();
             if let Some(ref mut stdout) = child.stdout {
                 stdout.read_to_string(&mut out).ok();
             }
             deregister_proc(self.pid);
-            Some(out)
+            status.success().then_some(out)
         } else {
             self.kill();
             None
@@ -168,7 +213,7 @@ pub(crate) fn spawn(cmd: &[&str], env: &[(&str, &str)], cpu: Option<&str>) -> Pr
     let mut command = Command::new(args[0]);
     command.args(&args[1..]);
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::inherit());
     for &(k, v) in env {
         command.env(k, v);
     }
@@ -296,5 +341,53 @@ impl WaitTimeout for Child {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_reported_executable_without_assuming_target_directory() {
+        let message = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "peer" },
+            "executable": "/mnt/bench/tmp/custom/x86_64-unknown-linux-gnu/release/peer"
+        });
+        assert_eq!(
+            executable_artifact(&message, "peer"),
+            Some(PathBuf::from(
+                "/mnt/bench/tmp/custom/x86_64-unknown-linux-gnu/release/peer"
+            ))
+        );
+        assert_eq!(executable_artifact(&message, "other"), None);
+        assert_eq!(
+            executable_artifact(&serde_json::json!({"reason": "build-finished"}), "peer"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_rejects_unsuccessful_exit_even_with_plausible_output() {
+        assert_eq!(
+            capture(
+                &["sh", "-c", "printf 123; exit 7"],
+                &[],
+                None,
+                Duration::from_secs(1)
+            ),
+            None
+        );
+        assert_eq!(
+            capture(
+                &["sh", "-c", "printf 123"],
+                &[],
+                None,
+                Duration::from_secs(1)
+            ),
+            Some("123".into())
+        );
     }
 }

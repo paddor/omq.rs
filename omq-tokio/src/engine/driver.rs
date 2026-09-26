@@ -438,7 +438,7 @@ impl RecvSink {
                 let _ = sink.push(m);
                 None
             }
-            Self::Peer(_) => unreachable!("PEER lanes never fall back through the actor"),
+            Self::Peer(_) => unreachable!("PEER receives never fall back through the actor"),
             Self::Channel(pipe) => {
                 let _ = pipe.send(m).await;
                 None
@@ -734,7 +734,7 @@ pub enum PeerDriverCommand {
     /// this peer as ready.
     ActivateDataPlane,
     /// Install a socket-selected receive sink before activating application
-    /// traffic. Used for identity-routed PEER lanes after handshake.
+    /// traffic. Used for PEER receive queues after handshake.
     ActivateWithRecvSink(RecvSink),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
@@ -3958,7 +3958,13 @@ mod tests {
         server_cancel.cancel();
         assert!(stopped.is_ok(), "Close was trapped behind a stalled write");
 
-        let _ = server_task.await;
+        // No actor drains server events here. Release a queued message so the
+        // driver can report Closed even when that one-slot channel is full.
+        drop(server_events_rx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server teardown stalled")
+            .expect("server driver panicked");
     }
 
     #[tokio::test]
@@ -4219,10 +4225,12 @@ mod tests {
         let wire = drain_transmit(&mut sender);
         assert!(wire.len() < READ_BUF_MAX);
         connection.handle_input(Bytes::from(wire)).unwrap();
-        let mut limits = crate::PeerRecvConfig::new(1);
-        limits.max_messages_per_lane = 16;
-        let (mut routes, mut receivers) =
-            crate::socket::peer_recv::PeerRecvRoutes::new(limits, 16).unwrap();
+        let handles = crate::socket::recv::SpscHandles::new(
+            crate::socket::recv::BlockingRecvWaker::new(),
+            false,
+        );
+        let (mut routes, mut receiver) =
+            crate::socket::peer_recv::PeerRecvRoutes::new(16, &handles, None);
         let sink = routes
             .register(Bytes::from_static(b"peer"), CancellationToken::new())
             .unwrap();
@@ -4249,10 +4257,7 @@ mod tests {
             assert!(sink.as_ref().unwrap().peer_blocked());
         }
         let mut queued = Vec::new();
-        assert_eq!(
-            receivers[0].try_recv_many_into(100, &mut queued).unwrap(),
-            16
-        );
+        assert_eq!(receiver.try_recv_many_into(100, &mut queued).unwrap(), 16);
         // Only one additional message left the decoder for pending admission.
         // Repeated driver turns under backpressure consume no further input.
         let mut remaining = 0;

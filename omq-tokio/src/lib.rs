@@ -56,6 +56,5 @@ pub use context::{Context, ContextConfig, ContextCore};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, PeerRecvConfig, PeerRecvLane,
-    Socket,
+    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,
 };

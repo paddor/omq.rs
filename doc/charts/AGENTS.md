@@ -11,6 +11,7 @@ cargo run --release -p omq-bench -- chart comparison # per-transport
 cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
 cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
+cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 ```
 
 A chart refresh without new benchmarks just re-renders existing data.
@@ -85,6 +86,20 @@ panel scale.
 Payload: structural JSON (`OMQ_BENCH_PAYLOAD=json`). Dict: 2 KiB,
 trained on diverse seeded samples (`json_payload_seeded`, seeds 1..N).
 Bench: `omq-bench run pushpull-lz4` (uses `bench_peer_blocking`, 1IO).
+
+Historical caveat: before `d6f07c40a` (2026-07-31), the blocking sender ignored
+the JSON and dictionary settings. Its throughput used repeated `x` bytes,
+while wire-size probes used JSON. Do not compare those old throughput rows
+with current JSON/dictionary runs.
+
+## Zstd chart (1 file)
+
+Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
+`pushpull_zstd_dict`.
+
+`pushpull/zstd_tcp.svg` uses the same sizes, link projections, structural JSON,
+and 2 KiB dictionary setup as the LZ4 chart, at Zstd level 1.
+Bench: `omq-bench run pushpull-zstd --level 1`.
 
 ## OMQ runtime modes
 

@@ -5,7 +5,7 @@
 #   ./scripts/flamegraph.sh [options]
 #
 # Options:
-#   -b BENCH    bench name (default: push_pull)
+#   -b BENCH    bench name (default: omq_push_pull)
 #   -p CRATE    crate to bench (default: omq-tokio)
 #   -t LIST     OMQ_BENCH_TRANSPORTS override (default: tcp)
 #   -s LIST     OMQ_BENCH_SIZES override (default: 512,2048)
@@ -19,7 +19,7 @@
 #   ./scripts/flamegraph.sh -b latency -t tcp -s 256,1024
 set -euo pipefail
 
-BENCH=push_pull
+BENCH=omq_push_pull
 CRATE=omq-tokio
 TRANSPORTS=tcp
 SIZES=512,2048

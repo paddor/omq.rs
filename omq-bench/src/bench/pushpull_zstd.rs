@@ -34,44 +34,8 @@ struct Peers {
 }
 
 fn build_peers() -> Peers {
-    eprintln!("  building omq_bench_peer_blocking (zstd)...");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "omq-tokio",
-            "--bin",
-            "omq_bench_peer_blocking",
-            "--features",
-            "zstd",
-            "-q",
-        ])
-        .status()
-        .expect("failed to run cargo build");
-    assert!(status.success(), "build failed");
-
-    eprintln!("  building omq_bench_peer_tokio (zstd)...");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "omq-tokio",
-            "--bin",
-            "omq_bench_peer_tokio",
-            "--features",
-            "zstd",
-            "-q",
-        ])
-        .status()
-        .expect("failed to run cargo build");
-    assert!(status.success(), "build failed");
-
-    Peers {
-        blocking: PathBuf::from("target/release/omq_bench_peer_blocking"),
-        tokio: PathBuf::from("target/release/omq_bench_peer_tokio"),
-    }
+    let [blocking, tokio] = process::build_compression_peers("zstd");
+    Peers { blocking, tokio }
 }
 
 fn get_wire_size(
@@ -98,8 +62,8 @@ fn get_wire_size(
         None,
         Duration::from_secs(10),
     )
-    .unwrap_or_default();
-    output.trim().parse().unwrap_or(size)
+    .expect("wire-size peer failed or timed out");
+    output.trim().parse().expect("invalid wire-size result")
 }
 
 fn train_dict(binary: &str, path: &str, capacity: u64) {
@@ -109,7 +73,8 @@ fn train_dict(binary: &str, path: &str, capacity: u64) {
         &[],
         None,
         Duration::from_secs(30),
-    );
+    )
+    .expect("dictionary training failed or timed out");
 }
 
 fn run_cell(
@@ -228,10 +193,9 @@ pub(crate) fn run(args: PushpullZstdArgs) {
 
             let mut best: Option<(f64, f64, f64)> = None;
             for _ in 0..rounds {
-                if let Some(result) =
-                    run_cell(bench_bin, transport, size, duration, None, args.level)
-                    && best.as_ref().is_none_or(|b| result.0 > b.0)
-                {
+                let result = run_cell(bench_bin, transport, size, duration, None, args.level)
+                    .expect("PUSH/PULL peer failed, timed out, or returned invalid results");
+                if best.as_ref().is_none_or(|b| result.0 > b.0) {
                     best = Some(result);
                 }
             }
@@ -281,15 +245,16 @@ pub(crate) fn run(args: PushpullZstdArgs) {
 
                 let mut best: Option<(f64, f64, f64)> = None;
                 for _ in 0..rounds {
-                    if let Some(result) = run_cell(
+                    let result = run_cell(
                         bench_bin,
                         transport,
                         size,
                         duration,
                         Some(&dict_path),
                         args.level,
-                    ) && best.as_ref().is_none_or(|b| result.0 > b.0)
-                    {
+                    )
+                    .expect("PUSH/PULL peer failed, timed out, or returned invalid results");
+                    if best.as_ref().is_none_or(|b| result.0 > b.0) {
                         best = Some(result);
                     }
                 }

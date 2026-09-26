@@ -187,9 +187,9 @@ cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --test-threads=
 ## Benchmarks
 
 ```sh
-cargo bench -p omq-tokio --bench push_pull
-cargo bench -p omq-tokio --bench inproc_threads
-cargo bench -p omq-tokio --bench pull_bulk_fanin
+cargo bench -p omq-tokio --bench omq_push_pull
+cargo bench -p omq-tokio --bench omq_inproc_threads
+cargo bench -p omq-tokio --bench omq_pull_bulk_fanin
 ```
 
 Env knobs: `OMQ_BENCH_TRANSPORTS`, `OMQ_BENCH_SIZES`,

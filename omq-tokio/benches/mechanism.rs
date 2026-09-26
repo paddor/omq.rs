@@ -4,7 +4,10 @@
 //! and decryption overhead. Single peer, loopback TCP.
 //!
 //! Run:
-//!   cargo bench -p omq-tokio --bench mechanism --features 'plain curve'
+//!
+//! ```sh
+//! cargo bench -p omq-tokio --bench omq_mechanism --features 'plain curve'
+//! ```
 
 #[path = "common/mod.rs"]
 mod common;

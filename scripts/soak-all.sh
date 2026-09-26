@@ -40,6 +40,8 @@ if [[ -z "${RUBY:-}" ]]; then
   printf 'error: Ruby not found; set RUBY or OMQ_RUBY\n' >&2
   exit 2
 fi
+# bindings/ruby/scripts/soak.sh reads OMQ_RUBY, not RUBY.
+export OMQ_RUBY="${OMQ_RUBY:-$RUBY}"
 
 timeout_seconds="${SOAK_TIMEOUT_SECS:-$((duration_seconds + 900))}"
 if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
@@ -112,6 +114,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+trap 'exit 129' HUP
 
 cat >"$nextest_config" <<EOF
 [profile.default]
@@ -233,15 +236,33 @@ if [[ "${SOAK_PREBUILD_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+# Each job runs in its own session so cleanup can signal the whole tree. A
+# session has no controlling terminal, so jobs get no SIGHUP when the
+# terminal goes away, and the EXIT trap does not run if this script is
+# killed with SIGKILL. A per-job watchdog tears the session down once this
+# script is gone.
 run_job() {
   local label="$1"
   shift
   setsid --wait bash -c '
     set -o pipefail
-    label="$1"
-    shift
+    parent="$1"
+    label="$2"
+    shift 2
+    (
+      while kill -0 "$parent" 2>/dev/null; do sleep 1; done
+      # Survive our own session-wide TERM long enough to escalate to KILL.
+      trap "" TERM
+      pkill -TERM -s "$$" 2>/dev/null
+      sleep 5
+      pkill -KILL -s "$$" 2>/dev/null
+    ) &
+    watchdog=$!
     "$@" 2>&1 | sed -u "s/^/[${label}] /"
-  ' bash "$label" "$@" &
+    status=$?
+    kill "$watchdog" 2>/dev/null
+    exit "$status"
+  ' bash "$$" "$label" "$@" &
   pids+=("$!")
   active_pids+=("$!")
   active_labels+=("$label")
@@ -266,7 +287,11 @@ wait_oldest_job() {
 export SOAK_SKIP_BUILD=1
 
 binding_workers="${SOAK_BINDING_WORKERS:-1}"
-binding_jobs="${SOAK_BINDING_JOBS:-9}"
+# All 9 jobs at once reserve about 7 GB of virtual memory (Node, JVM, .NET,
+# and Go reserve large heaps up front). Under strict overcommit
+# (vm.overcommit_memory=2) that exhausts the commit limit and every
+# allocation on the host fails, including the terminal multiplexer's.
+binding_jobs="${SOAK_BINDING_JOBS:-3}"
 if [[ ! "$binding_jobs" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: SOAK_BINDING_JOBS must be a positive integer\n' >&2
   exit 2

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove `Socket::peer_recv_lanes`, `PeerRecvConfig`, and `PeerRecvLane`.
+  PEER uses ordinary `recv` and bulk receive methods with one socket-owned
+  fanring. Application code owns worker dispatch; per-connection fairness,
+  reconnect fencing, and existing ordinary receive limits are preserved.
+
+### Changed
+
+- PEER receives use fanring ready-peer selection and batched space credits,
+  preserving identity routing, reconnect fencing, and aggregate receive budgets.
+- *(deps)* Bump `fanring` to 0.3.7 and `yring` to 0.3.18 for
+  `try_recv_batch_into_while` and `pop_into_while`.
+- `recv_batching` bulk receives move whole per-connection windows at once.
+
+### Fixed
+
+- Concurrent parked PEER receives hand off coalesced batch wakes, including
+  cancellation, without per-message wakes on the single-consumer path.
+- Receive admission failure no longer evicts the current PEER connection
+  with the same identity.
+- Stale PEER reconnect entries count toward message and byte drain limits;
+  async cleanup yields when either limit is exhausted.
+- Late wire connections racing socket close or last-handle drop no longer
+  panic while registering a producer on the closed receive fan-in.
+- Ordinary fan-in receives retain bounded slot-release batches instead of
+  issuing a producer capacity wake after every message. Partial credits
+  flush before receive parks; bulk receives still release slots on return.
+- `xpub_nodrop` sends waiting for lane space wake up when the lane worker
+  exits during close.
+- `DataSignal` fences in `mark` and `begin_drain`, so a producer that skips
+  its wake because the signal is pending cannot leave its message unseen by
+  a consumer that then parks.
+
 ## [0.23.0] - 2026-09-19
 
 ### Added

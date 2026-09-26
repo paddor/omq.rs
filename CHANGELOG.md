@@ -6,10 +6,22 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove opt-in PEER receive partitioning: `Socket::peer_recv_lanes`,
+  `PeerRecvConfig`, and `PeerRecvLane`. Use ordinary socket receive methods;
+  application code owns worker dispatch. Internal fanring fairness, bounded
+  queues, and reconnect fencing remain unchanged.
+
 ### Changed
 
+- PEER receives use fanring ready-peer selection and batched space credits,
+  retaining identity routing, reconnect fencing, and aggregate receive budgets.
+- Upgrade compression dependencies to `lz4rip` 0.11.8 and `zrip` 0.8.10.
 - Tokio direct TCP receives reuse bounded buffers through 8 MiB without
   zero-filling payload memory or extending pool lifetime past connection close.
+- Tokio `recv_batching` bulk receives move whole per-connection windows at
+  once, under the same message and byte budgets as before.
 
 ### Added
 
@@ -21,6 +33,16 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Concurrent parked PEER receives pass a batch wake onward, including when a
+  notified receive is canceled, so queued messages cannot strand a waiter.
+- A PEER replacement rejected by receive limits no longer evicts the
+  current connection with the same identity.
+- Tokio `xpub_nodrop` sends waiting for fan-out lane space no longer wait
+  forever when the lane worker exits during close.
+- Tokio data-ready signaling can no longer strand the last queued message of
+  a burst. A producer that found the signal pending skipped its wake, and
+  without a full fence on both sides the consumer could read a stale queue
+  and park. `DataSignal` now fences in `mark` and `begin_drain`.
 - Async inproc `PUSH` sends remain safe when a task moves between runtime
   worker threads or cloned socket handles send concurrently.
 

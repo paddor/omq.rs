@@ -754,3 +754,52 @@ async fn wait_subscribed_cumulative_across_peers() {
         .expect("should already be at 4");
     assert_eq!(count, 4);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pub_clones_send_concurrently_and_sub_preserves_per_clone_fifo() {
+    const CLONES: usize = 4;
+    const PER_CLONE: u32 = 1000;
+    let _guard = PUB_IO_LANE_TEST_LOCK.lock().await;
+    // A small blocking lane per clone exercises the lane-space wait as well.
+    let mut opts = Options::default().send_hwm(64);
+    opts.xpub_nodrop = true;
+    let pub_ = Socket::new(SocketType::Pub, opts);
+    let port = test_support::bind_loopback(&pub_).await;
+
+    let sub = Socket::new(SocketType::Sub, Options::default().recv_hwm(4096));
+    sub.subscribe(bytes::Bytes::new()).await.unwrap();
+    sub.connect(test_support::tcp_loopback(port)).await.unwrap();
+    pub_.wait_subscribed(1, Duration::from_secs(1))
+        .await
+        .expect("subscription did not arrive");
+
+    let senders: Vec<_> = (0..CLONES)
+        .map(|tag| {
+            let pub_ = pub_.clone();
+            tokio::spawn(async move {
+                for seq in 0..PER_CLONE {
+                    let mut body = vec![tag as u8];
+                    body.extend_from_slice(&seq.to_le_bytes());
+                    pub_.send(Message::single(body)).await.unwrap();
+                }
+            })
+        })
+        .collect();
+
+    let mut next = [0u32; CLONES];
+    for _ in 0..(CLONES as u32 * PER_CLONE) {
+        let m = tokio::time::timeout(Duration::from_secs(10), sub.recv())
+            .await
+            .expect("recv timed out")
+            .unwrap();
+        let body = m.part_bytes(0).unwrap();
+        let tag = usize::from(body[0]);
+        let seq = u32::from_le_bytes(body[1..5].try_into().unwrap());
+        assert_eq!(seq, next[tag], "clone {tag} delivered out of order");
+        next[tag] += 1;
+    }
+    for sender in senders {
+        sender.await.unwrap();
+    }
+    assert_eq!(next, [PER_CLONE; CLONES]);
+}

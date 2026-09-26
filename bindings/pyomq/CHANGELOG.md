@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require published `yring` 0.3.18 instead of a sibling checkout.
+
 ## [0.22.0] - 2026-09-19
 ### Added
 

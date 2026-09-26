@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Update native dependency bounds for `omq-proto` 0.28,
+  `omq-tokio` 0.23/0.24, and published `yring` 0.3.18.
+  Workspace checks now exercise the current core through local patches.
+
 ## [0.2.1] - 2026-09-19
 
 ### Changed

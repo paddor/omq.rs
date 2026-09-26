@@ -165,6 +165,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+ "loom",
 ]
 
 [[package]]
@@ -299,6 +300,19 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+
+[[package]]
+name = "fanring"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1a77573cda392ec06cdcb8e4033ea298b8b120242ed38734f7718119b41e756"
+dependencies = [
+ "arc-swap",
+ "atomic-waker",
+ "concurrent-queue",
+ "loom",
+ "yring",
+]
 
 [[package]]
 name = "fiat-crypto"
@@ -546,9 +560,9 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.11.6"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab11c655199025ef9fff504d7905ea46877da7377c908eca012273e6992453c0"
+checksum = "8aec7f2070089db97a0ddf7b0e476bff6b31fc875ba223e20f49aa1f92628891"
 dependencies = [
  "lz4rip-core",
  "lz4rip-decode",
@@ -557,24 +571,24 @@ dependencies = [
 
 [[package]]
 name = "lz4rip-core"
-version = "0.5.5"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fc4edb61fcaf1cdad24ac2982eff7af4417ef463c33bcf5c42ba549abd8b96"
+checksum = "edb50206b4d66e3ec849d2e7ac9257d79c19733c435909a0a46cbb34f9ec7107"
 
 [[package]]
 name = "lz4rip-decode"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60d65bfd4c032fefcf8c18fb5f8d9958f4925146845db16dbc9d416f1566b9bf"
+checksum = "d89c54c126f2acb3979c7d8fc9482506d6371438f514f2e83ef96ede9b585594"
 dependencies = [
  "lz4rip-core",
 ]
 
 [[package]]
 name = "lz4rip-encode"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a4e226501cf35f6f17d82f4384668c39477ea1ce40ff1d74369fb68ab8b6957"
+checksum = "cfb1db4505b7d5cc32a0550981e1731ff4f0b22d749f37c9b94664177d3bd53f"
 dependencies = [
  "lz4rip-core",
 ]
@@ -632,9 +646,7 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d505248553c40a08b4c32a02e736e7a3b64905531562b769208b2d3acc9c8a73"
+version = "0.28.0"
 dependencies = [
  "bytes",
  "crypto_box",
@@ -653,13 +665,12 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbacdc09af3877d8c173a963773750e87c4820ea11faec2b04776f7933e69206"
+version = "0.23.0"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "fanring",
  "futures",
  "libc",
  "omq-proto",
@@ -1389,9 +1400,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c054fc88ec1358a6452273e36e4bff59a34dc4045573972c02eda89dbae1677"
+checksum = "7ad40d31fd5e9026696958c858f08ff1b11bd441ead80a328e133a9761db498c"
 dependencies = [
  "atomic-waker",
  "futures-core",
@@ -1420,9 +1431,9 @@ dependencies = [
 
 [[package]]
 name = "zrip"
-version = "0.8.8"
+version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab0181a3ab0d61f30727381c20ebe7c0ed44edbaa1e279be39665f4d7b6d2168"
+checksum = "2c88b6ef5b1c4cde86608d46c08b11dca39c82d372fda6a8731c0fbec47febe5"
 dependencies = [
  "zrip-core",
  "zrip-decode",
@@ -1431,32 +1442,24 @@ dependencies = [
 
 [[package]]
 name = "zrip-core"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a91bc58032e884eb76396eaa2d6607db874dcf95e6752fb15401da494ab72ba7"
+checksum = "6dec95be8c75252532ba0ef5e738d9da26a6f51ad52cb45f4ed90c89979727c1"
 
 [[package]]
 name = "zrip-decode"
-version = "0.8.7"
+version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d931c512bc14f368493e91df8570c5da60e2809e1d0c2cab906b6e4babbab84"
+checksum = "f9386a88930b83ca35c0d703b9767987eacb7c8f24c1d1a9a02f8471e2ebf0c5"
 dependencies = [
  "zrip-core",
 ]
 
 [[package]]
 name = "zrip-encode"
-version = "0.8.7"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8eb51ef0ac2bda5ff1381eccf970be2bf7cc431e44f0e7a4b8cdccf685fd6f7"
+checksum = "b657fa83287fe6799596e53540a7b1f179ca34ffd8589d5c576a5b8a1bcc4260"
 dependencies = [
  "zrip-core",
 ]
-
-[[patch.unused]]
-name = "omq-proto"
-version = "0.28.0"
-
-[[patch.unused]]
-name = "omq-tokio"
-version = "0.23.0"

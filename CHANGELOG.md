@@ -15,7 +15,7 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
-- PEER receive lanes use fanring ready-peer selection and batched space credits,
+- PEER receives use fanring ready-peer selection and batched space credits,
   retaining identity routing, reconnect fencing, and aggregate receive budgets.
 - Upgrade compression dependencies to `lz4rip` 0.11.8 and `zrip` 0.8.10.
 - Tokio direct TCP receives reuse bounded buffers through 8 MiB without
@@ -35,7 +35,7 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 - Concurrent parked PEER receives pass a batch wake onward, including when a
   notified receive is canceled, so queued messages cannot strand a waiter.
-- A PEER replacement rejected by receive-lane limits no longer evicts the
+- A PEER replacement rejected by receive limits no longer evicts the
   current connection with the same identity.
 - Tokio `xpub_nodrop` sends waiting for fan-out lane space no longer wait
   forever when the lane worker exits during close.

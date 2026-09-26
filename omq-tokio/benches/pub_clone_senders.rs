@@ -20,6 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use omq_proto::flow::DrainBudget;
 use omq_tokio::{Message, Socket, SocketType};
 
 const PATTERN: &str = "pub_clone_senders";
@@ -71,13 +72,20 @@ fn spawn_receivers(
             let recv_count = recv_count.clone();
             tokio::spawn(async move {
                 while !stop.load(Ordering::Relaxed) {
-                    if let Ok(Ok(_)) =
+                    if let Ok(Ok(msg)) =
                         tokio::time::timeout(Duration::from_millis(20), s.recv()).await
                     {
+                        let mut budget = DrainBudget::WORKER;
+                        let _ = budget.account(msg.byte_len());
                         recv_count.fetch_add(1, Ordering::Relaxed);
-                        while s.try_recv().is_ok() {
+                        while !budget.exhausted() {
+                            let Ok(msg) = s.try_recv() else { break };
+                            let _ = budget.account(msg.byte_len());
                             recv_count.fetch_add(1, Ordering::Relaxed);
                         }
+                        // A continuously ready SUB must let round timers and
+                        // other receivers run before starting another batch.
+                        tokio::task::yield_now().await;
                     }
                 }
                 drop(s);

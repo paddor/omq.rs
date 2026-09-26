@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Late wire connections racing socket close or last-handle drop no longer
+  panic while registering a producer on the closed receive fan-in.
+- Ordinary fan-in receives retain bounded slot-release batches instead of
+  issuing a producer capacity wake after every message. Partial credits
+  flush before receive parks; bulk receives still release slots on return.
 - `xpub_nodrop` sends waiting for lane space wake up when the lane worker
   exits during close.
 - `DataSignal` fences in `mark` and `begin_drain`, so a producer that skips

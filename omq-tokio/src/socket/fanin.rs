@@ -139,10 +139,15 @@ impl Fanin {
         let receiver = &mut guard.as_mut().ok_or(Error::Closed)?.rx;
         self.signal.begin_drain();
         let result = receiver.try_recv_fair();
-        receiver.release_consumed();
         if let Ok(item) = result {
+            // Keep fanring's bounded slot-release batches. Forcing a release
+            // here wakes the producer after every message, even while this
+            // consumer is still draining. Fair rotation is unchanged.
             Ok(item.into_message())
         } else {
+            // Publish partial credits before the caller can park. Bulk calls
+            // still release all consumed slots before returning to the caller.
+            receiver.release_consumed();
             if self.signal.clear_after(true) {
                 self.blocking.wake();
             }
@@ -316,6 +321,175 @@ mod tests {
             Arc::new(DataSignal::new()),
             BlockingRecvWaker::new(),
         )
+    }
+
+    #[test]
+    fn single_receives_coalesce_space_wakes_until_release_boundary() {
+        for capacity in [2, 4, 16, 32] {
+            let queue = queue(capacity);
+            let mut sender = queue.register().unwrap();
+            for seq in 0..capacity {
+                sender
+                    .try_send(RecvItem::new(Message::from_slice(&[seq as u8])))
+                    .unwrap();
+            }
+            assert!(sender.is_full()); // Register the real producer space waker.
+            let space = sender.space();
+            let seen = space.generation();
+            for seq in 0..capacity {
+                assert_eq!(
+                    queue.try_recv().unwrap().part_slice(0).unwrap(),
+                    &[seq as u8]
+                );
+                if seq + 1 < capacity {
+                    assert_eq!(space.generation(), seen, "no per-message space wake");
+                }
+            }
+            assert_ne!(space.generation(), seen, "full batch must wake the sender");
+            assert!(!sender.is_full());
+            for seq in 0..capacity {
+                sender
+                    .try_send(RecvItem::new(Message::from_slice(&[seq as u8])))
+                    .unwrap();
+            }
+            assert!(sender.is_full(), "only consumed slots may be reused");
+        }
+    }
+
+    #[test]
+    fn single_receives_release_partial_credits_before_empty() {
+        let queue = queue(32);
+        let mut sender = queue.register().unwrap();
+        for round in 0..64 {
+            for seq in 0..3 {
+                sender
+                    .try_send(RecvItem::new(Message::from_slice(&[round, seq])))
+                    .unwrap();
+            }
+            for seq in 0..3 {
+                assert_eq!(
+                    queue.try_recv().unwrap().part_slice(0).unwrap(),
+                    &[round, seq]
+                );
+            }
+            assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
+            assert!(queue.signal.is_idle());
+        }
+        for seq in 0..32 {
+            sender
+                .try_send(RecvItem::new(Message::from_slice(&[seq])))
+                .unwrap();
+        }
+        assert!(sender.is_full());
+    }
+
+    #[test]
+    fn bulk_after_single_receives_releases_partial_credits_from_every_lane() {
+        for batching in [false, true] {
+            let queue = queue(8);
+            let mut senders: Vec<_> = (0..2).map(|_| queue.register().unwrap()).collect();
+            for (peer, sender) in senders.iter_mut().enumerate() {
+                for seq in 0..8 {
+                    sender
+                        .try_send(RecvItem::new(Message::from_slice(&[peer as u8, seq])))
+                        .unwrap();
+                }
+                assert!(sender.is_full());
+            }
+            for peer in 0..2 {
+                assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[peer, 0]);
+            }
+            let mut out = Vec::new();
+            queue
+                .recv_into(&mut out, DrainBudget::new(1, 1024), batching)
+                .unwrap();
+            assert_eq!(out[0].part_slice(0).unwrap(), &[0, 1]);
+            for (peer, sender) in senders.iter_mut().enumerate() {
+                let freed = if peer == 0 { 2 } else { 1 };
+                for seq in 8..8 + freed {
+                    sender
+                        .try_send(RecvItem::new(Message::from_slice(&[peer as u8, seq])))
+                        .unwrap();
+                }
+                assert!(sender.is_full());
+            }
+        }
+    }
+
+    #[test]
+    fn single_receives_notice_new_lanes_and_drain_disconnected_senders() {
+        let queue = queue(32);
+        let mut first = queue.register().unwrap();
+        for seq in 0..32 {
+            first
+                .try_send(RecvItem::new(Message::from_slice(&[0, seq])))
+                .unwrap();
+        }
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[0, 0]);
+        let mut second = queue.register().unwrap();
+        second
+            .try_send(RecvItem::new(Message::from_slice(&[1, 0])))
+            .unwrap();
+        drop((first, second));
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[0, 1]);
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[1, 0]);
+        for seq in 2..32 {
+            assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), &[0, seq]);
+        }
+        assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
+        let mut reconnected = queue.register().unwrap();
+        reconnected
+            .try_send(RecvItem::new(Message::from_slice(b"new")))
+            .unwrap();
+        assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn single_receive_batch_wakes_pending_sink_and_close_wakes_partial_batch() {
+        use futures::FutureExt as _;
+
+        for capacity in [1, 2, 16, 32] {
+            let queue = queue(capacity);
+            let mut sink = Sink::owned(queue.register().unwrap());
+            for seq in 0..=capacity {
+                assert!(sink.push(Message::from_slice(&[seq as u8])));
+            }
+            assert!(sink.blocked());
+            let receiver = queue.clone();
+            let drain = async move {
+                // Let ready() register its waiter before releasing capacity.
+                tokio::task::yield_now().await;
+                for seq in 0..capacity {
+                    assert_eq!(
+                        receiver.try_recv().unwrap().part_slice(0).unwrap(),
+                        &[seq as u8]
+                    );
+                }
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::join!(sink.ready(), drain);
+            })
+            .await
+            .expect("released receive batch must wake the pending sink");
+            assert!(sink.retry_pending());
+            assert!(!sink.blocked());
+            for seq in 0..capacity {
+                assert!(sink.push(Message::from_slice(&[seq as u8])));
+            }
+            assert!(sink.blocked());
+            assert!(sink.ready().now_or_never().is_none());
+            // Close must wake the sink even without reaching a release boundary.
+            assert_eq!(
+                queue.try_recv().unwrap().part_slice(0).unwrap(),
+                &[capacity as u8]
+            );
+            queue.close();
+            tokio::time::timeout(std::time::Duration::from_secs(1), sink.ready())
+                .await
+                .expect("closed receiver must wake a pending sink");
+            assert!(!sink.retry_pending());
+            assert!(matches!(queue.try_recv(), Err(Error::Closed)));
+        }
     }
 
     #[test]

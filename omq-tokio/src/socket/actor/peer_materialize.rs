@@ -655,9 +655,7 @@ fn attach_yring_recv_bypass(
         .and_then(|cfg| cfg.take_sink())
         .unwrap_or_else(|| {
             if let Some(fanin) = &socket.spsc.fanin {
-                return crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(
-                    fanin.register().expect("live receive socket"),
-                ));
+                return fanin_recv_sink(fanin, &socket.recv_tx);
             }
             let cap = socket.options.recv_hwm.max(16) as usize;
             let (prod, cons) = yring::spsc(cap);
@@ -690,6 +688,19 @@ fn attach_yring_recv_bypass(
     } else {
         peer_driver.with_recv_sink(sink)
     }
+}
+
+fn fanin_recv_sink(
+    fanin: &crate::socket::fanin::Fanin,
+    recv_tx: &Arc<crate::socket::recv::SharedRecvPipe>,
+) -> crate::engine::RecvSink {
+    if let Some(producer) = fanin.register() {
+        return crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer));
+    }
+    // Close/drop can shut down fan-in before the actor handles a connection
+    // event. Keep receive closed without preventing outbound linger drain.
+    recv_tx.close();
+    crate::engine::RecvSink::Channel(recv_tx.clone())
 }
 
 fn take_inproc_recv_sink(socket: &SocketDriver) -> Option<crate::engine::RecvSink> {
@@ -752,6 +763,36 @@ fn can_use_yring_recv_bypass(t: SocketType, latency_profile: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fanin_attachment_tolerates_receive_shutdown_before_actor_close() {
+        let blocking = crate::socket::recv::BlockingRecvWaker::new();
+        let signal = Arc::new(crate::engine::signal::DataSignal::new());
+        let fanin = crate::socket::fanin::Fanin::new(16, signal, blocking.clone());
+        let (recv_tx, _consumer, _, _) = crate::socket::recv::recv_pipe(16, blocking);
+        let crate::engine::RecvSink::Fanin(mut live) = fanin_recv_sink(&fanin, &recv_tx) else {
+            panic!("live receive side must retain the fan-in bypass");
+        };
+        assert!(live.push(omq_proto::Message::single("before-close")));
+        live.flush();
+        assert_eq!(
+            fanin.try_recv().unwrap().part_slice(0).unwrap(),
+            b"before-close"
+        );
+
+        // Last-handle drop closes fan-in before the actor sees its command
+        // channel close. A queued Accepted/Connected event can run meanwhile.
+        fanin.close();
+        assert!(!live.push(omq_proto::Message::single("after-close")));
+        let crate::engine::RecvSink::Channel(closed) = fanin_recv_sink(&fanin, &recv_tx) else {
+            panic!("late attachment must use a closed receive sink");
+        };
+        assert!(Arc::ptr_eq(&closed, &recv_tx));
+        assert!(matches!(
+            closed.send(omq_proto::Message::single("late-peer")).await,
+            Err(omq_proto::Error::Closed)
+        ));
+    }
 
     #[test]
     fn req_uses_yring_recv_bypass_only_for_latency_profile() {

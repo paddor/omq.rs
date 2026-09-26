@@ -512,6 +512,9 @@ impl FanOutLanes {
         loop {
             let wait = {
                 let mut dist = self.distributor.lock().expect("distributor poisoned");
+                // Capture before trying the ring so a space release or worker
+                // exit during the push cannot become the generation we await.
+                let seen = dist.space.generation();
                 if Self::try_push_pending_compression(&mut dist) {
                     match dist.tx.push(LaneData::Dispatch(dispatch)) {
                         Ok(()) => {
@@ -528,7 +531,6 @@ impl FanOutLanes {
                         Err(returned) => {
                             dist.tx.flush();
                             dist.signal.mark();
-                            let seen = dist.space.generation();
                             let space = dist.space.clone();
                             dispatch = match returned {
                                 LaneData::Dispatch(dispatch) => dispatch,
@@ -540,18 +542,17 @@ impl FanOutLanes {
                 } else {
                     dist.tx.flush();
                     dist.signal.mark();
-                    let seen = dist.space.generation();
                     let space = dist.space.clone();
                     (space, seen)
                 }
             };
-            wait.0.changed_after(wait.1).await;
             // The worker sets this flag before its final space wake. Nothing
-            // drains the ring after that: drop the message, as a closed
-            // socket does.
+            // drains the ring after that. Check before parking in case that
+            // final wake preceded our generation snapshot.
             if self.distributor_exited.load(Ordering::Acquire) {
                 return;
             }
+            wait.0.changed_after(wait.1).await;
         }
     }
 
@@ -1440,6 +1441,47 @@ mod tests {
             "an exited worker leaves nothing to linger on"
         );
         drop(data_rx);
+    }
+
+    #[tokio::test]
+    async fn nodrop_dispatch_returns_if_worker_exited_before_send() {
+        use futures::FutureExt;
+
+        for drop_ring in [false, true] {
+            let (data_tx, data_rx) = yring::spsc::<LaneData>(1);
+            let mut data_rx = Some(data_rx);
+            let data_space = Arc::new(crate::engine::signal::StateSignal::new());
+            let lanes = FanOutLanes {
+                state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
+                active_flags: Arc::new(vec![AtomicBool::new(false)]),
+                distributor: Mutex::new(LaneDistributor {
+                    tx: data_tx,
+                    signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                    space: data_space.clone(),
+                    pending_compression: None,
+                }),
+                distributor_exited: Arc::new(AtomicBool::new(false)),
+                mute_policy: FanOutMutePolicy::Block,
+            };
+            lanes.try_dispatch(test_dispatch("one")).unwrap();
+
+            // Stop can publish its final wake before an in-flight sender
+            // tries to push. No later space notification will arrive.
+            lanes
+                .distributor_exited
+                .store(true, std::sync::atomic::Ordering::Release);
+            data_space.notify_changed();
+            if drop_ring {
+                drop(data_rx.take());
+            }
+            assert!(
+                lanes
+                    .dispatch(test_dispatch("two"))
+                    .now_or_never()
+                    .is_some(),
+                "dispatch missed the final worker wake (drop_ring={drop_ring})"
+            );
+        }
     }
 
     #[tokio::test]

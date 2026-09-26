@@ -161,6 +161,78 @@ async fn push_pull_single_peer() {
     assert_eq!(m3, Message::single("c"));
 }
 
+#[test]
+fn blocking_single_receives_release_credit_across_wraps_and_idle_periods() {
+    for tcp in [false, true] {
+        for io_threads in [1, 2] {
+            for hwm in [1, 32] {
+                blocking_credit_case(tcp, io_threads, hwm);
+            }
+        }
+    }
+}
+
+fn blocking_credit_case(tcp: bool, io_threads: usize, hwm: u32) {
+    use omq_tokio::{Context, ContextConfig, Error, TrySendError};
+
+    const BURSTS: [u32; 5] = [1, 3, 33, 257, 1025];
+    let receiver_ctx = Context::with_config(ContextConfig { io_threads });
+    let sender_ctx = if tcp {
+        Context::with_config(ContextConfig { io_threads })
+    } else {
+        receiver_ctx.clone()
+    };
+    let pull = receiver_ctx.blocking_socket(SocketType::Pull, Options::default().recv_hwm(hwm));
+    let push = sender_ctx.blocking_socket(SocketType::Push, Options::default().send_hwm(hwm));
+    let endpoint = if tcp {
+        "tcp://127.0.0.1:0".parse().unwrap()
+    } else {
+        inproc_ep("single-recv-credits")
+    };
+    push.connect(pull.bind(endpoint).unwrap()).unwrap();
+    pull.wait_connected(1, Duration::from_secs(2)).unwrap();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(move || {
+            let mut seq = 0u32;
+            for count in BURSTS {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                for _ in 0..count {
+                    let mut message = Message::from_slice(&seq.to_be_bytes());
+                    loop {
+                        match push.try_send(message) {
+                            Ok(()) => break,
+                            Err(TrySendError::Full(returned)) => message = returned,
+                            Err(error) => panic!("send failed: {error}"),
+                        }
+                        assert!(std::time::Instant::now() < deadline, "send stayed muted");
+                        std::thread::yield_now();
+                    }
+                    seq += 1;
+                }
+                ack_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        });
+        let mut seq = 0u32;
+        for count in BURSTS {
+            for _ in 0..count {
+                let message = pull.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert_eq!(message.part_slice(0).unwrap(), &seq.to_be_bytes());
+                seq += 1;
+            }
+            // Force a park after a partial batch before allowing more sends.
+            assert!(matches!(
+                pull.recv_timeout(Duration::from_millis(1)),
+                Err(Error::Timeout)
+            ));
+            ack_tx.send(()).unwrap();
+        }
+        sender.join().unwrap();
+    });
+    sender_ctx.term();
+    receiver_ctx.term();
+}
+
 #[tokio::test]
 async fn push_round_robin_delivers_two_rounds_to_each_pull() {
     const PULLS: usize = 5;

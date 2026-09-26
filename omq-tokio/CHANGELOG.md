@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent parked PEER receives hand off coalesced batch wakes, including
+  cancellation, without per-message wakes on the single-consumer path.
 - Receive-lane admission failure no longer evicts the current PEER connection
   with the same identity.
 - Stale PEER reconnect entries count toward message and byte drain limits;

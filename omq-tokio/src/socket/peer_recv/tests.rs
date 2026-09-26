@@ -40,6 +40,171 @@ fn put(sink: &mut PeerRecvSink, value: &'static str) {
     sink.flush();
 }
 
+struct WakeCount(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn canceled_waiter_hands_off_batch_without_consuming() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    for cancel_first in [true, false] {
+        let (mut routes, receiver, _pipe) = ordinary_receive(16);
+        let mut sink = register(&mut routes, "a");
+        let counts: [_; 3] = std::array::from_fn(|_| Arc::new(WakeCount(0.into())));
+        let wakers = counts
+            .each_ref()
+            .map(|counter| Waker::from(counter.clone()));
+        let mut waiting = std::array::from_fn::<_, 3, _>(|_| Some(Box::pin(receiver.recv())));
+        for (future, waker) in waiting.iter_mut().zip(&wakers) {
+            assert!(
+                future
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .poll(&mut Context::from_waker(waker))
+                    .is_pending()
+            );
+        }
+        for value in ["first", "second", "third"] {
+            assert!(sink.push(Message::single(value)));
+        }
+        sink.flush();
+        let mut messages = Vec::new();
+        if cancel_first {
+            drop(waiting[0].take());
+        } else {
+            let Poll::Ready(Ok(message)) = waiting[0]
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&wakers[0]))
+            else {
+                panic!("first receive not ready");
+            };
+            messages.push(message);
+            drop(waiting[1].take());
+        }
+        for index in if cancel_first { 1..3 } else { 2..3 } {
+            assert!(
+                counts[index].0.load(Ordering::Relaxed) > 0,
+                "receiver {index} stranded after cancellation"
+            );
+            let Poll::Ready(Ok(message)) = waiting[index]
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&wakers[index]))
+            else {
+                panic!("receive not ready");
+            };
+            messages.push(message);
+        }
+        messages.push(receiver.try_recv().unwrap());
+        for (message, expected) in messages.iter().zip(["first", "second", "third"]) {
+            assert_eq!(message.part_slice(1), Some(expected.as_bytes()));
+        }
+        assert!(matches!(receiver.try_recv(), Err(Error::WouldBlock)));
+    }
+}
+
+#[test]
+fn repeated_receives_coalesce_handoffs_to_a_parked_waiter() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut routes, receiver, _pipe) = ordinary_receive(16);
+    let mut sink = register(&mut routes, "a");
+    let counter = Arc::new(WakeCount(0.into()));
+    let waker = Waker::from(counter.clone());
+    let mut waiting = Box::pin(receiver.recv());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    for _ in 0..16 {
+        assert!(sink.push(Message::single("value")));
+    }
+    sink.flush();
+    receiver.try_recv().unwrap();
+    let counts = counter.0.load(Ordering::Relaxed);
+    for _ in 0..14 {
+        receiver.try_recv().unwrap();
+    }
+    assert_eq!(counter.0.load(Ordering::Relaxed), counts);
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_ready()
+    );
+}
+
+#[test]
+fn one_batch_wakes_two_parked_socket_receivers() {
+    use std::future::Future;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Wake, Waker};
+
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let (mut routes, receiver, _pipe) = ordinary_receive(16);
+    let mut sink = register(&mut routes, "a");
+    let counts = [
+        Arc::new(Wakes(AtomicUsize::new(0))),
+        Arc::new(Wakes(AtomicUsize::new(0))),
+    ];
+    let wakers = counts
+        .each_ref()
+        .map(|counter| Waker::from(counter.clone()));
+    let mut first = std::pin::pin!(receiver.recv());
+    let mut second = std::pin::pin!(receiver.recv());
+    assert!(
+        first
+            .as_mut()
+            .poll(&mut Context::from_waker(&wakers[0]))
+            .is_pending()
+    );
+    assert!(
+        second
+            .as_mut()
+            .poll(&mut Context::from_waker(&wakers[1]))
+            .is_pending()
+    );
+    assert!(sink.push(Message::single("first")));
+    assert!(sink.push(Message::single("second")));
+    sink.flush();
+    assert!(counts[0].0.load(Ordering::Relaxed) > 0);
+    assert!(
+        first
+            .as_mut()
+            .poll(&mut Context::from_waker(&wakers[0]))
+            .is_ready()
+    );
+    assert!(
+        counts[1].0.load(Ordering::Relaxed) > 0,
+        "second parked receiver needs a wake"
+    );
+    assert!(
+        second
+            .as_mut()
+            .poll(&mut Context::from_waker(&wakers[1]))
+            .is_ready()
+    );
+}
+
 #[test]
 #[ignore = "local sparse-peer receive profiling"]
 fn profile_sparse_peer_receive() {

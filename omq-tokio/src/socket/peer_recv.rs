@@ -46,6 +46,24 @@ pub(crate) struct PeerReceiver {
     shared: Arc<RecvShared>,
     receiver: Option<mpsc::Receiver<RecvItem, Coordinated>>,
     yield_pending: bool,
+    async_waiters: usize,
+    handoff_pending: bool,
+}
+
+/// Registration spans only the async wait, never a drain. Cancellation must
+/// pass a pending wake to another receiver if messages remain buffered.
+#[derive(Debug)]
+pub(super) struct ReceiveWaiter<'a>(&'a Mutex<PeerReceiver>);
+
+impl Drop for ReceiveWaiter<'_> {
+    fn drop(&mut self) {
+        let mut receiver = self.0.lock().expect("PEER receive poisoned");
+        receiver.async_waiters -= 1;
+        receiver.handoff_pending = false;
+        if !receiver.is_empty() {
+            receiver.wake_waiter();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +168,8 @@ impl PeerRecvRoutes {
             shared: shared.clone(),
             receiver: Some(receiver),
             yield_pending: false,
+            async_waiters: 0,
+            handoff_pending: false,
         };
         (
             Self {
@@ -231,6 +251,21 @@ impl Drop for PeerRecvRoutes {
 }
 
 impl PeerReceiver {
+    pub(super) fn wait(receiver: &Mutex<Self>) -> ReceiveWaiter<'_> {
+        receiver
+            .lock()
+            .expect("PEER receive poisoned")
+            .async_waiters += 1;
+        ReceiveWaiter(receiver)
+    }
+
+    fn wake_waiter(&mut self) {
+        if self.async_waiters != 0 && !self.handoff_pending {
+            self.handoff_pending = true;
+            self.shared.data.reschedule();
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.shared.budget.is_empty()
     }
@@ -274,10 +309,12 @@ impl PeerReceiver {
             if let Ok(item) = receiver.try_recv_fair() {
                 let _ = budget.account(item.budget_bytes());
                 if item.state.current.load(Ordering::Acquire) {
-                    return Ok(Message::with_prefix(
-                        item.state.identity.clone(),
-                        item.body.into_message(),
-                    ));
+                    let message =
+                        Message::with_prefix(item.state.identity.clone(), item.body.into_message());
+                    // Another caller may already be parked on this batch's
+                    // coalesced signal. No handoff work for a sole receiver.
+                    self.wake_waiter();
+                    return Ok(message);
                 }
                 // Dropping a stale generation returns its aggregate permit.
             } else {

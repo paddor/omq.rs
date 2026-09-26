@@ -33,6 +33,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Concurrent parked PEER receives pass a batch wake onward, including when a
+  notified receive is canceled, so queued messages cannot strand a waiter.
 - A PEER replacement rejected by receive-lane limits no longer evicts the
   current connection with the same identity.
 - Tokio `xpub_nodrop` sends waiting for fan-out lane space no longer wait

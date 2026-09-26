@@ -304,6 +304,8 @@ PEER uses one socket-owned fanring receiver, with one bounded producer per
 connection. Fanring selects ready connections; idle peers need no manual scan.
 Single-message receives rotate fairly across ready producers. Socket clones
 share the receiver; concurrent receive calls serialize the drain.
+Parked async callers hand off a batch wake only when another caller is waiting;
+canceling a receive passes that wake onward if messages remain queued.
 
 Use ordinary `recv()` or `recv_many_into()` on application threads. Each message
 retains its identity prefix for replies and application dispatch. OMQ does not

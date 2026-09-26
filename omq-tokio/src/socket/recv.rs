@@ -1218,6 +1218,10 @@ impl SpscAwareRecv {
                     continue;
                 }
 
+                let _peer_waiter = self
+                    .peer_recv
+                    .as_deref()
+                    .map(super::peer_recv::PeerReceiver::wait);
                 tokio::select! {
                     biased;
                     () = &mut recv_ready => continue,

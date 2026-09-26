@@ -649,6 +649,69 @@ async fn socket_clones_and_concurrently_shared_handle_preserve_sender_fifo() {
 }
 
 #[tokio::test]
+async fn socket_receiver_clones_deliver_once_and_all_wake_on_close() {
+    let context = Context::new();
+    let server = context.socket(SocketType::Peer, options("server"));
+    let endpoint = server
+        .bind(Endpoint::Inproc {
+            name: "peer-recv-clones".into(),
+        })
+        .await
+        .unwrap();
+    let client = context.socket(SocketType::Peer, options("client"));
+    client.connect(endpoint).await.unwrap();
+    connected(&client).await;
+    connected(&server).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let receivers: Vec<_> = (0..4)
+        .map(|_| {
+            let socket = server.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match socket.recv().await {
+                        Ok(message) => tx.send(message).await.unwrap(),
+                        Err(Error::Closed) => break,
+                        Err(error) => panic!("unexpected receive failure: {error:?}"),
+                    }
+                }
+            })
+        })
+        .collect();
+    drop(tx);
+    tokio::time::timeout(DEADLINE, async {
+        for sequence in 0u8..=255 {
+            client
+                .send(Message::multipart([
+                    Bytes::from_static(b"server"),
+                    Bytes::copy_from_slice(&[sequence]),
+                ]))
+                .await
+                .unwrap();
+        }
+        let mut seen = [false; 256];
+        for _ in 0..256 {
+            let message = rx.recv().await.unwrap();
+            assert_eq!(message.part_slice(0), Some(b"client".as_slice()));
+            let index = usize::from(message.part_slice(1).unwrap()[0]);
+            assert!(
+                !std::mem::replace(&mut seen[index], true),
+                "duplicate {index}"
+            );
+        }
+        assert!(seen.into_iter().all(|received| received));
+        server.close().await.unwrap();
+        for receiver in receivers {
+            receiver.await.unwrap();
+        }
+        assert!(rx.recv().await.is_none());
+    })
+    .await
+    .unwrap();
+    client.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn full_peer_queue_saturation_transport_and_io_thread_matrix() {
     for io_threads in [1, 2, 4] {
         full_queue_with_threads(

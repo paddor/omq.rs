@@ -325,7 +325,8 @@ mod tests {
 
     #[test]
     fn single_receives_coalesce_space_wakes_until_release_boundary() {
-        for capacity in [2, 4, 16, 32] {
+        for capacity in [1_usize, 2, 4, 16, 32, 256] {
+            let release_batch = capacity.div_ceil(2).max(64).min(capacity);
             let queue = queue(capacity);
             let mut sender = queue.register().unwrap();
             for seq in 0..capacity {
@@ -341,11 +342,17 @@ mod tests {
                     queue.try_recv().unwrap().part_slice(0).unwrap(),
                     &[seq as u8]
                 );
-                if seq + 1 < capacity {
+                if seq + 1 < release_batch {
                     assert_eq!(space.generation(), seen, "no per-message space wake");
+                } else if seq + 1 == release_batch {
+                    assert_ne!(space.generation(), seen, "LWM must wake the sender");
                 }
             }
-            assert_ne!(space.generation(), seen, "full batch must wake the sender");
+            assert_ne!(
+                space.generation(),
+                seen,
+                "consumed batch must wake the sender"
+            );
             assert!(!sender.is_full());
             for seq in 0..capacity {
                 sender

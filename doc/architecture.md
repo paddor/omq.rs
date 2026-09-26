@@ -286,15 +286,17 @@ adds atomic and wakeup work to the receive hot path.
 
 Ordinary fan-in receives retain native credit batching:
 
-- Release after `min(lane capacity, 64)` consumed slots.
+- Release after half a ring of consumed slots, with a 64-slot minimum capped
+  at capacity. Larger full rings resume at the half-full low watermark;
+  small rings keep their existing batch size. Fairness remains independent.
 - Release partial credits when a lane is observed empty and before receive
   can park. Bulk calls release consumed slots before returning.
 - Return messages immediately. Do not wait for a batch to fill, change
   per-message fairness, or weaken signal fences.
 
-The tradeoff is delayed slot reuse: a producer can temporarily see up to 63
-consumed slots as unavailable. This is local flow control, not TCP or ZMTP
-acknowledgment batching.
+The tradeoff is delayed slot reuse: a producer can temporarily see up to one
+credit batch minus one consumed slots as unavailable. This is local flow
+control, not TCP or ZMTP acknowledgment batching.
 
 ### PEER receive ownership
 

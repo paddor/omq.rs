@@ -1,487 +1,649 @@
 # Architecture
 
-`omq.rs` is split into a sans-I/O protocol crate, an async backend, and
-compatibility layers. The protocol crate owns ZMTP correctness. The backend
-owns tasks, transports, queues, reconnect, and socket semantics.
+OMQ sockets send and receive complete messages. The backend handles routing,
+connections, framing, and backpressure; applications choose a transport by URI.
+
+Three distinctions explain most of the implementation:
+
+- **Protocol vs. I/O:** `omq-proto` processes bytes; `omq-tokio` owns sockets
+  and tasks.
+- **Control vs. data:** the socket actor manages peers and lifecycle. Most
+  messages travel through queues without an actor hop.
+- **Ownership vs. notification:** queues hold messages. Signals tell tasks
+  when to check those queues; a wake is not a message.
+
+Start with [runtime ownership](#runtime-ownership) and
+[a message through the system](#a-message-through-the-system). For a specific
+path, see [routing](#routing), [receives](#receives),
+[buffers](#messages-and-buffers), or [scheduling](#scheduling-and-wakeups).
+The [source map](#source-map) points to implementations.
+
+## Crates and responsibilities
 
 ```text
-user API: omq-tokio, omq-libzmq, pyomq
-        |
-        v
-omq-tokio backend: SocketDriver, ConnectionDriver, transports, routing
-        |
-        v
-omq-proto core: Connection, frames, mechanisms, messages, options
+ Rust application       C application        Python application
+        |                     |                     |
+        |                omq-libzmq                pyomq
+        |                     |                     |
+        +---------------------+---------------------+
+                              |
+                          omq-tokio
+                 sockets, routing, tasks, transports
+                       /             \
+                  omq-proto       yring / fanring
+                codec + values    message queues
 ```
 
-## Context and runtime management
+| Component | Owns |
+| --- | --- |
+| `omq-proto` | ZMTP codec, messages, options, mechanisms, transforms; no async or I/O |
+| `omq-tokio` | Default backend, async/blocking APIs, drivers, routing, reconnects |
+| `omq-libzmq` | libzmq-compatible C ABI and C socket semantics |
+| `bindings/` | Language ownership, conversion, and API adapters |
+| `omq-bench` | Cross-implementation peers, benchmark data, SVG generation |
 
-`Context` is a cheap handle to a shared `ContextCore`. The core owns
-one or more independent `current_thread` tokio runtimes,
-each on its own OS thread. Each runtime has its own IO reactor (epoll /
-kqueue), timer wheel, and task scheduler. There is no cross-thread work
-stealing and no shared scheduler lock. Connections assigned to one
-thread run with zero contention from connections on other threads.
-`ContextCore` also owns the `inproc://` namespace for sockets created
-through that context.
+The queue crates live in the separate
+[fanring.rs workspace](https://github.com/paddor/fanring.rs). Their releases,
+Loom tests, and Miri checks belong there. Language bindings build outside the
+main Cargo workspace.
 
-- `Context::new()`: one IO thread. Default.
-- `Context::with_config(cfg)`: N IO threads. Each IO thread is a
-  separate `current_thread` runtime on a dedicated OS thread.
-  Connections are distributed across threads by least-load assignment.
-  Fan-out sockets (`PUB`, `XPUB`, `RADIO`) create one lane worker
-  per IO thread for parallel subscription matching and encoding.
-- `Context::current()`: wraps the caller's active tokio runtime
-  (works with both `current_thread` and `multi_thread`). No background
-  threads, no IO pool. All connections share the caller's runtime.
-  Fan-out lane count is always 1. This mode is useful for embedding
-  omq in an existing async application, and for single-connection benchmarks
-  where a `multi_thread` runtime can push a single TCP pipe to its
-  limit. It does not scale fan-out across threads.
+The sans-I/O `Connection` exposes four main operations:
+`handle_input` accepts bytes, `poll_event` emits decoded events,
+`send_message` accepts outgoing messages, and `poll_transmit` exposes wire data.
+The backend decides when and how to read or write it.
 
-`Context::socket()` creates async sockets whose driver tasks run on the
-context's runtime. With an owned context, callers await socket futures
-from their own async runtime while OMQ IO stays on the context's runtime
-threads. `Context::block_on()` is a plain-`fn main()` helper that runs a
-future on the owned runtime and blocks the caller (not available on
-`Context::current()`).
+## Runtime ownership
 
-`Context::share_key()` returns a process-local opaque `u128` key.
-`Context::from_share_key()` turns that key back into another handle to
-the same `ContextCore`, if the owner still exists and has not been
-terminated. The registry stores weak references only, so a key cannot
-keep a context alive. C and foreign bindings pass the key as two `u64`
-words; imported binding contexts must not terminate the owner unless
-their API explicitly says they own it.
+`Context` is a cheap handle to a shared `ContextCore`. The core owns runtime
+resources and the context's `inproc://` namespace.
 
-## Blocking API (background IO)
+| Construction | Runtime placement | Fan-out lanes |
+| --- | --- | --- |
+| `Context::new()` | One background `current_thread` runtime for control and I/O | 1 |
+| `Context::with_config`, N > 1 | N data runtimes plus one internal control runtime | N |
+| `Context::current()` | Borrows the caller's active Tokio runtime; creates no threads | 1 |
 
-`Context::blocking_socket()` creates a sync socket for callers with no
-async runtime. The application thread never touches tokio. The Context's
-IO thread handles all network I/O, connection management, encoding, and
-decoding. The application thread communicates with the IO thread through
-lock-free queues.
-
-**Send path.** `blocking::Socket::send()` tries `try_send()` first,
-which pushes the message into the send pipe (yring) on the caller's
-thread with no cross-thread hop. Only when the pipe is full does it
-fall back to `Context::block_on()`.
-
-**Recv path.** `blocking::Socket::recv()` calls `blocking_recv()`,
-which drains the recv pipe directly on the caller's thread via
-`try_drain()`. If no data is available, the thread parks via
-`std::thread::park()`. The IO thread's connection driver unparks
-the caller (via `BlockingRecvWaker`) when new data arrives.
-
-**Performance tradeoffs.** The blocking API pipelines I/O and
-application work across two threads: the IO thread reads from TCP,
-decodes frames, and pushes into the recv pipe while the application
-thread independently drains it. The async 1T path serializes these
-on one thread (connection driver and user recv take turns). This
-pipelining gives the blocking API roughly 2x throughput at small
-message sizes (16-128 B). At 4+ KiB, wire bandwidth saturates and
-the extra thread stops helping.
-
-Latency is worse: each message crosses a thread boundary (yring push
-plus `unpark()`), adding roughly 30 us per hop. In throughput mode
-this cost is amortized across batches; in request/reply it is paid
-on every round trip (roughly 80 us vs 47 us p50 at 16 B).
-
-| metric | async 1T | bg 1T | why |
-|--------|----------|-------|-----|
-| small-msg throughput | 7M msg/s | 14M msg/s | parallel I/O + app |
-| small-msg CPU (push) | 100% | 200% | 2 threads both saturated |
-| large-msg throughput | 5.5 GB/s | 5.2 GB/s | wire-limited |
-| REQ/REP latency | 47 us | 80 us | cross-thread signaling |
-
-Owned contexts configured with more than one IO thread run one internal control
-runtime plus N data-plane runtimes, where N is `ContextConfig::io_threads`.
-The control runtime runs socket actors and blocking binding calls. It is not
-included in the configured IO thread count. Peer drivers and fan-out lanes run
-only on data-plane runtimes. A one-thread context shares control and data work
-on its single runtime.
-
-In multi-IO contexts, accepted or connected TCP/IPC streams migrate from the
-control runtime's reactor to the assigned data-plane runtime's reactor via
-`into_std()` / `from_std()` re-registration. This is necessary because each
-`current_thread` runtime owns its own epoll fd; a socket registered on one
-reactor cannot be polled from another.
-
-The `OMQ_IO_THREADS` environment variable sets the default IO thread
-count for `ContextConfig::from_env()`.
-
-## Crates
-
-`omq-proto` is pure protocol code. It has no file descriptors and no async
-runtime. `Connection::handle_input` consumes bytes, `poll_event` emits decoded
-events, `send_message` queues frames, and `poll_transmit` exposes wire bytes.
-
-`omq-tokio` is the default runtime backend. It owns TCP, IPC, inproc, UDP,
-WS/WSS, reconnect supervisors, monitor events, socket actors, connection
-drivers, and hot-path send/recv shortcuts.
-
-`omq-libzmq` exposes a libzmq-compatible C ABI. `omq-bench` drives
-cross-implementation benchmark peers and SVG chart generation.
-`bindings/pyomq` exposes sync and asyncio Python APIs through PyO3.
-`yring` provides hot-path queues used by inproc and routing.
-
-## Socket Model
-
-Every socket has one logical inbound queue and one logical outbound routing
-surface. Connected peers attach driver tasks to those surfaces.
+Owned multi-IO contexts look like this:
 
 ```text
-Socket::send -> SendSubmitter / SocketDriver -> per-peer send pipe
-per-peer driver -> recv_tx / SocketDriver -> Socket::recv
+ ContextCore
+ |
+ +-- Control thread: current_thread runtime
+ |     socket actors, endpoint management, blocking control calls
+ |
+ +-- IO thread 0: current_thread runtime + reactor
+ |     assigned connection drivers, fan-out lane 0
+ |
+ +-- IO thread 1: current_thread runtime + reactor
+ |     assigned connection drivers, fan-out lane 1
+ |
+ +-- ... IO thread N-1
+ |
+ +-- inproc namespace shared by this context's sockets
 ```
 
-`SocketDriver` owns state that must be serialized: peer table, bind/connect
-lifecycles, reconnect timers, monitor events, ROUTER identities, XPUB
-subscriptions, DISH groups, and REQ/REP type state. It is not on every hot
-message path.
+The control thread is not included in `io_threads`. With one IO thread,
+control and data share that thread. Each owned runtime has its own reactor,
+timers, and scheduler; there is no work stealing between them.
 
-Stateless sends bypass the actor through `SendSubmitter`. REQ/REP still check
-shared type state before submit. Plain recv paths bypass the actor when no
-identity, group, or subscription post-processing is needed.
+Connections use least-load assignment. TCP/IPC streams accepted or connected
+on the control runtime are re-registered on the chosen data reactor through
+`into_std()` / `from_std()`. Sharing a stream handle does not migrate its
+reactor registration.
 
-`PULL`, `GATHER`, `SUB`, and `XSUB` receive through a socket-owned fanring MPSC
-channel: each connection driver owns a sender lane, and only the application
-drains. Receives rotate lanes after every message by default. With
-`Options::recv_batching`, bulk receives move whole per-connection windows at
-once under the same message and byte budgets; the byte budget runs as an
-admission predicate on the queued values, so no message is staged on the
-application side between calls.
+### Application APIs
 
-Native PEER receives use independently bounded per-connection yrings.
-Ordinary `Socket::recv()` fair-drains one shared application receiver; concurrent
-calls serialize only that drain. `Socket::peer_recv_lanes(PeerRecvConfig)` transfers
-receives to exclusive application receivers before bind/connect. The actor assigns
-each handshake identity to a fixed receiver, preserved across reconnects. Move
-each receiver to its application thread and use ordinary socket clones for sends
-and control. Receive assignment creates no threads and does not change send
-semantics. TCP, IPC, and inproc share these semantics.
+- **Async:** `Context::socket()` creates a socket whose drivers run on the
+  context. Application futures can be awaited on the caller's own runtime.
+- **Blocking:** `Context::blocking_socket()` uses the same background I/O.
+  Ready sends try admission directly; ready receives drain on the application
+  thread. Empty receives park through `BlockingRecvWaker`. A full send can
+  fall back to `Context::block_on()`.
+- **Embedded:** `Context::current()` supports either Tokio runtime flavor.
+  It has no owned IO pool, and `Context::block_on()` is unavailable.
+- **Configuration:** `ContextConfig::from_env()` reads `OMQ_IO_THREADS`.
+  Configuring zero IO threads selects the borrowed-runtime mode.
 
-A receive worker bounds queued messages, payload bytes plus per-frame slot
-storage, and allocated peer rings, including retired generations until both halves release ownership.
-Defaults: 128 peer rings, 8192 messages, and 64 MiB per worker. Each connection's
-ring capacity is the receive HWM rounded to a power of two, with a minimum of 16.
-The worker budget deliberately couples peers assigned to that worker; distinct
-workers have independent budgets. Decoder buffers, transport buffers, and one
-pending decoded message per connection are additional. PEER defaults its maximum
-message size to 64 MiB when no explicit limit is configured. Ring descriptors,
-frame tables, and backing storage retained by payload slices add overhead beyond
-charged bytes. Caller-owned payload storage is outside socket budgets.
+Background I/O can overlap decoding with application work, at the cost of
+cross-thread signaling. A single-thread embedded application shares execution
+time with its drivers. Neither layout is universally faster; measure the
+actual payload, socket pattern, and placement.
 
-A full receive queue pauses inbound data only: outgoing replies, close commands,
-and cancellation continue. Heartbeat receive timeout accounting pauses while OMQ
-deliberately stops reading. Dropping a worker receiver closes its peers, including
-idle peers. Identity handover invalidates unread old-generation messages before
-replacement traffic becomes observable. Ordinary disconnects leave already queued
-messages readable. Socket close ends receive admission independently of send
-linger. Heartbeat traffic continues when outbound space allows; sustained transport
-backpressure can still trigger the remote endpoint's own timeout policy.
+### Sharing contexts across bindings
 
-### Caller-driven exclusive sockets
+`share_key()` exports a process-local opaque `u128`; `from_share_key()` imports
+another handle to the same core. C bindings carry it as two `u64` words.
 
-`omq_tokio::exclusive::Socket` is an opt-in alternative for latency-sensitive,
-single-peer workloads. It owns both the Tokio TCP stream and the sans-I/O
-`omq_proto::Connection`; the caller drives TCP, ZMTP, reconnects, and heartbeat
-timers through methods requiring `&mut self`. It supports TCP `PAIR`,
-`DEALER`, `ROUTER`, `REQ`, `REP`, `CLIENT`, and `SERVER`.
+The registry holds weak references. A key neither keeps a context alive nor
+revives a terminated context. Imported binding contexts must not terminate
+the owner unless their API explicitly grants ownership.
+
+## A message through the system
+
+Each regular socket has one logical receive interface and one logical send
+routing interface. These are not necessarily single physical queues.
+
+For ordinary throughput-mode TCP PUSH/PULL:
 
 ```text
-regular Socket:   caller -> routing/queue -> ConnectionDriver task -> TCP
-exclusive Socket: caller -> omq_proto::Connection                  -> TCP
+ Sending process                       Receiving process
+
+ application: send(Message)             application: recv() -> Message
+             |                                      ^
+       SendSubmitter                          fair application drain
+             |                                      ^
+      per-peer send pipe                       fanring sender lane
+             |                                      ^
+     ConnectionDriver                         ConnectionDriver
+      frame / encode                           read / decode
+             |                                      ^
+             +---------------- TCP -----------------+
+
+ Each SocketDriver manages its own peers and lifecycle alongside this path.
 ```
 
-The exclusive path removes the connection-driver task and userspace data relay,
-but deliberately gives up the regular socket's cloneable handles, multi-peer
-routing, background progress, and userspace outbound queue. A failed send is
-not replayed because it is ambiguous whether the peer received a partial or
-complete command. When no `send` or `recv` future is active, the application
-must call `maintain()` to drive idle heartbeat and reconnect work.
+`SocketDriver` serializes the peer table, bind/connect lifecycle, monitor
+events, identities, subscriptions, groups, and socket-type state. It does not
+process every payload. `ConnectionDriver` bridges one peer's queues and wire.
 
-The initial implementation supports connected TCP DEALER, REQ, and REP sockets
-using the NULL mechanism. Unsupported socket types and transports return
-explicit configuration errors; bind/accept and additional socket semantics can
-be added incrementally.
+Ordinary throughput callers enqueue raw messages. Drivers or fan-out workers
+encode and compress them. Existing plain-TCP latency fast paths are a specific
+exception, described under [writes](#framing-and-writes).
 
-## Messages
-
-`Payload` and `Message` are small-value enums optimized for common single-part
-traffic.
-
-`Payload` is 64 B and stores up to 62 B inline. `Message` is 64 B and stores up
-to 55 B inline, avoiding heap allocation and refcount traffic for small
-messages. Larger payloads use `Bytes` or an existing `Arc<PayloadOwner>`.
-Shared owners avoid allocating a new owner block when constructing or cloning
-a payload. Borrowing remains allocation-free; explicitly converting a shared
-owner to `Bytes` allocates an adapter, without copying its contents. Empty
-payloads retain their explicitly supplied owners too.
-
-Multipart messages own a frame table. An optional `MessagePool` preallocates
-and reuses these tables, including through routing and prefix changes. Its
-cache is bounded; exhaustion allocates normally and oversized tables are not
-retained. It does not bound all in-flight messages or their payload bytes.
-Applications needing bounded record storage must separately manage owner
-lifetimes and admission. Table return drops payload owners before taking the
-cache lock, so application release callbacks do not run under that lock.
-`Options::recv_message_pool` opts native byte-stream sockets into the same
-table reuse across their connections. It is disabled by default; inproc already
-transfers owned messages directly. A multipart table caches its total payload
-length and invalidates that sum whenever the table is mutably accessed.
-
-### Receive buffers
-
-Plain TCP/IPC frames at or above the direct-read threshold bypass the rolling
-decoder buffer. Payloads through 8 MiB read into a per-connection `BytesMut`
-pool without zero-filling spare capacity. `Bytes::from_owner` returns the
-allocation only after the last payload clone or slice drops. The pool retains
-at most 64 MiB and payload owners hold only a weak pool reference, so closing a
-connection releases idle buffers even while the application holds messages.
-Payloads above 8 MiB use a fresh `BytesMut` and are never pooled.
-
-## Encoding
-
-`FrameBuffer` is the outbound framing buffer: an arena (16 KiB for TCP/WS,
-64 KiB for IPC) plus an entry list. Frame headers always go into the arena.
-Small messages below `ARENA_THRESHOLD` (4 KiB) encode header and payload
-contiguously into the arena. Large messages
-write the header into the arena and keep payload `Bytes` as external entries
-for gather write. The arena tracks its peak capacity so that after
-`split().freeze()` reclaims the buffer, the next reserve pre-allocates at full
-size instead of cascading through doubling copies.
-
-`PeerTransmitSlot` wraps `FrameBuffer` in a short-held `std::sync::Mutex`, capped
-at 512 KiB (close to the kernel TCP send buffer). Socket handles encode into
-the slot. `ConnectionDriver` owns the writer and stages slot data without I/O;
-its main `select!` performs bounded write progress. Producer-to-consumer
-signaling uses `DataSignal`: an atomic
-flag plus `Notify` that coalesces wakes so only the `false`-to-`true`
-transition fires `notify_one`. The consumer clears the flag before draining,
-then calls `rearm_if_nonempty` to self-wake if data remains. For
-budget-interrupted drains, `reschedule` fires unconditionally.
-
-Latency-profile TCP peers also carry a stateless `DirectTcpWriter` with a
-duplicated nonblocking descriptor. After `PeerOutbound` encodes an arena-only
-message into the peer slot, it may try one direct `write()` from
-`FrameBuffer::arena_bytes()` on the caller side. The writer reports the actual
-byte count. `PeerTransmitSlot` advances the arena by that count and leaves any
-remainder queued under normal `DataSignal` readiness, so partial writes are
-finished by the connection driver and never live in a side buffer.
-
-The async driver has a separate arena-only path. It copies slot arena bytes
-into a reusable driver-owned buffer because the slot mutex guards the
-`arena_bytes()` borrow and must not be held across await. Partial writes retain
-their offset in driver state. Gather entries remain owned `Bytes` and use
-vectored writes. This persistent state makes the selected write future safe to
-cancel when control work arrives.
-
-CURVE keeps per-connection nonce state, so encrypted traffic uses
-per-connection ordered transforms. CURVE encrypts and decrypts in place
-(`SalsaBox::encrypt_in_place_detached` / `decrypt_in_place_detached`) with one
-allocation per message.
-
-Compression transports (`lz4+tcp://`, `zstd+tcp://`) transform whole messages
-before ZMTP framing.
-
-- Peer-routed sends (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `PAIR`, `ROUTER`,
-  `REP`, `SERVER`, `PEER`, `STREAM`) compress in the selected peer driver.
-  Large messages (>= `Options::compression_offload_threshold`, default 8 KiB)
-  borrow a warm encoder from the socket's `CompressionPool`, run compression
-  on Tokio's blocking pool, and drain results in send order.
-- Lane-routed broadcast sends (`PUB`, `XPUB`, `RADIO`) use lane-local
-  encoders. Each lane compresses once for its matched peers, with ordered dict
-  updates, and does not use the offload pool.
+REQ/REP still enforce send/receive alternation. REQ has a shared hot-path flag;
+latency-profile REP can strip and save its request envelope in the connection
+driver. Receive paths needing actor-owned routing state keep that processing.
 
 ## Routing
 
-Round-robin sockets (`PUSH`, `DEALER`, `REQ`, `CLIENT`, `SCATTER`) use per-peer
-`yring` send pipes for both byte-stream and inproc peers. The submitter scans
-active pipes from a moving cursor. If every active pipe is full, async send
-waits on a rotating peer and `try_send` reports HWM backpressure.
+| Policy | Socket types | Destination |
+| --- | --- | --- |
+| Round-robin | PUSH, DEALER, REQ, CLIENT, SCATTER | One eligible peer |
+| Fan-out | PUB, XPUB, RADIO | Matching subscribers or groups |
+| Identity/reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
+| One peer | PAIR, CHANNEL | The exclusive peer |
 
-Connect-side round-robin endpoints allocate a pre-ready pipe during
-`connect()`. The producer is immediately eligible for routing, so
-connect-before-bind sends can queue before ZMTP READY. When the handshake
-completes, the peer driver drains the same pipe; messages queued before READY
-are not overtaken by later sends.
+STREAM uses a separate raw-TCP path: application messages carry peer identity
+frames, but the wire has no ZMTP framing or handshake.
 
-Bind-side round-robin sockets with no ready pipe are mute, matching libzmq:
-blocking `send()` waits and `try_send()` returns `Full`. `omq-libzmq` maps that
-native `Full` to `EAGAIN` for `DONTWAIT`/zero-timeout C sends. Native
-`omq-tokio` has no `ZMQ_IMMEDIATE` option; `omq-libzmq` implements
-`ZMQ_IMMEDIATE=1` by gating connected no-ready sends before they enter the
-pre-ready pipe.
+### Round-robin and startup
 
-`Options::send_hwm` is a complete-message count, not a byte cap. It applies per
-outbound pipe/ring: connect-side pre-ready pipes, materialized peer pipes, and
-fan-out lane rings each have their own cap. Effective native capacity can
-exceed `send_hwm` when multiple pipes or transmit slots exist.
+Byte-stream and inproc peers use per-peer `yring` send pipes. The submitter
+scans from a moving cursor; if all active pipes are full, async send waits
+for space and `try_send` reports `Full`.
 
-Fan-out sockets (`PUB`, `XPUB`, `RADIO`) use lane workers for parallel
-subscription matching and encoding. With N owned IO threads, N lane workers run,
-one per IO thread. The caller pushes each message once to lane 0 (the
-distributor). Lane 0 distributes the batch to active secondary lanes first,
-then processes its own peers. This keeps the caller's send path to a single
-`yring` push regardless of lane count. Each lane has split channels: a
-`yring` control channel for subscribe, cancel, add-peer, remove-peer, and
-shutdown commands, and a `yring` data channel for encoded dispatches. The
-worker drains all control commands unconditionally every iteration, then drains
-data dispatches up to `DrainBudget::WORKER` (256 messages / 2 MiB). This separation
-guarantees control commands are reachable within bounded time regardless of
-data throughput. Fan-out sockets drop on mute; `OnMute::Block` does not make
-`PUB` or `XPUB` wait. `xpub_nodrop` stays on the direct backpressure path.
+Connection ordering does not require application coordination:
 
-With `Context::current()` (borrowed runtime), fan-out always uses a single
-lane regardless of the runtime's thread count.
+1. A connect-side endpoint allocates a bounded pre-ready pipe at `connect()`.
+2. Sends can enter that pipe before the remote endpoint binds or reaches READY.
+3. After handshake, the driver drains the same pipe. Later sends cannot
+   overtake the queued messages.
 
-Identity-routed sockets (`ROUTER`, `REP`, `SERVER`, `PEER`) route by peer
-identity. Exclusive sockets (`PAIR`, `CHANNEL`) target one peer. Fair-queue
-recv preserves per-peer ordering while rotating across peers.
+A bound socket with no ready pipe is mute: blocking send waits, and
+`try_send` returns `Full`. The C ABI maps this to `EAGAIN` for nonblocking
+sends. Its `ZMQ_IMMEDIATE=1` option gates admission to connected, not-yet-ready
+peers; the native API has no `ZMQ_IMMEDIATE` option.
 
-PEER send routing publishes immutable identity tables using ArcSwap. Connect,
-disconnect, and shutdown serialize table updates. Each `Socket` clone lazily
-registers and reuses its own fanring producer per destination. Hot sends lock
-only that clone's producer for that destination; concurrently sharing one clone
-remains safe. Application threads enqueue raw messages. The connection's existing
-I/O task fair-drains all its producers, then frames, compresses, and writes.
-There is no socket-wide payload FIFO or additional dispatcher task.
+`send_hwm` counts complete messages per pipe/ring, not bytes or total socket
+memory. Multiple peers, pre-ready pipes, lane rings, and transmit slots can
+make aggregate capacity larger than one HWM.
 
-FIFO holds for sequential sends through one clone to one destination. There is
-no order between concurrent sends or between distinct clones. Backpressure and
-cancellation retain the existing `send` and `try_send` interfaces: failed admission
-returns the intact message through `try_send`; canceling an uncompleted send
-consumes no capacity. Queued sends survive dropping their socket clone.
+### Fan-out lanes
 
-Each connection admits at most 64 application producer rings plus an empty
-registration ring. Retired rings count until the consumer reclaims them. Ring
-capacity is `min(send_hwm, 64)`, rounded to a power of two, minimum one. All
-producers together share the connection's send HWM and a byte budget (payload
-plus frame slots) of `max(64 MiB, max_message_size)`. This prevents clones from
-multiplying queued payload allowance; descriptors have a separate bound of 65 times the ring
-capacity. Registration exhaustion backpressures until a producer retires. These
-per-connection budgets deliberately couple that connection's senders. Driver
-batches and wire buffers are additional, bounded by their count/byte drain limits
-and maximum message size. A locally oversized PEER send returns a protocol error.
+The application enqueues once to lane 0, regardless of lane count. Lane 0
+distributes batches to active secondary lanes before processing its own peers.
 
-Retirement clears cached producers before publishing replacement routes, then
-wakes blocked senders. Cached old routing tables retain no producer queues;
-coordinated fanring teardown releases unread payloads even while send handles
-remain alive. Stale disconnect events cannot remove a replacement route.
+```text
+ caller -- raw Message --> lane 0 / distributor
+                              |
+                              +--> lane 1 --> match + encode --> peer slots
+                              +--> lane 2 --> match + encode --> peer slots
+                              |
+                              +-----------> match + encode --> peer slots
 
-## Proxy
+ SocketDriver -- separate control ring --> each lane
+ peer slots   -- ConnectionDriver writes --> transports
+```
 
-`omq-tokio::Proxy` composes two existing sockets. It has no socket type of
-its own and no forwarding yring; local buffering is limited to one pending
-message per direction when a target reports HWM backpressure. Socket HWMs,
-routing policies, and drop/block behavior remain the source of truth.
+Each owned IO thread hosts one lane. Borrowed contexts always use one lane,
+even on a multi-thread runtime. Socket clones share lane 0's producer under
+a short mutex; adding clones does not add distributor lanes.
 
-The loop drains at most `burst_size` complete messages from one direction
-before rechecking control and the opposite direction. Default burst is 64:
-large enough to avoid one `select!` per message under load, bounded enough
-that a hot frontend cannot indefinitely starve backend-to-frontend traffic.
-When a target is full, the proxy retries the pending message before reading
-more from that source.
+The important work-saving choices are:
 
-Steerable control supports `PAUSE`, `RESUME`, `TERMINATE`, and `KILL`.
-`STATISTICS` is omitted. Capture sockets receive best-effort copies via
-nonblocking send and never backpressure data forwarding.
+- Match before encoding. Prefix subscriptions use a Patricia trie; an
+  all-subscribed shortcut skips per-peer lookups. RADIO uses group membership.
+- Encode/compress once per compatible target set in a lane. Share large
+  payload chunks; retain per-peer paths for connection-specific transforms.
+- Bound total copying: if encoded size times target count exceeds 8 KiB,
+  use shared gather chunks rather than copying the body into every peer slot.
+- Reuse framing and target scratch; signal each touched peer once per batch.
+- Under drop-newest policy, skip muted destinations until space returns.
+  A slow subscriber must not stop delivery to other subscribers.
 
-## Inproc
+Fan-out drops on mute by default. `OnMute::Block` alone does not make PUB or
+XPUB wait; `xpub_nodrop` enables their backpressure path.
 
-Inproc bypasses ZMTP framing and kernel I/O. Cross-thread peers use `yring`
-send pipes and deliver `InboundFrame::Message` through `inproc_peer_driver`.
-Same-thread paths use direct `yring::ProducerOwner` access where applicable.
-Names are scoped to the owning `ContextCore`, not the process. Two
-independent contexts can bind the same `inproc://name` without seeing
-each other. Handles imported with `Context::from_share_key()` share the
-same namespace, which lets different language bindings in one process
-communicate over inproc without a process-global registry. Public
-semantics remain the same: HWM backpressure, round-robin fairness, and
-connect-before-bind.
+### Identity routing and PEER sends
 
-## Drain Budgets And Signaling
+ROUTER borrows the identity frame for lookup, then removes it from the owned
+message. SERVER routes using numeric metadata rather than an identity frame.
+REP uses its saved request route.
 
-Every loop that drains a channel or queue is capped by `DrainBudget`: both a
-message count and a byte count. Unbounded drains would starve the tokio runtime
-and other tasks. Standard presets: `DrainBudget::WORKER` (256 messages / 2 MiB)
-for lane workers and deferred fan-out, `DrainBudget::WIRE_DRAIN` (1024 / 1
-MiB) for wire-slot drain.
+PEER uses immutable identity tables published through ArcSwap:
 
-Data-ready paths use `DataSignal`, a small atomic state machine plus `Notify`.
-`mark()` fires `notify_one` only on the idle-to-pending transition. The consumer
-calls `begin_drain()` before draining and `clear_after(is_empty)` afterward. A
-producer mark that races with drain clear moves the signal to `DIRTY`, so
-readiness survives stale empty observations. A producer that finds the
-signal already pending skips its wake, so its item must be visible to the
-consumer's next drain. That handoff is a store-then-load on both sides, so
-`mark()` and `begin_drain()` each issue a sequentially consistent fence;
-release and acquire alone let both sides read stale values and strand the
-item. `reschedule()` fires
-unconditionally for budget-interrupted drains where the consumer already knows
-data remains. Wire slots, send pipes, drop queues, and lane workers all use
-`DataSignal`.
+- Each socket clone lazily registers one fanring producer per destination.
+- Hot sends lock only that clone's producer for that destination.
+- The existing connection I/O task fair-drains producers, then frames,
+  compresses, and writes. There is no additional payload dispatcher.
+- Sequential sends through one clone preserve per-destination FIFO. Different
+  clones and concurrent sends have no relative order.
 
-State-change waits use `StateSignal`: a generation counter plus `Notify`.
-Waiters capture a generation, enable their waiter, re-check caller state, then
-await only if nothing changed meanwhile. This is used where readiness is not a
-single data queue, for example pipe-space release and route-state changes.
+All producers for one PEER connection share admission limits:
 
-Control commands (subscribe, cancel, add-peer, remove-peer, shutdown) travel on
-dedicated channels separate from data. Lane workers and connection drivers
-drain all queued control commands before data work. Connection drivers encode
-at most 512 messages, the configured batch-byte limit, or 1 ms at a time.
-Writes run as a main `select!` arm, retain partial progress, and return after
-`DrainBudget::WIRE_DRAIN` or 1 ms. Stalled transport writes therefore cannot
-hide control behind data queue depth or an uninterruptible full-buffer drain.
-`omq_soak_driver_control` repeatedly fills the data inbox behind a 64-byte
-transport, then verifies control-driven close remains bounded.
+| Limit | Bound |
+| --- | --- |
+| Application producer rings | 64, plus an empty registration ring |
+| Capacity per ring | `min(send_hwm, 64)`, rounded to a power of two, minimum 1 |
+| Total queued messages | Connection's send HWM, not HWM times clone count |
+| Total charged bytes | `max(64 MiB, max_message_size)`, including frame slots |
 
-Loom covers the race windows that would lose these wakeups:
-`omq-tokio/tests/loom_signal.rs` models `DataSignal` rearming, the fenced
-skip-when-pending handoff (and shows the race without the fences), `StateSignal`
-generation checks, pipe-space release, and route waits that race with peer
-activation. The [yring Loom suite](https://github.com/paddor/fanring.rs/blob/main/yring/tests/loom.rs)
-covers the lower-level SPSC cursor ordering,
-wraparound, producer drop, async `push_async` wakeups, and upper-layer
-readiness patterns built on the ring.
+Retired rings count until reclaimed. Registration exhaustion backpressures;
+cloning cannot multiply the connection's payload allowance. Ring descriptors
+have a separate bound of 65 times ring capacity. Driver/wire buffers are
+additional and have their own batch and message-size bounds.
 
-## Transports
+Failed `try_send` admission returns the intact message. Canceling an
+uncompleted send consumes no capacity; accepted sends survive clone drop.
+Oversized local PEER messages return a protocol error.
 
-| URI | implementation |
+Route retirement clears cached producers before publishing replacement routes
+and wakes blocked senders. Coordinated queue teardown releases unread payloads
+even if stale handles remain. Old disconnect events cannot remove a new route.
+
+## Receives
+
+### Fair fan-in and bulk receives
+
+PULL, GATHER, SUB, and XSUB use socket-owned fanring MPSC channels. Each
+connection driver owns a producer lane; the application owns the drain.
+Ordinary receives rotate after each message and preserve each peer's FIFO.
+
+`Options::recv_batching` changes bulk receive scheduling: move whole
+per-connection windows instead of popping one message at a time. Count and
+byte budgets still apply. Admission checks queued values, so no extra message
+is staged on the application side between calls.
+
+`recv_many_into` and related APIs reuse caller-owned vectors. Internal scratch
+and generation-based peer snapshots avoid allocating or rebuilding the peer
+list on every drain.
+
+### Capacity credits are not messages
+
+A credit is a consumed ring slot that the producer may reuse. Publishing
+credits can wake a producer waiting for space; doing that after every message
+adds atomic and wakeup work to the receive hot path.
+
+Ordinary fan-in receives retain native credit batching:
+
+- Release after `min(lane capacity, 64)` consumed slots.
+- Release partial credits when a lane is observed empty and before receive
+  can park. Bulk calls release consumed slots before returning.
+- Return messages immediately. Do not wait for a batch to fill, change
+  per-message fairness, or weaken signal fences.
+
+The tradeoff is delayed slot reuse: a producer can temporarily see up to 63
+consumed slots as unavailable. This is local flow control, not TCP or ZMTP
+acknowledgment batching.
+
+### PEER receive ownership
+
+PEER has independently bounded per-connection yrings. Ordinary `recv()` uses
+one shared, fair-draining application receiver; concurrent calls serialize
+that drain.
+
+Before bind/connect, `peer_recv_lanes(PeerRecvConfig)` can instead transfer
+receiving to exclusive application receivers. The actor assigns each handshake
+identity to one receiver and preserves the assignment across reconnects.
+
+Move receivers to application threads; use ordinary socket clones for sends
+and control. Receive assignment creates no threads and changes no send
+semantics. TCP, IPC, and inproc use the same ownership model.
+
+| Default per receive worker | Bound |
+| --- | --- |
+| Allocated peer rings | 128, including retired generations still owned |
+| Queued messages | 8192 |
+| Charged bytes | 64 MiB of payload plus per-frame slot storage |
+| Per-connection ring | Receive HWM rounded to a power of two, minimum 16 |
+
+Peers assigned to one worker share its budget; different workers have
+independent budgets. PEER defaults `max_message_size` to 64 MiB.
+
+These are admission limits, not a total-memory promise. Decoder/transport
+buffers, one pending decoded message per connection, descriptors, frame tables,
+slice-retained backing storage, and caller-owned storage add memory beyond the
+charged queue bytes.
+
+### Backpressure, disconnect, and close
+
+- A full PEER receive queue pauses inbound data, not replies, close commands,
+  or cancellation. Local heartbeat receive-timeout accounting pauses while
+  OMQ deliberately stops reading.
+- Dropping a worker receiver closes its peers, including idle peers.
+- Identity handover invalidates unread old-generation messages before new
+  traffic becomes visible. Ordinary disconnect leaves queued messages readable.
+- Socket close ends receive admission independently of send linger. A late
+  connection attachment must tolerate the receive queue already being closed.
+
+Heartbeats detect missing peer activity; they do not make a slow application
+drain its queue. Heartbeat traffic can continue when outbound space allows,
+but transport backpressure may still trigger the remote endpoint's timeout.
+
+## Messages and buffers
+
+### Value layout and ownership
+
+| Representation | Purpose |
+| --- | --- |
+| `Message`: 64 B, up to 55 B inline | Common single-part messages without heap payload storage |
+| `Payload`: 64 B, up to 62 B inline | Small multipart parts without separate payload allocation |
+| `Bytes` or shared `Arc<PayloadOwner>` | Large payloads share storage across clones/slices |
+| Multipart frame table | Owns part descriptors, not necessarily copies of their bodies |
+
+The 64-byte size is not a cache-line alignment guarantee. Inline construction
+copies bytes into the value; larger owned `Vec`/`String` inputs can transfer
+their storage instead.
+
+Borrow with `part_slice`, `iter_slices`, or `as_slice` when ownership is not
+needed. Converting inline data to `Bytes` can allocate and copy. Converting a
+shared owner allocates an adapter without copying its body; empty payloads
+also retain explicitly supplied owners.
+
+Compact forms avoid frame tables for common REQ delimiters and SERVER routing
+IDs. Routing changes retain existing multipart tables where possible. Cached
+byte totals avoid rescanning parts; mutable table access invalidates the cache.
+
+### Pools reduce allocation, not admission
+
+`MessagePool` recycles multipart frame tables. Its cache is bounded, but
+exhaustion allocates normally and oversized tables are not retained. It does
+not cap all in-flight messages or payload memory.
+
+`Options::recv_message_pool` opts native byte-stream decoders into table reuse;
+it is off by default. Inproc already transfers owned messages. Returning a
+table drops payload owners before taking the cache lock, so application release
+callbacks do not run under that lock.
+
+### Framing and writes
+
+`FrameBuffer` combines an arena with external payload entries. Default initial
+arenas are 16 KiB for TCP/WS and 64 KiB for IPC.
+
+- Below the default 4 KiB threshold, copy headers and bodies into the arena.
+  Many small messages then share one write buffer.
+- For large bodies, keep headers in the arena and bodies as shared `Bytes`.
+  Gather writes avoid concatenating large payloads first.
+- Driver-owned arena-only output writes directly from its slice and retains
+  allocation capacity. Mixed-entry drain copies arena bytes once into shared
+  storage, retaining the original arena for reuse.
+- A `PeerTransmitSlot` holds framed output under a short mutex, with a default
+  512 KiB byte cap. Its arena is staged into reusable driver storage before
+  awaiting I/O; the mutex never spans the write await.
+- Partial writes retain chunks and offsets. A canceled write future resumes
+  without re-encoding or copying the unwritten tail.
+
+Eligible plain-TCP latency routes have a `DirectTcpWriter`. That specialized
+path may frame into the slot and attempt one caller-side nonblocking write.
+Partial or gather output stays queued for the driver; it is not kept in a
+separate retry buffer. Throughput and transformed paths use workers.
+
+TCP uses `TCP_NODELAY`; userspace batches provide coalescing. Queued-byte totals,
+header scratch, chunk vectors, and arena capacity are retained rather than
+recomputed or reallocated for every frame.
+
+### Reads and decoding
+
+The rolling read buffer starts at 4 KiB and grows to at most 128 KiB after
+consecutive full reads. The codec accepts owned chunks without an append copy.
+
+| Incoming data | Handling |
+| --- | --- |
+| Complete untransformed single-part frame <= 55 B | Decode directly into inline `Message` |
+| Larger frame contained in one chunk | Share the chunk by slicing |
+| Frame spanning chunks | Coalesce into owned storage |
+| Eligible plain TCP/IPC frame >= 128 KiB by default | Read directly into final owned payload storage |
+
+Direct reads copy any already-read prefix once, then read the remainder into
+spare `BytesMut` capacity without zero-filling it. WS and frame transforms such
+as CURVE do not use this path. The threshold can be changed or disabled.
+
+Per-connection receive pools recycle direct-read buffers through 8 MiB and
+retain at most 64 MiB. A buffer returns only after its last payload clone/slice
+drops. Weak pool references let connection close free idle buffers even while
+applications retain messages. Larger payloads use fresh, unpooled storage.
+
+Here, "zero-copy" only means avoiding a specific userspace payload copy. It
+does not promise zero kernel copies, no metadata allocation, or copy-free
+multipart, encryption, and binding conversions.
+
+## Compression and wire transforms
+
+Compression transports transform messages before ZMTP framing.
+
+| Path | Encoder ownership and scheduling |
+| --- | --- |
+| Peer-routed sends | Selected connection driver; eligible large work can use a warm `CompressionPool` encoder on Tokio's blocking pool |
+| PUB/XPUB/RADIO lanes | One independent encoder per lane; one result shared by its matching peers |
+| CURVE | Per-connection cipher and nonce state; ordered transforms |
+
+Compression offload defaults to messages at least 8 KiB. Results stay in send
+order. Small messages, unavailable pool capacity, or pending dictionary/training
+state can keep work on the connection driver. Fan-out lanes do not use this pool.
+
+LZ4 and Zstd reuse contexts and scratch. Small parts can pass through without
+compression; encoders also reject results without enough wire-size saving.
+Eligible plaintext paths frame the sentinel plus original payload directly.
+Warm contexts do not eliminate owned output allocations.
+
+Dictionary setup and shipment are separate:
+
+- Static or trained dictionaries initialize reusable encoder state.
+- Fan-out distributes a trained dictionary to lanes instead of training once
+  per subscriber.
+- Shipment is tracked per direction and connection, before dependent data.
+  Offload encoders do not ship dictionaries.
+- LZ4 permits at most one dictionary shipment per direction on a connection;
+  a second shipment closes it. See the [LZ4 RFC](lz4-rfc.md).
+
+CURVE encrypts/decrypts in place using retained cipher state, but constructing
+encrypted wire messages still needs mutable storage and copying. WS has fused
+framing and tiny-message decode paths; client masking needs writable storage.
+These are specialized paths, not end-to-end zero-copy guarantees.
+
+## Scheduling and wakeups
+
+### Bound data work; keep control reachable
+
+Data drains use both count and byte limits. Separate control channels keep
+subscribe, cancel, peer changes, and shutdown out of payload backlogs. Workers
+service queued control commands before starting the next bounded data batch.
+
+| Work | Default limit |
+| --- | --- |
+| Lane/deferred fan-out drain | `DrainBudget::WORKER`: 256 messages / 2 MiB |
+| Wire-slot drain | `DrainBudget::WIRE_DRAIN`: 1024 drain iterations / 1 MiB |
+| Driver encoding | 512 messages, configured batch bytes, or 1 ms |
+| Driver write turn | Wire-drain budget or 1 ms |
+
+Wire-drain iterations are not necessarily individual messages. The default
+encode byte limit is 128 KiB; `OMQ_BATCH_BYTES` is read once and cached.
+
+Writes run as a main `select!` arm and preserve partial progress. A stalled
+transport therefore does not trap control behind a full-buffer write loop.
+Async sends that complete synchronously yield periodically; workers yield at
+batch boundaries. Hot drain loops avoid unnecessary per-message clock reads.
+
+### DataSignal: work is pending
+
+`DataSignal` combines `Notify` with four states: `IDLE`, `PENDING`, `DRAINING`,
+and `DIRTY`. It coalesces data-ready notifications without losing work that
+arrives during a drain.
+
+```text
+ Producer                                Consumer
+    |                                       |
+ publish message into queue                 |
+    |                                  begin_drain()
+ SeqCst fence                          enter DRAINING if PENDING
+    |                                  SeqCst fence
+ mark(): inspect signal                     |
+    |                                  inspect / drain queue
+    +-- IDLE: set PENDING, notify            |
+    +-- DRAINING: set DIRTY             clear_after(is_empty)
+    +-- PENDING/DIRTY: coalesce              |
+                                       DIRTY or nonempty: rearm
+                                       DRAINING + empty: become idle
+```
+
+The columns show each participant's ordering, not a fixed interleaving.
+Both fences matter: without them, a producer can skip its wake while the
+consumer reads stale queue state and parks. Release/acquire alone is not
+enough for this store-then-load handoff across queue and signal atomics.
+
+When a budget expires and work is known to remain, `reschedule()` notifies
+unconditionally. It must not rely on another producer transition to wake the
+consumer. Wire slots, send pipes, and fan-out lanes use this discipline.
+
+### StateSignal: something changed
+
+Space availability and route changes use a generation counter plus `Notify`:
+
+1. Capture the generation before attempting the operation.
+2. Enable the waiter and recheck readiness or closure.
+3. Sleep only if no relevant state changed. Retry after a change.
+
+Worker exit must wake blocked senders, and senders must check exit before
+parking. `BlockingRecvWaker` similarly avoids `unpark()` and its thread mutex
+while the application is active; waiter registration closes the sleep race.
+
+Capacity notifications are batched separately from data notifications.
+Fan-in returns [slot credits](#capacity-credits-are-not-messages) in groups;
+transmit slots notify space/reactivate fan-out peers after crossing low-water
+marks. Neither optimization permits dropping a required wake.
+
+### Concurrency checks
+
+[Signal Loom tests](../omq-tokio/tests/loom_signal.rs) cover rearming, the fenced
+skip-wake handoff, generation checks, space release, and route activation.
+The unfenced negative control demonstrates the stranded-message race.
+
+Queue-level Loom/Miri checks live in the external queue workspace.
+`omq_soak_driver_control` exercises bounded close with a saturated data inbox
+and stalled transport. Fairness, reconnect, linger, and backpressure also have
+integration tests in `omq-tokio/tests/`.
+
+## Other execution paths
+
+### Inproc
+
+Inproc transfers owned messages without ZMTP framing or kernel transport I/O.
+Cross-thread peers use send pipes and `inproc_peer_driver`; eligible same-thread
+paths use direct `yring::ProducerOwner` access. HWM, fairness, and
+connect-before-bind still apply.
+
+Names belong to `ContextCore`, not the process. Independent contexts can bind
+the same name. Handles imported through `from_share_key()` share the namespace,
+including across language bindings in one process.
+
+### Caller-driven exclusive sockets
+
+`omq_tokio::exclusive::Socket` is a separate, opt-in API. The caller owns the
+TCP stream and codec through `&mut self`; there is no connection-driver task,
+background progress, multi-peer routing, or userspace outbound queue.
+
+It supports TCP bind/connect for PAIR, DEALER, ROUTER, REQ, REP, CLIENT, and
+SERVER with NULL authentication, accepting one peer at a time. Unsupported
+types/transports return configuration errors.
+
+Idle applications must call `maintain()` for reconnect and heartbeat work.
+Failed sends are not automatically replayed: the peer may have received a
+partial or complete command. This contract differs from the regular socket API.
+
+### Proxy
+
+`Proxy` composes two sockets rather than introducing a socket type or another
+forwarding queue. It retains at most one pending message per direction when
+the target is full, retrying that message before reading more from its source.
+
+The default burst is 64 messages before rechecking control and reverse traffic.
+Socket HWMs and routing/drop policies remain authoritative. Capture uses
+best-effort nonblocking copies and cannot backpressure forwarding.
+
+Steerable control supports `PAUSE`, `RESUME`, `TERMINATE`, and `KILL`, not
+`STATISTICS`.
+
+### C and language boundaries
+
+The C layer preserves libzmq's externally serialized socket ownership contract;
+native Tokio sockets allow shared async handles. C's `LocalCell` avoids a
+socket-state mutex under that contract. Debug builds check thread ownership.
+
+The same performance rules apply at binding boundaries:
+
+- Try ready operations before entering a runtime or OS wait. Direct receive
+  sinks and registered waiters avoid extra relay and registration work.
+- Borrow native parts when copying to caller-provided buffers. Do not create
+  temporary `Bytes` merely to copy them again.
+- Retain native payload owners for view-based receives where the language
+  supports them. Converting to language-owned byte strings may still copy.
+- Reuse batch buffers and combine native API crossings. A batch API can reduce
+  call/object overhead without being payload-copy-free.
+
+For example, Python `copy=False` views retain native ownership, while copying
+to Python `bytes` creates new storage. Retained send buffers must stay valid
+and unchanged for their documented lifetime. C `zmq_msg_t` has no native
+`Message`-style inline payload representation.
+
+## Transports, reconnects, and monitoring
+
+| URI | Transport |
 | --- | --- |
 | `tcp://host:port` | TCP with `TCP_NODELAY` |
 | `ipc:///path` | Unix stream or Windows named pipe |
-| `inproc://name` | in-process channel |
-| `udp://host:port` | datagrams for RADIO/DISH |
-| `lz4+tcp://host:port` | TCP plus LZ4 transform |
-| `ws://...`, `wss://...` | ZWS over WebSocket, optional TLS |
+| `inproc://name` | Context-local message transfer |
+| `udp://host:port` | RADIO/DISH datagrams |
+| `lz4+tcp://host:port` | TCP with LZ4 message transform |
+| `zstd+tcp://host:port` | TCP with Zstd message transform |
+| `ws://...`, `wss://...` | ZWS over WebSocket, optionally TLS |
 
-Reconnect supervisors replay subscriptions and groups after reconnect.
-Connect-side round-robin sends use bounded pre-ready pipes; bind-side
-round-robin sends with no ready pipe mute.
+Regular sockets supervise reconnects and replay subscriptions/groups. Peer
+failure is handled internally; applications do not manage connection ordering.
+Queued sends follow the routing, HWM, and linger rules described above.
 
-## Mechanisms And Monitoring
+NULL authentication is always available. PLAIN and CURVE are feature-gated
+protocol mechanisms; LZ4, Zstd, and WS are transport features.
 
-Mechanisms live under `omq-proto/src/proto/mechanism/`: NULL is always on;
-PLAIN and CURVE are feature-gated. LZ4 and WS are transport features.
+`Socket::monitor()` returns a stream of lifecycle events with owned `PeerInfo`
+snapshots: listening, accept/connect, delayed connect, handshake, disconnect,
+peer commands, and close.
 
-`Socket::monitor()` returns a `Stream<Item = MonitorEvent>`. Events carry owned
-`PeerInfo` snapshots for listening, accept/connect, delayed connect,
-handshake, disconnect, peer command, and close.
+## Source map
 
-## Source Map
+| Question | Start here |
+| --- | --- |
+| Who owns runtimes and threads? | [context.rs](../omq-tokio/src/context.rs) |
+| What does a socket call do? | [handle.rs](../omq-tokio/src/socket/handle.rs), [blocking.rs](../omq-tokio/src/blocking.rs) |
+| Who changes peers and lifecycle? | [socket/actor/](../omq-tokio/src/socket/actor/) |
+| Where are queues drained and bytes written? | [engine/driver.rs](../omq-tokio/src/engine/driver.rs), [send_pipe.rs](../omq-tokio/src/engine/send_pipe.rs) |
+| How are peers selected? | [routing/](../omq-tokio/src/routing/) |
+| How are receives and credits managed? | [fanin.rs](../omq-tokio/src/socket/fanin.rs), [recv.rs](../omq-tokio/src/socket/recv.rs), [peer_recv.rs](../omq-tokio/src/socket/peer_recv.rs) |
+| How are payloads stored and framed? | [message.rs](../omq-proto/src/message.rs), [frame_buffer.rs](../omq-proto/src/frame_buffer.rs) |
+| What keeps wakeups and drains safe? | [signal.rs](../omq-tokio/src/engine/signal.rs), [flow.rs](../omq-proto/src/flow.rs) |
+| Where are codec and transport rules? | [proto/connection/](../omq-proto/src/proto/connection/), [transport/](../omq-tokio/src/transport/), [LZ4 RFC](lz4-rfc.md) |
+| How do I test or measure a change? | [DEVELOPMENT.md](../DEVELOPMENT.md), [perf-verification.md](perf-verification.md) |
 
-Protocol: `omq-proto/src/message.rs`, `frame_buffer.rs`, `flow.rs`,
-`routing.rs`, `subscription.rs`, `proto/connection/`, `proto/frame.rs`.
-
-Backend: `omq-tokio/src/socket/actor/`, `socket/handle.rs`,
-`engine/driver.rs`, `engine/send_pipe.rs`, `engine/transmit_slot.rs`,
-`engine/signal.rs`, `routing/`, `transport/`, and
-`tests/loom_signal.rs`.
-
-To add a socket type, extend `omq_proto::proto::SocketType`, compatibility
-checks, protocol routing, and the matching backend strategy. To add a
-transport or mechanism, extend endpoint/mechanism parsing first, then add the
-backend module and integration tests.
+Add socket types through protocol compatibility/routing and the matching
+backend strategy. Add transports or mechanisms through endpoint/mechanism
+parsing, backend support, and integration tests. The public socket contract is
+checked by [coverage_matrix.rs](../omq-tokio/tests/coverage_matrix.rs).

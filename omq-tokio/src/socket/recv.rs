@@ -436,7 +436,7 @@ pub(crate) fn recv_pipe(
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
     pub fanin: Option<Arc<super::fanin::Fanin>>,
-    pub peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
+    pub peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
     pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
     pub send_ring: SpscSendRing,
@@ -466,9 +466,7 @@ impl SpscHandles {
         hwm: usize,
         max_message_size: Option<usize>,
     ) -> super::peer_recv::PeerRecvRoutes {
-        let (routes, receive) =
-            super::peer_recv::PeerRecvRoutes::ordinary(hwm, self, max_message_size)
-                .expect("default PEER receive limits");
+        let (routes, receive) = super::peer_recv::PeerRecvRoutes::new(hwm, self, max_message_size);
         self.peer_recv = Some(Arc::new(Mutex::new(receive)));
         routes
     }
@@ -519,7 +517,7 @@ impl SpscHandles {
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
     fanin: Option<Arc<super::fanin::Fanin>>,
-    peer_recv: Option<Arc<Mutex<super::PeerRecvLane>>>,
+    peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
     /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
     consumers: SpscConsumers,
     /// Per-TCP-peer yring consumers. Actor appends on handshake.

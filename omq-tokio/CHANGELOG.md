@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove `Socket::peer_recv_lanes`, `PeerRecvConfig`, and `PeerRecvLane`.
+  PEER uses ordinary `recv` and bulk receive methods with one socket-owned
+  fanring. Application code owns worker dispatch; per-connection fairness,
+  reconnect fencing, and existing ordinary receive limits are preserved.
+
 ### Changed
 
 - PEER receive lanes use fanring ready-peer selection and batched space credits,

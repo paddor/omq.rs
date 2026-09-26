@@ -44,7 +44,7 @@ pub use omq_proto::error::TrySendError;
 /// # Concurrency
 ///
 /// The tokio backend is multi-threaded. `recv` drains a set of
-/// pre-allocated yring channels (per-peer and shared recv pipe),
+/// pre-allocated queues (per-peer fan-in and shared receive pipe),
 /// so concurrent `recv` calls from different tasks are safe. Each
 /// message is delivered to exactly one caller. `send` goes through
 /// a per-socket `SendSubmitter` that serializes internally, so
@@ -52,8 +52,7 @@ pub use omq_proto::error::TrySendError;
 /// producer lanes per destination. Sequential sends through one clone preserve
 /// FIFO per destination; concurrent sends and distinct clones have no relative
 /// order. PEER bounds producer registrations and aggregate per-connection queued
-/// payloads. Receive ownership can be split using [`Socket::peer_recv_lanes`];
-/// this is independent of cloning sockets for sending.
+/// payloads. PEER receives share one fair fan-in across all socket clones.
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: Arc<Inner>,
@@ -67,7 +66,6 @@ struct Inner {
     cancel: CancellationToken,
     linger: Option<std::time::Duration>,
     recv_rx: SpscAwareRecv,
-    peer_recv_lanes: Arc<AtomicBool>,
     monitor: MonitorPublisher,
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
@@ -248,7 +246,6 @@ impl Socket {
                     latency_profile,
                     recv_batching,
                 ),
-                peer_recv_lanes: Arc::new(AtomicBool::new(false)),
                 monitor,
                 send_submitter,
                 type_state,
@@ -275,41 +272,6 @@ impl Socket {
     /// The socket type.
     pub fn socket_type(&self) -> SocketType {
         self.inner.socket_type
-    }
-
-    /// Split PEER receives into exclusive, identity-routed application lanes.
-    /// Call once, before any bind or connect. Normal `recv` methods then reject
-    /// calls; sending and socket addressing stay unchanged. Configuration is
-    /// static for this socket's lifetime. See [`super::PeerRecvConfig`].
-    pub async fn peer_recv_lanes(
-        &self,
-        config: super::PeerRecvConfig,
-    ) -> Result<Vec<super::PeerRecvLane>> {
-        let (ack, reply) = oneshot::channel();
-        self.inner
-            .cmd_tx
-            .send(SocketCommand::PeerRecvLanes {
-                config,
-                enabled: self.inner.peer_recv_lanes.clone(),
-                ack,
-            })
-            .await
-            .map_err(|_| Error::Closed)?;
-        let mut lanes = reply.await.map_err(|_| Error::Closed)??;
-        for lane in &mut lanes {
-            lane.socket = Some(self.clone());
-        }
-        Ok(lanes)
-    }
-
-    fn check_recv_mode(&self) -> Result<()> {
-        if self.inner.peer_recv_lanes.load(Ordering::Acquire) {
-            Err(Error::Protocol(
-                "PEER receives belong to the configured receive lanes".into(),
-            ))
-        } else {
-            Ok(())
-        }
     }
 
     #[doc(hidden)]
@@ -591,7 +553,6 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let mut msg = self.inner.recv_rx.recv().await?;
@@ -640,7 +601,6 @@ impl Socket {
     /// Blocking receive for sync callers. The calling thread registers
     /// itself and parks until data arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
-        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let mut msg = self.inner.recv_rx.blocking_recv()?;
@@ -690,7 +650,6 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let Some(mut msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
@@ -745,7 +704,6 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        self.check_recv_mode()?;
         match self.inner.socket_type {
             SocketType::Req => loop {
                 let Some(mut msg) = self
@@ -808,7 +766,6 @@ impl Socket {
 
     /// Blocking receive with a timeout for sync callers.
     pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
-        self.check_recv_mode()?;
         let now = std::time::Instant::now();
         let Some(deadline) = now.checked_add(timeout) else {
             return self.blocking_recv();
@@ -996,7 +953,6 @@ impl Socket {
 
     /// Try to receive up to `max` ready messages into `out` without blocking.
     pub fn try_recv_many_into(&self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
-        self.check_recv_mode()?;
         if matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             if max == 0 {
                 return Ok(0);
@@ -1011,7 +967,6 @@ impl Socket {
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
-        self.check_recv_mode()?;
         if self.inner.socket_type == SocketType::Req {
             loop {
                 let mut msg = self.inner.recv_rx.try_recv()?;

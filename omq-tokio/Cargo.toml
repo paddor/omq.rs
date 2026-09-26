@@ -85,8 +85,8 @@ name = "pub_sub_lz4"
 required-features = ["lz4"]
 
 [[test]]
-name = "peer_recv_lanes"
-path = "tests/peer_recv_lanes.rs"
+name = "peer_recv"
+path = "tests/peer_recv.rs"
 
 [[bench]]
 name = "omq_exclusive_latency"

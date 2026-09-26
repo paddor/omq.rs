@@ -300,27 +300,20 @@ control, not TCP or ZMTP acknowledgment batching.
 
 ### PEER receive ownership
 
-PEER uses one fanring receiver per application receive lane, with one bounded
-producer per connection. Fanring selects ready connections; idle peers need
-no manual scan. Single-message receives rotate fairly across ready producers.
-Ordinary `recv()` shares one receiver; concurrent calls serialize that drain.
+PEER uses one socket-owned fanring receiver, with one bounded producer per
+connection. Fanring selects ready connections; idle peers need no manual scan.
+Single-message receives rotate fairly across ready producers. Socket clones
+share the receiver; concurrent receive calls serialize the drain.
 
-Before bind/connect, `peer_recv_lanes(PeerRecvConfig)` can instead transfer
-receiving to exclusive application receivers. The actor assigns each handshake
-identity to one receiver and preserves the assignment across reconnects.
-
-Move receivers to application threads; use ordinary socket clones for sends
-and control. Receive assignment creates no threads and changes no send
-semantics. TCP, IPC, and inproc use the same ownership model.
+Use ordinary `recv()` or `recv_many_into()` on application threads. Each message
+retains its identity prefix for replies and application dispatch. OMQ does not
+assign identities to application workers. TCP, IPC, and inproc use the same
+ownership model; connection I/O assignment and sending remain independent.
 
 ```text
 connection A --> producer A --+
-connection B --> producer B --+--> lane 0 fanring --> application receiver 0
-                             |    shared count/byte budget
-connection C --> producer C -----> lane 1 fanring --> application receiver 1
-                                  separate budget
-
-handshake identity selects lane; connection I/O assignment stays unchanged
+connection B --> producer B --+--> socket fanring --> recv / recv_many_into
+connection C --> producer C --+    shared count/byte budget
 ```
 
 Each entry carries its connection's identity/generation state and an aggregate
@@ -331,17 +324,18 @@ async yield when cleanup exhausts a budget.
 Space credits follow fanring's batching above. Empty drains and bulk returns
 release partial credits before the application can park. Driver batches
 coalesce application wakes through `DataSignal`. Registration and shutdown
-share a cold lock; exclusive receive never takes it.
+share a cold lock; message drains never take it.
 
-| Default per receive worker | Bound |
+| Default per PEER socket | Bound |
 | --- | --- |
 | Allocated peer rings | 128, including retired generations still owned |
 | Queued messages | 8192 |
 | Charged bytes | 64 MiB of payload plus per-frame slot storage |
 | Per-connection ring | Receive HWM rounded to a power of two, minimum 16 |
 
-Peers assigned to one worker share its budget; different workers have
-independent budgets. PEER defaults `max_message_size` to 64 MiB.
+All peers share the socket's aggregate budget. The byte allowance grows to
+`max_message_size` when that option exceeds 64 MiB. PEER defaults
+`max_message_size` to 64 MiB. Receive HWM still bounds each connection's ring.
 
 These are admission limits, not a total-memory promise. Decoder/transport
 buffers, one pending decoded message per connection, descriptors, frame tables,
@@ -353,7 +347,7 @@ charged queue bytes.
 - A full PEER receive queue pauses inbound data, not replies, close commands,
   or cancellation. Local heartbeat receive-timeout accounting pauses while
   OMQ deliberately stops reading.
-- Dropping a worker receiver closes its peers, including idle peers. Coordinated
+- Socket receive teardown cancels its peers, including idle peers. Coordinated
   fanring teardown immediately reclaims unread payloads even with live producers.
 - Identity handover invalidates unread old-generation messages before new
   traffic becomes visible. Ordinary disconnect leaves queued messages readable.

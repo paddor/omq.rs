@@ -1,4 +1,4 @@
-//! Shared lane admission limits. Ownership returns capacity even on cancellation
+//! Socket-wide receive admission limits. Ownership returns capacity even on cancellation
 //! or queue destruction; no per-message allocation, just an Arc count.
 
 use super::{Arc, Message, Ordering, StateSignal};

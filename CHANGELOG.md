@@ -6,6 +6,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove opt-in PEER receive partitioning: `Socket::peer_recv_lanes`,
+  `PeerRecvConfig`, and `PeerRecvLane`. Use ordinary socket receive methods;
+  application code owns worker dispatch. Internal fanring fairness, bounded
+  queues, and reconnect fencing remain unchanged.
+
 ### Changed
 
 - PEER receive lanes use fanring ready-peer selection and batched space credits,

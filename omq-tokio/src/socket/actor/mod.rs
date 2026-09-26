@@ -55,11 +55,6 @@ use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerD
 /// and uses its own Message-typed channel pair (see `AnyConn`).
 #[derive(Debug)]
 pub(crate) enum SocketCommand {
-    PeerRecvLanes {
-        config: super::PeerRecvConfig,
-        enabled: Arc<AtomicBool>,
-        ack: oneshot::Sender<Result<Vec<super::PeerRecvLane>>>,
-    },
     Bind {
         endpoint: Endpoint,
         ack: oneshot::Sender<Result<Endpoint>>,
@@ -264,7 +259,6 @@ pub(crate) struct SocketDriver {
     inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
     pub(crate) peer_recv_routes: Option<super::peer_recv::PeerRecvRoutes>,
-    endpoints_started: bool,
 }
 
 impl SocketDriver {
@@ -335,7 +329,6 @@ impl SocketDriver {
             inproc_registry,
             recv_ip_rate_limiter,
             peer_recv_routes: None,
-            endpoints_started: false,
         }
     }
 
@@ -405,42 +398,11 @@ impl SocketDriver {
 
     async fn handle_command(&mut self, cmd: SocketCommand) {
         match cmd {
-            SocketCommand::PeerRecvLanes {
-                config,
-                enabled,
-                ack,
-            } => {
-                let result = if self.socket_type != SocketType::Peer
-                    || self.endpoints_started
-                    || enabled.load(std::sync::atomic::Ordering::Acquire)
-                    || self.recv_sink_config.is_some()
-                    || self.closing
-                {
-                    Err(Error::Protocol(
-                        "receive lanes require an unused PEER socket".into(),
-                    ))
-                } else {
-                    super::peer_recv::PeerRecvRoutes::new(config, self.options.recv_hwm as usize)
-                        .map(|(routes, lanes)| {
-                            self.peer_recv_routes = Some(routes);
-                            enabled.store(true, std::sync::atomic::Ordering::Release);
-                            // Wake any ordinary recv already waiting on an unused socket.
-                            self.recv_tx.close();
-                            if let Some(fanin) = &self.spsc.fanin {
-                                fanin.close();
-                            }
-                            lanes
-                        })
-                };
-                let _ = ack.send(result);
-            }
             SocketCommand::Bind { endpoint, ack } => {
-                self.endpoints_started = true;
                 let res = self.bind(endpoint).await;
                 let _ = ack.send(res);
             }
             SocketCommand::Connect { endpoint, ack } => {
-                self.endpoints_started = true;
                 if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
                     let _ = ack.send(Err(Error::Protocol(
                         "STREAM sockets only support tcp:// endpoints".into(),

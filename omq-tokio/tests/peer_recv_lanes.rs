@@ -129,6 +129,12 @@ async fn compressed_tcp_lanes_and_independent_replies() {
     exercise("lz4+tcp://127.0.0.1:0".parse().unwrap()).await;
 }
 
+#[cfg(feature = "zstd")]
+#[tokio::test]
+async fn zstd_tcp_lanes_and_independent_replies() {
+    exercise("zstd+tcp://127.0.0.1:0".parse().unwrap()).await;
+}
+
 #[tokio::test]
 async fn non_peer_and_invalid_config_are_rejected_without_consuming_socket() {
     let socket = Socket::new(SocketType::Pair, options("pair"));
@@ -355,6 +361,124 @@ async fn handshake_notification_already_has_a_usable_reply_route() {
         client.close().await.unwrap();
     }
     server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_replacement_does_not_evict_live_identity() {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let server = context.socket(SocketType::Peer, options("server"));
+    let mut config = PeerRecvConfig::new(1);
+    config.max_peers_per_lane = 1;
+    let mut lanes = server.peer_recv_lanes(config).await.unwrap();
+    let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
+    let client_options = options("client").reconnect(omq_tokio::ReconnectPolicy::Disabled);
+    let original = context.socket(SocketType::Peer, client_options.clone());
+    original.connect(endpoint.clone()).await.unwrap();
+    connected(&original).await;
+    connected(&server).await;
+    let mut monitor = server.monitor();
+    let replacement = context.socket(SocketType::Peer, client_options);
+    replacement.connect(endpoint).await.unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            match monitor.recv().await.unwrap() {
+                omq_tokio::MonitorEvent::HandshakeFailed { reason, .. } => {
+                    assert!(reason.contains("queue limit"), "{reason}");
+                    break;
+                }
+                omq_tokio::MonitorEvent::Disconnected {
+                    reason: omq_tokio::DisconnectReason::Handover,
+                    ..
+                } => {
+                    panic!("current connection evicted before replacement admission");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server
+        .send(Message::multipart(["client", "still current"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(DEADLINE, original.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.part_slice(1), Some(b"still current".as_slice()));
+    original
+        .send(Message::multipart(["server", "still readable"]))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(DEADLINE, lanes[0].recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_slice(1), Some(b"still readable".as_slice()));
+    original.close().await.unwrap();
+    replacement.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_churn_discards_stale_backlogs_and_reclaims_retired_rings() {
+    for endpoint in [
+        test_support::tcp_loopback(0),
+        Endpoint::Inproc {
+            name: "peer-handover-churn".into(),
+        },
+    ] {
+        let context = Context::with_config(ContextConfig { io_threads: 2 });
+        let server = context.socket(SocketType::Peer, options("server"));
+        let mut config = PeerRecvConfig::new(1);
+        config.max_peers_per_lane = 2;
+        let mut lanes = server.peer_recv_lanes(config).await.unwrap();
+        let endpoint = server.bind(endpoint).await.unwrap();
+        let client_options = options("client").reconnect(omq_tokio::ReconnectPolicy::Disabled);
+        let mut current = context.socket(SocketType::Peer, client_options.clone());
+        current.connect(endpoint.clone()).await.unwrap();
+        connected(&current).await;
+        connected(&server).await;
+        for _ in 0..32 {
+            current
+                .send(Message::multipart(["server", "before handover"]))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(DEADLINE, lanes[0].recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.part_slice(1), Some(b"before handover".as_slice()));
+            for _ in 0..16 {
+                current
+                    .send(Message::multipart(["server", "stale"]))
+                    .await
+                    .unwrap();
+            }
+            let mut monitor = server.monitor();
+            let replacement = context.socket(SocketType::Peer, client_options.clone());
+            replacement.connect(endpoint.clone()).await.unwrap();
+            test_support::wait_for_handshake_on(&mut monitor).await;
+            connected(&replacement).await;
+            replacement
+                .send(Message::multipart(["server", "current"]))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(DEADLINE, lanes[0].recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.part_slice(1), Some(b"current".as_slice()));
+            current.close().await.unwrap();
+            // Empty observation retires disconnected fanring producers before
+            // the next handshake needs the second and final queue slot.
+            assert!(matches!(lanes[0].try_recv(), Err(Error::WouldBlock)));
+            current = replacement;
+        }
+        current.close().await.unwrap();
+        server.close().await.unwrap();
+    }
 }
 
 #[expect(clippy::too_many_lines)]

@@ -1191,6 +1191,11 @@ impl SpscAwareRecv {
                 DrainResult::Empty => {}
             }
 
+            if self.take_peer_yield_pending() {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
             let recv_ready = self.recv_signal.ready();
             let pipe_ready = self.recv_pipe_notify.ready();
             let activated_seen = self.activated.generation();
@@ -1208,6 +1213,11 @@ impl SpscAwareRecv {
                     DrainResult::Message(msg) => return Ok(msg),
                     DrainResult::Closed => return Err(Error::Closed),
                     DrainResult::Empty => {}
+                }
+
+                if self.take_peer_yield_pending() {
+                    tokio::task::yield_now().await;
+                    continue;
                 }
 
                 tokio::select! {
@@ -1232,6 +1242,14 @@ impl SpscAwareRecv {
         }
     }
 
+    fn take_peer_yield_pending(&self) -> bool {
+        self.peer_recv.as_ref().is_some_and(|peer| {
+            peer.lock()
+                .expect("PEER receive poisoned")
+                .take_yield_pending()
+        })
+    }
+
     pub(crate) fn try_recv(&self) -> Result<Message> {
         match self.try_drain() {
             DrainResult::Message(msg) => Ok(msg),
@@ -1250,6 +1268,12 @@ impl SpscAwareRecv {
         max: usize,
         out: &mut Vec<Message>,
     ) -> Result<usize> {
+        if let Some(peer) = &self.peer_recv {
+            return peer
+                .lock()
+                .expect("PEER receive poisoned")
+                .try_recv_many_after_first(max, out);
+        }
         let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
         let first = out.last().expect("first message already received");
         if !budget.account(RecvSizeClass::for_message(first).budget_bytes()) {

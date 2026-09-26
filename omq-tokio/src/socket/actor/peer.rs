@@ -369,14 +369,16 @@ impl SocketDriver {
             .identity
             .clone()
             .unwrap_or_else(|| generated_identity(peer_id));
+        // Admission can reject a replacement at the receive queue limit.
+        // Keep the current route alive until the replacement owns its queue.
+        let Some(activation) = self.receive_activation(peer_id, &identity) else {
+            return;
+        };
         if let Some(old_id) = self.send_strategy.peer_for_identity(&identity)
             && old_id != peer_id
         {
             self.evict_peer_for_handover(old_id);
         }
-        let Some(activation) = self.receive_activation(peer_id, &identity) else {
-            return;
-        };
         let (handle, route_id, subs_replay, peer_ident, io_thread, became_ready, ready_event) = {
             let Some(p) = self.peers.get_mut(&peer_id) else {
                 return;

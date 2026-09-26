@@ -1,10 +1,13 @@
 //! Optional PEER receive partitioning. Routing changes only at handshake;
-//! each application receiver exclusively owns its per-peer yring consumers.
+//! each application receiver exclusively owns a fanring of per-peer queues.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::task::Wake;
 
 use bytes::Bytes;
+use fanring::{mpsc, teardown::Coordinated};
+use omq_proto::flow::DrainBudget;
 use omq_proto::{Error, Message, Result};
 use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
@@ -83,29 +86,33 @@ impl PeerRecvConfig {
 /// The handle keeps its socket alive. Dropping it closes admission to this lane;
 /// affected peers are disconnected, never silently rerouted to another lane.
 ///
-/// Each peer has a bounded yring using the socket's receive HWM (rounded up to a
+/// Each peer has a bounded fanring lane using the receive HWM (rounded up to a
 /// power of two, minimum 16). `max_peers_per_lane` bounds both live and retired
 /// rings. Set `Options::max_message_size` to bound payload memory too. Decoder,
 /// transport and one pending message per connection are additional buffers.
 #[derive(Debug)]
 pub struct PeerRecvLane {
     shared: Arc<LaneShared>,
-    peers: Vec<PeerQueue>,
-    generation: usize,
-    cursor: usize,
+    receiver: Option<mpsc::Receiver<RecvItem, Coordinated>>,
+    yield_pending: bool,
     // Set by Socket only after the actor accepts configuration.
     pub(super) socket: Option<super::Socket>,
 }
 
 #[derive(Debug)]
 struct LaneShared {
-    pending: Mutex<Vec<PeerQueue>>,
-    generation: AtomicUsize,
-    allocated: AtomicUsize,
+    registration: Mutex<Registration>,
     closed: AtomicBool,
     data: Arc<DataSignal>,
     blocking: Option<Arc<super::recv::BlockingRecvWaker>>,
     budget: Arc<Budget>,
+}
+
+/// Cold registration and shutdown only. Ready-peer selection belongs to fanring.
+#[derive(Debug)]
+struct Registration {
+    registrar: mpsc::Sender<RecvItem, Coordinated>,
+    states: Vec<Weak<QueueState>>,
 }
 
 impl LaneShared {
@@ -126,38 +133,40 @@ impl LaneShared {
 
 #[derive(Debug)]
 struct QueueState {
+    identity: Bytes,
     // Identity handover invalidates the old queue before publishing its replacement.
     current: AtomicBool,
     space: StateSignal,
     cancel: CancellationToken,
-    lane: Weak<LaneShared>,
 }
 
-impl Drop for QueueState {
-    fn drop(&mut self) {
-        if let Some(lane) = self.lane.upgrade() {
-            lane.allocated.fetch_sub(1, Ordering::AcqRel);
-        }
+impl Wake for QueueState {
+    fn wake(self: Arc<Self>) {
+        self.space.notify_changed();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.space.notify_changed();
     }
 }
 
 #[derive(Debug)]
-struct PeerQueue {
-    identity: Bytes,
-    consumer: yring::Consumer<QueuedMessage>,
+struct RecvItem {
+    body: QueuedMessage,
     state: Arc<QueueState>,
 }
 
-impl Drop for PeerQueue {
-    fn drop(&mut self) {
-        self.consumer.close();
-        self.state.cancel.cancel();
-        self.state.space.notify_changed();
+impl RecvItem {
+    fn budget_bytes(&self) -> usize {
+        self.body
+            .byte_len()
+            .saturating_add(self.state.identity.len())
+            .saturating_add(std::mem::size_of::<omq_proto::message::Payload>())
     }
 }
 
-/// Actor-owned registration state. The application takes a lock only when a
-/// generation change announces newly connected peers, never to drain messages.
+/// Actor-owned identity routing. Registration and shutdown share a cold lock;
+/// the exclusive application receiver never locks it to drain messages.
 #[derive(Debug)]
 pub(crate) struct PeerRecvRoutes {
     lanes: Vec<Arc<LaneShared>>,
@@ -165,7 +174,6 @@ pub(crate) struct PeerRecvRoutes {
     previous: FxHashMap<Bytes, Weak<QueueState>>,
     default_lane: usize,
     max_peers: usize,
-    hwm: usize,
 }
 
 impl PeerRecvRoutes {
@@ -197,12 +205,14 @@ impl PeerRecvRoutes {
         handles: Option<&super::recv::SpscHandles>,
     ) -> Result<(Self, Vec<PeerRecvLane>)> {
         config.validate()?;
-        let lanes: Vec<_> = (0..config.lanes)
+        let (lanes, receivers): (Vec<_>, Vec<_>) = (0..config.lanes)
             .map(|_| {
-                Arc::new(LaneShared {
-                    pending: Mutex::new(Vec::new()),
-                    generation: AtomicUsize::new(0),
-                    allocated: AtomicUsize::new(0),
+                let (registrar, receiver) = mpsc::channel_with_policy(hwm.max(16));
+                let shared = Arc::new(LaneShared {
+                    registration: Mutex::new(Registration {
+                        registrar,
+                        states: Vec::new(),
+                    }),
                     closed: AtomicBool::new(false),
                     data: handles
                         .map_or_else(|| Arc::new(DataSignal::new()), |h| h.recv_signal.clone()),
@@ -211,19 +221,16 @@ impl PeerRecvRoutes {
                         config.max_messages_per_lane,
                         config.max_bytes_per_lane,
                     )),
-                })
+                });
+                let receiver = PeerRecvLane {
+                    shared: shared.clone(),
+                    receiver: Some(receiver),
+                    yield_pending: false,
+                    socket: None,
+                };
+                (shared, receiver)
             })
-            .collect();
-        let receivers = lanes
-            .iter()
-            .map(|shared| PeerRecvLane {
-                shared: shared.clone(),
-                peers: Vec::new(),
-                generation: 0,
-                cursor: 0,
-                socket: None,
-            })
-            .collect();
+            .unzip();
         Ok((
             Self {
                 lanes,
@@ -231,7 +238,6 @@ impl PeerRecvRoutes {
                 previous: FxHashMap::default(),
                 default_lane: config.default_lane,
                 max_peers: config.max_peers_per_lane,
-                hwm: hwm.max(16),
             },
             receivers,
         ))
@@ -248,50 +254,46 @@ impl PeerRecvRoutes {
             .copied()
             .unwrap_or(self.default_lane);
         let lane = &self.lanes[index];
-        // Only the actor allocates; consumer drops can only decrease this count.
-        if lane.closed.load(Ordering::Acquire)
-            || lane.allocated.load(Ordering::Acquire) >= self.max_peers
-        {
-            return Err(Error::Protocol(
-                "PEER receive lane closed or peer queue limit reached".into(),
-            ));
-        }
-        // Reclaim weak keys on churn, not on the data path. This also bounds
-        // identities of disconnected peers, not merely their message rings.
-        self.previous.retain(|_, state| state.strong_count() != 0);
-        let state = Arc::new(QueueState {
-            current: AtomicBool::new(true),
-            space: StateSignal::new(),
-            cancel,
-            lane: Arc::downgrade(lane),
-        });
-        if let Some(previous) = self
-            .previous
-            .insert(identity.clone(), Arc::downgrade(&state))
-            .and_then(|state| state.upgrade())
-        {
-            previous.current.store(false, Ordering::Release);
-            previous.space.notify_changed();
-        }
-        let (producer, consumer) = yring::spsc(self.hwm);
-        lane.allocated.fetch_add(1, Ordering::AcqRel);
-        let queue = PeerQueue {
-            identity,
-            consumer,
-            state: state.clone(),
-        };
-        let mut pending = lane
-            .pending
+        let mut registration = lane
+            .registration
             .lock()
-            .expect("PEER receive registration poisoned");
-        // Receiver drop serializes with registration through this cold lock.
+            .expect("PEER registration poisoned");
         if lane.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        pending.push(queue);
-        lane.generation.fetch_add(1, Ordering::Release);
-        drop(pending);
-        lane.mark();
+        // The idle registrar owns one internal lane. Retired connection rings
+        // still count until fanring observes them disconnected and empty.
+        let Ok(producer) = registration
+            .registrar
+            .try_register_bounded(self.max_peers.saturating_add(1))
+        else {
+            return Err(Error::Protocol(
+                "PEER receive lane closed or peer queue limit reached".into(),
+            ));
+        };
+        // Reclaim weak keys on churn, not on the data path. This also bounds
+        // identities of disconnected peers, not merely their message rings.
+        self.previous.retain(|_, state| state.strong_count() != 0);
+        registration
+            .states
+            .retain(|state| state.strong_count() != 0);
+        let state = Arc::new(QueueState {
+            identity: identity.clone(),
+            current: AtomicBool::new(true),
+            space: StateSignal::new(),
+            cancel,
+        });
+        registration.states.push(Arc::downgrade(&state));
+        if let Some(previous) = self
+            .previous
+            .insert(identity, Arc::downgrade(&state))
+            .and_then(|state| state.upgrade())
+        {
+            previous.current.store(false, Ordering::Release);
+            previous.cancel.cancel();
+            previous.space.notify_changed();
+        }
+        drop(registration);
         Ok(PeerRecvSink::new(producer, state, lane.clone()))
     }
 
@@ -323,34 +325,41 @@ impl PeerRecvLane {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.shared.closed.store(true, Ordering::Release);
-        self.shared
-            .pending
-            .lock()
-            .expect("PEER receive registration poisoned")
-            .clear();
-        self.peers.clear();
+        let states = {
+            let mut registration = self
+                .shared
+                .registration
+                .lock()
+                .expect("PEER registration poisoned");
+            self.shared.closed.store(true, Ordering::Release);
+            std::mem::take(&mut registration.states)
+        };
+        for state in states.into_iter().filter_map(|state| state.upgrade()) {
+            state.cancel.cancel();
+            state.space.notify_changed();
+        }
+        // Coordinated teardown reclaims unread payloads even while senders
+        // remain alive. Never run payload drops under the registration lock.
+        self.receiver.take();
+        self.shared.budget.space.notify_changed();
         self.shared.wake_all();
     }
 
-    fn refresh(&mut self) {
-        let generation = self.shared.generation.load(Ordering::Acquire);
-        if self.generation != generation {
-            let mut pending = self
-                .shared
-                .pending
-                .lock()
-                .expect("PEER receive registration poisoned");
-            self.peers.append(&mut pending);
-            self.generation = generation;
-        }
+    pub(crate) fn take_yield_pending(&mut self) -> bool {
+        std::mem::take(&mut self.yield_pending)
     }
 
     /// Receive one message. Cancellation safe: an uncompleted call consumes none.
     pub async fn recv(&mut self) -> Result<Message> {
         loop {
             match self.try_recv() {
-                Err(Error::WouldBlock) => self.shared.data.ready().await,
+                Err(Error::WouldBlock) => {
+                    if self.take_yield_pending() {
+                        tokio::task::yield_now().await;
+                    } else {
+                        self.shared.data.ready().await;
+                    }
+                }
                 result => return result,
             }
         }
@@ -359,67 +368,103 @@ impl PeerRecvLane {
     /// Receive one currently queued message without waiting.
     pub fn try_recv(&mut self) -> Result<Message> {
         self.shared.data.begin_drain();
-        self.refresh();
-        let mut checked = 0;
-        while checked < self.peers.len() {
-            self.cursor %= self.peers.len();
-            let peer = &mut self.peers[self.cursor];
-            if !peer.state.current.load(Ordering::Acquire) || peer.consumer.is_disconnected() {
-                self.peers.swap_remove(self.cursor);
-                checked = 0;
-                continue;
-            }
-            self.cursor += 1;
-            checked += 1;
-            if let Some((body, wake)) = peer.consumer.prefetch_and_pop_with_full() {
-                if wake {
-                    peer.state.space.notify_changed();
+        let mut budget = DrainBudget::WORKER;
+        self.drain_one(&mut budget)
+    }
+
+    fn drain_one(&mut self, budget: &mut DrainBudget) -> Result<Message> {
+        self.yield_pending = false;
+        let receiver = self.receiver.as_mut().ok_or(Error::Closed)?;
+        while !budget.exhausted() {
+            if let Ok(item) = receiver.try_recv_fair() {
+                let _ = budget.account(item.budget_bytes());
+                if item.state.current.load(Ordering::Acquire) {
+                    return Ok(Message::with_prefix(
+                        item.state.identity.clone(),
+                        item.body.into_message(),
+                    ));
                 }
-                let message = Message::with_prefix(peer.identity.clone(), body.into_message());
-                self.shared.data.clear_after(false);
-                return Ok(message);
+                // Dropping a stale generation returns its aggregate permit.
+            } else {
+                receiver.release_consumed();
+                if self.shared.data.clear_after(true)
+                    && let Some(blocking) = &self.shared.blocking
+                {
+                    blocking.wake();
+                }
+                return if self.shared.closed.load(Ordering::Acquire) {
+                    Err(Error::Closed)
+                } else {
+                    Err(Error::WouldBlock)
+                };
             }
         }
-        self.shared.data.clear_after(true);
-        if self.shared.closed.load(Ordering::Acquire) {
-            Err(Error::Closed)
-        } else {
-            Err(Error::WouldBlock)
+        // Reconnect churn cannot bury runtime/control work behind stale data.
+        receiver.release_consumed();
+        self.yield_pending = true;
+        self.shared.data.clear_after(false);
+        self.shared.data.reschedule();
+        if let Some(blocking) = &self.shared.blocking {
+            blocking.wake();
         }
+        Err(Error::WouldBlock)
     }
 
     /// Fair bulk drain into reusable caller storage. Never waits to fill a batch.
     /// Returns `WouldBlock` only if no message was appended; zero limit succeeds.
     pub fn try_recv_many_into(&mut self, max: usize, out: &mut Vec<Message>) -> Result<usize> {
+        self.drain_many(Self::bulk_budget(max), out)
+    }
+
+    pub(crate) fn try_recv_many_after_first(
+        &mut self,
+        max: usize,
+        out: &mut Vec<Message>,
+    ) -> Result<usize> {
+        let mut budget = Self::bulk_budget(max);
+        let first = out.last().expect("first message already received");
+        let _ = budget.account(first.max_message_size_len());
+        // Even an exhausted budget must release the first message's credits.
+        self.drain_many(budget, out)
+    }
+
+    fn bulk_budget(max: usize) -> DrainBudget {
+        DrainBudget::new(
+            max.min(super::recv::RECV_BATCH_MESSAGES),
+            omq_proto::flow::max_batch_bytes(),
+        )
+    }
+
+    fn drain_many(&mut self, mut budget: DrainBudget, out: &mut Vec<Message>) -> Result<usize> {
         let start = out.len();
-        let mut bytes = 0;
-        while out.len() - start < max && bytes < omq_proto::flow::max_batch_bytes() {
-            match self.try_recv() {
+        self.shared.data.begin_drain();
+        let mut error = None;
+        while !budget.exhausted() {
+            match self.drain_one(&mut budget) {
                 Ok(message) => {
-                    bytes += message.max_message_size_len();
                     out.push(message);
                 }
-                Err(error) if out.len() == start => return Err(error),
-                Err(_) => break,
+                Err(stopped) => {
+                    error = Some(stopped);
+                    break;
+                }
             }
         }
-        Ok(out.len() - start)
+        if let Some(receiver) = &mut self.receiver {
+            receiver.release_consumed();
+        }
+        if out.len() == start
+            && let Some(error) = error
+        {
+            Err(error)
+        } else {
+            Ok(out.len() - start)
+        }
     }
 }
 
 impl Drop for PeerRecvLane {
     fn drop(&mut self) {
-        let pending = {
-            let mut pending = self
-                .shared
-                .pending
-                .lock()
-                .expect("PEER receive registration poisoned");
-            self.shared.closed.store(true, Ordering::Release);
-            std::mem::take(&mut *pending)
-        };
-        drop(pending);
-        self.peers.clear();
-        self.shared.wake_all();
+        self.shutdown();
     }
 }

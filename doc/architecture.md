@@ -300,9 +300,10 @@ control, not TCP or ZMTP acknowledgment batching.
 
 ### PEER receive ownership
 
-PEER has independently bounded per-connection yrings. Ordinary `recv()` uses
-one shared, fair-draining application receiver; concurrent calls serialize
-that drain.
+PEER uses one fanring receiver per application receive lane, with one bounded
+producer per connection. Fanring selects ready connections; idle peers need
+no manual scan. Single-message receives rotate fairly across ready producers.
+Ordinary `recv()` shares one receiver; concurrent calls serialize that drain.
 
 Before bind/connect, `peer_recv_lanes(PeerRecvConfig)` can instead transfer
 receiving to exclusive application receivers. The actor assigns each handshake
@@ -311,6 +312,26 @@ identity to one receiver and preserves the assignment across reconnects.
 Move receivers to application threads; use ordinary socket clones for sends
 and control. Receive assignment creates no threads and changes no send
 semantics. TCP, IPC, and inproc use the same ownership model.
+
+```text
+connection A --> producer A --+
+connection B --> producer B --+--> lane 0 fanring --> application receiver 0
+                             |    shared count/byte budget
+connection C --> producer C -----> lane 1 fanring --> application receiver 1
+                                  separate budget
+
+handshake identity selects lane; connection I/O assignment stays unchanged
+```
+
+Each entry carries its connection's identity/generation state and an aggregate
+budget permit. Handover invalidates the old state; receive discards stale entries
+and returns their permits. Discards count toward both drain limits, with an
+async yield when cleanup exhausts a budget.
+
+Space credits follow fanring's batching above. Empty drains and bulk returns
+release partial credits before the application can park. Driver batches
+coalesce application wakes through `DataSignal`. Registration and shutdown
+share a cold lock; exclusive receive never takes it.
 
 | Default per receive worker | Bound |
 | --- | --- |
@@ -332,7 +353,8 @@ charged queue bytes.
 - A full PEER receive queue pauses inbound data, not replies, close commands,
   or cancellation. Local heartbeat receive-timeout accounting pauses while
   OMQ deliberately stops reading.
-- Dropping a worker receiver closes its peers, including idle peers.
+- Dropping a worker receiver closes its peers, including idle peers. Coordinated
+  fanring teardown immediately reclaims unread payloads even with live producers.
 - Identity handover invalidates unread old-generation messages before new
   traffic becomes visible. Ordinary disconnect leaves queued messages readable.
 - Socket close ends receive admission independently of send linger. A late

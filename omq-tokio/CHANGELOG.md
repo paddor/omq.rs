@@ -9,12 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- PEER receive lanes use fanring ready-peer selection and batched space credits,
+  preserving identity routing, reconnect fencing, and aggregate receive budgets.
 - *(deps)* Bump `fanring` to 0.3.7 and `yring` to 0.3.18 for
   `try_recv_batch_into_while` and `pop_into_while`.
 - `recv_batching` bulk receives move whole per-connection windows at once.
 
 ### Fixed
 
+- Receive-lane admission failure no longer evicts the current PEER connection
+  with the same identity.
+- Stale PEER reconnect entries count toward message and byte drain limits;
+  async cleanup yields when either limit is exhausted.
 - Late wire connections racing socket close or last-handle drop no longer
   panic while registering a producer on the closed receive fan-in.
 - Ordinary fan-in receives retain bounded slot-release batches instead of

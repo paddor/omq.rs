@@ -15,8 +15,7 @@ that needs native transports should use an OMQ.rs binding such as
 
 ## Install
 
-Published as `@paddor/omq` on
-[JSR](https://jsr.io/@paddor/omq) and
+Published as `@paddor/omq` on [JSR](https://jsr.io/@paddor/omq) and
 [npm](https://www.npmjs.com/package/@paddor/omq).
 
 ```sh
@@ -151,13 +150,17 @@ queue drop.
 ### Live Interop Tests
 
 Run `npm run test:interop` from this repo to start real `omq-tokio` WebSocket
-peers from the crates.io test fixture and verify NULL, PLAIN, and `lz4+ws://`
-traffic.
+peers from the local `../omq.rs` checkout and verify NULL, PLAIN, and
+`lz4+ws://` traffic. The Rust fixture depends directly on that sibling checkout
+so tests exercise transport changes under development, not an older release.
 
 Run `npm run test:browser` for the headless Firefox browser interop test. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
-`wss://`.
+`wss://`. The harness passes the temporary page origin explicitly to Rust
+listeners via `OMQ_TS_BROWSER_ORIGIN`. Production Rust listeners must configure
+`options.ws.allowed_origins` for their application origins; the default rejects
+browser requests carrying Origin.
 
 Run the opt-in mixed browser soak with:
 

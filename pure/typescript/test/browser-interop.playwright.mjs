@@ -184,7 +184,7 @@ async function verifySelfSignedWssCertificate(host, port) {
   ].join("\n");
 }
 
-function startBrowserPeerOnce(basePort) {
+function startBrowserPeerOnce(basePort, origin) {
   const child = spawn("cargo", [
     "run",
     "--quiet",
@@ -196,7 +196,11 @@ function startBrowserPeerOnce(basePort) {
     "127.0.0.1",
   ], {
     cwd: repoRoot,
-    env: { ...process.env, RUST_BACKTRACE: "1" },
+    env: {
+      ...process.env,
+      RUST_BACKTRACE: "1",
+      ...(origin ? { OMQ_TS_BROWSER_ORIGIN: origin } : {}),
+    },
   });
 
   let stdout = "";
@@ -243,13 +247,13 @@ function startBrowserPeerOnce(basePort) {
   });
 }
 
-async function startBrowserPeer({ beforeAttempt } = {}) {
+async function startBrowserPeer({ beforeAttempt, origin } = {}) {
   let lastError;
   for (let attempt = 0; attempt < 20; attempt++) {
     const basePort = await findFreePortRange(21);
     const cleanup = await beforeAttempt?.(basePort, attempt);
     try {
-      const peer = await startBrowserPeerOnce(basePort);
+      const peer = await startBrowserPeerOnce(basePort, origin);
       return { ...peer, basePort, attempts: attempt + 1 };
     } catch (error) {
       lastError = error;
@@ -311,7 +315,7 @@ test("Firefox browser interop with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    peer = await startBrowserPeer();
+    peer = await startBrowserPeer({ origin: new URL(staticServer.url).origin });
     const { basePort } = peer;
     const certSummary = await verifySelfSignedWssCertificate(
       "127.0.0.1",
@@ -395,7 +399,7 @@ test("Firefox browser soak with omq.rs WebSocket peer", async ({
   try {
     serverDir = await prepareStaticSite();
     staticServer = await startStaticServer(serverDir);
-    peer = await startBrowserPeer();
+    peer = await startBrowserPeer({ origin: new URL(staticServer.url).origin });
     const { basePort } = peer;
     await page.goto(staticServer.url, { waitUntil: "domcontentloaded" });
 

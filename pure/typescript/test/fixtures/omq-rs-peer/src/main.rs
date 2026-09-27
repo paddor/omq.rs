@@ -13,6 +13,13 @@ fn accept_alice(peer: &MechanismPeerInfo) -> bool {
     peer.username.as_deref() == Some("alice") && peer.password.as_deref() == Some("secret")
 }
 
+fn browser_options(mut options: Options) -> Options {
+    if let Ok(origin) = std::env::var("OMQ_TS_BROWSER_ORIGIN") {
+        options.ws.allowed_origins = vec![origin];
+    }
+    options
+}
+
 fn options(auth: &str) -> Options {
     match auth {
         "plain" => Options::default().plain_server(accept_alice),
@@ -116,6 +123,7 @@ fn wss_options(cert_pem: &[u8], key_pem: &[u8]) -> Options {
             server_cert_pem: Some(cert_pem.to_vec()),
             server_key_pem: Some(key_pem.to_vec()),
             accept_invalid_certs: false,
+            ..WssTls::default()
         },
         ..Options::default()
     }
@@ -127,6 +135,7 @@ fn plain_wss_options(cert_pem: &[u8], key_pem: &[u8]) -> Options {
             server_cert_pem: Some(cert_pem.to_vec()),
             server_key_pem: Some(key_pem.to_vec()),
             accept_invalid_certs: false,
+            ..WssTls::default()
         },
         ..Options::default().plain_server(accept_alice)
     }
@@ -242,7 +251,7 @@ async fn browser_sub_record(sub: Socket, name: &'static str, state: BrowserState
 
 async fn browser_bind_retry(endpoint: &Endpoint, options: Options, label: &str) -> Socket {
     for _ in 0..80 {
-        let pull = Socket::new(SocketType::Pull, options.clone());
+        let pull = Socket::new(SocketType::Pull, browser_options(options.clone()));
         if pull.bind(endpoint.clone()).await.is_ok() {
             return pull;
         }
@@ -290,7 +299,7 @@ async fn browser_pull_delayed_bind(
 }
 
 async fn bind_socket(socket_type: SocketType, endpoint: Endpoint, options: Options) -> Socket {
-    let socket = Socket::new(socket_type, options);
+    let socket = Socket::new(socket_type, browser_options(options));
     socket.bind(endpoint).await.expect("browser bind");
     socket
 }
@@ -327,7 +336,7 @@ async fn browser_bind(base: u16, host: String) {
     .await;
     let push_ws_monitor = push_ws.monitor();
 
-    let sub_ws = Socket::new(SocketType::Sub, Options::default());
+    let sub_ws = Socket::new(SocketType::Sub, browser_options(Options::default()));
     sub_ws
         .subscribe("news.")
         .await
@@ -655,10 +664,10 @@ async fn server_bind(endpoint: Endpoint, expected: String, reply: String, auth: 
         .await
         .expect("server recv timed out")
         .expect("server recv");
-    assert_eq!(msg.part_bytes(1).unwrap(), expected.as_bytes());
-    let routing_id = msg.part_bytes(0).unwrap();
+    assert_eq!(msg.part_bytes(0).unwrap(), expected.as_bytes());
+    let routing_id = msg.routing_id().expect("SERVER routing id");
     server
-        .send(Message::multipart([routing_id, Bytes::from(reply)]))
+        .send(Message::single(reply).with_routing_id(routing_id))
         .await
         .expect("server send");
     tokio::time::sleep(Duration::from_millis(200)).await;

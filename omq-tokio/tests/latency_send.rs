@@ -187,16 +187,21 @@ async fn latency_fallback_honors_small_send_hwm() {
         let server = context.socket(kind, options(b"server", WorkloadProfile::Latency));
         let client = context.socket(
             kind,
-            options(b"client", WorkloadProfile::Latency).send_hwm(1),
+            options(b"client", WorkloadProfile::Latency)
+                .send_hwm(1)
+                .arena_threshold(0),
         );
         let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
         client.connect(endpoint).await.unwrap();
         client.wait_connected(1, DEADLINE).await.unwrap();
         server.wait_connected(1, DEADLINE).await.unwrap();
-        let message = Message::single(Bytes::from(vec![42; 1024 * 1024]));
+        let message = Message::single(Bytes::from(vec![42; 64]));
         let mut accepted = 0;
-        // The borrowed runtime cannot drain the fallback queue during this loop.
-        // At most one direct tail plus one admitted inbox message can remain.
+        // External payloads require the driver; the direct writer only writes
+        // arena-only frames. This prevents completed kernel writes from being
+        // counted as queued messages, regardless of TCP buffering behavior.
+        // The borrowed runtime cannot drain during this synchronous loop, so
+        // at most one slot message plus one admitted inbox message can remain.
         for _ in 0..128 {
             match client.try_send(message.clone()) {
                 Ok(()) => accepted += 1,

@@ -601,22 +601,33 @@ async fn saturate(socket: &Socket, identity: &'static str) {
 async fn socket_clones_and_concurrently_shared_handle_preserve_sender_fifo() {
     // A one-slot ring forces frequent capacity handoffs between futures that
     // share one producer. Keep the ordinary batched case covered as well.
-    for hwm in [1, 16] {
-        shared_sender_fifo(hwm).await;
+    for profile in [
+        omq_tokio::options::WorkloadProfile::Throughput,
+        omq_tokio::options::WorkloadProfile::Latency,
+    ] {
+        for hwm in [1, 16] {
+            shared_sender_fifo(hwm, profile).await;
+        }
     }
 }
 
-async fn shared_sender_fifo(hwm: u32) {
+async fn shared_sender_fifo(hwm: u32, profile: omq_tokio::options::WorkloadProfile) {
     for io_threads in [1, 2, 4] {
         let context = Context::with_config(ContextConfig { io_threads });
         let server = context.socket(
             SocketType::Peer,
-            options("server").send_hwm(hwm).recv_hwm(hwm),
+            options("server")
+                .send_hwm(hwm)
+                .recv_hwm(hwm)
+                .workload_profile(profile),
         );
         let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
         let client = context.socket(
             SocketType::Peer,
-            options("client").send_hwm(hwm).recv_hwm(hwm),
+            options("client")
+                .send_hwm(hwm)
+                .recv_hwm(hwm)
+                .workload_profile(profile),
         );
         client.connect(endpoint).await.unwrap();
         connected(&client).await;
@@ -654,7 +665,7 @@ async fn shared_sender_fifo(hwm: u32) {
         .await
         .unwrap_or_else(|error| {
             panic!(
-                "PEER FIFO timeout: {error}; hwm={hwm}, io_threads={io_threads}, received={next:?}, senders_finished={:?}",
+                "PEER FIFO timeout: {error}; hwm={hwm}, profile={profile:?}, io_threads={io_threads}, received={next:?}, senders_finished={:?}",
                 senders.iter().map(tokio::task::JoinHandle::is_finished).collect::<Vec<_>>()
             );
         });

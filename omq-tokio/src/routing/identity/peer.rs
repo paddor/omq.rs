@@ -2,6 +2,7 @@
 //! acquire the table-update lock. Each peer serializes only its own producer.
 
 use crate::engine::SendPipeProducer;
+use crate::engine::send_pipe::SendPreparation;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use std::sync::Weak;
 
@@ -242,23 +243,19 @@ impl PeerRoutes {
 
     pub(super) fn try_send(
         &self,
-        mut message: Message,
+        message: Message,
         mandatory: bool,
         lanes: &SenderLanes,
     ) -> core::result::Result<(), TrySendError> {
-        let routing_id = message.routing_id();
-        let identity = message
-            .pop_front_payload()
-            .ok_or(TrySendError::Error(Error::Unroutable))?;
-        match self.try_send_to(identity.as_slice(), message, mandatory, lanes) {
+        match self.try_send_inner(
+            None,
+            message,
+            mandatory,
+            lanes,
+            SendPreparation::StripIdentity,
+        ) {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(SendRetry::Full(body, _))) => {
-                let mut returned = Message::with_prefix(identity.as_bytes(), body);
-                if let Some(id) = routing_id {
-                    returned = returned.with_routing_id(id);
-                }
-                Err(TrySendError::Full(returned))
-            }
+            Ok(Err(SendRetry::Full(message, _))) => Err(TrySendError::Full(message)),
             Err(Error::Closed) => Err(TrySendError::Closed),
             Err(error) => Err(TrySendError::Error(error)),
         }
@@ -267,15 +264,35 @@ impl PeerRoutes {
     pub(super) fn try_send_to(
         &self,
         identity: &[u8],
+        message: Message,
+        mandatory: bool,
+        lanes: &SenderLanes,
+    ) -> Result<core::result::Result<(), SendRetry>> {
+        self.try_send_inner(
+            Some(identity),
+            message,
+            mandatory,
+            lanes,
+            SendPreparation::Plain,
+        )
+    }
+
+    fn try_send_inner(
+        &self,
+        identity: Option<&[u8]>,
         mut message: Message,
         mandatory: bool,
         lanes: &SenderLanes,
+        preparation: SendPreparation,
     ) -> Result<core::result::Result<(), SendRetry>> {
         // One replacement retry keeps churn from turning a send into an
         // unbounded loop. The async caller yields on a further replacement.
         for _ in 0..2 {
             let table = self.table.load();
             let table = table.as_ref().ok_or(Error::Closed)?;
+            let identity = identity
+                .or_else(|| message.part_slice(0))
+                .ok_or(Error::Unroutable)?;
             let Some(route) = table.get(identity) else {
                 return if mandatory {
                     Err(Error::Unroutable)
@@ -285,7 +302,7 @@ impl PeerRoutes {
             };
             if route
                 .max_bytes
-                .is_some_and(|limit| message.max_message_size_len() > limit)
+                .is_some_and(|limit| preparation.bytes(&message) > limit)
             {
                 return Err(Error::Protocol(
                     "PEER message exceeds connection byte budget".into(),
@@ -299,7 +316,7 @@ impl PeerRoutes {
                 let mut producer = lane.producer.lock().expect("peer producer poisoned");
                 match producer.as_mut() {
                     Some(producer) => {
-                        let result = producer.try_send(message);
+                        let result = producer.try_send_prepared(message, preparation);
                         (result, Some(producer.space_available()))
                     }
                     None => (Err(SendPipeError::Closed(message)), None),
@@ -307,7 +324,10 @@ impl PeerRoutes {
             } else {
                 let mut target = route.target.lock().expect("peer send queue poisoned");
                 match target.as_mut() {
-                    Some(target) => (target.try_send(message), target.space_available()),
+                    Some(target) => (
+                        target.try_send_prepared(message, preparation),
+                        target.space_available(),
+                    ),
                     None => (Err(SendPipeError::Closed(message)), None),
                 }
             };

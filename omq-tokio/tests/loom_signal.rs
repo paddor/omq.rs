@@ -960,3 +960,68 @@ fn data_signal_skipped_mark_model(fenced: bool) {
         );
     }
 }
+
+// Compile the production transitions against Loom's admission mutex.
+#[path = "../src/engine/write_ownership.rs"]
+mod write_ownership;
+
+#[test]
+fn direct_idle_publication_cannot_miss_queue_admission() {
+    loom::model(|| {
+        use write_ownership::WriteOwnership;
+        let owner = Arc::new(Mutex::new(WriteOwnership::new()));
+        let queued = Arc::new(AtomicBool::new(false));
+        let producer = {
+            let owner = owner.clone();
+            let queued = queued.clone();
+            thread::spawn(move || {
+                let mut owner = owner.lock().unwrap();
+                if !owner.is_idle() {
+                    assert!(owner.claim_driver());
+                    queued.store(true, Ordering::Release);
+                }
+            })
+        };
+        owner
+            .lock()
+            .unwrap()
+            .publish_idle(|| !queued.load(Ordering::Acquire));
+        producer.join().unwrap();
+        assert!(!owner.lock().unwrap().is_idle() || !queued.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn pending_write_excludes_direct_send_until_completion_or_close() {
+    loom::model(|| {
+        use write_ownership::WriteOwnership;
+        let owner = Arc::new(Mutex::new(WriteOwnership::new()));
+        let pending = Arc::new(AtomicBool::new(true));
+        let sender = {
+            let owner = owner.clone();
+            let pending = pending.clone();
+            thread::spawn(move || {
+                let mut owner = owner.lock().unwrap();
+                if owner.is_idle() {
+                    assert!(!pending.load(Ordering::Acquire));
+                } else if !owner.is_closed() {
+                    owner.claim_driver();
+                }
+            })
+        };
+        let closer = {
+            let owner = owner.clone();
+            thread::spawn(move || owner.lock().unwrap().close())
+        };
+        // No mutex held while the driver's write future is pending/canceled.
+        thread::yield_now();
+        pending.store(false, Ordering::Release);
+        owner
+            .lock()
+            .unwrap()
+            .publish_idle(|| !pending.load(Ordering::Acquire));
+        sender.join().unwrap();
+        closer.join().unwrap();
+        assert!(owner.lock().unwrap().is_closed());
+    });
+}

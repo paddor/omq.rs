@@ -430,7 +430,7 @@ fn uses_latency_round_robin(t: SocketType, options: &Options) -> bool {
 
 fn uses_latency_exclusive(t: SocketType, options: &Options) -> bool {
     !options.mechanism.has_frame_transform()
-        && matches!(t, SocketType::Pair)
+        && matches!(t, SocketType::Pair | SocketType::Channel)
         && options.workload_profile == Some(omq_proto::WorkloadProfile::Latency)
 }
 
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn latency_profile_extends_client_and_pair() {
+    fn latency_profile_extends_client_pair_and_channel() {
         let io_pool = crate::context::IoPoolHandle::none();
         let latency = Options::default().workload_profile(WorkloadProfile::Latency);
 
@@ -548,6 +548,10 @@ mod tests {
         ));
         assert!(matches!(
             SendStrategy::for_socket_type(SocketType::Pair, &latency, &io_pool),
+            SendStrategy::Latency(_)
+        ));
+        assert!(matches!(
+            SendStrategy::for_socket_type(SocketType::Channel, &latency, &io_pool),
             SendStrategy::Latency(_)
         ));
         assert!(matches!(

@@ -38,6 +38,8 @@ use omq_tokio::exclusive::{Options as ExclusiveOptions, Socket as ExclusiveSocke
 use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketType};
 use std::net::Ipv4Addr;
 
+mod latency_common;
+
 fn parse_ep(s: &str) -> Endpoint {
     if let Ok(port) = s.parse::<u16>() {
         return Endpoint::Tcp {
@@ -1032,23 +1034,31 @@ fn with_commas(s: &str) -> String {
 
 async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup: usize) {
     let ep = Endpoint::Inproc { name };
+    let pair = latency_common::SocketPair::from_env();
 
     let rep_ep = ep.clone();
     tokio::spawn(async move {
-        let rep = Socket::new(SocketType::Rep, Options::default());
+        let rep = Socket::new(pair.responder(), pair.options(Options::default(), false));
         rep.bind(rep_ep).await.expect("rep bind");
+        let first = rep.recv().await.unwrap();
+        pair.validate(&first, size, false);
+        rep.send(first).await.unwrap();
         loop {
             let msg = rep.recv().await.unwrap();
             rep.send(msg).await.unwrap();
         }
     });
 
-    let req = Socket::new(SocketType::Req, Options::default());
+    let req = Socket::new(pair.requester(), pair.options(Options::default(), true));
     req.connect(ep).await.expect("req connect");
+    req.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("latency peer ready");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let payload = Bytes::from(vec![b'x'; size]);
-    let msg = Message::single(payload);
+    let msg = pair.request(size);
+    req.send(msg.clone()).await.unwrap();
+    pair.validate(&req.recv().await.unwrap(), size, true);
 
     for _ in 0..warmup {
         req.send(msg.clone()).await.unwrap();
@@ -1074,9 +1084,13 @@ async fn run_inproc_latency(name: String, size: usize, iterations: usize, warmup
 }
 
 async fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
-    let rep = ctx.socket(SocketType::Rep, bench_options(size));
+    let pair = latency_common::SocketPair::from_env();
+    let rep = ctx.socket(pair.responder(), pair.options(bench_options(size), false));
     let bound = rep.bind(ep).await.expect("rep bind");
     report_bound_port(ctx, &bound).await;
+    let first = rep.recv().await.unwrap();
+    pair.validate(&first, size, false);
+    rep.send(first).await.unwrap();
     loop {
         let msg = rep.recv().await.unwrap();
         rep.send(msg).await.unwrap();
@@ -1108,15 +1122,21 @@ async fn run_req(
     iterations: usize,
     warmup: usize,
 ) {
-    let req = ctx.socket(SocketType::Req, bench_options(size));
+    let pair = latency_common::SocketPair::from_env();
+    let req = ctx.socket(pair.requester(), pair.options(bench_options(size), true));
     req.connect(ep).await.expect("req connect");
+    req.wait_connected(1, Duration::from_secs(5))
+        .await
+        .expect("latency peer ready");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let payload = Bytes::from(vec![b'x'; size]);
+    let msg = pair.request(size);
+    req.send(msg.clone()).await.unwrap();
+    pair.validate(&req.recv().await.unwrap(), size, true);
 
     for _ in 0..warmup {
-        req.send(Message::single(payload.clone())).await.unwrap();
+        req.send(msg.clone()).await.unwrap();
         req.recv().await.unwrap();
     }
 
@@ -1125,7 +1145,7 @@ async fn run_req(
     let mut rtts = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t0 = Instant::now();
-        req.send(Message::single(payload.clone())).await.unwrap();
+        req.send(msg.clone()).await.unwrap();
         req.recv().await.unwrap();
         rtts.push(t0.elapsed().as_nanos() as u64);
     }

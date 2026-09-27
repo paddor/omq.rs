@@ -19,8 +19,8 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 
+use crate::engine::send_pipe::SendPreparation;
 use crate::engine::signal::StateSignal;
-use crate::engine::transmit_slot::TryFrameResult;
 use crate::engine::{PeerDriverData, PeerDriverHandle, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use crate::routing::{RepEnvelope, rep_reply_with_envelope};
@@ -47,23 +47,28 @@ enum PeerTarget {
 
 impl PeerTarget {
     fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
+        self.try_send_prepared(msg, SendPreparation::Plain)
+    }
+
+    fn try_send_prepared(
+        &mut self,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> core::result::Result<(), SendPipeError> {
         match self {
-            Self::Pipe(p) | Self::RepInproc(p) => p.try_send(msg),
-            Self::Direct(target) => match target.try_encode(&msg) {
-                TryFrameResult::Ok => Ok(()),
-                TryFrameResult::Full => Err(SendPipeError::Full(msg)),
-                TryFrameResult::Dead => Err(SendPipeError::Closed(msg)),
-                TryFrameResult::Ineligible => unreachable!("direct target handles ineligible"),
-            },
-            Self::Inbox(tx) => match tx.try_send(PeerDriverData::SendMessage(msg)) {
-                Ok(()) => Ok(()),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(PeerDriverData::SendMessage(
-                    m,
-                ))) => Err(SendPipeError::Full(m)),
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(
-                    PeerDriverData::SendMessage(m),
-                )) => Err(SendPipeError::Closed(m)),
-                Err(_) => unreachable!("message send cannot return encoded data"),
+            Self::Pipe(p) | Self::RepInproc(p) => p.try_send_prepared(msg, preparation),
+            Self::Direct(target) => target.try_send_prepared(msg, preparation),
+            Self::Inbox(tx) => match tx.try_reserve() {
+                Ok(permit) => {
+                    permit.send(PeerDriverData::SendMessage(preparation.prepare(msg)));
+                    Ok(())
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                    Err(SendPipeError::Full(msg))
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    Err(SendPipeError::Closed(msg))
+                }
             },
         }
     }
@@ -107,7 +112,7 @@ impl Submitter {
 
     pub(crate) fn try_send(
         &self,
-        mut msg: Message,
+        msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
         if let Some(peer) = &self.peer {
             return peer.try_send(msg, self.router_mandatory, &self.lanes);
@@ -131,19 +136,12 @@ impl Submitter {
             }
             return Ok(());
         };
-        let routing_id = msg.routing_id();
-        let identity = msg
-            .pop_front_payload()
-            .expect("routing frame checked above");
-        match peer.target.try_send(msg) {
+        match peer
+            .target
+            .try_send_prepared(msg, SendPreparation::StripIdentity)
+        {
             Ok(()) => Ok(()),
-            Err(SendPipeError::Full(body)) => {
-                let mut returned = Message::with_prefix(identity.as_bytes(), body);
-                if let Some(id) = routing_id {
-                    returned = returned.with_routing_id(id);
-                }
-                Err(omq_proto::error::TrySendError::Full(returned))
-            }
+            Err(SendPipeError::Full(returned)) => Err(TrySendError::Full(returned)),
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
                 if self.router_mandatory {
@@ -272,8 +270,24 @@ impl Submitter {
                 .wait_until(|| self.peer_pipe_ready(identity, notified))
                 .await;
         } else if let Some((notified, false)) = waiting {
-            let seen = notified.generation();
-            notified.changed_after(seen).await;
+            notified
+                .wait_until(|| {
+                    let state = self.inner.lock().expect("identity inner poisoned");
+                    let peer = state
+                        .identity_to_peer
+                        .get(identity)
+                        .and_then(|id| state.peers.get(id));
+                    peer.is_none_or(|peer| match &peer.target {
+                        PeerTarget::Direct(target) => {
+                            target.send_ready()
+                                || target
+                                    .space_available()
+                                    .is_none_or(|space| !Arc::ptr_eq(&space, &notified))
+                        }
+                        _ => true,
+                    })
+                })
+                .await;
         } else {
             tokio::task::yield_now().await;
         }
@@ -492,7 +506,7 @@ impl IdentitySend {
     }
 
     pub(crate) fn needs_transmit_slot(&self) -> bool {
-        self.peer.is_none() && self.latency_profile
+        self.latency_profile
     }
 
     #[expect(clippy::needless_pass_by_value)]
@@ -503,7 +517,7 @@ impl IdentitySend {
         identity: Bytes,
         is_inproc: bool,
     ) {
-        let target = if self.latency_profile {
+        let target = if self.latency_profile && self.peer.is_none() {
             PeerTarget::Direct(PeerOutbound::from_handle(&handle))
         } else if let Some(ref pipe_handle) = handle.send_pipe {
             if let Some(pipe) = pipe_handle.lock().expect("identity send pipe").take() {

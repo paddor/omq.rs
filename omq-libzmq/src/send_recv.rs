@@ -1249,14 +1249,14 @@ fn try_pop_dual(
     cons.fast
         .prefetch_and_pop_with_full()
         .map(|(item, released_full_slot)| PoppedMessage {
-            message: item.into_message(),
+            message: item,
             released_full_slot,
         })
         .or_else(|| {
             cons.pump
                 .prefetch_and_pop_with_full()
                 .map(|(item, released_full_slot)| PoppedMessage {
-                    message: item.into_message(),
+                    message: item,
                     released_full_slot,
                 })
         })

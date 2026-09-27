@@ -14,8 +14,8 @@ pub(crate) mod rate_limit;
 pub(crate) mod send_pipe;
 pub(crate) mod signal;
 pub(crate) mod transmit_slot;
+pub(crate) mod write_ownership;
 
-pub use crate::socket::recv::RecvItem;
 pub use driver::{
     AuthenticatedRecvItem, ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverData,
     PeerDriverHandle, PeerEvent, RecvSink, RecvSinkConfig, YringSink,

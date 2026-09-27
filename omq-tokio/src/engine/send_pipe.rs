@@ -6,6 +6,34 @@ use std::collections::VecDeque;
 use omq_proto::message::Message;
 
 use super::signal::{DataSignal, StateSignal};
+use super::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+
+/// Routing metadata is consumed only after capacity has been admitted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SendPreparation {
+    Plain,
+    StripIdentity,
+}
+
+impl SendPreparation {
+    pub(crate) fn bytes(self, message: &Message) -> usize {
+        let bytes = message.max_message_size_len();
+        match self {
+            Self::Plain => bytes,
+            Self::StripIdentity => bytes.saturating_sub(
+                message.part_slice(0).map_or(0, <[u8]>::len)
+                    + std::mem::size_of::<omq_proto::message::Payload>(),
+            ),
+        }
+    }
+
+    pub(crate) fn prepare(self, mut message: Message) -> Message {
+        if matches!(self, Self::StripIdentity) {
+            message.pop_front_payload();
+        }
+        message
+    }
+}
 
 pub(crate) type SendPipeProducerHandle = Arc<Mutex<Option<SendPipeProducer>>>;
 
@@ -61,6 +89,7 @@ enum SendPipeConsumerInner {
 #[derive(Debug)]
 pub(crate) struct SendPipeProducer {
     inner: SendPipeProducerInner,
+    direct_slot: Option<Arc<PeerTransmitSlot>>,
     data_signal: Arc<DataSignal>,
     space_available: Arc<StateSignal>,
     pub(crate) above_lwm: Arc<AtomicBool>,
@@ -103,6 +132,7 @@ pub(crate) fn send_pipe_with_mode(
     (
         SendPipeProducer {
             inner: producer,
+            direct_slot: None,
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
             above_lwm: above_lwm.clone(),
@@ -132,6 +162,7 @@ pub(crate) fn peer_send_pipe(
     (
         SendPipeProducer {
             inner: SendPipeProducerInner::Peer(producer),
+            direct_slot: None,
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
             above_lwm: above_lwm.clone(),
@@ -146,12 +177,18 @@ pub(crate) fn peer_send_pipe(
 }
 
 impl SendPipeProducer {
+    pub(crate) fn set_direct_slot(&mut self, slot: Arc<PeerTransmitSlot>) {
+        assert!(matches!(self.inner, SendPipeProducerInner::Peer(_)));
+        self.direct_slot = Some(slot);
+    }
+
     pub(crate) fn register_peer_lane(&self) -> Option<Self> {
         let SendPipeProducerInner::Peer(peer) = &self.inner else {
             return None;
         };
         peer.register().map(|producer| Self {
             inner: SendPipeProducerInner::Peer(producer),
+            direct_slot: self.direct_slot.clone(),
             data_signal: self.data_signal.clone(),
             space_available: self.space_available.clone(),
             above_lwm: self.above_lwm.clone(),
@@ -181,26 +218,53 @@ impl SendPipeProducer {
 
     #[inline]
     pub(crate) fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
+        self.try_send_prepared(msg, SendPreparation::Plain)
+    }
+
+    pub(crate) fn try_send_prepared(
+        &mut self,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> core::result::Result<(), SendPipeError> {
         if let SendPipeProducerInner::Peer(peer) = &mut self.inner {
-            return peer.try_send(msg);
+            let Some(slot) = &self.direct_slot else {
+                return peer.try_send_prepared(msg, preparation, |_| false);
+            };
+            let mut state = slot.direct_writer().expect("direct slot writer").lock();
+            if state.is_closed() {
+                return Err(SendPipeError::Closed(msg));
+            }
+            // Registration, ring capacity and the shared budget all precede
+            // the direct attempt. Hold admission through fallback publication.
+            let mut sent_direct = false;
+            let result = peer.try_send_prepared(msg, preparation, |message| {
+                sent_direct = state.try_send(slot, message) == TryFrameResult::Ok;
+                sent_direct
+            });
+            if result.is_ok() && !sent_direct {
+                state.queued();
+            }
+            return result;
         }
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
-            return self.try_send_conflate(msg);
+            return self.try_send_conflate(msg, preparation);
         };
         if producer.is_consumer_dropped() {
             return Err(SendPipeError::Closed(msg));
         }
-        match producer.push(msg) {
+        if producer.is_full() {
+            self.above_lwm.store(true, Ordering::Release);
+            return Err(SendPipeError::Full(msg));
+        }
+        // Exclusive producer access guarantees capacity until this push.
+        match producer.push(preparation.prepare(msg)) {
             Ok(()) => {
                 producer.flush();
                 self.data_signal.mark();
                 Ok(())
             }
-            Err(returned) if producer.is_consumer_dropped() => Err(SendPipeError::Closed(returned)),
-            Err(returned) => {
-                self.above_lwm.store(true, Ordering::Release);
-                Err(SendPipeError::Full(returned))
-            }
+            Err(_) if producer.is_consumer_dropped() => Ok(()),
+            Err(_) => unreachable!("admitted SPSC capacity cannot be stolen"),
         }
     }
 
@@ -262,14 +326,18 @@ impl SendPipeProducer {
     }
 
     #[cold]
-    fn try_send_conflate(&self, msg: Message) -> core::result::Result<(), SendPipeError> {
+    fn try_send_conflate(
+        &self,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> core::result::Result<(), SendPipeError> {
         let SendPipeProducerInner::Conflate(state) = &self.inner else {
             unreachable!("queue send handled by try_send")
         };
         if state.consumer_dropped.load(Ordering::Acquire) {
             return Err(SendPipeError::Closed(msg));
         }
-        *state.slot.lock().expect("conflate send pipe") = Some(msg);
+        *state.slot.lock().expect("conflate send pipe") = Some(preparation.prepare(msg));
         self.data_signal.mark();
         Ok(())
     }
@@ -328,9 +396,13 @@ impl Drop for SendPipeProducer {
 }
 
 impl SendPipeConsumer {
+    pub(crate) fn needs_drain(&self) -> bool {
+        !self.is_empty() || self.is_disconnected() || !self.data_signal.is_idle()
+    }
+
     pub(crate) async fn ready(&self) {
         loop {
-            if !self.is_empty() || self.is_disconnected() || !self.data_signal.is_idle() {
+            if self.needs_drain() {
                 return;
             }
             self.data_signal.ready().await;

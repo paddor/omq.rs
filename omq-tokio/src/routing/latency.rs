@@ -7,7 +7,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::engine::transmit_slot::TryFrameResult;
 use crate::engine::{PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use omq_proto::error::{Error, Result, TrySendError};
@@ -126,80 +125,93 @@ impl Submitter {
                 Err(TrySendError::Closed) => return Err(Error::Closed),
             }
 
-            let notified = {
-                let state = self.state.lock().expect("latency send state");
-                state.space_available()
-            };
-            let Some(notified) = notified else {
-                if self.closed.load(Ordering::Acquire) {
-                    return Err(Error::Closed);
-                }
-                let seen = self.changed.generation();
-                let changed = self.changed.changed_after(seen);
-                tokio::pin!(changed);
-                match self.try_send(msg) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Full(returned)) => msg = returned,
-                    Err(TrySendError::Error(error)) => return Err(error),
-                    Err(TrySendError::Closed) => return Err(Error::Closed),
-                }
-                changed.await;
-                continue;
-            };
-            let seen = notified.generation();
-            let notified = notified.changed_after(seen);
-            tokio::pin!(notified);
-            match self.try_send(msg) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Full(returned)) => msg = returned,
-                Err(TrySendError::Error(error)) => return Err(error),
-                Err(TrySendError::Closed) => return Err(Error::Closed),
-            }
-            notified.await;
+            self.wait_send_progress().await;
         }
     }
 
     pub(crate) async fn wait_send_progress(&self) {
-        let notified = {
+        let seen = self.changed.generation();
+        let (mut peers, notified) = {
             let state = self.state.lock().expect("latency send state");
-            state.space_available()
+            (
+                state
+                    .peers
+                    .iter()
+                    .map(|peer| peer.target.clone())
+                    .collect::<smallvec::SmallVec<[PeerOutbound; 1]>>(),
+                state.space_available(),
+            )
         };
-        if let Some(notified) = notified {
-            let seen = notified.generation();
-            notified.changed_after(seen).await;
+        if peers.len() == 1 {
+            let peer = peers.pop().unwrap();
+            tokio::select! {
+                () = peer.wait_capacity() => {},
+                () = self.changed.changed_after(seen) => {},
+            }
+            return;
+        }
+        if !peers.is_empty() {
+            use futures::StreamExt;
+            // A muted multi-peer route needs one waiter per destination.
+            // Single-peer waits and synchronous Full retries allocate nothing.
+            let mut waits: futures::stream::FuturesUnordered<_> = peers
+                .into_iter()
+                .map(|peer| async move { peer.wait_capacity().await })
+                .collect();
+            tokio::select! {
+                _ = waits.next() => {},
+                () = self.changed.changed_after(seen) => {},
+            }
+            return;
+        }
+        let ready = || {
+            if self.closed.load(Ordering::Acquire) {
+                return true;
+            }
+            let state = self.state.lock().expect("latency send state");
+            state.peers.iter().any(|peer| peer.target.send_ready())
+                || (state.peers.is_empty()
+                    && state
+                        .pending
+                        .iter()
+                        .any(|pipe| !pipe.tx.is_alive() || pipe.tx.is_below_lwm()))
+        };
+        if ready() {
+            return;
+        }
+        if let Some(signal) = notified {
+            tokio::select! {
+                () = signal.wait_until(ready) => {},
+                () = self.changed.changed_after(seen) => {},
+            }
         } else {
-            let seen = self.changed.generation();
             self.changed.changed_after(seen).await;
         }
     }
 
-    pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+    pub(crate) fn try_send(&self, mut msg: Message) -> core::result::Result<(), TrySendError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Closed);
         }
 
         let mut state = self.state.lock().expect("latency send state");
+        state.peers.retain(|peer| peer.target.is_alive());
         if state.peers.is_empty() {
             return state.try_send_pending(msg);
         }
 
-        let mut full = false;
         let count = state.peers.len();
         for _ in 0..count {
             let index = state.cursor % count;
             state.cursor = (index + 1) % count;
-            match state.peers[index].target.try_encode(&msg) {
-                TryFrameResult::Ok => return Ok(()),
-                TryFrameResult::Full => full = true,
-                TryFrameResult::Dead => return Err(TrySendError::Closed),
-                TryFrameResult::Ineligible => unreachable!("latency route needs direct target"),
+            match state.peers[index].target.try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err(SendPipeError::Full(returned) | SendPipeError::Closed(returned)) => {
+                    msg = returned;
+                }
             }
         }
-        if full {
-            Err(TrySendError::Full(msg))
-        } else {
-            Err(TrySendError::Closed)
-        }
+        Err(TrySendError::Full(msg))
     }
 }
 
@@ -288,23 +300,31 @@ mod tests {
         (client, server)
     }
 
-    fn direct_peer_handle(slot: Arc<PeerTransmitSlot>) -> PeerDriverHandle {
+    fn direct_peer_handle(
+        slot: Arc<PeerTransmitSlot>,
+    ) -> (
+        PeerDriverHandle,
+        tokio::sync::mpsc::Receiver<crate::engine::PeerDriverData>,
+    ) {
         let (tcp, _peer) = tcp_pair();
         let direct = crate::socket::dispatch::DirectTcpWriter::new(tcp);
         let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
-        let (data_inbox, _data_rx) = tokio::sync::mpsc::channel(1);
-        PeerDriverHandle {
-            inbox,
-            data_inbox,
-            cancel: CancellationToken::new(),
-            transmit_slot: Some(slot),
-            direct_tcp_writer: Some(Arc::new(direct)),
-            send_pipe: None,
-        }
+        let (data_inbox, data_rx) = tokio::sync::mpsc::channel(1);
+        (
+            PeerDriverHandle {
+                inbox,
+                data_inbox,
+                cancel: CancellationToken::new(),
+                transmit_slot: Some(slot),
+                direct_tcp_writer: Some(Arc::new(direct)),
+                send_pipe: None,
+            },
+            data_rx,
+        )
     }
 
     #[tokio::test]
-    async fn direct_writer_full_slot_waits_for_space_signal() {
+    async fn direct_writer_full_inbox_waits_for_space_signal() {
         let mut send = LatencySend::new(&Options::default().send_hwm(1));
         let submitter = send.submitter();
         let slot = PeerTransmitSlot::new(
@@ -322,7 +342,8 @@ mod tests {
             false,
         );
         slot.handshake_done.store(true, Ordering::Release);
-        send.connection_added(7, &direct_peer_handle(slot.clone()));
+        let (handle, mut receiver) = direct_peer_handle(slot.clone());
+        send.connection_added(7, &handle);
 
         submitter
             .try_send(Message::single(Bytes::from(vec![
@@ -343,21 +364,59 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(
             !blocked.is_finished(),
-            "send should wait while transmit slot is full"
+            "send should wait while inbox is full"
         );
 
-        let mut drained = Vec::new();
-        let drain = slot.drain(&mut drained, 1024);
-        assert!(!drained.is_empty());
-        if drain.space_available {
-            slot.space_available.notify_changed();
-        }
+        receiver.try_recv().unwrap();
+        slot.space_available.notify_changed();
 
         tokio::time::timeout(Duration::from_secs(1), blocked)
             .await
-            .expect("send did not wake after transmit slot space")
+            .expect("send did not wake after inbox space")
             .expect("send task panicked")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbox_wait_observes_any_peer_capacity_and_route_retirement() {
+        use futures::FutureExt;
+        for peers in [1, 2] {
+            let mut send = LatencySend::new(&Options::default());
+            let submitter = send.submitter();
+            let mut receivers = Vec::new();
+            for id in 0..peers {
+                let (data_inbox, receiver) = tokio::sync::mpsc::channel(1);
+                let handle = PeerDriverHandle {
+                    inbox: tokio::sync::mpsc::channel(1).0,
+                    data_inbox,
+                    cancel: CancellationToken::new(),
+                    transmit_slot: None,
+                    direct_tcp_writer: None,
+                    send_pipe: None,
+                };
+                send.connection_added(id, &handle);
+                receivers.push(receiver);
+                submitter.try_send(Message::single("full")).unwrap();
+            }
+            assert!(matches!(
+                submitter.try_send(Message::single("retry")),
+                Err(omq_proto::TrySendError::Full(_))
+            ));
+            let wait = submitter.wait_send_progress();
+            tokio::pin!(wait);
+            assert!(wait.as_mut().now_or_never().is_none());
+            receivers.last_mut().unwrap().try_recv().unwrap();
+            assert!(
+                wait.as_mut().now_or_never().is_some(),
+                "any destination must wake the sender"
+            );
+            submitter.try_send(Message::single("refill")).unwrap();
+            let retired = submitter.wait_send_progress();
+            tokio::pin!(retired);
+            assert!(retired.as_mut().now_or_never().is_none());
+            send.connection_removed(peers - 1);
+            assert!(retired.as_mut().now_or_never().is_some());
+        }
     }
 
     #[test]
@@ -378,7 +437,8 @@ mod tests {
             #[cfg(feature = "ws")]
             false,
         );
-        send.connection_added(2, &direct_peer_handle(slot.clone()));
+        let (handle, _receiver) = direct_peer_handle(slot.clone());
+        send.connection_added(2, &handle);
 
         let state = send.state.lock().expect("latency send state");
         let peer_signal = match &state.peers[0] {

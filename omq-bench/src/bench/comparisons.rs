@@ -100,6 +100,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[],
     },
     ImplDef {
+        name: "omq-tokio-1t-spin50",
+        binary_from: Some("omq-tokio-1t"),
+        prefix: "s",
+        class: Some(ImplClass::Classic),
+        main: false,
+        transports: &[Tcp, Ipc, Inproc],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "inproc-latency",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[("OMQ_BENCH_RECV_SPIN_US", "50")],
+    },
+    ImplDef {
         name: "omq-tokio-mt",
         binary_from: Some("omq-tokio-ct"),
         prefix: "m",
@@ -362,7 +378,37 @@ fn find_impl(name: &str) -> Option<&'static ImplDef> {
 }
 
 fn supports_pushpull(def: &ImplDef) -> bool {
-    def.name != "omq-tokio-exclusive"
+    !matches!(def.name, "omq-tokio-exclusive" | "omq-tokio-1t-spin50")
+}
+
+fn supports_latency_pair(def: &ImplDef, pair: &str, profile: &str) -> bool {
+    (pair == "req-rep" && profile == "default")
+        || (def.binary_from.unwrap_or(def.name) == "libzmq"
+            && profile == "default"
+            && matches!(pair, "router-dealer" | "router-router" | "pair"))
+        || (def.name != "omq-tokio-exclusive"
+            && matches!(
+                def.binary_from.unwrap_or(def.name),
+                "omq-tokio-1t" | "omq-tokio-ct"
+            ))
+}
+
+fn latency_env<'a>(def: &ImplDef, pair: &'a str, profile: &'a str) -> Vec<(&'a str, &'a str)> {
+    let mut env = def.env.to_vec();
+    env.push(("OMQ_BENCH_LATENCY_PAIR", pair));
+    env.push(("OMQ_BENCH_WORKLOAD_PROFILE", profile));
+    // Keep inherited experiment settings from silently changing the baseline.
+    if !env.iter().any(|&(key, _)| key == "OMQ_BENCH_RECV_SPIN_US") {
+        env.push(("OMQ_BENCH_RECV_SPIN_US", "0"));
+    }
+    if !env.iter().any(|&(key, _)| key == "OMQ_IO_THREADS") {
+        match def.binary_from.unwrap_or(def.name) {
+            "omq-tokio-1t" => env.push(("OMQ_IO_THREADS", "1")),
+            "omq-tokio-ct" => env.push(("OMQ_IO_THREADS", "0")),
+            _ => {}
+        }
+    }
+    env
 }
 
 fn supports_fanio(def: &ImplDef) -> bool {
@@ -462,7 +508,6 @@ fn addr_for(
 
 // ---- Build ----------------------------------------------------------------
 
-#[expect(clippy::too_many_lines)]
 fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMap<String, PathBuf> {
     let mut binaries: HashMap<String, PathBuf> = HashMap::new();
     let mut built: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -492,26 +537,9 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 if needs_mt_runtime {
                     features.push("bench-mt-runtime");
                 }
-                let mut cmd = vec![
-                    "cargo",
-                    "build",
-                    "--release",
-                    "-p",
-                    "omq-tokio",
-                    "--bin",
-                    "omq_bench_peer_tokio",
-                    "-q",
-                ];
-                let feat_str;
-                if !features.is_empty() {
-                    feat_str = features.join(",");
-                    cmd.push("--features");
-                    cmd.push(&feat_str);
-                }
-                run_build(&cmd);
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("target/release/omq_bench_peer_tokio"),
+                    process::build_omq_peer("omq_bench_peer_tokio", &features),
                 );
             }
             "omq-tokio-1t" => {
@@ -522,26 +550,9 @@ fn build_peers(impl_names: &[&str], needs_ws: bool, needs_curve: bool) -> HashMa
                 if needs_curve {
                     features.push("curve");
                 }
-                let mut cmd = vec![
-                    "cargo",
-                    "build",
-                    "--release",
-                    "-p",
-                    "omq-tokio",
-                    "--bin",
-                    "omq_bench_peer_blocking",
-                    "-q",
-                ];
-                let feat_str;
-                if !features.is_empty() {
-                    feat_str = features.join(",");
-                    cmd.push("--features");
-                    cmd.push(&feat_str);
-                }
-                run_build(&cmd);
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("target/release/omq_bench_peer_blocking"),
+                    process::build_omq_peer("omq_bench_peer_blocking", &features),
                 );
             }
             "libzmq" => {
@@ -1379,6 +1390,8 @@ fn run_latency_cell(
     warmup: u64,
     timeout: u64,
     base_port: u16,
+    pair: &str,
+    profile: &str,
 ) -> Option<LatencyResult> {
     let binary_str = binary.to_str().unwrap();
     let peer_binary_str = peer_binary.to_str().unwrap();
@@ -1388,7 +1401,7 @@ fn run_latency_cell(
 
     if transport == TransportKind::Inproc {
         let name = addr_for(transport, def.prefix, 0, base_port, def.name);
-        let env: Vec<(&str, &str)> = def.env.to_vec();
+        let env = latency_env(def, pair, profile);
         let (out, cpu) = process::capture_with_cpu(
             &[
                 binary_str,
@@ -1403,6 +1416,7 @@ fn run_latency_cell(
             Duration::from_secs(timeout + 30),
         )?;
         let r = parse::parse_latency(&out)?;
+        validate_latency_result(&r, iterations);
         return Some(LatencyResult {
             p50_us: r.p50_us,
             p99_us: r.p99_us,
@@ -1418,8 +1432,8 @@ fn run_latency_cell(
     let addr = addr_for(transport, def.prefix, 0, base_port, def.name);
     let connect_addr;
 
-    let rep_env: Vec<(&str, &str)> = def.env.to_vec();
-    let req_env: Vec<(&str, &str)> = def.env.to_vec();
+    let rep_env = latency_env(def, pair, profile);
+    let req_env = rep_env.clone();
 
     let mut rep_cmd = vec![peer_binary_str, latency_rep_subcmd(def)];
     if transport == TransportKind::Tcp {
@@ -1469,6 +1483,7 @@ fn run_latency_cell(
 
     let (output, _measured_req_cpu) = req_result?;
     let r = parse::parse_latency(&output)?;
+    validate_latency_result(&r, iterations);
 
     let req_cpu = r.req_cpu;
     let cpu_time = match (req_cpu, rep_cpu) {
@@ -1486,6 +1501,16 @@ fn run_latency_cell(
         req_cpu,
         elapsed: r.elapsed,
     })
+}
+
+fn validate_latency_result(result: &parse::LatencyResult, iterations: u64) {
+    assert_eq!(
+        result.iterations, iterations,
+        "incomplete latency measurement"
+    );
+    let quantiles = [result.p50_us, result.p99_us, result.p999_us, result.max_us];
+    assert!(quantiles.iter().all(|v| v.is_finite() && *v >= 0.0));
+    assert!(quantiles.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
 fn representative_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellResult {
@@ -1707,6 +1732,9 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             p999_us: None,
                             max_us: None,
                             iterations: None,
+                            latency_pair: None,
+                            workload_profile: None,
+                            recv_spin_us: None,
                             peer_min: None,
                             peer_max: None,
                             peer_p10: None,
@@ -1736,67 +1764,99 @@ pub(crate) fn run(args: ComparisonsArgs) {
         // Latency
         if !args.no_latency {
             let latency_sizes = latency_sizes_from(&sizes);
-            eprintln!("\n=== Latency / {transport_str} ===");
-            print_latency_header(&active_impls);
+            for pair in &args.latency_pairs {
+                for profile in &args.latency_profiles {
+                    let latency_impls: Vec<&str> = active_impls
+                        .iter()
+                        .copied()
+                        .filter(|name| {
+                            let def = find_impl(name).unwrap();
+                            supports_latency_pair(def, pair, profile)
+                                && (transport != TransportKind::Inproc
+                                    || !def.inproc_lat_subcmd.is_empty())
+                        })
+                        .collect();
+                    if latency_impls.is_empty() {
+                        continue;
+                    }
+                    eprintln!("\n=== Latency / {pair} / {profile} / {transport_str} (p99 us) ===");
+                    print_latency_header(&latency_impls);
 
-            for &size in &latency_sizes {
-                let mut cells = Vec::with_capacity(active_impls.len());
-                for &impl_name in &active_impls {
-                    let def = find_impl(impl_name).unwrap();
-                    let binary = binaries[impl_name].as_path();
+                    for &size in &latency_sizes {
+                        let mut cells = Vec::with_capacity(latency_impls.len());
+                        for &impl_name in &latency_impls {
+                            let def = find_impl(impl_name).unwrap();
+                            let binary = binaries[impl_name].as_path();
 
-                    let result = run_latency_cell(
-                        binary,
-                        binary,
-                        def,
-                        transport,
-                        size,
-                        latency_iters,
-                        latency_warmup,
-                        latency_timeout,
-                        base_port,
-                    );
+                            let result = run_latency_cell(
+                                binary,
+                                binary,
+                                def,
+                                transport,
+                                size,
+                                latency_iters,
+                                latency_warmup,
+                                latency_timeout,
+                                base_port,
+                                pair,
+                                profile,
+                            );
 
-                    match result {
-                        Some(lat) => {
-                            let row = ComparisonRow {
-                                run_id: run_id.clone(),
-                                impl_name: impl_name.to_string(),
-                                kind: "latency".to_string(),
-                                transport: transport_str.to_string(),
-                                msg_size: size,
-                                peers: None,
-                                msgs_s: None,
-                                mbps: None,
-                                elapsed: lat.elapsed,
-                                cpu_time: lat.cpu_time,
-                                push_cpu_time: None,
-                                pull_cpu_time: None,
-                                pub_cpu_time: None,
-                                req_cpu_time: lat.req_cpu,
-                                p50_us: Some(lat.p50_us),
-                                p99_us: Some(lat.p99_us),
-                                p999_us: Some(lat.p999_us),
-                                max_us: Some(lat.max_us),
-                                iterations: Some(lat.iterations),
-                                peer_min: None,
-                                peer_max: None,
-                                peer_p10: None,
-                                peer_p25: None,
-                                peer_median: None,
-                                peer_p75: None,
-                                peer_p90: None,
-                                zero_transport: None,
-                            };
-                            jsonl::append_jsonl(&jsonl_path, &row);
-                            cells.push(format!("{:.1}", lat.p50_us));
+                            match result {
+                                Some(lat) => {
+                                    let row = ComparisonRow {
+                                        run_id: run_id.clone(),
+                                        impl_name: impl_name.to_string(),
+                                        kind: "latency".to_string(),
+                                        transport: transport_str.to_string(),
+                                        msg_size: size,
+                                        peers: None,
+                                        msgs_s: None,
+                                        mbps: None,
+                                        elapsed: lat.elapsed,
+                                        cpu_time: lat.cpu_time,
+                                        push_cpu_time: None,
+                                        pull_cpu_time: None,
+                                        pub_cpu_time: None,
+                                        req_cpu_time: lat.req_cpu,
+                                        p50_us: Some(lat.p50_us),
+                                        p99_us: Some(lat.p99_us),
+                                        p999_us: Some(lat.p999_us),
+                                        max_us: Some(lat.max_us),
+                                        iterations: Some(lat.iterations),
+                                        latency_pair: Some(pair.clone()),
+                                        workload_profile: Some(profile.clone()),
+                                        recv_spin_us: impl_name.starts_with("omq-").then(|| {
+                                            latency_env(def, pair, profile)
+                                                .iter()
+                                                .find(|&&(key, _)| key == "OMQ_BENCH_RECV_SPIN_US")
+                                                .unwrap()
+                                                .1
+                                                .parse()
+                                                .unwrap()
+                                        }),
+                                        peer_min: None,
+                                        peer_max: None,
+                                        peer_p10: None,
+                                        peer_p25: None,
+                                        peer_median: None,
+                                        peer_p75: None,
+                                        peer_p90: None,
+                                        zero_transport: None,
+                                    };
+                                    jsonl::append_jsonl(&jsonl_path, &row);
+                                    cells.push(format!("{:.1}", lat.p99_us));
+                                }
+                                None => {
+                                    panic!(
+                                        "latency measurement failed: {impl_name} {pair} {profile} {transport_str} {size} B"
+                                    );
+                                }
+                            }
                         }
-                        None => {
-                            cells.push("-".to_string());
-                        }
+                        print_table_row(&size_label(size), &cells, 14);
                     }
                 }
-                print_table_row(&size_label(size), &cells, 14);
             }
         }
 
@@ -1866,6 +1926,9 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             p999_us: None,
                             max_us: None,
                             iterations: None,
+                            latency_pair: None,
+                            workload_profile: None,
+                            recv_spin_us: None,
                             peer_min: result.peer_min,
                             peer_max: result.peer_max,
                             peer_p10: result.peer_p10,
@@ -1952,6 +2015,9 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             p999_us: None,
                             max_us: None,
                             iterations: None,
+                            latency_pair: None,
+                            workload_profile: None,
+                            recv_spin_us: None,
                             peer_min: result.peer_min,
                             peer_max: result.peer_max,
                             peer_p10: result.peer_p10,
@@ -2043,6 +2109,9 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             p999_us: None,
                             max_us: None,
                             iterations: None,
+                            latency_pair: None,
+                            workload_profile: None,
+                            recv_spin_us: None,
                             peer_min: result.peer_min,
                             peer_max: result.peer_max,
                             peer_p10: result.peer_p10,
@@ -2136,6 +2205,9 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         p999_us: None,
                         max_us: None,
                         iterations: None,
+                        latency_pair: None,
+                        workload_profile: None,
+                        recv_spin_us: None,
                         peer_min: result.peer_min,
                         peer_max: result.peer_max,
                         peer_p10: result.peer_p10,
@@ -2180,7 +2252,7 @@ fn print_latency_header(impls: &[&str]) {
     for &name in impls {
         eprint!("  {name:>14}");
     }
-    eprintln!("  (p50 us)");
+    eprintln!("  (p99 us)");
 }
 
 fn print_table_row(label: &str, cells: &[String], width: usize) {
@@ -2252,6 +2324,41 @@ mod tests {
             assert_eq!(sender_env, receiver_env, "{}", def.name);
             assert_eq!(sender_io, receiver_io, "{}", def.name);
         }
+    }
+
+    #[test]
+    fn latency_variants_preserve_runtime_and_spin_configuration() {
+        for (name, io, spin) in [
+            ("omq-tokio-ct", "0", "0"),
+            ("omq-tokio-1t", "1", "0"),
+            ("omq-tokio-1t-spin50", "1", "50"),
+            ("omq-tokio-2t", "2", "0"),
+        ] {
+            let def = find_impl(name).unwrap();
+            let env = latency_env(def, "router-router", "latency");
+            assert!(env.contains(&("OMQ_BENCH_LATENCY_PAIR", "router-router")));
+            assert!(env.contains(&("OMQ_BENCH_WORKLOAD_PROFILE", "latency")));
+            assert!(env.contains(&("OMQ_BENCH_RECV_SPIN_US", spin)));
+            assert!(env.contains(&("OMQ_IO_THREADS", io)));
+            assert!(supports_latency_pair(def, "router-router", "latency"));
+        }
+        for name in ["libzmq", "omq-tokio-exclusive", "zmq.rs"] {
+            let def = find_impl(name).unwrap();
+            assert!(supports_latency_pair(def, "req-rep", "default"));
+            assert!(!supports_latency_pair(def, "router-router", "latency"));
+        }
+        for name in ["libzmq", "libzmq-2t"] {
+            let def = find_impl(name).unwrap();
+            for pair in ["router-dealer", "router-router", "pair"] {
+                assert!(supports_latency_pair(def, pair, "default"));
+            }
+            for pair in ["client-server", "peer", "channel"] {
+                assert!(!supports_latency_pair(def, pair, "default"));
+            }
+        }
+        assert!(!supports_pushpull(
+            find_impl("omq-tokio-1t-spin50").unwrap()
+        ));
     }
 
     #[test]

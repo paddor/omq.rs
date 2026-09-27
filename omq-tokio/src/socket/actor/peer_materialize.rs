@@ -52,7 +52,8 @@ pub(super) fn spawn_byte_stream_connection(
     };
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) =
+        mpsc::channel(PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize));
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
@@ -118,11 +119,22 @@ pub(super) fn spawn_byte_stream_connection(
     let peer_driver = peer_driver
         .with_arena_threshold(arena.threshold)
         .with_arena_cap(arena.cap);
+    if let (Some(slot), Some(direct)) = (&transmit_slot, &direct_tcp_writer) {
+        slot.set_direct_writer(direct.clone());
+    }
     let peer_driver = match transmit_slot {
         Some(ref slot) => peer_driver.with_transmit_slot(slot.clone()),
         None => peer_driver,
     };
     let (send_pipe, peer_driver) = attach_send_pipe(socket, peer_driver, pre_ready_send_pipe_rx);
+    if socket.socket_type == SocketType::Peer
+        && let (Some(handle), Some(slot), Some(_)) =
+            (&send_pipe, &transmit_slot, &direct_tcp_writer)
+        && let Some(producer) = handle.lock().expect("peer send pipe").as_mut()
+    {
+        producer.set_direct_slot(slot.clone());
+    }
+
     let peer_driver = attach_recv_bypass(socket, peer_driver, peer_id);
     let io_thread = socket.io_pool.assign_thread();
 
@@ -211,7 +223,8 @@ pub(super) fn spawn_inproc_peer(
     }
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (data_inbox_tx, data_inbox_rx) =
+        mpsc::channel(PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize));
     let child_cancel = socket.cancel.child_token();
     let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
     let peer_props = omq_proto::proto::command::PeerProperties::default()
@@ -457,6 +470,8 @@ fn supports_direct_tcp_writer(socket_type: SocketType) -> bool {
             | SocketType::Server
             | SocketType::Client
             | SocketType::Pair
+            | SocketType::Channel
+            | SocketType::Peer
     )
 }
 
@@ -816,6 +831,7 @@ mod tests {
             assert!(supports_direct_tcp_writer(socket_type));
         }
         assert!(!supports_direct_tcp_writer(SocketType::Push));
-        assert!(!supports_direct_tcp_writer(SocketType::Channel));
+        assert!(supports_direct_tcp_writer(SocketType::Channel));
+        assert!(supports_direct_tcp_writer(SocketType::Peer));
     }
 }

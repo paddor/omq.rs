@@ -236,6 +236,32 @@ async fn peer_inproc() {
 }
 
 #[tokio::test]
+async fn recv_spin_does_not_block_current_thread_runtime() {
+    let ctx = omq_tokio::Context::current();
+    let ep = inproc_ep("recv-spin-async");
+    let pull = ctx.socket(
+        SocketType::Pull,
+        Options::default().recv_spin(Duration::from_secs(5)),
+    );
+    pull.bind(ep.clone()).await.unwrap();
+    let push = ctx.socket(SocketType::Push, Options::default());
+    push.connect(ep).await.unwrap();
+    let sender = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        push.send(Message::single("ready")).await.unwrap();
+        push
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), pull.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Message::single("ready")
+    );
+    let _push = sender.await.unwrap();
+}
+
+#[tokio::test]
 async fn push_pull_ipc() {
     let ep = ipc_ep("pp");
     let pull = Socket::new(SocketType::Pull, Options::default());

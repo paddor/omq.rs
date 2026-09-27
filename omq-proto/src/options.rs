@@ -83,6 +83,7 @@ pub struct Options {
     /// latency profile; all other socket types use the throughput profile.
     /// For ping-pong SERVER/CLIENT or ROUTER/DEALER workloads, set this
     /// explicitly on both endpoints.
+    /// This profile does not enable receive spinning; see [`Self::recv_spin`].
     pub workload_profile: Option<WorkloadProfile>,
 
     /// Send-side high-water mark as a message count.
@@ -97,6 +98,20 @@ pub struct Options {
 
     /// Receive-side high-water mark as a message count.
     pub recv_hwm: u32,
+
+    /// Maximum busy-wait time before each park in native blocking receives.
+    ///
+    /// Defaults to zero for every socket type, independently of
+    /// [`Self::workload_profile`]. Applies to single-message receives and the
+    /// first message of a bulk receive, including timeout and cancelable calls.
+    /// Timeouts and cancellation stop the spin early. Async and nonblocking
+    /// receives do not spin.
+    ///
+    /// Spinning can reduce wakeup latency when application and IO threads have
+    /// separate CPU resources, but consumes CPU and can worsen latency when
+    /// those threads compete for a CPU. For example, opt in with
+    /// `Options::default().recv_spin(Duration::from_micros(50))`.
+    pub recv_spin: Duration,
 
     /// Allow receive batching to relax cross-connection message ordering.
     ///
@@ -344,6 +359,7 @@ impl Default for Options {
             workload_profile: None,
             send_hwm: 1000,
             recv_hwm: 1000,
+            recv_spin: Duration::ZERO,
             recv_batching: false,
             recv_message_pool: None,
             recv_rate_limit: None,
@@ -509,6 +525,14 @@ impl Options {
     /// not a byte limit.
     pub fn recv_hwm(mut self, hwm: u32) -> Self {
         self.recv_hwm = hwm;
+        self
+    }
+
+    /// Set the busy-wait budget before parking in native blocking receives.
+    /// Zero disables spinning. See [`Self::recv_spin`] for scope and tradeoffs.
+    #[must_use]
+    pub fn recv_spin(mut self, budget: Duration) -> Self {
+        self.recv_spin = budget;
         self
     }
 
@@ -1235,6 +1259,7 @@ mod tests {
             .workload_profile(WorkloadProfile::Latency)
             .send_hwm(42)
             .recv_hwm(99)
+            .recv_spin(Duration::from_micros(50))
             .recv_batching(true)
             .linger(Duration::from_secs(5))
             .identity("router-id")
@@ -1247,6 +1272,7 @@ mod tests {
         assert_eq!(o.send_hwm, 42);
         assert_eq!(o.workload_profile, Some(WorkloadProfile::Latency));
         assert_eq!(o.recv_hwm, 99);
+        assert_eq!(o.recv_spin, Duration::from_micros(50));
         assert!(o.recv_batching);
         assert_eq!(o.linger, Some(Duration::from_secs(5)));
         assert_eq!(o.identity, &b"router-id"[..]);
@@ -1261,6 +1287,13 @@ mod tests {
     #[test]
     fn workload_profile_defaults_to_socket_type_selection() {
         assert_eq!(Options::default().workload_profile, None);
+        assert_eq!(Options::default().recv_spin, Duration::ZERO);
+        assert_eq!(
+            Options::default()
+                .workload_profile(WorkloadProfile::Latency)
+                .recv_spin,
+            Duration::ZERO
+        );
         assert_eq!(
             Options::new()
                 .workload_profile(WorkloadProfile::Throughput)

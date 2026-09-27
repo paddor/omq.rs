@@ -58,6 +58,35 @@ fn executable_artifact(message: &serde_json::Value, name: &str) -> Option<PathBu
     message["executable"].as_str().map(PathBuf::from)
 }
 
+/// Resolve the built peer through Cargo, including configured target directories.
+pub(crate) fn build_omq_peer(name: &str, features: &[&str]) -> PathBuf {
+    let mut command = Command::new("cargo");
+    command.args([
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "omq-tokio",
+        "--bin",
+        name,
+        "--message-format=json-render-diagnostics",
+    ]);
+    if !features.is_empty() {
+        command.args(["--features", &features.join(",")]);
+    }
+    let output = command
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("build OMQ peer");
+    assert!(output.status.success(), "OMQ peer build failed: {name}");
+    output
+        .stdout
+        .split(|&byte| byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .find_map(|message| executable_artifact(&message, name))
+        .unwrap_or_else(|| panic!("Cargo did not report executable for {name}"))
+}
+
 fn live_procs() -> &'static Mutex<HashMap<u32, Instant>> {
     LIVE_PROCS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -253,11 +282,11 @@ pub(crate) fn capture_with_cpu(
 
     let cpu_secs = read_proc_cpu(pid);
 
-    if let Ok(Some(_)) = child.wait_timeout(timeout) {
+    if let Ok(Some(status)) = child.wait_timeout(timeout) {
         deregister_proc(pid);
         // Prevent the Drop from killing again.
         std::mem::forget(proc);
-        Some((stdout_content, cpu_secs))
+        status.success().then_some((stdout_content, cpu_secs))
     } else {
         drop(proc);
         None
@@ -371,6 +400,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn capture_rejects_unsuccessful_exit_even_with_plausible_output() {
+        assert!(
+            capture_with_cpu(
+                &["sh", "-c", "printf 123; exit 7"],
+                &[],
+                None,
+                Duration::from_secs(1)
+            )
+            .is_none()
+        );
         assert_eq!(
             capture(
                 &["sh", "-c", "printf 123; exit 7"],

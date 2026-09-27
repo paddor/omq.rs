@@ -1,13 +1,10 @@
-// During connection churn (heartbeat timeout, peer restart, network
-// blip) a small number of messages may be reordered. The wire slot
-// bypass and the driver inbox are two independent paths into the same
-// TCP stream. When a new connection's handshake completes, one
-// in-flight message may still be in the inbox while the next message
-// takes the wire slot fast path and reaches the wire first.
+// Plain TCP latency writes share admission and write ownership with the
+// connection driver. The slot retains an accepted direct write's tail;
+// queued messages cannot pass it while the driver waits for writability.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::{Bytes, BytesMut};
 
@@ -37,6 +34,7 @@ pub(crate) enum TryFrameResult {
 
 pub(crate) struct PeerTransmitSlot {
     eq: Mutex<FrameBuffer>,
+    direct_writer: OnceLock<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     cap: usize,
     msg_cap: usize,
     pub(crate) data_signal: DataSignal,
@@ -93,6 +91,7 @@ impl PeerTransmitSlot {
     ) -> Arc<Self> {
         Arc::new(Self {
             eq: Mutex::new(FrameBuffer::with_config_lazy(arena_threshold, arena_cap)),
+            direct_writer: OnceLock::new(),
             cap,
             msg_cap: msg_cap.max(1),
             data_signal: DataSignal::new(),
@@ -122,7 +121,24 @@ impl PeerTransmitSlot {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn try_encode(&self, msg: &Message) -> TryFrameResult {
+        let result = self.try_encode_without_signal(msg);
+        if result == TryFrameResult::Ok {
+            self.signal_encoded();
+        }
+        result
+    }
+
+    pub(crate) fn set_direct_writer(&self, writer: Arc<crate::socket::dispatch::DirectTcpWriter>) {
+        self.direct_writer.get_or_init(|| writer);
+    }
+
+    pub(crate) fn direct_writer(&self) -> Option<&Arc<crate::socket::dispatch::DirectTcpWriter>> {
+        self.direct_writer.get()
+    }
+
+    pub(crate) fn try_encode_without_signal(&self, msg: &Message) -> TryFrameResult {
         if self.dead.load(Ordering::Acquire) {
             return TryFrameResult::Dead;
         }
@@ -131,6 +147,9 @@ impl PeerTransmitSlot {
         }
 
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
         let decision = decide_handle_frame(
             HandleFrameState {
                 uses_crypto: false,
@@ -168,7 +187,6 @@ impl PeerTransmitSlot {
         self.queued_msgs.fetch_add(1, Ordering::Relaxed);
         self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
         drop(eq);
-        self.signal_encoded();
         TryFrameResult::Ok
     }
 
@@ -178,6 +196,9 @@ impl PeerTransmitSlot {
         }
         let bytes = chunks.iter().map(Bytes::len).sum();
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         if queued_msgs >= self.msg_cap
             || (queued_msgs > 0 && eq.total_bytes().saturating_add(bytes) >= self.cap)
@@ -198,6 +219,9 @@ impl PeerTransmitSlot {
             return TryFrameResult::Dead;
         }
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
         if self.is_full(&eq) {
             self.above_lwm.store(true, Ordering::Relaxed);
             return TryFrameResult::Full;
@@ -231,6 +255,9 @@ impl PeerTransmitSlot {
         // can remove the oldest whole message instead of an arbitrary chunk.
         let chunk = fanout_frame_chunk(frame);
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return TryFrameResult::Dead;
+        }
         let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         while queued_msgs > 0
             && (eq.total_bytes().saturating_add(chunk.len()) >= self.cap
@@ -312,17 +339,17 @@ impl PeerTransmitSlot {
         out.extend_from_slice(eq.arena_bytes());
         eq.clear_arena();
         self.data_signal.begin_drain();
-        drop(eq);
-
         self.queued_msgs.store(0, Ordering::Relaxed);
-        self.clear_data_signal_and_rearm();
         let below_lwm = self.is_below_lwm(0, 0);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        if below_lwm
+        let reactivate = below_lwm
             && self
                 .fanout_active
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+                .is_ok();
+        drop(eq);
+        self.clear_data_signal_and_rearm();
+        if reactivate
             && let Some(cb) = self
                 .fanout_reactivation
                 .lock()
@@ -336,40 +363,37 @@ impl PeerTransmitSlot {
 
     pub(crate) fn try_direct_write_arena_only(
         &self,
-        direct: &crate::socket::dispatch::DirectTcpWriter,
+        write: impl FnOnce(&[u8]) -> io::Result<usize>,
     ) -> io::Result<bool> {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         if !eq.has_arena_only() {
             return Ok(false);
         }
 
-        let n = direct.try_write(eq.arena_bytes())?;
+        let n = write(eq.arena_bytes())?;
         if n > 0 {
             eq.advance_arena(n);
         }
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
-        drop(eq);
-
         if eq_empty {
             self.queued_msgs.store(0, Ordering::Relaxed);
-            self.clear_data_signal_and_rearm();
-        } else {
-            self.data_signal.reschedule();
         }
-
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        if space_available {
-            self.space_available.notify_changed();
-        }
-        if below_lwm
+        let reactivate = below_lwm
             && self
                 .fanout_active
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+                .is_ok();
+        drop(eq);
+        self.clear_data_signal_and_rearm();
+        if space_available {
+            self.space_available.notify_changed();
+        }
+        if reactivate
             && let Some(cb) = self
                 .fanout_reactivation
                 .lock()
@@ -390,7 +414,6 @@ impl PeerTransmitSlot {
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
-        drop(eq);
 
         if protected_drained > 0 {
             self.mark_fanout_dict_shipped();
@@ -407,16 +430,20 @@ impl PeerTransmitSlot {
 
         if eq_empty {
             self.queued_msgs.store(0, Ordering::Relaxed);
-            self.clear_data_signal_and_rearm();
         }
         let queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         let below_lwm = self.is_below_lwm(eq_bytes, queued_msgs);
         let space_available = below_lwm && self.above_lwm.swap(false, Ordering::AcqRel);
-        if below_lwm
+        let reactivate = below_lwm
             && self
                 .fanout_active
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+                .is_ok();
+        drop(eq);
+        if eq_empty {
+            self.clear_data_signal_and_rearm();
+        }
+        if reactivate
             && let Some(cb) = self
                 .fanout_reactivation
                 .lock()
@@ -438,18 +465,24 @@ impl PeerTransmitSlot {
     }
 
     pub(crate) fn mark_dead(&self) {
-        self.dead.store(true, Ordering::Release);
-        {
-            let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-            *eq = FrameBuffer::one_shot();
+        let mut ownership = self.direct_writer.get().map(|writer| writer.lock());
+        if let Some(state) = ownership.as_mut() {
+            state.close();
         }
-        self.queued_msgs.store(0, Ordering::Relaxed);
+        self.dead.store(true, Ordering::Release);
+        let retired = {
+            let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+            self.queued_msgs.store(0, Ordering::Relaxed);
+            std::mem::replace(&mut *eq, FrameBuffer::one_shot())
+        };
         self.fanout_dict_queued.store(false, Ordering::Relaxed);
         self.fanout_dict_shipped.store(false, Ordering::Relaxed);
         self.fanout_active.store(false, Ordering::Relaxed);
         self.above_lwm.store(false, Ordering::Relaxed);
+        drop(ownership);
         self.data_signal.wake_all();
         self.space_available.notify_changed();
+        drop(retired);
     }
 
     fn is_full(&self, eq: &FrameBuffer) -> bool {

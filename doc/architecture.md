@@ -97,8 +97,14 @@ reactor registration.
   context. Application futures can be awaited on the caller's own runtime.
 - **Blocking:** `Context::blocking_socket()` uses the same background I/O.
   Ready sends try admission directly; ready receives drain on the application
-  thread. Empty receives park through `BlockingRecvWaker`. A full send can
-  fall back to `Context::block_on()`.
+  thread. Empty receives park through `BlockingRecvWaker`. Optional
+  `Options::recv_spin(Duration)` polls before each park, across socket types.
+  The budget defaults to zero, independently of the latency profile. It also
+  applies to timed/cancelable receives and bulk calls waiting for their first
+  message; deadlines and cancellation stop the spin early. Async and
+  nonblocking receives do not spin. Enable only when the CPU cost is acceptable;
+  sharing CPUs with IO threads or peers can make tail latency worse. A full send
+  can fall back to `Context::block_on()`.
 - **Embedded:** `Context::current()` supports either Tokio runtime flavor.
   It has no owned IO pool, and `Context::block_on()` is unavailable.
 - **Configuration:** `ContextConfig::from_env()` reads `OMQ_IO_THREADS`.
@@ -226,14 +232,16 @@ XPUB wait; `xpub_nodrop` enables their backpressure path.
 
 ### Identity routing and PEER sends
 
-ROUTER borrows the identity frame for lookup, then removes it from the owned
-message. SERVER routes using numeric metadata rather than an identity frame.
+ROUTER borrows the identity frame for lookup, then removes it only after
+capacity admission. A full retry returns the original message without rebuilding
+its envelope. SERVER routes using numeric metadata rather than an identity frame.
 REP uses its saved request route.
 
 PEER uses immutable identity tables published through ArcSwap:
 
 - Each socket clone lazily registers one fanring producer per destination.
-- Hot sends lock only that clone's producer for that destination.
+- Hot sends lock that clone's producer for that destination. Latency-profile
+  plain TCP additionally locks the connection's write admission guard.
 - The existing connection I/O task fair-drains producers, then frames,
   compresses, and writes. There is no additional payload dispatcher.
 - Sequential sends through one clone preserve per-destination FIFO. Different
@@ -274,9 +282,10 @@ per-connection windows instead of popping one message at a time. Count and
 byte budgets still apply. Admission checks queued values, so no extra message
 is staged on the application side between calls.
 
-`recv_many_into` and related APIs reuse caller-owned vectors. Internal scratch
-and generation-based peer snapshots avoid allocating or rebuilding the peer
-list on every drain.
+Receive queues store plain `Message` values. Drain predicates derive conservative
+byte charges from message lengths, without adding per-slot metadata.
+`recv_many_into` and related APIs append directly to caller-owned vectors.
+Generation-based peer snapshots avoid rebuilding the peer list on every drain.
 
 ### Capacity credits are not messages
 
@@ -415,8 +424,19 @@ arenas are 16 KiB for TCP/WS and 64 KiB for IPC.
 
 Eligible plain-TCP latency routes have a `DirectTcpWriter`. That specialized
 path may frame into the slot and attempt one caller-side nonblocking write.
-Partial or gather output stays queued for the driver; it is not kept in a
-separate retry buffer. Throughput and transformed paths use workers.
+CHANNEL has the same eligibility as PAIR. PEER keeps its ArcSwap routes,
+per-clone fanring producers, shared admission limits, and fair draining under
+both profiles. Its direct attempt happens after normal admission.
+
+One connection guard coordinates queue publication with write ownership.
+Handshake starts driver-owned. The driver publishes idle only when its partial
+write, codec, framing buffer, batch, offloads, send pipe, and inbox are empty.
+Fallback data inboxes admit at most `min(64, max(1, send_hwm))` messages.
+A caller may write only while idle. A short write or EAGAIN retains the tail in
+the slot and transfers ownership to the driver. Later sends queue behind it.
+Driver ownership persists across awaits and canceled write polls without holding
+the mutex. Retirement closes admission and wakes blocked senders. Throughput and
+transformed paths use workers.
 
 TCP uses `TCP_NODELAY`; userspace batches provide coalescing. Queued-byte totals,
 header scratch, chunk vectors, and arena capacity are retained rather than

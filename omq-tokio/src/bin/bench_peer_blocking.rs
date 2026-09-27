@@ -15,6 +15,8 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
 use std::net::Ipv4Addr;
 
+mod latency_common;
+
 fn multi_pull_drain_batch(size: usize) -> usize {
     if let Some(batch) = std::env::var("OMQ_BENCH_DRAIN_BATCH")
         .ok()
@@ -199,7 +201,7 @@ fn main() {
 // --- Options -----------------------------------------------------------------
 
 fn bench_options(msg_size: usize) -> Options {
-    let mut o = Options::default();
+    let mut o = Options::default().recv_spin(bench_recv_spin());
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
@@ -223,6 +225,13 @@ fn bench_options(msg_size: usize) -> Options {
         o = o.recv_ip_rate_limit(rate, burst);
     }
     o
+}
+
+fn bench_recv_spin() -> Duration {
+    Duration::from_micros(
+        std::env::var("OMQ_BENCH_RECV_SPIN_US")
+            .map_or(0, |value| value.parse().expect("OMQ_BENCH_RECV_SPIN_US")),
+    )
 }
 
 fn parse_rate_limit(value: &str, name: &str) -> (u32, u32) {
@@ -857,9 +866,16 @@ fn run_multi_sub(
 }
 
 fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
-    let rep = ctx.blocking_socket(SocketType::Rep, bench_options_server(size));
+    let pair = latency_common::SocketPair::from_env();
+    let rep = ctx.blocking_socket(
+        pair.responder(),
+        pair.options(bench_options_server(size), false),
+    );
     let bound = rep.bind(ep).expect("rep bind");
     report_bound_port(ctx, &bound);
+    let first = rep.recv().unwrap();
+    pair.validate(&first, size, false);
+    rep.send(first).unwrap();
     loop {
         let msg = rep.recv().unwrap();
         rep.send(msg).unwrap();
@@ -867,13 +883,20 @@ fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {
 }
 
 fn run_req(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, iterations: usize, warmup: usize) {
-    let req = ctx.blocking_socket(SocketType::Req, bench_options_client(size));
+    let pair = latency_common::SocketPair::from_env();
+    let req = ctx.blocking_socket(
+        pair.requester(),
+        pair.options(bench_options_client(size), true),
+    );
     req.connect(ep).expect("req connect");
+    req.wait_connected(1, Duration::from_secs(5))
+        .expect("latency peer ready");
 
     std::thread::sleep(Duration::from_millis(200));
 
-    let payload = Bytes::from(vec![b'x'; size]);
-    let msg = Message::single(payload);
+    let msg = pair.request(size);
+    req.send(msg.clone()).unwrap();
+    pair.validate(&req.recv().unwrap(), size, true);
 
     for _ in 0..warmup {
         req.send(msg.clone()).unwrap();
@@ -1036,22 +1059,35 @@ fn run_inproc_latency(
     warmup: usize,
 ) {
     let ep = Endpoint::Inproc { name };
-    let rep = ctx.blocking_socket(SocketType::Rep, Options::default());
+    let pair = latency_common::SocketPair::from_env();
+    let rep = ctx.blocking_socket(
+        pair.responder(),
+        pair.options(Options::default().recv_spin(bench_recv_spin()), false),
+    );
     rep.bind(ep.clone()).expect("rep bind");
 
     std::thread::spawn(move || {
+        let first = rep.recv().unwrap();
+        pair.validate(&first, size, false);
+        rep.send(first).unwrap();
         loop {
             let msg = rep.recv().unwrap();
             rep.send(msg).unwrap();
         }
     });
 
-    let req = ctx.blocking_socket(SocketType::Req, Options::default());
+    let req = ctx.blocking_socket(
+        pair.requester(),
+        pair.options(Options::default().recv_spin(bench_recv_spin()), true),
+    );
     req.connect(ep).expect("req connect");
+    req.wait_connected(1, Duration::from_secs(5))
+        .expect("latency peer ready");
     std::thread::sleep(Duration::from_millis(200));
 
-    let payload = Bytes::from(vec![b'x'; size]);
-    let msg = Message::single(payload);
+    let msg = pair.request(size);
+    req.send(msg.clone()).unwrap();
+    pair.validate(&req.recv().unwrap(), size, true);
 
     for _ in 0..warmup {
         req.send(msg.clone()).unwrap();

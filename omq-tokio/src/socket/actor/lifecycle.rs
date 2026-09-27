@@ -100,7 +100,7 @@ impl<'a> PeerLifecycle<'a> {
 
     pub(super) fn register_tcp_consumer(
         &mut self,
-        consumer: yring::Consumer<crate::socket::recv::RecvItem>,
+        consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,
         peer_id: u64,
     ) {

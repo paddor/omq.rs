@@ -9,6 +9,7 @@ use fanring::{mpsc, teardown::Coordinated};
 use omq_proto::Message;
 
 use super::SendPipeError;
+use super::send_pipe::SendPreparation;
 use super::signal::{DataSignal, StateSignal};
 
 pub(crate) const MAX_SENDERS: usize = 64;
@@ -178,23 +179,34 @@ impl Producer {
             }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_send(&mut self, message: Message) -> Result<(), SendPipeError> {
+        self.try_send_prepared(message, SendPreparation::Plain, |_| false)
+    }
+
+    pub(crate) fn try_send_prepared(
+        &mut self,
+        message: Message,
+        preparation: SendPreparation,
+        direct: impl FnOnce(&Message) -> bool,
+    ) -> Result<(), SendPipeError> {
         if !self.alive() {
             return Err(SendPipeError::Closed(message));
         }
         self.waiting_budget = false;
-        let bytes = message.max_message_size_len();
+        let bytes = preparation.bytes(&message);
         self.waiting_bytes = bytes;
         let was_waiting = self.ring_space.waiting.load(Ordering::Acquire);
         self.ring_space.waiting.store(true, Ordering::Release);
-        if self
+        match self
             .sender
             .as_mut()
             .expect("live sender")
             .poll_ready(&mut Context::from_waker(&self.waker))
-            .is_pending()
         {
-            return Err(SendPipeError::Full(message));
+            std::task::Poll::Pending => return Err(SendPipeError::Full(message)),
+            std::task::Poll::Ready(Err(_)) => return Err(SendPipeError::Closed(message)),
+            std::task::Poll::Ready(Ok(())) => {}
         }
         self.ring_space.waiting.store(false, Ordering::Release);
         if was_waiting {
@@ -231,21 +243,24 @@ impl Producer {
         }
         self.waiting_budget = false;
         let queued = Queued {
-            message: Some(message),
+            message: Some(preparation.prepare(message)),
             bytes,
             shared: self.shared.clone(),
         };
+        if direct(queued.message.as_ref().expect("admitted message")) {
+            return Ok(());
+        }
         match self.sender.as_mut().expect("live sender").try_send(queued) {
             Ok(()) => {
                 self.shared.data.mark();
                 Ok(())
             }
-            Err(mpsc::TrySendError::Full(queued)) => {
-                Err(SendPipeError::Full(queued.into_message()))
+            Err(mpsc::TrySendError::Full(_)) => {
+                unreachable!("admitted producer capacity cannot be stolen")
             }
-            Err(mpsc::TrySendError::Disconnected(queued)) => {
-                Err(SendPipeError::Closed(queued.into_message()))
-            }
+            // The receiver can disappear after admission, just as it can
+            // immediately after publication. Never retry an accepted message.
+            Err(mpsc::TrySendError::Disconnected(_)) => Ok(()),
         }
     }
 }

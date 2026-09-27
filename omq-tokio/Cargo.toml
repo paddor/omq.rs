@@ -84,6 +84,10 @@ name = "pub_sub_lz4"
 required-features = ["lz4"]
 
 [[test]]
+name = "omq_latency_send"
+path = "tests/latency_send.rs"
+
+[[test]]
 name = "peer_recv"
 path = "tests/peer_recv.rs"
 

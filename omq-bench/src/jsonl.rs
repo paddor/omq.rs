@@ -97,6 +97,12 @@ pub(crate) struct ComparisonRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iterations: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_pair: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recv_spin_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_max: Option<f64>,

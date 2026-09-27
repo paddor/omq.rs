@@ -26,6 +26,7 @@ const IDLE_HEARTBEATS: Duration = Duration::from_millis(80);
 #[derive(Clone, Copy, Debug)]
 enum Flow {
     Pair,
+    Peer,
     DealerRouter,
     ReqRep,
     ClientServer,
@@ -56,6 +57,7 @@ fn latency_options(kind: SocketType, side: &str) -> Options {
         SocketType::Rep => Bytes::from(format!("rep-{side}")),
         SocketType::Router => Bytes::from(format!("router-{side}")),
         SocketType::Server => Bytes::from(format!("server-{side}")),
+        SocketType::Peer => Bytes::from(format!("peer-{side}")),
         SocketType::Pair => Bytes::from(format!("pair-{side}")),
         _ => Bytes::new(),
     };
@@ -141,6 +143,18 @@ async fn cycle(state: &mut ScenarioState) {
 
 async fn exchange_once(spec: Scenario, bound: &Socket, peer: &Socket, seq: u64) {
     match spec.flow {
+        Flow::Peer => {
+            peer.send(Message::multipart(["peer-bind", "request"]))
+                .await
+                .unwrap();
+            let request = recv("peer-bound", bound).await;
+            assert_eq!(request.part_slice(1), Some(b"request".as_slice()));
+            bound.send(request).await.unwrap();
+            assert_eq!(
+                recv("peer-connect", peer).await.part_slice(1),
+                Some(b"request".as_slice())
+            );
+        }
         Flow::Pair => exchange_pair(bound, peer, seq).await,
         Flow::DealerRouter => exchange_dealer_router(spec, bound, peer, seq).await,
         Flow::ReqRep => exchange_req_rep(spec, bound, peer, seq).await,
@@ -291,6 +305,18 @@ fn soak_latency_profile_all_supported_socket_types() {
 
     ctx.block_on(async move {
         let specs = [
+            Scenario {
+                name: "channel",
+                bind_kind: SocketType::Channel,
+                connect_kind: SocketType::Channel,
+                flow: Flow::Pair,
+            },
+            Scenario {
+                name: "peer",
+                bind_kind: SocketType::Peer,
+                connect_kind: SocketType::Peer,
+                flow: Flow::Peer,
+            },
             Scenario {
                 name: "pair",
                 bind_kind: SocketType::Pair,

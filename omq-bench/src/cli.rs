@@ -114,6 +114,14 @@ pub(crate) struct ComparisonsArgs {
     #[arg(long)]
     pub no_latency: bool,
 
+    /// Latency socket pairs (comma-separated). libzmq also supports ROUTER and PAIR pairs.
+    #[arg(long, value_delimiter = ',', default_value = "req-rep", value_parser = ["req-rep", "router-dealer", "router-router", "pair", "client-server", "peer", "channel"])]
+    pub latency_pairs: Vec<String>,
+
+    /// OMQ latency benchmark profiles (comma-separated); default preserves socket defaults.
+    #[arg(long, value_delimiter = ',', default_value = "default", value_parser = ["default", "latency", "throughput"])]
+    pub latency_profiles: Vec<String>,
+
     /// Skip pub/sub measurements.
     #[arg(long)]
     pub no_pubsub: bool,

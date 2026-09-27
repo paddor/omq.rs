@@ -24,6 +24,29 @@ fn latency_identity_uses_transmit_slot_not_peer_pipe() {
 }
 
 #[test]
+fn latency_peer_keeps_fanring_admission() {
+    let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
+    let mut send = IdentitySend::new(SocketType::Peer, &options);
+    assert!(send.needs_peer_send_pipe());
+    assert!(send.needs_transmit_slot());
+    let (producer, mut receiver) = crate::engine::peer_send_pipe(1, None);
+    send.connection_added(1, peer_handle(producer), Bytes::from_static(b"id"), false);
+    let first = send.submitter();
+    let second = first.clone();
+    first.try_send(Message::multipart(["id", "first"])).unwrap();
+    assert!(matches!(
+        second.try_send(Message::multipart(["id", "second"])),
+        Err(TrySendError::Full(_))
+    ));
+    let mut batch = Vec::new();
+    assert_eq!(receiver.drain_into(&mut batch, 1, 1024), 1);
+    assert_eq!(batch[0], Message::single("first"));
+    second
+        .try_send(Message::multipart(["id", "second"]))
+        .unwrap();
+}
+
+#[test]
 fn try_send_reports_full_and_preserves_routing_frame() {
     let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
     let mut send = IdentitySend::new(SocketType::Rep, &options);

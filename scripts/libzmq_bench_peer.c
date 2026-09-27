@@ -175,6 +175,91 @@ static const char *resolve_addr(const char *s, char *buf, size_t bufsz) {
     return s;
 }
 
+/* Stable socket pairs only. Draft types require a draft-enabled libzmq build. */
+static int latency_socket_type(int requester) {
+    const char *pair = getenv("OMQ_BENCH_LATENCY_PAIR");
+    if (!pair || strcmp(pair, "req-rep") == 0)
+        return requester ? ZMQ_REQ : ZMQ_REP;
+    if (strcmp(pair, "router-dealer") == 0)
+        return requester ? ZMQ_DEALER : ZMQ_ROUTER;
+    if (strcmp(pair, "router-router") == 0) return ZMQ_ROUTER;
+    if (strcmp(pair, "pair") == 0) return ZMQ_PAIR;
+    fprintf(stderr, "unsupported libzmq latency pair: %s\n", pair);
+    exit(1);
+}
+
+#define LATENCY_REQUESTER "bench-requester"
+#define LATENCY_RESPONDER "bench-responder"
+
+static void *latency_socket(void *ctx, int requester) {
+    int type = latency_socket_type(requester);
+    void *sock = zmq_socket(ctx, type);
+    if (!sock) die("zmq_socket latency");
+    const char *identity = requester ? LATENCY_REQUESTER : LATENCY_RESPONDER;
+    if (zmq_setsockopt(sock, ZMQ_IDENTITY, identity, strlen(identity)) != 0)
+        die("zmq_setsockopt IDENTITY");
+    if (type == ZMQ_ROUTER) {
+        int mandatory = 1;
+        if (zmq_setsockopt(sock, ZMQ_ROUTER_MANDATORY, &mandatory, sizeof(mandatory)) != 0)
+            die("zmq_setsockopt ROUTER_MANDATORY");
+    }
+    return sock;
+}
+
+static void validate_latency_message(zmq_msg_t *body, zmq_msg_t *identity,
+                                     int routed, int requester, int size) {
+    if (zmq_msg_size(body) != (size_t)size || zmq_msg_more(body)) {
+        fprintf(stderr, "invalid latency body size or frame count\n");
+        exit(1);
+    }
+    const unsigned char *bytes = zmq_msg_data(body);
+    for (int i = 0; i < size; i++) {
+        if (bytes[i] != 'x') {
+            fprintf(stderr, "invalid latency body content\n");
+            exit(1);
+        }
+    }
+    if (routed) {
+        const char *expected = requester ? LATENCY_RESPONDER : LATENCY_REQUESTER;
+        if (!zmq_msg_more(identity) || zmq_msg_size(identity) != strlen(expected)
+            || memcmp(zmq_msg_data(identity), expected, strlen(expected)) != 0) {
+            fprintf(stderr, "invalid latency routing envelope\n");
+            exit(1);
+        }
+    }
+}
+
+static void latency_echo(void *sock, int size) {
+    int routed = latency_socket_type(0) == ZMQ_ROUTER;
+    zmq_msg_t identity, body;
+    zmq_msg_init(&identity);
+    zmq_msg_init(&body);
+    int first = 1;
+    for (;;) {
+        if (routed && zmq_msg_recv(&identity, sock, 0) < 0)
+            die("zmq_recv latency identity");
+        if (zmq_msg_recv(&body, sock, 0) < 0) die("zmq_recv latency body");
+        if (first) {
+            validate_latency_message(&body, &identity, routed, 0, size);
+            first = 0;
+        }
+        if (routed && zmq_send(sock, zmq_msg_data(&identity), zmq_msg_size(&identity), ZMQ_SNDMORE) < 0)
+            die("zmq_send latency identity");
+        if (zmq_send(sock, zmq_msg_data(&body), zmq_msg_size(&body), 0) < 0)
+            die("zmq_send latency body");
+    }
+}
+
+static void latency_exchange(void *sock, const char *buf, int size, int routed,
+                             zmq_msg_t *identity, zmq_msg_t *reply) {
+    if (routed && zmq_send(sock, LATENCY_RESPONDER, strlen(LATENCY_RESPONDER), ZMQ_SNDMORE) < 0)
+        die("zmq_send latency identity");
+    if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send latency body");
+    if (routed && zmq_msg_recv(identity, sock, 0) < 0)
+        die("zmq_recv latency identity");
+    if (zmq_msg_recv(reply, sock, 0) < 0) die("zmq_recv latency body");
+}
+
 
 typedef struct { void *ctx; const char *name; int size; } InprocPushArg;
 typedef struct { void *ctx; const char *name; int size; } InprocRepArg;
@@ -213,17 +298,9 @@ static void *inproc_rep_thread(void *arg_) {
     InprocRepArg *a = arg_;
     char addr[256];
     snprintf(addr, sizeof(addr), "inproc://%s", a->name);
-    void *sock = zmq_socket(a->ctx, ZMQ_REP);
-    if (!sock || zmq_bind(sock, addr) != 0) return NULL;
-    zmq_msg_t msg;
-    zmq_msg_init(&msg);
-    for (;;) {
-        int rc = zmq_msg_recv(&msg, sock, 0);
-        if (rc < 0) break;
-        int sz = zmq_msg_size(&msg);
-        if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
-    }
-    zmq_msg_close(&msg);
+    void *sock = latency_socket(a->ctx, 0);
+    if (zmq_bind(sock, addr) != 0) die("zmq_bind latency");
+    latency_echo(sock, a->size);
     zmq_close(sock);
     return NULL;
 }
@@ -791,20 +868,11 @@ done_inproc_pubsub:;
             zmq_close(sockets[i]);
 
     } else if (strcmp(role, "rep") == 0) {
-        void *sock = zmq_socket(ctx, ZMQ_REP);
-        if (!sock) die("zmq_socket REP");
+        void *sock = latency_socket(ctx, 0);
         if (zmq_bind(sock, addr) != 0) die("zmq_bind");
         report_bound_port(ctx, sock);
 
-        zmq_msg_t msg;
-        zmq_msg_init(&msg);
-        for (;;) {
-            int rc = zmq_msg_recv(&msg, sock, 0);
-            if (rc < 0) break;
-            int sz = zmq_msg_size(&msg);
-            if (zmq_send(sock, zmq_msg_data(&msg), sz, 0) < 0) break;
-        }
-        zmq_msg_close(&msg);
+        latency_echo(sock, size);
         zmq_close(sock);
 
     } else if (strcmp(role, "req") == 0) {
@@ -812,8 +880,8 @@ done_inproc_pubsub:;
         int iterations = atoi(argv[4]);
         int warmup = atoi(argv[5]);
 
-        void *sock = zmq_socket(ctx, ZMQ_REQ);
-        if (!sock) die("zmq_socket REQ");
+        int routed = latency_socket_type(1) == ZMQ_ROUTER;
+        void *sock = latency_socket(ctx, 1);
         if (zmq_connect(sock, addr) != 0) die("zmq_connect");
 
         struct timespec sleep_ts = {0, 200000000};
@@ -823,12 +891,14 @@ done_inproc_pubsub:;
         if (!buf) { perror("calloc"); exit(1); }
         memset(buf, 'x', size);
 
-        zmq_msg_t reply;
+        zmq_msg_t identity, reply;
+        zmq_msg_init(&identity);
         zmq_msg_init(&reply);
 
+        latency_exchange(sock, buf, size, routed, &identity, &reply);
+        validate_latency_message(&reply, &identity, routed, 1, size);
         for (int i = 0; i < warmup; i++) {
-            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send warmup");
-            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv warmup");
+            latency_exchange(sock, buf, size, routed, &identity, &reply);
         }
 
         uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
@@ -839,8 +909,7 @@ done_inproc_pubsub:;
         for (int i = 0; i < iterations; i++) {
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            if (zmq_send(sock, buf, size, 0) < 0) break;
-            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv");
+            latency_exchange(sock, buf, size, routed, &identity, &reply);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
                      + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
@@ -858,6 +927,7 @@ done_inproc_pubsub:;
 
         free(rtts);
         free(buf);
+        zmq_msg_close(&identity);
         zmq_msg_close(&reply);
         zmq_close(sock);
 
@@ -879,20 +949,22 @@ done_inproc_pubsub:;
         struct timespec sleep_ts = {0, 200000000};
         nanosleep(&sleep_ts, NULL);
 
-        void *sock = zmq_socket(ctx, ZMQ_REQ);
-        if (!sock) die("zmq_socket REQ");
+        int routed = latency_socket_type(1) == ZMQ_ROUTER;
+        void *sock = latency_socket(ctx, 1);
         if (zmq_connect(sock, inproc_addr) != 0) die("zmq_connect");
 
         char *buf = calloc(1, size);
         if (!buf) { perror("calloc"); exit(1); }
         memset(buf, 'x', size);
 
-        zmq_msg_t reply;
+        zmq_msg_t identity, reply;
+        zmq_msg_init(&identity);
         zmq_msg_init(&reply);
 
+        latency_exchange(sock, buf, size, routed, &identity, &reply);
+        validate_latency_message(&reply, &identity, routed, 1, size);
         for (int i = 0; i < warmup; i++) {
-            if (zmq_send(sock, buf, size, 0) < 0) die("zmq_send warmup");
-            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv warmup");
+            latency_exchange(sock, buf, size, routed, &identity, &reply);
         }
 
         uint64_t *rtts = malloc(sizeof(uint64_t) * iterations);
@@ -903,8 +975,7 @@ done_inproc_pubsub:;
         for (int i = 0; i < iterations; i++) {
             struct timespec t0, t1;
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            if (zmq_send(sock, buf, size, 0) < 0) break;
-            if (zmq_msg_recv(&reply, sock, 0) < 0) die("zmq_recv");
+            latency_exchange(sock, buf, size, routed, &identity, &reply);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             rtts[i] = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
                      + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
@@ -923,6 +994,7 @@ done_inproc_pubsub:;
 
         free(rtts);
         free(buf);
+        zmq_msg_close(&identity);
         zmq_msg_close(&reply);
         zmq_close(sock);
         exit(0);

@@ -10,7 +10,9 @@ use std::io;
 use std::io::IoSlice;
 use std::io::Write;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -23,25 +25,89 @@ use crate::engine::signal::DataSignal;
 /// Caller-side TCP writer for the latency profile. It uses a duplicated
 /// nonblocking descriptor, so sends do not enter the connection driver's
 /// reactor loop.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct DirectTcpWriter {
-    stream: Arc<Mutex<std::net::TcpStream>>,
+    state: Mutex<DirectWriteState>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DirectWriteState<W = std::net::TcpStream> {
+    stream: W,
+    ownership: crate::engine::write_ownership::WriteOwnership,
 }
 
 impl DirectTcpWriter {
     pub(crate) fn new(stream: std::net::TcpStream) -> Self {
         Self {
-            stream: Arc::new(Mutex::new(stream)),
+            state: Mutex::new(DirectWriteState {
+                stream,
+                ownership: crate::engine::write_ownership::WriteOwnership::new(),
+            }),
         }
     }
 
-    pub(crate) fn try_write(&self, bytes: &[u8]) -> io::Result<usize> {
-        match self
-            .stream
-            .lock()
-            .expect("direct writer stream")
-            .write(bytes)
-        {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, DirectWriteState> {
+        self.state.lock().expect("direct writer state")
+    }
+
+    pub(crate) fn claim_driver(&self) -> bool {
+        self.lock().ownership.claim_driver()
+    }
+
+    /// Queue observations must happen under the same lock as send admission.
+    pub(crate) fn publish_idle(&self, empty: impl FnOnce() -> bool) {
+        self.lock().ownership.publish_idle(empty);
+    }
+}
+
+impl<W: Write> DirectWriteState<W> {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.ownership.is_closed()
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.ownership.close();
+    }
+
+    pub(crate) fn queued(&mut self) {
+        self.ownership.claim_driver();
+    }
+
+    /// Called with admission locked. Ineligible means enqueue the owned message.
+    pub(crate) fn try_send(
+        &mut self,
+        slot: &crate::engine::transmit_slot::PeerTransmitSlot,
+        message: &omq_proto::Message,
+    ) -> crate::engine::transmit_slot::TryFrameResult {
+        use crate::engine::transmit_slot::TryFrameResult;
+        if self.is_closed() {
+            return TryFrameResult::Dead;
+        }
+        if !self.ownership.is_idle() {
+            return TryFrameResult::Ineligible;
+        }
+        let result = slot.try_encode_without_signal(message);
+        if result != TryFrameResult::Ok {
+            return result;
+        }
+        // Admission succeeded. A subsequent peer failure must not become a
+        // socket-closed error, nor cause the caller to retry accepted bytes.
+        match slot.try_direct_write_arena_only(|bytes| self.try_write(bytes)) {
+            Ok(true) if slot.is_empty() => {}
+            Ok(_) => {
+                self.queued();
+                slot.data_signal.mark();
+            }
+            Err(_) => {
+                self.close();
+                slot.data_signal.mark();
+            }
+        }
+        TryFrameResult::Ok
+    }
+
+    fn try_write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.stream.write(bytes) {
             Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
             Ok(n) => Ok(n),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
@@ -894,3 +960,6 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod direct_tests;

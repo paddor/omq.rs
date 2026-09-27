@@ -17,7 +17,15 @@ fn ordinary_receive(
     let mut handles = SpscHandles::new(blocking.clone(), false);
     let routes = handles.init_peer_recv(hwm, None);
     let (pipe, consumer, notify, space) = recv_pipe(hwm, blocking);
-    let receiver = SpscAwareRecv::new(consumer, notify, space, handles, false, false);
+    let receiver = SpscAwareRecv::new(
+        consumer,
+        notify,
+        space,
+        handles,
+        false,
+        false,
+        std::time::Duration::ZERO,
+    );
     (routes, receiver, pipe)
 }
 
@@ -444,7 +452,15 @@ fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
     let mut routes = handles.init_peer_recv(512, None);
     let lane = handles.peer_recv.clone().unwrap();
     let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
-    let receiver = SpscAwareRecv::new(consumer, notify, space, handles, false, false);
+    let receiver = SpscAwareRecv::new(
+        consumer,
+        notify,
+        space,
+        handles,
+        false,
+        false,
+        std::time::Duration::ZERO,
+    );
     let mut old = register(&mut routes, "a");
     for _ in 0..512 {
         put(&mut old, "stale");
@@ -469,7 +485,15 @@ fn ordinary_bulk_after_first_preserves_budget_and_releases_partial_credits() {
         let mut handles = SpscHandles::new(blocking.clone(), false);
         let mut routes = handles.init_peer_recv(512, None);
         let (_pipe, consumer, notify, space) = recv_pipe(512, blocking);
-        let receiver = SpscAwareRecv::new(consumer, notify, space, handles, false, false);
+        let receiver = SpscAwareRecv::new(
+            consumer,
+            notify,
+            space,
+            handles,
+            false,
+            false,
+            std::time::Duration::ZERO,
+        );
         let mut sink = register(&mut routes, "a");
         let payload = Bytes::from(vec![0x55; size]);
         for _ in 0..513 {

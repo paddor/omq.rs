@@ -27,7 +27,6 @@ use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
 use crate::routing::RepEnvelope;
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
-use crate::socket::recv::RecvItem;
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
 use omq_proto::frame_buffer::FrameBuffer;
 
@@ -154,7 +153,7 @@ pub struct ServerRecvSink {
 /// empty-to-non-empty transitions.
 #[allow(private_interfaces)]
 pub struct YringSink {
-    pub producer: yring::Producer<RecvItem>,
+    pub producer: yring::Producer<Message>,
     pub signal: Box<dyn Fn() + Send + Sync>,
     pub space: Arc<StateSignal>,
 }
@@ -195,7 +194,7 @@ impl std::fmt::Debug for AuthenticatedRecvSink {
 /// `pending_consumer`.
 pub struct RecvSinkConfig {
     slot: std::sync::Mutex<Option<RecvSink>>,
-    pending_consumer: std::sync::Mutex<Option<yring::Consumer<RecvItem>>>,
+    pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
     signal: Arc<dyn Fn() + Send + Sync>,
     space: Arc<StateSignal>,
     cap: usize,
@@ -260,7 +259,7 @@ impl RecvSinkConfig {
     }
 
     #[allow(private_interfaces)]
-    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<RecvItem>> {
+    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<Message>> {
         self.pending_consumer.try_lock().ok()?.take()
     }
 
@@ -314,7 +313,7 @@ impl YringSink {
     }
 
     async fn send_deferred(&mut self, m: Message, pending: &mut bool) -> bool {
-        let mut item = RecvItem::new(m);
+        let mut item = m;
         loop {
             match self.producer.push(item) {
                 Ok(()) => {
@@ -443,12 +442,12 @@ impl RecvSink {
                 let _ = pipe.send(m).await;
                 None
             }
-            Self::Yring(sink) => match sink.producer.push(RecvItem::new(m)) {
+            Self::Yring(sink) => match sink.producer.push(m) {
                 Ok(()) => {
                     sink.flush_and_signal();
                     None
                 }
-                Err(returned) => Some(returned.message),
+                Err(returned) => Some(returned),
             },
             Self::Authenticated(sink) => {
                 let peer_properties = sink
@@ -490,8 +489,8 @@ impl RecvSink {
             Self::Yring(sink) => {
                 let mut msg = m;
                 loop {
-                    if let Err(returned) = sink.producer.push(RecvItem::new(msg)) {
-                        msg = returned.message;
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
                     } else {
                         sink.flush_and_signal();
                         return true;
@@ -502,8 +501,8 @@ impl RecvSink {
                     let seen = sink.space.generation();
                     let changed = sink.space.changed_after(seen);
                     tokio::pin!(changed);
-                    if let Err(returned) = sink.producer.push(RecvItem::new(msg)) {
-                        msg = returned.message;
+                    if let Err(returned) = sink.producer.push(msg) {
+                        msg = returned;
                         tokio::select! {
                             biased;
                             () = changed => {}
@@ -1275,6 +1274,12 @@ where
         let mut pending_write = PendingWrite::default();
         let mut deferred_data = None;
         let mut pipe_batch: Vec<Message> = Vec::new();
+        let _write_lifetime = DirectWriteLifetime(
+            transmit_slot
+                .as_ref()
+                .filter(|slot| slot.direct_writer().is_some())
+                .cloned(),
+        );
         let mut last_input = Instant::now();
         let mut handshake_deadline: Option<Instant> = config
             .handshake_timeout
@@ -1370,6 +1375,18 @@ where
 
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
         loop {
+            if !claim_direct_writer(transmit_slot.as_deref()) {
+                return Ok(());
+            }
+            // A direct short write is older than all subsequently admitted
+            // inbox/pipe messages and protocol commands.
+            if pending_write.is_empty()
+                && transmit_slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.direct_writer().is_some() && !slot.is_empty())
+            {
+                stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
+            }
             loop {
                 match inbox.try_recv() {
                     Ok(cmd) => {
@@ -1384,6 +1401,15 @@ where
                 }
             }
 
+            publish_direct_idle(
+                transmit_slot.as_deref(),
+                outbound_work_idle(&pending_write, &eq, &connection, &outbound)
+                    && pipe_batch.is_empty()
+                    && deferred_data.is_none(),
+                send_pipe_rx.as_ref(),
+                data_inbox.as_ref(),
+                &inbox,
+            );
             if !emit_connection_events(&mut connection, &peer_out, peer_id, recv_direct.as_mut())
                 .await
             {
@@ -1411,7 +1437,20 @@ where
                 DriverStep::Close => return Ok(()),
             }
 
+            if !claim_direct_writer(transmit_slot.as_deref()) {
+                return Ok(());
+            }
+            if pending_write.is_empty()
+                && transmit_slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.direct_writer().is_some() && !slot.is_empty())
+            {
+                stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
+            }
+
             if deferred_data.is_some()
+                && pipe_batch.is_empty()
+                && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
             {
                 let data = deferred_data.take().unwrap();
@@ -1422,6 +1461,9 @@ where
                     &mut connection,
                     &mut eq,
                 )?;
+                if let Some(slot) = &transmit_slot {
+                    slot.space_available.notify_changed();
+                }
             }
 
             if !pipe_batch.is_empty()
@@ -1436,7 +1478,9 @@ where
             // readiness arm remains for an empty-to-nonempty race.
             if pipe_batch.is_empty()
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
-                && send_pipe_rx.as_ref().is_some_and(|rx| !rx.is_empty())
+                && send_pipe_rx
+                    .as_ref()
+                    .is_some_and(SendPipeConsumer::needs_drain)
             {
                 match handle_send_pipe_ready(
                     &mut send_pipe_rx,
@@ -1472,6 +1516,15 @@ where
             }
             was_recv_blocked = recv_blocked;
 
+            publish_direct_idle(
+                transmit_slot.as_deref(),
+                outbound_work_idle(&pending_write, &eq, &connection, &outbound)
+                    && pipe_batch.is_empty()
+                    && deferred_data.is_none(),
+                send_pipe_rx.as_ref(),
+                data_inbox.as_ref(),
+                &inbox,
+            );
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
@@ -1482,6 +1535,7 @@ where
                 }
 
                 cmd = inbox.recv() => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     if handle_inbox_command(cmd, &mut connection, &mut recv_direct)? == DriverStep::Close {
                         return Ok(());
                     }
@@ -1505,6 +1559,7 @@ where
                 }, if latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) && can_accept_data => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     stage_transmit_slot(
                         transmit_slot.as_ref().unwrap(), &mut pending_write,
                     );
@@ -1513,6 +1568,7 @@ where
                 () = async { recv_direct.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
 
                 res = reader.read_buf(&mut read_buf), if !recv_blocked => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
@@ -1533,30 +1589,24 @@ where
                         &peer_out,
                         peer_id,
                     ).await;
-                    if let Err(error) = input {
-                        drain_writes(&mut writer, &mut connection).await.ok();
-                        return Err(error);
-                    }
+                    input?;
                 }
 
                 // Drain completed offloaded compression in wire order. The
                 // resulting frames are written by the write arm above.
                 Some(first) = outbound.next_offload(), if outbound.has_pending_offload() => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     outbound.drain_ready_offload_batch(first, &connection, &mut eq)?;
                 }
 
                 data = async {
                     data_inbox.as_mut().unwrap().recv().await
-                }, if can_accept_data && data_inbox.is_some() => {
+                }, if can_accept_data && data_inbox.is_some() && deferred_data.is_none() => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     match data {
                         Some(data) => {
-                            deferred_data = handle_data_inbox(
-                                data,
-                                data_inbox.as_mut().expect("data inbox select guard"),
-                                &mut outbound,
-                                &mut connection,
-                                &mut eq,
-                            )?;
+                            deferred_data = Some(data);
+                            if let Some(slot) = &transmit_slot { slot.space_available.notify_changed(); }
                         }
                         None => data_inbox = None,
                     }
@@ -1570,6 +1620,7 @@ where
                 }, if !latency_profile && transmit_slot.as_ref().is_some_and(|s| {
                     s.handshake_done.load(Ordering::Acquire)
                 }) && can_accept_data => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     stage_transmit_slot(
                         transmit_slot.as_ref().unwrap(), &mut pending_write,
                     );
@@ -1580,21 +1631,7 @@ where
                 () = async {
                     send_pipe_rx.as_ref().unwrap().ready().await;
                 }, if send_pipe_rx.is_some() && pipe_batch.is_empty() && can_accept_data => {
-                    match handle_send_pipe_ready(
-                        &mut send_pipe_rx,
-                        &mut pipe_batch,
-                        &mut outbound,
-                        &mut connection,
-                        &mut eq,
-                    )? {
-                        DriverStep::Continue => {}
-                        DriverStep::Yield => {
-                            tokio::task::yield_now().await;
-                        }
-                        DriverStep::Close => {
-                            return Ok(());
-                        }
-                    }
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                 },
 
                 // Heartbeat tick: enabled only post-handshake when
@@ -1606,6 +1643,7 @@ where
                 // peer has no data to send, so last_input stays at
                 // handshake time until the first PONG arrives.
                 () = sleep_until_opt(hb_deadline), if hb_deadline.is_some() => {
+                    if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     if recv_blocked && !can_accept_data {
                         // Keep liveness traffic when writable, but never queue
                         // more PINGs behind a stalled outbound write.
@@ -1627,6 +1665,44 @@ where
             }
         }
     }
+}
+
+/// Abort/error cleanup must retire a direct route even when `run()` is dropped.
+struct DirectWriteLifetime(Option<Arc<PeerTransmitSlot>>);
+
+impl Drop for DirectWriteLifetime {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.0 {
+            slot.mark_dead();
+        }
+    }
+}
+
+fn claim_direct_writer(slot: Option<&PeerTransmitSlot>) -> bool {
+    slot.and_then(PeerTransmitSlot::direct_writer)
+        .is_none_or(|writer| writer.claim_driver())
+}
+
+fn publish_direct_idle(
+    slot: Option<&PeerTransmitSlot>,
+    local_empty: bool,
+    pipe: Option<&SendPipeConsumer>,
+    data: Option<&mpsc::Receiver<PeerDriverData>>,
+    control: &mpsc::Receiver<PeerDriverCommand>,
+) {
+    let Some(slot) = slot else { return };
+    let Some(writer) = slot.direct_writer() else {
+        return;
+    };
+    if !local_empty || !slot.handshake_done.load(Ordering::Acquire) {
+        return;
+    }
+    writer.publish_idle(|| {
+        slot.is_empty()
+            && pipe.is_none_or(SendPipeConsumer::is_empty)
+            && data.is_none_or(mpsc::Receiver::is_empty)
+            && control.is_empty()
+    });
 }
 
 fn close_error_reason(err: &Error) -> String {
@@ -2578,15 +2654,9 @@ mod tests {
             space: Arc::new(StateSignal::new()),
         };
 
-        assert!(matches!(
-            sink.producer.push(RecvItem::new(Message::single("a"))),
-            Ok(())
-        ));
+        assert!(matches!(sink.producer.push(Message::single("a")), Ok(())));
         sink.flush_and_signal();
-        assert!(matches!(
-            sink.producer.push(RecvItem::new(Message::single("b"))),
-            Ok(())
-        ));
+        assert!(matches!(sink.producer.push(Message::single("b")), Ok(())));
         sink.flush_and_signal();
 
         assert_eq!(signals.load(Ordering::Relaxed), 2);
@@ -4347,7 +4417,7 @@ mod tests {
     }
 
     async fn drain_large_messages_until(
-        consumer: &mut yring::Consumer<RecvItem>,
+        consumer: &mut yring::Consumer<Message>,
         space: &StateSignal,
         msg_size: usize,
         next_recv: &mut usize,
@@ -4366,7 +4436,7 @@ mod tests {
             let mut released = false;
             while let Some(item) = consumer.pop() {
                 released = true;
-                let data = item.message.part_bytes(0).unwrap();
+                let data = item.part_bytes(0).unwrap();
                 assert_eq!(
                     data.as_ref(),
                     patterned_payload(msg_size, *next_recv as u64)

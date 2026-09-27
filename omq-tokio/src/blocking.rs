@@ -160,6 +160,8 @@ impl Socket {
     }
 
     /// Receive one complete message, blocking until one is available.
+    ///
+    /// [`crate::Options::recv_spin`] optionally polls before parking.
     pub fn recv(&self) -> Result<Message> {
         self.inner.blocking_recv()
     }
@@ -366,6 +368,106 @@ mod tests {
         let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
         pull.bind(endpoint.clone()).unwrap();
         pull
+    }
+
+    #[test]
+    fn recv_spin_supports_reqrep_and_pushpull_over_inproc_and_tcp() {
+        for tcp in [false, true] {
+            for (sender_type, receiver_type) in [
+                (SocketType::Req, SocketType::Rep),
+                (SocketType::Push, SocketType::Pull),
+            ] {
+                let ctx = Context::new();
+                let options = Options::default().recv_spin(Duration::from_micros(50));
+                let receiver = ctx.blocking_socket(receiver_type, options.clone());
+                receiver
+                    .bind(if tcp {
+                        "tcp://127.0.0.1:0".parse().unwrap()
+                    } else {
+                        endpoint("blocking-spin")
+                    })
+                    .unwrap();
+                let sender = ctx.blocking_socket(sender_type, options);
+                sender
+                    .connect(receiver.last_bound_endpoint().unwrap())
+                    .unwrap();
+                for _ in 0..16 {
+                    sender.send(Message::single("request")).unwrap();
+                    let mut messages = Vec::new();
+                    assert_eq!(
+                        receiver
+                            .recv_many_timeout_into(8, Duration::from_secs(2), &mut messages)
+                            .unwrap(),
+                        1
+                    );
+                    assert_eq!(messages, [Message::single("request")]);
+                    if receiver_type == SocketType::Rep {
+                        receiver.send(Message::single("reply")).unwrap();
+                        assert_eq!(
+                            sender.recv_timeout(Duration::from_secs(2)).unwrap(),
+                            Message::single("reply")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recv_spin_stops_at_receive_deadline() {
+        let ctx = Context::new();
+        let pull = ctx.blocking_socket(
+            SocketType::Pull,
+            Options::default().recv_spin(Duration::from_secs(5)),
+        );
+        for timeout in [Duration::ZERO, Duration::from_millis(5)] {
+            let started = std::time::Instant::now();
+            assert!(matches!(pull.recv_timeout(timeout), Err(Error::Timeout)));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            let mut messages = Vec::new();
+            let started = std::time::Instant::now();
+            assert!(matches!(
+                pull.recv_many_timeout_into(8, timeout, &mut messages),
+                Err(Error::Timeout)
+            ));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(messages.is_empty());
+        }
+    }
+
+    #[test]
+    fn recv_spin_stops_when_canceled() {
+        for registered in [false, true] {
+            let ctx = Context::new();
+            let pull = ctx.blocking_socket(
+                SocketType::Pull,
+                Options::default().recv_spin(Duration::from_secs(5)),
+            );
+            let cancel = Arc::new(BlockingRecvCancel::new());
+            let worker_cancel = cancel.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let mut messages = Vec::new();
+                if registered {
+                    worker_cancel.register_current_thread_once();
+                }
+                started_tx.send(()).unwrap();
+                let result = if registered {
+                    pull.recv_many_registered_cancelable_into(8, &worker_cancel, &mut messages)
+                } else {
+                    pull.recv_many_cancelable_into(8, &worker_cancel, &mut messages)
+                };
+                done_tx.send((result, messages)).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            cancel.cancel();
+            let (result, messages) = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(result.unwrap(), None);
+            assert!(messages.is_empty());
+            worker.join().unwrap();
+        }
     }
 
     #[test]

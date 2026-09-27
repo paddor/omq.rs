@@ -191,6 +191,7 @@ impl Socket {
         let recv_hwm = options.recv_hwm.max(16) as usize;
         let driver_linger = options.linger;
         let recv_batching = options.recv_batching && supports_recv_batching(socket_type);
+        let recv_spin = options.recv_spin;
         let blocking_recv_waker = super::recv::BlockingRecvWaker::new();
         let (recv_tx, recv_consumer, recv_pipe_notify, recv_pipe_space) =
             super::recv::recv_pipe(recv_hwm, blocking_recv_waker.clone());
@@ -245,6 +246,7 @@ impl Socket {
                     spsc,
                     latency_profile,
                     recv_batching,
+                    recv_spin,
                 ),
                 monitor,
                 send_submitter,

@@ -23,13 +23,13 @@ use futures::channel::oneshot;
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::mpsc;
 
+use omq_proto::Message;
 use omq_proto::error::{Error, Result};
 use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 use omq_proto::proto::SocketType;
 
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::socket::fanin::{Fanin, Producer};
-use crate::socket::recv::RecvItem;
 
 /// Sender-side SPSC state for inproc fast path.
 #[derive(Debug)]
@@ -85,7 +85,7 @@ pub struct InprocTx {
 
 #[derive(Debug)]
 pub(crate) enum InprocProducer {
-    Yring(yring::Producer<RecvItem>),
+    Yring(yring::Producer<Message>),
     Fanin(Producer),
 }
 impl InprocProducer {
@@ -101,7 +101,7 @@ impl InprocProducer {
             Self::Fanin(p) => p.is_closed(),
         }
     }
-    pub(crate) fn push_and_flush(&mut self, item: RecvItem) -> std::result::Result<(), RecvItem> {
+    pub(crate) fn push_and_flush(&mut self, item: Message) -> std::result::Result<(), Message> {
         match self {
             Self::Yring(p) => p.push_and_flush(item),
             Self::Fanin(p) => p.try_send(item),
@@ -140,7 +140,7 @@ impl InprocTx {
 #[allow(private_interfaces)]
 #[derive(Debug)]
 pub struct InprocRx {
-    pub consumer: Mutex<yring::Consumer<RecvItem>>,
+    pub consumer: Mutex<yring::Consumer<Message>>,
     pub batch_remaining: std::sync::atomic::AtomicUsize,
     pub(crate) recv_signal: Arc<DataSignal>,
     pub recv_ready: Arc<std::sync::atomic::AtomicBool>,

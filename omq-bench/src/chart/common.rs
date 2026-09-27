@@ -28,6 +28,14 @@ pub(crate) struct Impl {
 
 pub(crate) type ValMap = BTreeMap<u64, BTreeMap<String, f64>>;
 
+pub(crate) struct LatencyEntry {
+    pub p50: f64,
+    pub p99: f64,
+    pub p999: f64,
+}
+
+pub(crate) type LatencyMap = BTreeMap<u64, BTreeMap<String, LatencyEntry>>;
+
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
     pub receiver: Option<f64>,
@@ -54,6 +62,7 @@ enum LegendVersionMode {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
+pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
 pub(crate) const C_OMQ_EXCLUSIVE: RGBColor = RGBColor(45, 212, 191);
@@ -621,18 +630,29 @@ pub(crate) fn load_latency(
     transport: &str,
     sizes: &[u64],
     impls: &[Impl],
-) -> (ValMap, BTreeMap<String, CpuData>) {
+) -> (LatencyMap, BTreeMap<String, CpuData>) {
     use crate::jsonl::{self, ComparisonRow};
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
     let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
 
-    let mut lat: ValMap = BTreeMap::new();
+    let mut lat: LatencyMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
 
     for (_, row) in rows {
         if row.transport != transport || row.kind != "latency" {
+            continue;
+        }
+        if row
+            .latency_pair
+            .as_deref()
+            .is_some_and(|pair| pair != "req-rep")
+            || row
+                .workload_profile
+                .as_deref()
+                .is_some_and(|profile| profile != "default")
+        {
             continue;
         }
         if !keys.contains(&row.impl_name.as_str()) {
@@ -648,10 +668,10 @@ pub(crate) fn load_latency(
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
     for row in latest.into_values() {
-        if let Some(v) = row.p50_us {
+        if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
@@ -1051,7 +1071,7 @@ pub(crate) fn draw_latency_single_panel(
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
-    lat: &ValMap,
+    lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1072,7 +1092,7 @@ pub(crate) fn draw_latency_single_panel_with_versions(
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
-    lat: &ValMap,
+    lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1094,7 +1114,7 @@ fn draw_latency_single_panel_with_version_mode(
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
-    lat: &ValMap,
+    lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
     version_mode: LegendVersionMode,
@@ -1122,7 +1142,7 @@ fn draw_latency_single_panel_with_version_mode(
     let n = sizes.len();
     let mut chart = ChartBuilder::on(&chart_area)
         .caption(
-            "p50 round-trip latency (lower is better)",
+            "p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)",
             ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
@@ -1130,7 +1150,7 @@ fn draw_latency_single_panel_with_version_mode(
         .margin_top(36)
         .margin_left(10)
         .margin_right(30)
-        .build_cartesian_2d(0.0..(n - 1) as f64, lat_range.0..lat_range.1)?;
+        .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_range.0..lat_range.1)?;
 
     chart
         .configure_mesh()
@@ -1148,11 +1168,28 @@ fn draw_latency_single_panel_with_version_mode(
         .axis_style(AXIS_COLOR)
         .draw()?;
 
+    // Draw ranges behind the p99 lines and dots. All three values come from
+    // the same measured run, not from variation between runs.
+    for imp in present.iter().rev() {
+        let stroke = imp.color.mix(0.65).stroke_width(1);
+        for (index, size) in sizes.iter().enumerate() {
+            let Some(entry) = lat.get(size).and_then(|values| values.get(imp.key)) else {
+                continue;
+            };
+            let x = index as f64;
+            chart.draw_series([
+                PathElement::new(vec![(x, entry.p50), (x, entry.p999)], stroke),
+                PathElement::new(vec![(x - 0.05, entry.p50), (x + 0.05, entry.p50)], stroke),
+                PathElement::new(vec![(x - 0.05, entry.p999), (x + 0.05, entry.p999)], stroke),
+            ])?;
+        }
+    }
+
     for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
             .iter()
             .enumerate()
-            .filter_map(|(i, &s)| lat.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
+            .filter_map(|(i, &s)| lat.get(&s)?.get(imp.key).map(|v| (i as f64, v.p99)))
             .collect();
         if pts.is_empty() {
             continue;
@@ -1332,14 +1369,13 @@ fn draw_gbs_panel_log(
     Ok(())
 }
 
-pub(crate) fn auto_lat_range(lat: &ValMap) -> (f64, f64) {
+pub(crate) fn auto_lat_range(lat: &LatencyMap) -> (f64, f64) {
     let max_val = lat
         .values()
         .flat_map(|m| m.values())
-        .copied()
+        .map(|entry| entry.p999)
         .fold(0.0_f64, f64::max);
-    let step = nice_step(max_val, 6);
-    let top = (max_val / step).ceil() * step;
+    let (top, _) = nice_axis(max_val * 1.05, 6);
     (0.0, top)
 }
 

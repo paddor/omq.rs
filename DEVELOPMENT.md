@@ -224,6 +224,36 @@ when a measured cell looks bad, don't hand-wave it as noise.
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 | `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
 
+For direct blocking-peer experiments, `OMQ_BENCH_RECV_SPIN_US=50` sets
+`Options::recv_spin(Duration::from_micros(50))` on both endpoints. Unset or
+zero disables spinning, including for REQ/REP's default latency profile.
+Use separate experiment data files when comparing spin budgets.
+
+The comparison runner also exposes `--impl omq-tokio-1t-spin50` as a latency-only
+variant, alongside `omq-tokio-1t` and `omq-tokio-ct`. Its 50 us spin budget applies
+to both receiving endpoints. Pair and profile selection is available for OMQ
+peers:
+
+```sh
+cargo run --release -p omq-bench -- run comparisons \
+  --impl omq-tokio-1t --impl omq-tokio-1t-spin50 --impl omq-tokio-ct \
+  --no-throughput --no-pubsub --transport tcp --transport inproc \
+  --latency-pairs req-rep,router-dealer,router-router,pair,client-server,peer,channel \
+  --latency-profiles default,latency --sizes 16,64,256,1024,4096
+```
+
+`router-dealer` binds ROUTER and connects DEALER; `client-server` binds SERVER
+and connects CLIENT. The connecting socket initiates every exchange. ROUTER
+and PEER preserve identity frames; SERVER preserves `routing_id` when echoing.
+Body sizes exclude routing envelopes. Both endpoints validate a full exchange
+before warmup and timing. JSONL latency rows record `latency_pair`,
+`workload_profile`, and `recv_spin_us`; other pairs/profiles do not replace
+REQ/REP chart points. The libzmq peer also supports ROUTER/DEALER,
+ROUTER/ROUTER, and PAIR with `--latency-profiles default`. Its draft socket
+types are not enabled in this harness. Other external implementations support
+REQ/REP defaults only. Latency tables print p99; cache rows retain p50, p99,
+and p99.9.
+
 Each binary speaks a subcommand protocol:
 
 - `push <addr> <size>`: bind PUSH, send forever.
@@ -240,6 +270,10 @@ application-level QoS are disabled.
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
 ## Updating Charts
+
+Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers
+from p50 to p99.9. Each point uses all three percentiles from the same measured
+run, and the Y axis includes the full whisker range.
 
 Chart subtitles come from `.chart_hw` in the repo root:
 

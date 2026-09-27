@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgrade compression dependencies to `lz4rip` 0.11.8 and `zrip` 0.8.10.
+- Require `lz4rip` 0.11.9 for its small-input compression performance fix.
 
 ## [0.28.0] - 2026-09-19
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-27
+
 ### Breaking
 
 - Remove `Socket::peer_recv_lanes`, `PeerRecvConfig`, and `PeerRecvLane`.
@@ -20,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserving identity routing, reconnect fencing, and aggregate receive budgets.
 - *(deps)* Bump `fanring` to 0.3.7 and `yring` to 0.3.18 for
   `try_recv_batch_into_while` and `pop_into_while`.
+- *(deps)* Bump `omq-proto` to 0.28.1 for `lz4rip` 0.11.9 and
+  `zrip` 0.8.10.
 - `recv_batching` bulk receives move whole per-connection windows at once.
 
 ### Fixed

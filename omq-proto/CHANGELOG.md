@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-09-27
+
 ### Changed
 
 - Upgrade compression dependencies to `lz4rip` 0.11.8 and `zrip` 0.8.10.

@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-09-27
+
 ### Changed
 
+- Bundle `omq-tokio` 0.24.0 with PEER fanring receives, batched receive
+  credits, and signaling/shutdown wake fixes. The C API is unchanged.
 - Require published `yring` 0.3.18 instead of a sibling checkout.
 
 ## [0.5.19] - 2026-09-19

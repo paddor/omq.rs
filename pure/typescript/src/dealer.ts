@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import type { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -40,7 +40,7 @@ export class Dealer extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    conn: Connection,
+    conn: PeerConnection,
     msg: Message,
   ): void {
     this.enqueueMessage(conn, msg);

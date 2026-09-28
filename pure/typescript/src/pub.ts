@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import type { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -20,7 +20,7 @@ export class Pub extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "PUB";
   /** @ignore */
-  protected peerSubscriptions: Map<Connection, Uint8Array[]> = new Map();
+  protected peerSubscriptions: Map<PeerConnection, Uint8Array[]> = new Map();
 
   /** Create a PUB socket. */
   constructor(opts?: SocketOptions) {
@@ -42,7 +42,7 @@ export class Pub extends Socket {
 
   /** @ignore */
   protected override onCommand(
-    conn: Connection,
+    conn: PeerConnection,
     name: string,
     body: Uint8Array,
   ): void {
@@ -68,14 +68,14 @@ export class Pub extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     this.peerSubscriptions.delete(conn);
     super.onConnectionClosed(conn);
   }
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    _conn: PeerConnection,
     _msg: Message,
   ): void {
     // PUB never receives application messages

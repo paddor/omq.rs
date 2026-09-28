@@ -19,6 +19,7 @@ import {
   Lz4Encoder,
 } from "./lz4.ts";
 import { Message } from "./message.ts";
+import type { ConnectionState, PeerConnection } from "./peer_connection.ts";
 import {
   decodeZwsFrame,
   encodeCommandFrame,
@@ -28,10 +29,19 @@ import {
   FLAG_MORE,
 } from "./zws.ts";
 
-export type ConnectionState = "connecting" | "handshaking" | "ready" | "closed";
+export type { ConnectionState } from "./peer_connection.ts";
 type PlainHandshakeState = "awaiting-welcome" | "awaiting-ready";
 
-/** Low-level WebSocket connection options used by `Socket`. */
+/** WebTransport-specific connection settings. */
+export interface WebTransportOptions {
+  /**
+   * Accept a server certificate by SHA-256 hash instead of the browser's trust
+   * store (W3C `serverCertificateHashes`: ECDSA, at most 14 days validity).
+   */
+  serverCertificateHashes?: WebTransportHash[];
+}
+
+/** Low-level connection options used by `Socket`. */
 export interface ConnectionOptions {
   /** Local ZMQ socket type advertised in READY. */
   socketType: SocketTypeName;
@@ -53,16 +63,22 @@ export interface ConnectionOptions {
   handshakeTimeoutMs?: number;
   /** Optional ZMTP PLAIN credentials. */
   plain?: PlainAuthOptions;
+  /** WebTransport settings for `h3+quic://` and `https://` endpoints. */
+  webTransport?: WebTransportOptions;
+  /** WebTransport liveness PING interval. Disabled by default. */
+  heartbeatIntervalMs?: number;
+  /** WebTransport liveness timeout; defaults to the interval. */
+  heartbeatTimeoutMs?: number;
   /** Called after ZMTP READY/PLAIN handshake succeeds. */
-  onReady?: (conn: Connection) => void;
+  onReady?: (conn: PeerConnection) => void;
   /** Called for each decoded application message. */
-  onMessage?: (conn: Connection, msg: Message) => void;
+  onMessage?: (conn: PeerConnection, msg: Message) => void;
   /** Called for incoming ZMTP command frames. */
-  onCommand?: (conn: Connection, name: string, body: Uint8Array) => void;
-  /** Called when the WebSocket connection closes. */
-  onClose?: (conn: Connection) => void;
+  onCommand?: (conn: PeerConnection, name: string, body: Uint8Array) => void;
+  /** Called when the connection closes. */
+  onClose?: (conn: PeerConnection) => void;
   /** Called when protocol or transport errors close the connection. */
-  onError?: (conn: Connection, error: Error) => void;
+  onError?: (conn: PeerConnection, error: Error) => void;
 }
 
 interface QueuedSend {
@@ -96,7 +112,7 @@ function eventDataToArrayBuffer(data: unknown): ArrayBuffer {
 }
 
 /** Low-level ZWS/ZMTP connection used by socket classes. */
-export class Connection {
+export class Connection implements PeerConnection {
   /** Original endpoint URL passed to the constructor. */
   readonly url: string;
   private ws: WebSocket | null = null;

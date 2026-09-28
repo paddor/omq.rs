@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -14,7 +14,7 @@ export class Req extends Socket {
     resolve: (msg: Message) => void;
     reject: (error: Error) => void;
   } | null = null;
-  private replyConnection: Connection | null = null;
+  private replyConnection: PeerConnection | null = null;
 
   /** Create a REQ socket. */
   constructor(opts?: SocketOptions) {
@@ -61,7 +61,7 @@ export class Req extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    conn: Connection,
+    conn: PeerConnection,
     msg: Message,
   ): void {
     if (!this.pendingReply) return;
@@ -78,7 +78,7 @@ export class Req extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     if (this.replyConnection === conn && this.pendingReply) {
       const pending = this.pendingReply;
       this.pendingReply = null;

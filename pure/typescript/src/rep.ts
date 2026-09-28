@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -10,15 +10,15 @@ import { Socket, type SocketOptions } from "./socket.ts";
 export class Rep extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "REP";
-  private pendingRequests: Array<{ conn: Connection; msg: Message }> = [];
+  private pendingRequests: Array<{ conn: PeerConnection; msg: Message }> = [];
   private requestWaiters: Array<
     {
-      resolve: (entry: { conn: Connection; msg: Message }) => void;
+      resolve: (entry: { conn: PeerConnection; msg: Message }) => void;
       reject: (error: Error) => void;
     }
   > = [];
   private routingEnvelope: Uint8Array[] | null = null;
-  private replyConnection: Connection | null = null;
+  private replyConnection: PeerConnection | null = null;
 
   /** Create a REP socket. */
   constructor(opts?: SocketOptions) {
@@ -35,7 +35,7 @@ export class Rep extends Socket {
       throw new Error("REP socket must send a reply before receiving again");
     }
 
-    let entry: { conn: Connection; msg: Message };
+    let entry: { conn: PeerConnection; msg: Message };
     const queued = this.pendingRequests.shift();
     if (queued) {
       entry = queued;
@@ -85,7 +85,10 @@ export class Rep extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionMessage(conn: Connection, msg: Message): void {
+  protected override onConnectionMessage(
+    conn: PeerConnection,
+    msg: Message,
+  ): void {
     const entry = { conn, msg };
     const waiter = this.requestWaiters.shift();
     if (waiter) {
@@ -103,7 +106,7 @@ export class Rep extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     this.pendingRequests = this.pendingRequests.filter((entry) =>
       entry.conn !== conn
     );

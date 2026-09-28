@@ -1,3 +1,5 @@
+mod webtransport;
+
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -845,6 +847,10 @@ async fn main() {
     let mode = args.next().expect("mode");
 
     match mode.as_str() {
+        "webtransport-browser" => {
+            let host = args.next().unwrap_or_else(|| "127.0.0.1".to_string());
+            webtransport::webtransport_browser(host).await;
+        }
         "browser-bind" => {
             let base = args
                 .next()

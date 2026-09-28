@@ -117,6 +117,37 @@ duplicate TLS encryption and add a larger ZMTP crypto handshake surface. CURVE
 over `ws://` could make sense later for ZMQ-style key identity without TLS
 client-certificate deployment, but it is intentionally out of scope today.
 
+### WebTransport
+
+Browsers with WebTransport (Chromium, Firefox) can reach an `omq-tokio`
+`h3+quic://` listener. The connection carries real ZMTP 3.1 on one ordered
+stream and liveness records on a second stream; the same socket classes,
+PLAIN authentication, reconnect, and subscription replay apply. OMQ
+compression is not available on WebTransport.
+
+```ts
+const req = new Req({
+  heartbeatIntervalMs: 1000, // liveness PINGs; peer silence closes after the timeout
+  heartbeatTimeoutMs: 5000,
+});
+req.connect("h3+quic://broker.example.com:4433/omq"); // or https://...
+```
+
+The server certificate must be trusted by the browser. For short-lived
+self-signed ECDSA certificates (at most 14 days), pass their SHA-256 hash:
+
+```ts
+new Sub({
+  webTransport: {
+    serverCertificateHashes: [{ algorithm: "sha-256", value: certSha256 }],
+  },
+});
+```
+
+The listener must list the page origin in `QuicOptions::allowed_origins`.
+Each connection requests `allowPooling: false`, so every OMQ peer gets its
+own QUIC connection.
+
 ### Robustness Options
 
 Sockets reconnect by default after peer-side close or WebSocket error. Current
@@ -154,7 +185,10 @@ peers from the local `../omq.rs` checkout and verify NULL, PLAIN, and
 `lz4+ws://` traffic. The Rust fixture depends directly on that sibling checkout
 so tests exercise transport changes under development, not an older release.
 
-Run `npm run test:browser` for the headless Firefox browser interop test. It
+Run `npm run test:browser` for the headless browser interop tests. The
+WebTransport spec runs in both Chromium and Firefox against the fixture's
+`h3+quic://` listener, trusting its ten-day certificate by hash. The WebSocket
+spec runs in Firefox. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
 `wss://`. The harness passes the temporary page origin explicitly to Rust

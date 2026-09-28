@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { Dealer } from "./dealer.ts";
 import type { Message } from "./message.ts";
 import type { SocketOptions } from "./socket.ts";
@@ -29,7 +29,10 @@ export class Client extends Dealer {
   }
 
   /** @ignore */
-  protected override onConnectionMessage(conn: Connection, msg: Message): void {
+  protected override onConnectionMessage(
+    conn: PeerConnection,
+    msg: Message,
+  ): void {
     if (msg.parts.length !== 1) return;
     super.onConnectionMessage(conn, msg);
   }

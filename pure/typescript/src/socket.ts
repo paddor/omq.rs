@@ -1,5 +1,11 @@
-import { Connection, type ConnectionOptions } from "./connection.ts";
+import {
+  Connection,
+  type ConnectionOptions,
+  type WebTransportOptions,
+} from "./connection.ts";
 import type { PlainAuthOptions } from "./auth.ts";
+import type { PeerConnection } from "./peer_connection.ts";
+import { isWebTransportUrl, WebTransportConnection } from "./webtransport.ts";
 import type { SocketTypeName } from "./command.ts";
 import type { Message } from "./message.ts";
 
@@ -10,7 +16,7 @@ interface Waiter<T> {
 
 interface EndpointState {
   url: string;
-  conn: Connection | null;
+  conn: PeerConnection | null;
   reconnectDelayMs: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   closedByUser: boolean;
@@ -64,6 +70,12 @@ export interface SocketOptions {
   sendBufferPollMs?: number;
   /** Close if WebSocket/ZMTP handshake has not completed by this time. Disabled by default. */
   handshakeTimeoutMs?: number;
+  /** WebTransport settings for `h3+quic://` and `https://` endpoints. */
+  webTransport?: WebTransportOptions;
+  /** WebTransport liveness PING interval in milliseconds. Disabled by default. */
+  heartbeatIntervalMs?: number;
+  /** WebTransport liveness timeout in milliseconds; defaults to the interval. */
+  heartbeatTimeoutMs?: number;
   /** Called when a connection or protocol error occurs. */
   onError?: (error: Error) => void;
 }
@@ -78,9 +90,9 @@ export abstract class Socket {
   /** @ignore */
   protected abstract readonly socketType: SocketTypeName;
   /** @ignore */
-  protected connections: Map<string, Connection> = new Map();
+  protected connections: Map<string, PeerConnection> = new Map();
   /** @ignore */
-  protected readyConnections: Connection[] = [];
+  protected readyConnections: PeerConnection[] = [];
   /** @ignore */
   protected opts: SocketOptions;
   /** @ignore */
@@ -91,9 +103,9 @@ export abstract class Socket {
   protected messageWaiters: Array<Waiter<Message>> = [];
 
   private connectionReadyWaiters: Array<Waiter<void>> = [];
-  private readyWaiters: Array<Waiter<Connection>> = [];
+  private readyWaiters: Array<Waiter<PeerConnection>> = [];
   private endpoints: Map<string, EndpointState> = new Map();
-  private urlsByConnection: Map<Connection, string> = new Map();
+  private urlsByConnection: Map<PeerConnection, string> = new Map();
   private closed = false;
 
   /** @ignore */
@@ -190,6 +202,9 @@ export abstract class Socket {
       sendBufferPollMs: this.opts.sendBufferPollMs,
       handshakeTimeoutMs: this.opts.handshakeTimeoutMs,
       plain: this.opts.plain,
+      webTransport: this.opts.webTransport,
+      heartbeatIntervalMs: this.opts.heartbeatIntervalMs,
+      heartbeatTimeoutMs: this.opts.heartbeatTimeoutMs,
       onReady: (conn) => this.onConnectionReady(conn),
       onMessage: (conn, msg) => this.onConnectionMessage(conn, msg),
       onCommand: (conn, name, body) => this.onCommand(conn, name, body),
@@ -197,7 +212,9 @@ export abstract class Socket {
       onError: (conn, err) => this.onConnectionError(conn, err),
     };
 
-    const conn = new Connection(endpoint.url, connOpts);
+    const conn: PeerConnection = isWebTransportUrl(endpoint.url)
+      ? new WebTransportConnection(endpoint.url, connOpts)
+      : new Connection(endpoint.url, connOpts);
     endpoint.conn = conn;
     this.connections.set(endpoint.url, conn);
     this.urlsByConnection.set(conn, endpoint.url);
@@ -279,7 +296,7 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected onConnectionReady(conn: Connection): void {
+  protected onConnectionReady(conn: PeerConnection): void {
     if (this.closed) return;
     if (!this.readyConnections.includes(conn)) {
       this.readyConnections.push(conn);
@@ -295,10 +312,13 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected abstract onConnectionMessage(conn: Connection, msg: Message): void;
+  protected abstract onConnectionMessage(
+    conn: PeerConnection,
+    msg: Message,
+  ): void;
 
   /** @ignore */
-  protected onConnectionClosed(conn: Connection): void {
+  protected onConnectionClosed(conn: PeerConnection): void {
     this.removeReadyConnection(conn);
     const url = this.urlsByConnection.get(conn);
     if (!url) return;
@@ -328,7 +348,7 @@ export abstract class Socket {
 
   /** @ignore */
   protected onCommand(
-    _conn: Connection,
+    _conn: PeerConnection,
     _name: string,
     _body: Uint8Array,
   ): void {
@@ -336,12 +356,12 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected onConnectionError(_conn: Connection, err: Error): void {
+  protected onConnectionError(_conn: PeerConnection, err: Error): void {
     this.opts.onError?.(err);
   }
 
   /** @ignore */
-  protected enqueueMessage(conn: Connection, msg: Message): void {
+  protected enqueueMessage(conn: PeerConnection, msg: Message): void {
     const waiter = this.messageWaiters.shift();
     if (waiter) {
       waiter.resolve(msg);
@@ -371,7 +391,7 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected waitForReady(): Promise<Connection> {
+  protected waitForReady(): Promise<PeerConnection> {
     if (this.readyConnections.length > 0) {
       return Promise.resolve(this.readyConnections[0]!);
     }
@@ -391,7 +411,7 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected pickRoundRobin(): Connection | null {
+  protected pickRoundRobin(): PeerConnection | null {
     if (this.readyConnections.length === 0) return null;
     const conn = this.readyConnections.shift()!;
     this.readyConnections.push(conn);
@@ -404,7 +424,10 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected sendOnConnection(conn: Connection, msg: Message): Promise<void> {
+  protected sendOnConnection(
+    conn: PeerConnection,
+    msg: Message,
+  ): Promise<void> {
     return conn.send(msg);
   }
 
@@ -424,7 +447,7 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  protected closeForReceiveHighWaterMark(conn: Connection): void {
+  protected closeForReceiveHighWaterMark(conn: PeerConnection): void {
     const error = new Error("Receive high water mark reached");
     this.onConnectionError(conn, error);
     conn.close();
@@ -468,13 +491,13 @@ export abstract class Socket {
   }
 
   /** @ignore */
-  private endpointFor(conn: Connection): EndpointState | null {
+  private endpointFor(conn: PeerConnection): EndpointState | null {
     const url = this.urlsByConnection.get(conn);
     return url ? this.endpoints.get(url) ?? null : null;
   }
 
   /** @ignore */
-  private removeReadyConnection(conn: Connection): void {
+  private removeReadyConnection(conn: PeerConnection): void {
     const idx = this.readyConnections.indexOf(conn);
     if (idx >= 0) this.readyConnections.splice(idx, 1);
   }

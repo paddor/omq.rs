@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import type { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -27,7 +27,7 @@ export class Push extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    _conn: PeerConnection,
     _msg: Message,
   ): void {
     // PUSH never receives

@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { bytesKey } from "./bytes.ts";
 import { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
@@ -13,9 +13,9 @@ export class Router extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "ROUTER";
   /** @ignore */
-  protected peerIdentities: Map<Connection, Uint8Array> = new Map();
+  protected peerIdentities: Map<PeerConnection, Uint8Array> = new Map();
   /** @ignore */
-  protected connectionsByIdentity: Map<string, Connection> = new Map();
+  protected connectionsByIdentity: Map<string, PeerConnection> = new Map();
   private idCounter = 0;
 
   /** Create a ROUTER socket. */
@@ -49,7 +49,7 @@ export class Router extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionReady(conn: Connection): void {
+  protected override onConnectionReady(conn: PeerConnection): void {
     super.onConnectionReady(conn);
 
     const peerIdentity = conn.peerProperties?.identity;
@@ -62,7 +62,7 @@ export class Router extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     const identity = this.peerIdentities.get(conn);
     if (identity) {
       const key = bytesKey(identity);
@@ -76,7 +76,7 @@ export class Router extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    conn: Connection,
+    conn: PeerConnection,
     msg: Message,
   ): void {
     const identity = this.peerIdentities.get(conn);

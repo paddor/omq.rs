@@ -44,6 +44,8 @@ export { Peer } from "./peer.ts";
 export { Channel } from "./channel.ts";
 
 export type { SocketOptions } from "./socket.ts";
+export type { WebTransportOptions } from "./connection.ts";
+export type { ConnectionState, PeerConnection } from "./peer_connection.ts";
 export type { PlainAuthOptions } from "./auth.ts";
 export type { PeerProperties } from "./command.ts";
 export type { SocketTypeName } from "./command.ts";

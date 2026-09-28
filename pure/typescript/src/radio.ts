@@ -1,6 +1,6 @@
 import { bytesKey } from "./bytes.ts";
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import type { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -13,7 +13,7 @@ import { Socket, type SocketOptions } from "./socket.ts";
 export class Radio extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "RADIO";
-  private peerGroups: Map<Connection, Set<string>> = new Map();
+  private peerGroups: Map<PeerConnection, Set<string>> = new Map();
 
   /** Create a RADIO socket. */
   constructor(opts?: SocketOptions) {
@@ -41,7 +41,7 @@ export class Radio extends Socket {
 
   /** @ignore */
   protected override onCommand(
-    conn: Connection,
+    conn: PeerConnection,
     name: string,
     body: Uint8Array,
   ): void {
@@ -60,14 +60,14 @@ export class Radio extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     this.peerGroups.delete(conn);
     super.onConnectionClosed(conn);
   }
 
   /** @ignore */
   protected override onConnectionMessage(
-    _conn: Connection,
+    _conn: PeerConnection,
     _msg: Message,
   ): void {
     // RADIO never receives application messages

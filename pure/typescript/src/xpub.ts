@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { Message } from "./message.ts";
 import { Pub } from "./pub.ts";
 import type { SocketOptions } from "./socket.ts";
@@ -32,7 +32,7 @@ export class XPub extends Pub {
 
   /** @ignore */
   protected override onCommand(
-    conn: Connection,
+    conn: PeerConnection,
     name: string,
     body: Uint8Array,
   ): void {

@@ -1,5 +1,5 @@
 import type { SocketTypeName } from "./command.ts";
-import type { Connection } from "./connection.ts";
+import type { PeerConnection } from "./peer_connection.ts";
 import { Message } from "./message.ts";
 import { Socket, type SocketOptions } from "./socket.ts";
 
@@ -12,8 +12,8 @@ import { Socket, type SocketOptions } from "./socket.ts";
 export class Peer extends Socket {
   /** @ignore */
   protected readonly socketType: SocketTypeName = "PEER";
-  private routingIds: Map<Connection, Uint8Array> = new Map();
-  private connectionsByRoutingId: Map<number, Connection> = new Map();
+  private routingIds: Map<PeerConnection, Uint8Array> = new Map();
+  private connectionsByRoutingId: Map<number, PeerConnection> = new Map();
   private nextRoutingId = 1;
 
   /** Create a PEER socket. */
@@ -52,7 +52,7 @@ export class Peer extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionReady(conn: Connection): void {
+  protected override onConnectionReady(conn: PeerConnection): void {
     super.onConnectionReady(conn);
     const id = this.nextRoutingId++;
     const frame = new Uint8Array(4);
@@ -62,7 +62,7 @@ export class Peer extends Socket {
   }
 
   /** @ignore */
-  protected override onConnectionClosed(conn: Connection): void {
+  protected override onConnectionClosed(conn: PeerConnection): void {
     const frame = this.routingIds.get(conn);
     if (frame) {
       const id = new DataView(frame.buffer).getUint32(0, false);
@@ -74,7 +74,7 @@ export class Peer extends Socket {
 
   /** @ignore */
   protected override onConnectionMessage(
-    conn: Connection,
+    conn: PeerConnection,
     msg: Message,
   ): void {
     const idFrame = this.routingIds.get(conn);

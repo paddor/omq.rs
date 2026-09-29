@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 // WebTransport interop between real browsers and the local omq.rs
-// `h3+quic://` listener. The fixture's ECDSA certificate is valid for ten
+// `quic://` listener. The fixture's ECDSA certificate is valid for ten
 // days, so the page trusts it through W3C `serverCertificateHashes`, not by
 // disabling verification.
 
@@ -207,7 +207,7 @@ async function runInPage(page, endpoints, hash) {
 test.setTimeout(420_000);
 
 for (const browser of ["chromium", "firefox"]) {
-  test(`${browser} WebTransport interop with omq.rs h3+quic listener`, async ({ browserName, page }) => {
+  test(`${browser} WebTransport interop with omq.rs quic listener`, async ({ browserName, page }) => {
     test.skip(browserName !== browser, `runs on ${browser}`);
     const root = await prepareSite();
     const site = await startSite(root);

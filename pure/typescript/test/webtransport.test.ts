@@ -122,18 +122,19 @@ async function events(stream: PeerStream, decoder: ZmtpDecoder, count: number) {
 }
 
 describe("WebTransport ZMTP connection", () => {
-  it("maps h3+quic URLs and requires WebTransport", () => {
-    expect(webTransportUrl("h3+quic://host:4433/omq")).toBe(
+  it("accepts HTTPS URLs and requires WebTransport", () => {
+    expect(webTransportUrl("https://host:4433/omq")).toBe(
       "https://host:4433/omq",
     );
     expect(webTransportUrl("https://host/omq")).toBe("https://host/omq");
+    expect(() => webTransportUrl("h3+quic://host/omq")).toThrow();
     expect(() => webTransportUrl("ws://host")).toThrow();
   });
 
   it("writes role prefaces, handshakes, and exchanges messages", async () => {
     const received: Message[] = [];
     let ready = false;
-    const conn = new WebTransportConnection("h3+quic://127.0.0.1:4433/omq", {
+    const conn = new WebTransportConnection("https://127.0.0.1:4433/omq", {
       socketType: "DEALER",
       identity: new Uint8Array(0),
       onReady: () => (ready = true),
@@ -143,6 +144,7 @@ describe("WebTransport ZMTP connection", () => {
     const wt = FakeWebTransport.last!;
     expect(wt.url).toBe("https://127.0.0.1:4433/omq");
     expect(wt.options.allowPooling).toBe(false);
+    expect(wt.options.requireUnreliable).toBe(true);
     const [data, liveness] = wt.streams as [PeerStream, PeerStream];
     expect(await data.readExact(8)).toEqual(DATA_PREFACE);
     expect(await liveness.readExact(8)).toEqual(LIVENESS_PREFACE);
@@ -183,7 +185,7 @@ describe("WebTransport ZMTP connection", () => {
   });
 
   it("answers liveness PINGs with the newest nonce", async () => {
-    new WebTransportConnection("h3+quic://127.0.0.1:1/omq", {
+    new WebTransportConnection("https://127.0.0.1:1/omq", {
       socketType: "PULL",
       identity: new Uint8Array(0),
     });
@@ -200,7 +202,7 @@ describe("WebTransport ZMTP connection", () => {
   it("closes on a bad liveness record, peer FIN, or mechanism mismatch", async () => {
     for (const scenario of ["record", "fin", "mechanism"] as const) {
       const errors: string[] = [];
-      new WebTransportConnection("h3+quic://127.0.0.1:1/omq", {
+      new WebTransportConnection("https://127.0.0.1:1/omq", {
         socketType: "PULL",
         identity: new Uint8Array(0),
         onError: (_c, error) => errors.push(error.message),
@@ -225,7 +227,7 @@ describe("WebTransport ZMTP connection", () => {
 
   it("detects liveness timeout when the peer stays silent", async () => {
     const errors: string[] = [];
-    new WebTransportConnection("h3+quic://127.0.0.1:1/omq", {
+    new WebTransportConnection("https://127.0.0.1:1/omq", {
       socketType: "PULL",
       identity: new Uint8Array(0),
       heartbeatIntervalMs: 10,
@@ -237,7 +239,7 @@ describe("WebTransport ZMTP connection", () => {
 
   it("delivers post-handshake commands to the socket in stream order", async () => {
     const commands: string[] = [];
-    new WebTransportConnection("h3+quic://127.0.0.1:1/omq", {
+    new WebTransportConnection("https://127.0.0.1:1/omq", {
       socketType: "XPUB",
       identity: new Uint8Array(0),
       onCommand: (_c, name) => commands.push(name),

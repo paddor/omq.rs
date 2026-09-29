@@ -63,7 +63,7 @@ export interface ConnectionOptions {
   handshakeTimeoutMs?: number;
   /** Optional ZMTP PLAIN credentials. */
   plain?: PlainAuthOptions;
-  /** WebTransport settings for `h3+quic://` and `https://` endpoints. */
+  /** WebTransport settings for `https://` endpoints. */
   webTransport?: WebTransportOptions;
   /** WebTransport liveness PING interval. Disabled by default. */
   heartbeatIntervalMs?: number;

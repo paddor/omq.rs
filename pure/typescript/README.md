@@ -119,9 +119,10 @@ client-certificate deployment, but it is intentionally out of scope today.
 
 ### WebTransport
 
-Browsers with WebTransport (Chromium, Firefox) can reach an `omq-tokio`
-`h3+quic://` listener. The connection carries real ZMTP 3.1 on one ordered
-stream and liveness records on a second stream; the same socket classes,
+The WebTransport carrier targets an `omq-tokio` `quic://` listener through
+an `https://` WebTransport URL. Once established, the connection carries
+ZMTP 3.1 on one ordered stream and liveness records on a second stream;
+the same socket classes,
 PLAIN authentication, reconnect, and subscription replay apply. OMQ
 compression is not available on WebTransport.
 
@@ -130,7 +131,7 @@ const req = new Req({
   heartbeatIntervalMs: 1000, // liveness PINGs; peer silence closes after the timeout
   heartbeatTimeoutMs: 5000,
 });
-req.connect("h3+quic://broker.example.com:4433/omq"); // or https://...
+req.connect("https://broker.example.com:4433/omq");
 ```
 
 The server certificate must be trusted by the browser. For short-lived
@@ -145,8 +146,10 @@ new Sub({
 ```
 
 The listener must list the page origin in `QuicOptions::allowed_origins`.
-Each connection requests `allowPooling: false`, so every OMQ peer gets its
-own QUIC connection.
+Each connection requests `allowPooling: false` and `requireUnreliable: true`,
+so every OMQ peer gets its own HTTP/3 QUIC connection.
+The OMQ listener supports both the draft-02 handshake used by current
+Chromium and Firefox and draft-16 with Quickie's `RESET_STREAM_AT` extension.
 
 ### Robustness Options
 
@@ -186,9 +189,11 @@ peers from the local `../omq.rs` checkout and verify NULL, PLAIN, and
 so tests exercise transport changes under development, not an older release.
 
 Run `npm run test:browser` for the headless browser interop tests. The
-WebTransport spec runs in both Chromium and Firefox against the fixture's
-`h3+quic://` listener, trusting its ten-day certificate by hash. The WebSocket
-spec runs in Firefox. It
+WebTransport spec probes Chromium and Firefox against the fixture's
+`quic://` listener, trusting its ten-day certificate by hash. It checks
+the full message exchange with both browsers. Set `OMQ_TEST_CHROMIUM` or
+`OMQ_TEST_FIREFOX` to test a browser executable outside Playwright's pinned
+versions. The WebSocket spec runs in Firefox. It
 starts a Rust WebSocket peer, serves a temporary browser bundle, and verifies
 the same paths through native browser `WebSocket` and WASM LZ4, including
 `wss://`. The harness passes the temporary page origin explicitly to Rust

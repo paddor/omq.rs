@@ -10,3 +10,10 @@ omq-tokio = { path = "../../../../omq.rs/omq-tokio", features = ["lz4", "plain",
 rcgen = "0.14"
 time = "0.3"
 tokio = { version = "1.52.0", features = ["macros", "rt", "time"] }
+
+[patch.crates-io]
+quinn = { path = "../../../../omq.rs/tmp/quickie/quinn" }
+quinn-proto = { path = "../../../../omq.rs/tmp/quickie/quinn-proto" }
+quinn-udp = { path = "../../../../omq.rs/tmp/quickie/quinn-udp" }
+webtrans-proto = { path = "../../../../omq.rs/vendor/webtrans-proto" }
+webtrans-quinn = { path = "../../../../omq.rs/vendor/webtrans-quinn" }

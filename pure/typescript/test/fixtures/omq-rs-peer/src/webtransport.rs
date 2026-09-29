@@ -44,10 +44,20 @@ fn server_options(cert: &[u8], key: &[u8]) -> Options {
 }
 
 async fn bind(kind: SocketType, host: &str, path: &str, options: &Options) -> Socket {
-    let socket = Socket::new(kind, options.clone());
-    let endpoint: Endpoint = format!("h3+quic://{host}:0{path}").parse().unwrap();
+    let mut options = options.clone();
+    options.quic.webtransport_path = path.into();
+    let socket = Socket::new(kind, options);
+    let endpoint: Endpoint = format!("quic://{host}:0").parse().unwrap();
     let bound = socket.bind(endpoint).await.expect("bind WebTransport");
-    println!("ENDPOINT {path} {bound}");
+    let address = bound.to_string().replace("quic://", "https://");
+    println!("ENDPOINT {path} {address}{path}");
+    let mut monitor = socket.monitor();
+    let path = path.to_owned();
+    tokio::spawn(async move {
+        while let Ok(event) = monitor.recv().await {
+            eprintln!("{path}: {event:?}");
+        }
+    });
     socket
 }
 

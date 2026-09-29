@@ -70,7 +70,7 @@ export interface SocketOptions {
   sendBufferPollMs?: number;
   /** Close if WebSocket/ZMTP handshake has not completed by this time. Disabled by default. */
   handshakeTimeoutMs?: number;
-  /** WebTransport settings for `h3+quic://` and `https://` endpoints. */
+  /** WebTransport settings for `https://` endpoints. */
   webTransport?: WebTransportOptions;
   /** WebTransport liveness PING interval in milliseconds. Disabled by default. */
   heartbeatIntervalMs?: number;

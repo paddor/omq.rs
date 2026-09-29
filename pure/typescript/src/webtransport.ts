@@ -48,16 +48,15 @@ const RECORD_LENGTH = 9;
 const PING = 0x01;
 const PONG = 0x02;
 
-/** Convert `h3+quic://host:port/path` to the WebTransport `https://` URL. */
+/** Require the browser's WebTransport URL scheme. */
 export function webTransportUrl(url: string): string {
-  if (url.startsWith("h3+quic://")) return `https://${url.slice(10)}`;
   if (url.startsWith("https://")) return url;
   throw new Error(`Unsupported WebTransport URL: ${url}`);
 }
 
 /** Whether `url` selects the WebTransport carrier. */
 export function isWebTransportUrl(url: string): boolean {
-  return url.startsWith("h3+quic://") || url.startsWith("https://");
+  return url.startsWith("https://");
 }
 
 function errorFromUnknown(error: unknown): Error {
@@ -139,12 +138,13 @@ export class WebTransportConnection implements PeerConnection {
   private async open(url: string): Promise<void> {
     const transport = new WebTransport(url, {
       allowPooling: false,
+      requireUnreliable: true,
       serverCertificateHashes: this.opts.webTransport?.serverCertificateHashes,
     });
     this.transport = transport;
     transport.closed.then(
       () => this.onTransportClosed(),
-      () => this.onTransportClosed(),
+      (error) => this.closeWithError(errorFromUnknown(error).message),
     );
     await transport.ready;
     if (this.isClosed) return;

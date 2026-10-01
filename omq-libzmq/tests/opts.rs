@@ -530,7 +530,7 @@ fn handshake_ivl_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
 
-    assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 30_000);
+    assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 10_000);
 
     set_i32(s, ZMQ_HANDSHAKE_IVL, 10);
     assert_eq!(get_i32(s, ZMQ_HANDSHAKE_IVL), 10);

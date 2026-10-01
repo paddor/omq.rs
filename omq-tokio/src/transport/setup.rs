@@ -1,4 +1,9 @@
 //! Admission owned continuously from transport setup through authentication.
+//!
+//! Every attempt carries one absolute deadline through DNS, dialing, carrier
+//! setup, actor handoff, and ZMTP READY. A timeout or cancellation drops both
+//! the transport and its reservation before waiting for the reconnect delay.
+//! Waiting for initial admission happens before starting that attempt's clock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -92,6 +97,18 @@ impl PendingHandshake {
     }
 }
 
+/// Listener-side setup policy shared by encrypted carriers.
+#[cfg(any(feature = "ws", feature = "quic"))]
+pub(crate) struct AcceptSetup {
+    pub(crate) admission: Admission,
+    pub(crate) timeout: Duration,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) monitor: crate::socket::monitor::MonitorPublisher,
+    /// Data IO runtimes for carriers that place setup work per peer.
+    #[cfg_attr(not(feature = "quic"), expect(dead_code))]
+    pub(crate) io_pool: crate::context::IoPoolHandle,
+}
+
 #[derive(Debug)]
 pub(crate) struct SetupState {
     pub(crate) deadline: Option<Instant>,
@@ -107,14 +124,10 @@ pub(crate) struct DialSetup {
 }
 
 impl DialSetup {
-    pub(crate) async fn run_until<T>(
-        &self,
-        first_deadline: Option<Instant>,
-        first_admission: Option<PendingHandshake>,
-        dial: impl Future<Output = Result<T>>,
-    ) -> Result<(T, Option<SetupState>)> {
-        let deadline = match first_deadline {
-            Some(deadline) => Some(deadline),
+    /// The attempt's absolute deadline: a supplied one, or now plus timeout.
+    pub(crate) fn deadline(&self, first_deadline: Option<Instant>) -> Result<Option<Instant>> {
+        match first_deadline {
+            Some(deadline) => Ok(Some(deadline)),
             None => self
                 .timeout
                 .map(|timeout| {
@@ -122,8 +135,17 @@ impl DialSetup {
                         Error::HandshakeFailed("transport setup timeout exceeds clock range".into())
                     })
                 })
-                .transpose()?,
-        };
+                .transpose(),
+        }
+    }
+
+    pub(crate) async fn run_until<T>(
+        &self,
+        first_deadline: Option<Instant>,
+        first_admission: Option<PendingHandshake>,
+        dial: impl Future<Output = Result<T>>,
+    ) -> Result<(T, Option<SetupState>)> {
+        let deadline = self.deadline(first_deadline)?;
         let admission = match first_admission {
             Some(admission) => Some(admission),
             None => self

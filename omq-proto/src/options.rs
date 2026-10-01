@@ -5,6 +5,8 @@
 //! `send_hwm`/`recv_hwm` are message-count caps, not byte caps. Native OMQ
 //! applies `send_hwm` per outbound pipe; it is not a single socket-wide byte
 //! or message budget.
+//! Setup defaults to 10 seconds in Rust and all bindings, compared with libzmq's
+//! 30-second `ZMQ_HANDSHAKE_IVL`.
 
 use std::time::Duration;
 
@@ -24,6 +26,9 @@ const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 /// Default cap for byte-stream peers that are accepted but have not
 /// completed the ZMTP handshake.
 pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 128;
+
+/// Default deadline for one connection setup attempt, from DNS through READY.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default per-`FrameBuffer` arena threshold.
 pub const DEFAULT_ARENA_THRESHOLD: usize = crate::frame_buffer::ARENA_THRESHOLD;
@@ -201,10 +206,12 @@ pub struct Options {
     /// Defaults to `heartbeat_interval` when unset.
     pub heartbeat_timeout: Option<Duration>,
 
-    /// Max time allowed to complete the ZMTP handshake. WS/WSS uses one
-    /// deadline across the transport attempt (DNS/TCP/TLS/HTTP) and ZMTP.
+    /// Max time for one connection setup attempt. Default 10 seconds. One
+    /// deadline covers DNS, dialing, TLS/HTTP when applicable, and ZMTP
+    /// authentication through READY. Reconnect attempts each get a fresh budget.
     ///
-    /// Encrypted mechanisms and WS/WSS require a finite timeout. Longer values
+    /// Encrypted mechanisms and WS/WSS require a finite timeout. QUIC uses
+    /// the default when unset. Longer values
     /// give slow peers more time to finish authentication, but also let malicious
     /// peers hold pending-handshake slots longer.
     pub handshake_timeout: Option<Duration>,
@@ -228,6 +235,8 @@ pub struct Options {
     /// For compression transports this is the decoded size. Framing has a
     /// separate finite allowance for codec overhead and dictionary setup;
     /// command limits and dictionary protocol ceilings remain independent.
+    /// Count HWM and assembly limits do not bound aggregate retained bytes;
+    /// there is no separate WS message-size default or socket byte ledger.
     pub max_message_size: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to
@@ -257,10 +266,21 @@ pub struct Options {
     /// connect/accept. `None` leaves the OS default. Larger values
     /// reduce the number of kernel-to-userspace round-trips for large
     /// messages.
+    ///
+    /// QUIC applies it to UDP sockets, which carry many connections: a
+    /// listener's socket at bind, and the connector socket each IO thread
+    /// shares, which keeps the largest size its connections requested.
+    /// Loopback or LAN bursts from many QUIC peers can overflow the OS
+    /// default and cause packet loss.
+    ///
+    /// Best effort: Linux caps the size at `net.core.rmem_max`; macOS and
+    /// BSDs reject sizes above `kern.ipc.maxsockbuf` and keep the old size.
     pub recv_buffer_size: Option<usize>,
 
     /// `SO_SNDBUF` size in bytes. Applied to every TCP/IPC stream after
-    /// connect/accept. `None` leaves the OS default.
+    /// connect/accept, and to QUIC UDP sockets like `recv_buffer_size`.
+    /// `None` leaves the OS default. Linux caps the size at
+    /// `net.core.wmem_max`.
     pub send_buffer_size: Option<usize>,
 
     /// Active security mechanism. Defaults to `Null` (no encryption).
@@ -357,6 +377,129 @@ pub struct Options {
     /// Browser-origin policy for WS/WSS listeners. Requires the `ws` feature.
     #[cfg(feature = "ws")]
     pub ws: WsOptions,
+
+    /// TLS and transport settings for `quic://` endpoints. Requires the
+    /// `quic` feature.
+    #[cfg(feature = "quic")]
+    pub quic: QuicOptions,
+}
+
+/// Settings for OMQ over QUIC (`quic://`).
+///
+/// Bind requires a server certificate and key. Connect always verifies the
+/// server certificate against `trust_pem` and/or the platform store; there
+/// is no accept-any-certificate mode. Mutual TLS is not implemented.
+///
+/// The data stream receive window bounds unread data per peer. The
+/// connection window adds a reserve (one quarter of the stream window, at
+/// least 64 KiB) so carrier liveness records keep flowing while the data
+/// stream is blocked by local receive backpressure.
+#[cfg(feature = "quic")]
+#[derive(Clone)]
+pub struct QuicOptions {
+    /// PEM-encoded server certificate chain for bind.
+    pub server_cert_pem: Option<Vec<u8>>,
+    /// PEM-encoded server private key for bind.
+    pub server_key_pem: Option<Vec<u8>>,
+    /// PEM-encoded trust anchors for connect.
+    pub trust_pem: Option<Vec<u8>>,
+    /// Trust the platform certificate store for connect. Default true.
+    pub trust_system: bool,
+    /// Verified server name override for connect, for example when the
+    /// endpoint uses an IP address and the certificate names a host.
+    pub server_name: Option<String>,
+    /// Per-stream receive window in bytes. Default 1 MiB. Range 16 KiB to
+    /// 256 MiB. Each admitted peer can hold this much unread data plus the
+    /// liveness reserve.
+    pub stream_window: u32,
+    /// QUIC idle timeout. Default 10 s. A transport without any packets
+    /// for this long is closed and reconnects normally.
+    pub idle_timeout: Duration,
+    /// QUIC keepalive interval. Default 2 s; must be below `idle_timeout`.
+    /// Transport keepalive only; carrier liveness follows the heartbeat
+    /// options.
+    pub keep_alive_interval: Duration,
+    /// Maximum ready QUIC connections across this socket's endpoints.
+    /// Default 1024; must be nonzero.
+    pub max_ready_peers: usize,
+}
+
+#[cfg(feature = "quic")]
+impl std::fmt::Debug for QuicOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("QuicOptions");
+        debug.field("server_cert_pem", &self.server_cert_pem);
+        debug.field(
+            "server_key_pem",
+            &self.server_key_pem.as_ref().map(|_| "<redacted>"),
+        );
+        debug.field("trust_pem", &self.trust_pem);
+        debug.field("trust_system", &self.trust_system);
+        debug.field("server_name", &self.server_name);
+        debug.field("stream_window", &self.stream_window);
+        debug.field("idle_timeout", &self.idle_timeout);
+        debug.field("keep_alive_interval", &self.keep_alive_interval);
+        debug.field("max_ready_peers", &self.max_ready_peers);
+        debug.finish()
+    }
+}
+
+#[cfg(feature = "quic")]
+impl QuicOptions {
+    /// Smallest accepted stream window.
+    pub const MIN_STREAM_WINDOW: u32 = 16 * 1024;
+    /// Largest accepted stream window.
+    pub const MAX_STREAM_WINDOW: u32 = 256 * 1024 * 1024;
+
+    /// Connection-level reserve above the data stream window.
+    #[must_use]
+    pub fn liveness_reserve(&self) -> u32 {
+        (self.stream_window / 4).max(64 * 1024)
+    }
+
+    fn validate(&self) -> crate::error::Result<()> {
+        if !(Self::MIN_STREAM_WINDOW..=Self::MAX_STREAM_WINDOW).contains(&self.stream_window) {
+            return Err(crate::error::Error::Config(format!(
+                "quic.stream_window {} outside {}..={}",
+                self.stream_window,
+                Self::MIN_STREAM_WINDOW,
+                Self::MAX_STREAM_WINDOW
+            )));
+        }
+        if self.keep_alive_interval.is_zero() || self.keep_alive_interval >= self.idle_timeout {
+            return Err(crate::error::Error::Config(
+                "quic.keep_alive_interval must be nonzero and below quic.idle_timeout".into(),
+            ));
+        }
+        if self.idle_timeout > Duration::from_hours(1) {
+            return Err(crate::error::Error::Config(
+                "quic.idle_timeout must not exceed one hour".into(),
+            ));
+        }
+        if self.max_ready_peers == 0 {
+            return Err(crate::error::Error::Config(
+                "quic.max_ready_peers must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "quic")]
+impl Default for QuicOptions {
+    fn default() -> Self {
+        Self {
+            server_cert_pem: None,
+            server_key_pem: None,
+            trust_pem: None,
+            trust_system: true,
+            server_name: None,
+            stream_window: 1024 * 1024,
+            idle_timeout: Duration::from_secs(10),
+            keep_alive_interval: Duration::from_secs(2),
+            max_ready_peers: 1024,
+        }
+    }
 }
 
 /// WebSocket connection policy. Native clients may omit Origin; a present
@@ -392,7 +535,7 @@ impl Default for WsOptions {
 /// and client-side server certificate validation only. Mutual TLS/client
 /// certificate authentication is not implemented.
 #[cfg(feature = "ws")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WssTls {
     /// PEM-encoded server certificate chain for WSS bind.
     pub server_cert_pem: Option<Vec<u8>>,
@@ -406,6 +549,23 @@ pub struct WssTls {
     pub trust_system: bool,
     /// Accept invalid server certificates on connect (for testing).
     pub accept_invalid_certs: bool,
+}
+
+#[cfg(feature = "ws")]
+impl std::fmt::Debug for WssTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WssTls")
+            .field("server_cert_pem", &self.server_cert_pem)
+            .field(
+                "server_key_pem",
+                &self.server_key_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field("trust_pem", &self.trust_pem)
+            .field("hostname", &self.hostname)
+            .field("trust_system", &self.trust_system)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .finish()
+    }
 }
 
 #[cfg(feature = "ws")]
@@ -442,7 +602,7 @@ impl Default for Options {
             heartbeat_interval: None,
             heartbeat_ttl: None,
             heartbeat_timeout: None,
-            handshake_timeout: Some(Duration::from_secs(30)),
+            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_message_size: None,
             conflate: false,
@@ -464,6 +624,8 @@ impl Default for Options {
             transmit_slot_cap: None,
             xpub_nodrop: false,
             reconnect_stop_conn_refused: false,
+            #[cfg(feature = "quic")]
+            quic: QuicOptions::default(),
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
             #[cfg(feature = "ws")]
@@ -509,6 +671,8 @@ impl Options {
                 "max_pending_handshakes must be greater than zero".into(),
             ));
         }
+        #[cfg(feature = "quic")]
+        self.quic.validate()?;
         #[cfg(feature = "ws")]
         if self.ws.max_ready_peers == 0 {
             return Err(crate::error::Error::Config(
@@ -765,14 +929,14 @@ impl Options {
     }
 
     #[must_use]
-    /// Set OS receive buffer size for stream transports.
+    /// Set OS receive buffer size for TCP/IPC streams and QUIC UDP sockets.
     pub fn recv_buffer_size(mut self, bytes: usize) -> Self {
         self.recv_buffer_size = Some(bytes);
         self
     }
 
     #[must_use]
-    /// Set OS send buffer size for stream transports.
+    /// Set OS send buffer size for TCP/IPC streams and QUIC UDP sockets.
     pub fn send_buffer_size(mut self, bytes: usize) -> Self {
         self.send_buffer_size = Some(bytes);
         self
@@ -865,7 +1029,7 @@ impl Options {
     /// Configure this socket as a PLAIN server (RFC 24). The
     /// authenticator receives [`MechanismPeerInfo`] with `username`
     /// and `password` populated; return `true` to admit the client.
-    /// No encryption is applied; use on trusted networks only.
+    /// PLAIN adds no encryption; use it over a trusted or encrypted transport.
     #[cfg(feature = "plain")]
     #[must_use]
     pub fn plain_server<F>(mut self, f: F) -> Self
@@ -1105,6 +1269,35 @@ impl KeepAlive {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "quic")]
+    #[test]
+    fn debug_redacts_quic_private_key() {
+        let mut options = Options::default();
+        options.quic.server_key_pem = Some(b"private-key-sentinel".to_vec());
+        let debug = format!("{options:?}");
+        assert!(debug.contains("server_key_pem: Some(\"<redacted>\")"));
+        assert!(!debug.contains("private-key-sentinel"));
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn debug_redacts_wss_private_key() {
+        let mut options = Options::default();
+        options.wss_tls.server_key_pem = Some(b"private-key-sentinel".to_vec());
+        let debug = format!("{options:?}");
+        assert!(debug.contains("server_key_pem: Some(\"<redacted>\")"));
+        assert!(!debug.contains("private-key-sentinel"));
+    }
+
+    #[cfg(feature = "plain")]
+    #[test]
+    fn debug_redacts_plain_client_password() {
+        let options = Options::default().plain_client("alice", "password-sentinel");
+        let debug = format!("{options:?}");
+        assert!(debug.contains("password: \"<redacted>\""));
+        assert!(!debug.contains("password-sentinel"));
+    }
+
     #[cfg(feature = "plain")]
     #[test]
     fn fixed_plain_credentials_match_exactly() {
@@ -1172,7 +1365,7 @@ mod tests {
         assert_eq!(o.recv_rate_limit, None);
         assert_eq!(o.recv_ip_rate_limit, None);
         assert_eq!(o.linger, Some(Duration::ZERO));
-        assert_eq!(o.handshake_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(o.handshake_timeout, Some(Duration::from_secs(10)));
         assert_eq!(o.max_pending_handshakes, DEFAULT_MAX_PENDING_HANDSHAKES);
         assert_eq!(o.heartbeat_interval, None);
         assert_eq!(o.max_message_size, None);
@@ -1182,6 +1375,11 @@ mod tests {
         assert_eq!(o.compression_level, None);
         assert_eq!(o.on_mute, OnMute::Block);
         assert_eq!(o.large_message_threshold, Some(128 * 1024));
+        #[cfg(feature = "quic")]
+        {
+            assert_eq!(o.quic.idle_timeout, Duration::from_secs(10));
+            assert_eq!(o.quic.keep_alive_interval, Duration::from_secs(2));
+        }
     }
 
     #[cfg(feature = "ws")]

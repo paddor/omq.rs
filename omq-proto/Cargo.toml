@@ -27,6 +27,7 @@ plain = []
 lz4 = ["dep:lz4rip"]
 zstd = ["dep:zrip"]
 ws = []
+quic = []
 soak = []
 
 [dependencies]

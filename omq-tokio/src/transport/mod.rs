@@ -21,10 +21,12 @@ pub mod backoff;
 pub(crate) mod dns;
 pub mod inproc;
 pub mod ipc;
+#[cfg(feature = "quic")]
+pub(crate) mod quic;
 pub(crate) mod setup;
 pub(crate) mod stream_raw;
 pub mod tcp;
-#[cfg(feature = "ws")]
+#[cfg(any(feature = "ws", feature = "quic"))]
 pub(crate) mod tls;
 pub mod udp;
 

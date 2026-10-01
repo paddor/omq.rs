@@ -341,6 +341,15 @@ class FeaturesTest < Minitest::Test
     assert_instance_of Integer, handshake[:connection_id]
   end
 
+  def test_monitor_timeout_after_event_is_consumed
+    pull = socket(:pull)
+    monitor = pull.monitor
+    tcp_endpoint(pull)
+    assert_equal :listening, monitor.recv(timeout: 1)[:event]
+
+    assert_raises(IO::TimeoutError) { monitor.recv(timeout: 0.02) }
+  end
+
   def test_monitor_each_stops_when_socket_closes
     pull = socket(:pull)
     events = pull.monitor.each

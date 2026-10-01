@@ -32,6 +32,8 @@ pub(crate) enum ChartSub {
     Pubsub,
     /// Fan-out and fan-in charts.
     Fanio,
+    /// OMQ over QUIC against OMQ over TCP.
+    Quic,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
     /// PUSH/PULL Zstd compression chart.
@@ -56,6 +58,7 @@ pub(crate) enum Transport {
     Ipc,
     Inproc,
     Ws,
+    Quic,
 }
 
 impl Transport {
@@ -65,6 +68,7 @@ impl Transport {
             Self::Ipc => "ipc",
             Self::Inproc => "inproc",
             Self::Ws => "ws",
+            Self::Quic => "quic",
         }
     }
 }

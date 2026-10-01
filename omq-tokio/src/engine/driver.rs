@@ -1,4 +1,17 @@
 //! Per-connection driver: one tokio task per live peer connection.
+//!
+//! Queue-space and event-mailbox waits remain under the main select alongside
+//! local control, reverse writes, cancellation, and deadlines. Large payload
+//! reads retain their destination but read at most 64 KiB per selected operation.
+//! Control drains stop at 64 commands or 64 KiB and poll writes before another
+//! turn; receive backpressure suspends heartbeat silence accounting.
+//!
+//! Drain carries the socket's original linger deadline through accepted batches,
+//! offloads, arenas, slots, partial writes, WS CLOSE 1000, and writer/TLS shutdown.
+//! A missing CLOSE reply cannot restart that clock. Unlimited linger may wait
+//! indefinitely; peer-initiated WS close gets a ten-second reply-flush ceiling,
+//! tightened by a later socket close. Transport completion does not acknowledge
+//! remote application delivery.
 
 use std::io;
 use std::net::IpAddr;
@@ -51,9 +64,30 @@ pub(crate) enum ReceiveProfile {
 /// Stream abstraction allowing production TCP streams to use owned halves.
 pub trait DriverStream: Sized {
     type Reader: AsyncRead + Send + Unpin + 'static;
-    type Writer: AsyncWrite + Send + Unpin + 'static;
+    type Writer: DriverWrite;
 
     fn split(self, fast_write: bool) -> (Self::Reader, Self::Writer);
+}
+
+/// Write half of a [`DriverStream`].
+pub trait DriverWrite: AsyncWrite + Send + Unpin + 'static {
+    /// The owned-chunk path of a writer that keeps wire chunks until the
+    /// peer acknowledges them (QUIC). Other writers copy from `IoSlice`s.
+    fn chunk_writer(&mut self) -> Option<&mut dyn ChunkWrite> {
+        None
+    }
+}
+
+/// A writer that takes wire chunks owned instead of copying them.
+pub trait ChunkWrite: Send {
+    /// Write a prefix of `bufs`, emptying accepted chunks and trimming a
+    /// partly accepted one in place. Returns the bytes accepted. Pending
+    /// leaves `bufs` unchanged.
+    fn poll_write_chunks(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        bufs: &mut [Bytes],
+    ) -> std::task::Poll<io::Result<usize>>;
 }
 
 impl DriverStream for AnyStream {
@@ -64,6 +98,31 @@ impl DriverStream for AnyStream {
         AnyStream::split(self, fast_write)
     }
 }
+
+impl DriverWrite for AnyWriteHalf {
+    fn chunk_writer(&mut self) -> Option<&mut dyn ChunkWrite> {
+        match self {
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => Some(writer),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+impl ChunkWrite for crate::transport::quic::QuicSendHalf {
+    fn poll_write_chunks(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        bufs: &mut [Bytes],
+    ) -> std::task::Poll<io::Result<usize>> {
+        crate::transport::quic::QuicSendHalf::poll_write_chunks(self, cx, bufs)
+    }
+}
+
+impl DriverWrite for tokio::net::tcp::OwnedWriteHalf {}
+
+impl<T: AsyncRead + AsyncWrite + Send + 'static> DriverWrite for tokio::io::WriteHalf<T> {}
 
 impl DriverStream for tokio::net::TcpStream {
     type Reader = tokio::net::tcp::OwnedReadHalf;
@@ -324,6 +383,52 @@ struct PendingWrite {
     arena_offset: usize,
 }
 
+/// Owned chunks at least this long reach the writer uncopied.
+const OWNED_COALESCE_BELOW: usize = 16 * 1024;
+/// Upper bound for one merged run of smaller chunks.
+const OWNED_COALESCE_TARGET: usize = 64 * 1024;
+
+/// Merges runs of small owned chunks into one buffer each, in order.
+///
+/// Quinn's send buffer keeps one segment per written chunk until the peer
+/// acknowledges it, and finds the data for each STREAM frame by walking
+/// those segments linearly. Many small chunks in flight make packet
+/// assembly quadratic, so small frames and shared fan-out payloads are
+/// copied into larger runs. A run of one chunk is kept as is.
+fn coalesce_small_chunks(chunks: &mut Vec<Bytes>) {
+    let mut write = 0;
+    let mut read = 0;
+    while read < chunks.len() {
+        if chunks[read].len() >= OWNED_COALESCE_BELOW {
+            chunks.swap(write, read);
+            write += 1;
+            read += 1;
+            continue;
+        }
+        let start = read;
+        let mut run_len = 0;
+        while read < chunks.len()
+            && chunks[read].len() < OWNED_COALESCE_BELOW
+            && (read == start || run_len + chunks[read].len() <= OWNED_COALESCE_TARGET)
+        {
+            run_len += chunks[read].len();
+            read += 1;
+        }
+        let merged = if read - start == 1 {
+            std::mem::take(&mut chunks[start])
+        } else {
+            let mut merged = bytes::BytesMut::with_capacity(run_len);
+            for chunk in &chunks[start..read] {
+                merged.extend_from_slice(chunk);
+            }
+            merged.freeze()
+        };
+        chunks[write] = merged;
+        write += 1;
+    }
+    chunks.truncate(write);
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GracefulClose {
     deadline: Option<Instant>,
@@ -346,7 +451,9 @@ impl PendingWrite {
         self.remaining = self.chunks.iter().map(Bytes::len).sum();
     }
 
-    fn stage_slot(&mut self, slot: &PeerTransmitSlot) -> bool {
+    /// Stage one slot batch. With `owned`, arena bytes move into the chunks
+    /// without a copy and small chunks are merged for the owned-chunk writer.
+    fn stage_slot(&mut self, slot: &PeerTransmitSlot, owned: bool) -> bool {
         debug_assert!(self.is_empty());
         self.arena.clear();
         self.arena_offset = 0;
@@ -358,12 +465,55 @@ impl PendingWrite {
         self.chunks.clear();
         self.first = 0;
         self.offset = 0;
-        let outcome = slot.drain(&mut self.chunks, 1024);
+        let outcome = if owned {
+            let outcome = slot.drain_owned(&mut self.chunks, 1024);
+            coalesce_small_chunks(&mut self.chunks);
+            outcome
+        } else {
+            slot.drain(&mut self.chunks, 1024)
+        };
         self.remaining = self.chunks.iter().map(Bytes::len).sum();
         if !slot.is_empty() {
             slot.data_signal.reschedule();
         }
         outcome.space_available
+    }
+
+    /// Stage for a writer that takes owned chunks. Arena bytes move into
+    /// the chunks without a copy.
+    fn stage_owned(&mut self, eq: &mut FrameBuffer) {
+        debug_assert!(self.is_empty());
+        self.chunks.clear();
+        self.first = 0;
+        self.offset = 0;
+        eq.drain_owned(&mut self.chunks, 1024);
+        coalesce_small_chunks(&mut self.chunks);
+        self.remaining = self.chunks.iter().map(Bytes::len).sum();
+    }
+
+    fn has_chunks(&self) -> bool {
+        self.arena_offset == self.arena.len() && self.first < self.chunks.len()
+    }
+
+    /// Unwritten chunks for an owned-chunk writer, which trims them in place.
+    fn chunks_mut(&mut self) -> &mut [Bytes] {
+        debug_assert_eq!(self.offset, 0);
+        &mut self.chunks[self.first..]
+    }
+
+    /// Account an owned-chunk write. The writer emptied accepted chunks and
+    /// trimmed a partly accepted one.
+    fn advance_owned(&mut self, written: usize) {
+        debug_assert!(written <= self.remaining);
+        self.remaining -= written;
+        while self.first < self.chunks.len() && self.chunks[self.first].is_empty() {
+            self.first += 1;
+        }
+        if self.is_empty() {
+            self.chunks.clear();
+            self.first = 0;
+            self.remaining = 0;
+        }
     }
 
     fn io_slices(&self) -> SmallVec<[io::IoSlice<'_>; 64]> {
@@ -908,6 +1058,7 @@ where
         let mut eq = FrameBuffer::with_config_lazy(arena_threshold, arena_cap);
         let mut drain_buf: Vec<Bytes> = Vec::new();
         let mut pending_write = PendingWrite::default();
+        let owned_chunks = writer.chunk_writer().is_some();
         let mut deferred_data = None;
         let mut pipe_batch: Vec<Message> = Vec::new();
         let _write_lifetime = DirectWriteLifetime(
@@ -1102,7 +1253,11 @@ where
                     .as_ref()
                     .is_some_and(|slot| slot.direct_writer().is_some() && !slot.is_empty())
             {
-                stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
+                stage_transmit_slot(
+                    transmit_slot.as_ref().unwrap(),
+                    &mut pending_write,
+                    owned_chunks,
+                );
             }
             let mut control_budget = DrainBudget::new(64, 64 * 1024);
             let mut control_exhausted = false;
@@ -1247,7 +1402,11 @@ where
                     .as_ref()
                     .is_some_and(|slot| slot.direct_writer().is_some() && !slot.is_empty())
             {
-                stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
+                stage_transmit_slot(
+                    transmit_slot.as_ref().unwrap(),
+                    &mut pending_write,
+                    owned_chunks,
+                );
             }
 
             if data_plane_open
@@ -1308,7 +1467,11 @@ where
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
                 && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty())
             {
-                stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
+                stage_transmit_slot(
+                    transmit_slot.as_ref().unwrap(),
+                    &mut pending_write,
+                    owned_chunks,
+                );
             }
 
             let shutdown_ready = graceful_close.is_some()
@@ -1459,7 +1622,7 @@ where
                 }) && can_accept_data => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     stage_transmit_slot(
-                        transmit_slot.as_ref().unwrap(), &mut pending_write,
+                        transmit_slot.as_ref().unwrap(), &mut pending_write, owned_chunks,
                     );
                 }
 
@@ -1536,7 +1699,7 @@ where
                 }) && can_accept_data => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     stage_transmit_slot(
-                        transmit_slot.as_ref().unwrap(), &mut pending_write,
+                        transmit_slot.as_ref().unwrap(), &mut pending_write, owned_chunks,
                     );
                 },
 
@@ -1972,8 +2135,8 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 /// Move one bounded transmit-slot batch into persistent driver-owned state.
 /// No I/O happens here: the main `select!` owns every potentially blocking
 /// write.
-fn stage_transmit_slot(slot: &PeerTransmitSlot, pending: &mut PendingWrite) {
-    if pending.stage_slot(slot) {
+fn stage_transmit_slot(slot: &PeerTransmitSlot, pending: &mut PendingWrite, owned: bool) {
+    if pending.stage_slot(slot, owned) {
         slot.space_available.notify_changed();
     }
 }
@@ -2035,7 +2198,7 @@ impl HeartbeatProbe {
 /// Make bounded wire progress. This future is polled directly by the main
 /// `select!`; if control wins, all destructively drained chunks remain owned
 /// by `pending` and the write can safely resume later.
-async fn write_driver_progress<W: AsyncWrite + Unpin>(
+async fn write_driver_progress<W: DriverWrite>(
     writer: &mut W,
     eq: &mut FrameBuffer,
     pending: &mut PendingWrite,
@@ -2044,8 +2207,19 @@ async fn write_driver_progress<W: AsyncWrite + Unpin>(
 ) -> io::Result<()> {
     let started = Instant::now();
     let mut budget = DrainBudget::WIRE_DRAIN;
+    let owned = writer.chunk_writer().is_some();
     loop {
-        let written = if !pending.is_empty() {
+        let written = if owned && pending.has_chunks() {
+            let owned_writer = writer.chunk_writer().expect("owned-chunk writer");
+            let chunks = pending.chunks_mut();
+            let written =
+                std::future::poll_fn(|cx| owned_writer.poll_write_chunks(cx, chunks)).await?;
+            if written == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+            }
+            pending.advance_owned(written);
+            written
+        } else if !pending.is_empty() {
             let iovecs = pending.io_slices();
             let written = writer.write_vectored(&iovecs).await?;
             drop(iovecs);
@@ -2054,6 +2228,9 @@ async fn write_driver_progress<W: AsyncWrite + Unpin>(
             }
             pending.advance(written);
             written
+        } else if owned && !eq.is_empty() {
+            pending.stage_owned(eq);
+            continue;
         } else if eq.has_arena_only() {
             let written = {
                 let data = eq.arena_bytes();
@@ -2683,6 +2860,11 @@ mod tests {
             }
         }
     }
+
+    impl DriverWrite for StalledShutdownWriter {}
+    #[cfg(feature = "plain")]
+    impl DriverWrite for GreetingOnlyWriter {}
+    impl<W: AsyncWrite + Send + Unpin + 'static> DriverWrite for ChoppyWriter<W> {}
 
     #[derive(Debug)]
     struct ChoppyWriter<W> {
@@ -4050,8 +4232,8 @@ mod tests {
         )
         .with_data_inbox(c_data_rx);
 
-        tokio::spawn(async move { s_driver.run().await });
-        tokio::spawn(async move { c_driver.run().await });
+        tokio::spawn(Box::pin(s_driver.run()));
+        tokio::spawn(Box::pin(c_driver.run()));
 
         (
             PeerDriverHandle {
@@ -4878,8 +5060,8 @@ mod tests {
         )
         .with_send_pipe(send_pipe_rx);
 
-        let server_task = tokio::spawn(async move { server.run().await });
-        let client_task = tokio::spawn(async move { client.run().await });
+        let server_task = tokio::spawn(Box::pin(server.run()));
+        let client_task = tokio::spawn(Box::pin(client.run()));
 
         c_evt_rx.recv().await.unwrap();
         s_evt_rx.recv().await.unwrap();
@@ -5062,8 +5244,8 @@ mod tests {
             client_cancel.clone(),
         )
         .with_data_inbox(client_data_rx);
-        let server_task = tokio::spawn(async move { server.run().await });
-        let mut client_task = tokio::spawn(async move { client.run().await });
+        let server_task = tokio::spawn(Box::pin(server.run()));
+        let mut client_task = tokio::spawn(Box::pin(client.run()));
 
         assert!(matches!(
             client_events_rx.recv().await,
@@ -5462,8 +5644,8 @@ mod tests {
             1,
             CancellationToken::new(),
         );
-        let server_task = tokio::spawn(async move { server.run().await });
-        let client_task = tokio::spawn(async move { client.run().await });
+        let server_task = tokio::spawn(Box::pin(server.run()));
+        let client_task = tokio::spawn(Box::pin(client.run()));
         let _inboxes = (server_inbox_tx, client_inbox_tx);
 
         let reason = tokio::time::timeout(Duration::from_secs(2), async {
@@ -5506,7 +5688,7 @@ mod tests {
             0,
             CancellationToken::new(),
         );
-        tokio::spawn(async move { s_driver.run().await });
+        tokio::spawn(Box::pin(s_driver.run()));
 
         // Manual client: use a connection to generate correct wire bytes.
         let mut client_connection = Connection::new(
@@ -5784,5 +5966,282 @@ mod tests {
                 *next_recv,
             );
         }
+    }
+
+    /// Owned-chunk writer with Quinn's `write_chunks` semantics: it empties
+    /// accepted chunks and trims a partly accepted one. `caps` scripts each
+    /// call: `Some(n)` accepts up to `n` bytes, `None` stays pending without
+    /// a wake until the test removes it, like a flow-control stall.
+    #[derive(Debug, Default)]
+    struct OwnedChunkWriter {
+        caps: VecDeque<Option<usize>>,
+        default_cap: usize,
+        out: Vec<u8>,
+        chunk_starts: Vec<usize>,
+    }
+
+    impl OwnedChunkWriter {
+        fn new(caps: impl IntoIterator<Item = Option<usize>>, default_cap: usize) -> Self {
+            Self {
+                caps: caps.into_iter().collect(),
+                default_cap,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl ChunkWrite for OwnedChunkWriter {
+        fn poll_write_chunks(
+            &mut self,
+            _cx: &mut Context<'_>,
+            bufs: &mut [Bytes],
+        ) -> Poll<io::Result<usize>> {
+            if self.caps.front() == Some(&None) {
+                return Poll::Pending;
+            }
+            let mut left = self.caps.pop_front().flatten().unwrap_or(self.default_cap);
+            let mut written = 0;
+            for buf in bufs.iter_mut() {
+                if left == 0 {
+                    break;
+                }
+                let take = buf.len().min(left);
+                let chunk = if take == buf.len() {
+                    std::mem::take(buf)
+                } else {
+                    buf.split_to(take)
+                };
+                self.chunk_starts.push(chunk.as_ptr() as usize);
+                self.out.extend_from_slice(&chunk);
+                written += take;
+                left -= take;
+            }
+            Poll::Ready(Ok(written))
+        }
+    }
+
+    impl DriverWrite for OwnedChunkWriter {
+        fn chunk_writer(&mut self) -> Option<&mut dyn ChunkWrite> {
+            Some(self)
+        }
+    }
+
+    impl AsyncWrite for OwnedChunkWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.out.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Small (arena) and large (external) frames in one buffer, plus the
+    /// expected wire bytes.
+    fn mixed_frames(eq: &mut FrameBuffer) -> (Vec<u8>, Vec<usize>) {
+        let mut expected = Vec::new();
+        let mut large_starts = Vec::new();
+        for (seq, len) in [16, 300, 70_000, 64, 1_000, 200_000, 32]
+            .into_iter()
+            .enumerate()
+        {
+            let payload = Bytes::from(patterned_payload(len, seq as u64));
+            push_expected_single_frame(&mut expected, &payload);
+            if len >= omq_proto::frame_buffer::ARENA_THRESHOLD {
+                large_starts.push(payload.as_ptr() as usize);
+            }
+            eq.frame(&Message::single(payload));
+        }
+        (expected, large_starts)
+    }
+
+    async fn write_owned_until_idle(
+        writer: &mut OwnedChunkWriter,
+        eq: &mut FrameBuffer,
+        pending: &mut PendingWrite,
+        connection: &mut Connection,
+    ) {
+        let mut heartbeat = HeartbeatProbe::default();
+        while !pending.is_empty() || !eq.is_empty() {
+            write_driver_progress(writer, eq, pending, connection, &mut heartbeat)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_chunk_writer_receives_payloads_without_copies() {
+        let mut eq = FrameBuffer::new();
+        let (expected, large_starts) = mixed_frames(&mut eq);
+        let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+        let _ = drain_transmit(&mut connection);
+        let mut pending = PendingWrite::default();
+        let mut writer = OwnedChunkWriter::new([], usize::MAX);
+
+        write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+
+        assert_eq!(writer.out, expected);
+        for start in large_starts {
+            assert!(
+                writer.chunk_starts.contains(&start),
+                "large payload reached the writer as a copy"
+            );
+        }
+    }
+
+    #[test]
+    fn coalesce_small_chunks_merges_runs_and_keeps_large_chunks() {
+        let large = Bytes::from(patterned_payload(OWNED_COALESCE_BELOW, 1));
+        let small: Vec<Bytes> = (0..40)
+            .map(|seq| Bytes::from(patterned_payload(4_096, seq)))
+            .collect();
+        let lone = Bytes::from_static(b"lone");
+        let mut chunks = vec![Bytes::from_static(b"hdr"), large.clone(), lone.clone()];
+        chunks.push(large.clone());
+        chunks.extend(small.iter().cloned());
+        let expected: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+
+        coalesce_small_chunks(&mut chunks);
+
+        let out: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(out, expected);
+        assert_eq!(chunks[1].as_ptr(), large.as_ptr(), "large chunk was copied");
+        assert_eq!(
+            chunks[2].as_ptr(),
+            lone.as_ptr(),
+            "single small chunk was copied"
+        );
+        assert_eq!(chunks[3].as_ptr(), large.as_ptr(), "large chunk was copied");
+        // 40 x 4 KiB merge into runs of at most 64 KiB.
+        assert_eq!(chunks.len(), 4 + 3);
+        assert!(chunks[4..].iter().all(|c| c.len() <= OWNED_COALESCE_TARGET));
+    }
+
+    #[tokio::test]
+    async fn owned_chunk_writer_receives_few_chunks_for_mid_size_frames() {
+        let mut eq = FrameBuffer::new();
+        let mut expected = Vec::new();
+        for seq in 0..64 {
+            let payload = Bytes::from(patterned_payload(4_096, seq));
+            push_expected_single_frame(&mut expected, &payload);
+            eq.frame(&Message::single(payload));
+        }
+        let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+        let _ = drain_transmit(&mut connection);
+        let mut pending = PendingWrite::default();
+        let mut writer = OwnedChunkWriter::new([], usize::MAX);
+
+        write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+
+        assert_eq!(writer.out, expected);
+        // 64 headers and 64 payloads, about 257 KiB, in runs of 64 KiB.
+        assert!(
+            writer.chunk_starts.len() <= 8,
+            "{} chunks reached the writer",
+            writer.chunk_starts.len()
+        );
+    }
+
+    #[test]
+    fn owned_slot_staging_merges_shared_fan_out_chunks() {
+        let slot = PeerTransmitSlot::new(
+            1,
+            false,
+            None,
+            None,
+            omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
+            crate::engine::transmit_slot::TRANSMIT_SLOT_MSG_CAP_DEFAULT,
+            crate::engine::framing::WireFraming::Zmtp,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+        // Shared fan-out payloads stay separate chunks in the slot.
+        let payload = Bytes::from(patterned_payload(256, 7));
+        let mut expected = Vec::new();
+        for _ in 0..200 {
+            let header = Bytes::from_static(&[0, 0x80]);
+            expected.extend_from_slice(&header);
+            expected.extend_from_slice(&payload);
+            assert_eq!(
+                slot.try_push_encoded(&[header, payload.clone()]),
+                crate::engine::transmit_slot::TryFrameResult::Ok
+            );
+        }
+
+        let mut pending = PendingWrite::default();
+        pending.stage_slot(&slot, true);
+
+        let staged: Vec<u8> = pending
+            .chunks
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .collect();
+        assert_eq!(staged, expected);
+        assert_eq!(pending.remaining, expected.len());
+        assert!(
+            pending.chunks.len() <= 2,
+            "{} chunks staged",
+            pending.chunks.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_chunk_writer_preserves_bytes_under_partial_writes() {
+        for cap in [1, 7, 9, 64, 4_095, 65_537] {
+            let mut eq = FrameBuffer::new();
+            let (expected, _) = mixed_frames(&mut eq);
+            let mut connection =
+                Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+            let _ = drain_transmit(&mut connection);
+            let mut pending = PendingWrite::default();
+            let mut writer = OwnedChunkWriter::new([], cap);
+
+            write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+
+            assert_eq!(writer.out, expected, "cap {cap}");
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_chunk_write_cancellation_keeps_staged_chunks() {
+        let mut eq = FrameBuffer::new();
+        let (expected, _) = mixed_frames(&mut eq);
+        let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
+        let _ = drain_transmit(&mut connection);
+        let mut pending = PendingWrite::default();
+        let mut heartbeat = HeartbeatProbe::default();
+        let mut writer = OwnedChunkWriter::new([Some(1_234), None], 50_000);
+
+        // The batch time limit may end a call before the scripted stall.
+        loop {
+            tokio::select! {
+                biased;
+                result = write_driver_progress(
+                    &mut writer,
+                    &mut eq,
+                    &mut pending,
+                    &mut connection,
+                    &mut heartbeat,
+                ) => result.unwrap(),
+                () = tokio::time::sleep(Duration::from_millis(10)) => break,
+            }
+        }
+        assert!(!pending.is_empty(), "cancelled write dropped staged chunks");
+        assert_eq!(writer.out.len(), 1_234);
+
+        writer.caps.pop_front();
+
+        write_owned_until_idle(&mut writer, &mut eq, &mut pending, &mut connection).await;
+        assert_eq!(writer.out, expected);
     }
 }

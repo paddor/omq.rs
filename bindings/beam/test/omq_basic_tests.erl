@@ -13,6 +13,19 @@ context_socket_type_test() ->
     ?assertEqual(ok, omq:close(Sock)),
     ?assertEqual(ok, omq:term(Ctx)).
 
+initial_dns_failures_test() ->
+    {ok, Ctx} = omq:context(),
+    {ok, Pull} = omq:socket(Ctx, pull),
+    {ok, Push} = omq:socket(Ctx, push),
+    try
+        ?assertMatch({error, io, _}, omq:bind(Pull, <<"tcp://omq-no-such-host.invalid:0">>)),
+        ?assertMatch({error, io, _}, omq:connect(Push, <<"tcp://omq-no-such-host.invalid:5555">>))
+    after
+        ok = omq:close(Push),
+        ok = omq:close(Pull),
+        ok = omq:term(Ctx)
+    end.
+
 metadata_and_destroy_alias_test() ->
     {ok, <<"tokio">>} = omq:backend_name(),
     {ok, Version} = omq:version(),
@@ -1154,6 +1167,8 @@ zstd_auto_train_tcp_test() ->
 options_before_materialize_test() ->
     {ok, Ctx} = omq:context(),
     {ok, Sock} = omq:socket(Ctx, dealer),
+    ?assertEqual({ok, 10000}, omq:getsockopt(Sock, handshake_ivl)),
+    ?assertEqual({ok, 100}, omq:getsockopt(Sock, reconnect_ivl)),
     ok = omq:set(Sock, identity, <<"beam-id">>),
     ?assertEqual({ok, <<"beam-id">>}, omq:get(Sock, identity)),
     ok = omq:setsockopt(Sock, sndhwm, 42),

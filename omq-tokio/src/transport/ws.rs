@@ -1,8 +1,14 @@
-//! WebSocket bind/connect glue (ZWS/2.0, RFC 45).
+//! WebSocket bind/connect glue for OMQ's ZMTP profile.
 //!
 //! Performs the HTTP upgrade handshake and returns a raw byte stream
 //! (`WsTransport`). The Connection codec in omq-proto handles WS
 //! framing internally via `ws_role`.
+//!
+//! WS/WSS shares the finite setup deadline through DNS, TCP, TLS, HTTP, and
+//! ZMTP READY. TLS verifies certificate chains and server names by default;
+//! custom trust and name overrides are explicit. Mutual TLS is unsupported.
+//! Compression is available on eligible plain `lz4+ws`; WSS and CURVE disable
+//! OMQ compression. Encoding stays on connection drivers or fan-out workers.
 
 use std::net::SocketAddr;
 
@@ -14,7 +20,7 @@ use omq_proto::proto::ws_handshake;
 mod insecure;
 mod listener;
 mod upgrade;
-pub(crate) use listener::{AcceptSetup, WsListener, bind};
+pub(crate) use listener::{WsListener, bind};
 
 pub(crate) enum WsTransport {
     Plain(TcpStream),

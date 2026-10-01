@@ -12,6 +12,10 @@ readme = "README.md"
 keywords = ["zeromq", "high-performance", "ffi", "libzmq", "c-api"]
 categories = ["network-programming", "api-bindings"]
 
+[features]
+# QUIC carriers are optional: they add Quinn and rustls/ring to the library.
+quic = ["omq-tokio/quic"]
+
 [lib]
 name = "omq_zmq"
 crate-type = ["cdylib", "staticlib", "rlib"]
@@ -126,6 +130,11 @@ path = "tests/poller.rs"
 [[test]]
 name = "omq_libzmq_proxy"
 path = "tests/proxy.rs"
+
+[[test]]
+name = "omq_libzmq_quic"
+path = "tests/quic.rs"
+required-features = ["quic"]
 
 [[test]]
 name = "omq_libzmq_security"

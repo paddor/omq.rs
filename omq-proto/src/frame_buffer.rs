@@ -8,6 +8,13 @@ use crate::proto::frame;
 pub const ARENA_THRESHOLD: usize = 4 * 1024;
 pub const ARENA_INITIAL_CAP: usize = 16 * 1024;
 pub const ARENA_INITIAL_CAP_IPC: usize = 64 * 1024;
+/// Arenas moved out by [`FrameBuffer::drain_owned`] stay available for
+/// reuse once the writer drops every chunk taken from them. Bounded by
+/// count and by capacity. The capacity bound is twice the default QUIC
+/// stream window, so arenas still in flight rarely force an allocation.
+/// It is also the most a `FrameBuffer` retains for reuse while idle.
+const RETIRED_ARENAS: usize = 16;
+const RETIRED_ARENA_BYTES: usize = 2 * 1024 * 1024;
 
 /// An entry in the encoded output sequence: either a range within the
 /// arena buffer or an external zero-copy `Bytes` (large payload).
@@ -40,6 +47,11 @@ pub struct FrameBuffer {
     /// data at each step. Pre-reserving to the peak eliminates the
     /// cascade: one allocation at full size, zero data copies.
     arena_peak_cap: usize,
+    /// Frozen arenas from `drain_owned` with their capacity, oldest first.
+    /// Each handle is our own reference; `Bytes::try_into_mut` succeeds
+    /// only after the writer dropped all chunks sliced from it.
+    retired: VecDeque<(Bytes, usize)>,
+    retired_bytes: usize,
 }
 
 impl std::fmt::Debug for FrameBuffer {
@@ -64,6 +76,8 @@ impl FrameBuffer {
             arena_threshold,
             arena_mark: 0,
             arena_peak_cap: arena_cap,
+            retired: VecDeque::new(),
+            retired_bytes: 0,
         }
     }
 
@@ -75,6 +89,8 @@ impl FrameBuffer {
             arena_threshold,
             arena_mark: 0,
             arena_peak_cap: arena_cap,
+            retired: VecDeque::new(),
+            retired_bytes: 0,
         }
     }
 
@@ -86,6 +102,8 @@ impl FrameBuffer {
             arena_threshold: ARENA_THRESHOLD,
             arena_mark: 0,
             arena_peak_cap: 0,
+            retired: VecDeque::new(),
+            retired_bytes: 0,
         }
     }
 
@@ -153,7 +171,39 @@ impl FrameBuffer {
 
     fn reserve_arena(&mut self, additional: usize) {
         if self.arena.capacity() == 0 && self.arena_peak_cap > 0 {
-            self.arena.reserve(self.arena_peak_cap.max(additional));
+            let wanted = self.arena_peak_cap.max(additional);
+            match self.reuse_retired_arena(wanted) {
+                Some(arena) => self.arena = arena,
+                None => self.arena.reserve(wanted),
+            }
+        }
+    }
+
+    /// Take back a retired arena that no chunk references any more.
+    fn reuse_retired_arena(&mut self, wanted: usize) -> Option<BytesMut> {
+        for _ in 0..self.retired.len() {
+            let (retired, capacity) = self.retired.pop_front()?;
+            self.retired_bytes -= capacity;
+            match retired.try_into_mut() {
+                Ok(mut arena) if arena.capacity() >= wanted => {
+                    arena.clear();
+                    return Some(arena);
+                }
+                // Too small for the current peak: let it go.
+                Ok(_) => {}
+                Err(retired) => self.retire_arena(retired, capacity),
+            }
+        }
+        None
+    }
+
+    fn retire_arena(&mut self, arena: Bytes, capacity: usize) {
+        self.retired.push_back((arena, capacity));
+        self.retired_bytes += capacity;
+        while self.retired.len() > RETIRED_ARENAS || self.retired_bytes > RETIRED_ARENA_BYTES {
+            // Drops only our reference; chunks still in flight keep it.
+            let (_, capacity) = self.retired.pop_front().expect("retired arena");
+            self.retired_bytes -= capacity;
         }
     }
 
@@ -359,11 +409,24 @@ impl FrameBuffer {
     }
 
     pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> usize {
+        self.drain_arena(buf, max_chunks, false)
+    }
+
+    /// Like [`Self::drain`], but moves the arena bytes into the drained
+    /// chunks instead of copying them. For writers that keep the chunks
+    /// until the peer acknowledges them (QUIC). The next encode reuses a
+    /// retired arena once its chunks are dropped, else allocates.
+    pub fn drain_owned(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> usize {
+        self.drain_arena(buf, max_chunks, true)
+    }
+
+    fn drain_arena(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> usize {
         self.commit_arena_range();
         if self.entries.is_empty() {
             return 0;
         }
 
+        let mut retired_capacity = 0;
         let frozen = if self.arena.is_empty() {
             None
         } else {
@@ -371,14 +434,19 @@ impl FrameBuffer {
             if cap > self.arena_peak_cap {
                 self.arena_peak_cap = cap;
             }
-            // Copy the arena content and clear() to preserve the backing
-            // allocation. The alternative (split().freeze()) transfers the
-            // entire backing to the frozen Bytes, forcing a fresh
-            // reserve() that causes page-fault storms on glibc's
-            // per-thread arenas.
-            let frozen = Bytes::copy_from_slice(&self.arena);
-            self.arena.clear();
-            Some(frozen)
+            if owned {
+                retired_capacity = cap;
+                Some(std::mem::take(&mut self.arena).freeze())
+            } else {
+                // Copy the arena content and clear() to preserve the backing
+                // allocation. The alternative (split().freeze()) transfers the
+                // entire backing to the frozen Bytes, forcing a fresh
+                // reserve() that causes page-fault storms on glibc's
+                // per-thread arenas.
+                let frozen = Bytes::copy_from_slice(&self.arena);
+                self.arena.clear();
+                Some(frozen)
+            }
         };
 
         let take = max_chunks.min(self.entries.len());
@@ -418,6 +486,9 @@ impl FrameBuffer {
         }
 
         self.arena_mark = 0;
+        if owned && let Some(frozen) = frozen {
+            self.retire_arena(frozen, retired_capacity);
+        }
         protected_drained
     }
 
@@ -471,6 +542,98 @@ impl Default for FrameBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_owned_moves_arena_bytes_and_reserves_again() {
+        let mut eq = FrameBuffer::new();
+        eq.frame(&Message::single("abc"));
+        eq.frame(&Message::single("defg"));
+        let arena_start = eq.arena_bytes().as_ptr() as usize;
+
+        let mut chunks = Vec::new();
+        eq.drain_owned(&mut chunks, 16);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(&chunks[0][..], b"\x00\x03abc\x00\x04defg");
+        assert_eq!(
+            chunks[0].as_ptr() as usize,
+            arena_start,
+            "arena bytes were copied"
+        );
+        assert!(eq.is_empty());
+        assert_eq!(eq.total_bytes(), 0);
+
+        let large = vec![7u8; ARENA_INITIAL_CAP];
+        eq.frame(&Message::single(Bytes::from(large.clone())));
+        eq.frame(&Message::single("h"));
+        // The first chunk still holds the old arena allocation.
+        assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
+        chunks.clear();
+        eq.drain_owned(&mut chunks, 16);
+        let wire: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        let mut expected = vec![0x02];
+        expected.extend_from_slice(&(large.len() as u64).to_be_bytes());
+        expected.extend_from_slice(&large);
+        expected.extend_from_slice(b"\x00\x01h");
+        assert_eq!(wire, expected);
+    }
+
+    #[test]
+    fn drain_owned_reuses_arena_only_after_chunks_drop() {
+        let mut eq = FrameBuffer::new();
+        let mut chunks = Vec::new();
+        eq.frame(&Message::single("first"));
+        let first_arena = eq.arena_bytes().as_ptr() as usize;
+        eq.drain_owned(&mut chunks, 16);
+
+        // A chunk still references the first arena: allocate another.
+        eq.frame(&Message::single("second"));
+        let second_arena = eq.arena_bytes().as_ptr() as usize;
+        assert_ne!(second_arena, first_arena);
+        let mut second = Vec::new();
+        eq.drain_owned(&mut second, 16);
+
+        // Dropping the first arena's chunks makes it reusable.
+        chunks.clear();
+        eq.frame(&Message::single("third"));
+        assert_eq!(eq.arena_bytes().as_ptr() as usize, first_arena);
+        assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
+        eq.drain_owned(&mut chunks, 16);
+        assert_eq!(&chunks[0][..], b"\x00\x05third");
+        assert_eq!(&second[0][..], b"\x00\x06second");
+    }
+
+    #[test]
+    fn drain_owned_bounds_retired_arenas_by_count_and_capacity() {
+        let mut eq = FrameBuffer::new();
+        let mut in_flight = Vec::new();
+        for _ in 0..3 * RETIRED_ARENAS {
+            eq.frame(&Message::single("x"));
+            eq.drain_owned(&mut in_flight, 16);
+            assert!(eq.retired.len() <= RETIRED_ARENAS);
+        }
+        let mut large = FrameBuffer::with_config(ARENA_THRESHOLD, 1024 * 1024);
+        for _ in 0..8 {
+            large.frame(&Message::single("x"));
+            large.drain_owned(&mut in_flight, 16);
+            assert!(large.retired_bytes <= RETIRED_ARENA_BYTES);
+            assert_eq!(
+                large.retired_bytes,
+                large
+                    .retired
+                    .iter()
+                    .map(|(_, capacity)| capacity)
+                    .sum::<usize>()
+            );
+        }
+        // Evicted arenas stay valid for the chunks that still hold them.
+        assert!(in_flight.iter().all(|chunk| &chunk[..] == b"\x00\x01x"));
+        in_flight.clear();
+        eq.frame(&Message::single("y"));
+        assert_eq!(eq.retired.len(), RETIRED_ARENAS - 1);
+    }
 
     #[test]
     fn lazy_config_defers_arena_allocation_until_encode() {

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Use the current backend's 10-second setup deadline and reconnect behavior.
+- Keep initial DNS errors visible; retry later resolution failures internally.
+
 ## [0.2.1] - 2026-09-19
 
 ### Changed

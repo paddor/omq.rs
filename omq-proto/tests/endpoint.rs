@@ -132,8 +132,8 @@ fn zstd_tcp() {
 #[test]
 fn unsupported_scheme() {
     assert!(matches!(
-        "quic://host:80".parse::<Endpoint>().unwrap_err(),
-        Error::UnsupportedScheme(s) if s == "quic"
+        "sctp://host:80".parse::<Endpoint>().unwrap_err(),
+        Error::UnsupportedScheme(s) if s == "sctp"
     ));
 }
 
@@ -314,4 +314,59 @@ fn ws_roundtrip() {
     let original = "ws://myhost:5555/path/to/endpoint";
     let ep = parse(original);
     assert_eq!(ep.to_string(), original);
+}
+
+#[test]
+#[cfg(feature = "quic")]
+fn quic_parse_display_and_scheme() {
+    let ep = parse("quic://example.com:4433");
+    assert!(matches!(
+        &ep,
+        Endpoint::Quic { host: Host::Name(h), port: 4433 } if h == "example.com"
+    ));
+    assert_eq!(ep.to_string(), "quic://example.com:4433");
+    assert_eq!(ep.scheme(), "quic");
+    assert!(!ep.is_tcp_family());
+
+    let v6 = parse("quic://[::1]:5555");
+    assert_eq!(v6.to_string(), "quic://[::1]:5555");
+    let wildcard = parse("quic://*:*");
+    assert!(matches!(
+        wildcard,
+        Endpoint::Quic {
+            host: Host::Wildcard,
+            port: 0
+        }
+    ));
+}
+
+#[test]
+#[cfg(feature = "quic")]
+fn quic_requires_explicit_port_and_rejects_paths() {
+    assert!("quic://host".parse::<Endpoint>().is_err());
+    assert!("quic://host:4433/omq".parse::<Endpoint>().is_err());
+    assert!("quic://::1:4433".parse::<Endpoint>().is_err());
+}
+
+#[test]
+#[cfg(all(feature = "quic", any(feature = "lz4", feature = "zstd")))]
+fn quic_rejects_codec_prefixes() {
+    for uri in ["lz4+quic://host:4433", "zstd+quic://host:4433"] {
+        assert!(uri.parse::<Endpoint>().is_err(), "{uri} must be rejected");
+    }
+    #[cfg(feature = "lz4")]
+    assert!(
+        parse("quic://host:4433")
+            .with_compression(omq_proto::CompressionKind::Lz4)
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg(not(feature = "quic"))]
+fn quic_scheme_requires_feature() {
+    assert!(matches!(
+        "quic://host:80".parse::<Endpoint>().unwrap_err(),
+        Error::UnsupportedScheme(s) if s == "quic"
+    ));
 }

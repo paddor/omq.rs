@@ -39,6 +39,50 @@ const ZMQ_ZAP_ENFORCE_DOMAIN: i32 = 93;
 const ZMQ_IO_THREADS: i32 = 1;
 const ZMQ_MSG_WORDS: usize = 64 / size_of::<usize>();
 
+#[cfg(feature = "quic")]
+#[test]
+fn plain_zap_authenticates_over_quic() {
+    const OMQ_QUIC_CERT_PEM: i32 = 1011;
+    const OMQ_QUIC_KEY_PEM: i32 = 1012;
+    const OMQ_QUIC_TRUST_PEM: i32 = 1013;
+    const OMQ_QUIC_TRUST_SYSTEM: i32 = 1015;
+
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let cert = certified.cert.pem();
+    let key = certified.signing_key.serialize_pem();
+    let ctx = zmq_ctx_new();
+    let zap = start_plain_zap_handler(ctx);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    for sock in [pull, push] {
+        set_i32(sock, ZMQ_LINGER, 0);
+        set_timeo(sock, 5000);
+    }
+    set_i32(pull, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(pull, ZMQ_ZAP_DOMAIN, b"global");
+    set_bytes(pull, OMQ_QUIC_CERT_PEM, cert.as_bytes());
+    set_bytes(pull, OMQ_QUIC_KEY_PEM, key.as_bytes());
+    assert_eq!(zmq_bind(pull, c"quic://127.0.0.1:0".as_ptr()), 0);
+    let endpoint = helpers::last_endpoint(pull);
+
+    set_bytes(push, ZMQ_PLAIN_USERNAME, b"alice");
+    set_bytes(push, ZMQ_PLAIN_PASSWORD, b"secret");
+    set_i32(push, OMQ_QUIC_TRUST_SYSTEM, 0);
+    set_bytes(push, OMQ_QUIC_TRUST_PEM, cert.as_bytes());
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(push, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), 5);
+    assert_eq!(&buf[..5], b"hello");
+    let request = zap.join().unwrap();
+    assert_eq!(request[5], b"PLAIN");
+    assert_eq!(request[6], b"alice");
+    assert_eq!(request[7], b"secret");
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
 #[repr(C)]
 struct ZmqMsg([usize; ZMQ_MSG_WORDS]);
 

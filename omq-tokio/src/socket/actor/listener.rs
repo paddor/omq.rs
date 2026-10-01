@@ -64,8 +64,18 @@ impl ListenerTask {
                 self.reject(peer_ident.clone(), "socket pending-handshake limit reached");
                 return false;
             };
+            let deadline = match self.options.handshake_timeout {
+                Some(timeout) => {
+                    let Some(deadline) = std::time::Instant::now().checked_add(timeout) else {
+                        self.reject(peer_ident.clone(), "setup timeout exceeds clock range");
+                        return false;
+                    };
+                    Some(deadline)
+                }
+                None => None,
+            };
             *setup = Some(SetupState {
-                deadline: None,
+                deadline,
                 cancel: self.cancel.clone(),
                 admission,
             });

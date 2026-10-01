@@ -7,7 +7,7 @@ git clone https://github.com/paddor/omq.rs.git
 cd omq.rs
 ```
 
-MSRV is Rust 1.93, edition 2024. See [DEVELOPMENT.md](DEVELOPMENT.md) for build, test, fuzz, soak, and benchmark commands.
+MSRV is Rust 1.93, edition 2024. See [DEVELOPMENT.md](DEVELOPMENT.md) for build and test commands, [RUNNING_BENCHMARKS.md](RUNNING_BENCHMARKS.md) for benchmarks, and [RELEASING.md](RELEASING.md) for fuzz, soak, and release steps.
 
 ## Making changes
 

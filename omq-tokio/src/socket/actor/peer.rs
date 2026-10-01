@@ -7,6 +7,8 @@ use super::{
 use crate::socket::actor::lifecycle::PeerLifecycle;
 use crate::socket::actor::peer_materialize::{ByteStreamConnection, PeerSetup};
 use omq_proto::WorkloadProfile;
+#[cfg(any(feature = "ws", feature = "quic"))]
+use omq_proto::endpoint::Endpoint;
 use std::sync::atomic::Ordering;
 
 impl SocketDriver {
@@ -84,8 +86,18 @@ impl SocketDriver {
                         && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
                     {
                         let ep = peer.endpoint.clone();
+                        // Transport success does not reset backoff: READY does.
+                        let failed_attempts = if peer.ready {
+                            1
+                        } else {
+                            self.dialers
+                                .iter()
+                                .find(|dialer| dialer.route_id == peer.route_id)
+                                .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
+                                .saturating_add(1)
+                        };
                         self.dialers.retain(|d| d.endpoint != ep);
-                        self.start_dial(ep, peer.options.clone());
+                        self.start_redial(ep, peer.options.clone(), failed_attempts);
                     }
                 }
             }
@@ -145,30 +157,59 @@ impl SocketDriver {
             .and_then(|d| d.send_pipe_rx.take())
     }
 
-    #[cfg_attr(not(feature = "ws"), expect(clippy::unused_self))]
+    #[cfg_attr(
+        not(any(feature = "ws", feature = "quic")),
+        expect(clippy::unused_self)
+    )]
     fn can_accept_carrier_peer(&self, peer_id: u64, identity: &bytes::Bytes) -> bool {
         #[cfg(feature = "ws")]
-        if self
-            .peers
-            .get(&peer_id)
-            .is_some_and(|peer| peer.endpoint.is_ws_family() && !peer.ready)
-        {
-            let ready = self
-                .peers
-                .values()
-                .filter(|peer| peer.ready && peer.endpoint.is_ws_family())
-                .count();
-            let replaced = self
-                .send_strategy
-                .peer_for_identity(identity)
-                .filter(|&old_id| old_id != peer_id)
-                .and_then(|old_id| self.peers.get(&old_id))
-                .is_some_and(|peer| peer.ready && peer.endpoint.is_ws_family());
-            return ready.saturating_sub(usize::from(replaced)) < self.options.ws.max_ready_peers;
+        if let Some(allowed) = self.carrier_ready_capacity(
+            peer_id,
+            identity,
+            Endpoint::is_ws_family,
+            self.options.ws.max_ready_peers,
+        ) {
+            return allowed;
         }
-        #[cfg(not(feature = "ws"))]
+        #[cfg(feature = "quic")]
+        if let Some(allowed) = self.carrier_ready_capacity(
+            peer_id,
+            identity,
+            Endpoint::is_quic_family,
+            self.options.quic.max_ready_peers,
+        ) {
+            return allowed;
+        }
+        #[cfg(not(any(feature = "ws", feature = "quic")))]
         let _ = (peer_id, identity);
         true
+    }
+
+    /// `None` when the peer does not belong to this carrier family.
+    #[cfg(any(feature = "ws", feature = "quic"))]
+    fn carrier_ready_capacity(
+        &self,
+        peer_id: u64,
+        identity: &bytes::Bytes,
+        family: impl Fn(&Endpoint) -> bool,
+        limit: usize,
+    ) -> Option<bool> {
+        let candidate = self.peers.get(&peer_id)?;
+        if !family(&candidate.endpoint) || candidate.ready {
+            return None;
+        }
+        let ready = self
+            .peers
+            .values()
+            .filter(|peer| peer.ready && family(&peer.endpoint))
+            .count();
+        let replaced = self
+            .send_strategy
+            .peer_for_identity(identity)
+            .filter(|&old_id| old_id != peer_id)
+            .and_then(|old_id| self.peers.get(&old_id))
+            .is_some_and(|peer| peer.ready && family(&peer.endpoint));
+        Some(ready.saturating_sub(usize::from(replaced)) < limit)
     }
 
     fn spawn_on_handshake(&mut self, mut conn: AnyConn, peer: PeerSetup) {

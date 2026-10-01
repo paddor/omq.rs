@@ -23,12 +23,22 @@ pub(crate) enum PlainMechanism {
     Server(PlainServer),
 }
 
-#[derive(Debug)]
 pub(crate) struct PlainClient {
     username: String,
     password: String,
     our_props: PeerProperties,
     state: PlainClientState,
+}
+
+impl std::fmt::Debug for PlainClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlainClient")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("our_props", &self.our_props)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +120,19 @@ impl PlainMechanism {
             Self::Client(c) => c.on_command(cmd, out),
             Self::Server(s) => s.on_command(cmd, out),
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::PlainMechanism;
+
+    #[test]
+    fn plain_client_debug_redacts_password() {
+        let client = PlainMechanism::new_client("alice".into(), "password-sentinel".into());
+        let debug = format!("{client:?}");
+        assert!(debug.contains("password: \"<redacted>\""));
+        assert!(!debug.contains("password-sentinel"));
     }
 }
 

@@ -18,6 +18,9 @@ use crate::error::fail;
 use crate::notify::NotifyHandle;
 use crate::socket::DEFAULT_HWM;
 
+#[cfg(feature = "quic")]
+mod quic;
+
 macro_rules! lock_overlay {
     ($sock:expr) => {
         match $sock.overlay.lock() {
@@ -68,13 +71,85 @@ pub(crate) struct SocketOverlay {
     pub req_relaxed: bool,
     pub xpub_nodrop: bool,
     pub reconnect_stop: i32,
-    pub wss_key_pem: Option<Vec<u8>>,
+    pub wss_key_pem: Option<SecretBytes>,
     pub wss_cert_pem: Option<Vec<u8>>,
     pub wss_trust_pem: Option<Vec<u8>>,
     pub wss_hostname: Option<String>,
     pub wss_trust_system: bool,
     pub ws_allowed_origins: Vec<String>,
     pub ws_max_ready_peers: i32,
+    #[cfg(feature = "quic")]
+    pub quic: QuicOverlay,
+}
+
+/// Keep the overlay's derived Debug without exposing a WSS private key.
+#[derive(Clone)]
+pub(crate) struct SecretBytes(Vec<u8>);
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// `OMQ_QUIC_*` settings; fixed when the backend socket materializes.
+#[cfg(feature = "quic")]
+#[derive(Clone)]
+pub(crate) struct QuicOverlay {
+    pub cert_pem: Option<Vec<u8>>,
+    pub key_pem: Option<Vec<u8>>,
+    pub trust_pem: Option<Vec<u8>>,
+    pub server_name: Option<String>,
+    pub trust_system: bool,
+    pub stream_window: i32,
+    pub max_ready_peers: i32,
+}
+
+#[cfg(feature = "quic")]
+impl std::fmt::Debug for QuicOverlay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("QuicOverlay");
+        debug.field("cert_pem", &self.cert_pem);
+        debug.field("key_pem", &self.key_pem.as_ref().map(|_| "<redacted>"));
+        debug.field("trust_pem", &self.trust_pem);
+        debug.field("server_name", &self.server_name);
+        debug.field("trust_system", &self.trust_system);
+        debug.field("stream_window", &self.stream_window);
+        debug.field("max_ready_peers", &self.max_ready_peers);
+        debug.finish()
+    }
+}
+
+#[cfg(feature = "quic")]
+impl Default for QuicOverlay {
+    fn default() -> Self {
+        let defaults = omq_tokio::options::QuicOptions::default();
+        Self {
+            cert_pem: None,
+            key_pem: None,
+            trust_pem: None,
+            server_name: None,
+            trust_system: true,
+            stream_window: i32::try_from(defaults.stream_window).unwrap_or(i32::MAX),
+            max_ready_peers: i32::try_from(defaults.max_ready_peers).unwrap_or(i32::MAX),
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+impl QuicOverlay {
+    fn options(&self) -> omq_tokio::options::QuicOptions {
+        omq_tokio::options::QuicOptions {
+            server_cert_pem: self.cert_pem.clone(),
+            server_key_pem: self.key_pem.clone(),
+            trust_pem: self.trust_pem.clone(),
+            trust_system: self.trust_system,
+            server_name: self.server_name.clone(),
+            stream_window: u32::try_from(self.stream_window).expect("validated window"),
+            max_ready_peers: usize::try_from(self.max_ready_peers).expect("validated limit"),
+            ..omq_tokio::options::QuicOptions::default()
+        }
+    }
 }
 
 impl Default for SocketOverlay {
@@ -125,11 +200,13 @@ impl Default for SocketOverlay {
             wss_trust_system: true,
             ws_allowed_origins: Vec::new(),
             ws_max_ready_peers: 1024,
+            #[cfg(feature = "quic")]
+            quic: QuicOverlay::default(),
         }
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) enum MechanismOverlay {
     #[default]
     Null,
@@ -149,6 +226,38 @@ pub(crate) enum MechanismOverlay {
         secret_key: [u8; 32],
         server_key: [u8; 32],
     },
+}
+
+impl std::fmt::Debug for MechanismOverlay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::PlainServer => f.write_str("PlainServer"),
+            Self::PlainServerCredentials { credentials } => f
+                .debug_struct("PlainServerCredentials")
+                .field("count", &credentials.len())
+                .finish(),
+            Self::PlainClient { username, .. } => f
+                .debug_struct("PlainClient")
+                .field("username", username)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::CurveServer { .. } => f
+                .debug_struct("CurveServer")
+                .field("secret_key", &"<redacted>")
+                .finish(),
+            Self::CurveClient {
+                public_key,
+                server_key,
+                ..
+            } => f
+                .debug_struct("CurveClient")
+                .field("public_key", public_key)
+                .field("secret_key", &"<redacted>")
+                .field("server_key", server_key)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -267,12 +376,14 @@ impl SocketOverlay {
             },
             wss_tls: omq_tokio::options::WssTls {
                 server_cert_pem: self.wss_cert_pem.clone(),
-                server_key_pem: self.wss_key_pem.clone(),
+                server_key_pem: self.wss_key_pem.as_ref().map(|key| key.0.clone()),
                 trust_pem: self.wss_trust_pem.clone(),
                 hostname: self.wss_hostname.clone(),
                 trust_system: self.wss_trust_system,
                 accept_invalid_certs: false,
             },
+            #[cfg(feature = "quic")]
+            quic: self.quic.options(),
             ..Default::default()
         }
     }
@@ -402,7 +513,7 @@ const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 
-const DEFAULT_HANDSHAKE_IVL_MS: i32 = 30_000;
+const DEFAULT_HANDSHAKE_IVL_MS: i32 = 10_000;
 const OMQ_ON_MUTE: c_int = 1004;
 const OMQ_COMPRESSION_LEVEL: c_int = 1005;
 const OMQ_COMPRESSION_DICT: c_int = 1006;
@@ -410,6 +521,20 @@ const OMQ_COMPRESSION_AUTO_TRAIN: c_int = 1007;
 const OMQ_WORKLOAD_PROFILE: c_int = 1008;
 const OMQ_WS_ALLOWED_ORIGINS: c_int = 1009;
 const OMQ_WS_MAX_READY_PEERS: c_int = 1010;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_CERT_PEM: c_int = 1011;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_KEY_PEM: c_int = 1012;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_TRUST_PEM: c_int = 1013;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_SERVER_NAME: c_int = 1014;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_TRUST_SYSTEM: c_int = 1015;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_STREAM_WINDOW: c_int = 1016;
+#[cfg(feature = "quic")]
+const OMQ_QUIC_MAX_READY_PEERS: c_int = 1018;
 const OMQ_ARENA_THRESHOLD: c_int = 10_001;
 const OMQ_ON_MUTE_BLOCK: c_int = 0;
 const OMQ_ON_MUTE_DROP_NEWEST: c_int = 1;
@@ -434,6 +559,11 @@ pub extern "C" fn zmq_setsockopt(
     }
     // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+
+    #[cfg(feature = "quic")]
+    if let Some(rc) = quic::set(sock_arc, option, optval, optvallen) {
+        return rc;
+    }
 
     match option {
         ZMQ_SNDTIMEO => {
@@ -907,7 +1037,7 @@ pub extern "C" fn zmq_setsockopt(
             let Some(v) = read_bytes(optval, optvallen) else {
                 return fail(libc::EINVAL);
             };
-            lock_overlay!(sock_arc).wss_key_pem = none_if_empty(v);
+            lock_overlay!(sock_arc).wss_key_pem = none_if_empty(v).map(SecretBytes);
         }
         ZMQ_WSS_CERT_PEM => {
             let Some(v) = read_bytes(optval, optvallen) else {
@@ -1170,6 +1300,11 @@ pub extern "C" fn zmq_getsockopt(
     }
     // SAFETY: caller guarantees sock is a valid socket pointer from zmq_socket.
     let sock_arc = unsafe { &*(sock.cast::<std::sync::Arc<crate::socket::OmqSocket>>()) };
+
+    #[cfg(feature = "quic")]
+    if let Some(rc) = quic::get(sock_arc, option, optval, optvallen) {
+        return rc;
+    }
 
     match option {
         ZMQ_SNDTIMEO => write_i32(
@@ -1524,7 +1659,13 @@ pub extern "C" fn zmq_getsockopt(
         ),
         ZMQ_WSS_KEY_PEM => {
             let ov = lock_overlay!(sock_arc);
-            write_bytes(optval, optvallen, ov.wss_key_pem.as_deref().unwrap_or(b""))
+            write_bytes(
+                optval,
+                optvallen,
+                ov.wss_key_pem
+                    .as_ref()
+                    .map_or(&[][..], |key| key.0.as_slice()),
+            )
         }
         ZMQ_WSS_CERT_PEM => {
             let ov = lock_overlay!(sock_arc);
@@ -1794,6 +1935,56 @@ fn write_key(optval: *mut libc::c_void, optvallen: *mut usize, key: &[u8; 32]) -
 mod tests {
     use super::*;
 
+    #[cfg(feature = "quic")]
+    #[test]
+    fn quic_overlay_debug_redacts_private_key() {
+        let overlay = QuicOverlay {
+            key_pem: Some(b"private-key-sentinel".to_vec()),
+            ..Default::default()
+        };
+        let debug = format!("{overlay:?}");
+        assert!(debug.contains("key_pem: Some(\"<redacted>\")"));
+        assert!(!debug.contains("private-key-sentinel"));
+    }
+
+    #[test]
+    fn overlay_debug_redacts_mechanism_secrets() {
+        let cases = [
+            MechanismOverlay::PlainServerCredentials {
+                credentials: vec![("alice".into(), "password-sentinel".into())],
+            },
+            MechanismOverlay::PlainClient {
+                username: "alice".into(),
+                password: "password-sentinel".into(),
+            },
+            MechanismOverlay::CurveServer {
+                secret_key: [0xAA; 32],
+            },
+        ];
+        for mechanism in cases {
+            let debug = format!(
+                "{:?}",
+                SocketOverlay {
+                    mechanism,
+                    ..Default::default()
+                }
+            );
+            assert!(!debug.contains("password-sentinel"));
+            assert!(!debug.contains("[170, 170"));
+        }
+    }
+
+    #[test]
+    fn overlay_debug_redacts_wss_private_key() {
+        let overlay = SocketOverlay {
+            wss_key_pem: Some(SecretBytes(b"private-key-sentinel".to_vec())),
+            ..Default::default()
+        };
+        let debug = format!("{overlay:?}");
+        assert!(debug.contains("wss_key_pem: Some(<redacted>)"));
+        assert!(!debug.contains("private-key-sentinel"));
+    }
+
     #[test]
     fn handshake_ivl_is_milliseconds_in_options() {
         let overlay = SocketOverlay {
@@ -1814,6 +2005,10 @@ mod tests {
         assert_eq!(
             overlay.to_options().handshake_timeout,
             Some(Duration::from_millis(DEFAULT_HANDSHAKE_IVL_MS as u64))
+        );
+        assert_eq!(
+            overlay.to_options().handshake_timeout,
+            omq_tokio::Options::default().handshake_timeout
         );
     }
 

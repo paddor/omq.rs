@@ -91,7 +91,7 @@ public final class SocketOptions {
             return add(Socket::heartbeatOff);
         }
 
-        /** Sets ZMTP handshake timeout. */
+        /** Sets connection setup timeout from DNS through READY (default 10s). */
         public Builder handshakeTimeout(Duration timeout) {
             Socket.millis(Objects.requireNonNull(timeout, "timeout"));
             return add(socket -> socket.handshakeTimeout(timeout));

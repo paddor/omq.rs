@@ -25,6 +25,8 @@ plain = ["omq-proto/plain"]
 lz4 = ["omq-proto/lz4"]
 zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
+# Raw OMQ over QUIC (`quic://`). Quinn with rustls/ring; no OMQ compression.
+quic = ["omq-proto/quic", "dep:quinn", "dep:nix", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
@@ -54,6 +56,10 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
+quinn = { version = "0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", optional = true, default-features = false, features = ["socket"] }
 
 [dev-dependencies]
 tokio = { version = "1.52.0", features = ["test-util", "rt-multi-thread"] }
@@ -391,6 +397,16 @@ name = "omq_soak_pub_sub_realworld_churn_tcp"
 path = "tests/omq_soak_pub_sub_realworld_churn_tcp.rs"
 
 [[test]]
+name = "omq_soak_quic_churn"
+path = "tests/omq_soak_quic_churn.rs"
+required-features = ["soak", "quic"]
+
+[[test]]
+name = "omq_soak_quic_long"
+path = "tests/omq_soak_quic_long.rs"
+required-features = ["soak", "quic"]
+
+[[test]]
 name = "omq_soak_rate_limit"
 path = "tests/omq_soak_rate_limit.rs"
 
@@ -553,6 +569,21 @@ path = "tests/wss_basic.rs"
 [[test]]
 name = "omq_wss_cert_reject"
 path = "tests/wss_cert_reject.rs"
+
+[[test]]
+name = "omq_quic_basic"
+path = "tests/quic_basic.rs"
+required-features = ["quic"]
+
+[[test]]
+name = "omq_quic_lifecycle"
+path = "tests/quic_lifecycle.rs"
+required-features = ["quic"]
+
+[[test]]
+name = "omq_quic_network"
+path = "tests/quic_network.rs"
+required-features = ["quic"]
 
 [[test]]
 name = "omq_xpub_xsub"

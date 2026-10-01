@@ -1,4 +1,9 @@
 //! Bounded HTTP/1.1 heads used for ZWS upgrade negotiation.
+//!
+//! Heads include their terminator in the 4096-byte cap. Fields and subprotocol
+//! offers each cap at 64. Parsing rejects duplicate singleton headers, malformed
+//! keys/list headers, bodies, and whitespace/control injection. Slash-separated
+//! native profiles use the narrow exception below; browsers use HTTP tokens.
 
 use super::{valid_ws_key, validate_ws_accept};
 use crate::{Error, Result};
@@ -188,7 +193,7 @@ pub fn parse_client_upgrade(request: &[u8]) -> Result<UpgradeRequest> {
         return Err(invalid("invalid WS resource target"));
     }
     let host = head.required("Host")?;
-    super::address::authority(host).map_err(|_| invalid("invalid HTTP Host"))?;
+    crate::proto::web_address::authority(host).map_err(|_| invalid("invalid HTTP Host"))?;
     if !head.contains_token("Upgrade", "websocket")?
         || !head.contains_token("Connection", "Upgrade")?
     {

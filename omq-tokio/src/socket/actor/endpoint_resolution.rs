@@ -1,4 +1,8 @@
 //! Named endpoint resolution without blocking the socket actor.
+//!
+//! Initial bind/connect DNS errors go back to the API caller. A successful
+//! connect retains the hostname for TLS and future reconnects. Later DNS
+//! failures belong to the dialer's silent retry loop, never send/recv.
 
 use omq_proto::Options;
 use std::sync::Arc;
@@ -15,7 +19,6 @@ use crate::transport::setup::PendingHandshake;
 use omq_proto::endpoint::Host;
 
 const MAX_PENDING_ENDPOINTS: usize = 128;
-const DNS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -106,6 +109,10 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
             }
         );
     }
+    #[cfg(feature = "quic")]
+    if let Endpoint::Quic { host, .. } = endpoint {
+        return matches!(host, Host::Name(_));
+    }
     false
 }
 
@@ -156,7 +163,19 @@ async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
         };
         return Ok(endpoint.rewrap_ws(resolved));
     }
-    unreachable!("only named TCP/WS endpoints are dispatched")
+    #[cfg(feature = "quic")]
+    if let Endpoint::Quic {
+        host: Host::Name(host),
+        port,
+    } = &endpoint
+    {
+        let address = first(host, *port).await?;
+        return Ok(Endpoint::Quic {
+            host: Host::Ip(address.ip()),
+            port: *port,
+        });
+    }
+    unreachable!("only named network endpoints are dispatched")
 }
 
 async fn first(host: &str, port: u16) -> Result<SocketAddr> {
@@ -173,7 +192,7 @@ struct EndpointTask {
     endpoint: Endpoint,
     cancel: CancellationToken,
     admission: Option<crate::transport::setup::Admission>,
-    ws_timeout: Option<Duration>,
+    setup_timeout: Option<Duration>,
     tx: tokio::sync::mpsc::Sender<InternalEvent>,
 }
 
@@ -204,14 +223,14 @@ impl EndpointTask {
         };
         let now = Instant::now();
         let first_deadline = self
-            .ws_timeout
+            .setup_timeout
             .map(|timeout| {
                 now.checked_add(timeout)
                     .ok_or_else(|| Error::HandshakeFailed("DNS timeout exceeds clock range".into()))
             })
             .transpose()?;
         let deadline = first_deadline
-            .or_else(|| now.checked_add(DNS_TIMEOUT))
+            .or_else(|| now.checked_add(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT))
             .ok_or_else(|| Error::HandshakeFailed("DNS timeout exceeds clock range".into()))?;
         let endpoint = tokio::time::timeout_at(deadline.into(), self.resolve())
             .await
@@ -260,13 +279,7 @@ impl SocketDriver {
         let kind = ack.kind();
         let admission = (kind == Kind::Connect && self.socket_type != super::SocketType::Stream)
             .then(|| self.setup_admission.clone());
-        #[cfg(feature = "ws")]
-        let ws_timeout = endpoint
-            .is_ws_family()
-            .then_some(options.handshake_timeout)
-            .flatten();
-        #[cfg(not(feature = "ws"))]
-        let ws_timeout: Option<Duration> = None;
+        let setup_timeout = super::endpoints::dial_setup_timeout(&endpoint, &options);
         let id = self.next_peer_id;
         self.next_peer_id += 1;
         let cancel = self.cancel.child_token();
@@ -280,7 +293,7 @@ impl SocketDriver {
                 endpoint: task_endpoint,
                 cancel: task_cancel,
                 admission,
-                ws_timeout,
+                setup_timeout,
                 tx,
             }
             .run(ack),
@@ -342,5 +355,5 @@ impl SocketDriver {
     }
 }
 
-#[cfg(all(test, feature = "ws"))]
+#[cfg(test)]
 mod tests;

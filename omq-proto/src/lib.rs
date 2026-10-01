@@ -34,6 +34,8 @@ pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
     PeerCommandKind, PeerIdent, PeerInfo,
 };
+#[cfg(feature = "quic")]
+pub use options::QuicOptions;
 pub use options::{
     CompressionOptions, KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options,
     ReconnectPolicy, WorkloadProfile,

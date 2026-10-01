@@ -82,8 +82,8 @@ impl ProbePeer {
             },
             remote_inbox,
             tasks: [
-                tokio::spawn(async move { sender.run().await }),
-                tokio::spawn(async move { receiver.run().await }),
+                tokio::spawn(Box::pin(sender.run())),
+                tokio::spawn(Box::pin(receiver.run())),
             ],
         }
     }

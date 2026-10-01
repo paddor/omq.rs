@@ -65,6 +65,10 @@ pub enum Endpoint {
     /// `lz4` and `ws` features.
     #[cfg(all(feature = "lz4", feature = "ws"))]
     Lz4Ws { host: Host, port: u16, path: String },
+    /// `quic://host:port` OMQ over QUIC (UDP port, TLS 1.3).
+    /// Uses ALPN `omq-zmtp/1`. Never compressed.
+    #[cfg(feature = "quic")]
+    Quic { host: Host, port: u16 },
 }
 
 /// TCP / UDP host specification: either an IP address or a DNS name.
@@ -127,8 +131,7 @@ impl FromStr for Endpoint {
             .split_once("://")
             .ok_or_else(|| Error::InvalidEndpoint(s.to_string()))?;
 
-        // Recognize complete carrier names first. A future carrier such as
-        // h3+quic must not be mistaken for two codec prefixes.
+        // Recognize complete carrier names before codec prefixes.
         if let Some(endpoint) = parse_carrier(scheme, rest, s) {
             return endpoint;
         }
@@ -163,6 +166,8 @@ fn parse_carrier(scheme: &str, rest: &str, original: &str) -> Option<Result<Endp
         "ws" => parse_ws(rest, false),
         #[cfg(feature = "ws")]
         "wss" => parse_ws(rest, true),
+        #[cfg(feature = "quic")]
+        "quic" => parse_host_port(rest).map(|(host, port)| Endpoint::Quic { host, port }),
         _ => return None,
     })
 }
@@ -187,6 +192,8 @@ impl fmt::Display for Endpoint {
             Self::Wss { host, port, path } => write!(f, "wss://{host}:{port}{path}"),
             #[cfg(all(feature = "lz4", feature = "ws"))]
             Self::Lz4Ws { host, port, path } => write!(f, "lz4+ws://{host}:{port}{path}"),
+            #[cfg(feature = "quic")]
+            Self::Quic { host, port } => write!(f, "quic://{host}:{port}"),
         }
     }
 }
@@ -333,6 +340,12 @@ impl Endpoint {
         }
     }
 
+    /// Whether this endpoint uses a QUIC carrier.
+    #[cfg(feature = "quic")]
+    pub fn is_quic_family(&self) -> bool {
+        matches!(self, Endpoint::Quic { .. })
+    }
+
     /// Short scheme tag suitable for monitor / log output.
     pub fn scheme(&self) -> &'static str {
         match self {
@@ -350,6 +363,8 @@ impl Endpoint {
             Endpoint::Wss { .. } => "wss",
             #[cfg(all(feature = "lz4", feature = "ws"))]
             Endpoint::Lz4Ws { .. } => "lz4+ws",
+            #[cfg(feature = "quic")]
+            Endpoint::Quic { .. } => "quic",
         }
     }
 }

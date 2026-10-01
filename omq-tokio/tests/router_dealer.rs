@@ -70,6 +70,43 @@ fn latency_dealer(identity: &'static [u8]) -> Socket {
 }
 
 #[tokio::test]
+async fn router_identity_api_keeps_dealer_body_intact() {
+    let endpoint = inproc_ep("router-identity-api");
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().router_mandatory(true),
+    )
+    .identity_routing()
+    .unwrap();
+    router.bind(endpoint.clone()).await.unwrap();
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(bytes::Bytes::from_static(b"dealer-id")),
+    );
+    dealer.connect(endpoint).await.unwrap();
+
+    dealer
+        .send(Message::multipart(["request", "part-2"]))
+        .await
+        .unwrap();
+    let (sender, body) = tokio::time::timeout(Duration::from_secs(1), router.recv_from())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sender.as_ref(), b"dealer-id");
+    assert_eq!(body, Message::multipart(["request", "part-2"]));
+
+    router
+        .try_send_to(sender, Message::single("reply"))
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(1), dealer.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Message::single("reply"));
+}
+
+#[tokio::test]
 async fn latency_dealer_preserves_multipart_and_large_fallback() {
     let router = Socket::new(SocketType::Router, Options::default());
     let port = test_support::bind_loopback(&router).await;

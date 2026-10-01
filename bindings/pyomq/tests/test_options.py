@@ -230,6 +230,7 @@ def test_conflate_round_trip():
 def test_handshake_ivl_round_trip():
     ctx, s = _push()
     try:
+        assert s.getsockopt(zmq.HANDSHAKE_IVL) == 10_000
         s.setsockopt(zmq.HANDSHAKE_IVL, 2000)
         assert s.getsockopt(zmq.HANDSHAKE_IVL) == 2000
     finally:

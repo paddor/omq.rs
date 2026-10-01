@@ -349,14 +349,15 @@ impl SocketDriver {
             &endpoint,
             &snapshot,
             &self.inproc_config(&options),
-            #[cfg(feature = "ws")]
+            #[cfg(any(feature = "ws", feature = "quic"))]
             &options,
-            #[cfg(feature = "ws")]
-            crate::transport::ws::AcceptSetup {
+            #[cfg(any(feature = "ws", feature = "quic"))]
+            crate::transport::setup::AcceptSetup {
                 admission: self.setup_admission.clone(),
-                timeout: options.handshake_timeout.unwrap_or_default(),
+                timeout: carrier_setup_timeout(&endpoint, &options),
                 cancel: cancel.clone(),
                 monitor: self.monitor.clone(),
+                io_pool: self.io_pool.clone(),
             },
         )
         .await?;
@@ -389,6 +390,15 @@ impl SocketDriver {
         self.start_dial_with_deadline(endpoint, options, None, None);
     }
 
+    pub(super) fn start_redial(
+        &mut self,
+        endpoint: Endpoint,
+        options: Arc<Options>,
+        failed_attempts: u32,
+    ) {
+        self.start_dial_task(endpoint, options, None, None, failed_attempts);
+    }
+
     pub(super) fn start_dial_with_deadline(
         &mut self,
         endpoint: Endpoint,
@@ -396,27 +406,27 @@ impl SocketDriver {
         first_deadline: Option<std::time::Instant>,
         first_admission: Option<crate::transport::setup::PendingHandshake>,
     ) {
+        self.start_dial_task(endpoint, options, first_deadline, first_admission, 0);
+    }
+
+    fn start_dial_task(
+        &mut self,
+        endpoint: Endpoint,
+        options: Arc<Options>,
+        first_deadline: Option<std::time::Instant>,
+        first_admission: Option<crate::transport::setup::PendingHandshake>,
+        failed_attempts: u32,
+    ) {
         let route_id = self.next_peer_id;
         self.next_peer_id += 1;
         let send_pipe_rx = self.send_strategy.make_connect_pipe(route_id);
         let cancel = self.cancel.child_token();
+        let failed_attempts = Arc::new(std::sync::atomic::AtomicU32::new(failed_attempts));
         let setup = crate::transport::setup::DialSetup {
             admission: (!matches!(endpoint, Endpoint::Inproc { .. })
                 && self.socket_type != SocketType::Stream)
                 .then(|| self.setup_admission.clone()),
-            timeout: {
-                #[cfg(feature = "ws")]
-                {
-                    endpoint
-                        .is_ws_family()
-                        .then_some(options.handshake_timeout)
-                        .flatten()
-                }
-                #[cfg(not(feature = "ws"))]
-                {
-                    None
-                }
-            },
+            timeout: dial_setup_timeout(&endpoint, &options),
             cancel: cancel.clone(),
         };
         let task = tokio::spawn(
@@ -433,6 +443,8 @@ impl SocketDriver {
                 setup,
                 first_deadline,
                 first_admission,
+                failed_attempts: failed_attempts.clone(),
+                io_pool: self.io_pool.clone(),
             }
             .run(),
         );
@@ -442,6 +454,7 @@ impl SocketDriver {
             cancel,
             route_id,
             send_pipe_rx,
+            failed_attempts,
             _task: task,
         });
     }
@@ -491,5 +504,38 @@ impl SocketDriver {
         #[cfg(not(feature = "ws"))]
         let _ = endpoint;
         Ok(())
+    }
+}
+
+/// Listener setup deadline. QUIC always has a finite deadline.
+#[cfg(any(feature = "ws", feature = "quic"))]
+fn carrier_setup_timeout(endpoint: &Endpoint, options: &Options) -> std::time::Duration {
+    #[cfg(feature = "quic")]
+    if endpoint.is_quic_family() {
+        return options
+            .handshake_timeout
+            .unwrap_or(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT);
+    }
+    let _ = endpoint;
+    options.handshake_timeout.unwrap_or_default()
+}
+
+/// One connect-side budget across DNS, carrier setup, and ZMTP READY.
+pub(super) fn dial_setup_timeout(
+    endpoint: &Endpoint,
+    options: &Options,
+) -> Option<std::time::Duration> {
+    #[cfg(feature = "quic")]
+    if endpoint.is_quic_family() {
+        return Some(
+            options
+                .handshake_timeout
+                .unwrap_or(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT),
+        );
+    }
+    if matches!(endpoint, Endpoint::Inproc { .. }) {
+        None
+    } else {
+        options.handshake_timeout
     }
 }

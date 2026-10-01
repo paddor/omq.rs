@@ -38,7 +38,7 @@ impl RemoteWire {
             encoder,
             decoder,
             cancel,
-            task: tokio::spawn(async move { driver.run().await }),
+            task: tokio::spawn(Box::pin(driver.run())),
         }
     }
 

@@ -32,6 +32,27 @@ func TestClosedSocketReturnsTypedError(t *testing.T) {
 	}
 }
 
+func TestInitialDNSFailuresAreTyped(t *testing.T) {
+	ctx := openTestContext(t)
+	defer closeContext(t, ctx)
+	pull := newTestSocket(t, ctx, Pull)
+	defer closeSocket(t, pull)
+	push := newTestSocket(t, ctx, Push)
+	defer closeSocket(t, push)
+
+	_, bindErr := pull.Bind("tcp://omq-no-such-host.invalid:0")
+	connectErr := push.Connect("tcp://omq-no-such-host.invalid:5555")
+	for operation, err := range map[string]error{"Bind": bindErr, "Connect": connectErr} {
+		var transport *TransportError
+		if !errors.As(err, &transport) {
+			t.Fatalf("%s err = %v, want TransportError", operation, err)
+		}
+		if transport.Err == "" {
+			t.Fatalf("%s DNS error has no detail", operation)
+		}
+	}
+}
+
 func TestMaxMessageSizeDropsOversizedReceive(t *testing.T) {
 	ctx := openTestContext(t)
 	defer closeContext(t, ctx)

@@ -220,7 +220,7 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](DEVELOPMENT.md) for build, test, and benchmark commands.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](DEVELOPMENT.md) for build and test commands, and [RUNNING_BENCHMARKS.md](RUNNING_BENCHMARKS.md) for benchmarks.
 
 ## AI disclosure
 

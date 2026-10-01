@@ -42,6 +42,53 @@ threads.
 
 `cargo add omq` picks this backend by default.
 
+### QUIC
+
+The `quic` feature adds `quic://host:port` for native OMQ peers. It carries
+ZMTP on one bidirectional stream and liveness records on a second stream.
+
+A bind needs a TLS server certificate chain and private key. A native OMQ
+connector verifies the certificate name and chain against the platform store
+and/or `trust_pem`. Use `server_name` when the endpoint host differs from the
+certificate name. QUIC does not offer an insecure verification override or
+mTLS. With the `plain` feature, PLAIN authenticates a client inside the
+encrypted QUIC connection:
+
+```rust
+let mut server = Options::default().plain_server_credentials([
+    ("alice", "client-secret"),
+]);
+server.quic.server_cert_pem = Some(cert_pem);
+server.quic.server_key_pem = Some(key_pem);
+let pull = ctx.socket(SocketType::Pull, server);
+pull.bind("quic://0.0.0.0:4433".parse()?).await?;
+
+let mut client = Options::default().plain_client("alice", "client-secret");
+client.quic.trust_pem = Some(ca_pem);
+client.quic.trust_system = false; // private CA only
+let push = ctx.socket(SocketType::Push, client);
+push.connect("quic://server.example.com:4433".parse()?).await?;
+```
+
+The server certificate must cover `server.example.com`. For dynamic
+admission, `Options::plain_server(|peer: &MechanismPeerInfo| ...)` receives
+the username, password, and remote IP during the handshake. CURVE remains
+available when client public keys are preferred; configure a CURVE server
+authenticator to restrict admitted keys. The C compatibility layer can use
+ZAP at `inproc://zeromq.zap.01` with a configured ZAP domain for PLAIN,
+CURVE, or NULL admission.
+
+`connect()` reports initial DNS errors immediately. TLS and ZMTP
+handshake failures appear on the socket monitor while automatic reconnect
+continues. Setup has a 10-second default deadline; reconnect starts at
+100 ms with jitter. `Options` retains `Debug`, with the QUIC private key
+and PLAIN client password redacted.
+
+Each peer is its own QUIC connection placed on one OMQ IO thread; one
+connection's packet work does not spread across threads. Heartbeat options
+drive a separate liveness stream, so a slow local consumer is not mistaken
+for a dead peer. OMQ compression is never used on this transport.
+
 ## Internals
 
 [`doc/architecture.md`](../doc/architecture.md) covers the actor shape,

@@ -405,12 +405,26 @@ test "closed socket maps to NoSocket" {
     try testing.expectError(error.NoSocket, pull.recvInto(&buffer, 0));
 }
 
+test "initial DNS failures return errors" {
+    var ctx = try omq.Context.init();
+    defer ctx.deinit();
+    var push = try ctx.socket(omq.PUSH);
+    defer push.deinit();
+    try push.setLinger(0);
+
+    try testing.expectError(error.Unknown, push.bind(allocator, "tcp://omq-no-such-host.invalid:0"));
+    try testing.expectError(error.Unknown, push.connect(allocator, "tcp://omq-no-such-host.invalid:5555"));
+}
+
 test "extended option round trips" {
     var ctx = try omq.Context.init();
     defer ctx.deinit();
 
     var push = try ctx.socket(omq.PUSH);
     defer push.deinit();
+
+    try testing.expectEqual(@as(i32, 10000), try push.handshakeInterval());
+    try testing.expectEqual(@as(i32, 100), try push.reconnectInterval());
 
     try push.setSendBufferSize(65536);
     try testing.expectEqual(@as(i32, 65536), try push.sendBufferSize());

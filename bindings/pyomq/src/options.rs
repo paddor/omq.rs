@@ -97,7 +97,7 @@ impl Default for Overlay {
             heartbeat_ivl: None,
             heartbeat_ttl: None,
             heartbeat_timeout: None,
-            handshake_ivl: Some(Duration::from_secs(30)),
+            handshake_ivl: Some(omq_proto::options::DEFAULT_HANDSHAKE_TIMEOUT),
             conflate: false,
             reconnect_ivl: None,
             reconnect_ivl_max: None,

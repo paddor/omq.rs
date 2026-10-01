@@ -1,4 +1,12 @@
 //! Bounded HTTP setup, separate from TLS and established-stream I/O.
+//!
+//! Resources match the exact configured path/query, without decoding or prefix
+//! matching. A present Origin must match the normalized explicit allowlist;
+//! native clients may omit it. Origin and proxy headers grant no authentication.
+//! Native profiles select the configured `ZWS2.0/NULL`, `/PLAIN`, or `/CURVE`.
+//! Browser-compatible `ZWS2.0` still runs OMQ's NULL/PLAIN ZMTP handshake.
+//! No extensions are negotiated. Bytes following the HTTP head remain input
+//! for the codec, including when the first frame arrived with the upgrade.
 
 use bytes::Bytes;
 use omq_proto::proto::ws_handshake::{self, MAX_HTTP_BYTES, UpgradeRequest};

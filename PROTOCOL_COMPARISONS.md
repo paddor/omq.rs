@@ -1,7 +1,8 @@
 # Other Protocol Comparisons
 
-These charts compare OMQ/ZMTP with other messaging and RPC protocols over TCP
-loopback. They measure one flow, not horizontal scaling.
+These charts compare OMQ/ZMTP with other messaging and RPC protocols over
+loopback. They measure one flow, not horizontal scaling. The chart filenames
+retain `tcp` for compatibility; Aeron uses UDP and iroh uses QUIC.
 
 ## Setup
 
@@ -9,15 +10,19 @@ loopback. They measure one flow, not horizontal scaling.
 - NATS uses transient NATS Core messaging.
 - RabbitMQ uses nonpersistent AMQP 0-9-1 messages, auto-delete queues, and
   automatic consumer acknowledgments.
-- Kafka runs against Redpanda.
 - Redis uses Redis Streams.
-- Iggy uses Apache Iggy streams and topics.
+- Aeron uses UDP channels and one Media Driver in each process.
+- zenoh uses a direct TCP peer link.
+- iroh uses encrypted QUIC streams. Its throughput count measures fixed-size
+  writes on a byte stream; QUIC does not preserve message boundaries.
 
 Each data point uses an opaque byte payload. Throughput uses one sender, one
 receiver, and one connection, queue, topic, or partition. Latency sends one
 request at a time and measures requester-observed round-trip time. Delivery
 and persistence semantics differ. The charts compare these concrete
-low-overhead configurations, not equal durability guarantees.
+low-overhead configurations, not equal durability guarantees. Aeron, zenoh,
+and iroh each cover all 15 throughput and six latency sizes shown. A series
+appears only where a measured data row exists.
 
 ## Producer/Consumer Throughput
 

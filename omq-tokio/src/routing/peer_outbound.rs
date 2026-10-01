@@ -164,10 +164,7 @@ mod tests {
             4096,
             8192,
             4,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         let (inbox, mut rx) = tokio::sync::mpsc::channel(4);
         let target = PeerOutbound::Wire {

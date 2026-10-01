@@ -7,9 +7,8 @@
 
 use std::time::{Duration, Instant};
 
-use crypto_secretbox::XSalsa20Poly1305;
-use crypto_secretbox::aead::generic_array::GenericArray;
 use crypto_secretbox::aead::{Aead, KeyInit};
+use crypto_secretbox::{Nonce, XSalsa20Poly1305};
 use rand::Rng;
 use zeroize::Zeroizing;
 
@@ -57,8 +56,9 @@ impl CurveCookieKey {
         let mut plaintext = [0u8; 64];
         plaintext[..32].copy_from_slice(cp);
         plaintext[32..].copy_from_slice(sn_secret);
-        let ciphertext = XSalsa20Poly1305::new(GenericArray::from_slice(&*self.key))
-            .encrypt(GenericArray::from_slice(&nonce), &plaintext[..])
+        let ciphertext = XSalsa20Poly1305::new_from_slice(&*self.key)
+            .expect("cookie key has 32 bytes")
+            .encrypt(&Nonce::from(nonce), &plaintext[..])
             .expect("cookie encrypt infallible");
         let mut out = Vec::with_capacity(96);
         out.extend_from_slice(&suffix);
@@ -92,8 +92,9 @@ impl CurveCookieKey {
     }
 
     fn try_decrypt(key: &[u8; 32], nonce: &[u8; 24], ciphertext: &[u8]) -> Result<Vec<u8>> {
-        XSalsa20Poly1305::new(GenericArray::from_slice(key))
-            .decrypt(GenericArray::from_slice(nonce), ciphertext)
+        XSalsa20Poly1305::new_from_slice(key)
+            .expect("cookie key has 32 bytes")
+            .decrypt(&Nonce::from(*nonce), ciphertext)
             .map_err(|_| Error::HandshakeFailed("CURVE cookie invalid".into()))
     }
 

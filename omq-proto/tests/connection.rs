@@ -529,6 +529,48 @@ fn handle_input_rejected_during_supply() {
 }
 
 #[test]
+fn supplied_payload_keeps_reverse_messages_and_commands_ready() {
+    let mut client = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair));
+    let mut server = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair));
+    pump(&mut client, &mut server);
+    while client.poll_event().is_some() {}
+    while server.poll_event().is_some() {}
+    let payload = Bytes::from(vec![7; 4096]);
+    client
+        .send_message(&Message::single(payload.clone()))
+        .unwrap();
+    let wire = client.poll_transmit();
+    client.advance_transmit(wire.len());
+    server.handle_input(wire.slice(..9)).unwrap();
+    assert_eq!(server.begin_supplied_payload(), Some(payload.len()));
+    assert!(server.is_ready(), "the handshake is still complete");
+    assert!(server.poll_message().is_none(), "no partial delivery");
+    server.send_message(&Message::single("reverse")).unwrap();
+    server
+        .send_command(&Command::Unknown {
+            name: "CONTROL".into(),
+            body: Bytes::from_static(b"live"),
+        })
+        .unwrap();
+    let response = server.poll_transmit();
+    server.advance_transmit(response.len());
+    client.handle_input(response).unwrap();
+    assert_eq!(
+        client.poll_message().unwrap().part_slice(0),
+        Some(b"reverse".as_slice())
+    );
+    assert!(
+        matches!(client.poll_event(), Some(Event::Command(Command::Unknown { name, body }))
+        if name == "CONTROL" && body == b"live"[..])
+    );
+    server.supply_payload(wire.slice(9..)).unwrap();
+    assert_eq!(
+        server.poll_message().unwrap().part_slice(0),
+        Some(payload.as_ref())
+    );
+}
+
+#[test]
 fn supply_payload_rejects_size_mismatch() {
     let (mut push, mut pull) = ready_pair();
     let big = vec![0u8; 1024];
@@ -617,6 +659,20 @@ fn supply_payload_through_curve() {
     assert_eq!(info.header_len, 9);
     let payload_len = server.begin_supplied_payload().expect("can switch");
     assert_eq!(payload_len, info.payload_len);
+    assert!(server.is_ready(), "CURVE handshake remains complete");
+    server
+        .send_command(&Command::Unknown {
+            name: "CONTROL".into(),
+            body: Bytes::from_static(b"encrypted reverse control"),
+        })
+        .unwrap();
+    let response = server.poll_transmit();
+    server.advance_transmit(response.len());
+    client.handle_input(response).unwrap();
+    assert!(
+        matches!(client.poll_event(), Some(Event::Command(Command::Unknown { name, body }))
+        if name == "CONTROL" && body == b"encrypted reverse control"[..])
+    );
     server
         .supply_payload(wire.slice(9..9 + payload_len))
         .unwrap();

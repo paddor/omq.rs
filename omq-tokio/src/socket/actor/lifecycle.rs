@@ -28,7 +28,6 @@ impl<'a> PeerLifecycle<'a> {
                     .ready_peer_count_shared
                     .fetch_sub(1, Ordering::AcqRel);
             }
-            self.driver.io_pool.release_thread(p.io_thread);
         }
         self.publish_disconnect(peer.as_ref(), reason);
         Self::invalidate_spsc(peer.as_ref());
@@ -47,6 +46,14 @@ impl<'a> PeerLifecycle<'a> {
     }
 
     pub(super) fn update_send_ring(&mut self) {
+        if self.driver.closing {
+            self.driver
+                .spsc
+                .send_ring_available
+                .store(false, Ordering::Release);
+            self.driver.spsc.send_ring.store(None);
+            return;
+        }
         let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocTx>> = None;
         let mut ready_count = 0;
         for p in self.driver.peers.values() {

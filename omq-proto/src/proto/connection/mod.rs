@@ -20,6 +20,8 @@
 
 mod inbound;
 mod outbound;
+#[cfg(feature = "ws")]
+mod ws;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -81,8 +83,14 @@ pub struct ConnectionConfig {
     pub socket_type: SocketType,
     /// Routing identity sent in the READY command. Empty = anonymous.
     pub identity: bytes::Bytes,
-    /// Reject inbound messages larger than this (bytes). `None` = no limit.
+    /// Reject inbound messages larger than this in body bytes plus one payload
+    /// slot per part. Commands use this limit too. `None` = no limit.
     pub max_message_size: Option<usize>,
+    /// Override the data framer's body-plus-payload-slot limit for a message
+    /// transform. Commands retain `max_message_size`; the transform must
+    /// enforce that logical limit after decoding. `None` uses the ordinary
+    /// message limit.
+    pub max_wire_message_size: Option<usize>,
     /// Security mechanism to negotiate during the handshake.
     pub mechanism: MechanismSetup,
     /// Remote address exposed to security authenticators, when known.
@@ -91,6 +99,11 @@ pub struct ConnectionConfig {
     /// `Some(Client)` or `Some(Server)` = ZWS/2.0 framing with WS masking.
     #[cfg(feature = "ws")]
     pub ws_role: Option<WsRole>,
+    /// Bound each WS input service turn. Call [`Connection::resume_input`]
+    /// after yielding while [`Connection::has_pending_input`] is true.
+    /// Disabled by default for existing sans-I/O callers.
+    #[cfg(feature = "ws")]
+    pub ws_input_budget: bool,
 }
 
 impl ConnectionConfig {
@@ -101,10 +114,13 @@ impl ConnectionConfig {
             socket_type,
             identity: bytes::Bytes::new(),
             max_message_size: None,
+            max_wire_message_size: None,
             mechanism: MechanismSetup::Null,
             peer_address: None,
             #[cfg(feature = "ws")]
             ws_role: None,
+            #[cfg(feature = "ws")]
+            ws_input_budget: false,
         }
     }
 
@@ -118,6 +134,26 @@ impl ConnectionConfig {
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
         self
+    }
+
+    /// Set a finite data framing allowance for codec overhead and setup.
+    /// The caller must enforce the decoded message limit separately.
+    #[must_use]
+    pub fn max_wire_message_size(mut self, n: usize) -> Self {
+        self.max_wire_message_size = Some(n);
+        self
+    }
+
+    fn data_size_limit(&self) -> Option<usize> {
+        self.max_wire_message_size.or(self.max_message_size)
+    }
+
+    fn frame_size_limit(&self, command: bool) -> Option<usize> {
+        if command {
+            self.max_message_size
+        } else {
+            self.data_size_limit()
+        }
     }
 
     #[must_use]
@@ -136,6 +172,14 @@ impl ConnectionConfig {
     #[must_use]
     pub fn ws_role(mut self, role: WsRole) -> Self {
         self.ws_role = Some(role);
+        self
+    }
+
+    /// Enable count/byte/time service limits for WebSocket parsing.
+    #[cfg(feature = "ws")]
+    #[must_use]
+    pub fn ws_input_budget(mut self, enabled: bool) -> Self {
+        self.ws_input_budget = enabled;
         self
     }
 
@@ -239,6 +283,8 @@ pub struct Connection {
     messages: VecDeque<Message>,
     pending_parts: Parts,
     pending_size: usize,
+    /// A bounded parser turn left buffered work for the next driver turn.
+    input_pending: bool,
     /// WebSocket role for this connection. `None` = ZMTP byte-stream.
     /// When set, `emit_frame` wraps ZMTP frames in WS binary frame
     /// headers and pushes directly into `out_chunks`; inbound `drive()`
@@ -250,7 +296,9 @@ pub struct Connection {
     ws_close_sent: bool,
     /// Partially assembled fragmented WebSocket binary message.
     #[cfg(feature = "ws")]
-    ws_fragment: Option<BytesMut>,
+    ws_fragment: Option<ws::Fragment>,
+    #[cfg(feature = "ws")]
+    ws_control: ws::Control,
 }
 
 impl Connection {
@@ -277,12 +325,15 @@ impl Connection {
             messages: VecDeque::new(),
             pending_parts: Vec::new().into(),
             pending_size: 0,
+            input_pending: false,
             #[cfg(feature = "ws")]
             ws_role,
             #[cfg(feature = "ws")]
             ws_close_sent: false,
             #[cfg(feature = "ws")]
             ws_fragment: None,
+            #[cfg(feature = "ws")]
+            ws_control: ws::Control::default(),
             config,
         };
         #[cfg(feature = "ws")]
@@ -340,9 +391,13 @@ impl Connection {
         self.out_chunks.push_back(bytes);
     }
 
-    /// Total bytes pending transmit across all queued chunks. O(1).
+    /// Whether the handshake is complete. Claiming an inbound payload does
+    /// not suspend the independent outbound direction.
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, State::Ready)
+        matches!(
+            self.state,
+            State::Ready | State::AwaitingSuppliedPayload { .. }
+        )
     }
 
     /// Whether a frame-level crypto transform (CURVE) is active.
@@ -399,6 +454,11 @@ impl Connection {
     /// Permanently close the connection; further input is rejected.
     pub fn close(&mut self) {
         self.state = State::Closed;
+    }
+
+    /// Whether the connection has received CLOSE or was explicitly closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(self.state, State::Closed)
     }
 
     /// Stub used by tests + reserved for future direct API.
@@ -617,6 +677,98 @@ mod tests {
             .unwrap();
         assert_eq!(header.opcode, OP_CLOSE_CODE);
         assert_eq!(header.payload_len, 0);
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn rejects_invalid_ws_close_codes_without_echoing_them() {
+        use super::super::ws_codec::OP_CLOSE_CODE;
+        for code in [
+            0u16, 999, 1004, 1005, 1006, 1015, 1016, 2000, 2999, 5000, 65535,
+        ] {
+            let mut connection = ready_ws_connection();
+            let pending = connection.pending_transmit_size();
+            connection.advance_transmit(pending);
+            let result = connection.handle_input(masked_ws_frame(
+                true,
+                OP_CLOSE_CODE,
+                &code.to_be_bytes(),
+                [1, 2, 3, 4],
+            ));
+            assert!(result.is_err(), "accepted reserved CLOSE code {code}");
+            assert_eq!(connection.pending_transmit_size(), 0);
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn validates_ws_close_reason_after_unmasking() {
+        use super::super::ws_codec::OP_CLOSE_CODE;
+        for reason in [
+            &[0xff][..],
+            &[0xc0, 0x80],
+            &[0xed, 0xa0, 0x80],
+            &[0xe2, 0x82],
+        ] {
+            let mut connection = ready_ws_connection();
+            let mut payload = 1000u16.to_be_bytes().to_vec();
+            payload.extend_from_slice(reason);
+            assert!(
+                connection
+                    .handle_input(masked_ws_frame(
+                        true,
+                        OP_CLOSE_CODE,
+                        &payload,
+                        [0xff, 0x20, 0xab, 0x12],
+                    ))
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn tiny_ws_fast_path_cannot_bypass_fragment_sequence() {
+        use super::super::ws_codec::OP_BINARY_CODE;
+        let mut connection = ready_ws_connection();
+        connection
+            .handle_input(masked_ws_frame(
+                false,
+                OP_BINARY_CODE,
+                &[0, b'a'],
+                [1, 2, 3, 4],
+            ))
+            .unwrap();
+        assert!(
+            connection
+                .handle_input(masked_ws_frame(
+                    true,
+                    OP_BINARY_CODE,
+                    &[0, b'b'],
+                    [5, 6, 7, 8],
+                ))
+                .is_err()
+        );
+        assert!(connection.poll_message().is_none());
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn accepts_registered_and_private_ws_close_codes_with_utf8() {
+        use super::super::ws_codec::OP_CLOSE_CODE;
+        for code in [
+            1000u16, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 3000, 4999,
+        ] {
+            let mut connection = ready_ws_connection();
+            let mut payload = code.to_be_bytes().to_vec();
+            payload.extend_from_slice("closing \u{1f44b}".as_bytes());
+            let wire = masked_ws_frame(true, OP_CLOSE_CODE, &payload, [1, 2, 3, 4]);
+            for byte in wire {
+                connection
+                    .handle_input(Bytes::copy_from_slice(&[byte]))
+                    .unwrap();
+            }
+        }
     }
 
     #[test]

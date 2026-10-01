@@ -26,6 +26,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 const MULTI_PULL_DRAIN_BATCH: usize = 64;
+const RECV_BATCH_BYTES: usize = 1024 * 1024;
 
 fn quantile(sorted: &[f64], probability: f64) -> f64 {
     let index = ((sorted.len().saturating_sub(1)) as f64 * probability).round() as usize;
@@ -39,6 +40,8 @@ use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketT
 use std::net::Ipv4Addr;
 
 mod latency_common;
+#[cfg(feature = "ws")]
+mod ws_bench_config;
 
 fn parse_ep(s: &str) -> Endpoint {
     if let Ok(port) = s.parse::<u16>() {
@@ -61,8 +64,17 @@ fn parse_ep(s: &str) -> Endpoint {
 }
 
 async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
-    let Endpoint::Tcp { port, .. } = ep else {
-        return;
+    let port = match ep {
+        Endpoint::Tcp { port, .. } => *port,
+        #[cfg(feature = "lz4")]
+        Endpoint::Lz4Tcp { port, .. } => *port,
+        #[cfg(feature = "zstd")]
+        Endpoint::ZstdTcp { port, .. } => *port,
+        #[cfg(feature = "ws")]
+        Endpoint::Ws { port, .. } | Endpoint::Wss { port, .. } => *port,
+        #[cfg(all(feature = "ws", feature = "lz4"))]
+        Endpoint::Lz4Ws { port, .. } => *port,
+        _ => return,
     };
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         println!("PORT {port}");
@@ -618,6 +630,8 @@ async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers:
 
 fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default();
+    #[cfg(feature = "ws")]
+    ws_bench_config::configure(&mut o);
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);
@@ -786,7 +800,7 @@ async fn run_multi_pull(
         let sock = sock.clone();
         warmup_handles.push(tokio::spawn(async move {
             while Instant::now() < warmup_deadline {
-                while sock.try_recv().is_ok() {}
+                drain_pending(&sock);
                 tokio::task::yield_now().await;
             }
         }));
@@ -806,24 +820,7 @@ async fn run_multi_pull(
     let mut handles = Vec::with_capacity(socket_count);
     for (sock, counter) in sockets.into_iter().zip(counters.iter().cloned()) {
         handles.push(tokio::spawn(async move {
-            let mut n: u64 = 0;
-            loop {
-                if !recv_before_deadline(&sock, deadline).await {
-                    break;
-                }
-                n += 1;
-                for _ in 1..MULTI_PULL_DRAIN_BATCH {
-                    if sock.try_recv().is_err() {
-                        break;
-                    }
-                    n += 1;
-                }
-                tokio::task::yield_now().await;
-                if Instant::now() >= deadline {
-                    break;
-                }
-            }
-            counter.store(n, AO::Relaxed);
+            counter.store(recv_fair_loop(&sock, deadline, size).await, AO::Relaxed);
         }));
     }
     for h in handles {
@@ -893,7 +890,7 @@ async fn run_multi_sub(
         let sock = sock.clone();
         warmup_handles.push(tokio::spawn(async move {
             while Instant::now() < warmup_deadline {
-                while sock.try_recv().is_ok() {}
+                drain_pending(&sock);
                 tokio::task::yield_now().await;
             }
         }));
@@ -913,20 +910,7 @@ async fn run_multi_sub(
     let mut handles = Vec::with_capacity(socket_count);
     for (sock, counter) in sockets.into_iter().zip(counters.iter().cloned()) {
         handles.push(tokio::spawn(async move {
-            let mut n: u64 = 0;
-            loop {
-                if !recv_before_deadline(&sock, deadline).await {
-                    break;
-                }
-                n += 1;
-                while sock.try_recv().is_ok() {
-                    n += 1;
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-            }
-            counter.store(n, AO::Relaxed);
+            counter.store(recv_fair_loop(&sock, deadline, size).await, AO::Relaxed);
         }));
     }
     for h in handles {
@@ -974,10 +958,28 @@ async fn run_multi_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, soc
     }
 }
 
+async fn recv_fair_loop(sock: &Socket, deadline: Instant, size: usize) -> u64 {
+    let mut count = 0;
+    while recv_before_deadline(sock, deadline).await {
+        count += 1;
+        let mut budget =
+            omq_proto::flow::DrainBudget::new(MULTI_PULL_DRAIN_BATCH, RECV_BATCH_BYTES);
+        let mut more = budget.account(size);
+        while more && sock.try_recv().is_ok() {
+            count += 1;
+            more = budget.account(size);
+        }
+        tokio::task::yield_now().await;
+    }
+    count
+}
+
 fn drain_pending(sock: &Socket) {
     let deadline = Instant::now() + Duration::from_millis(2);
-    for _ in 0..256 {
-        if Instant::now() >= deadline || sock.try_recv().is_err() {
+    let mut budget = omq_proto::flow::DrainBudget::new(256, RECV_BATCH_BYTES);
+    while Instant::now() < deadline {
+        let Ok(message) = sock.try_recv() else { break };
+        if !budget.account(message.byte_len()) {
             break;
         }
     }

@@ -508,6 +508,15 @@ impl RoundRobinSend {
         }
     }
 
+    pub(crate) fn stop_admission(&self) {
+        self.closed.store(true, Ordering::Release);
+        let active = self.active.lock().expect("round_robin active");
+        for pipe in active.active.iter().chain(&active.inactive) {
+            pipe.tx.space_available().notify_changed();
+        }
+        self.active_changed.notify_changed();
+    }
+
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         let mut active = self.active.lock().expect("round_robin active");

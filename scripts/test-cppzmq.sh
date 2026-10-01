@@ -30,8 +30,11 @@ fi
 
 "$cargo_cmd" build -p omq-libzmq
 
-out_dir="$repo_root/target/omq-test-tools"
-lib_dir="$repo_root/target/debug"
+# Honor a configured cargo target-dir (for example in ~/.cargo/config.toml).
+target_dir="$("$cargo_cmd" metadata --format-version 1 --no-deps \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+out_dir="$target_dir/omq-test-tools"
+lib_dir="$target_dir/debug"
 cppzmq_dir="$repo_root/omq-libzmq/tests/cppzmq"
 mkdir -p "$out_dir"
 

@@ -260,6 +260,22 @@ summed across all parts of a multipart message. A multipart message
 whose total wire length is small but whose total decompressed size
 exceeds the limit MUST be rejected before decoder invocation.
 
+OMQ additionally charges one internal `Payload` slot per part (currently
+64 bytes) against its socket limit. `MessageDecoder` reserves these slots
+before decompression, including slots for empty parts. The public raw
+`ZstdDecoder` retains its body-only budget for existing codec callers.
+
+For a finite decoded socket limit `M`, the ZMTP framer's data allowance is
+the larger of `M + 4 * floor(M / 64)` and `dict_cap + 64`. This counts
+transformed body bytes plus payload slots. Compressed output is used only
+when smaller than plaintext; passthrough adds at most four bytes per part.
+Arithmetic saturates and the result is capped at `isize::MAX`. Command
+limits retain the original socket limit; handshake ceilings remain separate.
+Dictionary setup retains its 8-KiB protocol ceiling and once-per-direction
+rule independently of the decoded application limit. A dictionary admitted
+by a larger data allowance is checked against its dictionary cap after
+message assembly; this does not provide partial-input prefix classification.
+
 
 ## 7. Dictionary Shipment
 

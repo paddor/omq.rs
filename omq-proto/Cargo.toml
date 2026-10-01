@@ -68,5 +68,13 @@ path = "tests/connection.rs"
 name = "omq_proto_endpoint"
 path = "tests/endpoint.rs"
 
+[[test]]
+name = "omq_proto_codec_policy"
+path = "tests/codec_policy.rs"
+
+[[test]]
+name = "omq_proto_codec_composition"
+path = "tests/codec_composition.rs"
+
 [package.metadata.docs.rs]
 all-features = true

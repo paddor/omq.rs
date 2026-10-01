@@ -273,6 +273,9 @@ impl Submitter {
             notified
                 .wait_until(|| {
                     let state = self.inner.lock().expect("identity inner poisoned");
+                    if state.closed {
+                        return true;
+                    }
                     let peer = state
                         .identity_to_peer
                         .get(identity)
@@ -295,6 +298,9 @@ impl Submitter {
 
     fn peer_pipe_ready(&self, identity: &[u8], waiting: &Arc<StateSignal>) -> bool {
         let g = self.inner.lock().expect("identity inner poisoned");
+        if g.closed {
+            return true;
+        }
         let peer = g
             .identity_to_peer
             .get(identity)
@@ -470,15 +476,17 @@ struct IdentityPeer {
 
 impl IdentitySend {
     pub(crate) fn new(socket_type: SocketType, options: &Options) -> Self {
-        let latency_profile =
-            options
+        let latency_profile = options
                 .workload_profile
                 .unwrap_or(if socket_type == SocketType::Rep {
                     omq_proto::WorkloadProfile::Latency
                 } else {
                     omq_proto::WorkloadProfile::Throughput
                 })
-                == omq_proto::WorkloadProfile::Latency;
+                == omq_proto::WorkloadProfile::Latency
+                // REP matches the socket's latency gate; CURVE peers use
+                // send pipes.
+                && !(socket_type == SocketType::Rep && options.mechanism.has_frame_transform());
         Self {
             inner: Arc::new(Mutex::new(IdentityInner {
                 peers: FxHashMap::default(),
@@ -584,6 +592,20 @@ impl IdentitySend {
         g.identity_to_peer.clear();
     }
 
+    pub(crate) fn stop_admission(&self) {
+        if let Some(peer) = &self.peer {
+            peer.stop_admission();
+            return;
+        }
+        let mut state = self.inner.lock().expect("identity inner poisoned");
+        state.closed = true;
+        for peer in state.peers.values() {
+            if let Some(space) = peer.target.space_available() {
+                space.notify_changed();
+            }
+        }
+    }
+
     pub(crate) fn is_drained(&self) -> bool {
         if let Some(peer) = &self.peer {
             return peer.is_drained();
@@ -597,14 +619,12 @@ impl IdentitySend {
 #[derive(Debug)]
 pub(crate) struct IdentityRecv {
     peers: Arc<Mutex<FxHashMap<u64, Bytes>>>,
-    recv_tx: Arc<crate::socket::recv::SharedRecvPipe>,
 }
 
 impl IdentityRecv {
-    pub(crate) fn new(recv_tx: Arc<crate::socket::recv::SharedRecvPipe>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(FxHashMap::default())),
-            recv_tx,
         }
     }
 
@@ -616,11 +636,6 @@ impl IdentityRecv {
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         let mut g = self.peers.lock().expect("identity recv poisoned");
         g.remove(&peer_id);
-    }
-
-    pub(crate) async fn deliver(&self, peer_id: u64, msg: Message) -> Result<()> {
-        let wrapped = self.wrap(peer_id, msg);
-        self.recv_tx.send(wrapped).await
     }
 
     pub(crate) fn wrap(&self, peer_id: u64, msg: Message) -> Message {

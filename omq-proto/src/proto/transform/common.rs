@@ -38,6 +38,14 @@ pub(super) fn take_budget(budget: &mut Option<usize>, take: usize) -> Result<()>
     Ok(())
 }
 
+/// Reserve the per-part storage charged by the socket's decoded-message limit
+/// before allocating any decompressed bodies. Raw codec APIs keep body-only
+/// budgets; the socket decoder uses this remaining body budget.
+pub(super) fn body_budget(parts: usize, mut limit: Option<usize>) -> Result<Option<usize>> {
+    take_budget(&mut limit, parts.saturating_mul(size_of::<Payload>()))?;
+    Ok(limit)
+}
+
 /// Build the plaintext-sentinel-prefixed payload for a part the
 /// transform decided not to compress (below threshold, or compressed
 /// envelope wasn't a net saving).

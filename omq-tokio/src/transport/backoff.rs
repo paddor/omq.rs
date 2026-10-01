@@ -14,6 +14,9 @@ use omq_proto::backoff::next_delay;
 use omq_proto::error::Result;
 use omq_proto::options::ReconnectPolicy;
 
+#[cfg(test)]
+mod tests;
+
 /// Outcome of a canceled backoff loop.
 #[derive(Debug)]
 pub enum Canceled {
@@ -36,7 +39,8 @@ pub enum Canceled {
 /// `ConnectDelayed` monitor events.
 ///
 /// The `dial` closure performs one connection attempt; each call builds a
-/// fresh future so no state leaks across retries.
+/// fresh future so no state leaks across retries. Cancellation drops a pending
+/// attempt; the future must release any partially established transport on drop.
 pub async fn dial_with_backoff<F, Fut, S>(
     mut dial: F,
     policy: ReconnectPolicy,
@@ -53,7 +57,12 @@ where
         if cancel.is_cancelled() {
             return Err(Canceled::Token);
         }
-        match dial().await {
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(Canceled::Token),
+            result = dial() => result,
+        };
+        match result {
             Ok(stream) => return Ok(stream),
             Err(err) => {
                 if stop_conn_refused && err.is_connection_refused() {

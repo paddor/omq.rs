@@ -96,3 +96,42 @@ async fn push_pull_many_messages() {
         assert_eq!(msg.part_bytes(0).unwrap(), format!("msg-{i}").as_bytes(),);
     }
 }
+
+#[tokio::test]
+async fn bounded_parser_drains_large_tiny_message_batches_in_both_profiles() {
+    use omq_proto::WorkloadProfile;
+    use std::time::Duration;
+
+    for profile in [WorkloadProfile::Throughput, WorkloadProfile::Latency] {
+        let options = Options {
+            workload_profile: Some(profile),
+            ..Options::default()
+        };
+        let pull = Socket::new(SocketType::Pull, options.clone());
+        let endpoint = pull.bind(ws_endpoint(0)).await.unwrap();
+        let push = Socket::new(SocketType::Push, options);
+        push.connect(endpoint).await.unwrap();
+        push.wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let sender = tokio::spawn(async move {
+            for sequence in 0u32..5000 {
+                push.send(Message::single(Bytes::copy_from_slice(
+                    &sequence.to_be_bytes(),
+                )))
+                .await
+                .unwrap();
+            }
+            push
+        });
+        for sequence in 0u32..5000 {
+            let message = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.part_bytes(0).unwrap(), sequence.to_be_bytes()[..]);
+        }
+        sender.await.unwrap().close().await.unwrap();
+        pull.close().await.unwrap();
+    }
+}

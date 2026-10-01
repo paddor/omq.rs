@@ -47,10 +47,7 @@ fn fixture(step: io::Result<usize>) -> (DirectWriteState<ScriptedWrite>, Arc<Pee
         4096,
         8192,
         4,
-        #[cfg(feature = "ws")]
-        false,
-        #[cfg(feature = "ws")]
-        false,
+        crate::engine::framing::WireFraming::Zmtp,
     );
     slot.handshake_done.store(true, Ordering::Release);
     (state, slot)

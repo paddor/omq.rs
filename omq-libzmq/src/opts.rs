@@ -73,6 +73,8 @@ pub(crate) struct SocketOverlay {
     pub wss_trust_pem: Option<Vec<u8>>,
     pub wss_hostname: Option<String>,
     pub wss_trust_system: bool,
+    pub ws_allowed_origins: Vec<String>,
+    pub ws_max_ready_peers: i32,
 }
 
 impl Default for SocketOverlay {
@@ -121,6 +123,8 @@ impl Default for SocketOverlay {
             wss_trust_pem: None,
             wss_hostname: None,
             wss_trust_system: true,
+            ws_allowed_origins: Vec::new(),
+            ws_max_ready_peers: 1024,
         }
     }
 }
@@ -256,6 +260,11 @@ impl SocketOverlay {
             workload_profile: self.workload_profile,
             xpub_nodrop: self.xpub_nodrop,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
+            ws: omq_tokio::options::WsOptions {
+                allowed_origins: self.ws_allowed_origins.clone(),
+                max_ready_peers: usize::try_from(self.ws_max_ready_peers)
+                    .expect("validated WS peer limit"),
+            },
             wss_tls: omq_tokio::options::WssTls {
                 server_cert_pem: self.wss_cert_pem.clone(),
                 server_key_pem: self.wss_key_pem.clone(),
@@ -399,6 +408,8 @@ const OMQ_COMPRESSION_LEVEL: c_int = 1005;
 const OMQ_COMPRESSION_DICT: c_int = 1006;
 const OMQ_COMPRESSION_AUTO_TRAIN: c_int = 1007;
 const OMQ_WORKLOAD_PROFILE: c_int = 1008;
+const OMQ_WS_ALLOWED_ORIGINS: c_int = 1009;
+const OMQ_WS_MAX_READY_PEERS: c_int = 1010;
 const OMQ_ARENA_THRESHOLD: c_int = 10_001;
 const OMQ_ON_MUTE_BLOCK: c_int = 0;
 const OMQ_ON_MUTE_DROP_NEWEST: c_int = 1;
@@ -857,6 +868,40 @@ pub extern "C" fn zmq_setsockopt(
                 return fail(libc::EINVAL);
             };
             lock_overlay!(sock_arc).reconnect_stop = v;
+        }
+        OMQ_WS_MAX_READY_PEERS => {
+            if sock_arc.inner.get().is_some() {
+                return fail(libc::EBUSY);
+            }
+            let Some(value) = read_i32(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            if value <= 0 {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).ws_max_ready_peers = value;
+        }
+        OMQ_WS_ALLOWED_ORIGINS => {
+            // Security policy must take effect, never silently mutate an
+            // overlay after its immutable backend options were consumed.
+            if sock_arc.inner.get().is_some() {
+                return fail(libc::EBUSY);
+            }
+            let Some(value) = read_string(optval, optvallen) else {
+                return fail(libc::EINVAL);
+            };
+            let origins: Vec<String> = if value.is_empty() {
+                Vec::new()
+            } else {
+                value.split('\n').map(str::to_owned).collect()
+            };
+            if origins
+                .iter()
+                .any(|origin| omq_tokio::proto::ws_handshake::normalize_ws_origin(origin).is_err())
+            {
+                return fail(libc::EINVAL);
+            }
+            lock_overlay!(sock_arc).ws_allowed_origins = origins;
         }
         ZMQ_WSS_KEY_PEM => {
             let Some(v) = read_bytes(optval, optvallen) else {
@@ -1475,6 +1520,19 @@ pub extern "C" fn zmq_getsockopt(
             i32::from(lock_overlay!(sock_arc).xpub_nodrop),
         ),
         ZMQ_RECONNECT_STOP => write_i32(optval, optvallen, lock_overlay!(sock_arc).reconnect_stop),
+        OMQ_WS_MAX_READY_PEERS => write_i32(
+            optval,
+            optvallen,
+            lock_overlay!(sock_arc).ws_max_ready_peers,
+        ),
+        OMQ_WS_ALLOWED_ORIGINS => write_bytes(
+            optval,
+            optvallen,
+            lock_overlay!(sock_arc)
+                .ws_allowed_origins
+                .join("\n")
+                .as_bytes(),
+        ),
         ZMQ_WSS_KEY_PEM => {
             let ov = lock_overlay!(sock_arc);
             write_bytes(optval, optvallen, ov.wss_key_pem.as_deref().unwrap_or(b""))

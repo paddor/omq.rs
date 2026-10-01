@@ -44,7 +44,7 @@ impl ChunkedInputBuf {
         self.total_len
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "ws"))]
     pub(crate) fn is_empty(&self) -> bool {
         self.total_len == 0
     }
@@ -180,6 +180,26 @@ impl ChunkedInputBuf {
             pos += take;
             remaining -= take;
             if take >= avail {
+                self.advance_front();
+            } else {
+                self.front_offset += take;
+            }
+        }
+    }
+
+    /// Append `n` bytes directly to mutable storage and consume them. Unlike
+    /// `split_to`, this never creates an intermediate coalesced allocation.
+    #[cfg(feature = "ws")]
+    pub(crate) fn copy_into(&mut self, mut n: usize, dest: &mut BytesMut) {
+        debug_assert!(n <= self.total_len);
+        self.total_len -= n;
+        while n > 0 {
+            let start = self.front_offset;
+            let avail = self.front.len() - start;
+            let take = n.min(avail);
+            dest.extend_from_slice(&self.front[start..start + take]);
+            n -= take;
+            if take == avail {
                 self.advance_front();
             } else {
                 self.front_offset += take;

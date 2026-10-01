@@ -497,6 +497,56 @@ async fn curve_req_rep() {
     assert_eq!(a.part_bytes(0).unwrap(), &b"a"[..]);
 }
 
+/// CURVE REP answers queued requests from several REQ peers in order and
+/// keeps empty body parts after the first delimiter.
+#[tokio::test]
+async fn curve_rep_queued_requests_keep_envelopes_and_empty_parts() {
+    const PEERS: usize = 3;
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let rep = Socket::new(SocketType::Rep, Options::default().curve_server(server_kp));
+    let ep = rep.bind(tcp_ep(0)).await.unwrap();
+
+    let mut reqs = Vec::with_capacity(PEERS);
+    for i in 0..PEERS {
+        let req = Socket::new(
+            SocketType::Req,
+            Options::default().curve_client(CurveKeypair::generate(), server_pub),
+        );
+        req.connect(ep.clone()).await.unwrap();
+        test_support::wait_for_handshake(&req).await;
+        req.send(Message::multipart([
+            format!("{i}"),
+            String::new(),
+            "x".into(),
+        ]))
+        .await
+        .unwrap();
+        reqs.push(req);
+    }
+
+    for _ in 0..PEERS {
+        let request = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.len(), 3, "request body {request:?}");
+        assert!(request.part_bytes(1).unwrap().is_empty());
+        let index = request.part_bytes(0).unwrap();
+        rep.send(Message::multipart([index, bytes::Bytes::new()]))
+            .await
+            .unwrap();
+    }
+
+    for (i, req) in reqs.iter().enumerate() {
+        let reply = tokio::time::timeout(Duration::from_secs(2), req.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, Message::multipart([format!("{i}"), String::new()]));
+    }
+}
+
 #[tokio::test]
 async fn curve_dealer_router() {
     let server_kp = CurveKeypair::generate();

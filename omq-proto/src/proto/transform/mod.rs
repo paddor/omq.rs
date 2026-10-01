@@ -5,8 +5,9 @@
 //! Compression transports (`lz4+tcp://`, `zstd+tcp://`) live here: they
 //! prepend a 4-byte sentinel to each message part and optionally compress
 //! the body. Distinct from the per-frame `CurveTransform` inside
-//! [`crate::proto::Connection`], which encrypts at the ZMTP frame layer
-//! after this transform has run.
+//! [`crate::proto::Connection`], which encrypts ZMTP frame payloads.
+//! OMQ codec configuration rejects compression combined with
+//! an encrypted mechanism.
 //!
 //! Transforms are sans-I/O. They take a `Message` and return one or more
 //! transformed `Message`s; or take a wire-level `Message` and return
@@ -37,6 +38,7 @@ use crate::endpoint::Host;
 use crate::error::Result;
 use crate::message::Message;
 use crate::options::Options;
+use crate::proto::mechanism::MechanismSetup;
 
 /// Compression transform selected by an endpoint scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,6 +51,59 @@ pub enum CompressionKind {
 }
 
 impl CompressionKind {
+    /// Leading URI prefix for this codec, without the carrier or `+`.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    #[must_use]
+    pub const fn scheme_prefix(self) -> &'static str {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4 => "lz4",
+            #[cfg(feature = "zstd")]
+            Self::Zstd => "zstd",
+        }
+    }
+
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(crate) fn for_scheme_prefix(prefix: &str) -> Option<Self> {
+        match prefix {
+            #[cfg(feature = "lz4")]
+            "lz4" => Some(Self::Lz4),
+            #[cfg(feature = "zstd")]
+            "zstd" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Existing enabled carrier profiles only. Adding a generic prefix does
+    /// not enable a new codec wire format on an otherwise unsupported carrier.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub(crate) fn supports_carrier(self, scheme: &str) -> bool {
+        match scheme {
+            "tcp" => true,
+            #[cfg(all(feature = "ws", feature = "lz4"))]
+            "ws" => self == Self::Lz4,
+            _ => false,
+        }
+    }
+
+    /// Resolve codec selection with the effective socket mechanism.
+    ///
+    /// Validate before DNS, transport allocation, or codec construction.
+    /// Plain authentication remains eligible. Encrypted mechanisms must use
+    /// an uncompressed endpoint; never silently discard a requested codec.
+    pub fn for_endpoint_with_mechanism(
+        endpoint: &Endpoint,
+        mechanism: &MechanismSetup,
+    ) -> Result<Option<Self>> {
+        let kind = Self::for_endpoint(endpoint);
+        if kind.is_some() && mechanism.has_frame_transform() {
+            return Err(crate::error::Error::Config(
+                "OMQ compression is not supported with encrypted mechanisms".into(),
+            ));
+        }
+        Ok(kind)
+    }
+
     /// Compression implied by an endpoint scheme.
     pub fn for_endpoint(endpoint: &Endpoint) -> Option<Self> {
         match endpoint {
@@ -100,6 +155,9 @@ pub enum MessageDecoder {
     Zstd(ZstdDecoder),
 }
 
+#[cfg(all(test, any(feature = "lz4", feature = "zstd")))]
+mod limits;
+
 impl MessageEncoder {
     /// Returns `(sentinel, threshold)` when this encoder will always emit a
     /// plaintext-passthrough sentinel for parts smaller than `threshold` bytes.
@@ -130,12 +188,14 @@ impl MessageEncoder {
     /// scheme. Returns `Ok(None)` for plain `tcp://` / `ipc://` /
     /// `inproc://` / `udp://`. Picks up `Options::compression_dict`,
     /// `Options::compression_auto_train`, and `Options::max_message_size`.
-    #[allow(unused_variables)]
+    /// Rejects compressed endpoints with an encrypted effective mechanism.
     pub fn for_endpoint(
         endpoint: &Endpoint,
         options: &Options,
     ) -> Result<Option<(Self, MessageDecoder)>> {
-        let Some(kind) = CompressionKind::for_endpoint(endpoint) else {
+        let Some(kind) =
+            CompressionKind::for_endpoint_with_mechanism(endpoint, &options.mechanism)?
+        else {
             return Ok(None);
         };
         Self::for_compression_kind(kind, options)
@@ -143,6 +203,8 @@ impl MessageEncoder {
 
     /// Build the per-connection encoder+decoder pair for a compression kind.
     /// Returns `Err` when a configured static dict is invalid.
+    /// The caller must validate the destination's effective codec/mechanism
+    /// profile before attaching this endpoint-independent encoder.
     #[allow(unused_variables)]
     pub fn for_compression_kind(
         kind: CompressionKind,
@@ -159,6 +221,18 @@ impl MessageEncoder {
     #[cfg(feature = "lz4")]
     fn build_lz4(options: &Options) -> Result<(Self, MessageDecoder)> {
         use lz4::{Lz4Decoder, Lz4Encoder};
+        // The pinned COVER trainer uses capacity / 4 segments and 8-byte
+        // samples. Smaller active targets underflow its segment arithmetic.
+        if options.compression_dict.is_none()
+            && options.compression_auto_train
+            && options
+                .compression_dict_capacity
+                .is_some_and(|capacity| capacity < 32)
+        {
+            return Err(crate::error::Error::Config(
+                "LZ4 dictionary auto-training requires capacity of at least 32 bytes".into(),
+            ));
+        }
         let mut enc = if let Some(d) = options.compression_dict.clone() {
             Lz4Encoder::with_send_dict(d)?
         } else {
@@ -282,6 +356,19 @@ impl MessageEncoder {
         }
     }
 
+    /// Synchronize all parameters of a reusable offload encoder. A primary's
+    /// live dictionary remains unchanged and shipments stay per connection.
+    pub fn sync_offload_config(&mut self, primary: &Self) {
+        #[allow(unreachable_patterns)]
+        match (self, primary) {
+            #[cfg(feature = "lz4")]
+            (Self::Lz4(me), Self::Lz4(primary)) => me.sync_offload_config(primary),
+            #[cfg(feature = "zstd")]
+            (Self::Zstd(me), Self::Zstd(primary)) => me.sync_offload_config(primary),
+            _ => {}
+        }
+    }
+
     /// True if both encoders are the same compression variant.
     pub fn variant_matches(&self, other: &Self) -> bool {
         #[allow(unreachable_patterns)]
@@ -296,8 +383,25 @@ impl MessageEncoder {
 }
 
 impl MessageDecoder {
+    /// Framer limit for transformed body bytes plus payload slots. This allows
+    /// bounded codec overhead and dictionary setup independently of the decoded
+    /// message limit. An explicitly unlimited decoded limit remains unlimited.
+    #[must_use]
+    pub fn max_wire_message_size(&self) -> Option<usize> {
+        match self {
+            #[cfg(feature = "lz4")]
+            Self::Lz4(t) => t.max_wire_message_size(),
+            #[cfg(feature = "zstd")]
+            Self::Zstd(t) => t.max_wire_message_size(),
+            #[cfg(not(any(feature = "lz4", feature = "zstd")))]
+            _ => unreachable!("MessageDecoder is uninhabited without compression features"),
+        }
+    }
+
     /// Transform an inbound wire message. `None` means the message was
     /// consumed by the transport (dict shipment) and must not surface.
+    /// The configured decoded limit includes a payload slot per part, reserved
+    /// before decompression. Raw codec decoders retain their body-only limits.
     #[cfg_attr(
         not(any(feature = "lz4", feature = "zstd")),
         allow(clippy::needless_pass_by_value)
@@ -305,9 +409,9 @@ impl MessageDecoder {
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         match self {
             #[cfg(feature = "lz4")]
-            Self::Lz4(t) => t.decode(msg),
+            Self::Lz4(t) => t.decode_with_payload_slots(msg),
             #[cfg(feature = "zstd")]
-            Self::Zstd(t) => t.decode(msg),
+            Self::Zstd(t) => t.decode_with_payload_slots(msg),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]
             _ => {
                 let _ = msg;

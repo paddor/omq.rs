@@ -25,6 +25,286 @@ fn inproc_ep(name: &str) -> Endpoint {
 }
 
 #[tokio::test]
+async fn full_actor_receive_keeps_queries_and_close_responsive_tcp() {
+    full_actor_receive_keeps_controls("tcp").await;
+}
+
+#[tokio::test]
+async fn full_actor_receive_keeps_queries_and_close_responsive_inproc() {
+    full_actor_receive_keeps_controls("inproc").await;
+}
+
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn full_actor_receive_keeps_queries_and_close_responsive_ws() {
+    full_actor_receive_keeps_controls("ws").await;
+}
+
+async fn full_actor_receive_keeps_controls(scheme: &str) {
+    let receiver = Socket::new(
+        SocketType::Router,
+        Options::default()
+            .recv_hwm(1)
+            .linger(Duration::from_millis(50)),
+    );
+    let endpoint = if scheme == "inproc" {
+        inproc_ep("full-actor-receive-controls")
+    } else {
+        let suffix = if scheme == "ws" { "/" } else { "" };
+        format!("{scheme}://127.0.0.1:0{suffix}").parse().unwrap()
+    };
+    let endpoint = receiver.bind(endpoint).await.unwrap();
+    let sender = Socket::new(SocketType::Dealer, Options::default());
+    sender.connect(endpoint).await.unwrap();
+    sender
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    // The shared receive pipe currently rounds HWM up to at least 16 slots.
+    for sequence in 0u8..64 {
+        sender
+            .send(Message::single(vec![sequence; 128]))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let peers = tokio::time::timeout(Duration::from_millis(250), receiver.connections())
+        .await
+        .expect("full actor receive must not block socket queries")
+        .unwrap();
+    assert_eq!(peers.len(), 1);
+    // Drain some messages, then fill the application queue again. Identity
+    // wrapping must happen only once when the staged delivery is retried.
+    for sequence in 0u8..8 {
+        let message = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.len(), 2);
+        assert!(
+            message
+                .part_slice(1)
+                .unwrap()
+                .iter()
+                .all(|&b| b == sequence)
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_millis(500), receiver.close())
+        .await
+        .expect("finite close must reach its deadline with a full receive queue")
+        .unwrap();
+    sender.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_xpub_notifications_keep_queries_and_close_responsive() {
+    let publisher = Socket::new(
+        SocketType::XPub,
+        Options::default()
+            .recv_hwm(1)
+            .linger(Duration::from_millis(50)),
+    );
+    let endpoint = publisher.bind(tcp_ep(0)).await.unwrap();
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    for prefix in 0..32 {
+        subscriber
+            .subscribe(format!("prefix-{prefix}"))
+            .await
+            .unwrap();
+    }
+    subscriber.connect(endpoint).await.unwrap();
+    subscriber
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_millis(250), publisher.connections())
+        .await
+        .expect("full XPUB notifications must not block socket queries")
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(500), publisher.close())
+        .await
+        .expect("finite close must interrupt notification backpressure")
+        .unwrap();
+    subscriber.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn linger_stops_new_sends_but_preserves_pre_ready_messages() {
+    let endpoint = free_tcp_ep();
+    let sender = Socket::new(SocketType::Push, Options::default().linger_forever());
+    sender.connect(endpoint.clone()).await.unwrap();
+    sender.send(Message::single("accepted")).await.unwrap();
+    let handle = sender.clone();
+    let close = tokio::spawn(sender.close());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), handle.recv())
+            .await
+            .unwrap(),
+        Err(omq_tokio::Error::Closed)
+    ));
+    assert!(matches!(
+        handle.try_send(Message::single("too late")),
+        Err(omq_tokio::TrySendError::Closed)
+    ));
+    let receiver = Socket::new(SocketType::Pull, Options::default());
+    receiver.bind(endpoint).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_slice(0).unwrap(), b"accepted");
+    tokio::time::timeout(Duration::from_secs(2), close)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    receiver.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn linger_drains_driver_owned_large_partial_writes_tcp() {
+    drain_large_partial_writes("tcp").await;
+}
+
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn linger_drains_driver_owned_large_partial_writes_ws() {
+    drain_large_partial_writes("ws").await;
+}
+
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn linger_drains_driver_owned_large_partial_writes_verified_wss() {
+    drain_large_partial_writes("wss").await;
+}
+
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn linger_drains_fanout_on_two_io_threads() {
+    use omq_tokio::{Context, ContextConfig};
+
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let publisher = context.socket(
+        SocketType::Pub,
+        Options {
+            xpub_nodrop: true,
+            send_buffer_size: Some(64 * 1024),
+            ..Options::default()
+                .send_hwm(32)
+                .linger(Duration::from_secs(4))
+        },
+    );
+    let endpoint = publisher
+        .bind("ws://127.0.0.1:0/".parse().unwrap())
+        .await
+        .unwrap();
+    let mut subscribers = Vec::new();
+    for _ in 0..4 {
+        let subscriber = Socket::new(SocketType::Sub, Options::default().recv_hwm(1));
+        subscriber.subscribe("").await.unwrap();
+        subscriber.connect(endpoint.clone()).await.unwrap();
+        subscribers.push(subscriber);
+    }
+    publisher
+        .wait_subscribed(4, Duration::from_secs(2))
+        .await
+        .unwrap();
+    for sequence in 0u8..16 {
+        publisher
+            .send(Message::single(vec![sequence; 256 * 1024]))
+            .await
+            .unwrap();
+    }
+    let close = tokio::spawn(publisher.close());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    for sequence in 0u8..16 {
+        for subscriber in &subscribers {
+            let message = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let body = message.part_slice(0).unwrap();
+            assert_eq!(body.len(), 256 * 1024);
+            assert!(body.iter().all(|&byte| byte == sequence));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), close)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for subscriber in subscribers {
+        subscriber.close().await.unwrap();
+    }
+    context.term();
+}
+
+async fn drain_large_partial_writes(scheme: &str) {
+    const COUNT: u32 = 24;
+    let receiver_options = Options::default().recv_hwm(1);
+    let sender_options = Options {
+        send_buffer_size: Some(64 * 1024),
+        ..Options::default()
+            .send_hwm(32)
+            .linger(Duration::from_secs(4))
+    };
+    #[cfg(feature = "ws")]
+    let (receiver_options, sender_options) = if scheme == "wss" {
+        let mut receiver_options = receiver_options;
+        let mut sender_options = sender_options;
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let cert = certified.cert.pem().into_bytes();
+        receiver_options.wss_tls.server_cert_pem = Some(cert.clone());
+        receiver_options.wss_tls.server_key_pem =
+            Some(certified.signing_key.serialize_pem().into_bytes());
+        sender_options.wss_tls.trust_pem = Some(cert);
+        sender_options.wss_tls.trust_system = false;
+        (receiver_options, sender_options)
+    } else {
+        (receiver_options, sender_options)
+    };
+    let receiver = Socket::new(SocketType::Pull, receiver_options);
+    let suffix = if scheme == "tcp" { "" } else { "/" };
+    let endpoint = receiver
+        .bind(format!("{scheme}://127.0.0.1:0{suffix}").parse().unwrap())
+        .await
+        .unwrap();
+    let sender = Socket::new(SocketType::Push, sender_options);
+    sender.connect(endpoint).await.unwrap();
+    sender
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    for sequence in 0..COUNT {
+        let mut body = vec![sequence as u8; 1024 * 1024];
+        body[..4].copy_from_slice(&sequence.to_be_bytes());
+        sender.send(Message::single(body)).await.unwrap();
+    }
+    let close = tokio::spawn(sender.close());
+    // Force driver-owned data to survive the actor's queue-empty decision.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    for sequence in 0..COUNT {
+        let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{scheme}: linger lost message {sequence}/{COUNT}"))
+            .unwrap();
+        let body = message.part_bytes(0).unwrap();
+        assert_eq!(body.len(), 1024 * 1024);
+        assert_eq!(&body[..4], &sequence.to_be_bytes());
+        assert!(body[4..].iter().all(|&byte| byte == sequence as u8));
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), close)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    receiver.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn linger_nonzero_drains_queued_messages_inproc() {
     const N: u32 = 20;
 

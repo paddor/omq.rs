@@ -69,29 +69,35 @@ const PULL_READY: &[u8] = &[
 
 #[tokio::test]
 async fn heartbeat_keeps_idle_connection_alive() {
-    let ep = inproc_ep("hb-idle");
-    let opts = Options::default()
-        .heartbeat_interval(Duration::from_millis(50))
-        .heartbeat_timeout(Duration::from_millis(500));
+    let endpoints = [inproc_ep("hb-idle"), tcp_ep(0)];
+    #[cfg(feature = "ws")]
+    let endpoints = endpoints
+        .into_iter()
+        .chain(["ws://127.0.0.1:0".parse::<Endpoint>().unwrap()]);
+    for ep in endpoints {
+        let opts = Options::default()
+            .heartbeat_interval(Duration::from_millis(50))
+            .heartbeat_timeout(Duration::from_millis(500));
 
-    let pull = Socket::new(SocketType::Pull, opts.clone());
-    pull.bind(ep.clone()).await.unwrap();
+        let pull = Socket::new(SocketType::Pull, opts.clone());
+        let ep = pull.bind(ep).await.unwrap();
 
-    let push = Socket::new(SocketType::Push, opts);
-    push.connect(ep).await.unwrap();
+        let push = Socket::new(SocketType::Push, opts);
+        push.connect(ep).await.unwrap();
 
-    // Let handshake complete.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Remain idle for several heartbeat intervals.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+        // Let handshake complete.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Remain idle for several heartbeat intervals.
+        tokio::time::sleep(Duration::from_millis(700)).await;
 
-    // Connection must still work.
-    push.send(Message::single("still alive")).await.unwrap();
-    let got = tokio::time::timeout(Duration::from_millis(500), pull.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(got.part_bytes(0).unwrap(), &b"still alive"[..]);
+        // Connection must still work.
+        push.send(Message::single("still alive")).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_millis(500), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.part_bytes(0).unwrap(), &b"still alive"[..]);
+    }
 }
 
 #[tokio::test]

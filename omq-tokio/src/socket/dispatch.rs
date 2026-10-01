@@ -145,6 +145,8 @@ pub(crate) trait Migratable: Sized {
 /// and uses its own Message-typed channel pair (see `AnyConn`).
 #[derive(Debug)]
 pub(crate) enum AnyStream {
+    #[cfg(test)]
+    Memory(tokio::io::DuplexStream),
     Tcp(TcpStream),
     Ipc(IpcStream),
     #[cfg(feature = "ws")]
@@ -154,6 +156,8 @@ pub(crate) enum AnyStream {
 impl Migratable for AnyStream {
     fn migrate(self) -> io::Result<Self> {
         match self {
+            #[cfg(test)]
+            Self::Memory(stream) => Ok(Self::Memory(stream)),
             Self::Tcp(s) => {
                 let std = s.into_std()?;
                 Ok(Self::Tcp(TcpStream::from_std(std)?))
@@ -175,6 +179,11 @@ impl AnyStream {
     /// Split the stream while retaining a TCP write-half fast path.
     pub(crate) fn split(self, fast_write: bool) -> (AnyReadHalf, AnyWriteHalf) {
         match self {
+            #[cfg(test)]
+            Self::Memory(stream) => {
+                let (reader, writer) = tokio::io::split(Self::Memory(stream));
+                (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
+            }
             Self::Tcp(stream) => {
                 let (reader, writer) = stream.into_split();
                 (
@@ -200,6 +209,8 @@ impl AnyStream {
     /// lifetime.
     pub(crate) fn apply_tcp_options(&self, options: &omq_proto::Options) -> std::io::Result<()> {
         match self {
+            #[cfg(test)]
+            Self::Memory(_) => Ok(()),
             Self::Tcp(s) => {
                 options.tcp_keepalive.apply(s)?;
                 options.apply_socket_buffers(s)?;
@@ -312,6 +323,8 @@ impl AsyncRead for AnyStream {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(test)]
+            Self::Memory(s) => Pin::new(s).poll_read(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
@@ -327,6 +340,8 @@ impl AsyncWrite for AnyStream {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(test)]
+            Self::Memory(s) => Pin::new(s).poll_write(cx, buf),
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
@@ -340,6 +355,8 @@ impl AsyncWrite for AnyStream {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(test)]
+            Self::Memory(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Ipc(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
@@ -349,6 +366,8 @@ impl AsyncWrite for AnyStream {
     fn is_write_vectored(&self) -> bool {
         match self {
             Self::Tcp(s) => s.is_write_vectored(),
+            #[cfg(test)]
+            Self::Memory(s) => s.is_write_vectored(),
             Self::Ipc(s) => s.is_write_vectored(),
             #[cfg(feature = "ws")]
             Self::Ws(s) => s.is_write_vectored(),
@@ -358,6 +377,8 @@ impl AsyncWrite for AnyStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(test)]
+            Self::Memory(s) => Pin::new(s).poll_flush(cx),
             Self::Ipc(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
@@ -367,6 +388,8 @@ impl AsyncWrite for AnyStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(test)]
+            Self::Memory(s) => Pin::new(s).poll_shutdown(cx),
             Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
@@ -383,6 +406,7 @@ pub(crate) enum AnyConn {
         stream: AnyStream,
         peer_ident: PeerIdent,
         leftover: bytes::Bytes,
+        setup: Option<crate::transport::setup::SetupState>,
     },
     Inproc {
         conn: InprocConn,
@@ -443,6 +467,7 @@ impl AnyListener {
                 stream: AnyStream::Tcp(s),
                 peer_ident,
                 leftover: bytes::Bytes::new(),
+                setup: None,
             }),
             Self::Inproc(l) => {
                 let peer_ident = PeerIdent::Inproc(l.name().to_string());
@@ -453,16 +478,16 @@ impl AnyListener {
                 stream: AnyStream::Ipc(s),
                 peer_ident,
                 leftover: bytes::Bytes::new(),
+                setup: None,
             }),
             #[cfg(feature = "ws")]
             Self::Ws(l) => {
-                let (stream, addr) = l.inner.accept().await.map_err(Error::Io)?;
-                let accepted =
-                    crate::transport::ws::accept(stream, l.tls_acceptor.as_ref()).await?;
+                let (accepted, addr, setup) = l.accept().await?;
                 Ok(AnyConn::ByteStream {
                     stream: AnyStream::Ws(Box::new(accepted.transport)),
                     peer_ident: PeerIdent::Socket(addr),
                     leftover: accepted.leftover,
+                    setup: Some(setup),
                 })
             }
         }
@@ -478,7 +503,8 @@ pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv: &inproc_transport::RecvConfig,
-    #[cfg(feature = "ws")] wss_tls: &omq_proto::options::WssTls,
+    #[cfg(feature = "ws")] ws_options: &omq_proto::Options,
+    #[cfg(feature = "ws")] ws_setup: crate::transport::ws::AcceptSetup,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
         let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.underlying_tcp()).await?);
@@ -491,6 +517,7 @@ pub(super) async fn bind_any(
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         let plain = endpoint.underlying_ws();
+        let wss_tls = &ws_options.wss_tls;
         let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
             let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
                 Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
@@ -498,12 +525,17 @@ pub(super) async fn bind_any(
             let key = wss_tls.server_key_pem.as_deref().ok_or_else(|| {
                 Error::Protocol("wss:// bind requires server_key_pem in WssTls options".into())
             })?;
-            Some(crate::transport::ws::build_tls_acceptor(cert, key)?)
+            Some(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+                crate::transport::tls::server_config(cert, key)?,
+            )))
         } else {
             None
         };
-        let listener = AnyListener::Ws(crate::transport::ws::bind(&plain, tls_acc).await?);
-        let resolved = endpoint.rewrap_ws(listener.local_endpoint().clone());
+        let mut ws_listener =
+            crate::transport::ws::bind(&plain, tls_acc, ws_setup, ws_options).await?;
+        let resolved = endpoint.rewrap_ws(ws_listener.local_endpoint().clone());
+        ws_listener.set_monitor_endpoint(resolved.clone());
+        let listener = AnyListener::Ws(ws_listener);
         return Ok(BoundListener {
             listener,
             endpoint: resolved,
@@ -569,18 +601,7 @@ async fn preflight_connect_host(host: &Host, port: u16) -> Result<()> {
             "cannot connect to wildcard host".into(),
         )),
         Host::Ip(_) => Ok(()),
-        Host::Name(name) => {
-            let mut addrs = tokio::net::lookup_host(format!("{name}:{port}"))
-                .await
-                .map_err(Error::Io)?;
-            if addrs.next().is_some() {
-                Ok(())
-            } else {
-                Err(Error::Io(io::Error::other(format!(
-                    "no addresses for {name}:{port}"
-                ))))
-            }
-        }
+        Host::Name(name) => crate::transport::dns::resolve(name, port).await.map(|_| ()),
         _ => unreachable!(),
     }
 }
@@ -600,6 +621,7 @@ pub(super) async fn connect_any(
             stream: AnyStream::Tcp(s),
             peer_ident,
             leftover: bytes::Bytes::new(),
+            setup: None,
         });
     }
     #[cfg(feature = "ws")]
@@ -628,6 +650,7 @@ pub(super) async fn connect_any(
             stream: AnyStream::Ws(Box::new(connected.transport)),
             peer_ident,
             leftover: connected.leftover,
+            setup: None,
         });
     }
     match endpoint {
@@ -654,6 +677,7 @@ pub(super) async fn connect_any(
                 stream: AnyStream::Ipc(s),
                 peer_ident,
                 leftover: bytes::Bytes::new(),
+                setup: None,
             })
         }
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
@@ -703,7 +727,7 @@ mod tests {
 
     async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
         #[cfg(feature = "ws")]
-        let wss_tls = omq_proto::options::WssTls::default();
+        let ws_options = omq_proto::Options::default();
         let inproc_registry = Arc::new(inproc_transport::InprocRegistry::new());
         bind_any(
             &inproc_registry,
@@ -716,7 +740,14 @@ mod tests {
                 fanin: None,
             },
             #[cfg(feature = "ws")]
-            &wss_tls,
+            &ws_options,
+            #[cfg(feature = "ws")]
+            crate::transport::ws::AcceptSetup {
+                admission: crate::transport::setup::Admission::new(128),
+                timeout: std::time::Duration::from_secs(30),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                monitor: crate::socket::monitor::MonitorPublisher::new(),
+            },
         )
         .await
     }

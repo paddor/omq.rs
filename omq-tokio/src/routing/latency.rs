@@ -100,6 +100,20 @@ impl LatencySend {
         self.changed.notify_changed();
     }
 
+    pub(crate) fn stop_admission(&self) {
+        self.closed.store(true, Ordering::Release);
+        let state = self.state.lock().expect("latency send state");
+        for peer in &state.peers {
+            if let Some(space) = peer.target.space_available() {
+                space.notify_changed();
+            }
+        }
+        for pipe in &state.pending {
+            pipe.tx.space_available().notify_changed();
+        }
+        self.changed.notify_changed();
+    }
+
     pub(crate) fn is_drained(&self) -> bool {
         let state = self.state.lock().expect("latency send state");
         state.peers.iter().all(|peer| peer.target.is_empty())
@@ -336,10 +350,7 @@ mod tests {
             1024,
             1024 * 1024,
             1,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
         let (handle, mut receiver) = direct_peer_handle(slot.clone());
@@ -432,10 +443,7 @@ mod tests {
             1024,
             1024 * 1024,
             1,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         let (handle, _receiver) = direct_peer_handle(slot.clone());
         send.connection_added(2, &handle);

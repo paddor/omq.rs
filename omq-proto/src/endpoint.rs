@@ -13,6 +13,8 @@ use std::str::FromStr;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
+#[cfg(any(feature = "lz4", feature = "zstd"))]
+use crate::proto::transform::CompressionKind;
 
 /// A transport endpoint.
 ///
@@ -125,37 +127,44 @@ impl FromStr for Endpoint {
             .split_once("://")
             .ok_or_else(|| Error::InvalidEndpoint(s.to_string()))?;
 
-        match scheme {
-            "tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Tcp { host, port }),
-            "ipc" => Ok(Endpoint::Ipc(parse_ipc(rest)?)),
-            "inproc" => {
-                if rest.is_empty() {
-                    return Err(Error::InvalidEndpoint(s.to_string()));
-                }
+        // Recognize complete carrier names first. A future carrier such as
+        // h3+quic must not be mistaken for two codec prefixes.
+        if let Some(endpoint) = parse_carrier(scheme, rest, s) {
+            return endpoint;
+        }
+        #[cfg(any(feature = "lz4", feature = "zstd"))]
+        if let Some((prefix, carrier)) = scheme.split_once('+')
+            && let Some(kind) = CompressionKind::for_scheme_prefix(prefix)
+            && kind.supports_carrier(carrier)
+        {
+            return parse_carrier(carrier, rest, s)
+                .expect("eligible codec carrier is enabled")?
+                .with_compression(kind);
+        }
+        Err(Error::UnsupportedScheme(scheme.to_string()))
+    }
+}
+
+fn parse_carrier(scheme: &str, rest: &str, original: &str) -> Option<Result<Endpoint>> {
+    Some(match scheme {
+        "tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Tcp { host, port }),
+        "ipc" => parse_ipc(rest).map(Endpoint::Ipc),
+        "inproc" => {
+            if rest.is_empty() {
+                Err(Error::InvalidEndpoint(original.to_string()))
+            } else {
                 Ok(Endpoint::Inproc {
                     name: rest.to_string(),
                 })
             }
-            "udp" => parse_udp(rest),
-            #[cfg(feature = "lz4")]
-            "lz4+tcp" => parse_host_port(rest).map(|(host, port)| Endpoint::Lz4Tcp { host, port }),
-            #[cfg(feature = "zstd")]
-            "zstd+tcp" => {
-                parse_host_port(rest).map(|(host, port)| Endpoint::ZstdTcp { host, port })
-            }
-            #[cfg(feature = "ws")]
-            "ws" => parse_ws(rest, false),
-            #[cfg(feature = "ws")]
-            "wss" => parse_ws(rest, true),
-            #[cfg(all(feature = "lz4", feature = "ws"))]
-            "lz4+ws" => parse_compressed_ws(rest, |h, p, pa| Endpoint::Lz4Ws {
-                host: h,
-                port: p,
-                path: pa,
-            }),
-            _ => Err(Error::UnsupportedScheme(scheme.to_string())),
         }
-    }
+        "udp" => parse_udp(rest),
+        #[cfg(feature = "ws")]
+        "ws" => parse_ws(rest, false),
+        #[cfg(feature = "ws")]
+        "wss" => parse_ws(rest, true),
+        _ => return None,
+    })
 }
 
 impl fmt::Display for Endpoint {
@@ -183,6 +192,50 @@ impl fmt::Display for Endpoint {
 }
 
 impl Endpoint {
+    /// Add one enabled codec to an eligible carrier, retaining legacy variants.
+    /// URI prefixes use this same carrier/codec validation. Reapplying the same
+    /// codec is idempotent; an existing different codec is never replaced.
+    /// Socket `Options` supply codec parameters. The effective socket mechanism
+    /// is validated separately at setup, before DNS or carrier IO.
+    ///
+    /// # Errors
+    /// Returns an error for conflicting codecs, unsupported carrier profiles,
+    /// or invalid WebSocket addresses. WSS and Zstd-over-WS are unsupported.
+    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    pub fn with_compression(self, kind: CompressionKind) -> Result<Self> {
+        if let Some(current) = CompressionKind::for_endpoint(&self) {
+            return if current == kind {
+                #[cfg(all(feature = "lz4", feature = "ws"))]
+                if let Self::Lz4Ws { host, path, .. } = &self {
+                    crate::proto::ws_handshake::validate_ws_address(host, path)?;
+                }
+                Ok(self)
+            } else {
+                Err(Error::Config(format!(
+                    "conflicting OMQ codecs: {} and {}",
+                    current.scheme_prefix(),
+                    kind.scheme_prefix()
+                )))
+            };
+        }
+        if !kind.supports_carrier(self.scheme()) {
+            return Err(Error::UnsupportedScheme(format!(
+                "{}+{}",
+                kind.scheme_prefix(),
+                self.scheme()
+            )));
+        }
+        match self {
+            Self::Tcp { host, port } => Ok(kind.tcp_endpoint(host, port)),
+            #[cfg(all(feature = "lz4", feature = "ws"))]
+            Self::Ws { host, port, path } => {
+                crate::proto::ws_handshake::validate_ws_address(&host, &path)?;
+                Ok(Self::Lz4Ws { host, port, path })
+            }
+            _ => unreachable!("eligible codec carrier was validated"),
+        }
+    }
+
     /// Strip the compression scheme prefix so the underlying TCP
     /// transport sees a plain `tcp://` endpoint. Identity for plain
     /// `tcp://`. Returns the endpoint unchanged for `ipc://` /
@@ -502,25 +555,12 @@ fn parse_ws(rest: &str, tls: bool) -> Result<Endpoint> {
         None => (rest, "/"),
     };
     let (host, port) = parse_host_port(hp)?;
-    if path.bytes().any(|b| matches!(b, b'\r' | b'\n')) {
-        return Err(Error::InvalidEndpoint("invalid ws path".into()));
-    }
+    crate::proto::ws_handshake::validate_ws_address(&host, path)?;
     let path = path.to_string();
     if tls {
         Ok(Endpoint::Wss { host, port, path })
     } else {
         Ok(Endpoint::Ws { host, port, path })
-    }
-}
-
-#[cfg(all(feature = "lz4", feature = "ws"))]
-fn parse_compressed_ws(
-    rest: &str,
-    wrap: impl FnOnce(Host, u16, String) -> Endpoint,
-) -> Result<Endpoint> {
-    match parse_ws(rest, false)? {
-        Endpoint::Ws { host, port, path } => Ok(wrap(host, port, path)),
-        _ => unreachable!(),
     }
 }
 

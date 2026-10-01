@@ -65,7 +65,9 @@ pub fn finish_fan_out_frame<'a>(
         FanOutFrame::Arena(eq.uncommitted_arena())
     } else {
         chunks.clear();
-        eq.drain(chunks, 1024);
+        // This is one atomic prepared publication, not a wire-write turn.
+        // A writev chunk cap here would split a large multipart message.
+        eq.drain(chunks, usize::MAX);
         FanOutFrame::Chunks(chunks)
     }
 }
@@ -128,5 +130,28 @@ mod tests {
 
         assert!(matches!(batch, FanOutFrame::Arena(_)));
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn gathered_multipart_keeps_all_chunks_in_one_publication() {
+        for parts in [600, 1025] {
+            let msg = Message::multipart((0..parts).map(|_| Bytes::from_static(&[0x5a; 1024])));
+            let mut expected = bytes::BytesMut::new();
+            crate::proto::frame::encode_message_flat(&msg, &mut expected);
+            let mut eq = FrameBuffer::one_shot();
+            let mut chunks = Vec::new();
+            let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, 2, 8 * 1024);
+            let FanOutFrame::Chunks(encoded_chunks) = frame else {
+                panic!("large multipart must gather");
+            };
+            assert!(encoded_chunks.len() > 1024);
+            let actual: Vec<u8> = encoded_chunks
+                .iter()
+                .flat_map(|chunk| chunk.iter().copied())
+                .collect();
+            assert_eq!(actual, expected.as_ref());
+            clear_fan_out_frame(&mut eq, &mut chunks);
+            assert!(eq.is_empty());
+        }
     }
 }

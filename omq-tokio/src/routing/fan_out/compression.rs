@@ -1,198 +1,152 @@
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-use std::sync::{Arc, Mutex};
+//! Bounded dictionary samples owned by an IO-lane codec group.
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
 use bytes::Bytes;
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
 use omq_proto::message::Message;
-#[cfg(any(feature = "lz4", feature = "zstd"))]
 use omq_proto::options::Options;
-#[cfg(any(feature = "lz4", feature = "zstd"))]
 use omq_proto::proto::transform::CompressionKind;
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-use super::{FanOutInner, lane::FanOutLanes};
+const MAX_MESSAGES: usize = 100;
+const MAX_SAMPLES: usize = 1000;
+const MAX_BYTES: usize = 100 * 1024;
+const MAX_SAMPLE_LEN: usize = 2048;
+const MAX_PARTS_PER_MESSAGE: usize = 32;
+const MAX_DICT_BYTES: usize = 8192;
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
+#[derive(Debug)]
 pub(super) struct DictTraining {
-    trainer: Option<Trainer>,
-    msgs_left: usize,
+    kind: CompressionKind,
+    samples: Vec<Vec<u8>>,
+    bytes: usize,
+    messages: usize,
     capacity: usize,
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-impl std::fmt::Debug for DictTraining {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DictTraining")
-            .field("kind", &self.trainer.as_ref().map(Trainer::kind))
-            .field("msgs_left", &self.msgs_left)
-            .field("capacity", &self.capacity)
-            .finish_non_exhaustive()
+impl DictTraining {
+    pub(super) fn new(kind: CompressionKind, options: &Options) -> Option<Self> {
+        let capacity = options
+            .compression_dict_capacity
+            .unwrap_or(2048)
+            .min(MAX_DICT_BYTES);
+        // COVER needs a segment of at least eight bytes (capacity / 4).
+        // A smaller training target supplies no usable dictionary.
+        (options.compression_auto_train && options.compression_dict.is_none() && capacity >= 32)
+            .then(|| Self {
+                kind,
+                samples: Vec::new(),
+                bytes: 0,
+                messages: 0,
+                capacity,
+            })
     }
-}
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-enum Trainer {
-    #[cfg(feature = "lz4")]
-    Lz4(omq_proto::proto::transform::lz4::DictTrainer),
-    #[cfg(feature = "zstd")]
-    Zstd(ZstdTraining),
-}
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-impl Trainer {
-    fn new(kind: CompressionKind, capacity: usize) -> Option<Self> {
-        #[cfg(not(feature = "lz4"))]
-        let _ = capacity;
-        match kind {
-            #[cfg(feature = "lz4")]
-            CompressionKind::Lz4 => Some(Self::Lz4(
-                omq_proto::proto::transform::lz4::DictTrainer::new(capacity),
-            )),
-            #[cfg(feature = "zstd")]
-            CompressionKind::Zstd => Some(Self::Zstd(ZstdTraining::new(capacity))),
-            _ => None,
+    /// Sample only a bounded prefix. Empty parts consume no sample storage.
+    /// Return true when this one training attempt must finish.
+    pub(super) fn feed(&mut self, msg: &Message) -> bool {
+        self.messages += 1;
+        for index in 0..MAX_PARTS_PER_MESSAGE {
+            let Some(part) = msg.part_bytes(index) else {
+                break;
+            };
+            if part.is_empty() || part.len() >= MAX_SAMPLE_LEN {
+                continue;
+            }
+            if self.samples.len() >= MAX_SAMPLES || self.bytes + part.len() > MAX_BYTES {
+                return true;
+            }
+            self.bytes += part.len();
+            self.samples.push(part.to_vec());
         }
+        self.messages >= MAX_MESSAGES
+            || self.samples.len() >= MAX_SAMPLES
+            || self.bytes >= MAX_BYTES
     }
 
-    fn kind(&self) -> CompressionKind {
-        match self {
+    pub(super) fn train(self) -> Option<Bytes> {
+        match self.kind {
             #[cfg(feature = "lz4")]
-            Self::Lz4(_) => CompressionKind::Lz4,
-            #[cfg(feature = "zstd")]
-            Self::Zstd(_) => CompressionKind::Zstd,
-        }
-    }
-
-    fn add_sample(&mut self, part: &[u8]) {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(trainer) => trainer.add_sample(part),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(training) => training.add_sample(part),
-        }
-    }
-
-    fn should_train(&self) -> bool {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(_) => false,
-            #[cfg(feature = "zstd")]
-            Self::Zstd(training) => training.should_train(),
-        }
-    }
-
-    fn train(self) -> Option<Bytes> {
-        match self {
-            #[cfg(feature = "lz4")]
-            Self::Lz4(trainer) => {
+            CompressionKind::Lz4 => {
+                let mut trainer = omq_proto::proto::transform::lz4::DictTrainer::new(self.capacity);
+                for sample in self.samples {
+                    trainer.add_sample(&sample);
+                }
                 let dict = trainer.train();
                 (!dict.is_empty()).then(|| Bytes::from(dict))
             }
             #[cfg(feature = "zstd")]
-            Self::Zstd(training) => training.train(),
+            CompressionKind::Zstd => {
+                let samples: Vec<&[u8]> = self.samples.iter().map(Vec::as_slice).collect();
+                omq_proto::proto::transform::train_zdict(&samples, self.capacity)
+            }
+            _ => None,
         }
     }
 }
 
-#[cfg(feature = "zstd")]
-struct ZstdTraining {
-    samples: Vec<Vec<u8>>,
-    total_bytes: usize,
-    capacity: usize,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(feature = "zstd")]
-impl ZstdTraining {
-    const MAX_BYTES: usize = 100 * 1024;
-    const MAX_SAMPLE_LEN: usize = 2048;
-
-    fn new(capacity: usize) -> Self {
-        Self {
-            samples: Vec::with_capacity(64),
-            total_bytes: 0,
-            capacity,
+    fn kind() -> CompressionKind {
+        #[cfg(feature = "lz4")]
+        {
+            CompressionKind::Lz4
+        }
+        #[cfg(all(not(feature = "lz4"), feature = "zstd"))]
+        {
+            CompressionKind::Zstd
         }
     }
 
-    fn add_sample(&mut self, part: &[u8]) {
-        if part.len() >= Self::MAX_SAMPLE_LEN {
-            return;
+    #[test]
+    fn training_bounds_empty_parts_samples_and_bytes() {
+        let options = Options::default().compression_auto_train(true);
+        let mut training = DictTraining::new(kind(), &options).unwrap();
+        let empty = Message::multipart((0..10_000).map(|_| Bytes::new()));
+        for _ in 0..MAX_MESSAGES - 1 {
+            assert!(!training.feed(&empty));
         }
-        self.samples.push(part.to_vec());
-        self.total_bytes += part.len();
+        assert!(training.feed(&empty));
+        assert!(training.samples.is_empty());
+        assert!(training.train().is_none());
+
+        for size in [1, MAX_SAMPLE_LEN - 1] {
+            let mut training = DictTraining::new(kind(), &options).unwrap();
+            let message = Message::multipart((0..10_000).map(|_| Bytes::from(vec![0x5a; size])));
+            for _ in 0..MAX_MESSAGES {
+                if training.feed(&message) {
+                    break;
+                }
+            }
+            assert!(training.samples.len() <= MAX_SAMPLES);
+            assert!(training.bytes <= MAX_BYTES);
+            assert!(training.samples.len() <= training.messages * MAX_PARTS_PER_MESSAGE);
+        }
     }
 
-    fn should_train(&self) -> bool {
-        self.total_bytes >= Self::MAX_BYTES
+    #[test]
+    fn static_dict_disables_training_and_tiny_targets_are_skipped() {
+        for capacity in [0, 1, 31] {
+            assert!(
+                DictTraining::new(
+                    kind(),
+                    &Options::default()
+                        .compression_auto_train(true)
+                        .compression_dict_capacity(capacity)
+                )
+                .is_none()
+            );
+        }
+        let options = Options::default()
+            .compression_auto_train(true)
+            .compression_dict(Bytes::from_static(b"dictionary"));
+        assert!(DictTraining::new(kind(), &options).is_none());
+        let training = DictTraining::new(
+            kind(),
+            &Options::default()
+                .compression_auto_train(true)
+                .compression_dict_capacity(usize::MAX),
+        )
+        .unwrap();
+        assert_eq!(training.capacity, MAX_DICT_BYTES);
     }
-
-    fn train(self) -> Option<Bytes> {
-        let samples: Vec<&[u8]> = self.samples.iter().map(Vec::as_slice).collect();
-        omq_proto::proto::transform::train_zdict(&samples, self.capacity)
-    }
-}
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-pub(super) fn new_dict_training(options: &Options) -> Option<DictTraining> {
-    if options.compression_auto_train && options.compression_dict.is_none() {
-        Some(DictTraining {
-            trainer: None,
-            msgs_left: 100,
-            capacity: options.compression_dict_capacity.unwrap_or(2048),
-        })
-    } else {
-        None
-    }
-}
-
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-pub(super) fn feed_dict_training(
-    dict_training: &Mutex<Option<DictTraining>>,
-    inner: &Arc<Mutex<FanOutInner>>,
-    lanes: &FanOutLanes,
-    msg: &Message,
-) {
-    let kind = inner
-        .lock()
-        .expect("fanout inner poisoned")
-        .compression_kind;
-    let Some(kind) = kind else { return };
-
-    let mut guard = dict_training.lock().expect("dict_training poisoned");
-    let Some(training) = guard.as_mut() else {
-        return;
-    };
-    if training.trainer.is_none() {
-        training.trainer = Trainer::new(kind, training.capacity);
-    }
-    let Some(trainer) = training.trainer.as_mut() else {
-        return;
-    };
-    if trainer.kind() != kind {
-        return;
-    }
-    let mut idx = 0;
-    while let Some(part) = msg.part_bytes(idx) {
-        trainer.add_sample(part.as_ref());
-        idx += 1;
-    }
-    training.msgs_left = training.msgs_left.saturating_sub(1);
-    if training.msgs_left > 0 && !trainer.should_train() {
-        return;
-    }
-    let training = guard.take().unwrap();
-    let Some(dict) = training.trainer.and_then(Trainer::train) else {
-        return;
-    };
-    let (kind, options) = {
-        let mut g = inner.lock().expect("fanout inner poisoned");
-        g.compression_dict = Some(dict.clone());
-        let Some(kind) = g.compression_kind else {
-            return;
-        };
-        (kind, g.options.clone())
-    };
-    lanes.set_compression_all_ordered(kind, &options, Some(&dict));
 }

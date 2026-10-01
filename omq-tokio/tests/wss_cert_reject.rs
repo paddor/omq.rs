@@ -67,3 +67,46 @@ async fn wss_rejects_invalid_cert() {
         "expected timeout: TLS handshake should fail with invalid cert"
     );
 }
+
+#[tokio::test]
+async fn wss_hostname_override_uses_explicit_trust_without_disabling_verification() {
+    let certificate = rcgen::generate_simple_self_signed(vec!["service.example".into()]).unwrap();
+    let cert_pem = certificate.cert.pem().into_bytes();
+    let server = Socket::new(
+        SocketType::Pull,
+        Options {
+            wss_tls: WssTls {
+                server_cert_pem: Some(cert_pem.clone()),
+                server_key_pem: Some(certificate.signing_key.serialize_pem().into_bytes()),
+                ..WssTls::default()
+            },
+            ..Options::default()
+        },
+    );
+    let endpoint = server.bind(wss_endpoint(0)).await.unwrap();
+    let client = Socket::new(
+        SocketType::Push,
+        Options {
+            wss_tls: WssTls {
+                trust_system: false,
+                trust_pem: Some(cert_pem),
+                hostname: Some("service.example".into()),
+                ..WssTls::default()
+            },
+            ..Options::default()
+        },
+    );
+    client.connect(endpoint).await.unwrap();
+    client
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    client.send(Message::single("verified name")).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.part_slice(0).unwrap(), b"verified name");
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}

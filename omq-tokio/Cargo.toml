@@ -291,6 +291,10 @@ name = "omq_lz4_ws"
 path = "tests/lz4_ws.rs"
 
 [[test]]
+name = "omq_codec_policy"
+path = "tests/codec_policy.rs"
+
+[[test]]
 name = "omq_mixed_transports"
 path = "tests/mixed_transports.rs"
 
@@ -529,6 +533,10 @@ path = "tests/ws_radio_dish.rs"
 [[test]]
 name = "omq_ws_reconnect"
 path = "tests/ws_reconnect.rs"
+
+[[test]]
+name = "omq_ws_setup"
+path = "tests/ws_setup.rs"
 
 [[test]]
 name = "omq_wss_basic"

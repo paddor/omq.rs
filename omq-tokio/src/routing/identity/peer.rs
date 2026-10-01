@@ -5,6 +5,7 @@ use crate::engine::SendPipeProducer;
 use crate::engine::send_pipe::SendPreparation;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     Arc, Bytes, Error, FxHashMap, Message, Mutex, PeerTarget, Result, SendPipeError, SendRetry,
@@ -17,6 +18,7 @@ type Table = FxHashMap<Bytes, Arc<Route>>;
 pub(super) struct PeerRoutes {
     table: ArcSwapOption<Table>,
     update: Mutex<()>,
+    admission_closed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -162,6 +164,7 @@ impl PeerRoutes {
         Self {
             table: ArcSwapOption::from(Some(Arc::new(Table::default()))),
             update: Mutex::new(()),
+            admission_closed: AtomicBool::new(false),
         }
     }
 
@@ -206,6 +209,7 @@ impl PeerRoutes {
     }
 
     pub(super) fn shutdown(&self) {
+        self.admission_closed.store(true, Ordering::Release);
         let update = self.update.lock().expect("peer routes poisoned");
         let current = self.table.swap(None);
         let retired: Vec<_> = current
@@ -218,6 +222,39 @@ impl PeerRoutes {
             route.notify_retired();
         }
         drop(retired);
+    }
+
+    pub(super) fn stop_admission(&self) {
+        self.admission_closed.store(true, Ordering::Release);
+        let table = self.table.load();
+        for route in table.iter().flat_map(|table| table.values()) {
+            route.notify_retired();
+            for lane in route
+                .lanes
+                .lock()
+                .expect("peer lanes poisoned")
+                .iter()
+                .filter_map(Weak::upgrade)
+            {
+                if let Some(producer) = lane
+                    .producer
+                    .lock()
+                    .expect("peer producer poisoned")
+                    .as_ref()
+                {
+                    producer.space_available().notify_changed();
+                }
+            }
+            if let Some(space) = route
+                .target
+                .lock()
+                .expect("peer target poisoned")
+                .as_ref()
+                .and_then(PeerTarget::space_available)
+            {
+                space.notify_changed();
+            }
+        }
     }
 
     pub(super) fn peer_for_identity(&self, identity: &[u8]) -> Option<u64> {
@@ -285,6 +322,9 @@ impl PeerRoutes {
         lanes: &SenderLanes,
         preparation: SendPreparation,
     ) -> Result<core::result::Result<(), SendRetry>> {
+        if self.admission_closed.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
         // One replacement retry keeps churn from turning a send into an
         // unbounded loop. The async caller yields on a further replacement.
         for _ in 0..2 {
@@ -346,6 +386,9 @@ impl PeerRoutes {
     }
 
     pub(super) async fn wait_send_progress(&self, message: &Message, lanes: &SenderLanes) {
+        if self.admission_closed.load(Ordering::Acquire) {
+            return;
+        }
         let Some(identity) = message.part_slice(0) else {
             return;
         };
@@ -364,6 +407,9 @@ impl PeerRoutes {
             if let Some(space) = waiting {
                 space
                     .wait_until(|| {
+                        if self.admission_closed.load(Ordering::Acquire) {
+                            return true;
+                        }
                         lane.producer
                             .lock()
                             .expect("peer producer poisoned")
@@ -383,7 +429,7 @@ impl PeerRoutes {
             return;
         };
         let seen = space.generation();
-        if route.ready() {
+        if self.admission_closed.load(Ordering::Acquire) || route.ready() {
             return;
         }
         let pipe = matches!(
@@ -395,7 +441,9 @@ impl PeerRoutes {
             Some(PeerTarget::Pipe(_) | PeerTarget::RepInproc(_))
         );
         if pipe {
-            space.wait_until(|| route.ready()).await;
+            space
+                .wait_until(|| self.admission_closed.load(Ordering::Acquire) || route.ready())
+                .await;
         } else {
             space.changed_after(seen).await;
         }

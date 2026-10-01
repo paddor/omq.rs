@@ -96,7 +96,7 @@ async fn resolve_bind(host: &Host, port: u16) -> Result<SocketAddr> {
     match host {
         Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => resolve_first(&format!("{name}:{port}")).await,
+        Host::Name(name) => resolve_first(name, port).await,
         _ => unreachable!(),
     }
 }
@@ -107,25 +107,21 @@ async fn resolve_connect(host: &Host, port: u16) -> Result<Vec<SocketAddr>> {
             "cannot connect to wildcard host".into(),
         )),
         Host::Ip(ip) => Ok(vec![SocketAddr::new(*ip, port)]),
-        Host::Name(name) => resolve_all(&format!("{name}:{port}")).await,
+        Host::Name(name) => resolve_all(name, port).await,
         _ => unreachable!(),
     }
 }
 
-async fn resolve_first(s: &str) -> Result<SocketAddr> {
-    resolve_all(s)
+async fn resolve_first(host: &str, port: u16) -> Result<SocketAddr> {
+    resolve_all(host, port)
         .await?
         .into_iter()
         .next()
-        .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {s}"))))
+        .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {host}:{port}"))))
 }
 
-async fn resolve_all(s: &str) -> Result<Vec<SocketAddr>> {
-    let addrs: Vec<_> = tokio::net::lookup_host(s).await?.collect();
-    if addrs.is_empty() {
-        return Err(Error::Io(io::Error::other(format!("no addresses for {s}"))));
-    }
-    Ok(addrs)
+async fn resolve_all(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    super::dns::resolve(host, port).await
 }
 
 async fn connect_any_resolved(addrs: Vec<SocketAddr>) -> Result<TcpStream> {

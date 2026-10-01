@@ -91,6 +91,13 @@ on the control runtime are re-registered on the chosen data reactor through
 `into_std()` / `from_std()`. Sharing a stream handle does not migrate its
 reactor registration.
 
+Each materialized byte-stream or inproc driver future owns one IO-thread load
+lease, reserved before spawning. Completion, setup failure, task abortion, and
+panic unwinding release it once. Peer-table removal does not release another
+owner's load. Raw STREAM currently runs on the actor runtime and holds no data
+IO-thread lease. Socket teardown joins or aborts tracked driver tasks so their
+leases also leave the shared context's counters.
+
 ### Application APIs
 
 - **Async:** `Context::socket()` creates a socket whose drivers run on the
@@ -214,6 +221,72 @@ distributes batches to active secondary lanes before processing its own peers.
 Each owned IO thread hosts one lane. Borrowed contexts always use one lane,
 even on a multi-thread runtime. Socket clones share lane 0's producer under
 a short mutex; adding clones does not add distributor lanes.
+
+Endpoint URI parsing recognizes complete carriers before interpreting one
+leading codec prefix. `Endpoint::with_compression` uses the same enabled-carrier
+policy and retains existing wrapped variants. The endpoint selects codec kind;
+ordinary bind/connect operations inherit immutable socket options. Explicit
+`bind_with_compression_options` and `connect_with_compression_options` capture
+five codec parameters: dictionary, auto-training, threshold, level, and target
+dictionary capacity. Unset fields select codec defaults; construct
+`CompressionOptions` from `&Options` to inherit values before overriding them.
+The C bridge captures its current compression overlay per operation, including
+after backend materialization. Mechanism and decoder limits retain the original
+socket configuration. Typed conflicts, unsupported
+carriers, and invalid WS addresses fail before setup. Effective CURVE/STREAM
+policy is checked before DNS or carrier IO. Pending resolution, listener
+accepts, completed connects, and reconnects retain their operation's immutable
+configuration. Updating the C compression overlay never replaces a live
+dictionary or reconfigures an existing listener.
+
+The private fan-out registration module owns peer admission, lane compatibility,
+and slot-capacity reactivation. `CodecSetup` captures concrete encoder/decoder
+state and an immutable profile from effective connection options. Slots retain
+that same profile. Compatibility compares codec kind, dictionary contents,
+effective thresholds, levels, training configuration, and logical size limits.
+Equivalent defaults share a group. Decoder dictionary caps stay per connection;
+ignored encoder fields do not split groups. Auto-training with a dynamic default
+threshold remains distinct from a fixed threshold. Queue, TLS, and mechanism
+options do not enter the key after encrypted-codec validation. Configured logical
+limits remain conservative until their wire boundaries are covered.
+
+Each existing IO lane owns at most eight compatible groups, including the plain
+group. Groups own concrete encoders and train independently on the lane task.
+No encoding or dictionary sampling runs on the caller thread. WS retains its
+connection-driver path; additional native profiles beyond the group limit also
+retain that reliable fallback. Removing the last peer retires its group. Ordered
+control commands initialize fresh state before a retired slot is reused.
+
+Training examines at most 32 parts per publication and finishes within 100
+publications, 1,000 nonempty samples, or 100 KiB of sample bytes. Individual
+samples stay below 2 KiB; dictionary capacity is at most 8 KiB. Static
+configuration disables training. Valid dictionary views are compacted when
+profiles are captured, so an 8-KiB slice cannot retain a larger backing buffer.
+Each group keeps its one dictionary shipment for late subscribers; shipment
+state remains per connection and dependent payloads follow that shipment.
+
+A publication is filtered before encoding. Each matched group encodes once.
+Blocking dispatch tries ready targets across all groups before waiting for
+slot space, continues serving control commands while waiting, and drops a
+removed connection's pending output without passing it to a replacement.
+Prepared storage holds at most eight payload frames and eight dictionary frames
+for one publication, shared by its blocked recipients. No prepared publication
+backlog is added. Absolute aggregate byte accounting and configured logical
+versus codec-wire size boundaries remain open in the transport plan.
+
+Fan-out preparation retains every gathered chunk of an atomic multipart
+publication. The 1,024-chunk wire-drain cap still limits individual write turns;
+it cannot serve as a limit on prepared message contents. Regression cases cover
+600 and 1,025 body parts, including grouped compressed output and all mute
+policies. Six production connection drivers also deliver three consecutive
+1,026-part publications through bounded memory streams and continued write/read
+turns. TCP has no explicit 1,024-part limit; WS retains its 65,536-part cap.
+
+With `xpub_nodrop`, fallback inbox admission waits independently for each
+peer while native lane admission progresses alongside it. Socket close wakes
+these waits. `try_send` reserves all fallback capacity before admitting any
+lane or fallback publication, so a full inbox does not silently drop data
+or publish part of a retry to the other peers.
 
 The important work-saving choices are:
 
@@ -365,6 +438,24 @@ charged queue bytes.
 - Socket close ends receive admission independently of send linger. A late
   connection attachment must tolerate the receive queue already being closed.
 
+Heartbeats retain at most one locally queued probe. Its timeout
+starts after the complete codec wire prefix reaches the writer; arena/slot
+traffic does not advance that prefix. Actual received bytes acknowledge an
+admitted probe. Periodic admitted keepalives preserve the original silence
+deadline. Local receive backpressure suspends silence accounting while
+retaining outbound keepalives for the other peer's liveness judgment.
+Writer admission is not remote receipt: TCP/WS ordering, TLS/kernel buffering,
+and runtime scheduling still constrain remote control progress.
+
+Close stops new caller sends while preserving accepted queues. Nonzero linger
+then asks each connection to drain its own batch, offload, arena, deferred,
+slot, and partial-write state. Removing a message from a send ring is not wire
+completion. Fan-out also waits for distributor and secondary worker batches.
+One absolute socket deadline covers draining, WS CLOSE reply, and writer/TLS
+shutdown; zero linger retains immediate cancellation. Transport completion
+does not acknowledge remote application delivery. Resource-accounting and
+control-progress limits are tracked in [WebSocket limits](zws.md).
+
 Heartbeats detect missing peer activity; they do not make a slow application
 drain its queue. Heartbeat traffic can continue when outbound space allows,
 but transport backpressure may still trigger the remote endpoint's timeout.
@@ -480,6 +571,10 @@ Compression transports transform messages before ZMTP framing.
 Compression offload defaults to messages at least 8 KiB. Results stay in send
 order. Small messages, unavailable pool capacity, or pending dictionary/training
 state can keep work on the connection driver. Fan-out lanes do not use this pool.
+Reused pool encoders synchronize the primary's threshold, level, dictionary,
+and size settings. They never change a live connection's dictionary or ship
+another dictionary. Active LZ4 auto-training targets must be at least 32 bytes
+because the pinned COVER trainer requires eight-byte segments.
 
 LZ4 and Zstd reuse contexts and scratch. Small parts can pass through without
 compression; encoders also reject results without enough wire-size saving.
@@ -501,6 +596,13 @@ encrypted wire messages still needs mutable storage and copying. WS has fused
 framing and tiny-message decode paths; client masking needs writable storage.
 These are specialized paths, not end-to-end zero-copy guarantees.
 
+Connection materialization resolves a private `WireFraming` once: ZMTP or
+ZWS with the local WS role. Codec setup and transmit slots consume that same
+value, so masking cannot disagree with the codec's role. TLS/carrier IO and
+message transforms retain their separate owners. This uses the existing fused
+arena and gather encoders; it adds no forwarding task or per-message trait
+dispatch. WS fan-out still uses its existing fallback pending lane evidence.
+
 ## Scheduling and wakeups
 
 ### Bound data work; keep control reachable
@@ -515,6 +617,7 @@ service queued control commands before starting the next bounded data batch.
 | Wire-slot drain | `DrainBudget::WIRE_DRAIN`: 1024 drain iterations / 1 MiB |
 | Driver encoding | 512 messages, configured batch bytes, or 1 ms |
 | Driver write turn | Wire-drain budget or 1 ms |
+| Codec-event admission | 64 events / 64 KiB of logical work / 1 ms |
 
 Wire-drain iterations are not necessarily individual messages. The default
 encode byte limit is 128 KiB; `OMQ_BATCH_BYTES` is read once and cached.
@@ -523,6 +626,30 @@ Writes run as a main `select!` arm and preserve partial progress. A stalled
 transport therefore does not trap control behind a full-buffer write loop.
 Async sends that complete synchronously yield periodically; workers yield at
 batch boundaries. Hot drain loops avoid unnecessary per-message clock reads.
+
+Receive queue admission lives in [recv_sink.rs](../omq-tokio/src/engine/recv_sink.rs).
+A full queue leaves one decoded message owned by the connection driver. Space,
+control, writes, cancellation, and linger remain selectable; retries neither
+decode again nor charge the receive limiter twice. MPSC reservations stay pinned
+across select turns and commit through their actual permits, preserving waiter
+order. REP publishes its envelope and body under one admission lock.
+Large native byte-stream payloads retain one claimed destination across 64-KiB
+reads in the same select, preserving buffer reuse and direct receive ownership.
+An inbound payload claim keeps the independent outbound direction ready,
+including CURVE command protection.
+
+Codec-event admission lives in [peer_events.rs](../omq-tokio/src/engine/peer_events.rs).
+A full actor mailbox retains one popped event and waits for its actual reserved
+slot under the driver select. Further input and decoded-message admission pause
+until the older event prefix is admitted. Metadata preparation happens once;
+reverse writes, local commands, cancellation, and deadlines remain reachable.
+The setup deadline stays active until handshake-event admission. Parse errors
+retain their original failure while older events await admission. Authentication
+ERROR output also runs under this select, with cancellation and the original
+setup deadline intact. Socket-owned drivers publish final disconnect through reserved completion
+slots, independent of mailbox space. The actor retains peer state until the
+admitted event prefix and any prepared receive finish. See
+[WebSocket limits](zws.md).
 
 ### DataSignal: work is pending
 

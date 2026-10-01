@@ -14,6 +14,54 @@ use omq_proto::message::Message;
 
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
+fn data_inbox(target: &PeerOutbound) -> &tokio::sync::mpsc::Sender<PeerDriverData> {
+    match target {
+        PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => inbox,
+    }
+}
+
+/// Reserve the entire fallback publication before changing any peer queue.
+/// Closed peers are ignored; full live peers must cause try-send to retry.
+pub(super) fn try_reserve_targets(
+    targets: &[PeerOutbound],
+) -> Option<smallvec::SmallVec<[tokio::sync::mpsc::Permit<'_, PeerDriverData>; 8]>> {
+    let mut permits = smallvec::SmallVec::new();
+    for target in targets {
+        match data_inbox(target).try_reserve() {
+            Ok(permit) => permits.push(permit),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return None,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+        }
+    }
+    Some(permits)
+}
+
+/// Each peer waits independently. A stalled peer cannot delay publication
+/// to another peer whose inbox has space, including a native wire lane.
+pub(super) async fn dispatch_blocking(
+    targets: &[PeerOutbound],
+    msg: &Message,
+    lanes: &super::lane::FanOutLanes,
+) {
+    use futures::{StreamExt, stream::FuturesUnordered};
+    let mut pending = FuturesUnordered::new();
+    for target in targets {
+        pending.push(data_inbox(target).send(PeerDriverData::SendMessage(msg.clone())));
+    }
+    let mut budget = omq_proto::flow::DrainBudget::WORKER;
+    while !pending.is_empty() {
+        tokio::select! {
+            biased;
+            () = lanes.admission_stopped() => return,
+            _ = pending.next() => {}
+        }
+        if !budget.account(msg.byte_len()) {
+            tokio::task::yield_now().await;
+            budget.reset();
+        }
+    }
+}
+
 pub(super) fn dispatch_to_targets(
     targets: &[PeerOutbound],
     msg: &Message,
@@ -163,6 +211,117 @@ mod tests {
 
     use super::*;
 
+    fn blocking_sender() -> super::super::FanOutSend {
+        let options = omq_proto::Options {
+            xpub_nodrop: true,
+            ..omq_proto::Options::default()
+        };
+        super::super::FanOutSend::new(
+            omq_proto::proto::SocketType::Pub,
+            &options,
+            super::super::FanOutMode::SubscriptionPrefix,
+            &crate::context::IoPoolHandle::none(),
+        )
+    }
+
+    fn add_inbox_peer(
+        sender: &mut super::super::FanOutSend,
+        id: u64,
+    ) -> tokio::sync::mpsc::Receiver<PeerDriverData> {
+        let (inbox, _commands) = tokio::sync::mpsc::channel(1);
+        let (data_inbox, data) = tokio::sync::mpsc::channel(1);
+        sender.connection_added(
+            id,
+            crate::engine::PeerDriverHandle {
+                inbox,
+                data_inbox,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                transmit_slot: None,
+                direct_tcp_writer: None,
+                send_pipe: None,
+            },
+            0,
+        );
+        assert!(sender.peer_subscribe(id, Bytes::new()).is_none());
+        data
+    }
+
+    #[tokio::test]
+    async fn nodrop_fallback_waits_without_starving_ready_peers_and_close_wakes_it() {
+        let mut sender = blocking_sender();
+        let mut slow = add_inbox_peer(&mut sender, 0);
+        let mut fast = add_inbox_peer(&mut sender, 1);
+        sender
+            .submitter()
+            .send(Message::single("first"))
+            .await
+            .unwrap();
+        let submitter = sender.submitter();
+        let blocked = tokio::spawn(async move { submitter.send(Message::single("second")).await });
+        tokio::task::yield_now().await;
+        assert!(!blocked.is_finished(), "full peers must backpressure send");
+        assert_eq!(recv_inbox_message(&mut fast), Message::single("first"));
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), fast.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(delivered, PeerDriverData::SendMessage(message) if message == Message::single("second"))
+        );
+        assert!(
+            !blocked.is_finished(),
+            "slow peer still holds its first message"
+        );
+        assert_eq!(recv_inbox_message(&mut slow), Message::single("first"));
+        blocked.await.unwrap().unwrap();
+        assert_eq!(recv_inbox_message(&mut slow), Message::single("second"));
+
+        sender
+            .submitter()
+            .send(Message::single("third"))
+            .await
+            .unwrap();
+        let submitter = sender.submitter();
+        let blocked = tokio::spawn(async move { submitter.send(Message::single("fourth")).await });
+        tokio::task::yield_now().await;
+        assert!(!blocked.is_finished());
+        sender.stop_admission();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), blocked)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(omq_proto::Error::Closed)));
+        sender.shutdown();
+    }
+
+    #[tokio::test]
+    async fn nodrop_try_send_reserves_all_fallbacks_before_publication() {
+        let mut sender = blocking_sender();
+        let mut first = add_inbox_peer(&mut sender, 0);
+        let mut second = add_inbox_peer(&mut sender, 1);
+        let submitter = sender.submitter();
+        submitter.try_send(Message::single("first")).unwrap();
+        assert_eq!(recv_inbox_message(&mut first), Message::single("first"));
+        assert!(matches!(
+            submitter.try_send(Message::single("second")),
+            Err(omq_proto::TrySendError::Full(message)) if message == Message::single("second")
+        ));
+        assert!(
+            first.try_recv().is_err(),
+            "no partial publication before retry"
+        );
+        assert_eq!(recv_inbox_message(&mut second), Message::single("first"));
+        submitter.try_send(Message::single("second")).unwrap();
+        for receive in [&mut first, &mut second] {
+            assert_eq!(recv_inbox_message(receive), Message::single("second"));
+            assert!(receive.try_recv().is_err());
+        }
+        drop(first);
+        drop(second);
+        submitter.send(Message::single("gone")).await.unwrap();
+        sender.shutdown();
+    }
+
     #[test]
     fn drop_oldest_single_target_fallback_keeps_newest_frames() {
         let slot = test_slot_with_msg_cap(2);
@@ -283,10 +442,7 @@ mod tests {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
             msg_cap,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot
@@ -302,10 +458,7 @@ mod tests {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             crate::engine::transmit_slot::TRANSMIT_SLOT_CAP_DEFAULT,
             8,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot

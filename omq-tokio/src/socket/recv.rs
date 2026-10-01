@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
-use omq_proto::error::{Error, Result};
+use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 
@@ -304,6 +304,33 @@ impl std::fmt::Debug for SharedRecvPipe {
 }
 
 impl SharedRecvPipe {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Try one prepared delivery without parking the socket actor.
+    pub(crate) fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
+        let mut producer = self.producer.lock().unwrap();
+        if self.is_closed() || producer.is_consumer_dropped() {
+            return Err(TrySendError::Closed);
+        }
+        producer.push(msg).map_err(TrySendError::Full)?;
+        producer.flush();
+        drop(producer);
+        self.notify.mark();
+        self.blocking_waker.wake();
+        Ok(())
+    }
+
+    pub(crate) async fn space_ready(&self) {
+        self.space
+            .wait_until(|| {
+                let mut producer = self.producer.lock().unwrap();
+                self.is_closed() || producer.is_consumer_dropped() || !producer.is_full()
+            })
+            .await;
+    }
+
     /// Blocking send. Waits for space if the ring is full.
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
         let mut item = msg;

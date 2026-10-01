@@ -32,8 +32,8 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, build_dict_shipment, plaintext_payload, take_budget,
-    validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, build_dict_shipment, plaintext_payload,
+    take_budget, validate_dict,
 };
 
 const SENTINEL_LZ4B: [u8; 4] = *b"LZ4B";
@@ -302,6 +302,29 @@ impl Lz4Encoder {
         }
     }
 
+    /// Reconfigure a reusable offload encoder for another primary. Call only
+    /// for offload encoders after the primary's dictionary shipment/training.
+    /// This does not change a live connection's dictionary or emit a shipment.
+    pub fn sync_offload_config(&mut self, primary: &Self) {
+        debug_assert!(self.can_offload() && primary.can_offload());
+        let same = match (&self.send_dict, &primary.send_dict) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
+            _ => false,
+        };
+        if !same {
+            self.send_dict.clone_from(&primary.send_dict);
+            self.compressor = match &self.send_dict {
+                Some(dict) => LzCompressor::Dict(DictCompressor::new(dict)),
+                None => LzCompressor::NoDict(Compressor::new()),
+            };
+        }
+        self.max_message_size = primary.max_message_size;
+        self.block_size = primary.block_size;
+        self.threshold_override = primary.threshold_override;
+        self.dict_capacity = primary.dict_capacity;
+    }
+
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         if let Some(trainer) = &mut self.trainer {
             for part in &msg.parts_payload() {
@@ -422,7 +445,8 @@ impl Lz4Decoder {
         Self::default()
     }
 
-    /// Set the decompression-size budget (RFC §7).
+    /// Set the raw decoder's decompressed-body budget. Socket-level
+    /// [`super::MessageDecoder`] also reserves a payload slot per part.
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
@@ -431,7 +455,7 @@ impl Lz4Decoder {
 
     #[must_use]
     pub fn with_max_recv_dict_size(mut self, max: usize) -> Self {
-        self.max_recv_dict_size = max;
+        self.max_recv_dict_size = max.min(MAX_DICT_BYTES);
         self
     }
 
@@ -451,9 +475,39 @@ impl Lz4Decoder {
     }
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        self.decode_with_budget(msg, self.max_message_size)
+    }
+
+    pub(super) fn decode_with_payload_slots(&mut self, msg: Message) -> Result<Option<Message>> {
+        if is_dict_shipment(&msg) {
+            return self.decode(msg);
+        }
+        let budget = body_budget(msg.len(), self.max_message_size)?;
+        self.decode_with_budget(msg, budget)
+    }
+
+    pub(super) fn max_wire_message_size(&self) -> Option<usize> {
+        self.max_message_size.map(|limit| {
+            let parts = limit / size_of::<Payload>();
+            // The pinned lz4rip output bound is n + n/10 + 20 bytes, plus
+            // the four-byte block length. Bound sum ceil(n/block_size).
+            let blocks = (limit / self.block_size.max(1)).saturating_add(parts);
+            let data = limit
+                .saturating_add(limit / 10)
+                .saturating_add(blocks.saturating_mul(4 + 20))
+                .saturating_add(parts.saturating_mul(ENVELOPE_LZ4B));
+            let setup = ENVELOPE_PLAIN + self.max_recv_dict_size + size_of::<Payload>();
+            data.max(setup).min(isize::MAX.unsigned_abs())
+        })
+    }
+
+    fn decode_with_budget(
+        &mut self,
+        msg: Message,
+        mut budget_left: Option<usize>,
+    ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
-        let mut budget_left = self.max_message_size;
         for (idx, part) in parts.iter_mut().enumerate() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {
@@ -840,6 +894,38 @@ mod tests {
         let big = Bytes::from(vec![0u8; MAX_DICT_BYTES + 1]);
         let err = Lz4Encoder::with_send_dict(big).unwrap_err();
         assert!(matches!(err, Error::Protocol(_)));
+    }
+
+    #[test]
+    fn receive_dictionary_limit_cannot_raise_the_protocol_ceiling() {
+        let oversized = Bytes::from(vec![0x5a; MAX_DICT_BYTES + 1]);
+        let largest = Bytes::from(vec![0x5a; MAX_DICT_BYTES]);
+        for limit in [MAX_DICT_BYTES, MAX_DICT_BYTES + 1, usize::MAX] {
+            let mut decoder = Lz4Decoder::new()
+                .with_max_recv_dict_size(limit)
+                .with_max_message_size(Some(0));
+            assert!(matches!(
+                decoder.decode(build_dict_shipment(SENTINEL_LZ4D, &oversized)),
+                Err(Error::Protocol(_))
+            ));
+            assert!(
+                decoder
+                    .decode(build_dict_shipment(SENTINEL_LZ4D, &largest))
+                    .unwrap()
+                    .is_none(),
+                "valid dictionaries do not consume the logical message budget"
+            );
+        }
+        let mut decoder = Lz4Decoder::new().with_max_recv_dict_size(31);
+        assert!(
+            decoder
+                .decode(build_dict_shipment(
+                    SENTINEL_LZ4D,
+                    &Bytes::from(vec![0x5a; 32])
+                ))
+                .is_err(),
+            "smaller configured dictionary limits still apply"
+        );
     }
 
     #[test]

@@ -35,7 +35,8 @@ pub use monitor::{
     PeerCommandKind, PeerIdent, PeerInfo,
 };
 pub use options::{
-    KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options, ReconnectPolicy, WorkloadProfile,
+    CompressionOptions, KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options,
+    ReconnectPolicy, WorkloadProfile,
 };
 pub use proto::mechanism::MechanismSetup;
 pub use proto::mechanism::{
@@ -43,4 +44,5 @@ pub use proto::mechanism::{
 };
 #[cfg(feature = "curve")]
 pub use proto::mechanism::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
+pub use proto::transform::CompressionKind;
 pub use proto::{SocketType, is_compatible};

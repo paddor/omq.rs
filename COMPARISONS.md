@@ -64,10 +64,9 @@ blocking API.
 
 ## Producer/Consumer Throughput
 
-Direct ZMTP, gRPC streaming over HTTP/2, brokered queues, and
-persistent stream/log systems over loopback TCP. Kafka and Redis Streams
-are included for context, but they are not transparent ZMQ-style
-PUSH/PULL sockets.
+Direct ZMTP/TCP, gRPC streaming over HTTP/2, brokered queues, Redis Streams,
+zenoh/TCP, Aeron/UDP, and iroh/QUIC over loopback. Transport and delivery
+semantics differ; the legend identifies each transport.
 
 <p align="center">
   <img src="doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">

@@ -355,7 +355,8 @@ Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
 `doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
 `doc/charts/main_reqrep_tcp.svg` (REQ/REP latency). The MOM benchmark also
 feeds `doc/charts/main_mom_tcp.svg` (throughput) and
-`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). TCP only.
+`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). The MOM
+charts also load Aeron UDP and iroh QUIC rows when present; zenoh uses TCP.
 Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:
 
 ```sh

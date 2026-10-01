@@ -22,6 +22,7 @@ pub(crate) const MUTED_TEXT_COLOR: RGBColor = RGBColor(156, 163, 175);
 pub(crate) const TITLE_FILL: &str = "#F9FAFB";
 pub(crate) const MUTED_FILL: &str = "#9CA3AF";
 
+#[derive(Clone, Copy)]
 pub(crate) struct Impl {
     pub key: &'static str,
     pub label: &'static str,
@@ -103,10 +104,12 @@ pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
 pub(crate) const C_RABBITMQ: RGBColor = RGBColor(251, 146, 60);
-pub(crate) const C_KAFKA: RGBColor = RGBColor(148, 163, 184);
+pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
 pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
-pub(crate) const C_IGGY: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
+pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
+pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 191, 36);
 
 // formatting
 
@@ -528,13 +531,14 @@ fn draw_legend_table_with_versions(
 
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
-        "omq-tokio-1t" => "omq-tokio v0.21.4",
+        "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.21.4",
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
-        "kafka" => "rdkafka v0.38.0",
+        "aeron-udp-2proc" => "Aeron v1.51.0",
         "nats" => "async-nats v0.42.0",
         "redis-streams" => "redis v0.32.7",
-        "iggy" => "iggy v0.10.0",
+        "zenoh-tcp-2proc" => "zenoh v1.10.1",
+        "iroh-quic-2proc" => "iroh v1.3.0",
         _ => "",
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "omq-rivals"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+zenoh = { version = "=1.10.1", default-features = false, features = ["transport_tcp"] }
+tokio = { version = "1", features = ["full"] }
+
+[workspace]

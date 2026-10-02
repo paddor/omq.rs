@@ -24,14 +24,19 @@ low-overhead configurations, not equal durability guarantees. Aeron, zenoh,
 and iroh each cover all 15 throughput and six latency sizes shown. A series
 appears only where a measured data row exists.
 
+OMQ, gRPC, NATS, Redis Streams, Aeron, zenoh, and iroh were refreshed on
+2026-10-02. RabbitMQ throughput retains the 2026-09-01 run; no RabbitMQ
+latency row is plotted. NATS used an 8 MiB `max_payload` setting to cover the
+largest chart sizes.
+
 ## Producer/Consumer Throughput
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+  <img src="doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>
 
 ## Request/Reply-Like Latency
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/main_mom_latency_tcp.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
+  <img src="doc/charts/main_mom_latency_tcp.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
 </p>

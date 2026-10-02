@@ -273,6 +273,8 @@ cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
   --warmup 1 --duration 3 --run-id mom-rust-timed-cpu-YYYYMMDD
 ```
 
+Set NATS `max_payload` to 8 MiB for the 4 MiB and 8 MiB chart sizes.
+
 Latency mode measures one request at a time and reports round-trip
 percentiles. gRPC uses unary echo, NATS uses native request/reply, RabbitMQ
 uses its RPC queue pattern, and Kafka, Redis Streams, and Iggy use paired

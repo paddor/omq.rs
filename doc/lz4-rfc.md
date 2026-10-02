@@ -385,33 +385,6 @@ If the budget is exhausted, the connection closes.
 
 If `max_message_size` is not set (unlimited), no bound is enforced.
 
-### 8.1 OMQ decoded and wire accounting
-
-OMQ's socket limit charges decoded body bytes plus one `Payload` slot per
-part (currently 64 bytes). `MessageDecoder` reserves all part slots before
-decompressing any body. Empty parts consume this metadata budget. The public
-raw `Lz4Decoder` retains its body-only budget for existing codec callers.
-
-The ZMTP/ZWS framer uses a separate finite data allowance when the socket
-limit is finite. It counts transformed body bytes and payload slots. It
-allows passthrough prefixes, LZ4M expansion, and an 8-KiB dictionary shipment
-without charging these against the decoded application budget. Command
-limits retain the original socket limit. Handshake ceilings remain separate.
-
-For decoded limit `M`, slot count bound `P = floor(M / 64)`, and block size
-`B`, the conservative data allowance is
-`M + floor(M / 10) + 24 * (floor(M / B) + P) + 12 * P`. The pinned
-`lz4rip` output bound is `n + floor(n / 10) + 20` per block; each block
-also carries a four-byte length. This covers the library's declared bound
-without assuming a tighter LZ4 compressor output bound.
-The framer uses the larger of this allowance and `4 + dict_cap + 64`, with
-saturating arithmetic and a final `isize::MAX` ceiling. The dictionary's
-own 8-KiB protocol ceiling and once-per-direction rule still apply.
-
-This bounds assembly before decoding; it does not classify dictionary
-prefixes from partial frame input. Under a larger data allowance, an invalid
-dictionary can be assembled before its stricter dictionary cap is checked.
-
 
 ## 9. ZMTP Interaction
 

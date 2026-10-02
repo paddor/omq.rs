@@ -26,22 +26,24 @@ RESULT = re.compile(r"^impl=(\S+) kind=(\S+) size=(\d+) round=(\d+) (.*)$")
 BAD = re.compile(r"\bwarn(?:ing)?\b|timeout", re.IGNORECASE)
 
 
-def command(name, mode, role, size, port, control):
+def command(name, mode, role, size, port, control, pin):
     if name == "aeron":
         jar = Path(os.environ["AERON_JAR"])
         classes = Path(os.environ["AERON_CLASSES"])
-        return [
+        cmd = [
             "java", "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
             "-cp", f"{classes}:{jar}", "AeronUdpPeer", mode, role,
             str(size), str(port), str(control),
         ]
-    binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq-rivals"
-    return [str(binary), name, mode, role, str(size), str(port), str(control)]
+    else:
+        binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq-rivals"
+        cmd = [str(binary), name, mode, role, str(size), str(port), str(control)]
+    return (["taskset", "-c", "3-4" if role == "server" else "1-2"] + cmd) if pin else cmd
 
 
-def run_pair(name, mode, size, port, control):
+def run_pair(name, mode, size, port, control, pin):
     server = subprocess.Popen(
-        command(name, mode, "server", size, port, control),
+        command(name, mode, "server", size, port, control, pin),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
     )
     client = None
@@ -52,13 +54,13 @@ def run_pair(name, mode, size, port, control):
         if server.poll() is not None:
             raise RuntimeError("server exited before client started")
         client = subprocess.Popen(
-            command(name, mode, "client", size, port, control),
+            command(name, mode, "client", size, port, control, pin),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         for proc, role in ((server, "server"), (client, "client")):
             sel.register(proc.stdout, selectors.EVENT_READ, (role, "stdout"))
             sel.register(proc.stderr, selectors.EVENT_READ, (role, "stderr"))
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + 300
         while sel.get_map():
             if time.monotonic() >= deadline:
                 raise RuntimeError("benchmark timeout")
@@ -104,8 +106,9 @@ def parse_rounds(lines, name, mode, size):
             key, value = item.split("=", 1)
             values[key] = float(value)
         rounds.append((int(round_number), values))
-    if [n for n, _ in rounds] != [1, 2, 3]:
-        raise RuntimeError(f"expected three rounds; got {rounds}")
+    expected = [1, 2, 3] if mode == "throughput" else [1]
+    if [n for n, _ in rounds] != expected:
+        raise RuntimeError(f"expected rounds {expected}; got {rounds}")
     return rounds
 
 
@@ -129,6 +132,9 @@ def comparison_row(name, mode, size, rounds, run_id):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", choices=TRANSPORT)
+    parser.add_argument("--mode", choices=SIZES, help="run only throughput or latency")
+    parser.add_argument("--sizes", help="comma-separated subset of sizes for the selected mode")
+    parser.add_argument("--pin", action="store_true", help="client CPUs 1-2, server CPUs 3-4")
     parser.add_argument("--port-base", type=int, default=43100)
     parser.add_argument(
         "--output", type=Path,
@@ -139,11 +145,18 @@ def main():
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{args.name}-2proc"
     rows = []
     with tempfile.TemporaryDirectory(prefix="omq-rivals-", dir=os.getenv("TMPDIR")) as temp:
-        for mode, sizes in SIZES.items():
+        modes = (args.mode,) if args.mode else SIZES
+        requested = None if args.sizes is None else tuple(int(s) for s in args.sizes.split(","))
+        if requested is not None and args.mode is None:
+            parser.error("--sizes requires --mode")
+        for mode in modes:
+            sizes = SIZES[mode] if requested is None else requested
+            if any(size not in SIZES[mode] for size in sizes):
+                parser.error(f"invalid {mode} size")
             for size in sizes:
                 port = args.port_base + len(rows) * 2
                 control = Path(temp) / f"{args.name}-{mode}-{size}"
-                lines = run_pair(args.name, mode, size, port, control)
+                lines = run_pair(args.name, mode, size, port, control, args.pin)
                 rounds = parse_rounds(lines, args.name, mode, size)
                 rows.append(comparison_row(args.name, mode, size, rounds, run_id))
     with args.output.open("a", encoding="utf-8") as output:

@@ -525,7 +525,20 @@ fn spawn_worker(
     files: ProducerFiles<'_>,
 ) -> Result<std::process::Child> {
     let exe = std::env::current_exe()?;
-    let mut cmd = Command::new(exe);
+    let mut cmd = if std::env::var_os("OMQ_MOM_BENCH_PIN").is_some() {
+        let cpus = match (impl_name == "grpc-rust", role) {
+            (true, Role::Producer) => "1-2",
+            (true, Role::Responder) => "3-4",
+            (false, Role::Producer) => "1",
+            (false, Role::Responder) => "2",
+            (_, Role::Coordinator) => bail!("cannot spawn coordinator as worker"),
+        };
+        let mut cmd = Command::new("taskset");
+        cmd.arg("-c").arg(cpus).arg(exe);
+        cmd
+    } else {
+        Command::new(exe)
+    };
     cmd.arg("--role")
         .arg(match role {
             Role::Producer => "producer",
@@ -627,7 +640,22 @@ async fn run_responder(args: &Args) -> Result<()> {
             grpc::producer(size, ready_file, port_file).await
         }
         "nats" => nats::responder(&args.nats_url, token, size, ready_file).await,
-        "rabbitmq" => rabbit::responder(&args.rabbitmq_url, token, size, ready_file).await,
+        "rabbitmq" => {
+            let stop_file = args.stop_file.as_deref().context("stop file missing")?;
+            let iterations = args
+                .latency_warmup
+                .checked_add(args.latency_iterations)
+                .context("latency iteration count overflow")?;
+            rabbit::responder(
+                &args.rabbitmq_url,
+                token,
+                size,
+                ready_file,
+                stop_file,
+                iterations,
+            )
+            .await
+        }
         "kafka" => kafka::responder(&args.kafka_url, token, size, ready_file).await,
         "redis-streams" => redis::responder(&args.redis_url, token, size, ready_file),
         "iggy" => {

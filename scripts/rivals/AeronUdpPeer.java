@@ -13,9 +13,12 @@ import java.util.Arrays;
 
 /** One Aeron client and one embedded Media Driver per process. */
 public final class AeronUdpPeer {
-    private static final long TIMEOUT_NS = 30_000_000_000L;
-    private static final int WARMUP_RTT = 2_000;
-    private static final int SAMPLES = 20_000;
+    private static final long TIMEOUT_NS = 180_000_000_000L;
+    // Long enough for the JIT to finish compiling the round-trip path.
+    private static final int WARMUP_RTT = 200_000;
+    private static final int SAMPLES = 10_000;
+    private static final long WARMUP_NS = 3_000_000_000L;
+    private static final long MEASURE_NS = 3_000_000_000L;
 
     private static void check(long started, String phase) {
         if (System.nanoTime() - started > TIMEOUT_NS) {
@@ -39,66 +42,89 @@ public final class AeronUdpPeer {
         }
     }
 
-    private static long countFor(int size) {
-        return Math.min(4_000_000L, Math.max(32L, 256L * 1024 * 1024 / size));
-    }
-
-    private static long warmupFor(int size) {
-        return Math.min(10_000L, Math.max(1L, 8L * 1024 * 1024 / size));
-    }
-
     private static void receiveThroughput(Subscription incoming, Publication outgoing, int size) {
-        long[] received = {0};
-        FragmentAssembler assembler = new FragmentAssembler((buffer, offset, length, header) -> {
-            if (length != size) {
-                throw new IllegalStateException("wrong message length " + length);
-            }
-            received[0]++;
-        });
-        UnsafeBuffer ack = new UnsafeBuffer(ByteBuffer.allocateDirect(Long.BYTES));
+        UnsafeBuffer ack = new UnsafeBuffer(ByteBuffer.allocateDirect(3 * Long.BYTES));
         for (int round = -1; round < 3; round++) {
-            long count = round == -1 ? warmupFor(size) : countFor(size);
-            long target = received[0] + count;
+            final int currentRound = round;
+            long duration = round == -1 ? WARMUP_NS : MEASURE_NS;
+            long[] first = {0};
+            long[] received = {0};
+            long[] measured = {0};
+            boolean[] ended = {false};
+            FragmentAssembler assembler = new FragmentAssembler((buffer, offset, length, header) -> {
+                if (length == Long.BYTES) {
+                    if (buffer.getLong(offset) != currentRound) {
+                        throw new IllegalStateException("wrong end marker");
+                    }
+                    ended[0] = true;
+                    return;
+                }
+                if (length != size || ended[0]) {
+                    throw new IllegalStateException("wrong message length " + length);
+                }
+                long now = System.nanoTime();
+                if (first[0] == 0) {
+                    first[0] = now;
+                }
+                received[0]++;
+                if (now - first[0] < duration) {
+                    measured[0]++;
+                }
+            });
             long started = System.nanoTime();
-            while (received[0] < target) {
+            while (!ended[0]) {
                 if (incoming.poll(assembler, 32) == 0) {
                     Thread.onSpinWait();
                 }
                 check(started, "receive round " + round);
             }
-            if (received[0] != target) {
-                throw new IllegalStateException("wrong message count " + received[0]);
+            if (received[0] == 0) {
+                throw new IllegalStateException("empty round");
             }
             ack.putLong(0, round);
-            offer(outgoing, ack, Long.BYTES, "ack round " + round);
+            ack.putLong(Long.BYTES, measured[0]);
+            ack.putLong(2 * Long.BYTES, received[0]);
+            offer(outgoing, ack, 3 * Long.BYTES, "ack round " + round);
         }
     }
 
     private static void sendThroughput(Publication outgoing, Subscription incoming, int size) {
         UnsafeBuffer payload = new UnsafeBuffer(ByteBuffer.allocateDirect(size));
+        UnsafeBuffer marker = new UnsafeBuffer(ByteBuffer.allocateDirect(Long.BYTES));
         long[] lastAck = {-2};
+        long[] measured = {0};
+        long[] received = {0};
         for (int round = -1; round < 3; round++) {
-            long count = round == -1 ? warmupFor(size) : countFor(size);
             long started = System.nanoTime();
-            for (long i = 0; i < count; i++) {
+            long duration = round == -1 ? WARMUP_NS : MEASURE_NS;
+            long sent = 0;
+            while (System.nanoTime() - started < duration) {
                 while (outgoing.offer(payload, 0, size) < 0) {
                     check(started, "send round " + round);
                     Thread.onSpinWait();
                 }
+                sent++;
             }
+            marker.putLong(0, round);
+            offer(outgoing, marker, Long.BYTES, "end round " + round);
             while (lastAck[0] != round) {
                 incoming.poll((buffer, offset, length, header) -> {
-                    if (length != Long.BYTES) {
+                    if (length != 3 * Long.BYTES) {
                         throw new IllegalStateException("wrong ack length " + length);
                     }
                     lastAck[0] = buffer.getLong(offset);
+                    measured[0] = buffer.getLong(offset + Long.BYTES);
+                    received[0] = buffer.getLong(offset + 2 * Long.BYTES);
                 }, 10);
                 check(started, "ack round " + round);
                 Thread.onSpinWait();
             }
+            if (received[0] != sent || measured[0] > received[0]) {
+                throw new IllegalStateException("wrong receiver count");
+            }
             if (round >= 0) {
-                double elapsed = (System.nanoTime() - started) / 1e9;
-                double msgsPerSecond = count / elapsed;
+                double elapsed = MEASURE_NS / 1e9;
+                double msgsPerSecond = measured[0] / elapsed;
                 System.out.printf("impl=aeron-udp-2proc kind=throughput size=%d round=%d msgs_s=%.6f mbps=%.6f elapsed=%.6f%n",
                     size, round + 1, msgsPerSecond, msgsPerSecond * size / 1e6, elapsed);
             }
@@ -108,7 +134,7 @@ public final class AeronUdpPeer {
     private static void echo(Subscription incoming, Publication outgoing, int size) {
         long[] received = {0};
         long started = System.nanoTime();
-        long total = WARMUP_RTT + 3L * SAMPLES;
+        long total = WARMUP_RTT + SAMPLES;
         FragmentAssembler assembler = new FragmentAssembler((buffer, offset, length, header) -> {
             if (length != size) {
                 throw new IllegalStateException("wrong request length " + length);
@@ -138,30 +164,25 @@ public final class AeronUdpPeer {
             }
             lastReply[0] = buffer.getLong(offset);
         });
-        long sequence = 0;
-        for (int round = 0; round < 3; round++) {
-            int count = round == 0 ? WARMUP_RTT + SAMPLES : SAMPLES;
-            long[] samples = new long[SAMPLES];
-            for (int i = 0; i < count; i++) {
-                payload.putLong(0, sequence);
-                long started = System.nanoTime();
-                offer(outgoing, payload, size, "request");
-                while (lastReply[0] != sequence) {
-                    incoming.poll(assembler, 10);
-                    check(started, "response");
-                    Thread.onSpinWait();
-                }
-                if (round != 0 || i >= WARMUP_RTT) {
-                    samples[round == 0 ? i - WARMUP_RTT : i] = System.nanoTime() - started;
-                }
-                sequence++;
+        long[] samples = new long[SAMPLES];
+        for (long sequence = 0; sequence < WARMUP_RTT + SAMPLES; sequence++) {
+            payload.putLong(0, sequence);
+            long started = System.nanoTime();
+            offer(outgoing, payload, size, "request");
+            while (lastReply[0] != sequence) {
+                incoming.poll(assembler, 10);
+                check(started, "response");
+                Thread.onSpinWait();
             }
-            Arrays.sort(samples);
-            System.out.printf("impl=aeron-udp-2proc kind=latency size=%d round=%d p50_us=%.6f p99_us=%.6f p999_us=%.6f%n",
-                size, round + 1, samples[SAMPLES / 2] / 1_000.0,
-                samples[SAMPLES * 99 / 100] / 1_000.0,
-                samples[SAMPLES * 999 / 1000] / 1_000.0);
+            if (sequence >= WARMUP_RTT) {
+                samples[(int) sequence - WARMUP_RTT] = System.nanoTime() - started;
+            }
         }
+        Arrays.sort(samples);
+        System.out.printf("impl=aeron-udp-2proc kind=latency size=%d round=1 p50_us=%.6f p99_us=%.6f p999_us=%.6f%n",
+            size, samples[SAMPLES / 2] / 1_000.0,
+            samples[SAMPLES * 99 / 100] / 1_000.0,
+            samples[SAMPLES * 999 / 1000] / 1_000.0);
     }
 
     public static void main(String[] args) throws Exception {

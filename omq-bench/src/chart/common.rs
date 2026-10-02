@@ -105,7 +105,6 @@ pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
 pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
 pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
-pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 191, 36);
 
 // formatting
 

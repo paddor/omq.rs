@@ -288,7 +288,7 @@ omq
 </text>
 <polyline fill="none" opacity="1" stroke="#FB923C" stroke-width="2" points="78,398 92,398 "/>
 <text x="98" y="392" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-omq (50 us spin)
+omq (50 μs spin)
 </text>
 <text x="250" y="392" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 1 IO

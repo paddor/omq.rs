@@ -78,7 +78,7 @@ const REQREP_IMPLS: &[Impl] = &[
     },
     Impl {
         key: "omq-tokio-1t-spin50",
-        label: "omq (50 us spin)",
+        label: "omq (50 μs spin)",
         threads: "1 IO",
         color: C_OMQ_SPIN,
     },

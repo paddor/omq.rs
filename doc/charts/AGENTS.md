@@ -25,13 +25,15 @@ Data: `comparisons.jsonl`. External impls required.
 |------|-------|
 | `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
 | `main_mom_tcp.svg` | omq TCP, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
-| `main_mom_latency_tcp.svg` | omq TCP, omq 50 μs spin, gRPC, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
+| `main_mom_latency_tcp.svg` | omq TCP, omq 50 μs spin, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
 | `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 64 peers). REQ/REP latency sizes: 16B..16KiB (6 points).
 MOM request/reply-like latency sizes: 16B, 32B, 64B, 256B, 1KiB, 4KiB.
+MOM latency uses a linear Y axis with 20 μs ticks, p99 lines, and p50 to p99.9
+whiskers. Off-scale p99.9 values are marked and labeled.
 The MOM chart filenames predate the mixed transports. Each legend entry names
 its transport. Missing benchmark rows do not produce plotted points.
 External loopback rows use `aeron-udp-2proc`, `zenoh-tcp-2proc`, and

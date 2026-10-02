@@ -1525,6 +1525,17 @@ fn representative_of(rounds: u32, mut f: impl FnMut(u32) -> CellResult) -> CellR
         .unwrap_or_else(|| zero_result(0.0))
 }
 
+fn representative_latency_of(
+    rounds: u32,
+    mut measure: impl FnMut() -> Option<LatencyResult>,
+) -> Option<LatencyResult> {
+    let mut results = (0..rounds).map(|_| measure()).collect::<Option<Vec<_>>>()?;
+    results.sort_by(|a, b| a.p99_us.total_cmp(&b.p99_us));
+    results
+        .into_iter()
+        .nth((rounds.saturating_sub(1) / 2) as usize)
+}
+
 fn cleanup_ipc_addr(addr: &str, impl_name: &str) {
     if uses_filesystem_ipc(impl_name)
         && let Some(path) = addr.strip_prefix("ipc://")
@@ -1789,19 +1800,21 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             let def = find_impl(impl_name).unwrap();
                             let binary = binaries[impl_name].as_path();
 
-                            let result = run_latency_cell(
-                                binary,
-                                binary,
-                                def,
-                                transport,
-                                size,
-                                latency_iters,
-                                latency_warmup,
-                                latency_timeout,
-                                base_port,
-                                pair,
-                                profile,
-                            );
+                            let result = representative_latency_of(rounds, || {
+                                run_latency_cell(
+                                    binary,
+                                    binary,
+                                    def,
+                                    transport,
+                                    size,
+                                    latency_iters,
+                                    latency_warmup,
+                                    latency_timeout,
+                                    base_port,
+                                    pair,
+                                    profile,
+                                )
+                            });
 
                             match result {
                                 Some(lat) => {

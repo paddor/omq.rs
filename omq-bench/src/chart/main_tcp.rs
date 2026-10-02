@@ -1,7 +1,7 @@
 use super::common::{
     self, C_AERON, C_GRPC, C_IROH, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T,
     C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_OMQ_SPIN, C_RABBITMQ, C_REDIS, C_RZMQ,
-    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, ValMap,
+    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyMap, ValMap,
     draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
@@ -218,7 +218,7 @@ fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuDa
     (tput, msgs, cpu)
 }
 
-fn mom_latency() -> (ValMap, std::collections::BTreeMap<String, CpuData>) {
+fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
     let (mut lat, mut cpu) = load_latency("tcp", LAT_SIZES, &mom_tcp_impls());
     for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_IMPLS)] {
         let (other_lat, other_cpu) = load_latency(transport, LAT_SIZES, impls);
@@ -321,7 +321,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_mom_tcp.svg");
         draw_throughput_dual_panel_brokered_with_versions(
             &out,
-            "Producer/consumer throughput, loopback, 2-process",
+            "Producer/consumer throughput, loopback, one flow",
             TPUT_SIZES,
             MOM_IMPLS,
             &tput,
@@ -341,7 +341,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_mom_latency_tcp.svg");
         draw_latency_brokered_with_versions(
             &out,
-            "Sequential request/reply-like latency, loopback, 2-process",
+            "Sequential request/reply-like latency, loopback, one flow",
             LAT_SIZES,
             MOM_IMPLS,
             &lat,

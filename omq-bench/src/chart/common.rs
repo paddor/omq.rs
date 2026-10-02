@@ -105,7 +105,6 @@ pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
 pub(crate) const C_ZENOH: RGBColor = RGBColor(255, 255, 255);
 pub(crate) const C_IROH: RGBColor = RGBColor(167, 139, 250);
-pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 191, 36);
 
 // formatting
 
@@ -515,7 +514,7 @@ fn draw_legend_table_with_versions(
 
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
-        "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.21.4",
+        "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.24.0",
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
         "aeron-udp-2proc" => "Aeron v1.51.0",
@@ -1372,7 +1371,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
-    lat: &ValMap,
+    lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -1384,7 +1383,12 @@ pub(crate) fn draw_latency_brokered_with_versions(
             })
         })
         .collect();
-    let lat_range = auto_lat_range(lat);
+    let max_p50 = lat
+        .values()
+        .flat_map(|values| values.values())
+        .map(|entry| entry.p50)
+        .fold(0.0_f64, f64::max);
+    let lat_range = (0.0, nice_axis(max_p50 * 1.05, 6).0);
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
@@ -1432,7 +1436,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
             .filter_map(|(index, size)| {
                 lat.get(size)?
                     .get(imp.key)
-                    .map(|&value| (index as f64, value))
+                    .map(|value| (index as f64, value.p50))
             })
             .collect();
         if points.is_empty() {

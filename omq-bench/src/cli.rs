@@ -102,7 +102,7 @@ pub(crate) struct ComparisonsArgs {
     #[arg(long)]
     pub duration: Option<f64>,
 
-    /// Measurement rounds. Defaults to 1; N>1 keeps the median throughput round.
+    /// Measurement rounds. Defaults to 1; N>1 keeps the median throughput or p99 latency round.
     #[arg(long)]
     pub rounds: Option<u32>,
 

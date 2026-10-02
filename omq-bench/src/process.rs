@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // Optional legacy affinity masks. Disabled unless OMQ_BENCH_TASKSET is set.
-pub(crate) const MEASURED_CPU: &str = "0-2";
-pub(crate) const OTHER_CPU: &str = "3-5";
+pub(crate) const MEASURED_CPU: &str = "1-2";
+pub(crate) const OTHER_CPU: &str = "3-4";
 const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
 
 static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();

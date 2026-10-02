@@ -17,20 +17,28 @@ cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Main charts (3 files)
+## Main charts (5 files)
 
 Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
 | `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 us receive spin, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
+| `main_mom_tcp.svg` | omq TCP, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
+| `main_mom_latency_tcp.svg` | omq TCP, omq 50 μs spin, gRPC, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 50 μs spin, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
-(6 points, 64 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
+(6 points, 64 peers). REQ/REP latency sizes: 16B..16KiB (6 points).
+MOM request/reply-like latency sizes: 16B, 32B, 64B, 256B, 1KiB, 4KiB.
+The MOM chart filenames predate the mixed transports. Each legend entry names
+its transport. Missing benchmark rows do not produce plotted points.
+External loopback rows use `aeron-udp-2proc`, `zenoh-tcp-2proc`, and
+`iroh-quic-2proc` implementation keys so single-process runs cannot be
+mistaken for two-process measurements.
 
-The `omq-tokio-1t-spin50` latency series sets `recv_spin` to 50 us on both
+The `omq-tokio-1t-spin50` latency series sets `recv_spin` to 50 μs on both
 endpoints, with one owned IO thread per process. Main and comparison REQ/REP
 charts exclude other socket pairs and explicit non-default profile runs.
 Older cache rows without pair/profile metadata remain valid REQ/REP defaults.

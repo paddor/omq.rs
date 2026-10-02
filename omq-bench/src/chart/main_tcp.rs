@@ -1,7 +1,9 @@
 use super::common::{
-    self, C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE,
-    C_OMQ_MT, C_OMQ_SPIN, C_RZMQ, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl,
-    draw_latency_single_panel_with_versions,
+    self, C_AERON, C_GRPC, C_IROH, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T,
+    C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_OMQ_SPIN, C_RABBITMQ, C_REDIS, C_RZMQ,
+    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyMap, ValMap,
+    draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
+    draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -10,7 +12,7 @@ const TPUT_SIZES: &[u64] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
 const PUBSUB_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
-const LAT_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
+const LAT_SIZES: &[u64] = &[16, 32, 64, 256, 1024, 4096];
 
 const PUSHPULL_IMPLS: &[Impl] = &[
     Impl {
@@ -78,8 +80,8 @@ const REQREP_IMPLS: &[Impl] = &[
     },
     Impl {
         key: "omq-tokio-1t-spin50",
-        label: "omq (50 us spin)",
-        threads: "1 IO",
+        label: "omq",
+        threads: "50 μs spin",
         color: C_OMQ_SPIN,
     },
     Impl {
@@ -119,6 +121,114 @@ const REQREP_IMPLS: &[Impl] = &[
         color: C_RZMQ_IOURING,
     },
 ];
+
+const MOM_IMPLS: &[Impl] = &[
+    Impl {
+        key: "omq-tokio-1t",
+        label: "OMQ / TCP",
+        threads: "",
+        color: C_OMQ_1T,
+    },
+    Impl {
+        key: "omq-tokio-1t-spin50",
+        label: "OMQ / TCP",
+        threads: "50 μs spin",
+        color: C_OMQ_SPIN,
+    },
+    Impl {
+        key: "grpc-rust",
+        label: "gRPC over HTTP/2",
+        threads: "",
+        color: C_GRPC,
+    },
+    Impl {
+        key: "rabbitmq",
+        label: "AMQP 0-9-1",
+        threads: "RabbitMQ",
+        color: C_RABBITMQ,
+    },
+    Impl {
+        key: "aeron-udp-2proc",
+        label: "Aeron / UDP",
+        threads: "",
+        color: C_AERON,
+    },
+    Impl {
+        key: "nats",
+        label: "NATS",
+        threads: "nats-server",
+        color: C_NATS,
+    },
+    Impl {
+        key: "redis-streams",
+        label: "Redis Streams",
+        threads: "Redis",
+        color: C_REDIS,
+    },
+    Impl {
+        key: "zenoh-tcp-2proc",
+        label: "zenoh / TCP",
+        threads: "",
+        color: C_ZENOH,
+    },
+    Impl {
+        key: "iroh-quic-2proc",
+        label: "iroh / QUIC",
+        threads: "",
+        color: C_IROH,
+    },
+];
+
+const MOM_UDP_IMPLS: &[Impl] = &[Impl {
+    key: "aeron-udp-2proc",
+    label: "Aeron / UDP",
+    threads: "",
+    color: C_AERON,
+}];
+
+const MOM_QUIC_IMPLS: &[Impl] = &[Impl {
+    key: "iroh-quic-2proc",
+    label: "iroh / QUIC",
+    threads: "",
+    color: C_IROH,
+}];
+
+fn merge_values(dst: &mut ValMap, src: ValMap) {
+    for (size, values) in src {
+        dst.entry(size).or_default().extend(values);
+    }
+}
+
+fn mom_tcp_impls() -> Vec<Impl> {
+    MOM_IMPLS
+        .iter()
+        .copied()
+        .filter(|imp| imp.key != "aeron-udp-2proc" && imp.key != "iroh-quic-2proc")
+        .collect()
+}
+
+fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuData>) {
+    let (mut tput, mut msgs, mut cpu) = load_tput("throughput", "tcp", None, &mom_tcp_impls());
+    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_IMPLS)] {
+        let (other_tput, other_msgs, other_cpu) = load_tput("throughput", transport, None, impls);
+        merge_values(&mut tput, other_tput);
+        merge_values(&mut msgs, other_msgs);
+        cpu.extend(other_cpu);
+    }
+    (tput, msgs, cpu)
+}
+
+fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
+    let (mut lat, mut cpu) = load_latency("tcp", LAT_SIZES, &mom_tcp_impls());
+    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_IMPLS)] {
+        let (other_lat, other_cpu) = load_latency(transport, LAT_SIZES, impls);
+        for (size, values) in other_lat {
+            lat.entry(size).or_default().extend(values);
+        }
+        cpu.extend(other_cpu);
+    }
+    (lat, cpu)
+}
 
 const PUBSUB_IMPLS: &[Impl] = &[
     Impl {
@@ -192,7 +302,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_pushpull_tcp.svg");
         draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
             &out,
-            "PUSH/PULL throughput, TCP loopback, 2-process",
+            "PUSH/PULL throughput, ZMQ-family TCP loopback, 2-process",
             TPUT_SIZES,
             PUSHPULL_IMPLS,
             &tput,
@@ -202,6 +312,42 @@ pub(crate) fn generate() {
             "rcv CPU%",
         )
         .expect("draw pushpull chart");
+        eprintln!("Written: {}", out.display());
+    }
+
+    // Producer/consumer throughput across direct, RPC, and brokered transports.
+    let (tput, msgs, cpu) = mom_throughput();
+    if !tput.is_empty() {
+        let out = dir.join("main_mom_tcp.svg");
+        draw_throughput_dual_panel_brokered_with_versions(
+            &out,
+            "Producer/consumer throughput, loopback, one flow",
+            TPUT_SIZES,
+            MOM_IMPLS,
+            &tput,
+            &msgs,
+            &cpu,
+            "snd CPU%",
+            "broker CPU%",
+            "rcv CPU%",
+        )
+        .expect("draw RPC/MOM chart");
+        eprintln!("Written: {}", out.display());
+    }
+
+    // Sequential request/reply-like latency across direct, RPC, and brokered transports.
+    let (lat, cpu) = mom_latency();
+    if !lat.is_empty() {
+        let out = dir.join("main_mom_latency_tcp.svg");
+        draw_latency_brokered_with_versions(
+            &out,
+            "Sequential request/reply-like latency, loopback, one flow",
+            LAT_SIZES,
+            MOM_IMPLS,
+            &lat,
+            &cpu,
+        )
+        .expect("draw RPC/MOM latency chart");
         eprintln!("Written: {}", out.display());
     }
 

@@ -1414,7 +1414,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
-    lat: &ValMap,
+    lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -1426,7 +1426,12 @@ pub(crate) fn draw_latency_brokered_with_versions(
             })
         })
         .collect();
-    let lat_range = auto_lat_range(lat);
+    let max_p50 = lat
+        .values()
+        .flat_map(|values| values.values())
+        .map(|entry| entry.p50)
+        .fold(0.0_f64, f64::max);
+    let lat_range = (0.0, nice_axis(max_p50 * 1.05, 6).0);
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
@@ -1474,7 +1479,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
             .filter_map(|(index, size)| {
                 lat.get(size)?
                     .get(imp.key)
-                    .map(|&value| (index as f64, value))
+                    .map(|value| (index as f64, value.p50))
             })
             .collect();
         if points.is_empty() {

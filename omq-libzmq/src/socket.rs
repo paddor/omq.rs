@@ -733,6 +733,23 @@ fn result_to_rc<T>(result: &Result<Result<T, omq_tokio::error::Error>, ()>) -> c
     }
 }
 
+/// Read codec parameters for this operation even after backend materialization.
+/// Validate both the requested overlay mechanism and the backend's actual
+/// mechanism; the latter is checked by the native endpoint setup.
+fn compression_options_for_endpoint(
+    overlay: &SocketOverlay,
+    endpoint: &Endpoint,
+) -> Result<Option<omq_tokio::CompressionOptions>, c_int> {
+    if omq_tokio::CompressionKind::for_endpoint(endpoint).is_none() {
+        return Ok(None);
+    }
+    let options = overlay.to_options();
+    omq_tokio::CompressionKind::for_endpoint_with_mechanism(endpoint, &options.mechanism)
+        .map_err(|_| libc::EINVAL)?;
+    options.validate().map_err(|_| libc::EINVAL)?;
+    Ok(Some(omq_tokio::CompressionOptions::from(&options)))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
     let (sock, addr_str, mut endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
@@ -762,6 +779,10 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     if ov.ipv6 {
         endpoint = ipv6_rewrite_wildcard(endpoint);
     }
+    let compression = match compression_options_for_endpoint(&ov, &endpoint) {
+        Ok(compression) => compression,
+        Err(error) => return fail(error),
+    };
     drop(ov);
 
     if sock.ctx.zero_io_threads() {
@@ -786,7 +807,12 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     };
 
     let result = with_socket(&sock.ctx, inner, move |s| async move {
-        s.bind(endpoint.clone()).await?;
+        if let Some(compression) = compression {
+            s.bind_with_compression_options(endpoint.clone(), compression)
+                .await?;
+        } else {
+            s.bind(endpoint.clone()).await?;
+        }
         let resolved = s.last_bound_endpoint().map(|ep| ep.to_string());
         Ok::<_, omq_tokio::error::Error>(resolved)
     });
@@ -820,6 +846,16 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         return fail(libc::EINVAL);
     }
 
+    let compression = {
+        let Ok(overlay) = sock.overlay.lock() else {
+            return fail(ETERM);
+        };
+        match compression_options_for_endpoint(&overlay, &endpoint) {
+            Ok(compression) => compression,
+            Err(error) => return fail(error),
+        }
+    };
+
     if sock.ctx.zero_io_threads() {
         if !zero_io_inproc_supported(sock, &endpoint) {
             return fail(libc::ENOTSUP);
@@ -843,7 +879,12 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
     };
 
     let result = with_socket(&sock.ctx, inner, move |s| async move {
-        s.connect(endpoint).await
+        if let Some(compression) = compression {
+            s.connect_with_compression_options(endpoint, compression)
+                .await
+        } else {
+            s.connect(endpoint).await
+        }
     });
 
     match result {
@@ -906,6 +947,8 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
 
     match result {
         Ok(Ok(())) => {
+            // Atomic::try_update is unstable on MSRV 1.93.
+            #[allow(deprecated)]
             let _ = sock
                 .connect_count
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

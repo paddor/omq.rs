@@ -15,6 +15,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
+use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{Context, ContextConfig, Endpoint, Error, Message, Options, Socket, SocketType};
 
 fn tcp_ep(port: u16) -> Endpoint {
@@ -486,9 +487,21 @@ async fn three_req_to_one_rep_direct_io_routing() {
 /// body queue must retain each request's routing envelope independently.
 #[tokio::test]
 async fn queued_requests_from_multiple_reqs_preserve_envelopes() {
+    assert_queued_requests_preserve_envelopes(Options::default()).await;
+}
+
+#[tokio::test]
+async fn queued_requests_preserve_envelopes_throughput_profile() {
+    assert_queued_requests_preserve_envelopes(
+        Options::default().workload_profile(WorkloadProfile::Throughput),
+    )
+    .await;
+}
+
+async fn assert_queued_requests_preserve_envelopes(rep_options: Options) {
     const PEERS: usize = 3;
 
-    let rep = Socket::new(SocketType::Rep, Options::default());
+    let rep = Socket::new(SocketType::Rep, rep_options);
     let ep = rep.bind(tcp_ep(0)).await.unwrap();
 
     let mut reqs = Vec::with_capacity(PEERS);
@@ -566,4 +579,109 @@ async fn rep_tcp_serves_sequential_clients() {
         )
         .await;
     }
+}
+
+/// libzmq splits the REP envelope at the first empty frame. Empty frames
+/// in the request or reply body belong to the body.
+async fn assert_empty_body_parts_roundtrip(
+    rep_ep: Endpoint,
+    client_type: SocketType,
+    rep_options: Options,
+) {
+    let rep = Socket::new(SocketType::Rep, rep_options);
+    let ep = rep.bind(rep_ep).await.unwrap();
+    let client = Socket::new(client_type, Options::default());
+    client.connect(ep).await.unwrap();
+    client
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .expect("client did not connect");
+
+    let bodies: [&[&str]; 4] = [
+        &["a", "", "b"],
+        &["", "b"],
+        &["a", ""],
+        &["a", "", "", "b", ""],
+    ];
+    for body in bodies {
+        let request = if client_type == SocketType::Dealer {
+            Message::multipart(std::iter::once("").chain(body.iter().copied()))
+        } else {
+            Message::multipart(body.iter().copied())
+        };
+        client.send(request).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), rep.recv())
+            .await
+            .expect("REP did not receive request")
+            .unwrap();
+        assert_eq!(
+            got,
+            Message::multipart(body.iter().copied()),
+            "request body"
+        );
+
+        rep.send(Message::multipart(body.iter().copied()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("client did not receive reply")
+            .unwrap();
+        let expected = if client_type == SocketType::Dealer {
+            Message::multipart(std::iter::once("").chain(body.iter().copied()))
+        } else {
+            Message::multipart(body.iter().copied())
+        };
+        assert_eq!(reply, expected, "reply body");
+    }
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_req_inproc() {
+    assert_empty_body_parts_roundtrip(
+        inproc_ep("rr-empty-body-req"),
+        SocketType::Req,
+        Options::default(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_req_tcp() {
+    assert_empty_body_parts_roundtrip(tcp_ep(0), SocketType::Req, Options::default()).await;
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_dealer_inproc() {
+    assert_empty_body_parts_roundtrip(
+        inproc_ep("rr-empty-body-dealer"),
+        SocketType::Dealer,
+        Options::default(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_dealer_tcp() {
+    assert_empty_body_parts_roundtrip(tcp_ep(0), SocketType::Dealer, Options::default()).await;
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_throughput_profile_inproc() {
+    assert_empty_body_parts_roundtrip(
+        inproc_ep("rr-empty-body-throughput"),
+        SocketType::Req,
+        Options::default().workload_profile(WorkloadProfile::Throughput),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn rep_keeps_empty_body_parts_throughput_profile_tcp() {
+    assert_empty_body_parts_roundtrip(
+        tcp_ep(0),
+        SocketType::Req,
+        Options::default().workload_profile(WorkloadProfile::Throughput),
+    )
+    .await;
 }

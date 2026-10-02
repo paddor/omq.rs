@@ -6,10 +6,15 @@
 //! compresses) locally, then pushes into its peers' `PeerTransmitSlot`
 //! rings.
 
+mod codec_group;
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 mod compression;
 mod fallback;
 mod filter;
 mod lane;
+#[cfg(all(test, feature = "lz4", feature = "zstd"))]
+mod probe;
+mod registration;
 
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,19 +24,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
-use crate::engine::PeerDriverHandle;
 use omq_proto::error::Result;
 use omq_proto::message::Message;
 use omq_proto::options::{OnMute, Options};
 use omq_proto::proto::SocketType;
-use omq_proto::proto::transform::CompressionKind;
 
 use super::peer_outbound::PeerOutbound;
 use super::subscription::SubscriptionSet;
-#[cfg(any(feature = "lz4", feature = "zstd"))]
-use compression::DictTraining;
 pub(crate) use filter::FanOutMode;
-use lane::{FanOutLanes, LaneDispatch, LanePeerAdd};
+use lane::{FanOutLanes, LaneDispatch};
 
 /// Total bytes copied into per-peer wire queues before switching to
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
@@ -76,8 +77,6 @@ pub(crate) struct Submitter {
     send_count: Arc<AtomicU32>,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
 impl Clone for Submitter {
@@ -92,8 +91,6 @@ impl Clone for Submitter {
             send_count: self.send_count.clone(),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(any(feature = "lz4", feature = "zstd"))]
-            dict_training: self.dict_training.clone(),
         }
     }
 }
@@ -136,6 +133,35 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
+    fn fallback_targets(
+        &self,
+        topic: &Bytes,
+        group: Option<&str>,
+    ) -> (SmallVec<[PeerOutbound; 8]>, bool) {
+        let g = self.inner.lock().expect("fanout inner poisoned");
+        let all_subscribe_all =
+            filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
+        let targets = g
+            .peers
+            .values()
+            .filter(|peer| peer.lane.is_none() && peer.fanout_active)
+            .filter(|peer| {
+                all_subscribe_all
+                    || filter::peer_matches(
+                        self.mode,
+                        &peer.subscriptions,
+                        &peer.groups,
+                        peer.any_groups,
+                        topic,
+                        group,
+                    )
+            })
+            .map(|peer| peer.target.clone())
+            .collect();
+        let has_lane_peers = g.peers.values().any(|peer| peer.lane.is_some());
+        (targets, has_lane_peers)
+    }
+
     fn try_dispatch_raw(
         &self,
         lanes: &FanOutLanes,
@@ -160,32 +186,27 @@ impl Submitter {
             return Ok(());
         }
 
-        // Slow path: fallback peers exist, acquire inner mutex.
-        let (fallback_targets, has_lane_peers) = {
-            let g = self.inner.lock().expect("fanout inner poisoned");
-            let all_subscribe_all =
-                filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
-            let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
-                .peers
-                .values()
-                .filter(|p| p.lane.is_none())
-                .filter(|p| p.fanout_active)
-                .filter(|p| {
-                    all_subscribe_all
-                        || filter::peer_matches(
-                            self.mode,
-                            &p.subscriptions,
-                            &p.groups,
-                            p.any_groups,
-                            &topic,
-                            group.as_deref(),
-                        )
-                })
-                .map(|p| p.target.clone())
-                .collect();
-            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
-            (fallback_targets, has_lane_peers)
-        };
+        let (fallback_targets, has_lane_peers) = self.fallback_targets(&topic, group.as_deref());
+
+        if self.mute_policy == FanOutMutePolicy::Block {
+            let Some(permits) = fallback::try_reserve_targets(&fallback_targets) else {
+                return Err(omq_proto::error::TrySendError::Full(msg.clone()));
+            };
+            if has_lane_peers {
+                let dispatch = LaneDispatch {
+                    msg: msg.clone(),
+                    topic,
+                    group,
+                };
+                if let Err(returned) = lanes.try_dispatch(dispatch) {
+                    return Err(omq_proto::error::TrySendError::Full(returned.msg));
+                }
+            }
+            for permit in permits {
+                permit.send(crate::engine::PeerDriverData::SendMessage(msg.clone()));
+            }
+            return Ok(());
+        }
 
         if !fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
@@ -234,32 +255,24 @@ impl Submitter {
             return Ok(());
         }
 
-        // Slow path: fallback peers exist, acquire inner mutex.
-        let (fallback_targets, has_lane_peers) = {
-            let g = self.inner.lock().expect("fanout inner poisoned");
-            let all_subscribe_all =
-                filter::all_peers_subscribe_all(self.mode, g.subscribe_all_count, g.peers.len());
-            let fallback_targets: SmallVec<[PeerOutbound; 8]> = g
-                .peers
-                .values()
-                .filter(|p| p.lane.is_none())
-                .filter(|p| p.fanout_active)
-                .filter(|p| {
-                    all_subscribe_all
-                        || filter::peer_matches(
-                            self.mode,
-                            &p.subscriptions,
-                            &p.groups,
-                            p.any_groups,
-                            &topic,
-                            group.as_deref(),
-                        )
-                })
-                .map(|p| p.target.clone())
-                .collect();
-            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
-            (fallback_targets, has_lane_peers)
-        };
+        let (fallback_targets, has_lane_peers) = self.fallback_targets(&topic, group.as_deref());
+
+        if self.mute_policy == FanOutMutePolicy::Block {
+            let fallback = fallback::dispatch_blocking(&fallback_targets, msg, lanes);
+            let native = async {
+                if has_lane_peers {
+                    lanes
+                        .dispatch(LaneDispatch {
+                            msg: msg.clone(),
+                            topic,
+                            group,
+                        })
+                        .await;
+                }
+            };
+            tokio::join!(fallback, native);
+            return Ok(());
+        }
 
         if !fallback_targets.is_empty() {
             let mut deactivate = |target: &PeerOutbound| self.deactivate_target(target);
@@ -294,22 +307,27 @@ impl Submitter {
         &self,
         msg: Message,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        if self.lanes.admission_closed() {
+            return Err(omq_proto::error::TrySendError::Closed);
+        }
         let (forwarded, group) =
             filter::prepare(self.mode, msg).map_err(omq_proto::error::TrySendError::Error)?;
 
         self.try_dispatch_raw(&self.lanes, &forwarded, group)?;
-        #[cfg(any(feature = "lz4", feature = "zstd"))]
-        compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
         Ok(())
     }
 
     pub(crate) async fn send(&self, msg: Message) -> Result<()> {
+        if self.lanes.admission_closed() {
+            return Err(omq_proto::Error::Closed);
+        }
         let (forwarded, group) = filter::prepare(self.mode, msg)?;
         let msg_bytes = forwarded.byte_len();
 
         self.dispatch_raw(&self.lanes, &forwarded, group).await?;
-        #[cfg(any(feature = "lz4", feature = "zstd"))]
-        compression::feed_dict_training(&self.dict_training, &self.inner, &self.lanes, &forwarded);
+        if self.lanes.admission_closed() {
+            return Err(omq_proto::Error::Closed);
+        }
         let target_count = self.lane_peer_count.load(Ordering::Relaxed)
             + self.fallback_peer_count.load(Ordering::Relaxed);
         self.maybe_yield(target_count, msg_bytes).await;
@@ -328,16 +346,11 @@ pub(crate) struct FanOutSend {
     mode: FanOutMode,
     xpub_nodrop: bool,
     mute_policy: FanOutMutePolicy,
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    dict_training: Arc<Mutex<Option<DictTraining>>>,
 }
 
 struct FanOutInner {
     peers: FxHashMap<u64, FanOutPeer>,
     subscribe_all_count: usize,
-    compression_kind: Option<CompressionKind>,
-    compression_dict: Option<Bytes>,
-    options: Options,
 }
 
 impl std::fmt::Debug for FanOutInner {
@@ -394,9 +407,6 @@ impl FanOutSend {
         let inner = Arc::new(Mutex::new(FanOutInner {
             peers: FxHashMap::default(),
             subscribe_all_count: 0,
-            compression_kind: None,
-            compression_dict: options.compression_dict.clone(),
-            options: options.clone(),
         }));
         let generation = Arc::new(AtomicU64::new(0));
         let lane_peer_count = Arc::new(AtomicUsize::new(0));
@@ -410,8 +420,6 @@ impl FanOutSend {
             mode,
             xpub_nodrop: options.xpub_nodrop,
             mute_policy,
-            #[cfg(any(feature = "lz4", feature = "zstd"))]
-            dict_training: Arc::new(Mutex::new(compression::new_dict_training(options))),
         }
     }
 
@@ -430,121 +438,7 @@ impl FanOutSend {
             send_count: Arc::new(AtomicU32::new(0)),
             xpub_nodrop: self.xpub_nodrop,
             mute_policy: self.mute_policy,
-            #[cfg(any(feature = "lz4", feature = "zstd"))]
-            dict_training: self.dict_training.clone(),
         }
-    }
-
-    pub(crate) fn connection_added(
-        &mut self,
-        peer_id: u64,
-        handle: PeerDriverHandle,
-        io_thread: usize,
-    ) {
-        self.add_peer(peer_id, handle, false, io_thread);
-    }
-
-    pub(crate) fn connection_added_any_groups(
-        &mut self,
-        peer_id: u64,
-        handle: PeerDriverHandle,
-        io_thread: usize,
-    ) {
-        self.add_peer(peer_id, handle, true, io_thread);
-    }
-
-    #[expect(clippy::needless_pass_by_value)]
-    fn add_peer(
-        &mut self,
-        peer_id: u64,
-        handle: PeerDriverHandle,
-        any_groups: bool,
-        io_thread: usize,
-    ) {
-        let compression_kind = handle
-            .transmit_slot
-            .as_ref()
-            .and_then(|s| s.compression_kind());
-        let target = PeerOutbound::from_handle(&handle);
-
-        #[cfg(feature = "ws")]
-        let target_is_ws = target.is_ws();
-        #[cfg(not(feature = "ws"))]
-        let target_is_ws = false;
-
-        let lane_base_eligible = !target_is_ws
-            && matches!(target, PeerOutbound::Wire { .. })
-            && handle.transmit_slot.is_some();
-
-        let lane_eligible = lane_base_eligible && {
-            let mut g = self.inner.lock().expect("fanout inner poisoned");
-            let has_lane_peers = g.peers.values().any(|p| p.lane.is_some());
-            if has_lane_peers {
-                g.compression_kind == compression_kind
-            } else {
-                g.compression_kind = compression_kind;
-                true
-            }
-        };
-
-        let lane = if !lane_eligible {
-            None
-        } else if let PeerOutbound::Wire { slot, .. } = &target {
-            let lane = self.lanes.add_lane_peer(
-                io_thread,
-                LanePeerAdd {
-                    peer_id,
-                    slot: slot.clone(),
-                    any_groups,
-                },
-            );
-            let g = self.inner.lock().expect("fanout inner poisoned");
-            if let Some(kind) = g.compression_kind {
-                let options = g.options.clone();
-                let dict = g.compression_dict.clone();
-                drop(g);
-                self.lanes.set_compression(lane, kind, options, dict);
-            } else {
-                drop(g);
-            }
-            Some(lane)
-        } else {
-            None
-        };
-
-        if lane.is_none() {
-            self.fallback_peer_count.fetch_add(1, Ordering::Release);
-        } else {
-            self.lane_peer_count.fetch_add(1, Ordering::Release);
-        }
-
-        if let PeerOutbound::Wire { slot, .. } = &target {
-            let inner = Arc::downgrade(&self.inner);
-            let generation = self.generation.clone();
-            slot.set_fanout_reactivation(Arc::new(move |peer_id| {
-                let Some(inner) = inner.upgrade() else {
-                    return;
-                };
-                let mut g = inner.lock().expect("fanout inner poisoned");
-                if g.reactivate_fanout_peer(peer_id) {
-                    drop(g);
-                    generation.fetch_add(1, Ordering::Release);
-                }
-            }));
-        }
-        let mut g = self.inner.lock().expect("fanout inner poisoned");
-        g.peers.insert(
-            peer_id,
-            FanOutPeer {
-                subscriptions: SubscriptionSet::new(),
-                groups: FxHashSet::default(),
-                any_groups,
-                target,
-                lane,
-                fanout_active: true,
-            },
-        );
-        self.bump_generation();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -649,6 +543,10 @@ impl FanOutSend {
         self.lane_peer_count.store(0, Ordering::Release);
         self.fallback_peer_count.store(0, Ordering::Release);
         self.bump_generation();
+    }
+
+    pub(crate) fn stop_admission(&self) {
+        self.lanes.stop_admission();
     }
 
     pub(crate) fn is_drained(&self) -> bool {

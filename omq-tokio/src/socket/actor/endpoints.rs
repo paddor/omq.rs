@@ -1,10 +1,10 @@
-#[cfg(feature = "ws")]
-use super::WsConnectOptions;
+use omq_proto::Options;
+use std::sync::Arc;
+
 use super::{
-    Canceled, ConnectionStatus, DialerEntry, DisconnectReason, Duration, Endpoint, Error,
-    InternalEvent, ListenerEntry, MonitorEvent, PeerIdent, PeerInfo, Result, SocketDriver,
-    SocketType, UdpDialerEntry, UdpListenerEntry, bind_any, connect_any, dial_with_backoff,
-    fake_handle, mpsc, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
+    ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, Error, ListenerEntry, MonitorEvent,
+    PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, UdpListenerEntry,
+    bind_any, fake_handle, mpsc, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
     supports_groups, supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
@@ -29,6 +29,8 @@ impl SocketDriver {
     }
 
     pub(super) fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
+        let pending =
+            self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
         let before = self.listeners.len() + self.udp_listeners.len();
         self.listeners.retain(|l| {
             if &l.endpoint == endpoint {
@@ -46,7 +48,7 @@ impl SocketDriver {
                 true
             }
         });
-        if self.listeners.len() + self.udp_listeners.len() < before {
+        if pending || self.listeners.len() + self.udp_listeners.len() < before {
             Ok(())
         } else {
             Err(Error::Unroutable)
@@ -59,6 +61,8 @@ impl SocketDriver {
     /// handshaked client-side peer tasks are stopped. Returns
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
+        let pending = self
+            .cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Connect)));
         let before = self.dialers.len() + self.udp_dialers.len();
         let mut removed_routes = Vec::new();
         self.dialers.retain(|d| {
@@ -117,7 +121,8 @@ impl SocketDriver {
             super::stop_peer_task(task).await;
         }
 
-        if self.dialers.len() + self.udp_dialers.len() < before
+        if pending
+            || self.dialers.len() + self.udp_dialers.len() < before
             || removed_udp_peers > 0
             || removed_live_peers > 0
         {
@@ -301,7 +306,32 @@ impl SocketDriver {
         Ok(())
     }
 
-    pub(super) async fn bind(&mut self, endpoint: Endpoint) -> Result<Endpoint> {
+    pub(super) fn capture_endpoint_options(
+        &self,
+        compression: Option<omq_proto::CompressionOptions>,
+    ) -> Arc<Options> {
+        let mut options = self.options.clone();
+        if let Some(compression) = compression {
+            options.compression_dict = compression.dict;
+            options.compression_auto_train = compression.auto_train;
+            options.compression_threshold = compression.threshold;
+            options.compression_level = compression.level;
+            options.compression_dict_capacity = compression.dict_capacity;
+        }
+        if let Some(dict) = &options.compression_dict
+            && dict.len() <= 8192
+        {
+            options.compression_dict = Some(bytes::Bytes::copy_from_slice(dict));
+        }
+        Arc::new(options)
+    }
+
+    pub(super) async fn bind(
+        &mut self,
+        endpoint: Endpoint,
+        options: Arc<Options>,
+    ) -> Result<Endpoint> {
+        self.validate_setup_options(&endpoint, &options)?;
         if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
             return Err(Error::Protocol(
                 "STREAM sockets only support tcp:// endpoints".into(),
@@ -310,52 +340,41 @@ impl SocketDriver {
         if matches!(endpoint, Endpoint::Udp { .. }) {
             return self.bind_udp(endpoint).await;
         }
-        reject_encrypted_inproc(&endpoint, &self.options.mechanism)?;
+        reject_encrypted_inproc(&endpoint, &options.mechanism)?;
         let snapshot = self.inproc_snapshot();
+        let cancel = self.cancel.child_token();
         let bound = bind_any(
             &self.inproc_registry,
             &endpoint,
             &snapshot,
-            &self.spsc.inproc_config(self.options.max_message_size),
+            &self.spsc.inproc_config(options.max_message_size),
             #[cfg(feature = "ws")]
-            &self.options.wss_tls,
+            &options,
+            #[cfg(feature = "ws")]
+            crate::transport::ws::AcceptSetup {
+                admission: self.setup_admission.clone(),
+                timeout: options.handshake_timeout.unwrap_or_default(),
+                cancel: cancel.clone(),
+                monitor: self.monitor.clone(),
+            },
         )
         .await?;
-        let mut listener = bound.listener;
         let resolved = bound.endpoint;
         self.monitor.publish(MonitorEvent::Listening {
             endpoint: resolved.clone(),
         });
-        let cancel = self.cancel.child_token();
-        let tx = self.internal_tx.clone();
-        let child_cancel = cancel.clone();
-        let ep_for_task = resolved.clone();
-        let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    () = child_cancel.cancelled() => return,
-                    res = listener.accept() => match res {
-                        Ok(conn) => {
-                            if tx
-                                .send(InternalEvent::Accepted {
-                                    conn,
-                                    endpoint: ep_for_task.clone(),
-                                })
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(_) => {
-                            // Per-accept errors (EMFILE etc.): back off briefly.
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                    }
-                }
+        let task = tokio::spawn(
+            super::listener::ListenerTask {
+                endpoint: resolved.clone(),
+                options: options.clone(),
+                cancel: cancel.clone(),
+                tx: self.internal_tx.clone(),
+                admission: (self.socket_type != SocketType::Stream)
+                    .then(|| self.setup_admission.clone()),
+                monitor: self.monitor.clone(),
             }
-        });
+            .run(bound.listener),
+        );
         let ret = resolved.clone();
         self.listeners.push(ListenerEntry {
             endpoint: resolved,
@@ -365,85 +384,111 @@ impl SocketDriver {
         Ok(ret)
     }
 
-    pub(super) fn start_dial(&mut self, endpoint: Endpoint) {
+    pub(super) fn start_dial(&mut self, endpoint: Endpoint, options: Arc<Options>) {
+        self.start_dial_with_deadline(endpoint, options, None, None);
+    }
+
+    pub(super) fn start_dial_with_deadline(
+        &mut self,
+        endpoint: Endpoint,
+        options: Arc<Options>,
+        first_deadline: Option<std::time::Instant>,
+        first_admission: Option<crate::transport::setup::PendingHandshake>,
+    ) {
         let route_id = self.next_peer_id;
         self.next_peer_id += 1;
         let send_pipe_rx = self.send_strategy.make_connect_pipe(route_id);
         let cancel = self.cancel.child_token();
-        let tx = self.internal_tx.clone();
-        let child_cancel = cancel.clone();
-        let policy = self.options.reconnect;
-        let stop_conn_refused = self.options.reconnect_stop_conn_refused;
-        let dialer_ep = endpoint.clone();
-        let monitor_ep = endpoint.clone();
-        let tx_for_delay = tx.clone();
-        let snapshot = self.inproc_snapshot();
-        let recv = self.spsc.inproc_config(self.options.max_message_size);
-        let inproc_registry = self.inproc_registry.clone();
-        #[cfg(feature = "ws")]
-        let wss_tls = self.options.wss_tls.clone();
-        #[cfg(feature = "ws")]
-        let mechanism = self.options.mechanism.clone();
-        let task = tokio::spawn(async move {
-            let ep_for_dial = dialer_ep.clone();
-            let result = dial_with_backoff(
-                || {
-                    connect_any(
-                        &inproc_registry,
-                        &ep_for_dial,
-                        &snapshot,
-                        &recv,
-                        #[cfg(feature = "ws")]
-                        WsConnectOptions {
-                            wss_tls: &wss_tls,
-                            mechanism: &mechanism,
-                        },
-                    )
-                },
-                policy,
-                stop_conn_refused,
-                &child_cancel,
-                |delay, attempt| {
-                    let ep = monitor_ep.clone();
-                    let txc = tx_for_delay.clone();
-                    tokio::spawn(async move {
-                        let _ = txc
-                            .send(InternalEvent::ConnectDelayed {
-                                endpoint: ep,
-                                retry_in: delay,
-                                attempt,
-                            })
-                            .await;
-                    });
-                },
-            )
-            .await;
-            match result {
-                Ok(conn) => {
-                    let _ = tx
-                        .send(InternalEvent::Connected {
-                            conn,
-                            endpoint: dialer_ep,
-                            route_id,
-                        })
-                        .await;
+        let setup = crate::transport::setup::DialSetup {
+            admission: (!matches!(endpoint, Endpoint::Inproc { .. })
+                && self.socket_type != SocketType::Stream)
+                .then(|| self.setup_admission.clone()),
+            timeout: {
+                #[cfg(feature = "ws")]
+                {
+                    endpoint
+                        .is_ws_family()
+                        .then_some(options.handshake_timeout)
+                        .flatten()
                 }
-                Err(Canceled::Token | Canceled::PolicyDisabled | Canceled::StoppedConnRefused) => {
-                    let _ = tx
-                        .send(InternalEvent::ConnectGaveUp {
-                            endpoint: dialer_ep,
-                            route_id,
-                        })
-                        .await;
+                #[cfg(not(feature = "ws"))]
+                {
+                    None
                 }
+            },
+            cancel: cancel.clone(),
+        };
+        let task = tokio::spawn(
+            super::dialer::DialTask {
+                endpoint: endpoint.clone(),
+                options: options.clone(),
+                route_id,
+                cancel: cancel.clone(),
+                tx: self.internal_tx.clone(),
+                monitor: self.monitor.clone(),
+                snapshot: self.inproc_snapshot(),
+                recv: self.spsc.inproc_config(options.max_message_size),
+                registry: self.inproc_registry.clone(),
+                setup,
+                first_deadline,
+                first_admission,
             }
-        });
+            .run(),
+        );
         self.dialers.push(DialerEntry {
+            options,
             endpoint,
             cancel,
             route_id,
             send_pipe_rx,
             _task: task,
         });
+    }
+
+    pub(super) fn validate_setup_options(
+        &self,
+        endpoint: &Endpoint,
+        options: &Options,
+    ) -> Result<()> {
+        options.validate()?;
+        // Validate the effective mechanism before DNS or carrier setup. The
+        // codec factory repeats this check for standalone sans-I/O callers.
+        let compression =
+            omq_proto::proto::transform::CompressionKind::for_endpoint_with_mechanism(
+                endpoint,
+                &options.mechanism,
+            )?;
+        if compression.is_some() && self.socket_type == SocketType::Stream {
+            return Err(Error::Config(
+                "OMQ compression is not supported on STREAM sockets".into(),
+            ));
+        }
+        let _ = crate::engine::codec::CodecSetup::for_endpoint(endpoint, options)
+            .map_err(|error| Error::Config(format!("invalid codec configuration: {error}")))?;
+        #[cfg(feature = "ws")]
+        if endpoint.is_ws_family() {
+            match endpoint {
+                Endpoint::Ws { host, path, .. } | Endpoint::Wss { host, path, .. } => {
+                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
+                }
+                #[cfg(feature = "lz4")]
+                Endpoint::Lz4Ws { host, path, .. } => {
+                    omq_proto::proto::ws_handshake::validate_ws_address(host, path)?;
+                }
+                _ => unreachable!(),
+            }
+            if options
+                .handshake_timeout
+                .and_then(|timeout| std::time::Instant::now().checked_add(timeout))
+                .is_none()
+            {
+                return Err(Error::Protocol(
+                    "WS/WSS requires a finite handshake_timeout".into(),
+                ));
+            }
+        }
+        #[cfg(not(feature = "ws"))]
+        let _ = endpoint;
+        Ok(())
     }
 }

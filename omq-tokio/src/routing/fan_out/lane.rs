@@ -2,10 +2,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use futures::{StreamExt, stream::FuturesUnordered};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
+use crate::engine::codec::CodecSharingKey;
 use crate::engine::signal::{DataSignal, StateSignal};
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
 use crate::routing::subscription::SubscriptionSet;
@@ -17,8 +19,8 @@ use omq_proto::flow::DrainBudget;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
-use omq_proto::proto::transform::{CompressionKind, MessageEncoder};
 
+use super::codec_group::{CodecGroup, MAX_CODEC_GROUPS};
 use super::filter::{self, FanOutMode};
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
@@ -26,7 +28,10 @@ const LANE_CTRL_RING_CAP: usize = 64;
 
 #[derive(Debug)]
 enum LaneControl {
-    AddPeer(LanePeerAdd),
+    AddPeer {
+        add: LanePeerAdd,
+        codec_group: usize,
+    },
     RemovePeer {
         peer_id: u64,
     },
@@ -47,11 +52,6 @@ enum LaneControl {
         peer_id: u64,
         group: Bytes,
     },
-    SetCompression {
-        kind: CompressionKind,
-        options: Box<Options>,
-        dict: Option<Bytes>,
-    },
     Shutdown,
 }
 
@@ -70,24 +70,14 @@ pub(super) struct LaneDispatch {
 }
 
 #[derive(Clone, Debug)]
-struct LaneCompressionUpdate {
-    kind: CompressionKind,
-    options: Box<Options>,
-    dict: Option<Bytes>,
-}
-
-#[derive(Clone, Debug)]
 enum LaneData {
     Dispatch(LaneDispatch),
-    SetCompression(LaneCompressionUpdate),
 }
 
 impl LaneData {
     fn byte_len(&self) -> usize {
-        match self {
-            Self::Dispatch(dispatch) => dispatch.msg.byte_len(),
-            Self::SetCompression(_) => 0,
-        }
+        let Self::Dispatch(dispatch) = self;
+        dispatch.msg.byte_len()
     }
 }
 
@@ -98,12 +88,23 @@ struct LanePeer {
     any_groups: bool,
     slot: Arc<PeerTransmitSlot>,
     dict_shipped: bool,
+    codec_group: usize,
 }
 
 struct LaneEndpoint {
     ctrl_tx: yring::Producer<LaneControl>,
     ctrl_notify: Arc<DataSignal>,
+    data_signal: Arc<DataSignal>,
+    exited: Arc<AtomicBool>,
     peer_count: usize,
+    codec_groups: [Option<GroupAdmission>; MAX_CODEC_GROUPS],
+    peer_groups: FxHashMap<u64, usize>,
+}
+
+#[derive(Debug)]
+struct GroupAdmission {
+    key: Option<CodecSharingKey>,
+    peers: usize,
 }
 
 /// Lane 0's input. Every `Socket` clone sends through this one producer
@@ -125,7 +126,6 @@ struct LaneDistributor {
     tx: yring::Producer<LaneData>,
     signal: Arc<DataSignal>,
     space: Arc<StateSignal>,
-    pending_compression: Option<LaneCompressionUpdate>,
 }
 
 struct LaneDistributionTarget {
@@ -145,6 +145,7 @@ pub(super) struct FanOutLanes {
     distributor: Mutex<LaneDistributor>,
     /// Set when lane 0's worker has returned; nothing drains after that.
     distributor_exited: Arc<AtomicBool>,
+    admission_closed: AtomicBool,
     mute_policy: FanOutMutePolicy,
 }
 
@@ -198,7 +199,7 @@ struct LaneWorker {
     subscribe_all_count: usize,
     eq: FrameBuffer,
     chunks: Vec<Bytes>,
-    encoder: Option<MessageEncoder>,
+    codec_groups: [Option<CodecGroup>; MAX_CODEC_GROUPS],
     distribution_targets: Vec<LaneDistributionTarget>,
     active_flags: Option<Arc<Vec<AtomicBool>>>,
     /// Set when `run` returns.
@@ -256,7 +257,6 @@ impl FanOutLanes {
             tx: dist_tx,
             signal: Arc::clone(&dist_signal),
             space: Arc::clone(&dist_space),
-            pending_compression: None,
         };
 
         let mut distribution_targets: Vec<LaneDistributionTarget> =
@@ -297,6 +297,12 @@ impl FanOutLanes {
                 let (rx, sig, space) = secondary_data.remove(0);
                 (rx, sig, space, Vec::new(), None)
             };
+            let endpoint_data_signal = data_signal.clone();
+            let exited = if i == 0 {
+                Arc::clone(&distributor_exited)
+            } else {
+                Arc::default()
+            };
             io_pool.spawn_on(
                 i,
                 LaneWorker {
@@ -311,21 +317,21 @@ impl FanOutLanes {
                     subscribe_all_count: 0,
                     eq: FrameBuffer::one_shot(),
                     chunks: Vec::new(),
-                    encoder: None,
+                    codec_groups: std::array::from_fn(|_| None),
                     distribution_targets: dist_targets,
                     active_flags: flags,
-                    exited: if i == 0 {
-                        Arc::clone(&distributor_exited)
-                    } else {
-                        Arc::default()
-                    },
+                    exited: exited.clone(),
                 }
                 .run(),
             );
             endpoints.push(LaneEndpoint {
                 ctrl_tx,
                 ctrl_notify,
+                data_signal: endpoint_data_signal,
+                exited,
                 peer_count: 0,
+                codec_groups: std::array::from_fn(|_| None),
+                peer_groups: FxHashMap::default(),
             });
         }
         Arc::new(Self {
@@ -333,6 +339,7 @@ impl FanOutLanes {
             active_flags,
             distributor: Mutex::new(distributor),
             distributor_exited,
+            admission_closed: AtomicBool::new(false),
             mute_policy,
         })
     }
@@ -370,15 +377,27 @@ impl FanOutLanes {
         }
     }
 
-    pub(super) fn add_lane_peer(&self, lane: usize, add: LanePeerAdd) -> usize {
+    pub(super) fn add_lane_peer(&self, lane: usize, add: LanePeerAdd) -> Option<usize> {
         let lane = self.normalize_lane(lane);
         let mut state = self.state.lock().expect("fanout lanes poisoned");
-        if let Some(endpoint) = state.endpoints.get_mut(lane) {
-            endpoint.peer_count += 1;
-            self.active_flags[lane].store(true, Ordering::Release);
-            Self::push_control(endpoint, LaneControl::AddPeer(add));
-        }
-        lane
+        let endpoint = state.endpoints.get_mut(lane)?;
+        let key = add
+            .slot
+            .codec_profile()
+            .map(crate::engine::codec::CodecProfile::sharing_key);
+        let codec_group = endpoint
+            .codec_groups
+            .iter()
+            .position(|group| group.as_ref().is_some_and(|group| group.key == key))
+            .or_else(|| endpoint.codec_groups.iter().position(Option::is_none))?;
+        let group = endpoint.codec_groups[codec_group]
+            .get_or_insert_with(|| GroupAdmission { key, peers: 0 });
+        group.peers += 1;
+        endpoint.peer_groups.insert(add.peer_id, codec_group);
+        endpoint.peer_count += 1;
+        self.active_flags[lane].store(true, Ordering::Release);
+        Self::push_control(endpoint, LaneControl::AddPeer { add, codec_group });
+        Some(lane)
     }
 
     fn send_to_lane(&self, lane: usize, cmd: LaneControl) {
@@ -425,43 +444,20 @@ impl FanOutLanes {
         self.send_to_lane(lane, LaneControl::Leave { peer_id, group });
     }
 
-    pub(super) fn set_compression(
-        &self,
-        lane: usize,
-        kind: CompressionKind,
-        options: Options,
-        dict: Option<Bytes>,
-    ) {
-        self.send_to_lane(
-            lane,
-            LaneControl::SetCompression {
-                kind,
-                options: Box::new(options),
-                dict,
-            },
-        );
-    }
-
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    pub(super) fn set_compression_all_ordered(
-        &self,
-        kind: CompressionKind,
-        options: &Options,
-        dict: Option<&Bytes>,
-    ) {
-        let mut distributor = self.distributor.lock().expect("distributor poisoned");
-        distributor.pending_compression = Some(LaneCompressionUpdate {
-            kind,
-            options: Box::new(options.clone()),
-            dict: dict.cloned(),
-        });
-    }
-
     pub(super) fn remove_peer(&self, lane: usize, peer_id: u64) {
         let lane = self.normalize_lane(lane);
         let mut state = self.state.lock().expect("fanout lanes poisoned");
         if let Some(endpoint) = state.endpoints.get_mut(lane) {
-            endpoint.peer_count = endpoint.peer_count.saturating_sub(1);
+            if let Some(group_id) = endpoint.peer_groups.remove(&peer_id) {
+                let group = endpoint.codec_groups[group_id]
+                    .as_mut()
+                    .expect("registered codec group");
+                group.peers -= 1;
+                if group.peers == 0 {
+                    endpoint.codec_groups[group_id] = None;
+                }
+                endpoint.peer_count -= 1;
+            }
             if endpoint.peer_count == 0 {
                 self.active_flags[lane].store(false, Ordering::Release);
             }
@@ -476,14 +472,8 @@ impl FanOutLanes {
         dispatch: LaneDispatch,
     ) -> core::result::Result<(), LaneDispatch> {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
-        if !Self::try_push_pending_compression(&mut dist) {
-            dist.tx.flush();
-            dist.signal.mark();
-            return if self.mute_policy.is_lossy() {
-                Ok(())
-            } else {
-                Err(dispatch)
-            };
+        if self.admission_closed.load(Ordering::Acquire) {
+            return Err(dispatch);
         }
         match dist.tx.push(LaneData::Dispatch(dispatch)) {
             Ok(()) => {
@@ -502,7 +492,6 @@ impl FanOutLanes {
                 dist.signal.mark();
                 match returned {
                     LaneData::Dispatch(dispatch) => Err(dispatch),
-                    LaneData::SetCompression(_) => unreachable!("pushed dispatch"),
                 }
             }
         }
@@ -512,38 +501,30 @@ impl FanOutLanes {
         loop {
             let wait = {
                 let mut dist = self.distributor.lock().expect("distributor poisoned");
+                if self.admission_closed.load(Ordering::Acquire) {
+                    return;
+                }
                 // Capture before trying the ring so a space release or worker
                 // exit during the push cannot become the generation we await.
                 let seen = dist.space.generation();
-                if Self::try_push_pending_compression(&mut dist) {
-                    match dist.tx.push(LaneData::Dispatch(dispatch)) {
-                        Ok(()) => {
-                            dist.tx.flush();
-                            dist.signal.mark();
-                            return;
-                        }
-                        Err(returned) if self.mute_policy.is_lossy() => {
-                            dist.tx.flush();
-                            dist.signal.mark();
-                            drop(returned);
-                            return;
-                        }
-                        Err(returned) => {
-                            dist.tx.flush();
-                            dist.signal.mark();
-                            let space = dist.space.clone();
-                            dispatch = match returned {
-                                LaneData::Dispatch(dispatch) => dispatch,
-                                LaneData::SetCompression(_) => unreachable!("pushed dispatch"),
-                            };
-                            (space, seen)
-                        }
+                match dist.tx.push(LaneData::Dispatch(dispatch)) {
+                    Ok(()) => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        return;
                     }
-                } else {
-                    dist.tx.flush();
-                    dist.signal.mark();
-                    let space = dist.space.clone();
-                    (space, seen)
+                    Err(returned) if self.mute_policy.is_lossy() => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        drop(returned);
+                        return;
+                    }
+                    Err(LaneData::Dispatch(returned)) => {
+                        dist.tx.flush();
+                        dist.signal.mark();
+                        dispatch = returned;
+                        (dist.space.clone(), seen)
+                    }
                 }
             };
             // The worker sets this flag before its final space wake. Nothing
@@ -556,47 +537,40 @@ impl FanOutLanes {
         }
     }
 
-    fn try_push_pending_compression(dist: &mut LaneDistributor) -> bool {
-        let Some(update) = dist.pending_compression.take() else {
-            return true;
-        };
-        match dist.tx.push(LaneData::SetCompression(update)) {
-            Ok(()) => true,
-            Err(LaneData::SetCompression(update)) => {
-                dist.pending_compression = Some(update);
-                false
-            }
-            Err(LaneData::Dispatch(_)) => unreachable!("pushed compression update"),
-        }
+    pub(super) fn stop_admission(&self) {
+        let distributor = self.distributor.lock().expect("distributor poisoned");
+        self.admission_closed.store(true, Ordering::Release);
+        distributor.space.notify_changed();
     }
 
-    fn push_data_spinning(
-        tx: &mut yring::Producer<LaneData>,
-        signal: &DataSignal,
-        mut data: LaneData,
-    ) {
+    pub(super) fn admission_closed(&self) -> bool {
+        self.admission_closed.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn admission_stopped(&self) {
+        let space = self
+            .distributor
+            .lock()
+            .expect("distributor poisoned")
+            .space
+            .clone();
         loop {
-            match tx.push(data) {
-                Ok(()) => {
-                    tx.flush();
-                    signal.mark();
-                    return;
-                }
-                Err(returned) => {
-                    data = returned;
-                    tx.flush();
-                    signal.mark();
-                    std::thread::yield_now();
-                }
+            let seen = space.generation();
+            if self.admission_closed() {
+                return;
             }
+            space.changed_after(seen).await;
         }
     }
 
     pub(super) fn shutdown(&self) {
+        self.stop_admission();
         let mut state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &mut state.endpoints {
             Self::push_control(endpoint, LaneControl::Shutdown);
             endpoint.peer_count = 0;
+            endpoint.peer_groups.clear();
+            endpoint.codec_groups = std::array::from_fn(|_| None);
         }
         for flag in self.active_flags.iter() {
             flag.store(false, Ordering::Release);
@@ -608,7 +582,11 @@ impl FanOutLanes {
     /// longer counts.
     pub(super) fn is_empty(&self) -> bool {
         let dist = self.distributor.lock().expect("distributor poisoned");
-        let dist_empty = dist.tx.is_empty() || self.distributor_exited.load(Ordering::Acquire);
+        // DRAINING covers worker-owned batches after release of ring slots.
+        // Observe lane 0 first: once it is idle with admission stopped, it
+        // cannot publish more work to secondary lanes after their idle checks.
+        let dist_empty = (dist.tx.is_empty() && dist.signal.is_idle())
+            || self.distributor_exited.load(Ordering::Acquire);
         drop(dist);
         dist_empty
             && self
@@ -617,7 +595,11 @@ impl FanOutLanes {
                 .expect("fanout lanes poisoned")
                 .endpoints
                 .iter()
-                .all(|endpoint| endpoint.ctrl_tx.is_empty())
+                .all(|endpoint| {
+                    endpoint.ctrl_tx.is_empty()
+                        && (endpoint.data_signal.is_idle()
+                            || endpoint.exited.load(Ordering::Acquire))
+                })
     }
 }
 
@@ -660,7 +642,7 @@ impl LaneWorker {
                 if !batch.is_empty() {
                     // Control sent before this data can race with the first
                     // control drain. Drain once more after observing data so
-                    // subscriptions and compression updates apply first.
+                    // subscriptions and group registration apply first.
                     if self.drain_control() {
                         self.stop(&mut touched);
                         return;
@@ -724,6 +706,7 @@ impl LaneWorker {
     fn stop(&mut self, touched: &mut SmallVec<[u64; 32]>) {
         self.flush_touched(touched);
         self.peers.clear();
+        self.codec_groups = std::array::from_fn(|_| None);
         self.subscribe_all_count = 0;
         self.exited.store(true, Ordering::Release);
         self.notify_data_space();
@@ -815,18 +798,7 @@ impl LaneWorker {
                 continue;
             }
             for data in batch {
-                match data {
-                    LaneData::Dispatch(dispatch) => {
-                        let _ = target.data_tx.push(LaneData::Dispatch(dispatch.clone()));
-                    }
-                    LaneData::SetCompression(_) => {
-                        FanOutLanes::push_data_spinning(
-                            &mut target.data_tx,
-                            &target.data_signal,
-                            data.clone(),
-                        );
-                    }
-                }
+                let _ = target.data_tx.push(data.clone());
             }
             target.data_tx.flush();
             target.data_signal.mark();
@@ -834,18 +806,18 @@ impl LaneWorker {
     }
 
     async fn handle_data(&mut self, data: &LaneData, touched: &mut SmallVec<[u64; 32]>) -> bool {
-        match data {
-            LaneData::Dispatch(dispatch) => self.dispatch(dispatch, touched).await,
-            LaneData::SetCompression(update) => {
-                self.init_encoder(update.kind, &update.options, update.dict.as_ref());
-                false
-            }
-        }
+        let LaneData::Dispatch(dispatch) = data;
+        self.dispatch(dispatch, touched).await
     }
 
     fn handle_control(&mut self, cmd: LaneControl) -> bool {
         match cmd {
-            LaneControl::AddPeer(add) => {
+            LaneControl::AddPeer { add, codec_group } => {
+                let group = self.codec_groups[codec_group].get_or_insert_with(|| {
+                    CodecGroup::new(add.slot.codec_profile().cloned())
+                        .expect("validated codec profile")
+                });
+                group.peers += 1;
                 self.peers.insert(
                     add.peer_id,
                     LanePeer {
@@ -853,15 +825,23 @@ impl LaneWorker {
                         groups: FxHashSet::default(),
                         any_groups: add.any_groups,
                         dict_shipped: add.slot.fanout_dict_shipped(),
+                        codec_group,
                         slot: add.slot,
                     },
                 );
             }
             LaneControl::RemovePeer { peer_id } => {
-                if let Some(peer) = self.peers.remove(&peer_id)
-                    && peer.subscriptions.is_subscribe_all()
-                {
-                    self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
+                if let Some(peer) = self.peers.remove(&peer_id) {
+                    if peer.subscriptions.is_subscribe_all() {
+                        self.subscribe_all_count = self.subscribe_all_count.saturating_sub(1);
+                    }
+                    let group = self.codec_groups[peer.codec_group]
+                        .as_mut()
+                        .expect("peer codec group");
+                    group.peers -= 1;
+                    if group.peers == 0 {
+                        self.codec_groups[peer.codec_group] = None;
+                    }
                 }
             }
             LaneControl::Subscribe {
@@ -899,202 +879,238 @@ impl LaneWorker {
                     peer.groups.remove(s);
                 }
             }
-            LaneControl::SetCompression {
-                kind,
-                options,
-                dict,
-            } => {
-                self.init_encoder(kind, &options, dict.as_ref());
-            }
             LaneControl::Shutdown => return true,
         }
         false
     }
 
-    #[allow(clippy::unused_self)]
-    fn init_encoder(
-        &mut self,
-        #[allow(unused)] kind: CompressionKind,
-        #[allow(unused)] options: &Options,
-        #[allow(unused)] dict: Option<&Bytes>,
-    ) {
-        #[cfg(any(feature = "lz4", feature = "zstd"))]
-        if self.encoder.is_none() || dict.is_some() {
-            let mut opts = options.clone().compression_auto_train(false);
-            if let Some(d) = dict {
-                opts = opts.compression_dict(d.clone());
-            }
-            if let Ok(Some((enc, _dec))) = MessageEncoder::for_compression_kind(kind, &opts) {
-                self.encoder = Some(enc);
-            }
-        }
-    }
-
-    #[expect(clippy::too_many_lines)]
     async fn dispatch(
         &mut self,
         dispatch: &LaneDispatch,
         touched: &mut SmallVec<[u64; 32]>,
     ) -> bool {
+        let targets = self.matching_peer_groups(dispatch);
         if self.mute_policy.is_lossy() {
-            self.dispatch_lossy(dispatch, touched);
+            for (group_id, peer_ids) in targets.into_iter().enumerate() {
+                self.dispatch_group_lossy(group_id, &peer_ids, dispatch, touched);
+            }
             return false;
         }
-        let mut peer_ids = SmallVec::<[u64; 32]>::new();
-        let all_subscribe_all =
-            filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
-        for (&peer_id, peer) in &self.peers {
-            if peer.slot.fanout_active()
-                && (all_subscribe_all
-                    || filter::peer_matches(
-                        self.mode,
-                        &peer.subscriptions,
-                        &peer.groups,
-                        peer.any_groups,
-                        &dispatch.topic,
-                        dispatch.group.as_deref(),
-                    ))
-            {
-                peer_ids.push(peer_id);
-            }
+        // One publication in flight. Retain at most one payload and one
+        // dictionary frame per bounded group, shared by its blocked peers.
+        let mut pending = SmallVec::<[PendingPeer; 8]>::new();
+        for (group_id, peer_ids) in targets.into_iter().enumerate() {
+            self.dispatch_group_ready(group_id, &peer_ids, dispatch, touched, &mut pending);
         }
-        if peer_ids.is_empty() {
-            return false;
-        }
-
-        // Compress if an encoder is active.
-        let mut wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
-            match enc.encode(&dispatch.msg) {
-                Ok(transformed) => transformed,
-                Err(_) => return false,
-            }
-        } else {
-            smallvec::smallvec![dispatch.msg.clone()]
-        };
-
-        // Handle dict shipment: the first transformed message may be a dict.
-        let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut wire_messages);
-
-        let target_count = peer_ids.len();
-        let mut eq = std::mem::replace(&mut self.eq, FrameBuffer::one_shot());
-        let mut chunks = std::mem::take(&mut self.chunks);
-        let mut shutdown = false;
-
-        // Encode dict and payload into per-peer slots. Both go through
-        // push_frame_to_peer (direct FrameBuffer push) to preserve ordering.
-        let has_dict = dict_msg.is_some();
-        if let Some(dict) = dict_msg.as_ref() {
-            {
-                let frame = build_fan_out_frame(
-                    &mut eq,
-                    dict,
-                    &mut chunks,
-                    target_count,
-                    FAN_OUT_TOTAL_COPY_BUDGET,
-                );
-                for &peer_id in &peer_ids {
-                    if self
-                        .peers
-                        .get(&peer_id)
-                        .is_some_and(|peer| !peer.dict_shipped)
-                    {
-                        match self.push_frame_to_peer(peer_id, &frame, touched).await {
-                            PushFrameResult::Pushed => {
-                                if let Some(peer) = self.peers.get_mut(&peer_id) {
-                                    peer.dict_shipped = true;
-                                    peer.slot.mark_fanout_dict_shipped();
-                                }
-                            }
-                            PushFrameResult::Skipped => {}
-                            PushFrameResult::Shutdown => {
-                                shutdown = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            clear_fan_out_frame(&mut eq, &mut chunks);
-        }
-
-        if !shutdown {
-            // Encode the payload messages into the FrameBuffer.
-            for wire_msg in &wire_messages {
-                encode_fan_out_message(&mut eq, wire_msg, target_count, FAN_OUT_TOTAL_COPY_BUDGET);
-            }
-
-            {
-                let encoded = finish_fan_out_frame(
-                    &mut eq,
-                    &mut chunks,
-                    target_count,
-                    FAN_OUT_TOTAL_COPY_BUDGET,
-                );
-
-                for peer_id in peer_ids {
-                    if has_dict
-                        && self
-                            .peers
-                            .get(&peer_id)
-                            .is_none_or(|peer| !peer.dict_shipped)
-                    {
-                        continue;
-                    }
-                    if matches!(
-                        self.push_frame_to_peer(peer_id, &encoded, touched).await,
-                        PushFrameResult::Shutdown
-                    ) {
-                        shutdown = true;
-                        break;
-                    }
-                }
-            }
-            clear_fan_out_frame(&mut eq, &mut chunks);
-        }
-
-        self.eq = eq;
-        self.chunks = chunks;
-        shutdown
+        self.finish_pending(&mut pending, touched).await
     }
 
-    fn matching_lossy_peer_ids(&self, dispatch: &LaneDispatch) -> SmallVec<[u64; 32]> {
-        let mut peer_ids = SmallVec::<[u64; 32]>::new();
-        let all_subscribe_all =
-            filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
-        for (&peer_id, peer) in &self.peers {
-            if peer.slot.fanout_active()
-                && (all_subscribe_all
-                    || filter::peer_matches(
-                        self.mode,
-                        &peer.subscriptions,
-                        &peer.groups,
-                        peer.any_groups,
-                        &dispatch.topic,
-                        dispatch.group.as_deref(),
-                    ))
-            {
-                peer_ids.push(peer_id);
-            }
-        }
-        peer_ids
-    }
-
-    fn dispatch_lossy(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
-        let peer_ids = self.matching_lossy_peer_ids(dispatch);
+    fn dispatch_group_ready(
+        &mut self,
+        group_id: usize,
+        peer_ids: &[u64],
+        dispatch: &LaneDispatch,
+        touched: &mut SmallVec<[u64; 32]>,
+        pending: &mut SmallVec<[PendingPeer; 8]>,
+    ) {
         if peer_ids.is_empty() {
             return;
         }
-
-        let mut wire_messages: SmallVec<[Message; 2]> = if let Some(ref mut enc) = self.encoder {
-            match enc.encode(&dispatch.msg) {
-                Ok(transformed) => transformed,
-                Err(_) => return,
-            }
-        } else {
-            smallvec::smallvec![dispatch.msg.clone()]
+        let group = self.codec_groups[group_id]
+            .as_mut()
+            .expect("matched codec group");
+        let Ok(wire_messages) = group.encode(&dispatch.msg) else {
+            return;
         };
+        let dictionary = group.dictionary().cloned();
+        let mut owned_dict = None;
+        if let Some(dict) = &dictionary {
+            let frame = build_fan_out_frame(
+                &mut self.eq,
+                dict,
+                &mut self.chunks,
+                peer_ids.len(),
+                FAN_OUT_TOTAL_COPY_BUDGET,
+            );
+            for &peer_id in peer_ids {
+                let Some(peer) = self.peers.get_mut(&peer_id) else {
+                    continue;
+                };
+                if !peer.dict_shipped {
+                    if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
+                        peer.dict_shipped = true;
+                        peer.slot.mark_fanout_dict_shipped();
+                        touched.push(peer_id);
+                    } else {
+                        owned_dict
+                            .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
+                    }
+                }
+            }
+            clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+        }
+        for message in &wire_messages {
+            encode_fan_out_message(
+                &mut self.eq,
+                message,
+                peer_ids.len(),
+                FAN_OUT_TOTAL_COPY_BUDGET,
+            );
+        }
+        let frame = finish_fan_out_frame(
+            &mut self.eq,
+            &mut self.chunks,
+            peer_ids.len(),
+            FAN_OUT_TOTAL_COPY_BUDGET,
+        );
+        let mut owned_payload = None;
+        for &peer_id in peer_ids {
+            let Some(peer) = self.peers.get(&peer_id) else {
+                continue;
+            };
+            let needs_dict = dictionary.is_some() && !peer.dict_shipped;
+            let result = if needs_dict {
+                TryFrameResult::Full
+            } else {
+                Self::try_push_frame(&peer.slot, &frame)
+            };
+            match result {
+                TryFrameResult::Ok => touched.push(peer_id),
+                TryFrameResult::Full => {
+                    let payload = owned_payload
+                        .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)))
+                        .clone();
+                    pending.push(PendingPeer {
+                        peer_id,
+                        slot: peer.slot.clone(),
+                        payload,
+                        dictionary: if needs_dict { owned_dict.clone() } else { None },
+                    });
+                }
+                TryFrameResult::Dead | TryFrameResult::Ineligible => {}
+            }
+        }
+        clear_fan_out_frame(&mut self.eq, &mut self.chunks);
+    }
 
-        let dict_msg = MessageEncoder::take_leading_dict_shipment(&mut wire_messages);
+    async fn finish_pending(
+        &mut self,
+        pending: &mut SmallVec<[PendingPeer; 8]>,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        while !pending.is_empty() {
+            let mut waits = FuturesUnordered::new();
+            pending.retain_mut(|target| {
+                let Some(peer) = self
+                    .peers
+                    .get_mut(&target.peer_id)
+                    .filter(|peer| Arc::ptr_eq(&peer.slot, &target.slot))
+                else {
+                    return false;
+                };
+                // Snapshot before admission so a concurrent drain cannot lose
+                // the only space wake between the failed push and parking.
+                let seen = target.slot.space_available.generation();
+                if let Some(dict) = &target.dictionary {
+                    match Self::try_push_frame(&target.slot, &dict.as_frame()) {
+                        TryFrameResult::Ok => {
+                            peer.dict_shipped = true;
+                            target.slot.mark_fanout_dict_shipped();
+                            touched.push(target.peer_id);
+                            target.dictionary = None;
+                        }
+                        TryFrameResult::Full => {}
+                        TryFrameResult::Dead | TryFrameResult::Ineligible => return false,
+                    }
+                }
+                if target.dictionary.is_none() {
+                    match Self::try_push_frame(&target.slot, &target.payload.as_frame()) {
+                        TryFrameResult::Ok => {
+                            touched.push(target.peer_id);
+                            return false;
+                        }
+                        TryFrameResult::Full => {}
+                        TryFrameResult::Dead | TryFrameResult::Ineligible => return false,
+                    }
+                }
+                target.slot.signal_encoded();
+                let space = target.slot.space_available.clone();
+                waits.push(async move { space.changed_after(seen).await });
+                true
+            });
+            self.flush_touched(touched);
+            touched.clear();
+            if pending.is_empty() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                () = self.ctrl_notify.ready() => {
+                    if self.drain_control() { return true; }
+                }
+                _ = waits.next() => {}
+            }
+        }
+        false
+    }
+
+    fn try_push_frame(slot: &PeerTransmitSlot, frame: &FanOutFrame<'_>) -> TryFrameResult {
+        match frame {
+            FanOutFrame::Arena(raw) => slot.try_push_pre_framed_no_signal(raw),
+            FanOutFrame::Chunks(chunks) => slot.try_push_encoded(chunks),
+        }
+    }
+
+    fn matching_peer_groups(
+        &self,
+        dispatch: &LaneDispatch,
+    ) -> [SmallVec<[u64; 32]>; MAX_CODEC_GROUPS] {
+        let mut groups: [SmallVec<[u64; 32]>; MAX_CODEC_GROUPS] =
+            std::array::from_fn(|_| SmallVec::new());
+        let all_subscribe_all =
+            filter::all_peers_subscribe_all(self.mode, self.subscribe_all_count, self.peers.len());
+        for (&peer_id, peer) in &self.peers {
+            if peer.slot.fanout_active()
+                && (all_subscribe_all
+                    || filter::peer_matches(
+                        self.mode,
+                        &peer.subscriptions,
+                        &peer.groups,
+                        peer.any_groups,
+                        &dispatch.topic,
+                        dispatch.group.as_deref(),
+                    ))
+            {
+                groups[peer.codec_group].push(peer_id);
+            }
+        }
+        groups
+    }
+
+    #[cfg(test)]
+    fn dispatch_lossy(&mut self, dispatch: &LaneDispatch, touched: &mut SmallVec<[u64; 32]>) {
+        for (group_id, peers) in self.matching_peer_groups(dispatch).into_iter().enumerate() {
+            self.dispatch_group_lossy(group_id, &peers, dispatch, touched);
+        }
+    }
+
+    fn dispatch_group_lossy(
+        &mut self,
+        group_id: usize,
+        peer_ids: &[u64],
+        dispatch: &LaneDispatch,
+        touched: &mut SmallVec<[u64; 32]>,
+    ) {
+        if peer_ids.is_empty() {
+            return;
+        }
+        let group = self.codec_groups[group_id]
+            .as_mut()
+            .expect("matched codec group");
+        let Ok(wire_messages) = group.encode(&dispatch.msg) else {
+            return;
+        };
+        let dict_msg = group.dictionary().cloned();
 
         let payload_peer_ids = if let Some(dict) = dict_msg.as_ref() {
             let mut payload_peer_ids = SmallVec::<[u64; 32]>::new();
@@ -1111,7 +1127,7 @@ impl LaneWorker {
                     peer_ids.len(),
                     FAN_OUT_TOTAL_COPY_BUDGET,
                 );
-                for peer_id in peer_ids {
+                for &peer_id in peer_ids {
                     let Some(peer) = self.peers.get_mut(&peer_id) else {
                         continue;
                     };
@@ -1132,7 +1148,7 @@ impl LaneWorker {
 
             payload_peer_ids
         } else {
-            peer_ids
+            SmallVec::<[u64; 32]>::from_slice(peer_ids)
         };
 
         if payload_peer_ids.is_empty() {
@@ -1221,58 +1237,6 @@ impl LaneWorker {
         }
     }
 
-    async fn push_frame_to_peer(
-        &mut self,
-        peer_id: u64,
-        frame: &FanOutFrame<'_>,
-        touched: &mut SmallVec<[u64; 32]>,
-    ) -> PushFrameResult {
-        loop {
-            let wait = {
-                let Some(peer) = self.peers.get_mut(&peer_id) else {
-                    return PushFrameResult::Skipped;
-                };
-                let result = match frame {
-                    FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-                    FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
-                };
-                match result {
-                    TryFrameResult::Ok => {
-                        touched.push(peer_id);
-                        return PushFrameResult::Pushed;
-                    }
-                    TryFrameResult::Dead => return PushFrameResult::Skipped,
-                    TryFrameResult::Full if self.mute_policy.is_lossy() => {
-                        peer.slot.deactivate_fanout();
-                        return PushFrameResult::Skipped;
-                    }
-                    TryFrameResult::Full => {
-                        let seen = peer.slot.space_available.generation();
-                        let space = peer.slot.space_available.clone();
-                        peer.slot.signal_encoded();
-                        (space, seen)
-                    }
-                    TryFrameResult::Ineligible if self.mute_policy.is_lossy() => {
-                        return PushFrameResult::Skipped;
-                    }
-                    TryFrameResult::Ineligible => {
-                        unreachable!("pre-framed fanout push cannot be ineligible")
-                    }
-                }
-            };
-            let changed = wait.0.changed_after(wait.1);
-            tokio::pin!(changed);
-            tokio::select! {
-                () = &mut changed => {}
-                () = self.ctrl_notify.ready() => {
-                    if self.drain_control() {
-                        return PushFrameResult::Shutdown;
-                    }
-                }
-            }
-        }
-    }
-
     fn flush_touched(&self, touched: &mut SmallVec<[u64; 32]>) {
         touched.sort_unstable();
         touched.dedup();
@@ -1284,11 +1248,35 @@ impl LaneWorker {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PushFrameResult {
-    Pushed,
-    Skipped,
-    Shutdown,
+/// Owned only when a ready-path admission blocks. Large chunks stay shared.
+#[derive(Debug)]
+enum PreparedFrame {
+    Arena(Bytes),
+    Chunks(Vec<Bytes>),
+}
+
+impl PreparedFrame {
+    fn from_frame(frame: &FanOutFrame<'_>) -> Self {
+        match frame {
+            FanOutFrame::Arena(raw) => Self::Arena(Bytes::copy_from_slice(raw)),
+            FanOutFrame::Chunks(chunks) => Self::Chunks(chunks.to_vec()),
+        }
+    }
+
+    fn as_frame(&self) -> FanOutFrame<'_> {
+        match self {
+            Self::Arena(raw) => FanOutFrame::Arena(raw),
+            Self::Chunks(chunks) => FanOutFrame::Chunks(chunks),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingPeer {
+    peer_id: u64,
+    slot: Arc<PeerTransmitSlot>,
+    payload: Arc<PreparedFrame>,
+    dictionary: Option<Arc<PreparedFrame>>,
 }
 
 #[cfg(test)]
@@ -1299,9 +1287,9 @@ mod tests {
     use bytes::Bytes;
     use omq_proto::fan_out_frame::{build_fan_out_frame, clear_fan_out_frame};
     use omq_proto::frame_buffer::FrameBuffer;
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    #[cfg(feature = "lz4")]
     use omq_proto::options::Options;
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
+    #[cfg(feature = "lz4")]
     use omq_proto::proto::transform::CompressionKind;
     use rustc_hash::{FxHashMap, FxHashSet};
     use smallvec::SmallVec;
@@ -1326,7 +1314,7 @@ mod tests {
             },
         );
 
-        assert_eq!(assigned, 2);
+        assert_eq!(assigned, Some(2));
         assert!(!lanes.active_flags[0].load(std::sync::atomic::Ordering::Acquire));
         assert!(!lanes.active_flags[1].load(std::sync::atomic::Ordering::Acquire));
         assert!(lanes.active_flags[2].load(std::sync::atomic::Ordering::Acquire));
@@ -1362,6 +1350,29 @@ mod tests {
         assert_eq!(state.endpoints[1].peer_count, 0);
     }
 
+    #[test]
+    fn linger_counts_distributor_and_secondary_worker_owned_batches() {
+        let lanes = test_lanes(2);
+        lanes.stop_admission();
+        assert!(lanes.is_empty());
+        let distributor = lanes.distributor.lock().unwrap().signal.clone();
+        distributor.mark();
+        distributor.begin_drain();
+        assert!(
+            !lanes.is_empty(),
+            "ring release must not finish a worker batch"
+        );
+        distributor.clear_after(true);
+        assert!(lanes.is_empty());
+        let secondary = lanes.state.lock().unwrap().endpoints[1].data_signal.clone();
+        secondary.mark();
+        assert!(!lanes.is_empty(), "secondary ring was missed");
+        secondary.begin_drain();
+        assert!(!lanes.is_empty(), "secondary worker batch was missed");
+        secondary.clear_after(true);
+        assert!(lanes.is_empty());
+    }
+
     #[tokio::test]
     async fn dispatch_waits_for_space_signal_when_nodrop_ring_full() {
         let (data_tx, mut data_rx) = yring::spsc::<LaneData>(1);
@@ -1373,9 +1384,9 @@ mod tests {
                 tx: data_tx,
                 signal: Arc::new(crate::engine::signal::DataSignal::new()),
                 space: data_space.clone(),
-                pending_compression: None,
             }),
             distributor_exited: Arc::new(AtomicBool::new(false)),
+            admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::Block,
         };
 
@@ -1390,9 +1401,7 @@ mod tests {
 
         data_rx.prefetch();
         let first = data_rx.pop().expect("first dispatch present");
-        let LaneData::Dispatch(first) = first else {
-            panic!("expected dispatch");
-        };
+        let LaneData::Dispatch(first) = first;
         assert_eq!(first.msg.part_bytes(0).unwrap().as_ref(), b"one");
         data_rx.release();
         data_space.notify_changed();
@@ -1413,9 +1422,9 @@ mod tests {
                 tx: data_tx,
                 signal: Arc::new(crate::engine::signal::DataSignal::new()),
                 space: data_space.clone(),
-                pending_compression: None,
             }),
             distributor_exited: Arc::new(AtomicBool::new(false)),
+            admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::Block,
         };
         lanes.try_dispatch(test_dispatch("one")).unwrap();
@@ -1458,9 +1467,9 @@ mod tests {
                     tx: data_tx,
                     signal: Arc::new(crate::engine::signal::DataSignal::new()),
                     space: data_space.clone(),
-                    pending_compression: None,
                 }),
                 distributor_exited: Arc::new(AtomicBool::new(false)),
+                admission_closed: AtomicBool::new(false),
                 mute_policy: FanOutMutePolicy::Block,
             };
             lanes.try_dispatch(test_dispatch("one")).unwrap();
@@ -1501,7 +1510,7 @@ mod tests {
             subscribe_all_count: 0,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            encoder: None,
+            codec_groups: test_plain_groups(),
             distribution_targets: Vec::new(),
             active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
@@ -1522,104 +1531,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    #[test]
-    fn pending_compression_update_precedes_next_dispatch() {
-        let (data_tx, mut data_rx) = yring::spsc::<LaneData>(4);
-        let lanes = FanOutLanes {
-            state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
-            active_flags: Arc::new(vec![AtomicBool::new(false)]),
-            distributor: Mutex::new(LaneDistributor {
-                tx: data_tx,
-                signal: Arc::new(crate::engine::signal::DataSignal::new()),
-                space: Arc::new(crate::engine::signal::StateSignal::new()),
-                pending_compression: None,
-            }),
-            distributor_exited: Arc::new(AtomicBool::new(false)),
-            mute_policy: FanOutMutePolicy::Block,
-        };
-        #[cfg(feature = "lz4")]
-        let kind = CompressionKind::Lz4;
-        #[cfg(all(not(feature = "lz4"), feature = "zstd"))]
-        let kind = CompressionKind::Zstd;
-
-        lanes.set_compression_all_ordered(kind, &Options::default(), None);
-        lanes.try_dispatch(test_dispatch("one")).unwrap();
-
-        data_rx.prefetch();
-        assert!(matches!(
-            data_rx.pop().expect("compression update present"),
-            LaneData::SetCompression(_)
-        ));
-        assert!(matches!(
-            data_rx.pop().expect("dispatch present"),
-            LaneData::Dispatch(_)
-        ));
-        data_rx.release();
-    }
-
-    #[cfg(any(feature = "lz4", feature = "zstd"))]
-    #[test]
-    fn pending_compression_update_survives_full_try_dispatch_ring() {
-        let (data_tx, mut data_rx) = yring::spsc::<LaneData>(4);
-        let lanes = FanOutLanes {
-            state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
-            active_flags: Arc::new(vec![AtomicBool::new(false)]),
-            distributor: Mutex::new(LaneDistributor {
-                tx: data_tx,
-                signal: Arc::new(crate::engine::signal::DataSignal::new()),
-                space: Arc::new(crate::engine::signal::StateSignal::new()),
-                pending_compression: None,
-            }),
-            distributor_exited: Arc::new(AtomicBool::new(false)),
-            mute_policy: FanOutMutePolicy::Block,
-        };
-        #[cfg(feature = "lz4")]
-        let kind = CompressionKind::Lz4;
-        #[cfg(all(not(feature = "lz4"), feature = "zstd"))]
-        let kind = CompressionKind::Zstd;
-
-        let mut fill_count = 0;
-        loop {
-            let dispatch = test_dispatch("pre");
-            if lanes.try_dispatch(dispatch).is_err() {
-                break;
-            }
-            fill_count += 1;
-            assert!(fill_count < 32, "test ring did not fill");
-        }
-        assert!(fill_count > 0);
-
-        lanes.set_compression_all_ordered(kind, &Options::default(), None);
-        let Err(returned) = lanes.try_dispatch(test_dispatch("blocked")) else {
-            panic!("full ring accepted dispatch before compression update fit");
-        };
-        assert_eq!(returned.msg.part_bytes(0).unwrap().as_ref(), b"blocked");
-
-        data_rx.prefetch();
-        for _ in 0..fill_count {
-            let Some(LaneData::Dispatch(dispatch)) = data_rx.pop() else {
-                panic!("expected only pre-compression dispatches");
-            };
-            assert_eq!(dispatch.msg.part_bytes(0).unwrap().as_ref(), b"pre");
-        }
-        assert!(data_rx.pop().is_none());
-        data_rx.release();
-
-        lanes.try_dispatch(test_dispatch("after")).unwrap();
-        data_rx.prefetch();
-        assert!(matches!(
-            data_rx.pop().expect("compression update present"),
-            LaneData::SetCompression(_)
-        ));
-        let Some(LaneData::Dispatch(dispatch)) = data_rx.pop() else {
-            panic!("expected dispatch after compression update");
-        };
-        assert_eq!(dispatch.msg.part_bytes(0).unwrap().as_ref(), b"after");
-        assert!(data_rx.pop().is_none());
-        data_rx.release();
-    }
-
     #[test]
     fn drop_oldest_lossy_dispatch_keeps_newest_per_peer_frames() {
         let (_data_tx, data_rx) = yring::spsc::<LaneData>(4);
@@ -1636,6 +1547,7 @@ mod tests {
                 any_groups: false,
                 slot: slot.clone(),
                 dict_shipped: false,
+                codec_group: 0,
             },
         );
         let mut worker = LaneWorker {
@@ -1650,7 +1562,7 @@ mod tests {
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            encoder: None,
+            codec_groups: test_plain_groups(),
             distribution_targets: Vec::new(),
             active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
@@ -1686,12 +1598,9 @@ mod tests {
                 any_groups: false,
                 slot: slot.clone(),
                 dict_shipped: false,
+                codec_group: 0,
             },
         );
-        let encoder = omq_proto::proto::transform::Lz4Encoder::with_send_dict(Bytes::from_static(
-            b"shared-dict",
-        ))
-        .unwrap();
         let mut worker = LaneWorker {
             data_rx,
             ctrl_rx,
@@ -1704,9 +1613,19 @@ mod tests {
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            encoder: Some(omq_proto::proto::transform::MessageEncoder::Lz4(Box::new(
-                encoder,
-            ))),
+            codec_groups: {
+                let options =
+                    Options::default().compression_dict(Bytes::from_static(b"shared-dict"));
+                let mut groups = std::array::from_fn(|_| None);
+                groups[0] = Some(
+                    super::CodecGroup::new(Some(crate::engine::codec::CodecProfile::new(
+                        CompressionKind::Lz4,
+                        &options,
+                    )))
+                    .unwrap(),
+                );
+                groups
+            },
             distribution_targets: Vec::new(),
             active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
@@ -1763,6 +1682,7 @@ mod tests {
                 any_groups: false,
                 slot: slot.clone(),
                 dict_shipped: false,
+                codec_group: 0,
             },
         );
         let mut worker = LaneWorker {
@@ -1777,7 +1697,7 @@ mod tests {
             subscribe_all_count: 1,
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
-            encoder: None,
+            codec_groups: test_plain_groups(),
             distribution_targets: Vec::new(),
             active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
@@ -1794,6 +1714,12 @@ mod tests {
         assert_eq!(actual, vec![encoded_dispatches(&["first", "second"])]);
     }
 
+    fn test_plain_groups() -> [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS] {
+        let mut groups = std::array::from_fn(|_| None);
+        groups[0] = Some(super::CodecGroup::new(None).unwrap());
+        groups
+    }
+
     fn test_lanes(count: usize) -> FanOutLanes {
         FanOutLanes {
             state: std::sync::Mutex::new(FanOutLaneState {
@@ -1806,6 +1732,7 @@ mod tests {
             ),
             distributor: test_distributor(),
             distributor_exited: Arc::new(AtomicBool::new(false)),
+            admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::DropNewest,
         }
     }
@@ -1819,7 +1746,11 @@ mod tests {
         LaneEndpoint {
             ctrl_tx,
             ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+            data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+            exited: Arc::new(AtomicBool::new(false)),
             peer_count: 0,
+            codec_groups: std::array::from_fn(|_| None),
+            peer_groups: FxHashMap::default(),
         }
     }
 
@@ -1840,10 +1771,7 @@ mod tests {
             16 * 1024,
             64 * 1024,
             msg_cap,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         )
     }
 
@@ -1853,7 +1781,6 @@ mod tests {
             tx: data_tx,
             signal: Arc::new(crate::engine::signal::DataSignal::new()),
             space: Arc::new(crate::engine::signal::StateSignal::new()),
-            pending_compression: None,
         })
     }
 
@@ -1898,3 +1825,6 @@ mod tests {
         bytes.freeze()
     }
 }
+
+#[cfg(all(test, any(feature = "lz4", feature = "zstd")))]
+mod codec_tests;

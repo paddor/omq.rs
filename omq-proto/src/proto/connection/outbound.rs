@@ -16,9 +16,9 @@ use super::super::mechanism::curve::CurveTransform;
 use super::super::ws_codec;
 #[cfg(feature = "ws")]
 use super::super::zws;
+use super::Connection;
 #[cfg(feature = "curve")]
 use super::FrameTransform;
-use super::{Connection, State};
 
 impl Connection {
     #[allow(clippy::unnecessary_wraps)]
@@ -30,7 +30,7 @@ impl Connection {
             // CURVE post-handshake: commands traverse MESSAGE encryption.
             // The inner flags byte carries COMMAND (0x02) for the peer.
             #[cfg(feature = "curve")]
-            if matches!(self.state, State::Ready)
+            if self.is_ready()
                 && let Some(FrameTransform::Curve(tx)) = self.transform.as_mut()
             {
                 let plaintext = body.freeze();
@@ -124,7 +124,7 @@ impl Connection {
     /// When a security mechanism has installed a frame transform (CURVE),
     /// each part is encrypted into a MESSAGE command per RFC 26.
     pub fn send_message(&mut self, msg: &Message) -> Result<()> {
-        if !matches!(self.state, State::Ready) {
+        if !self.is_ready() {
             return Err(Error::Protocol(
                 "send_message before handshake complete".into(),
             ));
@@ -160,7 +160,7 @@ impl Connection {
     /// Queue a ZMTP command (SUBSCRIBE, CANCEL, PING, JOIN, ...). Valid only
     /// after handshake.
     pub fn send_command(&mut self, cmd: &Command) -> Result<()> {
-        if !matches!(self.state, State::Ready) {
+        if !self.is_ready() {
             return Err(Error::Protocol(
                 "send_command before handshake complete".into(),
             ));
@@ -185,6 +185,10 @@ impl Connection {
             return;
         }
         self.ws_close_sent = true;
+        self.ws_control.pending_pong = None;
+        self.ws_fragment = None;
+        self.pending_parts.clear();
+        self.pending_size = 0;
         let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
         self.refill_scratch(8);
         ws_codec::encode_ws_control(
@@ -200,6 +204,13 @@ impl Connection {
     /// Queue a WebSocket pong frame echoing the ping payload.
     #[cfg(feature = "ws")]
     pub(super) fn queue_ws_pong(&mut self, payload: &[u8]) {
+        if self.ws_close_sent {
+            return;
+        }
+        if self.ws_control.pong_remaining.is_some() {
+            self.ws_control.pending_pong = Some(super::ws::Pong::new(payload));
+            return;
+        }
         let role = self.ws_role.unwrap_or(ws_codec::WsRole::Server);
         self.refill_scratch(6 + payload.len());
         ws_codec::encode_ws_control(
@@ -210,6 +221,22 @@ impl Connection {
             payload,
             role,
         );
+        self.ws_control.pong_remaining = Some(self.pending_transmit_size());
+    }
+
+    #[cfg(feature = "ws")]
+    fn advance_ws_pong(&mut self, written: usize) {
+        let Some(remaining) = self.ws_control.pong_remaining else {
+            return;
+        };
+        if written < remaining {
+            self.ws_control.pong_remaining = Some(remaining - written);
+            return;
+        }
+        self.ws_control.pong_remaining = None;
+        if let Some(pong) = self.ws_control.pending_pong.take() {
+            self.queue_ws_pong(pong.as_slice());
+        }
     }
 
     /// CURVE-encrypted data part: wrap the plaintext per RFC 26 and queue
@@ -305,6 +332,8 @@ impl Connection {
     /// peeling fully-consumed entries off the front and remembering
     /// the partial offset on the front chunk if any.
     pub fn advance_transmit(&mut self, mut n: usize) {
+        #[cfg(feature = "ws")]
+        let written = n;
         while n > 0 {
             let Some(front) = self.out_chunks.front() else {
                 debug_assert!(false, "advance_transmit beyond pending bytes");
@@ -314,13 +343,15 @@ impl Connection {
             let remaining = front_len - self.front_consumed;
             if n < remaining {
                 self.front_consumed += n;
-                return;
+                break;
             }
             n -= remaining;
             self.out_chunks.pop_front();
             self.out_bytes_total = self.out_bytes_total.saturating_sub(front_len);
             self.front_consumed = 0;
         }
+        #[cfg(feature = "ws")]
+        self.advance_ws_pong(written);
     }
 
     /// Encode `msg` as ZMTP DATA frames directly into `flat_buf` without

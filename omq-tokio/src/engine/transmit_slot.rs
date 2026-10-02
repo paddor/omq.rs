@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::{Bytes, BytesMut};
 
+use super::codec::CodecProfile;
+use super::framing::WireFraming;
 use super::signal::{DataSignal, StateSignal};
 use omq_proto::fan_out_frame::FanOutFrame;
 use omq_proto::frame_buffer::FrameBuffer;
@@ -15,7 +17,6 @@ use omq_proto::handle_frame::{
     HandleFrameCaps, HandleFrameDecision, HandleFrameState, decide_handle_frame,
 };
 use omq_proto::message::Message;
-use omq_proto::proto::transform::CompressionKind;
 
 pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
@@ -41,12 +42,9 @@ pub(crate) struct PeerTransmitSlot {
     pub(crate) space_available: Arc<StateSignal>,
     pub(crate) handshake_done: AtomicBool,
     pub(crate) has_transform: bool,
-    pub(crate) compression_kind: Option<CompressionKind>,
+    codec_profile: Option<CodecProfile>,
     pub(crate) transform_passthrough: Option<(Bytes, usize)>,
-    #[cfg(feature = "ws")]
-    is_ws: bool,
-    #[cfg(feature = "ws")]
-    ws_masked: bool,
+    framing: WireFraming,
     pub(crate) dead: AtomicBool,
     pub(crate) peer_id: u64,
     queued_msgs: AtomicUsize,
@@ -80,14 +78,13 @@ impl PeerTransmitSlot {
     pub(crate) fn new(
         peer_id: u64,
         has_transform: bool,
-        compression_kind: Option<CompressionKind>,
+        codec_profile: Option<CodecProfile>,
         transform_passthrough: Option<(Bytes, usize)>,
         arena_threshold: usize,
         arena_cap: usize,
         cap: usize,
         msg_cap: usize,
-        #[cfg(feature = "ws")] is_ws: bool,
-        #[cfg(feature = "ws")] ws_masked: bool,
+        framing: WireFraming,
     ) -> Arc<Self> {
         Arc::new(Self {
             eq: Mutex::new(FrameBuffer::with_config_lazy(arena_threshold, arena_cap)),
@@ -98,12 +95,9 @@ impl PeerTransmitSlot {
             space_available: Arc::new(StateSignal::new()),
             handshake_done: AtomicBool::new(false),
             has_transform,
-            compression_kind,
+            codec_profile,
             transform_passthrough,
-            #[cfg(feature = "ws")]
-            is_ws,
-            #[cfg(feature = "ws")]
-            ws_masked,
+            framing,
             dead: AtomicBool::new(false),
             peer_id,
             queued_msgs: AtomicUsize::new(0),
@@ -117,7 +111,7 @@ impl PeerTransmitSlot {
 
     #[cfg(feature = "ws")]
     pub(crate) fn is_ws(&self) -> bool {
-        self.is_ws
+        self.framing.is_ws()
     }
 
     #[inline]
@@ -156,10 +150,7 @@ impl PeerTransmitSlot {
                 handshake_done: true,
                 has_transform: self.has_transform,
                 transform_passthrough: self.transform_passthrough.as_ref(),
-                #[cfg(feature = "ws")]
-                is_ws: self.is_ws,
-                #[cfg(not(feature = "ws"))]
-                is_ws: false,
+                is_ws: self.framing.is_ws(),
                 queued_bytes: eq.total_bytes(),
                 queued_messages: self.queued_msgs.load(Ordering::Relaxed),
             },
@@ -172,7 +163,7 @@ impl PeerTransmitSlot {
         match decision {
             HandleFrameDecision::Plain => eq.frame(msg),
             #[cfg(feature = "ws")]
-            HandleFrameDecision::WebSocket => eq.frame_ws(msg, self.ws_masked),
+            HandleFrameDecision::WebSocket => eq.frame_ws(msg, self.framing.is_masked()),
             #[cfg(not(feature = "ws"))]
             HandleFrameDecision::WebSocket => unreachable!("ws disabled"),
             HandleFrameDecision::TransformPassthrough { sentinel } => {
@@ -288,8 +279,8 @@ impl PeerTransmitSlot {
     }
 
     #[inline]
-    pub(crate) fn compression_kind(&self) -> Option<CompressionKind> {
-        self.compression_kind
+    pub(crate) fn codec_profile(&self) -> Option<&CodecProfile> {
+        self.codec_profile.as_ref()
     }
 
     #[inline]
@@ -532,10 +523,7 @@ mod tests {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             TRANSMIT_SLOT_CAP_DEFAULT,
             TRANSMIT_SLOT_MSG_CAP_DEFAULT,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
         slot
@@ -576,10 +564,7 @@ mod tests {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             TRANSMIT_SLOT_CAP_DEFAULT,
             2,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
 
@@ -611,10 +596,7 @@ mod tests {
             omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             TRANSMIT_SLOT_CAP_DEFAULT,
             1,
-            #[cfg(feature = "ws")]
-            false,
-            #[cfg(feature = "ws")]
-            false,
+            crate::engine::framing::WireFraming::Zmtp,
         );
         slot.handshake_done.store(true, Ordering::Release);
 

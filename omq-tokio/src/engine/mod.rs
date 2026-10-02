@@ -8,9 +8,15 @@
 //!
 //! The socket actor composes one of these per peer.
 
+pub(crate) mod codec;
 pub mod compression_pool;
 pub mod driver;
+pub(crate) mod framing;
+pub(crate) mod peer_completion;
+mod peer_events;
 pub(crate) mod rate_limit;
+mod recv_sink;
+pub(crate) use recv_sink::reserve_authenticated;
 pub(crate) mod send_pipe;
 pub(crate) mod signal;
 pub(crate) mod transmit_slot;

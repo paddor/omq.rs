@@ -14,7 +14,7 @@ use crate::message::{Message, Payload};
 
 use super::TransformedOut;
 use super::common::{
-    ENVELOPE_PLAIN, SENTINEL_PLAIN, plaintext_payload, take_budget, validate_dict,
+    ENVELOPE_PLAIN, SENTINEL_PLAIN, body_budget, plaintext_payload, take_budget, validate_dict,
 };
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -202,6 +202,21 @@ impl ZstdEncoder {
         }
     }
 
+    /// Reconfigure an offload encoder after the primary's shipment/training.
+    /// Cached contexts must be rebuilt when the compression level changes.
+    /// Only reusable offload encoders may use this operation.
+    pub fn sync_offload_config(&mut self, primary: &Self) {
+        debug_assert!(self.can_offload() && primary.can_offload());
+        self.sync_dict(primary);
+        if self.level != primary.level {
+            self.cctx = None;
+            self.level = primary.level;
+        }
+        self.max_message_size = primary.max_message_size;
+        self.threshold_override = primary.threshold_override;
+        self.dict_capacity = primary.dict_capacity;
+    }
+
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         for part in &msg.parts_payload() {
             self.maybe_train(&part.as_bytes());
@@ -314,6 +329,8 @@ impl ZstdDecoder {
         Self::default()
     }
 
+    /// Set the raw decoder's decompressed-body budget. Socket-level
+    /// [`super::MessageDecoder`] also reserves a payload slot per part.
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
@@ -327,9 +344,35 @@ impl ZstdDecoder {
     }
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        self.decode_with_budget(msg, self.max_message_size)
+    }
+
+    pub(super) fn decode_with_payload_slots(&mut self, msg: Message) -> Result<Option<Message>> {
+        if is_dict_shipment(&msg) {
+            return self.decode(msg);
+        }
+        let budget = body_budget(msg.len(), self.max_message_size)?;
+        self.decode_with_budget(msg, budget)
+    }
+
+    pub(super) fn max_wire_message_size(&self) -> Option<usize> {
+        self.max_message_size.map(|limit| {
+            let parts = limit / size_of::<Payload>();
+            // Compressed output is used only when it beats plaintext. The
+            // largest per-part overhead is the four-byte passthrough prefix.
+            let data = limit.saturating_add(parts.saturating_mul(ENVELOPE_PLAIN));
+            let setup = self.max_recv_dict_size + size_of::<Payload>();
+            data.max(setup).min(isize::MAX.unsigned_abs())
+        })
+    }
+
+    fn decode_with_budget(
+        &mut self,
+        msg: Message,
+        mut budget_left: Option<usize>,
+    ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
-        let mut budget_left = self.max_message_size;
         for (idx, part) in parts.iter_mut().enumerate() {
             let bytes = part.as_bytes();
             if bytes.len() < 4 {

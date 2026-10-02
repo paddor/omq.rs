@@ -92,6 +92,9 @@ pub(crate) fn peek_ws_header(
                 return Ok(None);
             };
             let len = u64::from(u16::from_be_bytes([hdr[2], hdr[3]]));
+            if len < 126 {
+                return Err(Error::Protocol("nonminimal WS payload length".into()));
+            }
             (len, 4)
         }
         127 => {
@@ -101,6 +104,9 @@ pub(crate) fn peek_ws_header(
             let len = u64::from_be_bytes(hdr[2..10].try_into().unwrap());
             if len >> 63 != 0 {
                 return Err(Error::Protocol("WS payload length MSB set".into()));
+            }
+            if len <= 65535 {
+                return Err(Error::Protocol("nonminimal WS payload length".into()));
             }
             (len, 10)
         }
@@ -247,14 +253,30 @@ pub(crate) fn apply_mask_offset(data: &mut [u8], mask: [u8; 4], offset: usize) {
 
 pub(crate) fn generate_mask_key() -> [u8; 4] {
     use rand::Rng;
-    thread_local! {
-        static RNG: std::cell::RefCell<rand::rngs::SmallRng> = std::cell::RefCell::new(
-            rand::make_rng()
-        );
+    // RFC 6455 requires unpredictable masks. ThreadRng already buffers a
+    // cryptographic generator and periodically reseeds from system entropy.
+    rand::rng().next_u32().to_ne_bytes()
+}
+
+/// Validate a fully unmasked CLOSE payload before echoing its status.
+pub(crate) fn validate_close_payload(payload: &[u8]) -> Result<Option<u16>> {
+    if payload.is_empty() {
+        return Ok(None);
     }
-    let mut key = [0u8; 4];
-    RNG.with(|rng| rng.borrow_mut().fill_bytes(&mut key));
-    key
+    let Some(code_bytes) = payload.get(..2) else {
+        return Err(Error::Protocol(
+            "WS close frame has one-byte payload".into(),
+        ));
+    };
+    let code = u16::from_be_bytes([code_bytes[0], code_bytes[1]]);
+    // Registered protocol codes plus application/private ranges. No extension
+    // is negotiated that would permit codes from the reserved 1016..3000 range.
+    if !matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999) {
+        return Err(Error::Protocol(format!("invalid WS close code: {code}")));
+    }
+    std::str::from_utf8(&payload[2..])
+        .map_err(|_| Error::Protocol("invalid UTF-8 in WS close reason".into()))?;
+    Ok(Some(code))
 }
 
 pub(crate) const OP_CLOSE_CODE: u8 = OP_CLOSE;
@@ -326,7 +348,7 @@ mod tests {
         let mask = [0xFF; 4];
         let mut data: Vec<u8> = vec![];
         apply_mask(&mut data, mask);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
     }
 
     #[test]
@@ -374,6 +396,66 @@ mod tests {
         let hdr = peek_ws_header(&buf, WsRole::Server).unwrap().unwrap();
         assert_eq!(hdr.payload_len, 256);
         assert_eq!(hdr.header_len, 4);
+    }
+
+    #[test]
+    fn rejects_nonminimal_lengths_before_waiting_for_payload() {
+        for role in [WsRole::Client, WsRole::Server] {
+            for (len7, length) in [(126u8, 0u64), (126, 125), (127, 126), (127, 65535)] {
+                let mut wire = vec![FIN_BIT | OP_BINARY, len7];
+                if len7 == 126 {
+                    wire.extend_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+                } else {
+                    wire.extend_from_slice(&length.to_be_bytes());
+                }
+                if role == WsRole::Client {
+                    wire[1] |= MASK_BIT;
+                    wire.extend_from_slice(&[1, 2, 3, 4]);
+                }
+                let mut input = ChunkedInputBuf::new();
+                // Header parsing must also work across individual input chunks.
+                for byte in wire {
+                    input.push(Bytes::copy_from_slice(&[byte]));
+                }
+                assert!(
+                    peek_ws_header(&input, role).is_err(),
+                    "accepted nonminimal {len7}/{length} from {role:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_minimal_length_boundaries_in_both_roles() {
+        for role in [WsRole::Client, WsRole::Server] {
+            for length in [0usize, 125, 126, 65535, 65536] {
+                let mut wire = BytesMut::new();
+                encode_ws_binary_header(&mut wire, length, role);
+                let mut input = ChunkedInputBuf::new();
+                for byte in wire {
+                    input.push(Bytes::copy_from_slice(&[byte]));
+                }
+                let header = peek_ws_header(&input, role).unwrap().unwrap();
+                assert_eq!(header.payload_len, length as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn mask_offsets_match_complete_frame_at_every_split() {
+        let key = [0x21, 0x43, 0x65, 0x87];
+        let payload: Vec<u8> = (0..=255).collect();
+        let expected: Vec<_> = payload
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % 4])
+            .collect();
+        for split in 0..=payload.len() {
+            let mut actual = payload.clone();
+            apply_mask(&mut actual[..split], key);
+            apply_mask_offset(&mut actual[split..], key, split);
+            assert_eq!(actual, expected, "split {split}");
+        }
     }
 
     #[test]

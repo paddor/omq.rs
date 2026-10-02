@@ -35,13 +35,14 @@ pub mod transport;
 // pre-split crate.
 pub use omq_proto::IpcPath;
 pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
+pub use omq_proto::{
+    CompressionKind, CompressionOptions, Endpoint, EndpointRole, EndpointSpec, Error, Frame,
+    FrameFlags, KeepAlive, MechanismConfig, MechanismSetup, Message, MessageIter, MessagePool,
+    OnMute, Options, PartCountError, ReconnectPolicy, Result, SocketType, TrySendError,
+    is_compatible,
+};
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
-pub use omq_proto::{
-    Endpoint, EndpointRole, EndpointSpec, Error, Frame, FrameFlags, KeepAlive, MechanismConfig,
-    MechanismSetup, Message, MessageIter, MessagePool, OnMute, Options, PartCountError,
-    ReconnectPolicy, Result, SocketType, TrySendError, is_compatible,
-};
 
 // Sub-modules of omq_proto are re-exported under their original
 // paths so downstream `use omq_tokio::endpoint::Host` style imports keep

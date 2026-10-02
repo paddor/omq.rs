@@ -51,6 +51,38 @@ impl MessageRateLimit {
     }
 }
 
+/// Complete codec-parameter snapshot for one bind/connect operation.
+///
+/// The endpoint selects the codec kind. These parameters replace the socket's
+/// five compression settings; `None` selects the codec default, not inheritance.
+/// Construct from `&Options` to retain defaults before changing selected fields.
+/// Mechanism and decoder size limits come from the socket configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompressionOptions {
+    /// Static outbound dictionary. Takes precedence over auto-training.
+    pub dict: Option<Bytes>,
+    /// Train one dictionary when no static dictionary is supplied.
+    pub auto_train: bool,
+    /// Minimum part size to attempt compression.
+    pub threshold: Option<usize>,
+    /// Zstd compression level; ignored by LZ4.
+    pub level: Option<i32>,
+    /// Training dictionary capacity.
+    pub dict_capacity: Option<usize>,
+}
+
+impl From<&Options> for CompressionOptions {
+    fn from(options: &Options) -> Self {
+        Self {
+            dict: options.compression_dict.clone(),
+            auto_train: options.compression_auto_train,
+            threshold: options.compression_threshold,
+            level: options.compression_level,
+            dict_capacity: options.compression_dict_capacity,
+        }
+    }
+}
+
 /// Per-socket configuration.
 ///
 /// # Compatibility warnings
@@ -169,16 +201,20 @@ pub struct Options {
     /// Defaults to `heartbeat_interval` when unset.
     pub heartbeat_timeout: Option<Duration>,
 
-    /// Max time allowed to complete the ZMTP handshake.
+    /// Max time allowed to complete the ZMTP handshake. WS/WSS uses one
+    /// deadline across the transport attempt (DNS/TCP/TLS/HTTP) and ZMTP.
     ///
-    /// Encrypted mechanisms require a timeout. Longer values give slow peers
-    /// more time to finish authentication, but also let stalled or malicious
+    /// Encrypted mechanisms and WS/WSS require a finite timeout. Longer values
+    /// give slow peers more time to finish authentication, but also let malicious
     /// peers hold pending-handshake slots longer.
     pub handshake_timeout: Option<Duration>,
 
-    /// Maximum byte-stream peers allowed to sit in the ZMTP handshake state
-    /// at once. The tokio backend applies this before spawning a peer driver
-    /// for newly accepted TCP/IPC connections.
+    /// Maximum pending byte-stream handshakes per socket. Includes accepted
+    /// TCP/IPC connections, WS/WSS before TLS/HTTP, and outbound attempts.
+    /// The tokio backend reserves admission before spawning a peer driver,
+    /// including before DNS for named outbound connections. WS/WSS also
+    /// allows at most 32 pending peers per listener. Named bind/connect API
+    /// operations have a separate 128-job cap while awaiting DNS/admission.
     ///
     /// Lower values reduce memory/task pressure from unauthenticated peers,
     /// but can reject legitimate connection bursts while the cap is full.
@@ -189,6 +225,9 @@ pub struct Options {
 
     /// Reject incoming messages larger than this. Accounting includes payload
     /// bytes plus one internal payload slot per part. `None` = no limit.
+    /// For compression transports this is the decoded size. Framing has a
+    /// separate finite allowance for codec overhead and dictionary setup;
+    /// command limits and dictionary protocol ceilings remain independent.
     pub max_message_size: Option<usize>,
 
     /// Conflate: keep only the latest message per subscriber. Applies to
@@ -314,6 +353,39 @@ pub struct Options {
     /// transports. Requires the `ws` feature.
     #[cfg(feature = "ws")]
     pub wss_tls: WssTls,
+
+    /// Browser-origin policy for WS/WSS listeners. Requires the `ws` feature.
+    #[cfg(feature = "ws")]
+    pub ws: WsOptions,
+}
+
+/// WebSocket connection policy. Native clients may omit Origin; a present
+/// Origin must match a listener's explicit HTTP(S) origin allowlist.
+#[cfg(feature = "ws")]
+#[derive(Clone, Debug)]
+pub struct WsOptions {
+    /// Allowed browser origins, for example `https://app.example.com`.
+    /// Empty by default: requests carrying Origin are rejected. Matching uses
+    /// scheme, normalized host, and port; no suffix or wildcard matching.
+    /// Origin is not authentication, and native clients can forge it.
+    pub allowed_origins: Vec<String>,
+
+    /// Maximum ready WS/WSS connections across this socket's endpoints.
+    /// Defaults to 1024; must be nonzero. Other transports do not consume
+    /// this limit. Stricter socket-type limits still apply. A replacement
+    /// identity may hand over an existing route without an extra ready slot.
+    /// Pending handshakes have their separate admission limit.
+    pub max_ready_peers: usize,
+}
+
+#[cfg(feature = "ws")]
+impl Default for WsOptions {
+    fn default() -> Self {
+        Self {
+            allowed_origins: Vec::new(),
+            max_ready_peers: 1024,
+        }
+    }
 }
 
 /// TLS configuration for WSS endpoints. This covers server certificates
@@ -394,6 +466,8 @@ impl Default for Options {
             reconnect_stop_conn_refused: false,
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
+            #[cfg(feature = "ws")]
+            ws: WsOptions::default(),
         }
     }
 }
@@ -433,6 +507,12 @@ impl Options {
         if self.max_pending_handshakes == 0 {
             return Err(crate::error::Error::Config(
                 "max_pending_handshakes must be greater than zero".into(),
+            ));
+        }
+        #[cfg(feature = "ws")]
+        if self.ws.max_ready_peers == 0 {
+            return Err(crate::error::Error::Config(
+                "ws.max_ready_peers must be greater than zero".into(),
             ));
         }
         for (name, limit) in [
@@ -1102,6 +1182,17 @@ mod tests {
         assert_eq!(o.compression_level, None);
         assert_eq!(o.on_mute, OnMute::Block);
         assert_eq!(o.large_message_threshold, Some(128 * 1024));
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn ws_ready_peer_limit_is_finite_and_cannot_be_disabled() {
+        let mut options = Options::default();
+        assert_eq!(options.ws.max_ready_peers, 1024);
+        options.ws.max_ready_peers = 0;
+        assert!(options.validate().is_err());
+        options.ws.max_ready_peers = 1;
+        assert!(options.validate().is_ok());
     }
 
     #[test]

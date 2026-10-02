@@ -291,8 +291,8 @@ mod tests {
     fn hello_empty_credentials() {
         let wire = encode_hello("", "").unwrap();
         let (u, p) = decode_hello(&wire).unwrap();
-        assert!(u.is_empty());
-        assert!(p.is_empty());
+        assert_eq!(u, "");
+        assert_eq!(p, "");
     }
 
     #[test]

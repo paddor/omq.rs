@@ -3,7 +3,12 @@
 //! Inline SHA-1 and base64 to avoid external deps. SHA-1 is used only for the
 //! `Sec-WebSocket-Accept` computation per RFC 6455; it is not used for security.
 
-use crate::error::{Error, Result};
+mod address;
+mod http;
+pub use address::{normalize_ws_origin, validate_ws_address};
+pub use http::{
+    MAX_HTTP_BYTES, MAX_HTTP_FIELDS, UpgradeRequest, parse_client_upgrade, parse_server_upgrade,
+};
 
 const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -36,6 +41,7 @@ fn valid_ws_key(key: &str) -> bool {
                 || (i >= 22 && b == b'=')
         })
         && key.ends_with("==")
+        && matches!(key.as_bytes()[21], b'A' | b'Q' | b'g' | b'w')
 }
 
 /// Format a client HTTP upgrade request.
@@ -72,141 +78,6 @@ pub fn format_server_upgrade(accept: &str, subprotocol: &str) -> Vec<u8> {
     resp.extend_from_slice(subprotocol.as_bytes());
     resp.extend_from_slice(b"\r\n\r\n");
     resp
-}
-
-/// Parsed fields from a client HTTP upgrade request.
-#[derive(Debug)]
-pub struct UpgradeRequest {
-    pub key: String,
-    pub subprotocols: Vec<String>,
-    pub path: String,
-}
-
-/// Parse a client HTTP upgrade request. Validates required headers.
-pub fn parse_client_upgrade(request: &[u8]) -> Result<UpgradeRequest> {
-    let s = std::str::from_utf8(request)
-        .map_err(|_| Error::HandshakeFailed("invalid UTF-8 in HTTP request".into()))?;
-
-    let mut lines = s.lines();
-    let request_line = lines
-        .next()
-        .ok_or_else(|| Error::HandshakeFailed("empty HTTP request".into()))?;
-
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 3 || !parts[0].eq_ignore_ascii_case("GET") {
-        return Err(Error::HandshakeFailed("not a GET request".into()));
-    }
-    let path = parts[1].to_string();
-
-    let mut key = None;
-    let mut upgrade = false;
-    let mut connection_upgrade = false;
-    let mut version_13 = false;
-    let mut subprotocols = Vec::new();
-
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name.trim();
-        let value = value.trim();
-
-        if name.eq_ignore_ascii_case("Upgrade") && value.eq_ignore_ascii_case("websocket") {
-            upgrade = true;
-        } else if name.eq_ignore_ascii_case("Connection") {
-            if value
-                .split(',')
-                .any(|v| v.trim().eq_ignore_ascii_case("Upgrade"))
-            {
-                connection_upgrade = true;
-            }
-        } else if name.eq_ignore_ascii_case("Sec-WebSocket-Key") {
-            key = Some(value.to_string());
-        } else if name.eq_ignore_ascii_case("Sec-WebSocket-Version") && value == "13" {
-            version_13 = true;
-        } else if name.eq_ignore_ascii_case("Sec-WebSocket-Protocol") {
-            for proto in value.split(',') {
-                subprotocols.push(proto.trim().to_string());
-            }
-        }
-    }
-
-    if !upgrade {
-        return Err(Error::HandshakeFailed("missing Upgrade: websocket".into()));
-    }
-    if !connection_upgrade {
-        return Err(Error::HandshakeFailed("missing Connection: Upgrade".into()));
-    }
-    if !version_13 {
-        return Err(Error::HandshakeFailed(
-            "missing Sec-WebSocket-Version: 13".into(),
-        ));
-    }
-    let key = key.ok_or_else(|| Error::HandshakeFailed("missing Sec-WebSocket-Key".into()))?;
-    if !valid_ws_key(&key) {
-        return Err(Error::HandshakeFailed("invalid Sec-WebSocket-Key".into()));
-    }
-
-    Ok(UpgradeRequest {
-        key,
-        subprotocols,
-        path,
-    })
-}
-
-/// Parse a server HTTP 101 upgrade response. Validates status and Accept.
-pub fn parse_server_upgrade(response: &[u8], expected_key: &str) -> Result<String> {
-    let s = std::str::from_utf8(response)
-        .map_err(|_| Error::HandshakeFailed("invalid UTF-8 in HTTP response".into()))?;
-
-    let mut lines = s.lines();
-    let status_line = lines
-        .next()
-        .ok_or_else(|| Error::HandshakeFailed("empty HTTP response".into()))?;
-
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok());
-    if status_code != Some(101) {
-        return Err(Error::HandshakeFailed(format!(
-            "expected HTTP 101, got: {status_line}"
-        )));
-    }
-
-    let mut accept = None;
-    let mut subprotocol = None;
-
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name.trim();
-        let value = value.trim();
-
-        if name.eq_ignore_ascii_case("Sec-WebSocket-Accept") {
-            accept = Some(value.to_string());
-        } else if name.eq_ignore_ascii_case("Sec-WebSocket-Protocol") {
-            subprotocol = Some(value.to_string());
-        }
-    }
-
-    let accept =
-        accept.ok_or_else(|| Error::HandshakeFailed("missing Sec-WebSocket-Accept".into()))?;
-
-    if !validate_ws_accept(expected_key, &accept) {
-        return Err(Error::HandshakeFailed(
-            "Sec-WebSocket-Accept mismatch".into(),
-        ));
-    }
-
-    Ok(subprotocol.unwrap_or_default())
 }
 
 // --- Inline SHA-1 (RFC 3174) ---
@@ -302,6 +173,10 @@ fn base64_encode(data: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "ws_handshake/validation_tests.rs"]
+mod validation_tests;
 
 #[cfg(test)]
 mod tests {

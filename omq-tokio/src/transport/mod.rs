@@ -18,10 +18,14 @@ use omq_proto::error::Result;
 pub use omq_proto::monitor::PeerIdent;
 
 pub mod backoff;
+pub(crate) mod dns;
 pub mod inproc;
 pub mod ipc;
+pub(crate) mod setup;
 pub(crate) mod stream_raw;
 pub mod tcp;
+#[cfg(feature = "ws")]
+pub(crate) mod tls;
 pub mod udp;
 
 pub use backoff::{Canceled, dial_with_backoff};

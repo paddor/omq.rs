@@ -629,6 +629,54 @@ fn omq_workload_profile_roundtrip() {
 }
 
 #[test]
+fn updated_compression_after_materialization_is_validated_before_dns() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(
+        zmq_bind(socket, c"inproc://codec-snapshot-validation".as_ptr()),
+        0
+    );
+    assert_eq!(
+        set_bytes(socket, OMQ_COMPRESSION_DICT, b"invalid-zstd-dictionary"),
+        0
+    );
+    assert_eq!(
+        zmq_connect(socket, c"zstd+tcp://codec-snapshot.invalid:1".as_ptr()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(
+        zmq_bind(socket, c"zstd+tcp://codec-snapshot.invalid:2".as_ptr()),
+        -1
+    );
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn changed_curve_overlay_cannot_enable_compression_on_a_materialized_socket() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PUSH);
+    assert_eq!(
+        zmq_bind(socket, c"inproc://codec-snapshot-curve".as_ptr()),
+        0
+    );
+    assert_eq!(set_i32(socket, ZMQ_CURVE_SERVER, 1), 0);
+    for endpoint in [
+        c"lz4+tcp://codec-snapshot.invalid:1",
+        c"zstd+tcp://codec-snapshot.invalid:2",
+    ] {
+        assert_eq!(zmq_connect(socket, endpoint.as_ptr()), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+        assert_eq!(zmq_bind(socket, endpoint.as_ptr()), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    }
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn omq_compression_options_roundtrip() {
     let ctx = zmq_ctx_new();
     let s = zmq_socket(ctx, ZMQ_PUSH);
@@ -1183,4 +1231,64 @@ fn setsockopt_null_optval_returns_einval() {
 
     zmq_close(s);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn ws_origin_allowlist_roundtrip_validation_and_materialization() {
+    const OMQ_WS_ALLOWED_ORIGINS: i32 = 1009;
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+    let mut buffer = [0; 256];
+    assert_eq!(get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer), 0);
+    let origins = b"https://app.example.com\nhttp://[::1]:8080";
+    assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, origins), 0);
+    let size = get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer);
+    assert_eq!(&buffer[..size], origins);
+    for invalid in [
+        "*",
+        "null",
+        "https://a/path",
+        "https://a\n",
+        "https://a\n\nhttps://b",
+    ] {
+        assert_eq!(
+            set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, invalid.as_bytes()),
+            -1
+        );
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    }
+    let size = get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer);
+    assert_eq!(&buffer[..size], origins);
+    assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, b""), 0);
+    assert_eq!(get_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, &mut buffer), 0);
+    let endpoint = std::ffi::CString::new("ws://127.0.0.1:0/").unwrap();
+    assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
+    assert_eq!(set_bytes(socket, OMQ_WS_ALLOWED_ORIGINS, origins), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn ws_ready_peer_limit_roundtrip_validation_and_materialization() {
+    const OMQ_WS_MAX_READY_PEERS: i32 = 1010;
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_PULL);
+    assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 1024);
+    assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, 7), 0);
+    assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+    for invalid in [-1, 0] {
+        assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, invalid), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    }
+    assert_eq!(set_bytes(socket, OMQ_WS_MAX_READY_PEERS, &[1, 2]), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+    assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+    let endpoint = std::ffi::CString::new("ws://127.0.0.1:0/").unwrap();
+    assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
+    assert_eq!(set_i32(socket, OMQ_WS_MAX_READY_PEERS, 9), -1);
+    assert_eq!(omq_zmq::zmq_errno(), libc::EBUSY);
+    assert_eq!(get_i32(socket, OMQ_WS_MAX_READY_PEERS), 7);
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }

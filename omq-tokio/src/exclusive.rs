@@ -572,8 +572,9 @@ async fn resolve_bind_addr(host: &Host, port: u16) -> Result<SocketAddr> {
     match host {
         Host::Wildcard => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
         Host::Ip(ip) => Ok(SocketAddr::new(*ip, port)),
-        Host::Name(name) => tokio::net::lookup_host((name.as_str(), port))
+        Host::Name(name) => crate::transport::dns::resolve(name, port)
             .await?
+            .into_iter()
             .next()
             .ok_or_else(|| Error::Io(io::Error::other(format!("no addresses for {name}:{port}")))),
         _ => Err(Error::Config(

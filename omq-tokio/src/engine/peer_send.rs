@@ -184,6 +184,8 @@ impl Producer {
         self.try_send_prepared(message, SendPreparation::Plain, |_| false)
     }
 
+    // Atomic::try_update is unstable on MSRV 1.93.
+    #[allow(deprecated)]
     pub(crate) fn try_send_prepared(
         &mut self,
         message: Message,

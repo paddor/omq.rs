@@ -8,6 +8,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Breaking
 
+- WS/WSS ready connections default to at most 1024 per socket, configurable
+  through `Options::ws.max_ready_peers` (C: `OMQ_WS_MAX_READY_PEERS`). Other
+  transports have separate admission; identity handover reuses a ready slot.
+- WS/WSS listeners reject browser requests unless their Origin appears in
+  `Options::ws.allowed_origins` (C: `OMQ_WS_ALLOWED_ORIGINS`). Missing Origin
+  remains allowed for native clients. Resource path/query must match the bind.
 - Remove opt-in PEER receive partitioning: `Socket::peer_recv_lanes`,
   `PeerRecvConfig`, and `PeerRecvLane`. Use ordinary socket receive methods;
   application code owns worker dispatch. Internal fanring fairness, bounded
@@ -15,6 +21,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Share verified TLS trust, identity, and server-name setup internally while
+  isolating WSS's explicit insecure test override. Empty custom trust PEM now
+  fails configuration validation.
+- WS/WSS requires a finite `handshake_timeout`, shared across transport setup
+  and ZMTP. Pending-handshake admission includes outbound attempts and WS/WSS
+  before HTTP/TLS; each WS/WSS listener admits at most 32 pending peers.
 - PEER receives use fanring ready-peer selection and batched space credits,
   retaining identity routing, reconnect fencing, and aggregate receive budgets.
 - Upgrade compression dependencies to `lz4rip` 0.11.8 and `zrip` 0.8.10.
@@ -33,6 +45,43 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- REP splits the request envelope at the first empty frame, like libzmq.
+  Requests whose body had an empty second part lost their leading parts.
+- REP with `WorkloadProfile::Throughput` or CURVE replies to the peer that
+  sent each request. It kept one envelope slot, so replies to queued requests
+  failed with a protocol error, and it sent replies round-robin.
+- Locally rejected handshakes report closure through the normal driver
+  lifecycle, preserving outbound reconnect after ready/receive admission fails.
+- Yield between bounded WebSocket parsing turns without losing buffered
+  frames. Resume input after checking driver control and shutdown, preserving
+  receive order in throughput and latency profiles.
+
+- Cap WebSocket multipart and fragment counts, including empty input. Bound
+  PONG backlog to one staged frame plus the latest pending payload, preserving
+  partial writes and discarding pending PONG output when CLOSE is queued.
+
+- Resolve named TCP/WS hosts on a bounded OS worker pool, independent of
+  Tokio runtime shutdown. Cap queued lookups and returned addresses; canceled
+  platform lookups cannot accumulate unbounded blocking tasks.
+- Named endpoint setup no longer waits inside the socket actor. Cap pending
+  operations, cancel on caller drop or endpoint removal, and carry shared
+  admission through DNS and authentication.
+- WebSocket upgrade selection must match the configured mechanism and offered
+  profiles. Keep the existing browser NULL/PLAIN `ZWS2.0` profile; reject
+  unoffered server selections and typed endpoint HTTP header injection.
+- WebSocket HTTP upgrades validate exact start lines, required and duplicate
+  fields, canonical keys, protocol lists, and response upgrade headers. Reject
+  HTTP bodies and unsolicited extensions; cap heads at 4096 bytes/64 fields.
+- Stalled WS/WSS setup no longer serializes accepts. Setup reservations survive
+  HTTP upgrade through ZMTP, release on failure/cancellation, and share the
+  socket limit. Unbind cancels pending setup while preserving ready peers.
+- Reconnect-delay monitoring no longer spawns a task per notification, and
+  disconnected dialers cannot materialize a late queued connection.
+- Native WS/WSS client masks now use a cryptographic generator. WebSocket
+  receive rejects nonminimal lengths, invalid CLOSE status/reasons, and a new
+  tiny binary message interleaved into an unfinished fragmented message.
+- Canceling a Tokio dial now drops an in-flight connection attempt, including
+  stalled WS HTTP upgrades and WSS TLS handshakes, without changing retry policy.
 - Concurrent parked PEER receives pass a batch wake onward, including when a
   notified receive is canceled, so queued messages cannot strand a waiter.
 - A PEER replacement rejected by receive limits no longer evicts the

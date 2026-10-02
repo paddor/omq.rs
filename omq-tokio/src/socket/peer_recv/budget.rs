@@ -68,6 +68,8 @@ impl Budget {
             && self.bytes.load(Ordering::Acquire) <= self.max_bytes.saturating_sub(bytes)
     }
 
+    // Atomic::try_update is unstable on MSRV 1.93.
+    #[allow(deprecated)]
     pub(super) fn reserve(self: &Arc<Self>, message: Message) -> Result<QueuedMessage, Message> {
         let bytes = message.max_message_size_len();
         // Avoid provisional reservations/rollback notifications while no room

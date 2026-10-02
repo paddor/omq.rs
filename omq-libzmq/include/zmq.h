@@ -275,6 +275,8 @@ extern "C" {
 #define OMQ_COMPRESSION_DICT        1006
 #define OMQ_COMPRESSION_AUTO_TRAIN  1007
 #define OMQ_WORKLOAD_PROFILE        1008
+#define OMQ_WS_ALLOWED_ORIGINS      1009
+#define OMQ_WS_MAX_READY_PEERS      1010
 #define OMQ_ARENA_THRESHOLD         10001
 
 #define OMQ_ON_MUTE_BLOCK           0
@@ -334,6 +336,20 @@ extern "C" {
     this are copied into OMQ's frame arena; payloads at or above this value
     use gather-write from their Bytes payload. Set before first bind/connect.
     -1 restores the OMQ default.
+
+    OMQ_WS_ALLOWED_ORIGINS is a newline-separated UTF-8 list of exact HTTP(S)
+    origins. Empty (default) rejects requests carrying Origin; native clients
+    without Origin remain allowed. No wildcards, paths, credentials, or null
+    origins. Set before bind/connect/subscribe or other materialization;
+    later changes fail with EBUSY. getsockopt returns bytes without a NUL.
+    This is a browser boundary, not peer authentication.
+
+    OMQ_WS_MAX_READY_PEERS is an int32_t cap on ready WS/WSS connections
+    across all endpoints of a socket. Default 1024; must be positive.
+    Stricter socket-type limits still apply. Other transports do not count
+    against this cap. Identity handover replaces an existing route without
+    an extra ready slot. Set before backend materialization; later changes
+    fail with EBUSY. Pending handshakes have a separate limit.
 
     OMQ_WORKLOAD_PROFILE is an int32_t scheduling hint. The default (-1) uses
     OMQ's socket-type default: REQ/REP latency profile, other sockets

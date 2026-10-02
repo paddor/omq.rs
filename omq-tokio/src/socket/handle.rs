@@ -70,12 +70,10 @@ struct Inner {
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
-    /// Shared with the actor for REP `pre_send` / `post_recv`.
-    type_state: Arc<Mutex<TypeState>>,
-    /// Shared request envelope for the latency REP path.
+    /// REP request envelopes, one per queued request body, and the
+    /// envelope of the request being answered.
     rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
     rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
-    rep_latency: bool,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -221,7 +219,7 @@ impl Socket {
             monitor.clone(),
             send_strategy,
             spsc.clone(),
-            type_state.clone(),
+            type_state,
             rep_pending.clone(),
             req_awaiting_reply.clone(),
             recv_sink_config,
@@ -250,10 +248,8 @@ impl Socket {
                 ),
                 monitor,
                 send_submitter,
-                type_state,
                 rep_pending,
                 rep_current,
-                rep_latency: latency_profile && socket_type == SocketType::Rep,
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
                 subscribe_count,
@@ -295,24 +291,59 @@ impl Socket {
     #[doc(hidden)]
     pub fn mark_rep_request_received_for_external_recv(&self) {
         if self.inner.socket_type == SocketType::Rep {
-            let request = self
-                .inner
-                .rep_pending
-                .lock()
-                .expect("rep pending")
-                .pop_front();
-            *self.inner.rep_current.lock().expect("rep current") = request;
+            self.admit_rep_request();
         }
+    }
+
+    /// Make the oldest received request's envelope the reply target. The
+    /// receive queue holds REP bodies; drivers and the actor already split
+    /// the envelope at the first empty frame.
+    fn admit_rep_request(&self) {
+        let request = self
+            .inner
+            .rep_pending
+            .lock()
+            .expect("rep pending")
+            .pop_front();
+        *self.inner.rep_current.lock().expect("rep current") = request;
     }
 
     /// Bind to an endpoint. Returns the resolved endpoint once the
     /// listener is active. For wildcard binds (`tcp://...:0`) the
     /// returned endpoint contains the actual port.
     pub async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
+        self.bind_with_codec_snapshot(endpoint, None).await
+    }
+
+    /// Bind with a complete compression-parameter snapshot for this listener.
+    /// The endpoint selects the codec; `None` parameter fields use codec
+    /// defaults. Existing listeners/connections and decoder limits retain their
+    /// configuration. CURVE and unsupported carrier profiles remain rejected.
+    ///
+    /// # Errors
+    /// Returns an error for invalid configuration, bind failure, or a closed socket.
+    pub async fn bind_with_compression_options(
+        &self,
+        endpoint: Endpoint,
+        compression: omq_proto::CompressionOptions,
+    ) -> Result<Endpoint> {
+        self.bind_with_codec_snapshot(endpoint, Some(compression))
+            .await
+    }
+
+    async fn bind_with_codec_snapshot(
+        &self,
+        endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
+    ) -> Result<Endpoint> {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Bind { endpoint, ack })
+            .send(SocketCommand::Bind {
+                endpoint,
+                compression,
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         let resolved = rx.await.map_err(|_| Error::Closed)??;
@@ -328,10 +359,37 @@ impl Socket {
     /// Queue a connect attempt. Returns immediately; the background reconnect
     /// loop handles retries per the configured `ReconnectPolicy`.
     pub async fn connect(&self, endpoint: Endpoint) -> Result<()> {
+        self.connect_with_codec_snapshot(endpoint, None).await
+    }
+
+    /// Connect with a complete compression-parameter snapshot, retained across
+    /// retries and reconnects. The endpoint selects the codec kind. Existing
+    /// peers retain their settings; this does not reconfigure a live dictionary.
+    ///
+    /// # Errors
+    /// Returns an error for invalid local configuration or a closed socket.
+    pub async fn connect_with_compression_options(
+        &self,
+        endpoint: Endpoint,
+        compression: omq_proto::CompressionOptions,
+    ) -> Result<()> {
+        self.connect_with_codec_snapshot(endpoint, Some(compression))
+            .await
+    }
+
+    async fn connect_with_codec_snapshot(
+        &self,
+        endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
+    ) -> Result<()> {
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
-            .send(SocketCommand::Connect { endpoint, ack })
+            .send(SocketCommand::Connect {
+                endpoint,
+                compression,
+                ack,
+            })
             .await
             .map_err(|_| Error::Closed)?;
         rx.await.map_err(|_| Error::Closed)?
@@ -387,23 +445,14 @@ impl Socket {
                 result
             }
             SocketType::Rep => {
-                if self.inner.rep_latency {
-                    let identity = self.inner.rep_current.lock().expect("rep identity").take();
-                    if let Some((peer_id, identity)) = identity {
-                        return self
-                            .inner
-                            .send_submitter
-                            .send_rep_to_peer(peer_id, &identity, msg)
-                            .await;
-                    }
-                }
-                let msg = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .pre_send(self.inner.socket_type, msg)?;
-                self.send_submitter.send(msg).await
+                let request = self.inner.rep_current.lock().expect("rep identity").take();
+                let Some((peer_id, envelope)) = request else {
+                    return Err(rep_send_without_request());
+                };
+                self.inner
+                    .send_submitter
+                    .send_rep_to_peer(peer_id, &envelope, msg)
+                    .await
             }
             SocketType::Server => self.send_submitter.send_server(msg).await,
             SocketType::Router | SocketType::Peer | SocketType::Stream => {
@@ -451,28 +500,18 @@ impl Socket {
                 result
             }
             SocketType::Rep => {
-                if self.inner.rep_latency {
-                    let mut current = self.inner.rep_current.lock().expect("rep identity");
-                    let identity = current.take();
-                    if let Some((peer_id, identity)) = identity {
-                        let result = self
-                            .inner
-                            .send_submitter
-                            .send_rep_try_to_peer(peer_id, &identity, msg);
-                        if matches!(&result, Err(TrySendError::Full(_))) {
-                            *current = Some((peer_id, identity));
-                        }
-                        return result;
-                    }
-                }
-                let msg = self
+                let mut current = self.inner.rep_current.lock().expect("rep identity");
+                let Some((peer_id, envelope)) = current.take() else {
+                    return Err(TrySendError::Error(rep_send_without_request()));
+                };
+                let result = self
                     .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .pre_send(self.inner.socket_type, msg)
-                    .map_err(TrySendError::Error)?;
-                self.send_submitter.try_send(msg)
+                    .send_submitter
+                    .send_rep_try_to_peer(peer_id, &envelope, msg);
+                if matches!(&result, Err(TrySendError::Full(_))) {
+                    *current = Some((peer_id, envelope));
+                }
+                result
             }
             SocketType::Server => self.send_submitter.try_send_server(msg),
             SocketType::Router => {
@@ -567,35 +606,11 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(msg);
             },
-            SocketType::Rep => loop {
+            SocketType::Rep => {
                 let msg = self.inner.recv_rx.recv().await?;
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(msg);
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(body);
-                }
-            },
+                self.admit_rep_request();
+                Ok(msg)
+            }
             _ => self.inner.recv_rx.recv().await,
         }
     }
@@ -615,35 +630,11 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(msg);
             },
-            SocketType::Rep => loop {
+            SocketType::Rep => {
                 let msg = self.inner.recv_rx.blocking_recv()?;
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(msg);
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(body);
-                }
-            },
+                self.admit_rep_request();
+                Ok(msg)
+            }
             _ => self.inner.recv_rx.blocking_recv(),
         }
     }
@@ -666,37 +657,13 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(Some(msg));
             },
-            SocketType::Rep => loop {
+            SocketType::Rep => {
                 let Some(msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
                     return Ok(None);
                 };
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(Some(msg));
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(Some(body));
-                }
-            },
+                self.admit_rep_request();
+                Ok(Some(msg))
+            }
             _ => self.inner.recv_rx.blocking_recv_cancelable(cancel),
         }
     }
@@ -724,7 +691,7 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(Some(msg));
             },
-            SocketType::Rep => loop {
+            SocketType::Rep => {
                 let Some(msg) = self
                     .inner
                     .recv_rx
@@ -732,33 +699,9 @@ impl Socket {
                 else {
                     return Ok(None);
                 };
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(Some(msg));
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(Some(body));
-                }
-            },
+                self.admit_rep_request();
+                Ok(Some(msg))
+            }
             _ => self
                 .inner
                 .recv_rx
@@ -784,35 +727,11 @@ impl Socket {
                     .store(false, Ordering::Release);
                 return Ok(msg);
             },
-            SocketType::Rep => loop {
+            SocketType::Rep => {
                 let msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(msg);
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(body);
-                }
-            },
+                self.admit_rep_request();
+                Ok(msg)
+            }
             _ => self.inner.recv_rx.blocking_recv_timeout(timeout),
         }
     }
@@ -983,35 +902,9 @@ impl Socket {
             }
         }
         if self.inner.socket_type == SocketType::Rep {
-            loop {
-                let msg = self.inner.recv_rx.try_recv()?;
-                if msg.len() < 2 || !msg.part_bytes(1).is_some_and(|part| part.is_empty()) {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(msg);
-                }
-                let body = self
-                    .inner
-                    .type_state
-                    .lock()
-                    .expect("type_state")
-                    .post_recv(SocketType::Rep, msg)?;
-                if let Some(body) = body {
-                    let current = self
-                        .inner
-                        .rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .pop_front();
-                    *self.inner.rep_current.lock().expect("rep current") = current;
-                    return Ok(body);
-                }
-            }
+            let msg = self.inner.recv_rx.try_recv()?;
+            self.admit_rep_request();
+            return Ok(msg);
         }
         self.inner.recv_rx.try_recv()
     }
@@ -1402,6 +1295,10 @@ fn supports_recv_batching(t: SocketType) -> bool {
 /// `TypeState::pre_send` has no mutable side effects. This mirrors the check
 /// inside `TypeState::pre_send` for the relevant types so the actor-bypass
 /// send path still surfaces the same protocol errors.
+fn rep_send_without_request() -> Error {
+    Error::Protocol("REP socket must receive a request before replying".into())
+}
+
 fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
     match t {
         SocketType::Client | SocketType::Scatter | SocketType::Gather | SocketType::Channel

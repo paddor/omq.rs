@@ -431,7 +431,7 @@ mod tests {
                 Err(Error::Timeout)
             ));
             assert!(started.elapsed() < Duration::from_secs(1));
-            assert!(messages.is_empty());
+            assert_eq!(messages, [] as [Message; 0]);
         }
     }
 
@@ -465,7 +465,7 @@ mod tests {
             cancel.cancel();
             let (result, messages) = done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
             assert_eq!(result.unwrap(), None);
-            assert!(messages.is_empty());
+            assert_eq!(messages, [] as [Message; 0]);
             worker.join().unwrap();
         }
     }
@@ -484,7 +484,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(received, None);
-        assert!(messages.is_empty());
+        assert_eq!(messages, [] as [Message; 0]);
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(received, None);
-        assert!(messages.is_empty());
+        assert_eq!(messages, [] as [Message; 0]);
     }
 
     #[test]

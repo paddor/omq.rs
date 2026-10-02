@@ -256,6 +256,28 @@ pub(crate) struct IoPoolHandle {
     pool: Option<Arc<IoThreadPool>>,
 }
 
+/// One load reservation owned by the driver future, including before its
+/// first poll. Task completion, abortion, and setup failure release it once.
+#[derive(Debug)]
+pub(crate) struct IoThreadLease {
+    pool: Option<Arc<IoThreadPool>>,
+    index: usize,
+}
+
+impl IoThreadLease {
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
+}
+
+impl Drop for IoThreadLease {
+    fn drop(&mut self) {
+        if let Some(pool) = &self.pool {
+            pool.release_thread(self.index);
+        }
+    }
+}
+
 impl IoPoolHandle {
     pub(crate) fn none() -> Self {
         Self { pool: None }
@@ -293,19 +315,15 @@ impl IoPoolHandle {
             .is_some_and(|pool| pool.data_thread_offset() != 0)
     }
 
-    /// Pick the least-loaded IO thread, increment its load, return
-    /// the thread index.
-    pub(crate) fn assign_thread(&self) -> usize {
-        match &self.pool {
+    /// Reserve the least-loaded IO thread for one driver future.
+    pub(crate) fn reserve_thread(&self) -> IoThreadLease {
+        let index = match &self.pool {
             None => 0,
             Some(pool) => pool.assign_thread(),
-        }
-    }
-
-    /// Decrement load on a thread (peer removed).
-    pub(crate) fn release_thread(&self, index: usize) {
-        if let Some(pool) = &self.pool {
-            pool.release_thread(index);
+        };
+        IoThreadLease {
+            pool: self.pool.clone(),
+            index,
         }
     }
 
@@ -448,7 +466,7 @@ impl ContextCore {
         }
     }
 
-    fn io_pool_handle(&self) -> IoPoolHandle {
+    pub(crate) fn io_pool_handle(&self) -> IoPoolHandle {
         match &self.ownership {
             RuntimeOwnership::Owned { pool } => IoPoolHandle {
                 pool: Some(pool.clone()),
@@ -822,5 +840,96 @@ mod tests {
             super::ContextConfig { io_threads: 1 },
             "bad\0prefix",
         );
+    }
+
+    #[tokio::test]
+    async fn socket_teardown_releases_inproc_io_assignments() {
+        let context = super::Context::with_config(super::ContextConfig { io_threads: 2 });
+        let handle = context.inner.io_pool_handle();
+        let pool = handle.pool.as_ref().unwrap();
+        let receiver = context.socket(crate::SocketType::Pull, crate::Options::default());
+        let sender = context.socket(crate::SocketType::Push, crate::Options::default());
+        let endpoint = "inproc://io-assignment-release".parse().unwrap();
+        receiver.bind(endpoint).await.unwrap();
+        sender
+            .connect("inproc://io-assignment-release".parse().unwrap())
+            .await
+            .unwrap();
+        sender
+            .send(crate::Message::single("assigned"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let loads = || {
+            pool.threads
+                .iter()
+                .map(|thread| thread.load.load(super::Ordering::Relaxed))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(loads().iter().sum::<usize>(), 2);
+        let mut sender_monitor = sender.monitor();
+        let mut receiver_monitor = receiver.monitor();
+        sender
+            .close_with_linger(Some(Duration::ZERO))
+            .await
+            .unwrap();
+        receiver
+            .close_with_linger(Some(Duration::ZERO))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for monitor in [&mut sender_monitor, &mut receiver_monitor] {
+                while !matches!(monitor.recv().await.unwrap(), crate::MonitorEvent::Closed) {}
+            }
+        })
+        .await
+        .expect("socket teardown did not finish");
+        assert_eq!(
+            loads(),
+            vec![0, 0, 0],
+            "socket teardown leaked IO assignment load"
+        );
+    }
+
+    #[tokio::test]
+    async fn io_lease_releases_unpolled_aborted_and_panicked_tasks() {
+        let context = super::Context::with_config(super::ContextConfig { io_threads: 2 });
+        let handle = context.inner.io_pool_handle();
+        let pool = handle.pool.as_ref().unwrap();
+        let load = || {
+            pool.threads
+                .iter()
+                .map(|thread| thread.load.load(super::Ordering::Relaxed))
+                .sum::<usize>()
+        };
+
+        let assignment = handle.reserve_thread();
+        assert_eq!(load(), 1);
+        let future = async move {
+            let _assignment = assignment;
+            std::future::pending::<()>().await;
+        };
+        drop(future);
+        assert_eq!(load(), 0);
+
+        let assignment = handle.reserve_thread();
+        let task = handle.spawn_on(assignment.index(), async move {
+            let _assignment = assignment;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(load(), 0);
+
+        let assignment = handle.reserve_thread();
+        let task = handle.spawn_on(assignment.index(), async move {
+            let _assignment = assignment;
+            panic!("test IO driver panic");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert_eq!(load(), 0);
     }
 }

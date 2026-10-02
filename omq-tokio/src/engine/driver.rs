@@ -1,6 +1,5 @@
 //! Per-connection driver: one tokio task per live peer connection.
 
-use std::collections::VecDeque;
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
@@ -14,18 +13,18 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use futures::stream::FuturesOrdered;
-use omq_proto::error::{Error, Result};
+use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
 use omq_proto::{MessageRateLimit, WorkloadProfile};
 
 use super::compression_pool::CompressionPool;
+use super::peer_completion::CompletionProgress;
+use super::peer_events::PeerEventDispatch;
 use super::rate_limit::{SharedIpRateLimiter, TokenBucket};
 use super::send_pipe::{SendPipeConsumer, SendPipeProducerHandle};
-use super::signal::StateSignal;
 use super::transmit_slot::PeerTransmitSlot;
-use crate::routing::RepEnvelope;
 use crate::socket::dispatch::{AnyReadHalf, AnyStream, AnyWriteHalf};
 use omq_proto::flow::{DrainBudget, max_batch_bytes};
 use omq_proto::frame_buffer::FrameBuffer;
@@ -114,521 +113,10 @@ impl ReceiveProfile {
     }
 }
 
-/// Where the driver routes decoded inbound messages.
-///
-/// `Channel`: push into the shared recv pipe (yring + Mutex).
-/// `Yring`: direct push to a per-peer lock-free SPSC ring + external
-/// signal, used by omq-libzmq for direct delivery.
-#[allow(private_interfaces)]
-pub enum RecvSink {
-    Channel(Arc<crate::socket::recv::SharedRecvPipe>),
-    Yring(YringSink),
-    Fanin(crate::socket::fanin::Sink),
-    Authenticated(AuthenticatedRecvSink),
-    Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
-    Rep(RepRecvSink),
-    Server(ServerRecvSink),
-    Peer(crate::socket::peer_recv::PeerRecvSink),
-}
-
-/// REP's latency receive path: perform identity/envelope handling in the
-/// connection driver, before the message reaches the socket actor.
-#[derive(Debug)]
-pub struct RepRecvSink {
-    sink: Box<RecvSink>,
-    pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
-    peer_id: u64,
-}
-
-/// SERVER's direct receive path: attach the connection's opaque routing ID
-/// without constructing an identity frame or multipart message.
-#[derive(Debug)]
-pub struct ServerRecvSink {
-    sink: Box<RecvSink>,
-    routing_id: u32,
-}
-
-/// Yring-based recv sink. Pushes decoded messages directly into a
-/// lock-free SPSC ring and signals the consumer via a callback on
-/// empty-to-non-empty transitions.
-#[allow(private_interfaces)]
-pub struct YringSink {
-    pub producer: yring::Producer<Message>,
-    pub signal: Box<dyn Fn() + Send + Sync>,
-    pub space: Arc<StateSignal>,
-}
-
-/// Message plus authenticated peer properties for compatibility layers that
-/// expose ZAP metadata on each received message.
-#[derive(Debug)]
-pub struct AuthenticatedRecvItem {
-    message: Message,
-    peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
-}
-
-impl AuthenticatedRecvItem {
-    pub fn into_parts(self) -> (Message, Arc<omq_proto::proto::command::PeerProperties>) {
-        (self.message, self.peer_properties)
-    }
-}
-
-/// Shared MPSC receive sink used only by authenticated libzmq sockets.
-#[derive(Clone)]
-pub struct AuthenticatedRecvSink {
-    sender: mpsc::Sender<AuthenticatedRecvItem>,
-    signal: Arc<dyn Fn() + Send + Sync>,
-    peer_properties: Option<Arc<omq_proto::proto::command::PeerProperties>>,
-}
-
-impl std::fmt::Debug for AuthenticatedRecvSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthenticatedRecvSink")
-            .field("peer_properties", &self.peer_properties)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Shared config for creating and recycling [`RecvSink::Yring`] instances.
-/// The actor refills `slot` with a fresh yring pair on peer disconnect;
-/// the external consumer picks up the new consumer from
-/// `pending_consumer`.
-pub struct RecvSinkConfig {
-    slot: std::sync::Mutex<Option<RecvSink>>,
-    pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
-    signal: Arc<dyn Fn() + Send + Sync>,
-    space: Arc<StateSignal>,
-    cap: usize,
-}
-
-impl std::fmt::Debug for RecvSinkConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecvSinkConfig")
-            .field("cap", &self.cap)
-            .finish_non_exhaustive()
-    }
-}
-
-impl RecvSinkConfig {
-    pub fn new(
-        initial_sink: RecvSink,
-        signal: Arc<dyn Fn() + Send + Sync>,
-        space: Arc<StateSignal>,
-        cap: usize,
-    ) -> Self {
-        Self {
-            slot: std::sync::Mutex::new(Some(initial_sink)),
-            pending_consumer: std::sync::Mutex::new(None),
-            signal,
-            space,
-            cap,
-        }
-    }
-
-    /// Create a fresh yring pair. Puts the `RecvSink` in `slot` and the
-    /// consumer in `pending_consumer`. No-op if the slot already contains
-    /// a sink.
-    pub fn refill_sink(&self) {
-        let mut guard = self.slot.lock().unwrap();
-        if guard.is_some() {
-            return;
-        }
-        let (prod, cons) = yring::spsc(self.cap);
-        let f = self.signal.clone();
-        *guard = Some(RecvSink::Yring(YringSink {
-            producer: prod,
-            signal: Box::new(move || f()),
-            space: self.space.clone(),
-        }));
-        *self.pending_consumer.lock().unwrap() = Some(cons);
-    }
-
-    pub fn take_sink(&self) -> Option<RecvSink> {
-        let mut slot = self.slot.lock().unwrap();
-        if let Some(RecvSink::Authenticated(sink)) = slot.as_ref() {
-            return Some(RecvSink::Authenticated(sink.clone()));
-        }
-        slot.take()
-    }
-
-    pub(crate) fn authenticated_sink(&self) -> Option<RecvSink> {
-        let slot = self.slot.lock().unwrap();
-        let RecvSink::Authenticated(sink) = slot.as_ref()? else {
-            return None;
-        };
-        Some(RecvSink::Authenticated(sink.clone()))
-    }
-
-    #[allow(private_interfaces)]
-    pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<Message>> {
-        self.pending_consumer.try_lock().ok()?.take()
-    }
-
-    pub fn notify_space(&self) {
-        self.space.notify_changed();
-    }
-}
-
-impl std::fmt::Debug for RecvSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Channel(pipe) => f.debug_tuple("Channel").field(pipe).finish(),
-            Self::Yring(y) => f
-                .debug_struct("Yring")
-                .field("producer", &y.producer)
-                .finish_non_exhaustive(),
-            Self::Authenticated(_) => f.debug_tuple("Authenticated").finish_non_exhaustive(),
-            Self::Conflate(_) => f.debug_tuple("Conflate").finish_non_exhaustive(),
-            Self::Rep(_) => f.debug_tuple("Rep").finish_non_exhaustive(),
-            Self::Fanin(_) => f.debug_tuple("Fanin").finish_non_exhaustive(),
-            Self::Peer(_) => f.debug_tuple("Peer").finish_non_exhaustive(),
-            Self::Server(server) => f
-                .debug_struct("Server")
-                .field("routing_id", &server.routing_id)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-impl std::fmt::Debug for YringSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("YringSink")
-            .field("producer", &self.producer)
-            .finish_non_exhaustive()
-    }
-}
-
-impl YringSink {
-    #[inline]
-    fn flush_and_signal(&mut self) {
-        self.producer.flush();
-        (self.signal)();
-    }
-
-    #[inline]
-    fn flush_pending(&mut self, pending: &mut bool) {
-        if *pending {
-            self.flush_and_signal();
-            *pending = false;
-        }
-    }
-
-    async fn send_deferred(&mut self, m: Message, pending: &mut bool) -> bool {
-        let mut item = m;
-        loop {
-            match self.producer.push(item) {
-                Ok(()) => {
-                    *pending = true;
-                    return true;
-                }
-                Err(returned) => {
-                    item = returned;
-                    self.flush_pending(pending);
-                }
-            }
-            if self.producer.is_consumer_dropped() {
-                return false;
-            }
-            let seen = self.space.generation();
-            let changed = self.space.changed_after(seen);
-            tokio::pin!(changed);
-            match self.producer.push(item) {
-                Ok(()) => {
-                    *pending = true;
-                    return true;
-                }
-                Err(returned) => {
-                    item = returned;
-                    tokio::select! {
-                        biased;
-                        () = changed => {}
-                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl RecvSink {
-    /// Create a shared authenticated receive sink. Every connection gets a
-    /// clone of the sender, so messages from all peers retain their own
-    /// handshake properties in one application-facing queue.
-    pub fn authenticated(
-        cap: usize,
-        signal: Arc<dyn Fn() + Send + Sync>,
-    ) -> (Self, mpsc::Receiver<AuthenticatedRecvItem>) {
-        let (sender, receiver) = mpsc::channel(cap);
-        (
-            Self::Authenticated(AuthenticatedRecvSink {
-                sender,
-                signal,
-                peer_properties: None,
-            }),
-            receiver,
-        )
-    }
-
-    fn set_peer_properties(
-        &mut self,
-        peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
-    ) {
-        match self {
-            Self::Authenticated(sink) => sink.peer_properties = Some(peer_properties),
-            Self::Rep(rep) => rep.sink.set_peer_properties(peer_properties),
-            Self::Server(server) => server.sink.set_peer_properties(peer_properties),
-            Self::Channel(_)
-            | Self::Yring(_)
-            | Self::Conflate(_)
-            | Self::Peer(_)
-            | Self::Fanin(_) => {}
-        }
-    }
-
-    pub(crate) async fn send_authenticated(
-        &mut self,
-        message: Message,
-        peer_properties: Arc<omq_proto::proto::command::PeerProperties>,
-    ) -> bool {
-        self.set_peer_properties(peer_properties);
-        self.send_plain(message).await
-    }
-
-    pub(crate) fn rep(
-        sink: RecvSink,
-        pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
-        peer_id: u64,
-    ) -> Self {
-        Self::Rep(RepRecvSink {
-            sink: Box::new(sink),
-            pending,
-            peer_id,
-        })
-    }
-
-    pub(crate) fn server(sink: RecvSink, routing_id: u32) -> Self {
-        Self::Server(ServerRecvSink {
-            sink: Box::new(sink),
-            routing_id,
-        })
-    }
-
-    fn is_yring(&self) -> bool {
-        match self {
-            Self::Yring(_) | Self::Peer(_) | Self::Fanin(_) => true,
-            Self::Server(server) => server.sink.is_yring(),
-            _ => false,
-        }
-    }
-
-    /// Non-blocking push. Returns the message back if the yring is full.
-    /// Channel variant always succeeds (awaits space).
-    pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
-        if let Self::Server(server) = self {
-            let routed = m.with_routing_id(server.routing_id);
-            let _ = server.sink.send_plain(routed).await;
-            return None;
-        }
-        self.try_send_plain(m).await
-    }
-
-    async fn try_send_plain(&mut self, m: Message) -> Option<Message> {
-        match self {
-            Self::Fanin(sink) => {
-                let _ = sink.push(m);
-                None
-            }
-            Self::Peer(_) => unreachable!("PEER receives never fall back through the actor"),
-            Self::Channel(pipe) => {
-                let _ = pipe.send(m).await;
-                None
-            }
-            Self::Yring(sink) => match sink.producer.push(m) {
-                Ok(()) => {
-                    sink.flush_and_signal();
-                    None
-                }
-                Err(returned) => Some(returned),
-            },
-            Self::Authenticated(sink) => {
-                let peer_properties = sink
-                    .peer_properties
-                    .clone()
-                    .expect("authenticated sink activated after handshake");
-                match sink.sender.try_send(AuthenticatedRecvItem {
-                    message: m,
-                    peer_properties,
-                }) {
-                    Ok(()) => {
-                        (sink.signal)();
-                        None
-                    }
-                    Err(
-                        mpsc::error::TrySendError::Full(item)
-                        | mpsc::error::TrySendError::Closed(item),
-                    ) => Some(item.message),
-                }
-            }
-            Self::Conflate(slot) => {
-                let _ = slot.send_latest(m);
-                None
-            }
-            Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
-            Self::Server(_) => unreachable!("nested SERVER sink"),
-        }
-    }
-
-    async fn send_plain(&mut self, m: Message) -> bool {
-        match self {
-            Self::Fanin(sink) => sink.push(m),
-            Self::Peer(sink) => {
-                let alive = sink.push(m);
-                sink.flush();
-                alive
-            }
-            Self::Channel(pipe) => pipe.send(m).await.is_ok(),
-            Self::Yring(sink) => {
-                let mut msg = m;
-                loop {
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
-                    } else {
-                        sink.flush_and_signal();
-                        return true;
-                    }
-                    if sink.producer.is_consumer_dropped() {
-                        return false;
-                    }
-                    let seen = sink.space.generation();
-                    let changed = sink.space.changed_after(seen);
-                    tokio::pin!(changed);
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
-                        tokio::select! {
-                            biased;
-                            () = changed => {}
-                            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                        }
-                        continue;
-                    }
-                    // Field-level borrows: notified holds sink.space,
-                    // but producer and signal are disjoint fields.
-                    sink.producer.flush();
-                    (sink.signal)();
-                    return true;
-                }
-            }
-            Self::Authenticated(sink) => {
-                let peer_properties = sink
-                    .peer_properties
-                    .clone()
-                    .expect("authenticated sink activated after handshake");
-                if sink
-                    .sender
-                    .send(AuthenticatedRecvItem {
-                        message: m,
-                        peer_properties,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-                (sink.signal)();
-                true
-            }
-            Self::Conflate(slot) => slot.send_latest(m),
-            Self::Rep(_) | Self::Server(_) => unreachable!("wrapped sink uses routed send"),
-        }
-    }
-
-    pub(crate) async fn send(&mut self, m: Message) -> bool {
-        if let Self::Rep(rep) = self {
-            let Some((envelope, body)) = crate::routing::split_rep_request(&m) else {
-                return true;
-            };
-            rep.pending
-                .lock()
-                .expect("rep pending")
-                .push_back((rep.peer_id, envelope));
-            return rep.sink.send_plain(body).await;
-        }
-        if let Self::Server(server) = self {
-            let routed = m.with_routing_id(server.routing_id);
-            return server.sink.send_plain(routed).await;
-        }
-        self.send_plain(m).await
-    }
-
-    async fn send_with_flush_mode(
-        &mut self,
-        m: Message,
-        defer_yring_flush: bool,
-        pending_yring_flush: &mut bool,
-    ) -> bool {
-        if defer_yring_flush {
-            if let Self::Fanin(sink) = self {
-                *pending_yring_flush = true;
-                return sink.push_deferred(m);
-            }
-            if let Self::Peer(sink) = self {
-                return sink.push(m);
-            }
-            if let Self::Yring(sink) = self {
-                return sink.send_deferred(m, pending_yring_flush).await;
-            }
-            if let Self::Server(server) = self {
-                let routed = m.with_routing_id(server.routing_id);
-                if let Self::Yring(sink) = server.sink.as_mut() {
-                    return sink.send_deferred(routed, pending_yring_flush).await;
-                }
-                return server.sink.send_plain(routed).await;
-            }
-        }
-        self.send(m).await
-    }
-
-    fn flush_deferred(&mut self, pending_yring_flush: &mut bool) {
-        if let Self::Fanin(sink) = self {
-            if *pending_yring_flush {
-                sink.flush();
-                *pending_yring_flush = false;
-            }
-        } else if let Self::Peer(sink) = self {
-            sink.flush();
-        } else if let Self::Yring(sink) = self {
-            sink.flush_pending(pending_yring_flush);
-        } else if let Self::Server(server) = self
-            && let Self::Yring(sink) = server.sink.as_mut()
-        {
-            sink.flush_pending(pending_yring_flush);
-        }
-    }
-
-    pub(crate) fn peer_blocked(&self) -> bool {
-        match self {
-            Self::Peer(sink) => sink.blocked(),
-            Self::Fanin(sink) => sink.blocked(),
-            _ => false,
-        }
-    }
-
-    pub(crate) fn retry_peer_pending(&mut self) -> bool {
-        match self {
-            Self::Peer(sink) => sink.retry_pending(),
-            Self::Fanin(sink) => sink.retry_pending(),
-            _ => true,
-        }
-    }
-
-    pub(crate) async fn peer_space_ready(&mut self) {
-        if let Self::Fanin(sink) = self {
-            sink.ready().await;
-        }
-        if let Self::Peer(sink) = self {
-            sink.ready().await;
-        }
-    }
-}
+pub use super::recv_sink::{
+    AuthenticatedRecvItem, AuthenticatedRecvSink, RecvSink, RecvSinkConfig, RepRecvSink,
+    ServerRecvSink, YringSink,
+};
 
 /// Batch-encode messages into `FrameBuffer`. Two modes:
 ///
@@ -737,7 +225,10 @@ pub enum PeerDriverCommand {
     ActivateWithRecvSink(RecvSink),
     /// Queue a ZMTP command for send (SUBSCRIBE, CANCEL, JOIN, LEAVE, ...).
     SendCommand(Command),
-    /// Initiate clean shutdown.
+    /// Finish accepted output before shutting down the transport. The deadline
+    /// belongs to the socket close operation and must not restart per stage.
+    DrainAndClose { deadline: Option<Instant> },
+    /// Stop immediately, including any staged output.
     Close,
 }
 
@@ -766,11 +257,9 @@ pub struct PeerDriverHandle {
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
 }
 
-/// What a [`ConnectionDriver`] writes to its shared peer-event
-/// channel: either a parsed ZMTP `Event` or a final `Closed` signal
-/// emitted just before the driver task exits. Replaces the old
-/// per-connection shim task that wrapped Events into the
-/// `SocketDriver`'s `InternalEvent::PeerEvent` / `PeerClosed`.
+/// Parsed ZMTP events and the final closure signal for standalone drivers.
+/// Socket-owned byte-stream drivers use a separate reserved lifecycle slot
+/// for closure and retain this channel for ordered protocol events.
 #[derive(Debug)]
 pub enum PeerEvent {
     Event(Event),
@@ -802,6 +291,12 @@ struct PendingWrite {
     remaining: usize,
     arena: Vec<u8>,
     arena_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GracefulClose {
+    deadline: Option<Instant>,
+    ws_close_started: bool,
 }
 
 impl PendingWrite {
@@ -1020,9 +515,12 @@ where
     /// per-peer event loop. Each entry is tagged with the `peer_id`
     /// this driver was assigned; the receiver dispatches on that.
     peer_out: mpsc::Sender<(u64, PeerEvent)>,
+    completion: CompletionProgress,
     peer_id: u64,
     cancel: CancellationToken,
     config: PeerDriverConfig,
+    setup_deadline: Option<Instant>,
+    setup_cancel: Option<CancellationToken>,
     /// Send-side message encoder (`lz4+tcp://`).
     encoder: Option<MessageEncoder>,
     /// Receive-side message decoder. Symmetric to `encoder`.
@@ -1047,6 +545,7 @@ where
     arena_cap: usize,
     receive_profile: ReceiveProfile,
     recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
+    socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
 }
 
 impl<T> ConnectionDriver<T>
@@ -1090,6 +589,9 @@ where
             peer_id,
             cancel,
             config,
+            completion: CompletionProgress::default(),
+            setup_deadline: None,
+            setup_cancel: None,
             encoder: None,
             decoder: None,
             recv_direct: None,
@@ -1101,7 +603,25 @@ where
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             receive_profile: ReceiveProfile::Throughput,
             recv_ip_rate_limiter: None,
+            socket_close_state: None,
         }
+    }
+
+    /// Reserve lifecycle publication independently of the actor's data mailbox.
+    pub(crate) fn with_completion(mut self, completion: CompletionProgress) -> Self {
+        self.completion = completion;
+        self
+    }
+
+    /// Carry a transport's original deadline and pre-ready cancellation into ZMTP.
+    pub(crate) fn with_setup_deadline(
+        mut self,
+        deadline: Option<Instant>,
+        cancel: Option<CancellationToken>,
+    ) -> Self {
+        self.setup_deadline = deadline;
+        self.setup_cancel = cancel;
+        self
     }
 
     /// Install the send-side encoder. Used by compression transports.
@@ -1194,6 +714,14 @@ where
         self
     }
 
+    pub(crate) fn with_socket_close_state(
+        mut self,
+        state: Arc<crate::socket::recv::SharedRecvPipe>,
+    ) -> Self {
+        self.socket_close_state = Some(state);
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_ip_rate_limiter(
         mut self,
@@ -1220,20 +748,23 @@ where
     ///   inbox dropped).
     /// - `Err(_)` on protocol violations, I/O errors, or connection errors.
     ///
-    /// In every exit path (success or error) the driver sends one final
-    /// `PeerEvent::Closed` on the shared peer-event channel so the
-    /// `SocketDriver` can clean up its peer entry.
-    pub async fn run(self) -> Result<()> {
+    /// Socket-owned drivers publish into a pre-reserved completion slot.
+    /// Standalone drivers send a final `PeerEvent::Closed` on their supplied
+    /// channel. Both preserve the earlier admitted event prefix.
+    pub async fn run(mut self) -> Result<()> {
         let peer_out = self.peer_out.clone();
         let peer_id = self.peer_id;
-        let result = self.run_inner_body().await;
+        let mut completion = std::mem::take(&mut self.completion);
+        let result = self.run_inner_body(&mut completion).await;
         let error = result.as_ref().err().map(close_error_reason);
-        let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
+        if let Err(error) = completion.complete(error) {
+            let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
+        }
         result
     }
 
     #[expect(clippy::too_many_lines)]
-    async fn run_inner_body(self) -> Result<()> {
+    async fn run_inner_body(self, completion: &mut CompletionProgress) -> Result<()> {
         let Self {
             stream,
             mut connection,
@@ -1254,7 +785,14 @@ where
             arena_cap,
             receive_profile,
             recv_ip_rate_limiter,
+            setup_deadline,
+            setup_cancel,
+            socket_close_state,
+            completion: _,
         } = self;
+        if setup_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(Error::HandshakeFailed("transport setup timeout".into()));
+        }
         let mut recv_rate_limiter = config
             .recv_rate_limit
             .map(|limit| TokenBucket::new(limit, Instant::now()));
@@ -1281,9 +819,11 @@ where
                 .cloned(),
         );
         let mut last_input = Instant::now();
-        let mut handshake_deadline: Option<Instant> = config
-            .handshake_timeout
-            .and_then(|d| last_input.checked_add(d));
+        let mut handshake_deadline: Option<Instant> = setup_deadline.or_else(|| {
+            config
+                .handshake_timeout
+                .and_then(|d| last_input.checked_add(d))
+        });
         let hb_interval = config.heartbeat_interval;
         let hb_timeout = config
             .heartbeat_timeout
@@ -1294,18 +834,45 @@ where
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
         let mut hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
-        let mut hb_ping_sent = false;
+        let mut hb_probe = HeartbeatProbe::default();
         let mut was_recv_blocked = false;
+        let mut graceful_close = None;
+        let mut discard_receive = false;
+        let mut discard_pending = false;
+        let mut pending_receive = None;
+        let mut pending_large = None;
+        let mut pending_input_error = None;
 
+        let mut peer_events = PeerEventDispatch::default();
+        let actor_credit = peer_out.reserve();
+        tokio::pin!(actor_credit);
         loop {
-            if handshake_deadline.is_some() && connection.is_ready() {
+            if !peer_events.drive(
+                &mut connection,
+                &peer_out,
+                peer_id,
+                recv_direct.as_mut(),
+                completion,
+            ) {
+                return Ok(());
+            }
+            if handshake_deadline.is_some()
+                && connection.is_ready()
+                && peer_events.handshake_admitted()
+                && pending_input_error.is_none()
+            {
                 handshake_deadline = None;
             }
 
-            if !emit_connection_events(&mut connection, &peer_out, peer_id, recv_direct.as_mut())
-                .await
+            // Authentication failures may have queued a mechanism ERROR.
+            // Admit older events and flush that prefix through the select,
+            // retaining setup cancellation and the original deadline.
+            if pending_input_error.is_some()
+                && !peer_events.blocked()
+                && !connection.has_pending_transmit()
+                && eq.is_empty()
             {
-                return Ok(());
+                return Err(pending_input_error.take().unwrap());
             }
 
             let want_write = connection.has_pending_transmit() || !eq.is_empty();
@@ -1324,6 +891,7 @@ where
                         cmd,
                         &mut connection,
                         &mut recv_direct,
+                        pending_input_error.is_some(),
                     )? {
                         PreActivationStep::Continue => {}
                         PreActivationStep::Activate => break,
@@ -1331,11 +899,24 @@ where
                     }
                 }
 
-                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
-                    return Err(Error::HandshakeFailed("handshake timeout".into()));
+                permit = &mut actor_credit, if peer_events.has_pending() => {
+                    match permit {
+                        Ok(permit) => peer_events.send_reserved(permit, peer_id, completion),
+                        Err(_) => return Ok(()),
+                    }
+                    actor_credit.set(peer_out.reserve());
                 }
 
-                res = reader.read_buf(&mut read_buf), if !connection.is_ready() => {
+                () = async { setup_cancel.as_ref().unwrap().cancelled().await; }, if setup_cancel.is_some() => {
+                    return Ok(());
+                }
+
+                () = sleep_until_opt(handshake_deadline), if handshake_deadline.is_some() => {
+                    return Err(pending_input_error.take().unwrap_or_else(||
+                        Error::HandshakeFailed("handshake timeout".into())));
+                }
+
+                res = reader.read_buf(&mut read_buf), if pending_input_error.is_none() && !peer_events.blocked() && !connection.is_ready() && !connection.has_pending_input() => {
                     let n = res?;
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
@@ -1345,7 +926,6 @@ where
                     }
                     let input = read_stream_input(
                         n,
-                        &mut reader,
                         &mut connection,
                         &mut read_buf,
                         &mut read_buf_target,
@@ -1353,28 +933,47 @@ where
                         &config,
                         &mut last_input,
                         &recv_pool,
-                        &peer_out,
-                        peer_id,
-                    ).await;
-                    if let Err(error) = input {
-                        // Authentication failures may queue a mechanism ERROR.
-                        // Give it one best-effort flush before closing the peer.
-                        drain_writes(&mut writer, &mut connection).await.ok();
-                        return Err(error);
-                    }
+                        &mut pending_large,
+                    );
+                    pending_input_error = input.err();
                 }
 
                 res = async {
                     flush_frame_buffer(&mut writer, &mut eq, &mut drain_buf).await?;
                     flush_once(&mut writer, &mut connection).await
                 }, if want_write => {
+                    if res.is_err() && let Some(error) = pending_input_error.take() {
+                        return Err(error);
+                    }
                     res?;
                 }
+
+                () = tokio::task::yield_now(), if !peer_events.has_pending() && (peer_events.needs_drain() || (pending_input_error.is_none() && connection.has_pending_input())) => {
+                    if !peer_events.needs_drain() {
+                        pending_input_error = connection.resume_input().err();
+                    }
+                }
+
             }
         }
 
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+        let authenticated_sender = recv_direct
+            .as_ref()
+            .and_then(RecvSink::authenticated_sender);
+        let authenticated_credit = super::reserve_authenticated(authenticated_sender.as_ref());
+        tokio::pin!(authenticated_credit);
         loop {
+            if pending_large
+                .as_ref()
+                .is_some_and(PendingLargeRead::complete)
+            {
+                pending_large
+                    .take()
+                    .unwrap()
+                    .finish(&mut connection, &recv_pool)?;
+                pending_large = PendingLargeRead::begin(&mut connection, &config, &recv_pool)?;
+            }
             if !claim_direct_writer(transmit_slot.as_deref()) {
                 return Ok(());
             }
@@ -1387,13 +986,26 @@ where
             {
                 stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
             }
+            let mut control_budget = DrainBudget::new(64, 64 * 1024);
+            let mut control_exhausted = false;
             loop {
                 match inbox.try_recv() {
                     Ok(cmd) => {
-                        if handle_inbox_command(Some(cmd), &mut connection, &mut recv_direct)?
-                            == DriverStep::Close
+                        let before = connection.pending_transmit_size();
+                        if handle_inbox_command(
+                            Some(cmd),
+                            &mut connection,
+                            &mut graceful_close,
+                            pending_input_error.is_some(),
+                        )? == DriverStep::Close
                         {
                             return Ok(());
+                        }
+                        if !control_budget
+                            .account(connection.pending_transmit_size().saturating_sub(before))
+                        {
+                            control_exhausted = true;
+                            break;
                         }
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
@@ -1401,40 +1013,103 @@ where
                 }
             }
 
+            if pending_input_error.is_none() && connection.is_closed() && graceful_close.is_none() {
+                // Peer-initiated WS CLOSE is a disconnect: stop accepting data
+                // and finish the already-staged wire prefix plus the reply.
+                graceful_close = Some(GracefulClose {
+                    deadline: Instant::now().checked_add(Duration::from_secs(10)),
+                    ws_close_started: true,
+                });
+            }
+
+            if graceful_close.is_some() {
+                discard_receive = true;
+                if let Some(data) = &mut data_inbox {
+                    data.close();
+                }
+            }
+            let data_plane_open = pending_input_error.is_none()
+                && !graceful_close.is_some_and(|close| close.ws_close_started);
+            if graceful_close
+                .as_ref()
+                .and_then(|close| close.deadline)
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return Ok(());
+            }
+
             publish_direct_idle(
                 transmit_slot.as_deref(),
                 outbound_work_idle(&pending_write, &eq, &connection, &outbound)
                     && pipe_batch.is_empty()
-                    && deferred_data.is_none(),
+                    && deferred_data.is_none()
+                    && pending_input_error.is_none(),
                 send_pipe_rx.as_ref(),
                 data_inbox.as_ref(),
                 &inbox,
             );
-            if !emit_connection_events(&mut connection, &peer_out, peer_id, recv_direct.as_mut())
-                .await
+            // An older pending message already owns actor-mailbox admission.
+            // Reads are paused until it is delivered; do not poll a newer event
+            // into a competing reservation on that same mailbox.
+            if pending_receive.is_none()
+                && !peer_events.drive(
+                    &mut connection,
+                    &peer_out,
+                    peer_id,
+                    recv_direct.as_mut(),
+                    completion,
+                )
             {
                 return Ok(());
             }
-            match drain_decoded_messages(
-                &mut connection,
-                &mut decoder,
-                receive_profile,
-                &mut recv_direct,
-                &peer_out,
-                peer_id,
-                ReceiveRateLimiters {
-                    connection: &mut recv_rate_limiter,
-                    ip: recv_ip_rate_limiter.as_ref(),
-                },
-            )
-            .await?
-            {
-                DriverStep::Continue => {}
-                DriverStep::Yield => {
-                    tokio::task::yield_now().await;
-                    continue;
+            if pending_input_error.is_some() && !peer_events.blocked() {
+                return Err(pending_input_error.take().unwrap());
+            }
+            if peer_events.blocked() {
+                // Preserve the codec-event prefix before decoded messages.
+            } else if discard_receive {
+                if pending_receive.take().is_some() {
+                    actor_credit.set(peer_out.reserve());
+                    authenticated_credit
+                        .set(super::reserve_authenticated(authenticated_sender.as_ref()));
                 }
-                DriverStep::Close => return Ok(()),
+                discard_pending = discard_received_messages(&mut connection);
+            } else {
+                match drain_decoded_messages(
+                    &mut connection,
+                    &mut decoder,
+                    receive_profile,
+                    MessageDelivery {
+                        sink: &mut recv_direct,
+                        peer_out: &peer_out,
+                        peer_id,
+                        completion,
+                        pending: &mut pending_receive,
+                        reserved_admission: authenticated_sender.is_some(),
+                    },
+                    ReceiveRateLimiters {
+                        connection: &mut recv_rate_limiter,
+                        ip: recv_ip_rate_limiter.as_ref(),
+                    },
+                )? {
+                    DriverStep::Continue => {}
+                    DriverStep::Yield => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    DriverStep::Close => {
+                        if socket_close_state
+                            .as_ref()
+                            .is_some_and(|state| state.is_closed())
+                        {
+                            // Closing the user receive pipe must not discard accepted
+                            // transmit work before the drain command reaches us.
+                            discard_receive = true;
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                }
             }
 
             if !claim_direct_writer(transmit_slot.as_deref()) {
@@ -1448,7 +1123,8 @@ where
                 stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
             }
 
-            if deferred_data.is_some()
+            if data_plane_open
+                && deferred_data.is_some()
                 && pipe_batch.is_empty()
                 && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
@@ -1466,7 +1142,8 @@ where
                 }
             }
 
-            if !pipe_batch.is_empty()
+            if data_plane_open
+                && !pipe_batch.is_empty()
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
             {
                 drain_send_pipe_batch(&mut pipe_batch, &mut outbound, &mut connection, &mut eq)?;
@@ -1476,7 +1153,8 @@ where
             // the existing yring send pipe. Drain it immediately after the
             // control check, then let the main select perform the write. The
             // readiness arm remains for an empty-to-nonempty race.
-            if pipe_batch.is_empty()
+            if data_plane_open
+                && pipe_batch.is_empty()
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
                 && send_pipe_rx
                     .as_ref()
@@ -1498,17 +1176,47 @@ where
             // Latency-routed sends are encoded into the wire slot by
             // the caller. Stage already-queued work before polling the reader,
             // preserving the latency fast path without awaiting I/O here.
-            if latency_profile
+            if data_plane_open
+                && latency_profile
                 && outbound_work_idle(&pending_write, &eq, &connection, &outbound)
                 && transmit_slot.as_ref().is_some_and(|slot| !slot.is_empty())
             {
                 stage_transmit_slot(transmit_slot.as_ref().unwrap(), &mut pending_write);
             }
 
+            let shutdown_ready = graceful_close.is_some()
+                && pending_write.is_empty()
+                && eq.is_empty()
+                && !connection.has_pending_transmit()
+                && (!data_plane_open
+                    || (!outbound.has_pending_offload()
+                        && pipe_batch.is_empty()
+                        && deferred_data.is_none()
+                        && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
+                        && data_inbox.as_ref().is_none_or(mpsc::Receiver::is_empty)
+                        && transmit_slot.as_ref().is_none_or(|slot| slot.is_empty())));
+            #[cfg(feature = "ws")]
+            let shutdown_ready = if shutdown_ready && connection.is_ws() {
+                let close = graceful_close.as_mut().unwrap();
+                if close.ws_close_started {
+                    connection.is_closed()
+                } else {
+                    connection.send_ws_close(1000);
+                    close.ws_close_started = true;
+                    false
+                }
+            } else {
+                shutdown_ready
+            };
+
             let want_write =
                 !pending_write.is_empty() || connection.has_pending_transmit() || !eq.is_empty();
-            let can_accept_data = outbound_work_idle(&pending_write, &eq, &connection, &outbound);
-            let recv_blocked = recv_direct.as_ref().is_some_and(RecvSink::peer_blocked);
+            let can_accept_data =
+                data_plane_open && outbound_work_idle(&pending_write, &eq, &connection, &outbound);
+            let message_blocked = !discard_receive
+                && (pending_receive.is_some()
+                    || recv_direct.as_ref().is_some_and(RecvSink::peer_blocked));
+            let recv_blocked = message_blocked || peer_events.blocked();
             // A PONG can be behind application bytes we intentionally stopped
             // reading. Local backpressure is not evidence of a dead peer.
             if recv_blocked || was_recv_blocked {
@@ -1520,7 +1228,8 @@ where
                 transmit_slot.as_deref(),
                 outbound_work_idle(&pending_write, &eq, &connection, &outbound)
                     && pipe_batch.is_empty()
-                    && deferred_data.is_none(),
+                    && deferred_data.is_none()
+                    && pending_input_error.is_none(),
                 send_pipe_rx.as_ref(),
                 data_inbox.as_ref(),
                 &inbox,
@@ -1534,20 +1243,67 @@ where
                     return Ok(());
                 }
 
-                cmd = inbox.recv() => {
+                () = sleep_until_opt(graceful_close.and_then(|close| close.deadline)),
+                    if graceful_close.is_some_and(|close| close.deadline.is_some()) => return Ok(()),
+
+                cmd = inbox.recv(), if !control_exhausted => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
-                    if handle_inbox_command(cmd, &mut connection, &mut recv_direct)? == DriverStep::Close {
+                    if handle_inbox_command(cmd, &mut connection, &mut graceful_close, pending_input_error.is_some())? == DriverStep::Close {
                         return Ok(());
                     }
                 },
 
-                res = write_driver_progress(
-                    &mut writer,
-                    &mut eq,
-                    &mut pending_write,
-                    &mut connection,
-                ), if want_write => {
+                permit = &mut actor_credit,
+                    if peer_events.has_pending() || (pending_receive.is_some() && recv_direct.is_none()) => {
+                    match permit {
+                        Ok(permit) => {
+                            if peer_events.has_pending() {
+                                peer_events.send_reserved(permit, peer_id, completion);
+                            } else {
+                                permit.send((peer_id, PeerEvent::Event(Event::Message(pending_receive.take().unwrap()))));
+                                completion.note_event();
+                            }
+                        }
+                        Err(_) => return Ok(()),
+                    }
+                    actor_credit.set(peer_out.reserve());
+                }
+
+                permit = &mut authenticated_credit,
+                    if pending_receive.is_some() && authenticated_sender.is_some() => {
+                    match permit {
+                        Ok(permit) => {
+                            let message = pending_receive.take().unwrap();
+                            let _ = recv_direct.as_mut().unwrap().send_reserved(message, permit);
+                        }
+                        Err(_) => {
+                            if socket_close_state.as_ref().is_some_and(|state| state.is_closed()) {
+                                discard_receive = true;
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    authenticated_credit.set(super::reserve_authenticated(authenticated_sender.as_ref()));
+                }
+
+                res = async {
+                    if shutdown_ready {
+                        writer.shutdown().await
+                    } else {
+                        write_driver_progress(
+                            &mut writer,
+                            &mut eq,
+                            &mut pending_write,
+                            &mut connection,
+                            &mut hb_probe,
+                        ).await
+                    }
+                }, if want_write || shutdown_ready => {
                     res?;
+                    if shutdown_ready {
+                        return Ok(());
+                    }
                 }
 
                 // Latency-routed sends are written by the socket handle into
@@ -1565,9 +1321,23 @@ where
                     );
                 }
 
-                () = async { recv_direct.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
+                () = async {
+                    recv_direct.as_mut().unwrap().receive_space_ready().await;
+                }, if message_blocked && recv_direct.is_some() && authenticated_sender.is_none() => {}
 
-                res = reader.read_buf(&mut read_buf), if !recv_blocked => {
+                () = tokio::task::yield_now(), if !message_blocked && !peer_events.has_pending() && (peer_events.needs_drain() || (pending_input_error.is_none() && (connection.has_pending_input() || discard_pending))) => {
+                    if !peer_events.needs_drain() && connection.has_pending_input() && !discard_pending {
+                        pending_input_error = connection.resume_input().err();
+                    }
+                }
+
+                res = async {
+                    if let Some(large) = &mut pending_large {
+                        large.read(&mut reader).await
+                    } else {
+                        reader.read_buf(&mut read_buf).await
+                    }
+                }, if pending_input_error.is_none() && !recv_blocked && !connection.has_pending_input() && !discard_pending && !connection.is_closed() => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     let n = res?;
                     if n == 0 {
@@ -1576,25 +1346,27 @@ where
                         inbox.close();
                         return Ok(());
                     }
-                    let input = read_stream_input(
-                        n,
-                        &mut reader,
-                        &mut connection,
-                        &mut read_buf,
-                        &mut read_buf_target,
-                        &mut read_buf_full_reads,
-                        &config,
-                        &mut last_input,
-                        &recv_pool,
-                        &peer_out,
-                        peer_id,
-                    ).await;
-                    input?;
+                    hb_probe.received_input();
+                    if pending_large.is_some() {
+                        last_input = Instant::now();
+                    } else {
+                        pending_input_error = read_stream_input(
+                            n,
+                            &mut connection,
+                            &mut read_buf,
+                            &mut read_buf_target,
+                            &mut read_buf_full_reads,
+                            &config,
+                            &mut last_input,
+                            &recv_pool,
+                            &mut pending_large,
+                        ).err();
+                    }
                 }
 
                 // Drain completed offloaded compression in wire order. The
                 // resulting frames are written by the write arm above.
-                Some(first) = outbound.next_offload(), if outbound.has_pending_offload() => {
+                Some(first) = outbound.next_offload(), if data_plane_open && outbound.has_pending_offload() => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     outbound.drain_ready_offload_batch(first, &connection, &mut eq)?;
                 }
@@ -1638,29 +1410,26 @@ where
                 // `heartbeat_interval` is set. Uses a persistent pinned
                 // sleep so the safety-net timeout doesn't reset it.
                 //
-                // Only check the timeout after at least one PING has
-                // been sent: on unidirectional sockets (PUSH, PUB) the
-                // peer has no data to send, so last_input stays at
-                // handshake time until the first PONG arrives.
-                () = sleep_until_opt(hb_deadline), if hb_deadline.is_some() => {
+                // Only time a probe after its complete wire prefix reaches
+                // the writer. Locally queued probes cannot prove silence.
+                // Any actual peer input acknowledges the outstanding probe.
+                () = sleep_until_opt(hb_deadline), if hb_deadline.is_some() && graceful_close.is_none() && pending_input_error.is_none() => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
-                    if recv_blocked && !can_accept_data {
-                        // Keep liveness traffic when writable, but never queue
-                        // more PINGs behind a stalled outbound write.
-                        hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
-                        continue;
-                    }
-                    if !recv_blocked && hb_ping_sent && last_input.elapsed() > hb_timeout {
+                    if !recv_blocked && hb_probe.timed_out(last_input, hb_timeout) {
                         return Err(Error::Timeout);
                     }
-                    let ping = Command::Ping {
-                        ttl_deciseconds: hb_ttl_deciseconds,
-                        context: Bytes::new(),
-                    };
-                    let _ = connection.send_command(&ping);
-                    hb_ping_sent = true;
+                    if hb_probe.can_queue() {
+                        let ping = Command::Ping {
+                            ttl_deciseconds: hb_ttl_deciseconds,
+                            context: Bytes::new(),
+                        };
+                        connection.send_command(&ping)?;
+                        hb_probe.queued_through = Some(connection.pending_transmit_size());
+                    }
                     hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
                 }
+
+                () = tokio::task::yield_now(), if control_exhausted => {}
 
             }
         }
@@ -1712,70 +1481,111 @@ fn close_error_reason(err: &Error) -> String {
     }
 }
 
-async fn emit_connection_events(
-    connection: &mut Connection,
-    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-    peer_id: u64,
-    mut recv_direct: Option<&mut RecvSink>,
-) -> bool {
-    while let Some(ev) = connection.poll_event() {
-        if let Event::HandshakeSucceeded {
-            ref peer_properties,
-            ..
-        } = ev
-            && let Some(sink) = recv_direct.as_deref_mut()
-        {
-            sink.set_peer_properties(peer_properties.clone());
-        }
-        if peer_out
-            .send((peer_id, PeerEvent::Event(ev)))
-            .await
-            .is_err()
-        {
-            return false;
-        }
-    }
-    true
-}
-
-async fn emit_connection_events_best_effort(
-    connection: &mut Connection,
-    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-    peer_id: u64,
-) {
-    while let Some(ev) = connection.poll_event() {
-        let _ = peer_out.send((peer_id, PeerEvent::Event(ev))).await;
-    }
-}
-
 struct ReceiveRateLimiters<'a> {
     connection: &'a mut Option<TokenBucket>,
     ip: Option<&'a (Arc<SharedIpRateLimiter>, IpAddr)>,
 }
 
-async fn drain_decoded_messages(
+struct MessageDelivery<'a> {
+    sink: &'a mut Option<RecvSink>,
+    peer_out: &'a mpsc::Sender<(u64, PeerEvent)>,
+    peer_id: u64,
+    completion: &'a mut CompletionProgress,
+    pending: &'a mut Option<Message>,
+    reserved_admission: bool,
+}
+
+impl MessageDelivery<'_> {
+    fn blocked(&self) -> bool {
+        self.pending.is_some() || self.sink.as_ref().is_some_and(RecvSink::peer_blocked)
+    }
+
+    fn retry_pending(&mut self) -> bool {
+        if self
+            .sink
+            .as_mut()
+            .is_some_and(|sink| !sink.retry_peer_pending())
+        {
+            return false;
+        }
+        if self.pending.is_some() && (self.sink.is_none() || self.reserved_admission) {
+            return true;
+        }
+        if let Some(message) = self.pending.take() {
+            return self.send(message, false, &mut false);
+        }
+        true
+    }
+
+    #[inline]
+    fn send(&mut self, message: Message, defer: bool, pending_flush: &mut bool) -> bool {
+        if let Some(RecvSink::Fanin(sink)) = self.sink {
+            return if defer {
+                *pending_flush = true;
+                sink.push_deferred(message)
+            } else {
+                sink.push(message)
+            };
+        }
+        let result = if let Some(sink) = self.sink {
+            sink.try_send_with_flush_mode(message, defer, pending_flush)
+        } else {
+            match self
+                .peer_out
+                .try_send((self.peer_id, PeerEvent::Event(Event::Message(message))))
+            {
+                Ok(()) => {
+                    self.completion.note_event();
+                    Ok(())
+                }
+                Err(mpsc::error::TrySendError::Full((
+                    _,
+                    PeerEvent::Event(Event::Message(message)),
+                ))) => Err(TrySendError::Full(message)),
+                Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
+                Err(mpsc::error::TrySendError::Full(_)) => unreachable!("message delivery"),
+            }
+        };
+        match result {
+            Ok(()) => true,
+            Err(TrySendError::Full(message)) => {
+                *self.pending = Some(message);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn flush(&mut self, pending: &mut bool) {
+        if let Some(sink) = self.sink {
+            sink.flush_deferred(pending);
+        }
+    }
+}
+
+fn drain_decoded_messages(
     connection: &mut Connection,
     decoder: &mut Option<MessageDecoder>,
     receive_profile: ReceiveProfile,
-    recv_direct: &mut Option<RecvSink>,
-    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-    peer_id: u64,
+    mut delivery: MessageDelivery<'_>,
     rate_limiters: ReceiveRateLimiters<'_>,
 ) -> Result<DriverStep> {
-    if let Some(sink) = recv_direct.as_mut() {
-        if !sink.retry_peer_pending() {
-            return Ok(DriverStep::Close);
-        }
-        if sink.peer_blocked() {
-            return Ok(DriverStep::Continue);
-        }
+    let ReceiveRateLimiters {
+        connection: rate_connection,
+        ip: rate_ip,
+    } = rate_limiters;
+    if !delivery.retry_pending() {
+        return Ok(DriverStep::Close);
+    }
+    if delivery.blocked() {
+        return Ok(DriverStep::Continue);
     }
     let recv_batch_start = Instant::now();
     let mut recv_budget = None;
     let mut recv_batch_time = None;
     let defer_yring_flush = decoder.is_none()
         && matches!(receive_profile, ReceiveProfile::Throughput)
-        && recv_direct.as_ref().is_some_and(RecvSink::is_yring);
+        && delivery.sink.as_ref().is_some_and(RecvSink::is_yring);
     let mut pending_yring_flush = false;
     while let Some(m) = connection.poll_message() {
         let m = match decoder.as_mut() {
@@ -1785,15 +1595,12 @@ async fn drain_decoded_messages(
             },
             None => m,
         };
-        let rate_limited = rate_limiters
-            .connection
+        let rate_limited = rate_connection
             .as_mut()
             .is_some_and(|limiter| !limiter.allow(recv_batch_start))
-            || rate_limiters
-                .ip
-                .is_some_and(|(limiter, ip)| !limiter.allow(*ip, recv_batch_start));
+            || rate_ip.is_some_and(|(limiter, ip)| !limiter.allow(*ip, recv_batch_start));
         if rate_limited {
-            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+            delivery.flush(&mut pending_yring_flush);
             return Err(Error::ReceiveRateLimitExceeded);
         }
         let msg_bytes = m.byte_len();
@@ -1801,22 +1608,13 @@ async fn drain_decoded_messages(
             recv_batch_time = receive_profile.time(msg_bytes);
             receive_profile.budget(msg_bytes)
         });
-        if !route_message(
-            m,
-            recv_direct,
-            peer_out,
-            peer_id,
-            defer_yring_flush,
-            &mut pending_yring_flush,
-        )
-        .await
-        {
-            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+        if !delivery.send(m, defer_yring_flush, &mut pending_yring_flush) {
+            delivery.flush(&mut pending_yring_flush);
             return Ok(DriverStep::Close);
         }
         let budget_remains = budget.account(msg_bytes);
-        if recv_direct.as_ref().is_some_and(RecvSink::peer_blocked) {
-            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+        if delivery.blocked() {
+            delivery.flush(&mut pending_yring_flush);
             return Ok(DriverStep::Continue);
         }
         let time_check = budget.msgs().is_multiple_of(32);
@@ -1824,18 +1622,24 @@ async fn drain_decoded_messages(
             || (time_check
                 && recv_batch_time.is_some_and(|limit| recv_batch_start.elapsed() >= limit))
         {
-            flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+            delivery.flush(&mut pending_yring_flush);
             return Ok(DriverStep::Yield);
         }
     }
-    flush_deferred_recv(recv_direct, &mut pending_yring_flush);
+    delivery.flush(&mut pending_yring_flush);
     Ok(DriverStep::Continue)
 }
 
-fn flush_deferred_recv(recv_direct: &mut Option<RecvSink>, pending_yring_flush: &mut bool) {
-    if let Some(sink) = recv_direct {
-        sink.flush_deferred(pending_yring_flush);
+/// Closed sockets no longer deliver receives, but must keep parsing control
+/// traffic while accepted output drains. Bound even the discard work.
+fn discard_received_messages(connection: &mut Connection) -> bool {
+    let mut budget = DrainBudget::new(256, 1024 * 1024);
+    while let Some(message) = connection.poll_message() {
+        if !budget.account(message.byte_len()) {
+            return true;
+        }
     }
+    false
 }
 
 fn enable_transmit_slot_after_handshake(slot: Option<&PeerTransmitSlot>, connection: &Connection) {
@@ -1855,9 +1659,8 @@ fn mark_peer_dead(slot: Option<&PeerTransmitSlot>) {
 }
 
 #[expect(clippy::too_many_arguments)]
-async fn read_stream_input<R: AsyncRead + Unpin>(
+fn read_stream_input(
     n: usize,
-    reader: &mut R,
     connection: &mut Connection,
     read_buf: &mut BytesMut,
     read_buf_target: &mut usize,
@@ -1865,8 +1668,7 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     config: &PeerDriverConfig,
     last_input: &mut Instant,
     recv_pool: &Arc<RecvBufPool>,
-    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-    peer_id: u64,
+    pending_large: &mut Option<PendingLargeRead>,
 ) -> Result<()> {
     *last_input = Instant::now();
     if n >= *read_buf_target && *read_buf_target < READ_BUF_MAX {
@@ -1880,11 +1682,8 @@ async fn read_stream_input<R: AsyncRead + Unpin>(
     }
 
     let chunk = read_buf.split().freeze();
-    if let Err(e) = connection.handle_input(chunk) {
-        emit_connection_events_best_effort(connection, peer_out, peer_id).await;
-        return Err(e);
-    }
-    handle_large_messages(connection, reader, config, last_input, recv_pool).await?;
+    connection.handle_input(chunk)?;
+    *pending_large = PendingLargeRead::begin(connection, config, recv_pool)?;
     // Parsing (and copying any large-frame prefix into its pooled payload)
     // can release the split chunk. Reserve afterward so BytesMut can reclaim
     // that allocation instead of replacing it while the chunk still owns it.
@@ -1899,33 +1698,68 @@ fn handle_pre_activation_inbox_command(
     cmd: Option<PeerDriverCommand>,
     connection: &mut Connection,
     recv_direct: &mut Option<RecvSink>,
+    input_failed: bool,
 ) -> Result<PreActivationStep> {
     match cmd {
-        Some(PeerDriverCommand::ActivateDataPlane) => Ok(PreActivationStep::Activate),
+        Some(PeerDriverCommand::ActivateDataPlane) => Ok(if input_failed {
+            PreActivationStep::Continue
+        } else {
+            PreActivationStep::Activate
+        }),
+        Some(PeerDriverCommand::ActivateWithRecvSink(_)) if input_failed => {
+            Ok(PreActivationStep::Continue)
+        }
         Some(PeerDriverCommand::ActivateWithRecvSink(sink)) => {
             *recv_direct = Some(sink);
             Ok(PreActivationStep::Activate)
         }
         Some(PeerDriverCommand::SendCommand(c)) => {
-            connection.send_command(&c)?;
+            if !input_failed {
+                connection.send_command(&c)?;
+            }
             Ok(PreActivationStep::Continue)
         }
-        Some(PeerDriverCommand::Close) | None => Ok(PreActivationStep::Close),
+        Some(PeerDriverCommand::Close | PeerDriverCommand::DrainAndClose { .. }) | None => {
+            Ok(PreActivationStep::Close)
+        }
     }
 }
 
 fn handle_inbox_command(
     cmd: Option<PeerDriverCommand>,
     connection: &mut Connection,
-    _recv_direct: &mut Option<RecvSink>,
+    graceful_close: &mut Option<GracefulClose>,
+    input_failed: bool,
 ) -> Result<DriverStep> {
     match cmd {
         Some(PeerDriverCommand::ActivateDataPlane) => Ok(DriverStep::Continue),
+        Some(PeerDriverCommand::ActivateWithRecvSink(_)) if input_failed => {
+            Ok(DriverStep::Continue)
+        }
         Some(PeerDriverCommand::ActivateWithRecvSink(_)) => Err(Error::Protocol(
             "receive sink cannot change after activation".into(),
         )),
         Some(PeerDriverCommand::SendCommand(c)) => {
-            connection.send_command(&c)?;
+            if !input_failed && !graceful_close.is_some_and(|close| close.ws_close_started) {
+                connection.send_command(&c)?;
+            }
+            Ok(DriverStep::Continue)
+        }
+        Some(PeerDriverCommand::DrainAndClose { deadline }) => {
+            match graceful_close {
+                Some(close) => {
+                    close.deadline = match (close.deadline, deadline) {
+                        (Some(current), Some(requested)) => Some(current.min(requested)),
+                        (current, requested) => current.or(requested),
+                    };
+                }
+                None => {
+                    *graceful_close = Some(GracefulClose {
+                        deadline,
+                        ws_close_started: false,
+                    });
+                }
+            }
             Ok(DriverStep::Continue)
         }
         Some(PeerDriverCommand::Close) | None => Ok(DriverStep::Close),
@@ -1983,14 +1817,8 @@ fn handle_send_pipe_ready(
     }
     pipe_batch.reverse();
     drain_send_pipe_batch(pipe_batch, outbound, connection, eq)?;
-    if pipe_batch.is_empty()
-        && send_pipe_rx
-            .as_ref()
-            .expect("send pipe select guard")
-            .is_disconnected()
-    {
-        return Ok(DriverStep::Close);
-    }
+    // Producer EOF does not mean the bytes just encoded reached the writer.
+    // A subsequent idle drain can close after this final batch is flushed.
     Ok(DriverStep::Continue)
 }
 
@@ -2024,6 +1852,48 @@ fn outbound_work_idle(
         && !outbound.has_pending_offload()
 }
 
+/// A queued heartbeat owns one prefix of the codec transmit queue. Writes
+/// from arenas/slots do not advance it. Writer admission does not acknowledge
+/// remote delivery, especially through ordered TCP/WS or TLS buffering.
+#[derive(Debug, Default)]
+struct HeartbeatProbe {
+    queued_through: Option<usize>,
+    sent_at: Option<Instant>,
+}
+
+impl HeartbeatProbe {
+    fn can_queue(&self) -> bool {
+        // Keep periodic traffic when our receive queue is blocked: the peer
+        // may need that traffic for its own heartbeat/advertised TTL. Never
+        // accumulate multiple probes behind a locally stalled writer.
+        self.queued_through.is_none()
+    }
+
+    fn advance(&mut self, written: usize) {
+        let Some(remaining) = self.queued_through else {
+            return;
+        };
+        if written < remaining {
+            self.queued_through = Some(remaining - written);
+        } else {
+            self.queued_through = None;
+            // A later keepalive must not postpone an unanswered probe's
+            // original silence deadline.
+            self.sent_at.get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn received_input(&mut self) {
+        // Earlier peer traffic cannot acknowledge a probe still queued here.
+        self.sent_at = None;
+    }
+
+    fn timed_out(&self, last_input: Instant, timeout: Duration) -> bool {
+        self.sent_at
+            .is_some_and(|sent_at| sent_at.max(last_input).elapsed() > timeout)
+    }
+}
+
 /// Make bounded wire progress. This future is polled directly by the main
 /// `select!`; if control wins, all destructively drained chunks remain owned
 /// by `pending` and the write can safely resume later.
@@ -2032,6 +1902,7 @@ async fn write_driver_progress<W: AsyncWrite + Unpin>(
     eq: &mut FrameBuffer,
     pending: &mut PendingWrite,
     connection: &mut Connection,
+    heartbeat: &mut HeartbeatProbe,
 ) -> io::Result<()> {
     let started = Instant::now();
     let mut budget = DrainBudget::WIRE_DRAIN;
@@ -2059,7 +1930,11 @@ async fn write_driver_progress<W: AsyncWrite + Unpin>(
             pending.stage(eq);
             continue;
         } else if connection.has_pending_transmit() {
-            flush_once(writer, connection).await?
+            let written = flush_once(writer, connection).await?;
+            // Record successful writes before any further await. The main
+            // select may cancel this future on its next pending write.
+            heartbeat.advance(written);
+            written
         } else {
             return Ok(());
         };
@@ -2163,65 +2038,74 @@ impl Drop for PooledRecvBuf {
     }
 }
 
-/// Read large frames directly into pooled owned buffers (bypasses the fixed
-/// `read_buf` -> `Connection` buffering path).
-async fn handle_large_messages<R: AsyncRead + Unpin>(
-    connection: &mut Connection,
-    reader: &mut R,
-    config: &PeerDriverConfig,
-    last_input: &mut Instant,
-    recv_pool: &Arc<RecvBufPool>,
-) -> Result<()> {
-    #[cfg(feature = "ws")]
-    let skip_large = connection.is_ws();
-    #[cfg(not(feature = "ws"))]
-    let skip_large = false;
-    if config.large_message_threshold == 0 || connection.has_frame_transform() || skip_large {
-        return Ok(());
-    }
-    while let Some(info) = connection.peek_next_frame_payload_size()? {
-        if info.payload_len < config.large_message_threshold {
-            break;
-        }
-        let Some((plen, prefix)) = connection.begin_supplied_payload_with_prefix() else {
-            break;
-        };
-        let payload = if plen <= RECV_POOL_MAX_BUFFER_BYTES {
-            let mut buf = recv_pool.take(plen);
-            buf.extend_from_slice(prefix.as_slice());
-            if buf.len() < plen {
-                read_exact_buf(reader, &mut buf, plen).await?;
-            }
-            debug_assert_eq!(buf.len(), plen);
-            recv_pool.wrap(buf)
-        } else {
-            let mut buf = BytesMut::with_capacity(plen);
-            buf.extend_from_slice(prefix.as_slice());
-            if buf.len() < plen {
-                read_exact_buf(reader, &mut buf, plen).await?;
-            }
-            debug_assert_eq!(buf.len(), plen);
-            buf.freeze()
-        };
-        *last_input = Instant::now();
-        connection.supply_payload(payload)?;
-    }
-    Ok(())
+/// Own a claimed payload across cancel-safe, bounded reads in the main select.
+#[derive(Debug)]
+struct PendingLargeRead {
+    buf: BytesMut,
+    target: usize,
+    pooled: bool,
 }
 
-async fn read_exact_buf<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    buf: &mut BytesMut,
-    target_len: usize,
-) -> io::Result<()> {
-    while buf.len() < target_len {
-        let remaining = target_len - buf.len();
-        let mut limited = (&mut *buf).limit(remaining);
-        if reader.read_buf(&mut limited).await? == 0 {
+impl PendingLargeRead {
+    fn begin(
+        connection: &mut Connection,
+        config: &PeerDriverConfig,
+        pool: &Arc<RecvBufPool>,
+    ) -> Result<Option<Self>> {
+        #[cfg(feature = "ws")]
+        let skip_large = connection.is_ws();
+        #[cfg(not(feature = "ws"))]
+        let skip_large = false;
+        if config.large_message_threshold == 0 || connection.has_frame_transform() || skip_large {
+            return Ok(None);
+        }
+        let Some(info) = connection.peek_next_frame_payload_size()? else {
+            return Ok(None);
+        };
+        if info.payload_len < config.large_message_threshold {
+            return Ok(None);
+        }
+        let Some((target, prefix)) = connection.begin_supplied_payload_with_prefix() else {
+            return Ok(None);
+        };
+        let pooled = target <= RECV_POOL_MAX_BUFFER_BYTES;
+        let mut buf = if pooled {
+            pool.take(target)
+        } else {
+            BytesMut::with_capacity(target)
+        };
+        // Release the shared input prefix before the caller refills read_buf.
+        buf.extend_from_slice(prefix.as_slice());
+        Ok(Some(Self {
+            buf,
+            target,
+            pooled,
+        }))
+    }
+
+    fn complete(&self) -> bool {
+        self.buf.len() == self.target
+    }
+
+    async fn read<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<usize> {
+        let remaining = self.target - self.buf.len();
+        let mut limited = (&mut self.buf).limit(remaining.min(64 * 1024));
+        let n = reader.read_buf(&mut limited).await?;
+        if n == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
+        Ok(n)
     }
-    Ok(())
+
+    fn finish(self, connection: &mut Connection, pool: &Arc<RecvBufPool>) -> Result<()> {
+        debug_assert!(self.complete());
+        let payload = if self.pooled {
+            pool.wrap(self.buf)
+        } else {
+            self.buf.freeze()
+        };
+        connection.supply_payload(payload)
+    }
 }
 
 type OffloadPipeline = FuturesOrdered<
@@ -2354,28 +2238,6 @@ fn encode_msg(
     Ok(())
 }
 
-/// Route a decoded message to `recv_direct` or through the actor.
-/// Returns `true` if sent, `false` if the receiving channel closed.
-async fn route_message(
-    m: Message,
-    recv_direct: &mut Option<RecvSink>,
-    peer_out: &mpsc::Sender<(u64, PeerEvent)>,
-    peer_id: u64,
-    defer_yring_flush: bool,
-    pending_yring_flush: &mut bool,
-) -> bool {
-    match recv_direct {
-        Some(sink) => {
-            sink.send_with_flush_mode(m, defer_yring_flush, pending_yring_flush)
-                .await
-        }
-        None => peer_out
-            .send((peer_id, PeerEvent::Event(Event::Message(m))))
-            .await
-            .is_ok(),
-    }
-}
-
 /// Flush the `FrameBuffer` to the writer. Drains chunks into a
 /// reusable `Vec<Bytes>`, builds `IoSlice` refs, and does one
 /// `write_vectored`. On partial write, unwritten chunks are restored
@@ -2484,19 +2346,9 @@ where
     Ok(n)
 }
 
-/// Best-effort flush of remaining outbound bytes on shutdown.
-async fn drain_writes<W>(writer: &mut W, connection: &mut Connection) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    while connection.has_pending_transmit() {
-        flush_once(writer, connection).await?;
-    }
-    writer.flush().await
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::signal::StateSignal;
     use super::*;
     use bytes::Bytes;
     use std::collections::VecDeque;
@@ -2519,10 +2371,120 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct StalledShutdownStream {
+        stream: DuplexStream,
+        shutdown_seen: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DriverStream for StalledShutdownStream {
+        type Reader = tokio::io::ReadHalf<DuplexStream>;
+        type Writer = StalledShutdownWriter;
+
+        fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+            let (reader, writer) = tokio::io::split(self.stream);
+            (
+                reader,
+                StalledShutdownWriter {
+                    writer,
+                    shutdown_seen: self.shutdown_seen,
+                },
+            )
+        }
+    }
+
+    #[derive(Debug)]
+    struct StalledShutdownWriter {
+        writer: tokio::io::WriteHalf<DuplexStream>,
+        shutdown_seen: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl AsyncWrite for StalledShutdownWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.writer).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.writer).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown_seen.store(true, Ordering::Release);
+            Poll::Pending
+        }
+    }
+
+    #[derive(Debug)]
     struct ChoppyDuplex {
         inner: DuplexStream,
         read_cap: usize,
         write_cap: usize,
+    }
+
+    #[cfg(feature = "plain")]
+    #[derive(Debug)]
+    struct GreetingOnlyStream {
+        stream: DuplexStream,
+        stalled: Arc<StateSignal>,
+    }
+
+    #[cfg(feature = "plain")]
+    impl DriverStream for GreetingOnlyStream {
+        type Reader = tokio::io::ReadHalf<DuplexStream>;
+        type Writer = GreetingOnlyWriter;
+
+        fn split(self, _fast_write: bool) -> (Self::Reader, Self::Writer) {
+            let (reader, writer) = tokio::io::split(self.stream);
+            (
+                reader,
+                GreetingOnlyWriter {
+                    writer,
+                    remaining: 64,
+                    stalled: self.stalled,
+                },
+            )
+        }
+    }
+
+    #[cfg(feature = "plain")]
+    #[derive(Debug)]
+    struct GreetingOnlyWriter {
+        writer: tokio::io::WriteHalf<DuplexStream>,
+        remaining: usize,
+        stalled: Arc<StateSignal>,
+    }
+
+    #[cfg(feature = "plain")]
+    impl AsyncWrite for GreetingOnlyWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.remaining == 0 {
+                self.stalled.notify_changed();
+                return Poll::Pending;
+            }
+            let length = self.remaining.min(buf.len());
+            match Pin::new(&mut self.writer).poll_write(cx, &buf[..length]) {
+                Poll::Ready(Ok(written)) => {
+                    self.remaining -= written;
+                    Poll::Ready(Ok(written))
+                }
+                other => other,
+            }
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.writer).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.writer).poll_shutdown(cx)
+        }
     }
 
     impl ChoppyDuplex {
@@ -2978,6 +2940,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn heartbeat_queued_behind_stalled_data_does_not_kill_the_peer() {
+        queued_heartbeat_with_stalled_output(
+            ConnectionConfig::new(Role::Server, SocketType::Pair),
+            ConnectionConfig::new(Role::Client, SocketType::Pair),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn ws_heartbeat_queued_behind_stalled_data_does_not_kill_the_peer() {
+        use omq_proto::proto::connection::WsRole;
+        queued_heartbeat_with_stalled_output(
+            ConnectionConfig::new(Role::Server, SocketType::Pair).ws_role(WsRole::Server),
+            ConnectionConfig::new(Role::Client, SocketType::Pair).ws_role(WsRole::Client),
+        )
+        .await;
+    }
+
+    async fn queued_heartbeat_with_stalled_output(
+        server_config: ConnectionConfig,
+        client_config: ConnectionConfig,
+    ) {
+        let (server_stream, client_stream) = tokio::io::duplex(1024);
+        let (producer, _consumer) = yring::spsc(1);
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (client_control, client_inbox) = mpsc::channel(8);
+        let (client_data, client_data_inbox) = mpsc::channel(64);
+        let (server_events, mut server_event_inbox) = mpsc::channel(8);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        let server_cancel = CancellationToken::new();
+        let client_cancel = CancellationToken::new();
+        let server = ConnectionDriver::new(
+            server_stream,
+            Connection::new(server_config),
+            server_inbox,
+            server_events,
+            1,
+            server_cancel.clone(),
+        )
+        .with_recv_sink(RecvSink::Yring(YringSink {
+            producer,
+            signal: Box::new(|| {}),
+            space: Arc::new(StateSignal::new()),
+        }));
+        let client = ConnectionDriver::with_config(
+            client_stream,
+            Connection::new(client_config),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+            PeerDriverConfig {
+                heartbeat_interval: Some(Duration::from_millis(50)),
+                heartbeat_timeout: Some(Duration::from_millis(150)),
+                ..PeerDriverConfig::default()
+            },
+        )
+        .with_data_inbox(client_data_inbox);
+        let server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        assert!(matches!(
+            server_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        assert!(matches!(
+            client_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        server_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        client_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        for _ in 0..32 {
+            client_data
+                .send(PeerDriverData::SendMessage(Message::single(Bytes::from(
+                    vec![7; 1024],
+                ))))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(
+            !client_control.is_closed(),
+            "a locally queued PING cannot establish peer silence"
+        );
+        client_control.send(PeerDriverCommand::Close).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn selected_write_cancellation_preserves_external_chunks() {
         const MSG_SIZE: usize = 1024 * 1024;
         let payload = patterned_payload(MSG_SIZE, 7);
@@ -2989,6 +3056,7 @@ mod tests {
         let mut pending = PendingWrite::default();
         let mut connection = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Push));
         let _ = drain_transmit(&mut connection);
+        let mut heartbeat = HeartbeatProbe::default();
         let (stream, mut peer) = tokio::io::duplex(64);
         let (reader_half, mut writer) = tokio::io::split(stream);
         drop(reader_half);
@@ -3000,6 +3068,7 @@ mod tests {
                 &mut eq,
                 &mut pending,
                 &mut connection,
+                &mut heartbeat,
             ) => panic!("stalled write unexpectedly completed: {result:?}"),
             () = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
@@ -3014,9 +3083,15 @@ mod tests {
             actual
         });
         while !pending.is_empty() || !eq.is_empty() {
-            write_driver_progress(&mut writer, &mut eq, &mut pending, &mut connection)
-                .await
-                .unwrap();
+            write_driver_progress(
+                &mut writer,
+                &mut eq,
+                &mut pending,
+                &mut connection,
+                &mut heartbeat,
+            )
+            .await
+            .unwrap();
         }
         drop(writer);
         assert_eq!(reader.await.unwrap(), expected);
@@ -3225,7 +3300,7 @@ mod tests {
         let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
         write_chunks(&mut writer, &mut chunks).await.unwrap();
 
-        assert!(chunks.is_empty());
+        assert_eq!(chunks, [] as [Bytes; 0]);
         assert_eq!(writer.out, expected);
     }
 
@@ -3280,10 +3355,9 @@ mod tests {
         };
         let mut last_input = Instant::now();
         let pool = RecvBufPool::new();
-        let (events, _receiver) = mpsc::channel(8);
+        let mut pending_large = None;
         read_stream_input(
             READ_BUF_MAX,
-            &mut reader,
             &mut pull,
             &mut read_buf,
             &mut target,
@@ -3291,10 +3365,8 @@ mod tests {
             &config,
             &mut last_input,
             &pool,
-            &events,
-            1,
+            &mut pending_large,
         )
-        .await
         .unwrap();
         assert!(read_buf.is_empty());
         assert!(read_buf.capacity() >= target);
@@ -3303,6 +3375,11 @@ mod tests {
             original,
             "released prefix allocation should be reused"
         );
+        let mut large = pending_large.take().unwrap();
+        while !large.complete() {
+            large.read(&mut reader).await.unwrap();
+        }
+        large.finish(&mut pull, &pool).unwrap();
         let message = pull.poll_message().expect("complete large frame");
         assert_eq!(message.part_bytes(0).unwrap().as_ref(), payload);
     }
@@ -3640,8 +3717,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn yring_sink_deferred_send_signals_once_per_flush() {
+    #[test]
+    fn yring_sink_deferred_send_signals_once_per_flush() {
         let (producer, mut consumer) = yring::spsc(4);
         let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let signals_for_sink = signals.clone();
@@ -3654,8 +3731,10 @@ mod tests {
         };
         let mut pending = false;
 
-        assert!(sink.send_deferred(Message::single("a"), &mut pending).await);
-        assert!(sink.send_deferred(Message::single("b"), &mut pending).await);
+        sink.try_send_deferred(Message::single("a"), &mut pending)
+            .unwrap();
+        sink.try_send_deferred(Message::single("b"), &mut pending)
+            .unwrap();
         assert_eq!(signals.load(Ordering::Relaxed), 0);
         assert_eq!(consumer.prefetch(), 0);
 
@@ -3807,6 +3886,693 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_completion_keeps_driver_join_independent_of_full_mailbox() {
+        for cancel in [false, true] {
+            let (stream, mut remote) = tokio::io::duplex(1024);
+            let (_, connection) = ready_push_pull_connections();
+            let (commands, inbox) = mpsc::channel(1);
+            let (events, mut event_inbox) = mpsc::channel(1);
+            events
+                .try_send((
+                    99,
+                    PeerEvent::Event(Event::Message(Message::single("older"))),
+                ))
+                .unwrap();
+            let cancellation = CancellationToken::new();
+            if cancel {
+                cancellation.cancel();
+            } else {
+                commands.try_send(PeerDriverCommand::Close).unwrap();
+            }
+            let driver = ConnectionDriver::new(stream, connection, inbox, events, 1, cancellation);
+            let (completion, finished) = CompletionProgress::reserve(1);
+            let driver = driver.with_completion(completion);
+            let mut task = tokio::spawn(driver.run());
+            tokio::time::timeout(Duration::from_millis(500), commands.closed())
+                .await
+                .expect("driver did not tear down its command inbox");
+            assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
+            let joined = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
+            if joined.is_err() {
+                task.abort();
+            }
+            joined
+                .expect("final closure publication trapped the driver task")
+                .unwrap()
+                .unwrap();
+            let finished = finished.await.unwrap();
+            assert_eq!(finished.peer_id, 1);
+            assert_eq!(finished.admitted_events, 0);
+            assert!(finished.error.is_none());
+            assert_eq!(event_inbox.len(), 1);
+            assert_eq!(event_inbox.recv().await.unwrap().0, 99);
+        }
+    }
+
+    #[tokio::test]
+    async fn aborted_driver_publishes_reserved_completion_after_transport_drop() {
+        let (stream, mut remote) = tokio::io::duplex(1024);
+        let (_, connection) = ready_push_pull_connections();
+        let (_commands, inbox) = mpsc::channel(1);
+        let (events, mut event_inbox) = mpsc::channel(1);
+        let (completion, finished) = CompletionProgress::reserve(7);
+        let driver = ConnectionDriver::new(
+            stream,
+            connection,
+            inbox,
+            events,
+            7,
+            CancellationToken::new(),
+        )
+        .with_completion(completion);
+        let task = tokio::spawn(driver.run());
+        assert!(matches!(
+            event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        task.abort();
+        let finished = tokio::time::timeout(Duration::from_millis(500), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.peer_id, 7);
+        assert_eq!(finished.admitted_events, 1);
+        assert_eq!(
+            finished.error.as_deref(),
+            Some("connection driver stopped before completion")
+        );
+        assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(event_inbox.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn full_peer_event_mailbox_keeps_reverse_control_and_close_reachable() {
+        for mode in ["drain", "close", "cancel"] {
+            for reserved in [false, true] {
+                full_peer_event_mailbox_controls(mode, reserved).await;
+            }
+        }
+    }
+
+    #[expect(clippy::too_many_lines)]
+    async fn full_peer_event_mailbox_controls(mode: &str, reserved: bool) {
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (client_control, client_inbox) = mpsc::channel(8);
+        let (client_data, client_data_inbox) = mpsc::channel(1);
+        let (server_events, mut server_event_inbox) = mpsc::channel(1);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        let server_cancel = CancellationToken::new();
+        let client_cancel = CancellationToken::new();
+        let server = ConnectionDriver::new(
+            server_stream,
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair)),
+            server_inbox,
+            server_events,
+            1,
+            server_cancel.clone(),
+        );
+        let (completion, finished) = CompletionProgress::reserve(1);
+        let mut finished = reserved.then_some(finished);
+        let server = if reserved {
+            server.with_completion(completion)
+        } else {
+            drop(completion);
+            server
+        };
+        let client = ConnectionDriver::new(
+            client_stream,
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+        )
+        .with_data_inbox(client_data_inbox);
+        let mut server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        assert!(matches!(
+            server_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        assert!(matches!(
+            client_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        server_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        client_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        for sequence in 0..3 {
+            client_control
+                .send(PeerDriverCommand::SendCommand(Command::Unknown {
+                    name: format!("IN{sequence}").into(),
+                    body: Bytes::from_static(b"blocked"),
+                }))
+                .await
+                .unwrap();
+        }
+        client_data
+            .send(PeerDriverData::SendMessage(Message::single("after events")))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(server_event_inbox.len(), 1);
+        server_control
+            .send(PeerDriverCommand::SendCommand(Command::Unknown {
+                name: "CONTROL".into(),
+                body: Bytes::from_static(b"reverse"),
+            }))
+            .await
+            .unwrap();
+        let (_, event) =
+            tokio::time::timeout(Duration::from_millis(500), client_event_inbox.recv())
+                .await
+                .expect("event admission trapped reverse control")
+                .unwrap();
+        assert!(matches!(event,
+            PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
+                if name == "CONTROL" && body == b"reverse"[..]));
+        if mode == "drain" {
+            for sequence in 0..3 {
+                let (_, event) =
+                    tokio::time::timeout(Duration::from_millis(500), server_event_inbox.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let expected = format!("IN{sequence}");
+                assert!(matches!(event,
+                    PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
+                        if name == expected.as_bytes() && body == b"blocked"[..]));
+            }
+            let (_, event) =
+                tokio::time::timeout(Duration::from_millis(500), server_event_inbox.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(event, PeerEvent::Event(Event::Message(message))
+                if message.part_slice(0) == Some(b"after events".as_slice())));
+        }
+        if mode == "cancel" {
+            server_cancel.cancel();
+        } else {
+            server_control.send(PeerDriverCommand::Close).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_millis(500), server_control.closed())
+            .await
+            .expect("event admission trapped close/cancellation");
+        let mut admitted = if mode == "drain" { 5 } else { 1 };
+        if reserved {
+            tokio::time::timeout(Duration::from_millis(500), &mut server_task)
+                .await
+                .expect("reserved completion waited for mailbox credit")
+                .unwrap()
+                .unwrap();
+        }
+        // The standalone public API keeps Closed on its supplied mailbox.
+        // Socket-owned drivers join before that older admitted prefix drains.
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some((_, event)) = server_event_inbox.recv().await {
+                if matches!(event, PeerEvent::Closed { .. }) {
+                    assert!(!reserved);
+                    break;
+                }
+                admitted += 1;
+            }
+        })
+        .await
+        .unwrap();
+        if let Some(finished) = finished.take() {
+            let result = finished.await.unwrap();
+            assert_eq!(result.admitted_events, admitted);
+            assert!(result.error.is_none());
+        } else {
+            tokio::time::timeout(Duration::from_millis(500), server_task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        client_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_error_event_cleanup_keeps_close_and_cancel_reachable() {
+        for mode in ["close", "cancel", "linger", "drain"] {
+            full_error_event_mailbox_controls(mode).await;
+        }
+    }
+
+    #[expect(clippy::too_many_lines)]
+    async fn full_error_event_mailbox_controls(mode: &str) {
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (client_control, client_inbox) = mpsc::channel(8);
+        let (_client_data, client_data_inbox) = mpsc::channel(1);
+        let (server_events, mut server_event_inbox) = mpsc::channel(1);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        let server_cancel = CancellationToken::new();
+        let client_cancel = CancellationToken::new();
+        let server = ConnectionDriver::new(
+            server_stream,
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair)),
+            server_inbox,
+            server_events,
+            1,
+            server_cancel.clone(),
+        );
+        let client = ConnectionDriver::new(
+            client_stream,
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+        )
+        .with_data_inbox(client_data_inbox);
+        let server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        assert!(matches!(
+            server_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        assert!(matches!(
+            client_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        server_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        client_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        for sequence in 0..3 {
+            client_control
+                .send(PeerDriverCommand::SendCommand(Command::Unknown {
+                    name: format!("IN{sequence}").into(),
+                    body: Bytes::from_static(b"blocked"),
+                }))
+                .await
+                .unwrap();
+        }
+        client_control
+            .send(PeerDriverCommand::SendCommand(Command::Error {
+                reason: "post-handshake failure".into(),
+            }))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(server_event_inbox.len(), 1);
+        if mode == "drain" {
+            for sequence in 0..3 {
+                let (_, event) =
+                    tokio::time::timeout(Duration::from_millis(500), server_event_inbox.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let expected = format!("IN{sequence}");
+                assert!(matches!(event,
+                    PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
+                        if name == expected.as_bytes() && body == b"blocked"[..]));
+            }
+        }
+        if mode == "cancel" {
+            server_cancel.cancel();
+        } else if mode == "linger" {
+            server_control
+                .send(PeerDriverCommand::DrainAndClose {
+                    deadline: Instant::now().checked_add(Duration::from_millis(50)),
+                })
+                .await
+                .unwrap();
+        } else if mode != "drain" {
+            server_control.send(PeerDriverCommand::Close).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_millis(500), server_control.closed())
+            .await
+            .expect("event admission trapped close/cancellation");
+        // Final Closed publication deliberately waits for mailbox space.
+        // Retire the older admitted prefix before expecting the run to join.
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some((_, event)) = server_event_inbox.recv().await {
+                if let PeerEvent::Closed { error } = event {
+                    assert_eq!(error.is_some(), mode == "drain");
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(500), server_task)
+            .await
+            .unwrap()
+            .unwrap();
+        if mode == "drain" {
+            assert!(matches!(result, Err(Error::Protocol(_))));
+        } else {
+            result.unwrap();
+        }
+        client_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_handshake_event_mailbox_preserves_writes_and_original_deadline() {
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (_client_control, client_inbox) = mpsc::channel(8);
+        let (server_events, mut server_event_inbox) = mpsc::channel(1);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        server_events
+            .send((
+                9,
+                PeerEvent::Event(Event::Command(Command::Unknown {
+                    name: "occupied".into(),
+                    body: Bytes::new(),
+                })),
+            ))
+            .await
+            .unwrap();
+        let client_cancel = CancellationToken::new();
+        let server = ConnectionDriver::new(
+            server_stream,
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair)),
+            server_inbox,
+            server_events,
+            1,
+            CancellationToken::new(),
+        )
+        .with_setup_deadline(Some(Instant::now() + Duration::from_millis(150)), None);
+        let client = ConnectionDriver::new(
+            client_stream,
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+        );
+        let server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        let (_, event) =
+            tokio::time::timeout(Duration::from_millis(500), client_event_inbox.recv())
+                .await
+                .expect("full handshake mailbox trapped READY write")
+                .unwrap();
+        assert!(matches!(
+            event,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        tokio::time::timeout(Duration::from_millis(500), server_control.closed())
+            .await
+            .expect("handshake event admission lost the setup deadline");
+        let (_, occupied) = server_event_inbox.recv().await.unwrap();
+        assert!(matches!(occupied,
+            PeerEvent::Event(Event::Command(Command::Unknown { name, .. }))
+                if name == "occupied"));
+        let (_, closed) =
+            tokio::time::timeout(Duration::from_millis(500), server_event_inbox.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(closed, PeerEvent::Closed { error: Some(error) }
+            if error.contains("handshake timeout")));
+        let result = tokio::time::timeout(Duration::from_millis(500), server_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(Error::HandshakeFailed(_))));
+        client_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_receive_sinks_keep_control_and_reverse_writes_reachable() {
+        for kind in [
+            "channel",
+            "yring",
+            "authenticated",
+            "server",
+            "rep",
+            "actor",
+        ] {
+            full_receive_sink_controls(kind).await;
+        }
+    }
+
+    #[expect(clippy::too_many_lines)]
+    async fn full_receive_sink_controls(kind: &str) {
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let (pipe, _pipe_receiver, _, _) =
+            crate::socket::recv::recv_pipe(1, crate::socket::recv::BlockingRecvWaker::new());
+        let (producer, _yring_receiver) = yring::spsc(1);
+        let (authenticated, _authenticated_receiver) = RecvSink::authenticated(1, Arc::new(|| {}));
+        let envelopes = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let sink = match kind {
+            "channel" => Some(RecvSink::Channel(pipe.clone())),
+            "yring" => Some(RecvSink::Yring(YringSink {
+                producer,
+                signal: Box::new(|| {}),
+                space: Arc::new(StateSignal::new()),
+            })),
+            "authenticated" => Some(authenticated),
+            "server" => Some(RecvSink::server(RecvSink::Channel(pipe.clone()), 7)),
+            "rep" => Some(RecvSink::rep(
+                RecvSink::Channel(pipe.clone()),
+                envelopes.clone(),
+                1,
+            )),
+            "actor" => None,
+            _ => unreachable!(),
+        };
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (client_control, client_inbox) = mpsc::channel(8);
+        let (client_data, client_data_inbox) = mpsc::channel(64);
+        let (server_events, mut server_event_inbox) = mpsc::channel(1);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        let server_cancel = CancellationToken::new();
+        let client_cancel = CancellationToken::new();
+        let mut server = ConnectionDriver::new(
+            server_stream,
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair)),
+            server_inbox,
+            server_events,
+            1,
+            server_cancel.clone(),
+        );
+        if let Some(sink) = sink {
+            server = server.with_recv_sink(sink);
+        }
+        let client = ConnectionDriver::new(
+            client_stream,
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+        )
+        .with_data_inbox(client_data_inbox);
+        let server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        assert!(matches!(
+            server_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        assert!(matches!(
+            client_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        server_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        client_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        for sequence in 0u8..32 {
+            let body = Bytes::from(vec![sequence; 128]);
+            let message = if kind == "rep" {
+                Message::multipart([Bytes::new(), body])
+            } else {
+                Message::single(body)
+            };
+            client_data
+                .send(PeerDriverData::SendMessage(message))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        server_control
+            .send(PeerDriverCommand::SendCommand(Command::Unknown {
+                name: "CONTROL".into(),
+                body: Bytes::from_static(b"reverse"),
+            }))
+            .await
+            .unwrap();
+        let (_, event) =
+            tokio::time::timeout(Duration::from_millis(500), client_event_inbox.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{kind}: receive backpressure trapped reverse control"))
+                .unwrap();
+        assert!(
+            matches!(event, PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
+            if name == "CONTROL" && body == b"reverse"[..])
+        );
+        if kind == "rep" {
+            assert_eq!(
+                envelopes.lock().unwrap().len(),
+                1,
+                "only admitted requests may publish an envelope"
+            );
+        }
+        server_control.send(PeerDriverCommand::Close).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(500), server_control.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{kind}: receive backpressure trapped Close"));
+        // Final Closed publication still needs a free event slot for the
+        // legacy combined mailbox. Test command service separately from that.
+        let _ = server_event_inbox.try_recv();
+        tokio::time::timeout(Duration::from_millis(500), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        client_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_large_read_keeps_reverse_control_and_close_reachable() {
+        partial_large_read_controls(false).await;
+    }
+
+    #[tokio::test]
+    async fn partial_large_read_keeps_cancellation_reachable() {
+        partial_large_read_controls(true).await;
+    }
+
+    async fn partial_large_read_controls(cancel_only: bool) {
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let (server_control, server_inbox) = mpsc::channel(8);
+        let (client_control, client_inbox) = mpsc::channel(8);
+        let (client_data, client_data_inbox) = mpsc::channel(8);
+        let (server_events, mut server_event_inbox) = mpsc::channel(8);
+        let (client_events, mut client_event_inbox) = mpsc::channel(8);
+        let server_cancel = CancellationToken::new();
+        let client_cancel = CancellationToken::new();
+        let server = ConnectionDriver::with_config(
+            server_stream,
+            Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair)),
+            server_inbox,
+            server_events,
+            1,
+            server_cancel.clone(),
+            PeerDriverConfig {
+                large_message_threshold: 128 * 1024,
+                ..PeerDriverConfig::default()
+            },
+        );
+        let client = ConnectionDriver::new(
+            client_stream,
+            Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair)),
+            client_inbox,
+            client_events,
+            2,
+            client_cancel.clone(),
+        )
+        .with_data_inbox(client_data_inbox);
+        let server_task = tokio::spawn(server.run());
+        let client_task = tokio::spawn(client.run());
+        assert!(matches!(
+            server_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        assert!(matches!(
+            client_event_inbox.recv().await.unwrap().1,
+            PeerEvent::Event(Event::HandshakeSucceeded { .. })
+        ));
+        server_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        client_control
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        let mut prefix = vec![0x02];
+        prefix.extend_from_slice(&(1024_u64 * 1024).to_be_bytes());
+        prefix.extend_from_slice(&[7; 128]);
+        client_data
+            .send(PeerDriverData::SendEncoded(Arc::new(smallvec::smallvec![
+                Bytes::from(prefix)
+            ])))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        if cancel_only {
+            server_cancel.cancel();
+        } else {
+            server_control
+                .send(PeerDriverCommand::SendCommand(Command::Unknown {
+                    name: "CONTROL".into(),
+                    body: Bytes::from_static(b"partial"),
+                }))
+                .await
+                .unwrap();
+            let (_, event) =
+                tokio::time::timeout(Duration::from_millis(500), client_event_inbox.recv())
+                    .await
+                    .expect("partial large read trapped reverse control")
+                    .unwrap();
+            assert!(matches!(event,
+                PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
+                if name == "CONTROL" && body == b"partial"[..]
+            ));
+            server_control
+                .send(PeerDriverCommand::DrainAndClose {
+                    deadline: Instant::now().checked_add(Duration::from_millis(50)),
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_millis(500), server_task)
+            .await
+            .expect("partial large read trapped cancellation/linger")
+            .unwrap()
+            .unwrap();
+        client_cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(500), client_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn send_pipe_to_yring_preserves_large_payload_under_choppy_io() {
         let (server_stream, client_stream) = tokio::io::duplex(16 * 1024);
         let server_stream = ChoppyDuplex::new(server_stream, 17_003, 7_919);
@@ -3949,6 +4715,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graceful_close_deadline_interrupts_stalled_transport_shutdown() {
+        let (push, _pull) = ready_push_pull_connections();
+        let (stream, _remote) = tokio::io::duplex(64);
+        let shutdown_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (commands, inbox) = mpsc::channel(4);
+        let (events, _event_inbox) = mpsc::channel(4);
+        let driver = ConnectionDriver::new(
+            StalledShutdownStream {
+                stream,
+                shutdown_seen: shutdown_seen.clone(),
+            },
+            push,
+            inbox,
+            events,
+            1,
+            CancellationToken::new(),
+        );
+        commands
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        commands
+            .send(PeerDriverCommand::DrainAndClose {
+                deadline: Some(deadline),
+            })
+            .await
+            .unwrap();
+        let task = tokio::spawn(driver.run());
+        tokio::time::timeout_at((deadline + Duration::from_millis(75)).into(), task)
+            .await
+            .expect("transport shutdown hid the linger deadline")
+            .unwrap()
+            .unwrap();
+        assert!(shutdown_seen.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn producer_eof_preserves_the_final_send_pipe_batch() {
+        let (push, mut pull) = ready_push_pull_connections();
+        let (stream, mut remote) = tokio::io::duplex(64);
+        let (commands, inbox) = mpsc::channel(4);
+        let (events, _event_inbox) = mpsc::channel(4);
+        let (mut producer, consumer) = crate::engine::send_pipe(4);
+        producer.try_send(Message::single(vec![5; 4096])).unwrap();
+        drop(producer);
+        let driver =
+            ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
+                .with_send_pipe(consumer);
+        commands
+            .send(PeerDriverCommand::ActivateDataPlane)
+            .await
+            .unwrap();
+        let task = tokio::spawn(driver.run());
+        let mut buffer = [0; 1024];
+        loop {
+            let count = tokio::time::timeout(Duration::from_secs(1), remote.read(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            if count == 0 {
+                break;
+            }
+            pull.handle_input(Bytes::copy_from_slice(&buffer[..count]))
+                .unwrap();
+        }
+        assert_eq!(
+            pull.poll_message().unwrap().part_slice(0).unwrap(),
+            &[5; 4096]
+        );
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn close_interrupts_stalled_outbound_write() {
         let (server_stream, client_stream) = tokio::io::duplex(64);
         let server_connection =
@@ -4037,6 +4877,83 @@ mod tests {
             .expect("server driver panicked");
     }
 
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadline() {
+        use omq_proto::proto::connection::WsRole;
+
+        for reply in [false, true] {
+            let mut push = Connection::new(
+                ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
+            );
+            let mut pull = Connection::new(
+                ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
+            );
+            for _ in 0..10 {
+                let push_out = drain_transmit(&mut push);
+                let pull_out = drain_transmit(&mut pull);
+                if !push_out.is_empty() {
+                    pull.handle_input(Bytes::from(push_out)).unwrap();
+                }
+                if !pull_out.is_empty() {
+                    push.handle_input(Bytes::from(pull_out)).unwrap();
+                }
+            }
+            assert!(push.is_ready() && pull.is_ready());
+            while push.poll_event().is_some() {}
+            let (stream, mut remote) = tokio::io::duplex(64);
+            let (commands, inbox) = mpsc::channel(4);
+            let (data, data_inbox) = mpsc::channel(4);
+            let (events, _event_inbox) = mpsc::channel(4);
+            let driver =
+                ConnectionDriver::new(stream, push, inbox, events, 1, CancellationToken::new())
+                    .with_data_inbox(data_inbox);
+            data.send(PeerDriverData::SendMessage(Message::single(vec![9; 4096])))
+                .await
+                .unwrap();
+            commands
+                .send(PeerDriverCommand::ActivateDataPlane)
+                .await
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_millis(250);
+            commands
+                .send(PeerDriverCommand::DrainAndClose {
+                    deadline: Some(deadline),
+                })
+                .await
+                .unwrap();
+            let task = tokio::spawn(driver.run());
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            assert!(!task.is_finished(), "staged data was dropped during drain");
+            let mut buffer = [0; 1024];
+            while !pull.is_closed() {
+                let count = tokio::time::timeout_at(deadline.into(), remote.read(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(count, 0, "driver closed without the WS CLOSE frame");
+                pull.handle_input(Bytes::copy_from_slice(&buffer[..count]))
+                    .unwrap();
+            }
+            assert_eq!(
+                pull.poll_message().unwrap().part_slice(0).unwrap(),
+                &[9; 4096]
+            );
+            assert!(
+                !task.is_finished(),
+                "driver did not wait for the peer CLOSE"
+            );
+            if reply {
+                remote.write_all(&drain_transmit(&mut pull)).await.unwrap();
+            }
+            tokio::time::timeout_at((deadline + Duration::from_millis(75)).into(), task)
+                .await
+                .expect("close restarted its deadline after draining data")
+                .unwrap()
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn handshake_completes_over_tcp() {
         use crate::transport::{Listener as _, TcpTransport, Transport as _};
@@ -4103,6 +5020,82 @@ mod tests {
         match s_evt_rx.recv().await.unwrap() {
             Event::HandshakeSucceeded { .. } => {}
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "plain")]
+    #[tokio::test]
+    async fn stalled_authentication_error_keeps_cancel_and_original_deadline_reachable() {
+        for cancel in [true, false] {
+            let (server_stream, client_stream) = tokio::io::duplex(4096);
+            let stalled = Arc::new(StateSignal::new());
+            let server_connection = Connection::new(
+                ConnectionConfig::new(Role::Server, SocketType::Pull).mechanism(
+                    omq_proto::MechanismSetup::PlainServer {
+                        authenticator: omq_proto::Authenticator::new(|_| false),
+                    },
+                ),
+            );
+            let client_connection = Connection::new(
+                ConnectionConfig::new(Role::Client, SocketType::Push).mechanism(
+                    omq_proto::MechanismSetup::PlainClient {
+                        username: "alice".into(),
+                        password: "wrong".into(),
+                    },
+                ),
+            );
+            let (server_inbox, server_commands) = mpsc::channel(16);
+            let (_client_inbox, client_commands) = mpsc::channel(16);
+            let (server_events, mut server_events_rx) = mpsc::channel(16);
+            let (client_events, _client_events_rx) = mpsc::channel(16);
+            let server_cancel = CancellationToken::new();
+            let client_cancel = CancellationToken::new();
+            let mut server = ConnectionDriver::new(
+                GreetingOnlyStream {
+                    stream: server_stream,
+                    stalled: Arc::clone(&stalled),
+                },
+                server_connection,
+                server_commands,
+                server_events,
+                0,
+                server_cancel.clone(),
+            );
+            server.config.handshake_timeout = Some(if cancel {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(300)
+            });
+            let client = ConnectionDriver::new(
+                client_stream,
+                client_connection,
+                client_commands,
+                client_events,
+                1,
+                client_cancel.clone(),
+            );
+            let server_task = tokio::spawn(server.run());
+            let client_task = tokio::spawn(client.run());
+            tokio::time::timeout(Duration::from_secs(1), stalled.changed_after(0))
+                .await
+                .expect("authentication ERROR write never stalled");
+            if cancel {
+                server_cancel.cancel();
+            }
+            tokio::time::timeout(Duration::from_secs(1), server_inbox.closed())
+                .await
+                .expect("authentication ERROR write trapped teardown");
+            let result = server_task.await.unwrap();
+            if cancel {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(Error::HandshakeFailed(reason))
+                    if reason == "PLAIN authentication failed with status 400"));
+            }
+            let (_, event) = server_events_rx.recv().await.unwrap();
+            assert!(matches!(event, PeerEvent::Closed { .. }));
+            client_cancel.cancel();
+            let _ = client_task.await.unwrap();
         }
     }
 
@@ -4306,21 +5299,26 @@ mod tests {
             .unwrap();
         let mut sink = Some(RecvSink::Peer(sink));
         let (events, _rx) = mpsc::channel(1);
+        let mut pending = None;
         for _ in 0..8 {
             assert_eq!(
                 drain_decoded_messages(
                     &mut connection,
                     &mut None,
                     ReceiveProfile::Throughput,
-                    &mut sink,
-                    &events,
-                    0,
+                    MessageDelivery {
+                        sink: &mut sink,
+                        peer_out: &events,
+                        peer_id: 0,
+                        completion: &mut CompletionProgress::default(),
+                        pending: &mut pending,
+                        reserved_admission: false,
+                    },
                     ReceiveRateLimiters {
                         connection: &mut None,
                         ip: None
                     },
                 )
-                .await
                 .unwrap(),
                 DriverStep::Continue
             );
@@ -4363,7 +5361,14 @@ mod tests {
         last_input: &mut Instant,
     ) -> Result<()> {
         let recv_pool = RecvBufPool::new();
-        handle_large_messages(connection, reader, config, last_input, &recv_pool).await
+        while let Some(mut large) = PendingLargeRead::begin(connection, config, &recv_pool)? {
+            while !large.complete() {
+                large.read(reader).await?;
+                *last_input = Instant::now();
+            }
+            large.finish(connection, &recv_pool)?;
+        }
+        Ok(())
     }
 
     fn feed_input_in_chunks(

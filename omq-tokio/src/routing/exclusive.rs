@@ -144,6 +144,14 @@ impl ExclusiveSend {
         self.peer_ready.notify_changed();
     }
 
+    pub(crate) fn stop_admission(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Some(pipe) = self.pipe.lock().expect("exclusive pipe").as_ref() {
+            pipe.space_available().notify_changed();
+        }
+        self.peer_ready.notify_changed();
+    }
+
     pub(crate) fn is_drained(&self) -> bool {
         let guard = self.pipe.lock().expect("exclusive pipe");
         guard.as_ref().is_none_or(SendPipeProducer::is_empty)

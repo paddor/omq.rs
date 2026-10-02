@@ -16,9 +16,8 @@
 //! key is consumed when INITIATE is processed.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crypto_box::SalsaBox;
-use crypto_box::aead::generic_array::GenericArray;
 use crypto_box::aead::{Aead, AeadInPlace};
+use crypto_box::{Nonce, SalsaBox, Tag};
 use rand::Rng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -44,7 +43,7 @@ impl CurveBox {
 
     fn encrypt(&self, nonce: &[u8; 24], plaintext: &[u8]) -> Vec<u8> {
         self.inner
-            .encrypt(GenericArray::from_slice(nonce), plaintext)
+            .encrypt(&Nonce::from(*nonce), plaintext)
             .expect("SalsaBox::encrypt infallible without AAD")
     }
 
@@ -53,13 +52,12 @@ impl CurveBox {
         nonce: &[u8; 24],
         ciphertext: &[u8],
     ) -> core::result::Result<Vec<u8>, crypto_box::aead::Error> {
-        self.inner
-            .decrypt(GenericArray::from_slice(nonce), ciphertext)
+        self.inner.decrypt(&Nonce::from(*nonce), ciphertext)
     }
 
     fn encrypt_in_place_detached(&self, nonce: &[u8; 24], buf: &mut [u8]) -> [u8; 16] {
         self.inner
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), b"", buf)
+            .encrypt_in_place_detached(&Nonce::from(*nonce), b"", buf)
             .expect("SalsaBox::encrypt infallible without AAD")
             .into()
     }
@@ -70,12 +68,8 @@ impl CurveBox {
         buf: &mut [u8],
         tag: &[u8; 16],
     ) -> core::result::Result<(), crypto_box::aead::Error> {
-        self.inner.decrypt_in_place_detached(
-            GenericArray::from_slice(nonce),
-            b"",
-            buf,
-            GenericArray::from_slice(tag),
-        )
+        self.inner
+            .decrypt_in_place_detached(&Nonce::from(*nonce), b"", buf, &Tag::from(*tag))
     }
 }
 

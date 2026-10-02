@@ -16,7 +16,6 @@
 //! REP envelope save/restore lives at the socket-type wiring level.
 
 pub(crate) mod exclusive;
-pub(crate) mod fair_queue;
 pub(crate) mod fan_out;
 pub(crate) mod identity;
 pub(crate) mod latency;
@@ -26,7 +25,6 @@ pub(crate) mod round_robin;
 pub(crate) use omq_proto::subscription;
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use smallvec::SmallVec;
@@ -43,7 +41,6 @@ use tokio::sync::oneshot;
 pub(crate) const OUTBOUND_BATCH_MAX_MSGS: usize = 512;
 
 pub(crate) use exclusive::{ExclusiveSend, Submitter as ExclusiveSubmitter};
-pub(crate) use fair_queue::FairQueueRecv;
 pub(crate) use fan_out::{FanOutMode, FanOutSend, Submitter as FanOutSubmitter};
 pub(crate) use identity::{IdentityRecv, IdentitySend, Submitter as IdentitySubmitter};
 pub(crate) use latency::{LatencySend, Submitter as LatencySubmitter};
@@ -129,7 +126,7 @@ impl SendSubmitter {
     ) -> Result<()> {
         match self {
             Self::Identity(s) => s.send_rep(peer_id, envelope, msg).await,
-            _ => Err(Error::Protocol("REP latency route unavailable".into())),
+            _ => Err(Error::Protocol("REP route unavailable".into())),
         }
     }
 
@@ -247,11 +244,8 @@ impl SendStrategy {
             SendCategory::Exclusive if uses_latency_exclusive(t, options) => {
                 Self::Latency(LatencySend::new(options))
             }
-            SendCategory::RoundRobin
-                if t == SocketType::Rep
-                    && !options.mechanism.has_frame_transform()
-                    && options.workload_profile != Some(omq_proto::WorkloadProfile::Throughput) =>
-            {
+            // REP replies go to the peer that sent the request.
+            SendCategory::RoundRobin if t == SocketType::Rep => {
                 Self::Identity(IdentitySend::new(t, options))
             }
             SendCategory::RoundRobin => Self::RoundRobin(RoundRobinSend::new(options)),
@@ -389,6 +383,18 @@ impl SendStrategy {
         }
     }
 
+    /// Reject new sends while retaining every already accepted queue owner.
+    pub(crate) fn stop_admission(&self) {
+        match self {
+            Self::None => {}
+            Self::RoundRobin(s) => s.stop_admission(),
+            Self::Latency(s) => s.stop_admission(),
+            Self::Exclusive(s) => s.stop_admission(),
+            Self::FanOut(s) => s.stop_admission(),
+            Self::Identity(s) => s.stop_admission(),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         match self {
             Self::None => {}
@@ -438,43 +444,30 @@ fn uses_latency_exclusive(t: SocketType, options: &Options) -> bool {
 #[derive(Debug)]
 pub(crate) enum RecvStrategy {
     None,
-    FairQueue(FairQueueRecv),
+    FairQueue,
     Identity(IdentityRecv),
 }
 
 impl RecvStrategy {
-    pub(crate) fn for_socket_type(
-        t: SocketType,
-        recv_tx: Arc<crate::socket::recv::SharedRecvPipe>,
-    ) -> Self {
+    pub(crate) fn for_socket_type(t: SocketType) -> Self {
         match recv_category(t) {
             RecvCategory::None => Self::None,
-            RecvCategory::Identity => Self::Identity(IdentityRecv::new(recv_tx)),
-            RecvCategory::FairQueue => Self::FairQueue(FairQueueRecv::new(recv_tx)),
+            RecvCategory::Identity => Self::Identity(IdentityRecv::new()),
+            RecvCategory::FairQueue => Self::FairQueue,
         }
     }
 
     pub(crate) fn connection_added(&mut self, peer_id: u64, peer_identity: Bytes) {
         match self {
-            Self::None => {}
-            Self::FairQueue(fq) => fq.connection_added(peer_id),
+            Self::None | Self::FairQueue => {}
             Self::Identity(ir) => ir.connection_added(peer_id, peer_identity),
         }
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
         match self {
-            Self::None => {}
-            Self::FairQueue(fq) => fq.connection_removed(peer_id),
+            Self::None | Self::FairQueue => {}
             Self::Identity(ir) => ir.connection_removed(peer_id),
-        }
-    }
-
-    pub(crate) async fn deliver(&self, peer_id: u64, msg: Message) -> Result<()> {
-        match self {
-            Self::None => Ok(()),
-            Self::FairQueue(fq) => fq.deliver(peer_id, msg).await,
-            Self::Identity(ir) => ir.deliver(peer_id, msg).await,
         }
     }
 
@@ -486,7 +479,7 @@ impl RecvStrategy {
     pub(crate) fn wrap_for_transform(&self, peer_id: u64, msg: Message) -> Option<Message> {
         match self {
             Self::None => None,
-            Self::FairQueue(_) => Some(msg),
+            Self::FairQueue => Some(msg),
             Self::Identity(ir) => Some(ir.wrap(peer_id, msg)),
         }
     }

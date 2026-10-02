@@ -103,13 +103,27 @@ pub(crate) fn spawn_radio_sender(
     tokio::spawn(async move {
         let mut pending: Option<Bytes> = None;
         let mut control_open = true;
+        let mut closing = false;
+        let mut deadline: Option<std::time::Instant> = None;
         loop {
+            if closing && pending.is_none() && data_inbox_rx.is_empty() {
+                break;
+            }
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
+                () = async { tokio::time::sleep_until(deadline.unwrap().into()).await; },
+                    if deadline.is_some() => break,
                 cmd = inbox_rx.recv(), if control_open => match cmd {
                     Some(PeerDriverCommand::ActivateDataPlane | PeerDriverCommand::SendCommand(_)) => {}
                     Some(PeerDriverCommand::Close | PeerDriverCommand::ActivateWithRecvSink(_)) => break,
+                    Some(PeerDriverCommand::DrainAndClose { deadline: end }) => {
+                        if !closing {
+                            closing = true;
+                            deadline = end;
+                            data_inbox_rx.close();
+                        }
+                    }
                     None => control_open = false,
                 },
                 result = async {

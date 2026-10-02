@@ -1,7 +1,11 @@
 //! Socket actor: owns per-socket state, multiplexes commands + internal events.
 
+mod completion;
+mod dialer;
+mod endpoint_resolution;
 mod endpoints;
 mod lifecycle;
+mod listener;
 mod peer;
 mod peer_materialize;
 
@@ -13,15 +17,15 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt as _;
 use futures::channel::oneshot;
+use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "ws")]
-use super::dispatch::WsConnectOptions;
 use super::dispatch::{
-    AnyConn, AnyStream, bind_any, connect_any, generated_identity, peer_ident_socket_addr,
+    AnyConn, AnyStream, bind_any, generated_identity, peer_ident_socket_addr,
     preflight_connect_endpoint_resolution,
 };
 use super::monitor::{
@@ -35,16 +39,13 @@ use super::udp::{
 use crate::routing::{
     RecvStrategy, RepEnvelope, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
-use crate::transport::{
-    Canceled, InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent, dial_with_backoff,
-};
+use crate::transport::{InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent};
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::{Options, ReconnectPolicy};
 use omq_proto::proto::connection::{ConnectionConfig, Role};
-use omq_proto::proto::transform::MessageEncoder;
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
 use crate::engine::rate_limit::SharedIpRateLimiter;
@@ -57,10 +58,12 @@ use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerD
 pub(crate) enum SocketCommand {
     Bind {
         endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
         ack: oneshot::Sender<Result<Endpoint>>,
     },
     Connect {
         endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
         ack: oneshot::Sender<Result<()>>,
     },
     Subscribe {
@@ -121,6 +124,7 @@ enum InternalEvent {
     Accepted {
         conn: AnyConn,
         endpoint: Endpoint,
+        options: Arc<Options>,
     },
     Connected {
         conn: AnyConn,
@@ -131,14 +135,14 @@ enum InternalEvent {
         endpoint: Endpoint,
         route_id: u64,
     },
-    ConnectDelayed {
-        endpoint: Endpoint,
-        retry_in: Duration,
-        attempt: u32,
-    },
     PeerEvent {
         peer_id: u64,
         event: ZmtpEvent,
+    },
+    EndpointResolved {
+        id: u64,
+        ack: endpoint_resolution::Ack,
+        result: Result<endpoint_resolution::ResolvedEndpoint>,
     },
     PeerClosed {
         peer_id: u64,
@@ -147,6 +151,8 @@ enum InternalEvent {
 }
 
 struct PeerEntry {
+    /// Immutable endpoint-generation configuration, including reconnects.
+    options: Arc<Options>,
     ident: PeerIdent,
     handle: PeerDriverHandle,
     /// True after this peer is eligible for data-plane routing. For
@@ -158,6 +164,9 @@ struct PeerEntry {
     /// Inproc has a synthetic handshake and raw STREAM has no ZMTP
     /// handshake, so neither consumes the pending-handshake cap.
     pending_handshake: bool,
+    handshake_admission: Option<crate::transport::setup::PendingHandshake>,
+    handled_events: u64,
+    completion: Option<crate::engine::peer_completion::PeerCompletion>,
     /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
     identity: bytes::Bytes,
@@ -176,7 +185,8 @@ struct PeerEntry {
     /// SPSC ring for this inproc peer (None for wire/stream peers).
     spsc: Option<Arc<crate::transport::inproc::InprocTx>>,
     task: Option<JoinHandle<()>>,
-    /// IO thread index this peer's driver runs on (for load tracking).
+    /// Logical data IO thread index used by routing. The driver future owns
+    /// its load reservation; raw STREAM currently runs on the actor runtime.
     io_thread: usize,
 }
 
@@ -196,11 +206,18 @@ struct ListenerEntry {
 }
 
 struct DialerEntry {
+    options: Arc<Options>,
     endpoint: Endpoint,
     cancel: CancellationToken,
     route_id: u64,
     send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     _task: JoinHandle<()>,
+}
+
+struct PendingReceive {
+    peer_id: u64,
+    message: Message,
+    properties: Option<Arc<omq_proto::proto::command::PeerProperties>>,
 }
 
 /// The socket actor.
@@ -218,10 +235,20 @@ pub(crate) struct SocketDriver {
     /// `Event` values into `InternalEvent::PeerEvent`.
     peer_out_tx: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     peer_out_rx: mpsc::Receiver<(u64, crate::engine::PeerEvent)>,
+    /// One pre-reserved result per materialized driver. No data
+    /// mailbox slot or additional publisher task is needed at teardown.
+    peer_completions: FuturesUnordered<
+        tokio::sync::oneshot::Receiver<crate::engine::peer_completion::PeerCompletion>,
+    >,
+    /// At most one terminal receive per completed STREAM peer. These wait
+    /// behind the actor's existing pending receive without replacing it.
+    stream_disconnects: std::collections::VecDeque<u64>,
     next_peer_id: u64,
     peers: FxHashMap<u64, PeerEntry>,
+    setup_admission: crate::transport::setup::Admission,
     listeners: Vec<ListenerEntry>,
     dialers: Vec<DialerEntry>,
+    pending_endpoints: FxHashMap<u64, endpoint_resolution::PendingEndpoint>,
     send_strategy: SendStrategy,
     recv_strategy: RecvStrategy,
     /// REQ / REP envelope + alternation state. Shared with the socket
@@ -253,6 +280,7 @@ pub(crate) struct SocketDriver {
     compression_pool: Option<Arc<crate::engine::compression_pool::CompressionPool>>,
     recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
     authenticated_recv_sink: Option<crate::engine::RecvSink>,
+    pending_receive: Option<PendingReceive>,
     subscribe_count: Arc<AtomicU64>,
     ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
     io_pool: crate::context::IoPoolHandle,
@@ -283,7 +311,7 @@ impl SocketDriver {
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
         let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
-        let recv_strategy = RecvStrategy::for_socket_type(socket_type, recv_tx.clone());
+        let recv_strategy = RecvStrategy::for_socket_type(socket_type);
         let authenticated_recv_sink = recv_sink_config
             .as_ref()
             .and_then(|config| config.authenticated_sink());
@@ -293,6 +321,9 @@ impl SocketDriver {
             .map(Arc::new);
         Self {
             socket_type,
+            setup_admission: crate::transport::setup::Admission::new(
+                options.max_pending_handshakes,
+            ),
             options,
             cmd_rx,
             recv_tx,
@@ -301,10 +332,13 @@ impl SocketDriver {
             internal_rx,
             peer_out_tx,
             peer_out_rx,
+            peer_completions: FuturesUnordered::new(),
+            stream_disconnects: std::collections::VecDeque::new(),
             next_peer_id: 0,
             peers: FxHashMap::default(),
             listeners: Vec::new(),
             dialers: Vec::new(),
+            pending_endpoints: FxHashMap::default(),
             send_strategy,
             recv_strategy,
             type_state,
@@ -323,6 +357,7 @@ impl SocketDriver {
             compression_pool: None,
             recv_sink_config,
             authenticated_recv_sink,
+            pending_receive: None,
             subscribe_count,
             ready_peer_count_shared,
             io_pool,
@@ -333,7 +368,30 @@ impl SocketDriver {
     }
 
     async fn run(mut self) {
+        let authenticated_sender = self
+            .authenticated_recv_sink
+            .as_ref()
+            .and_then(crate::engine::RecvSink::authenticated_sender);
+        let authenticated_credit =
+            crate::engine::reserve_authenticated(authenticated_sender.as_ref());
+        tokio::pin!(authenticated_credit);
         loop {
+            let pending_peer = self.pending_receive.as_ref().map(|pending| pending.peer_id);
+            if self.closing && self.pending_receive.take().is_some() {
+                authenticated_credit.set(crate::engine::reserve_authenticated(
+                    authenticated_sender.as_ref(),
+                ));
+            }
+            if authenticated_sender.is_none() {
+                self.retry_pending_receive();
+            }
+            if self.pending_receive.is_none()
+                && let Some(peer_id) = pending_peer
+            {
+                self.retire_completed_peer(peer_id).await;
+            }
+            self.drain_peer_completions().await;
+            self.drain_stream_disconnects().await;
             if self.request_peer_close_if_drained().await {
                 self.teardown().await;
                 return;
@@ -362,7 +420,8 @@ impl SocketDriver {
                     return;
                 }
                 () = async { close_poll_sleep.unwrap().await }, if should_poll_close => {}
-                cmd = self.cmd_rx.recv(), if !self.closing => match cmd {
+                cmd = self.cmd_rx.recv(), if !self.closing || !self.cmd_rx.is_empty() => match cmd {
+                    Some(_) if self.closing => {},
                     Some(c) => self.handle_command(c).await,
                     None => {
                         // All handles dropped. No caller can await an ack here,
@@ -373,18 +432,33 @@ impl SocketDriver {
                 Some(evt) = self.internal_rx.recv() => {
                     self.handle_internal_event(evt).await;
                 }
-                Some((peer_id, peer_out)) = self.peer_out_rx.recv() => {
-                    use crate::engine::PeerEvent;
-                    let evt = match peer_out {
-                        PeerEvent::Event(e) => InternalEvent::PeerEvent { peer_id, event: e },
-                        PeerEvent::Closed { error } => InternalEvent::PeerClosed {
-                            peer_id,
-                            reason: error
-                                .map_or(DisconnectReason::PeerClosed, DisconnectReason::Error),
-                        },
-                    };
-                    self.handle_internal_event(evt).await;
+                Some(completion) = self.peer_completions.next(), if !self.peer_completions.is_empty() => {
+                    if let Ok(completion) = completion {
+                        self.handle_peer_completion(completion).await;
+                    }
                 }
+                permit = &mut authenticated_credit,
+                    if self.pending_receive.is_some() && authenticated_sender.is_some() => {
+                    match permit {
+                        Ok(permit) => {
+                            let pending = self.pending_receive.take().unwrap();
+                            let peer_id = pending.peer_id;
+                            self.authenticated_recv_sink.as_ref().unwrap().send_authenticated_reserved(
+                                pending.message, pending.properties.unwrap(), permit,
+                            );
+                            self.retire_completed_peer(peer_id).await;
+                        }
+                        Err(_) => self.begin_close(None, Some(Duration::ZERO)),
+                    }
+                    authenticated_credit.set(crate::engine::reserve_authenticated(authenticated_sender.as_ref()));
+                }
+                () = self.recv_tx.space_ready(),
+                    if self.pending_receive.is_some() && authenticated_sender.is_none() => {}
+                Some((peer_id, peer_out)) = self.peer_out_rx.recv(), if self.pending_receive.is_none() => {
+                    self.handle_peer_output(peer_id, peer_out).await;
+                }
+                () = tokio::task::yield_now(),
+                    if !self.stream_disconnects.is_empty() && self.pending_receive.is_none() => {}
             }
         }
     }
@@ -398,11 +472,30 @@ impl SocketDriver {
 
     async fn handle_command(&mut self, cmd: SocketCommand) {
         match cmd {
-            SocketCommand::Bind { endpoint, ack } => {
-                let res = self.bind(endpoint).await;
-                let _ = ack.send(res);
+            SocketCommand::Bind {
+                endpoint,
+                compression,
+                ack,
+            } => {
+                let options = self.capture_endpoint_options(compression);
+                if let Err(error) = self.validate_setup_options(&endpoint, &options) {
+                    let _ = ack.send(Err(error));
+                } else if endpoint_resolution::needs_dns(&endpoint) {
+                    self.start_endpoint_resolution(
+                        endpoint,
+                        options,
+                        endpoint_resolution::Ack::Bind(ack),
+                    );
+                } else {
+                    let _ = ack.send(self.bind(endpoint, options).await);
+                }
             }
-            SocketCommand::Connect { endpoint, ack } => {
+            SocketCommand::Connect {
+                endpoint,
+                compression,
+                ack,
+            } => {
+                let options = self.capture_endpoint_options(compression);
                 if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
                     let _ = ack.send(Err(Error::Protocol(
                         "STREAM sockets only support tcp:// endpoints".into(),
@@ -410,14 +503,22 @@ impl SocketDriver {
                 } else if matches!(endpoint, Endpoint::Udp { .. }) {
                     let res = self.start_dial_udp(endpoint).await;
                     let _ = ack.send(res);
-                } else if let Err(e) = reject_encrypted_inproc(&endpoint, &self.options.mechanism) {
+                } else if let Err(e) = reject_encrypted_inproc(&endpoint, &options.mechanism) {
                     let _ = ack.send(Err(e));
+                } else if let Err(e) = self.validate_setup_options(&endpoint, &options) {
+                    let _ = ack.send(Err(e));
+                } else if endpoint_resolution::needs_dns(&endpoint) {
+                    self.start_endpoint_resolution(
+                        endpoint,
+                        options,
+                        endpoint_resolution::Ack::Connect(ack),
+                    );
                 } else if let Err(e) = preflight_connect_endpoint_resolution(&endpoint).await {
                     let _ = ack.send(Err(e));
                 } else if self.should_ignore_duplicate_connect(&endpoint) {
                     let _ = ack.send(Ok(()));
                 } else {
-                    self.start_dial(endpoint);
+                    self.start_dial(endpoint, options);
                     let _ = ack.send(Ok(()));
                 }
             }
@@ -475,6 +576,13 @@ impl SocketDriver {
             return;
         }
         self.closing = true;
+        self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
+        self.cmd_rx.close();
+        self.send_strategy.stop_admission();
+        self.spsc
+            .send_ring_available
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.cancel_pending_endpoints(None);
         self.close_peers_requested = false;
         self.close_ack = ack;
         // Close the recv channel so any awaiting recv() returns Closed.
@@ -488,7 +596,6 @@ impl SocketDriver {
         // close() sets the closed flag; existing ring data can still be drained.
         // Non-zero linger keeps endpoints alive so late peers can take queued
         // sends before the deadline.
-        self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
         // If linger is zero, shut down the strategy now so in-flight
         // pumps bail immediately.
         if matches!(linger, Some(Duration::ZERO)) {
@@ -524,7 +631,9 @@ impl SocketDriver {
         let cancel = self.cancel.clone();
         let mut disconnected = Vec::new();
         for (peer_id, inbox) in targets {
-            let send = inbox.send(PeerDriverCommand::Close);
+            let send = inbox.send(PeerDriverCommand::DrainAndClose {
+                deadline: self.close_deadline,
+            });
             let result = match self.close_deadline {
                 Some(deadline) => {
                     let deadline = tokio::time::Instant::from_std(deadline);
@@ -569,6 +678,7 @@ impl SocketDriver {
         self.cmd_rx.close();
         self.internal_rx.close();
         self.peer_out_rx.close();
+        self.pending_endpoints.clear();
         self.send_strategy.shutdown();
         self.ready_peer_count_shared
             .store(0, std::sync::atomic::Ordering::Release);
@@ -611,14 +721,6 @@ impl SocketDriver {
 impl SocketDriver {
     pub(super) fn ready_peer_count(&self) -> usize {
         self.peers.values().filter(|p| p.ready).count()
-    }
-
-    pub(super) fn pending_handshake_count(&self) -> usize {
-        self.peers.values().filter(|p| p.pending_handshake).count()
-    }
-
-    pub(super) fn can_accept_pending_handshake(&self) -> bool {
-        self.pending_handshake_count() < self.options.max_pending_handshakes
     }
 
     pub(super) fn can_accept_ready_peer(&self) -> bool {

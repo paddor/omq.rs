@@ -14,10 +14,15 @@ pub(crate) enum PeerOutbound {
         direct: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     },
     Inbox(tokio::sync::mpsc::Sender<PeerDriverData>),
+    /// Direct delivery into an inproc peer's receive queue.
+    Inproc(crate::transport::inproc::InprocSender),
 }
 
 impl PeerOutbound {
     pub(crate) fn from_handle(handle: &PeerDriverHandle) -> Self {
+        if let Some(sender) = &handle.inproc {
+            return Self::Inproc(sender.clone());
+        }
         match handle.transmit_slot {
             Some(ref slot) => Self::Wire {
                 slot: slot.clone(),
@@ -52,6 +57,7 @@ impl PeerOutbound {
                 direct,
             } => (inbox, direct.as_ref().map(|writer| (slot, writer.lock()))),
             Self::Inbox(inbox) => (inbox, None),
+            Self::Inproc(sender) => return sender.try_send_prepared(msg, preparation),
         };
         if direct.as_ref().is_some_and(|(_, state)| state.is_closed()) {
             return Err(SendPipeError::Closed(msg));
@@ -87,12 +93,14 @@ impl PeerOutbound {
                         .is_none_or(|writer| !writer.lock().is_closed())
             }
             Self::Inbox(inbox) => !inbox.is_closed(),
+            Self::Inproc(sender) => sender.is_alive(),
         }
     }
 
     pub(crate) fn send_ready(&self) -> bool {
         let inbox = match self {
             Self::Wire { inbox, .. } | Self::Inbox(inbox) => inbox,
+            Self::Inproc(sender) => return sender.has_space(),
         };
         !self.is_alive() || inbox.capacity() > 0
     }
@@ -100,6 +108,7 @@ impl PeerOutbound {
     pub(crate) async fn wait_capacity(&self) {
         let inbox = match self {
             Self::Wire { inbox, .. } | Self::Inbox(inbox) => inbox,
+            Self::Inproc(sender) => return sender.wait_space().await,
         };
         // The permit is only a wake condition; routing is retried afterward.
         // reserve() registers and rechecks capacity, including inproc inboxes.
@@ -110,11 +119,15 @@ impl PeerOutbound {
         matches!(self, Self::Wire { slot, .. } if slot.has_transform)
     }
 
+    pub(crate) fn is_wire(&self) -> bool {
+        matches!(self, Self::Wire { .. })
+    }
+
     #[cfg(feature = "ws")]
     pub(crate) fn is_ws(&self) -> bool {
         match self {
             Self::Wire { slot, .. } => slot.is_ws(),
-            Self::Inbox(_) => false,
+            Self::Inbox(_) | Self::Inproc(_) => false,
         }
     }
 
@@ -124,6 +137,7 @@ impl PeerOutbound {
                 slot.is_empty() && inbox.capacity() == inbox.max_capacity()
             }
             Self::Inbox(tx) => tx.capacity() == tx.max_capacity(),
+            Self::Inproc(sender) => sender.is_empty(),
         }
     }
 
@@ -131,6 +145,7 @@ impl PeerOutbound {
         match self {
             Self::Wire { slot, .. } => Some(slot.space_available.clone()),
             Self::Inbox(_) => None,
+            Self::Inproc(sender) => Some(sender.space()),
         }
     }
 }

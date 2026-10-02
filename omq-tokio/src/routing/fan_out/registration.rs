@@ -159,6 +159,7 @@ mod tests {
             transmit_slot: Some(slot.clone()),
             direct_tcp_writer: None,
             send_pipe: None,
+            inproc: None,
         };
         (slot, handle, data)
     }

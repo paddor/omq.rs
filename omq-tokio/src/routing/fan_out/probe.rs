@@ -78,6 +78,7 @@ impl ProbePeer {
                 transmit_slot: Some(slot),
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             remote_inbox,
             tasks: [

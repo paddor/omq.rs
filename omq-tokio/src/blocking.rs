@@ -1,8 +1,9 @@
 //! Blocking socket API for sync callers.
 //!
 //! [`Socket`] wraps an async [`crate::socket::handle::Socket`] and a
-//! [`Context`]. Each method blocks the calling thread
-//! via [`Context::block_on`](crate::Context::block_on).
+//! [`Context`]. Control calls block the calling thread via
+//! [`Context::block_on`](crate::Context::block_on). `send` and `recv`
+//! wait on the calling thread itself.
 //!
 //! ```no_run
 //! use omq_tokio::{blocking, Context, Message, Options, SocketType};
@@ -14,6 +15,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use omq_proto::TrySendError;
@@ -25,6 +27,31 @@ use crate::context::Context;
 use crate::socket::handle::Socket as AsyncSocket;
 use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
 pub use crate::socket::recv::BlockingRecvCancel;
+
+/// Poll `future` on the calling thread and park it between wakeups.
+fn park_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
 
 /// Blocking socket handle.
 ///
@@ -124,18 +151,12 @@ impl Socket {
     pub fn send(&self, msg: Message) -> Result<()> {
         match self.inner.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(mut msg)) => loop {
-                if !self.inner.wait_for_spsc_space(&msg) {
-                    let s = self.inner.clone();
-                    return self.ctx.block_on(async move { s.send(msg).await });
-                }
-                match self.inner.try_send(msg) {
-                    Ok(()) => break Ok(()),
-                    Err(TrySendError::Full(returned)) => msg = returned,
-                    Err(TrySendError::Closed) => break Err(omq_proto::error::Error::Closed),
-                    Err(TrySendError::Error(error)) => break Err(error),
-                }
-            },
+            Err(TrySendError::Full(msg)) => {
+                // Wait on this thread. Whoever frees space wakes it
+                // directly, so a muted inproc send needs no IO thread.
+                let _runtime = self.ctx.handle().enter();
+                park_on(self.inner.send(msg))
+            }
             Err(TrySendError::Closed) => Err(omq_proto::error::Error::Closed),
             Err(TrySendError::Error(e)) => Err(e),
         }

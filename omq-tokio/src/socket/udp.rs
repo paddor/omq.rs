@@ -168,5 +168,6 @@ pub(crate) fn fake_handle(
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: None,
+        inproc: None,
     }
 }

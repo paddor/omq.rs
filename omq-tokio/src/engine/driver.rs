@@ -255,6 +255,8 @@ pub struct PeerDriverHandle {
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
     pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
+    /// Direct route into an inproc peer's receive queue.
+    pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
 }
 
 /// Parsed ZMTP events and the final closure signal for standalone drivers.
@@ -3823,6 +3825,7 @@ mod tests {
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             EventAdapter { rx: c_evt_rx },
             PeerDriverHandle {
@@ -3832,6 +3835,7 @@ mod tests {
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             EventAdapter { rx: s_evt_rx },
         )

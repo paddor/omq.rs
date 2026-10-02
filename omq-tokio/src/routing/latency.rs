@@ -332,6 +332,7 @@ mod tests {
                 transmit_slot: Some(slot),
                 direct_tcp_writer: Some(Arc::new(direct)),
                 send_pipe: None,
+                inproc: None,
             },
             data_rx,
         )
@@ -404,6 +405,7 @@ mod tests {
                     transmit_slot: None,
                     direct_tcp_writer: None,
                     send_pipe: None,
+                    inproc: None,
                 };
                 send.connection_added(id, &handle);
                 receivers.push(receiver);

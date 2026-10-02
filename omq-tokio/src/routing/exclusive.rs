@@ -181,6 +181,7 @@ mod tests {
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+                inproc: None,
             },
         );
 

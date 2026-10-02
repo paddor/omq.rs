@@ -4,7 +4,8 @@
 //! by joined groups. The caller pushes raw `Message` values into each
 //! active lane's yring. Each lane worker encodes (and optionally
 //! compresses) locally, then pushes into its peers' `PeerTransmitSlot`
-//! rings.
+//! rings. Peers without a lane (inproc, WS) are fallback peers: the
+//! caller matches and pushes to each of them in turn.
 
 mod codec_group;
 #[cfg(any(feature = "lz4", feature = "zstd"))]
@@ -72,6 +73,10 @@ pub(crate) struct Submitter {
     lane_peer_count: Arc<AtomicUsize>,
     fallback_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
+    /// Held while a blocking-policy publication checks and fills inproc
+    /// rings, so that senders on other threads cannot take the space in
+    /// between.
+    publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
     send_count: Arc<AtomicU32>,
@@ -86,6 +91,7 @@ impl Clone for Submitter {
             lane_peer_count: self.lane_peer_count.clone(),
             fallback_peer_count: self.fallback_peer_count.clone(),
             inner: self.inner.clone(),
+            publish: self.publish.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
             send_count: self.send_count.clone(),
@@ -189,6 +195,7 @@ impl Submitter {
         let (fallback_targets, has_lane_peers) = self.fallback_targets(&topic, group.as_deref());
 
         if self.mute_policy == FanOutMutePolicy::Block {
+            let _publishing = self.publish.lock().expect("fanout publish poisoned");
             let Some(permits) = fallback::try_reserve_targets(&fallback_targets) else {
                 return Err(omq_proto::error::TrySendError::Full(msg.clone()));
             };
@@ -203,7 +210,7 @@ impl Submitter {
                 }
             }
             for permit in permits {
-                permit.send(crate::engine::PeerDriverData::SendMessage(msg.clone()));
+                permit.send(msg.clone());
             }
             return Ok(());
         }
@@ -258,7 +265,20 @@ impl Submitter {
         let (fallback_targets, has_lane_peers) = self.fallback_targets(&topic, group.as_deref());
 
         if self.mute_policy == FanOutMutePolicy::Block {
-            let fallback = fallback::dispatch_blocking(&fallback_targets, msg, lanes);
+            // Every fallback peer usually has space. Publish to them at
+            // once and only set up per-peer waits when one is full.
+            let published = {
+                let _publishing = self.publish.lock().expect("fanout publish poisoned");
+                match fallback::try_reserve_targets(&fallback_targets) {
+                    Some(reserved) => {
+                        for peer in reserved {
+                            peer.send(msg.clone());
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
             let native = async {
                 if has_lane_peers {
                     lanes
@@ -270,7 +290,13 @@ impl Submitter {
                         .await;
                 }
             };
-            tokio::join!(fallback, native);
+            if published {
+                native.await;
+            } else {
+                let fallback =
+                    fallback::dispatch_blocking(&fallback_targets, msg, lanes, &self.publish);
+                tokio::join!(fallback, native);
+            }
             return Ok(());
         }
 
@@ -342,6 +368,7 @@ pub(crate) struct FanOutSend {
     lane_peer_count: Arc<AtomicUsize>,
     fallback_peer_count: Arc<AtomicUsize>,
     inner: Arc<Mutex<FanOutInner>>,
+    publish: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
     mode: FanOutMode,
     xpub_nodrop: bool,
@@ -416,6 +443,7 @@ impl FanOutSend {
             lane_peer_count,
             fallback_peer_count,
             inner,
+            publish: Arc::new(Mutex::new(())),
             generation,
             mode,
             xpub_nodrop: options.xpub_nodrop,
@@ -433,6 +461,7 @@ impl FanOutSend {
             lane_peer_count: self.lane_peer_count.clone(),
             fallback_peer_count: self.fallback_peer_count.clone(),
             inner: self.inner.clone(),
+            publish: self.publish.clone(),
             generation: self.generation.clone(),
             mode: self.mode,
             send_count: Arc::new(AtomicU32::new(0)),

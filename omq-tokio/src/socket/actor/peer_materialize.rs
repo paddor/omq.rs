@@ -180,6 +180,7 @@ pub(super) fn spawn_byte_stream_connection(
                 transmit_slot: transmit_slot.clone(),
                 direct_tcp_writer,
                 send_pipe,
+                inproc: None,
             },
             ready: false,
             pending_handshake: true,
@@ -191,7 +192,7 @@ pub(super) fn spawn_byte_stream_connection(
             endpoint,
             is_client: !is_server,
             route_id,
-            spsc: None,
+            inproc_inbound: None,
             task: None,
             io_thread,
         },
@@ -201,45 +202,32 @@ pub(super) fn spawn_byte_stream_connection(
         crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
     socket.peer_completions.push(receiver);
     let peer_driver = peer_driver.with_completion(completion);
-    PeerLifecycle::new(socket).after_peer_inserted();
     spawn_wire_task(socket, peer_id, io_assignment, peer_driver);
 }
 
-fn inproc_sink(
-    socket: &mut SocketDriver,
-    peer_id: u64,
-    recv_fanin: Option<Arc<crate::transport::inproc::InprocTx>>,
-) -> Option<crate::engine::RecvSink> {
-    let mut recv_sink = take_inproc_recv_sink(socket).or_else(|| {
+/// Receive sink for an inproc peer that has no receive port. Its
+/// messages are relayed by the peer task. Sockets with a fan-in queue
+/// always have a port, so that queue never appears here.
+fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
+    let recv_sink = take_inproc_recv_sink(socket).or_else(|| {
         socket
             .spsc
             .conflate_slot
             .as_ref()
             .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
     });
-    if recv_sink.is_none() {
-        recv_sink = recv_fanin
-            .map(|producer| {
-                crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::shared(producer))
-            })
-            .or_else(|| {
-                socket.spsc.fanin.as_ref()?.register().map(|producer| {
-                    crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(producer))
-                })
-            });
+    if socket.socket_type != SocketType::Server {
+        return recv_sink;
     }
-    if socket.socket_type == SocketType::Server {
-        let sink = recv_sink
-            .take()
-            .unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
-        recv_sink = Some(crate::engine::RecvSink::server(
-            sink,
-            server_routing_id(peer_id).expect("SERVER peer ID checked"),
-        ));
-    }
-    recv_sink
+    let sink =
+        recv_sink.unwrap_or_else(|| crate::engine::RecvSink::Channel(socket.recv_tx.clone()));
+    Some(crate::engine::RecvSink::server(
+        sink,
+        server_routing_id(peer_id).expect("SERVER peer ID checked"),
+    ))
 }
 
+#[expect(clippy::too_many_lines)]
 pub(super) fn spawn_inproc_peer(
     socket: &mut SocketDriver,
     conn: InprocConn,
@@ -267,19 +255,54 @@ pub(super) fn spawn_inproc_peer(
     let (data_inbox_tx, data_inbox_rx) =
         mpsc::channel(PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize));
     let child_cancel = socket.cancel.child_token();
-    let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
     let peer_props = omq_proto::proto::command::PeerProperties::default()
         .with_socket_type(conn.peer.socket_type)
         .with_identity(conn.peer.identity.clone());
     let InprocConn {
         out,
         in_rx,
-        peer: _peer,
-        recv_fanin,
-        tx,
-        rx,
+        peer: peer_snapshot,
+        peer_send_hwm,
+        inbound,
+        outbound,
     } = conn;
-    let recv_sink = inproc_sink(socket, peer_id, recv_fanin);
+    // Sends go straight into the peer's receive queue when both the peer
+    // and this socket's send strategy support it. The connect-side pipe,
+    // if any, becomes that route's backlog.
+    let outbound = outbound
+        .filter(|_| !socket.options.conflate && socket.send_strategy.supports_inproc_direct());
+    let (send_pipe, send_pipe_rx, inproc) = if let Some(port) = outbound {
+        let sender = crate::transport::inproc::InprocSender::new(port, pre_ready_send_pipe_rx);
+        let pipe = crate::engine::inproc_send_pipe(sender.clone());
+        (Some(Arc::new(Mutex::new(Some(pipe)))), None, Some(sender))
+    } else {
+        let (send_pipe, send_pipe_rx) = make_send_pipe(socket, pre_ready_send_pipe_rx);
+        (send_pipe, send_pipe_rx, None)
+    };
+    // With a receive port, every inbound message enters this connection's
+    // ring through it: the peer's own threads when it sends directly, this
+    // peer task otherwise.
+    let (recv_sink, inproc_inbound) = match &inbound {
+        Some(port) => {
+            let sink = inproc_port_sink(socket, peer_id, peer_send_hwm);
+            debug_assert!(sink.supports_direct());
+            let identity = (socket.socket_type == SocketType::Router).then(|| {
+                if peer_snapshot.identity.is_empty() {
+                    super::generated_identity(peer_id)
+                } else {
+                    peer_snapshot.identity.clone()
+                }
+            });
+            let open = crate::transport::inproc::OpenPort {
+                sink,
+                identity,
+                max_message_size: socket.options.max_message_size,
+                cancel: child_cancel.clone(),
+            };
+            (None, Some((port.clone(), open)))
+        }
+        None => (inproc_sink(socket, peer_id), None),
+    };
     let io_assignment = socket.io_pool.reserve_thread();
     let io_thread = io_assignment.index();
 
@@ -295,6 +318,7 @@ pub(super) fn spawn_inproc_peer(
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe,
+                inproc: inproc.clone(),
             },
             ready: false,
             pending_handshake: false,
@@ -306,23 +330,18 @@ pub(super) fn spawn_inproc_peer(
             endpoint,
             is_client: !is_server,
             route_id,
-            spsc: tx.clone(),
+            inproc_inbound,
             task: None,
             io_thread,
         },
     );
 
-    let direct_recv_enabled = can_bypass_actor_recv(socket.socket_type) && recv_sink.is_none();
-    let recv_direct = if direct_recv_enabled {
-        Some(socket.recv_tx.clone())
-    } else {
-        None
-    };
-    let recv_spsc = rx.clone().filter(|_| direct_recv_enabled);
-    if let Some(ref s) = recv_spsc {
-        PeerLifecycle::new(socket).register_inproc_consumer(s, true);
-    }
-    PeerLifecycle::new(socket).update_send_ring();
+    let recv_direct =
+        if can_bypass_actor_recv(socket.socket_type) && recv_sink.is_none() && inbound.is_none() {
+            Some(socket.recv_tx.clone())
+        } else {
+            None
+        };
 
     let (completion, receiver) =
         crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
@@ -341,10 +360,11 @@ pub(super) fn spawn_inproc_peer(
             max_message_size: socket.options.max_message_size,
             recv_direct,
             socket_close_state: socket.recv_tx.clone(),
-            spsc: recv_spsc,
             recv_sink,
             send_pipe_rx,
             blocking_recv_waker: socket.spsc.blocking_recv_waker.clone(),
+            inbound,
+            outbound: inproc,
         },
     );
     let task = socket.io_pool.spawn_on(io_thread, async move {
@@ -353,6 +373,54 @@ pub(super) fn spawn_inproc_peer(
     });
     if let Some(peer) = socket.peers.get_mut(&peer_id) {
         peer.task = Some(task);
+    }
+}
+
+/// Sink behind an inproc receive port: one ring for this connection,
+/// sized for the peer's send HWM plus this socket's receive HWM. The
+/// socket's receive path drains it directly. Sockets that keep only the
+/// latest message, or that hand an external consumer their own ring, use
+/// that queue instead.
+fn inproc_port_sink(
+    socket: &mut SocketDriver,
+    peer_id: u64,
+    peer_send_hwm: usize,
+) -> crate::engine::RecvSink {
+    let sink = take_inproc_recv_sink(socket)
+        .or_else(|| {
+            socket
+                .spsc
+                .conflate_slot
+                .as_ref()
+                .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
+        })
+        .unwrap_or_else(|| {
+            let cap =
+                (socket.options.recv_hwm.max(1) as usize).saturating_add(peer_send_hwm.max(1));
+            let (producer, consumer) = yring::spsc(cap);
+            let recv_signal = socket.spsc.recv_signal.clone();
+            let blocking_waker = socket.spsc.blocking_recv_waker.clone();
+            let space = Arc::new(StateSignal::new());
+            // REP requests stay whole in the ring. The receive path splits
+            // each envelope off as it hands out the body.
+            let rep = (socket.socket_type == SocketType::Rep).then(|| socket.rep_pending.clone());
+            PeerLifecycle::new(socket).register_tcp_consumer(consumer, space.clone(), peer_id, rep);
+            crate::engine::RecvSink::Yring(crate::engine::YringSink {
+                producer,
+                signal: Box::new(move || {
+                    recv_signal.mark();
+                    blocking_waker.wake();
+                }),
+                space,
+            })
+        });
+    if socket.socket_type == SocketType::Server {
+        crate::engine::RecvSink::server(
+            sink,
+            server_routing_id(peer_id).expect("SERVER peer ID checked"),
+        )
+    } else {
+        sink
     }
 }
 
@@ -758,7 +826,7 @@ fn attach_yring_recv_bypass(
                 }),
                 space: space.clone(),
             });
-            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id);
+            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id, None);
             sink
         });
 

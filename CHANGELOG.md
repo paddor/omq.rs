@@ -21,6 +21,18 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Inproc messages no longer pass through an I/O thread. Each direction of an
+  inproc connection is one `yring` that holds the sender's `send_hwm` plus the
+  receiver's `recv_hwm` messages. `send` pushes into it on the calling thread
+  and the peer's `recv` drains it. This applies to round-robin, exclusive,
+  identity-routed, and fan-out sends (PUSH, DEALER, REQ, REP, ROUTER, PAIR,
+  CLIENT, SERVER, CHANNEL, SCATTER, PUB, XPUB, RADIO). A publisher matches
+  subscriptions and pushes into each inproc subscriber's ring on the calling
+  thread; `xpub_nodrop` waits per subscriber. PEER and `conflate` senders
+  still relay through their peer task. A blocking `send` that hits a full
+  queue now waits on the calling thread instead of handing the wait to the
+  IO thread. Blocking REQ/REP round trips between two threads take two
+  thread wakes instead of four.
 - Share verified TLS trust, identity, and server-name setup internally while
   isolating WSS's explicit insecure test override. Empty custom trust PEM now
   fails configuration validation.

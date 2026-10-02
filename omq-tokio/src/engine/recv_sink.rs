@@ -614,6 +614,77 @@ impl RecvSink {
         }
     }
 
+    /// Whether a foreign thread can deliver into this sink. The other
+    /// sinks need the owning driver for admission or peer metadata.
+    pub(crate) fn supports_direct(&self) -> bool {
+        match self {
+            Self::Channel(_) | Self::Yring(_) | Self::Fanin(_) | Self::Conflate(_) => true,
+            Self::Rep(rep) => rep.sink.supports_direct(),
+            Self::Server(server) => server.sink.supports_direct(),
+            Self::Authenticated(_) | Self::Peer(_) => false,
+        }
+    }
+
+    /// Deliver one message without waiting. A full queue returns the
+    /// message unchanged; the sink never retains it.
+    pub(crate) fn try_deliver(
+        &mut self,
+        message: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        match self.try_send_with_flush_mode(message, false, &mut false) {
+            Ok(()) => {}
+            Err(TrySendError::Full(mut message)) => {
+                if matches!(self, Self::Server(_)) {
+                    let _ = message.take_routing_id();
+                }
+                return Err(TrySendError::Full(message));
+            }
+            Err(error) => return Err(error),
+        }
+        if let Self::Fanin(sink) = self
+            && let Some(message) = sink.take_pending()
+        {
+            // Register the space waker before reporting the full queue.
+            let _ = sink.is_full();
+            return Err(TrySendError::Full(message));
+        }
+        Ok(())
+    }
+
+    fn direct_inner(&mut self) -> &mut Self {
+        let mut unwrapped = self;
+        loop {
+            unwrapped = match unwrapped {
+                Self::Rep(rep) => rep.sink.as_mut(),
+                Self::Server(server) => server.sink.as_mut(),
+                _ => return unwrapped,
+            };
+        }
+    }
+
+    /// Signal that changes when the queue behind this sink frees space.
+    /// `None` for sinks that are never full.
+    pub(crate) fn direct_space(&mut self) -> Option<Arc<StateSignal>> {
+        match self.direct_inner() {
+            Self::Channel(pipe) => Some(pipe.space_signal()),
+            Self::Yring(sink) => Some(sink.space.clone()),
+            Self::Fanin(sink) => {
+                let _ = sink.is_full();
+                Some(sink.space())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn direct_has_space(&mut self) -> bool {
+        match self.direct_inner() {
+            Self::Channel(pipe) => pipe.has_space(),
+            Self::Yring(sink) => sink.producer.is_consumer_dropped() || !sink.producer.is_full(),
+            Self::Fanin(sink) => !sink.is_full(),
+            _ => true,
+        }
+    }
+
     pub(super) async fn receive_space_ready(&mut self) {
         let mut unwrapped = self;
         loop {

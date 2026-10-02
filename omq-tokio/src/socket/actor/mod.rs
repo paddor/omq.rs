@@ -182,8 +182,11 @@ struct PeerEntry {
     /// Send-strategy route id. For connect-side round-robin pipes this is
     /// allocated at `connect()` time and can differ from the peer id.
     route_id: u64,
-    /// SPSC ring for this inproc peer (None for wire/stream peers).
-    spsc: Option<Arc<crate::transport::inproc::InprocTx>>,
+    /// Inproc receive port and its sink, opened once this peer is ready.
+    inproc_inbound: Option<(
+        Arc<crate::transport::inproc::InprocPort>,
+        crate::transport::inproc::OpenPort,
+    )>,
     task: Option<JoinHandle<()>>,
     /// Logical data IO thread index used by routing. The driver future owns
     /// its load reservation; raw STREAM currently runs on the actor runtime.
@@ -579,9 +582,6 @@ impl SocketDriver {
         self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
         self.cmd_rx.close();
         self.send_strategy.stop_admission();
-        self.spsc
-            .send_ring_available
-            .store(false, std::sync::atomic::Ordering::Release);
         self.cancel_pending_endpoints(None);
         self.close_peers_requested = false;
         self.close_ack = ack;

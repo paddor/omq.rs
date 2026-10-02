@@ -109,9 +109,10 @@ ownership still follow the socket's ordinary rules.
 | Identity or reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
 | Exclusive | PAIR, CHANNEL | One peer |
 
-Round-robin byte-stream and inproc peers have bounded per-peer send pipes.
-Connect-side pipes exist before the remote endpoint binds, so messages sent
-before READY retain their order through handshake and reconnect. A bind-side
+Round-robin byte-stream peers have bounded per-peer send pipes; inproc peers
+push into their connection's ring (see [Inproc](#inproc)). Connect-side pipes
+exist before the remote endpoint binds, so messages sent before READY retain
+their order through handshake and reconnect. A bind-side
 socket without a ready pipe is mute. HWM limits each pipe's queued messages;
 it does not cap total socket memory.
 
@@ -207,10 +208,36 @@ through a change. Neither signal owns messages.
 
 ### Inproc
 
-Inproc transfers owned messages without ZMTP framing or kernel I/O. Peers
-across threads use send pipes; eligible same-thread peers use direct queue
-access. HWM, fairness, and connect-before-bind still apply. Names belong to a
-context, so separate contexts may bind the same name.
+Inproc transfers owned messages without ZMTP framing or kernel I/O. Each
+direction of a connection is one `yring` that holds the sender's send HWM plus
+the receiver's receive HWM. `send` pushes into it on the calling thread, and
+the receiving socket's `recv` drains it, so no I/O thread touches a message
+once the peers are connected. The receive path applies the socket type's rules
+as it drains: ROUTER messages carry the peer identity, SERVER messages the
+routing ID, and REP splits the request envelope from the body.
+
+```text
+ sender thread                         receiver thread
+
+ send(Message) -> routing -> [ yring: send HWM + receive HWM ] -> recv()
+```
+
+A connect-side socket queues sends in its pre-ready pipe until the peer binds.
+Those messages move into the ring first, in order. Peer tasks still exchange
+commands (SUBSCRIBE, JOIN) and report connection state. Fan-out senders (PUB,
+XPUB, RADIO) match subscriptions on the calling thread and push into each
+inproc subscriber's ring in turn; fan-out lanes serve wire peers only. With
+`xpub_nodrop`, `send` waits for each full subscriber separately. Senders with
+`conflate` keep their own send queue and their peer task relays each message
+into the same ring. PEER connections and authenticated C-API sockets still run
+through their peer tasks.
+
+A blocking `send` that finds its queue full waits on the calling thread and is
+woken by the peer that frees space. Blocking `bind`, `connect`, and the other
+control calls still run on the context's IO thread.
+
+HWM, fairness, and connect-before-bind still apply. Names belong to a context,
+so separate contexts may bind the same name.
 
 ### Caller-driven exclusive sockets
 

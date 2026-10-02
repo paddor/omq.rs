@@ -347,7 +347,7 @@ impl SocketDriver {
             &self.inproc_registry,
             &endpoint,
             &snapshot,
-            &self.spsc.inproc_config(options.max_message_size),
+            &self.inproc_config(&options),
             #[cfg(feature = "ws")]
             &options,
             #[cfg(feature = "ws")]
@@ -427,7 +427,7 @@ impl SocketDriver {
                 tx: self.internal_tx.clone(),
                 monitor: self.monitor.clone(),
                 snapshot: self.inproc_snapshot(),
-                recv: self.spsc.inproc_config(options.max_message_size),
+                recv: self.inproc_config(&options),
                 registry: self.inproc_registry.clone(),
                 setup,
                 first_deadline,

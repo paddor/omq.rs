@@ -219,6 +219,10 @@ name = "omq_zstd_tcp"
 path = "tests/zstd_tcp.rs"
 
 [[test]]
+name = "omq_inproc_direct"
+path = "tests/inproc_direct.rs"
+
+[[test]]
 name = "omq_inproc_rebind"
 path = "tests/inproc_rebind.rs"
 

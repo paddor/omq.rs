@@ -375,6 +375,17 @@ impl SendStrategy {
         }
     }
 
+    /// Whether sends to an inproc peer can go straight into its receive
+    /// queue. Fan-out publishes to inproc peers from the calling thread;
+    /// its lanes only serve wire peers. PEER lanes keep their own queues.
+    pub(crate) fn supports_inproc_direct(&self) -> bool {
+        match self {
+            Self::RoundRobin(_) | Self::Latency(_) | Self::Exclusive(_) | Self::FanOut(_) => true,
+            Self::Identity(s) => s.supports_inproc_direct(),
+            Self::None => false,
+        }
+    }
+
     pub(crate) fn needs_transmit_slot(&self) -> bool {
         match self {
             Self::Latency(_) | Self::FanOut(_) => true,

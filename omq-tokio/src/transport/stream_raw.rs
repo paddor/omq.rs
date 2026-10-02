@@ -49,6 +49,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
             transmit_slot: None,
             direct_tcp_writer: None,
             send_pipe: None,
+            inproc: None,
         },
         task,
     )

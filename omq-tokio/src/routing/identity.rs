@@ -517,6 +517,10 @@ impl IdentitySend {
         self.latency_profile
     }
 
+    pub(crate) fn supports_inproc_direct(&self) -> bool {
+        self.peer.is_none()
+    }
+
     #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added(
         &mut self,

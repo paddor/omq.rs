@@ -6,19 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwapOption;
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 
 use crate::engine::signal::{DataSignal, StateSignal};
-use crate::transport::inproc::{InprocRx, InprocTx};
-
-/// Per-peer SPSC consumers Vec. Actor appends; recv fair-queues.
-pub(crate) type SpscConsumers = Arc<RwLock<Vec<Arc<InprocRx>>>>;
-
-/// Single-peer send fast path ring. Actor sets/clears.
-pub(crate) type SpscSendRing = Arc<ArcSwapOption<InprocTx>>;
 
 /// Shared recv data signal. All inproc producers mark this.
 pub(crate) type SpscRecvSignal = Arc<DataSignal>;
@@ -191,15 +183,6 @@ impl Drop for BlockingRecvCancelGuard<'_> {
 /// `SpscAwareRecv` skip re-cloning the Vec when nothing changed.
 pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
 
-pub(crate) enum SpscPush {
-    Sent,
-    Unavailable(Message),
-    Full {
-        msg: Message,
-        space: Arc<StateSignal>,
-    },
-}
-
 /// Per-TCP-peer yring consumer entry. The driver pushes decoded messages
 /// into its yring producer; the recv side drains the consumer here.
 pub(crate) struct TcpYringConsumer {
@@ -207,7 +190,13 @@ pub(crate) struct TcpYringConsumer {
     pub batch_remaining: AtomicUsize,
     pub space: Arc<StateSignal>,
     pub peer_id: u64,
+    /// REP over inproc: the ring holds whole requests. The drain splits
+    /// off the envelope and queues it as the next reply route.
+    pub rep: Option<RepPending>,
 }
+
+/// REP request envelopes awaiting their reply, oldest first.
+pub(crate) type RepPending = Arc<Mutex<VecDeque<(u64, crate::routing::RepEnvelope)>>>;
 
 impl std::fmt::Debug for TcpYringConsumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -322,6 +311,18 @@ impl SharedRecvPipe {
         Ok(())
     }
 
+    /// Signal notified when the consumer releases slots or the pipe closes.
+    pub(crate) fn space_signal(&self) -> Arc<StateSignal> {
+        self.space.clone()
+    }
+
+    /// Whether a push can make progress now. A closed pipe reports `true`
+    /// so a waiting producer retries and observes the closure.
+    pub(crate) fn has_space(&self) -> bool {
+        let mut producer = self.producer.lock().unwrap();
+        self.is_closed() || producer.is_consumer_dropped() || !producer.is_full()
+    }
+
     pub(crate) async fn space_ready(&self) {
         self.space
             .wait_until(|| {
@@ -421,10 +422,7 @@ pub(crate) fn recv_pipe(
 pub(crate) struct SpscHandles {
     pub fanin: Option<Arc<super::fanin::Fanin>>,
     pub peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
-    pub consumers: SpscConsumers,
     pub consumer_generation: SpscConsumerGeneration,
-    pub send_ring: SpscSendRing,
-    pub send_ring_available: Arc<AtomicBool>,
     pub recv_signal: SpscRecvSignal,
     pub activated: SpscActivated,
     pub tcp_consumers: TcpConsumers,
@@ -433,18 +431,6 @@ pub(crate) struct SpscHandles {
 }
 
 impl SpscHandles {
-    pub(crate) fn inproc_config(
-        &self,
-        max_message_size: Option<usize>,
-    ) -> crate::transport::inproc::RecvConfig {
-        crate::transport::inproc::RecvConfig {
-            signal: self.recv_signal.clone(),
-            blocking: self.blocking_recv_waker.clone(),
-            max_message_size,
-            fanin: self.fanin.clone(),
-        }
-    }
-
     pub(crate) fn init_peer_recv(
         &mut self,
         hwm: usize,
@@ -462,10 +448,7 @@ impl SpscHandles {
         Self {
             fanin: None,
             peer_recv: None,
-            consumers: Arc::new(RwLock::new(Vec::new())),
             consumer_generation: Arc::new(AtomicU64::new(0)),
-            send_ring: Arc::new(ArcSwapOption::empty()),
-            send_ring_available: Arc::new(AtomicBool::new(false)),
             recv_signal,
             activated: Arc::new(StateSignal::new()),
             tcp_consumers: Arc::new(RwLock::new(Vec::new())),
@@ -502,9 +485,8 @@ impl SpscHandles {
 pub(crate) struct SpscAwareRecv {
     fanin: Option<Arc<super::fanin::Fanin>>,
     peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
-    /// Per-peer SPSC rings (one per eligible inproc peer). Actor appends.
-    consumers: SpscConsumers,
-    /// Per-TCP-peer yring consumers. Actor appends on handshake.
+    /// Per-peer yring consumers: byte-stream peers and inproc
+    /// connections. Actor appends.
     tcp_consumers: TcpConsumers,
     /// Generation counter. Bumped by the actor on any consumer add/remove
     /// (inproc or TCP).
@@ -513,11 +495,6 @@ pub(crate) struct SpscAwareRecv {
     recv_signal: SpscRecvSignal,
     /// Notified when consumers Vec changes (new peer added).
     activated: SpscActivated,
-    /// Single-peer send fast path ring (None when sender has >1 peer).
-    send_ring: SpscSendRing,
-    /// Cheap guard for the send fast path. Avoids an `ArcSwap` load on the
-    /// common TCP/no-inproc path.
-    send_ring_available: Arc<AtomicBool>,
     /// Data arrival signal from the shared recv pipe.
     recv_pipe_notify: Arc<DataSignal>,
     /// Space-available signal for the shared recv pipe.
@@ -533,13 +510,15 @@ pub(crate) struct SpscAwareRecv {
     recv_spin: Duration,
     /// Waker for blocking `recv()` callers.
     blocking_recv_waker: Arc<BlockingRecvWaker>,
+    /// Fan-in sockets with per-peer rings alternate which source a
+    /// receive tries first.
+    rings_first: AtomicBool,
 }
 
 #[derive(Debug)]
 struct DrainState {
     generation: u64,
     recv_cursor: usize,
-    inproc: Vec<Arc<InprocRx>>,
     tcp: Vec<Arc<TcpYringConsumer>>,
     batch: VecDeque<Message>,
     recv_consumer: yring::Consumer<Message>,
@@ -561,7 +540,6 @@ struct SourceDrain {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecvSource {
-    Inproc(usize),
     Stream(usize),
     Shared,
 }
@@ -572,43 +550,24 @@ enum DrainLimit {
     Budget,
 }
 
-#[derive(Clone, Copy)]
-enum PeerSource<'a> {
-    Inproc(&'a InprocRx),
-    Stream(&'a TcpYringConsumer),
-}
-
-fn recv_source_at(index: usize, inproc_len: usize, stream_len: usize) -> RecvSource {
-    if index < inproc_len {
-        RecvSource::Inproc(index)
-    } else if index < inproc_len + stream_len {
-        RecvSource::Stream(index - inproc_len)
+fn recv_source_at(index: usize, stream_len: usize) -> RecvSource {
+    if index < stream_len {
+        RecvSource::Stream(index)
     } else {
         RecvSource::Shared
     }
 }
 
 fn drain_peer_source(
-    source: PeerSource<'_>,
+    peer: &TcpYringConsumer,
     latency: bool,
     batch: &mut Vec<Message>,
     budget: &mut DrainBudget,
     limit: DrainLimit,
 ) -> SourceDrain {
-    match source {
-        PeerSource::Inproc(peer) => drain_peer_consumer(
-            &peer.consumer,
-            &peer.batch_remaining,
-            latency,
-            batch,
-            budget,
-            limit,
-            || {
-                peer.space_notify.notify_changed();
-                peer.blocking_space.notify();
-            },
-        ),
-        PeerSource::Stream(peer) => drain_peer_consumer(
+    match &peer.rep {
+        Some(pending) => drain_rep_requests(peer, pending),
+        None => drain_peer_consumer(
             &peer.consumer,
             &peer.batch_remaining,
             latency,
@@ -617,6 +576,39 @@ fn drain_peer_source(
             limit,
             || peer.space.notify_changed(),
         ),
+    }
+}
+
+/// Pop one REP request. The caller returns its body next, so its envelope
+/// goes to the front of the reply routes.
+fn drain_rep_requests(peer: &TcpYringConsumer, pending: &RepPending) -> SourceDrain {
+    let Ok(mut consumer) = peer.consumer.try_lock() else {
+        return SourceDrain::default();
+    };
+    let mut remaining = peer.batch_remaining.load(Ordering::Relaxed);
+    let mut released = false;
+    let message = loop {
+        let (request, freed) = drain_yring_one(&mut consumer, &mut remaining);
+        released |= freed;
+        let Some(request) = request else {
+            break None;
+        };
+        // A request without a delimiter is dropped, like libzmq.
+        if let Some((envelope, body)) = crate::routing::split_rep_request(&request) {
+            pending
+                .lock()
+                .expect("rep pending")
+                .push_front((peer.peer_id, envelope));
+            break Some(body);
+        }
+    };
+    if released {
+        peer.space.notify_changed();
+    }
+    peer.batch_remaining.store(remaining, Ordering::Relaxed);
+    SourceDrain {
+        message,
+        disconnected: consumer.is_disconnected(),
     }
 }
 
@@ -750,21 +742,18 @@ impl SpscAwareRecv {
             recv_spin,
             fanin: handles.fanin,
             peer_recv: handles.peer_recv,
-            consumers: handles.consumers,
             tcp_consumers: handles.tcp_consumers,
             consumer_generation: handles.consumer_generation,
             recv_signal: handles.recv_signal,
             activated: handles.activated,
-            send_ring: handles.send_ring,
-            send_ring_available: handles.send_ring_available,
             conflate_slot: handles.conflate_slot,
             recv_pipe_notify,
             recv_pipe_space,
             blocking_recv_waker: handles.blocking_recv_waker,
+            rings_first: AtomicBool::new(false),
             drain_state: Mutex::new(DrainState {
                 generation: u64::MAX,
                 recv_cursor: 0,
-                inproc: Vec::new(),
                 tcp: Vec::new(),
                 batch: VecDeque::new(),
                 recv_consumer,
@@ -932,7 +921,7 @@ impl SpscAwareRecv {
 
     fn buffered_sources_empty(&self) -> bool {
         // Fanring returns directly, without application-side staging.
-        if self.fanin.is_some() {
+        if self.fanin.is_some() && !self.has_ring_sources() {
             return true;
         }
         if let Some(peer) = &self.peer_recv {
@@ -942,14 +931,47 @@ impl SpscAwareRecv {
         Self::state_is_empty(&guard) && self.conflate_slot_empty()
     }
 
+    /// Per-peer rings were registered at some point. Fan-in sockets then
+    /// drain those next to the fan-in queue.
+    fn has_ring_sources(&self) -> bool {
+        self.consumer_generation.load(Ordering::Acquire) > 0
+    }
+
+    /// The fan-in queue, once a wire peer registered a producer. A socket
+    /// whose peers all deliver through rings never probes it.
+    fn active_fanin(&self) -> Option<&Arc<super::fanin::Fanin>> {
+        self.fanin.as_ref().filter(|fanin| fanin.has_registered())
+    }
+
     fn try_drain(&self) -> DrainResult {
-        if let Some(fanin) = &self.fanin {
-            return match fanin.try_recv() {
-                Ok(message) => DrainResult::Message(message),
-                Err(Error::Closed) => DrainResult::Closed,
-                Err(_) => DrainResult::Empty,
-            };
+        if let Some(fanin) = self.active_fanin() {
+            if !self.has_ring_sources() {
+                return match fanin.try_recv() {
+                    Ok(message) => DrainResult::Message(message),
+                    Err(Error::Closed) => DrainResult::Closed,
+                    Err(_) => DrainResult::Empty,
+                };
+            }
+            // Alternate the first source so neither starves the other.
+            // Both are checked before reporting an empty socket.
+            let rings_first = self.rings_first.fetch_xor(true, Ordering::Relaxed);
+            if rings_first && let DrainResult::Message(message) = self.try_drain_queues() {
+                return DrainResult::Message(message);
+            }
+            match fanin.try_recv() {
+                Ok(message) => return DrainResult::Message(message),
+                Err(Error::Closed) => return DrainResult::Closed,
+                Err(_) => {}
+            }
+            if !rings_first && let DrainResult::Message(message) = self.try_drain_queues() {
+                return DrainResult::Message(message);
+            }
+            return DrainResult::Empty;
         }
+        self.try_drain_queues()
+    }
+
+    fn try_drain_queues(&self) -> DrainResult {
         if let Some(peer) = &self.peer_recv {
             return match peer.lock().expect("PEER receive poisoned").try_recv() {
                 Ok(message) => DrainResult::Message(message),
@@ -990,7 +1012,7 @@ impl SpscAwareRecv {
         state.batch = batch.into();
         let result = latency_result.or_else(|| state.batch.pop_front());
         let pipe_disconnected = state.recv_consumer.is_disconnected();
-        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let has_peers = !state.tcp.is_empty();
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
         if result.is_none()
             && all_empty
@@ -1019,7 +1041,6 @@ impl SpscAwareRecv {
         if state.generation == current_gen {
             return;
         }
-        state.inproc.clone_from(&self.consumers.read().unwrap());
         state.tcp.clone_from(&self.tcp_consumers.read().unwrap());
         state.generation = current_gen;
     }
@@ -1035,16 +1056,12 @@ impl SpscAwareRecv {
     }
 
     fn try_latency_fast_path(state: &mut DrainState) -> Option<Message> {
-        if !state.latency
-            || !state.inproc.is_empty()
-            || state.tcp.len() != 1
-            || !state.recv_consumer.is_empty()
-        {
+        if !state.latency || state.tcp.len() != 1 || !state.recv_consumer.is_empty() {
             return None;
         }
         let mut budget = DrainBudget::new(1, RECV_BATCH_BYTES);
         drain_peer_source(
-            PeerSource::Stream(&state.tcp[0]),
+            &state.tcp[0],
             true,
             &mut Vec::new(),
             &mut budget,
@@ -1063,11 +1080,13 @@ impl SpscAwareRecv {
         let mut result = None;
         let mut has_disconnected = false;
         let latency = state.latency && !bulk;
-        let inproc_len = state.inproc.len();
         let tcp_len = state.tcp.len();
-        let source_count = inproc_len + tcp_len + 1;
-        let peer_source_count = inproc_len + tcp_len;
-        let limit = if !latency && peer_source_count > 1 {
+        let source_count = tcp_len + 1;
+        let peer_source_count = tcp_len;
+        // Batching bulk calls take one peer's whole window before moving
+        // on. Everything else rotates peers after each message.
+        let batching = bulk && self.recv_batching;
+        let limit = if !latency && peer_source_count > 1 && !batching {
             DrainLimit::One
         } else {
             DrainLimit::Budget
@@ -1084,21 +1103,10 @@ impl SpscAwareRecv {
                 }
                 let source = (start + offset) % source_count;
                 state.recv_cursor = (source + 1) % source_count;
-                let outcome = match recv_source_at(source, inproc_len, tcp_len) {
-                    RecvSource::Inproc(index) => drain_peer_source(
-                        PeerSource::Inproc(&state.inproc[index]),
-                        latency,
-                        batch,
-                        budget,
-                        limit,
-                    ),
-                    RecvSource::Stream(index) => drain_peer_source(
-                        PeerSource::Stream(&state.tcp[index]),
-                        latency,
-                        batch,
-                        budget,
-                        limit,
-                    ),
+                let outcome = match recv_source_at(source, tcp_len) {
+                    RecvSource::Stream(index) => {
+                        drain_peer_source(&state.tcp[index], latency, batch, budget, limit)
+                    }
                     RecvSource::Shared => {
                         self.drain_shared_source(state, budget, limit, latency, batch)
                     }
@@ -1161,11 +1169,6 @@ impl SpscAwareRecv {
     fn state_is_empty(state: &DrainState) -> bool {
         state.batch.is_empty()
             && state.recv_consumer.is_empty()
-            && state.inproc.iter().all(|p| {
-                p.consumer
-                    .try_lock()
-                    .is_ok_and(|consumer| consumer.is_empty())
-            })
             && state.tcp.iter().all(|tc| {
                 tc.consumer
                     .try_lock()
@@ -1176,13 +1179,6 @@ impl SpscAwareRecv {
     /// A fair round can leave a prefetched window partly consumed. Publish
     /// those slots before returning a bulk result so blocked producers resume.
     fn release_partial_batches(&self, state: &mut DrainState) {
-        for peer in &state.inproc {
-            if peer.batch_remaining.load(Ordering::Relaxed) > 0 {
-                peer.consumer.lock().unwrap().release();
-                peer.space_notify.notify_changed();
-                peer.blocking_space.notify();
-            }
-        }
         for peer in &state.tcp {
             if peer.batch_remaining.load(Ordering::Relaxed) > 0 {
                 peer.consumer.lock().unwrap().release();
@@ -1196,10 +1192,6 @@ impl SpscAwareRecv {
     }
 
     fn cleanup_disconnected(&self) {
-        self.consumers
-            .write()
-            .unwrap()
-            .retain(|p| p.consumer.try_lock().map_or(true, |c| !c.is_disconnected()));
         self.tcp_consumers.write().unwrap().retain(|tc| {
             tc.consumer
                 .try_lock()
@@ -1317,14 +1309,56 @@ impl SpscAwareRecv {
         &self,
         max: usize,
         out: &mut Vec<Message>,
-        mut budget: DrainBudget,
+        budget: DrainBudget,
     ) -> Result<usize> {
-        if let Some(fanin) = &self.fanin {
+        if let Some(fanin) = self.active_fanin() {
             if max == 0 {
                 return Ok(0);
             }
-            return fanin.recv_into(out, budget, self.recv_batching);
+            if !self.has_ring_sources() {
+                return fanin.recv_into(out, budget, self.recv_batching);
+            }
+            // Split the call's budget between the fan-in queue and the
+            // per-peer rings, alternating which one goes first.
+            let limit = budget.remaining_msgs();
+            let start_len = out.len();
+            let rings_first = self.rings_first.fetch_xor(true, Ordering::Relaxed);
+            if rings_first {
+                match self.try_recv_many_queues(limit, out, budget) {
+                    Ok(_) | Err(Error::WouldBlock | Error::Closed) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let taken = out.len() - start_len;
+            if taken < limit {
+                let rest = DrainBudget::new(limit - taken, RECV_BATCH_BYTES);
+                match fanin.recv_into(out, rest, self.recv_batching) {
+                    Ok(_) | Err(Error::WouldBlock) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let taken = out.len() - start_len;
+            if !rings_first && taken < limit {
+                let rest = DrainBudget::new(limit - taken, RECV_BATCH_BYTES);
+                match self.try_recv_many_queues(limit - taken, out, rest) {
+                    Ok(_) | Err(Error::WouldBlock | Error::Closed) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return match out.len() - start_len {
+                0 => Err(Error::WouldBlock),
+                count => Ok(count),
+            };
         }
+        self.try_recv_many_queues(max, out, budget)
+    }
+
+    fn try_recv_many_queues(
+        &self,
+        max: usize,
+        out: &mut Vec<Message>,
+        mut budget: DrainBudget,
+    ) -> Result<usize> {
         if let Some(peer) = &self.peer_recv {
             return peer
                 .lock()
@@ -1370,7 +1404,7 @@ impl SpscAwareRecv {
         self.release_partial_batches(state);
 
         let pipe_disconnected = state.recv_consumer.is_disconnected();
-        let has_peers = !state.inproc.is_empty() || !state.tcp.is_empty();
+        let has_peers = !state.tcp.is_empty();
         let all_empty = Self::state_is_empty(state) && self.conflate_slot_empty();
         if out.len() == start_len
             && all_empty
@@ -1411,116 +1445,14 @@ impl SpscAwareRecv {
                 state.recv_consumer.release();
             }
             state.batch.clear();
-            state.inproc.clear();
             state.tcp.clear();
             state.generation = u64::MAX;
         }
-        self.consumers.write().unwrap().clear();
         self.tcp_consumers.write().unwrap().clear();
         if let Some(slot) = &self.conflate_slot {
             slot.close();
         }
-        if let Some(pair) = self.send_ring.load_full() {
-            pair.space_notify.notify_changed();
-            pair.blocking_space.notify();
-        }
-        self.send_ring_available.store(false, Ordering::Release);
-        self.send_ring.store(None);
         self.recv_pipe_space.notify_changed();
-    }
-
-    pub(crate) fn try_push_spsc_or_full(&self, msg: Message) -> SpscPush {
-        if !self.send_ring_available.load(Ordering::Acquire) {
-            return SpscPush::Unavailable(msg);
-        }
-        let pair = self.send_ring.load();
-        let Some(pair) = pair.as_ref() else {
-            return SpscPush::Unavailable(msg);
-        };
-        if !pair.recv_ready.load(Ordering::Acquire)
-            || pair
-                .max_message_size
-                .is_some_and(|max| msg.max_message_size_len() > max)
-        {
-            return SpscPush::Unavailable(msg);
-        }
-        let mut producer = pair.producer.lock();
-        if producer.is_consumer_dropped() || !pair.recv_ready.load(Ordering::Acquire) {
-            return SpscPush::Unavailable(msg);
-        }
-        if producer.is_full() {
-            return SpscPush::Full {
-                msg,
-                space: pair.space_notify.clone(),
-            };
-        }
-        if let Err(item) = producer.push_and_flush(msg) {
-            return SpscPush::Full {
-                msg: item,
-                space: pair.space_notify.clone(),
-            };
-        }
-        drop(producer);
-        pair.recv_signal.mark();
-        pair.blocking_recv_waker.wake();
-        SpscPush::Sent
-    }
-
-    pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
-        if !self.send_ring_available.load(Ordering::Acquire) {
-            return false;
-        }
-        let pair = self.send_ring.load();
-        let Some(pair) = pair.as_ref() else {
-            return false;
-        };
-        if !pair.recv_ready.load(Ordering::Acquire)
-            || pair
-                .max_message_size
-                .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.lock().is_consumer_dropped()
-        {
-            return false;
-        }
-        pair.wait_for_space();
-        true
-    }
-
-    pub(crate) async fn wait_for_spsc_space_async(&self, msg: &Message) -> bool {
-        if !self.send_ring_available.load(Ordering::Acquire) {
-            return false;
-        }
-        let pair = self.send_ring.load_full();
-        let Some(pair) = pair.as_ref() else {
-            return false;
-        };
-        if !pair.recv_ready.load(Ordering::Acquire)
-            || pair
-                .max_message_size
-                .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.lock().is_consumer_dropped()
-        {
-            return false;
-        }
-        if !pair.producer.lock().is_full() {
-            return true;
-        }
-
-        let seen = pair.space_notify.generation();
-        let changed = pair.space_notify.changed_after(seen);
-        tokio::pin!(changed);
-        if !pair.recv_ready.load(Ordering::Acquire)
-            || pair
-                .max_message_size
-                .is_some_and(|max| msg.max_message_size_len() > max)
-            || pair.producer.lock().is_consumer_dropped()
-        {
-            return false;
-        }
-        if pair.producer.lock().is_full() {
-            changed.await;
-        }
-        true
     }
 }
 
@@ -1546,6 +1478,7 @@ mod tests {
                 batch_remaining: AtomicUsize::new(0),
                 space: Arc::new(crate::engine::signal::StateSignal::new()),
                 peer_id,
+                rep: None,
             }),
         )
     }
@@ -1574,6 +1507,7 @@ mod tests {
                     batch_remaining: AtomicUsize::new(0),
                     space: Arc::new(crate::engine::signal::StateSignal::new()),
                     peer_id: id as u64,
+                    rep: None,
                 }));
         }
         let (pipe, consumer, notify, space) = recv_pipe(capacity, waker);
@@ -1830,27 +1764,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_fair_rounds_include_inproc_stream_and_shared_sources() {
+    async fn bulk_fair_rounds_include_peer_and_shared_sources() {
         let (recv, mut producers, pipe) = bulk_receiver(2, 4, false);
-        let peer = recv.tcp_consumers.write().unwrap().remove(0);
-        let peer = Arc::try_unwrap(peer).unwrap();
-        let inproc = Arc::new(crate::transport::inproc::InprocRx {
-            consumer: peer.consumer,
-            batch_remaining: peer.batch_remaining,
-            recv_signal: recv.recv_signal.clone(),
-            recv_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            space_notify: peer.space,
-            blocking_space: Arc::new(crate::transport::inproc::BlockingSpace::new()),
-        });
-        let generation = inproc.space_notify.generation();
-        recv.consumers.write().unwrap().push(inproc.clone());
+        let first = recv.tcp_consumers.read().unwrap()[0].clone();
+        let generation = first.space.generation();
         preload(&mut producers, 4, 16);
         for seq in 0..4 {
             pipe.send(Message::from_slice(&[2, seq])).await.unwrap();
         }
         let mut out = Vec::new();
         assert_eq!(recv.try_recv_many_into(5, &mut out).unwrap(), 5);
-        assert!(inproc.space_notify.generation() > generation);
+        assert!(first.space.generation() > generation);
         // Both peer rings released two consumed slots from partial windows.
         for producer in &mut producers {
             for _ in 0..2 {
@@ -1962,19 +1886,18 @@ mod tests {
 
     #[test]
     fn recv_source_cursor_rotates_across_all_source_kinds() {
-        let sources = (0..4)
-            .map(|index| recv_source_at(index, 1, 2))
+        let sources = (0..3)
+            .map(|index| recv_source_at(index, 2))
             .collect::<Vec<_>>();
         assert_eq!(
             sources,
             vec![
-                RecvSource::Inproc(0),
                 RecvSource::Stream(0),
                 RecvSource::Stream(1),
                 RecvSource::Shared,
             ]
         );
-        assert_eq!(recv_source_at(4 % 4, 1, 2), RecvSource::Inproc(0));
+        assert_eq!(recv_source_at(3 % 3, 2), RecvSource::Stream(0));
     }
 
     #[test]

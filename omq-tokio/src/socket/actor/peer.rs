@@ -104,6 +104,33 @@ impl SocketDriver {
     /// inproc transport hands this to its peer at connect time so the
     /// synthesized handshake can populate `PeerProperties` without a
     /// real wire exchange.
+    /// Whether inproc peers may deliver into this socket's receive queue
+    /// from their own threads. The excluded types receive through the
+    /// actor or need per-message peer metadata from the peer task. DISH
+    /// needs no receive check here: its only peer type is RADIO, which
+    /// sends `[group, body]` and nothing else.
+    pub(super) fn inproc_direct_inbound(&self) -> bool {
+        self.authenticated_recv_sink.is_none()
+            && !matches!(
+                self.socket_type,
+                SocketType::Pub
+                    | SocketType::XPub
+                    | SocketType::Radio
+                    | SocketType::Peer
+                    | SocketType::Stream
+            )
+    }
+
+    pub(super) fn inproc_config(
+        &self,
+        options: &omq_proto::Options,
+    ) -> crate::transport::inproc::RecvConfig {
+        crate::transport::inproc::RecvConfig {
+            direct: self.inproc_direct_inbound(),
+            send_hwm: options.send_hwm.max(1) as usize,
+        }
+    }
+
     pub(super) fn inproc_snapshot(&self) -> InprocPeerSnapshot {
         InprocPeerSnapshot {
             socket_type: self.socket_type,
@@ -276,15 +303,13 @@ impl SocketDriver {
                 endpoint,
                 is_client: !is_server,
                 route_id,
-                spsc: None,
+                inproc_inbound: None,
                 task: Some(task),
                 io_thread: 0,
             },
         );
         self.ready_peer_count_shared
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-
-        PeerLifecycle::new(self).update_send_ring();
 
         self.send_strategy
             .connection_added(peer_id, route_id, handle, identity.clone(), false, 0);
@@ -438,7 +463,15 @@ impl SocketDriver {
             io_thread,
         );
         self.recv_strategy.connection_added(peer_id, identity);
-        PeerLifecycle::new(self).update_send_ring();
+        // Replies are routable now, so the peer may deliver into this
+        // socket's receive queue.
+        if let Some((port, open)) = self
+            .peers
+            .get_mut(&peer_id)
+            .and_then(|peer| peer.inproc_inbound.take())
+        {
+            port.open(open);
+        }
         if became_ready {
             self.ready_peer_count_shared
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -685,10 +718,42 @@ pub(super) struct InprocDriverCtx {
     pub(super) max_message_size: Option<usize>,
     pub(super) recv_direct: Option<std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
     pub(super) socket_close_state: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
-    pub(super) spsc: Option<std::sync::Arc<crate::transport::inproc::InprocRx>>,
     pub(super) recv_sink: Option<crate::engine::RecvSink>,
     pub(super) send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
     pub(super) blocking_recv_waker: std::sync::Arc<crate::socket::recv::BlockingRecvWaker>,
+    /// Receive port of this connection. The socket actor opens it; this
+    /// task relays messages from a peer without a direct route and closes
+    /// it on exit.
+    pub(super) inbound: Option<std::sync::Arc<crate::transport::inproc::InprocPort>>,
+    /// Direct send route. This task only delivers its connect-side backlog.
+    pub(super) outbound: Option<crate::transport::inproc::InprocSender>,
+}
+
+/// Closes the receive port when the peer task ends, including by abort.
+struct InprocPortGuard(Option<std::sync::Arc<crate::transport::inproc::InprocPort>>);
+
+impl Drop for InprocPortGuard {
+    fn drop(&mut self) {
+        if let Some(port) = &self.0 {
+            port.close();
+        }
+    }
+}
+
+/// Deliver a relayed message once the receive queue has space.
+async fn relay_inbound(port: &crate::transport::inproc::InprocPort, pending: &mut Option<Message>) {
+    loop {
+        let space = port.space();
+        let seen = space.generation();
+        let Some(message) = pending.take() else {
+            return;
+        };
+        match port.try_send(message) {
+            Ok(()) | Err(crate::engine::SendPipeError::Closed(_)) => return,
+            Err(crate::engine::SendPipeError::Full(message)) => *pending = Some(message),
+        }
+        space.changed_after(seen).await;
+    }
 }
 
 /// Synthesizes `HandshakeSucceeded` immediately (no greeting exchange),
@@ -726,12 +791,15 @@ async fn inproc_peer_driver_body(
         max_message_size,
         recv_direct,
         socket_close_state,
-        spsc,
         mut recv_sink,
         mut send_pipe_rx,
         blocking_recv_waker,
+        inbound,
+        outbound,
         completion: _,
     } = ctx;
+    let _port_guard = InprocPortGuard(inbound.clone());
+    let mut pending_in: Option<Message> = None;
     let mut send_pipe_batch = Vec::new();
     let mut pending_out = std::collections::VecDeque::new();
     let mut data_plane_active = false;
@@ -785,6 +853,7 @@ async fn inproc_peer_driver_body(
                 && pending_out.is_empty()
                 && data_inbox.is_empty()
                 && send_pipe_rx.as_ref().is_none_or(crate::engine::SendPipeConsumer::is_empty)
+                && outbound.as_ref().is_none_or(crate::transport::inproc::InprocSender::is_empty)
             {
                 return;
             }
@@ -812,6 +881,9 @@ async fn inproc_peer_driver_body(
                             close_requested = true;
                             close_deadline = deadline;
                             data_inbox.close();
+                            if let Some(port) = &inbound {
+                                port.close();
+                            }
                         }
                     }
                     Some(PeerDriverCommand::Close) | None => return,
@@ -847,9 +919,18 @@ async fn inproc_peer_driver_body(
                     pending_out.extend(send_pipe_batch.drain(..).map(InboundFrame::Message));
                     // Flush the final drained batch before observing EOF.
                 },
+                () = async { outbound.as_ref().unwrap().deliver_backlog().await; }, if data_plane_active && outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
+                () = async { relay_inbound(inbound.as_deref().unwrap(), &mut pending_in).await; }, if pending_in.is_some() => {}
                 () = async { recv_sink.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
-                frame = in_rx.recv(), if data_plane_active && !recv_blocked => match frame {
+                frame = in_rx.recv(), if data_plane_active && !recv_blocked && pending_in.is_none() => match frame {
                     Some(_) if close_requested || discard_receive => {},
+                    Some(InboundFrame::Message(m)) if inbound.is_some() => {
+                        match inbound.as_ref().unwrap().try_send(m) {
+                            Ok(()) => {}
+                            Err(crate::engine::SendPipeError::Full(m)) => pending_in = Some(m),
+                            Err(crate::engine::SendPipeError::Closed(_)) => discard_receive = true,
+                        }
+                    }
                     Some(InboundFrame::Message(m)) => {
                         if let Some(max) = max_message_size
                             && m.max_message_size_len() > max
@@ -902,9 +983,6 @@ async fn inproc_peer_driver_body(
     }
     .await;
     let () = result;
-    if let Some(ref ring) = spsc {
-        ring.recv_signal.wake_all();
-    }
     blocking_recv_waker.wake();
 }
 
@@ -980,10 +1058,11 @@ mod tests {
                 max_message_size: None,
                 recv_direct: None,
                 socket_close_state: recv,
-                spsc: None,
                 recv_sink: None,
                 send_pipe_rx: None,
                 blocking_recv_waker: blocking,
+                inbound: None,
+                outbound: None,
             },
         ));
         let result = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
@@ -1032,10 +1111,11 @@ mod tests {
                     max_message_size: None,
                     recv_direct: None,
                     socket_close_state: recv,
-                    spsc: None,
                     recv_sink: None,
                     send_pipe_rx: None,
                     blocking_recv_waker: blocking,
+                    inbound: None,
+                    outbound: None,
                 },
             ));
             assert!(matches!(

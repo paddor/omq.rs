@@ -60,6 +60,7 @@ fn try_send_reports_full_and_preserves_routing_frame() {
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
+        inproc: None,
     };
     send.connection_added(1, handle, Bytes::from_static(b"id"), false);
 
@@ -432,5 +433,6 @@ fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
+        inproc: None,
     }
 }

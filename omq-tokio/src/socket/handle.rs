@@ -18,7 +18,7 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream, PeerInfo};
-use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles, SpscPush};
+use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocRegistry;
 
@@ -242,7 +242,9 @@ impl Socket {
                     recv_pipe_notify,
                     recv_pipe_space,
                     spsc,
-                    latency_profile,
+                    // REP pairs each body with its envelope as it leaves
+                    // the queue, so it never stages a batch.
+                    latency_profile || socket_type == SocketType::Rep,
                     recv_batching,
                     recv_spin,
                 ),
@@ -455,14 +457,10 @@ impl Socket {
                     .await
             }
             SocketType::Server => self.send_submitter.send_server(msg).await,
-            SocketType::Router | SocketType::Peer | SocketType::Stream => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                self.send_submitter.send(msg).await
-            }
             SocketType::XSub => self.send_xsub_raw_command(&msg).await,
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                self.send_spsc_or_submit(msg).await
+                self.send_submitter.send(msg).await
             }
         }
     }
@@ -514,20 +512,11 @@ impl Socket {
                 result
             }
             SocketType::Server => self.send_submitter.try_send_server(msg),
-            SocketType::Router => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)
-                    .map_err(TrySendError::Error)?;
-                self.send_submitter.try_send(msg)
-            }
             SocketType::XSub => self.try_send_xsub_raw_command(msg),
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                    SpscPush::Sent => Ok(()),
-                    SpscPush::Full { msg, .. } => Err(TrySendError::Full(msg)),
-                    SpscPush::Unavailable(msg) => self.send_submitter.try_send(msg),
-                }
+                self.send_submitter.try_send(msg)
             }
         }
     }
@@ -571,17 +560,10 @@ impl Socket {
         }
     }
 
-    pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
-        self.inner.recv_rx.wait_for_spsc_space(msg)
-    }
-
     #[doc(hidden)]
     pub async fn wait_send_progress_for(&self, msg: &Message) {
         if self.inner.socket_type == SocketType::XSub && xsub_raw_command(msg).is_ok() {
             let _ = self.inner.cmd_tx.reserve().await;
-            return;
-        }
-        if self.inner.recv_rx.wait_for_spsc_space_async(msg).await {
             return;
         }
         self.send_submitter.wait_send_progress(msg).await;
@@ -1333,37 +1315,6 @@ impl Socket {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
-        }
-    }
-
-    async fn send_spsc_or_submit(&self, mut msg: Message) -> Result<()> {
-        loop {
-            match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                SpscPush::Sent => return Ok(()),
-                SpscPush::Unavailable(returned) => {
-                    return self.send_submitter.send(returned).await;
-                }
-                SpscPush::Full {
-                    msg: returned,
-                    space,
-                    ..
-                } => {
-                    msg = returned;
-                    let seen = space.generation();
-                    let changed = space.changed_after(seen);
-                    tokio::pin!(changed);
-                    match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                        SpscPush::Sent => return Ok(()),
-                        SpscPush::Unavailable(returned) => {
-                            return self.send_submitter.send(returned).await;
-                        }
-                        SpscPush::Full { msg: returned, .. } => {
-                            changed.await;
-                            msg = returned;
-                        }
-                    }
-                }
-            }
         }
     }
 }

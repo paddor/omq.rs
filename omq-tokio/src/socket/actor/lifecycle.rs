@@ -30,79 +30,11 @@ impl<'a> PeerLifecycle<'a> {
             }
         }
         self.publish_disconnect(peer.as_ref(), reason);
-        Self::invalidate_spsc(peer.as_ref());
         self.driver.spsc.remove_empty_tcp_consumer(peer_id);
-        self.update_send_ring();
         self.invalidate_transmit_slot(peer.as_ref());
         self.refill_recv_sink();
         self.reset_type_state_if_last_peer();
         peer
-    }
-
-    pub(super) fn after_peer_inserted(&mut self) {
-        if self.driver.ready_peer_count() > 1 {
-            self.update_send_ring();
-        }
-    }
-
-    pub(super) fn update_send_ring(&mut self) {
-        if self.driver.closing {
-            self.driver
-                .spsc
-                .send_ring_available
-                .store(false, Ordering::Release);
-            self.driver.spsc.send_ring.store(None);
-            return;
-        }
-        let mut sole_spsc: Option<&Arc<crate::transport::inproc::InprocTx>> = None;
-        let mut ready_count = 0;
-        for p in self.driver.peers.values() {
-            if !p.ready {
-                continue;
-            }
-            ready_count += 1;
-            if let Some(ref s) = p.spsc {
-                sole_spsc = Some(s);
-            } else {
-                sole_spsc = None;
-            }
-            if ready_count > 1 {
-                break;
-            }
-        }
-        if ready_count == 1
-            && let Some(s) = sole_spsc
-        {
-            self.driver.spsc.send_ring.store(Some(s.clone()));
-            self.driver
-                .spsc
-                .send_ring_available
-                .store(true, Ordering::Release);
-        } else {
-            self.driver
-                .spsc
-                .send_ring_available
-                .store(false, Ordering::Release);
-            self.driver.spsc.send_ring.store(None);
-        }
-    }
-
-    pub(super) fn register_inproc_consumer(
-        &mut self,
-        spsc: &Arc<crate::transport::inproc::InprocRx>,
-        recv_bypass: bool,
-    ) {
-        self.driver
-            .spsc
-            .consumers
-            .write()
-            .unwrap()
-            .push(spsc.clone());
-        self.bump_recv_consumers();
-        if recv_bypass {
-            spsc.recv_ready.store(true, Ordering::Release);
-        }
-        self.driver.spsc.activated.notify_changed();
     }
 
     pub(super) fn register_tcp_consumer(
@@ -110,12 +42,14 @@ impl<'a> PeerLifecycle<'a> {
         consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,
         peer_id: u64,
+        rep: Option<crate::socket::recv::RepPending>,
     ) {
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
             consumer: std::sync::Mutex::new(consumer),
             batch_remaining: std::sync::atomic::AtomicUsize::new(0),
             space,
             peer_id,
+            rep,
         });
         self.driver.spsc.tcp_consumers.write().unwrap().push(entry);
         self.bump_recv_consumers();
@@ -131,20 +65,6 @@ impl<'a> PeerLifecycle<'a> {
                 peer: info.clone(),
                 reason,
             });
-        }
-    }
-
-    fn invalidate_spsc(peer: Option<&PeerEntry>) {
-        // Mark the removed peer's SPSC ring as inactive so the send
-        // fast path stops targeting it. Don't remove it from the
-        // consumers Vec yet: the recv side may still have unconsumed
-        // messages. SpscAwareRecv::try_drain_consumers cleans up
-        // disconnected consumers lazily after they're drained.
-        if let Some(peer) = peer
-            && let Some(ref removed_spsc) = peer.spsc
-        {
-            removed_spsc.recv_ready.store(false, Ordering::Release);
-            removed_spsc.space_notify.notify_changed();
         }
     }
 

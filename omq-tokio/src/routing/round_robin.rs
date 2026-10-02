@@ -473,7 +473,10 @@ impl RoundRobinSend {
         _is_inproc: bool,
     ) {
         let mut active = self.active.lock().expect("round_robin active");
-        if active.has_pipe(route_id) {
+        // A direct inproc route replaces the connect-side pipe. Dropping
+        // that producer ends the pipe, and the route delivers what it still
+        // holds before any later message.
+        if active.has_pipe(route_id) && handle.inproc.is_none() {
             self.active_changed.notify_changed();
             return;
         }
@@ -666,6 +669,7 @@ mod tests {
             transmit_slot: None,
             direct_tcp_writer: None,
             send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+            inproc: None,
         };
         send.connection_added(7, &handle, false);
 

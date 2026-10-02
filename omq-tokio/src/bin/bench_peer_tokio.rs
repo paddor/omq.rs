@@ -40,8 +40,6 @@ use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketT
 use std::net::Ipv4Addr;
 
 mod latency_common;
-#[cfg(feature = "ws")]
-mod ws_bench_config;
 
 fn parse_ep(s: &str) -> Endpoint {
     if let Ok(port) = s.parse::<u16>() {
@@ -64,17 +62,8 @@ fn parse_ep(s: &str) -> Endpoint {
 }
 
 async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
-    let port = match ep {
-        Endpoint::Tcp { port, .. } => *port,
-        #[cfg(feature = "lz4")]
-        Endpoint::Lz4Tcp { port, .. } => *port,
-        #[cfg(feature = "zstd")]
-        Endpoint::ZstdTcp { port, .. } => *port,
-        #[cfg(feature = "ws")]
-        Endpoint::Ws { port, .. } | Endpoint::Wss { port, .. } => *port,
-        #[cfg(all(feature = "ws", feature = "lz4"))]
-        Endpoint::Lz4Ws { port, .. } => *port,
-        _ => return,
+    let Endpoint::Tcp { port, .. } = ep else {
+        return;
     };
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         println!("PORT {port}");
@@ -628,8 +617,6 @@ async fn run_inproc_pubsub(name: String, size: usize, duration: Duration, peers:
 
 fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default();
-    #[cfg(feature = "ws")]
-    ws_bench_config::configure(&mut o);
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);

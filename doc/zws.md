@@ -165,14 +165,3 @@ and partial writes. A small slice can retain a large allocation. Shared storage
 has one allocation owner; recipient-specific masking/encryption adds distinct
 storage. Admission must let every accepted multipart/fragmented message finish
 without partial-credit deadlock and keep control/setup service reachable.
-
-## Performance comparison
-
-Use the [serial baseline runner](../scripts/zws_baseline/README.md) with frozen
-reference/candidate binaries and identical workloads. Compare at least five
-alternating matched repetitions per case. Throughput must remain at least 90%,
-and p50/p99 latency at most 110%, of both the original reference and preceding
-implementation. Near-threshold spread needs longer paired runs. Profiles stay
-separate from unprofiled comparisons; measured hotspots guide optimization.
-Interoperability, memory ownership, and fault-injection checks remain separate
-from throughput results.

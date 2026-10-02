@@ -581,6 +581,14 @@ compression; encoders also reject results without enough wire-size saving.
 Eligible plaintext paths frame the sentinel plus original payload directly.
 Warm contexts do not eliminate owned output allocations.
 
+OMQ's socket receive limit counts decoded body bytes and one `Payload` slot
+(currently 64 bytes) per part, including empty parts. Raw codec decoders retain
+body-only limits.
+The ZMTP/ZWS framer uses a separate conservative wire allowance for transformed
+data and dictionary shipment, based on the codec's expansion bound. Command
+and handshake limits remain separate. Dictionary validation follows frame
+assembly; the wire allowance does not validate partial dictionary prefixes.
+
 Dictionary setup and shipment are separate:
 
 - Static or trained dictionaries initialize reusable encoder state.

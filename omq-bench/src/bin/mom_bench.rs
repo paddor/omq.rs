@@ -26,7 +26,7 @@ mod workload;
 const CHART_SIZES: &[usize] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
-const LATENCY_SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
+const LATENCY_SIZES: &[usize] = &[16, 32, 64, 256, 1024, 4096];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Mode {

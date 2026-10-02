@@ -24,13 +24,13 @@ Data: `comparisons.jsonl`. External impls required.
 | file | impls |
 |------|-------|
 | `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 us receive spin, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, omq EXCL, tmq, zmq.rs, rzmq, rzmq-iouring |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 64 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
 
-The `omq-tokio-1t-spin50` latency series sets `recv_spin` to 50 us on both
+The `omq-tokio-1t-spin50` latency series sets `recv_spin` to 50 μs on both
 endpoints, with one owned IO thread per process. Main and comparison REQ/REP
 charts exclude other socket pairs and explicit non-default profile runs.
 Older cache rows without pair/profile metadata remain valid REQ/REP defaults.
@@ -44,7 +44,8 @@ Data: `comparisons.jsonl`. OMQ vs libzmq only.
 - Inproc: libzmq 2 UT, omq CT, omq 2 UT. GB/s panel uses log scale.
 
 **Latency** (`reqrep/{tcp,ipc,inproc}.svg`):
-- TCP/IPC: libzmq 1IO, omq 1IO, omq CT
+- TCP: libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, omq EXCL
+- IPC: libzmq 1IO, omq 1IO, omq CT
 - Inproc: libzmq 2 UT, omq 2 UT, omq CT
 
 Main and comparison latency charts plot p99 round-trip latency with whiskers

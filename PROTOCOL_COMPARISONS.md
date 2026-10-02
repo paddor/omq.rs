@@ -3,6 +3,8 @@
 These charts compare OMQ/ZMTP with other messaging and RPC protocols over
 loopback. They measure one flow, not horizontal scaling. The chart filenames
 retain `tcp` for compatibility; Aeron uses UDP and iroh uses QUIC.
+External benchmark adapters and run instructions remain on the `other-moms`
+branch.
 
 ## Setup
 

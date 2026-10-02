@@ -67,6 +67,8 @@ blocking API.
 Direct ZMTP/TCP, gRPC streaming over HTTP/2, brokered queues, Redis Streams,
 zenoh/TCP, Aeron/UDP, and iroh/QUIC over loopback. Transport and delivery
 semantics differ; the legend identifies each transport.
+See [other protocol comparisons](PROTOCOL_COMPARISONS.md) for the setup and
+latency chart.
 
 <p align="center">
   <img src="doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">

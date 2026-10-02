@@ -152,6 +152,8 @@ pub(crate) async fn responder(
     token: &str,
     size: usize,
     ready_file: &Path,
+    stop_file: &Path,
+    iterations: u64,
 ) -> Result<()> {
     use lapin::{
         BasicProperties, Connection, ConnectionProperties,
@@ -187,8 +189,11 @@ pub(crate) async fn responder(
         .await?;
     write_marker(ready_file)?;
 
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery?;
+    for _ in 0..iterations {
+        let delivery = consumer
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("RabbitMQ request consumer closed"))??;
         if delivery.data.len() != size {
             bail!("bad RabbitMQ request payload size");
         }
@@ -214,6 +219,10 @@ pub(crate) async fn responder(
             )
             .await?;
     }
+    while !stop_file.exists() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    conn.close(0, "done").await?;
     Ok(())
 }
 
@@ -297,7 +306,7 @@ pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<Lat
         .await?;
         meter.record(start.elapsed())?;
     }
-    let result = meter.finish()?;
+    let result = meter.finish_gracefully(&paths.1).await?;
     conn.close(0, "done").await?;
     Ok(result)
 }

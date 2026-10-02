@@ -137,8 +137,8 @@ const MOM_IMPLS: &[Impl] = &[
     },
     Impl {
         key: "omq-tokio-1t-spin50",
-        label: "OMQ / TCP",
-        threads: "50 μs spin",
+        label: "OMQ / TCP (50 μs spin)",
+        threads: "",
         color: C_OMQ_SPIN,
     },
     Impl {

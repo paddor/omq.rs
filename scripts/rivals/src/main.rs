@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 const ALPN: &[u8] = b"omq-rivals/1";
 const WARMUP_RTT: usize = 2_000;
-const SAMPLES: usize = 20_000;
+const SAMPLES: usize = 10_000;
+const WARMUP: Duration = Duration::from_secs(1);
+const MEASURE: Duration = Duration::from_secs(3);
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -22,24 +24,16 @@ enum Role {
     Client,
 }
 
-fn throughput_count(transport: &str, size: usize) -> usize {
-    let maximum = if transport == "iroh" {
-        2_000_000
-    } else {
-        1_000_000
-    };
-    (256 * 1024 * 1024 / size).clamp(32, maximum)
+fn round_duration(round: usize) -> Duration {
+    if round == 0 { WARMUP } else { MEASURE }
 }
 
-fn warmup_count(size: usize) -> usize {
-    (8 * 1024 * 1024 / size).clamp(1, 1_000)
-}
-
-fn report_throughput(transport: &str, size: usize, count: usize, round: usize, elapsed: f64) {
+fn report_throughput(transport: &str, size: usize, count: u64, round: usize) {
     let impl_name = match transport {
         "iroh" => "iroh-quic-2proc",
         _ => "zenoh-tcp-2proc",
     };
+    let elapsed = MEASURE.as_secs_f64();
     let msgs_s = count as f64 / elapsed;
     let mbps = msgs_s * size as f64 / 1_000_000.0;
     println!(
@@ -89,30 +83,34 @@ async fn iroh_server(mode: Mode, size: usize, port: u16, control_file: &Path) ->
     match mode {
         Mode::Throughput => {
             for round in 0..4 {
-                let count = if round == 0 {
-                    warmup_count(size)
-                } else {
-                    throughput_count("iroh", size)
-                };
-                let expected = size * count;
                 let mut recv = conn.accept_uni().await?;
-                let mut received = 0;
-                while received < expected {
-                    let chunk = recv.read_chunk(64 * 1024).await?.ok_or("early EOF")?;
-                    received += chunk.len();
+                let mut received = 0_u64;
+                let mut measured = 0_u64;
+                let mut started = None;
+                while let Some(chunk) = recv.read_chunk(64 * 1024).await? {
+                    let now = Instant::now();
+                    let start = *started.get_or_insert(now);
+                    received += chunk.len() as u64;
+                    if now.duration_since(start) < round_duration(round) {
+                        measured += chunk.len() as u64;
+                    }
                 }
-                if received != expected {
-                    return Err("wrong byte count".into());
+                if received == 0 || !received.is_multiple_of(size as u64) {
+                    return Err("incomplete stream".into());
                 }
+                let mut result = [0_u8; 17];
+                result[0] = round as u8;
+                result[1..9].copy_from_slice(&(measured / size as u64).to_le_bytes());
+                result[9..17].copy_from_slice(&(received / size as u64).to_le_bytes());
                 let mut ack = conn.open_uni().await?;
-                ack.write_all(&[round as u8]).await?;
+                ack.write_all(&result).await?;
                 ack.finish()?;
             }
         }
         Mode::Latency => {
             let (mut send, mut recv) = conn.accept_bi().await?;
             let mut payload = vec![0u8; size];
-            for _ in 0..WARMUP_RTT + 3 * SAMPLES {
+            for _ in 0..WARMUP_RTT + SAMPLES {
                 recv.read_exact(&mut payload).await?;
                 send.write_all(&payload).await?;
             }
@@ -140,25 +138,27 @@ async fn iroh_client(mode: Mode, size: usize, port: u16, control_file: &Path) ->
         Mode::Throughput => {
             let payload = vec![0u8; size];
             for round in 0..4 {
-                let count = if round == 0 {
-                    warmup_count(size)
-                } else {
-                    throughput_count("iroh", size)
-                };
                 let started = Instant::now();
                 let mut send = conn.open_uni().await?;
-                for _ in 0..count {
+                let mut sent = 0_u64;
+                while started.elapsed() < round_duration(round) {
                     send.write_all(&payload).await?;
+                    sent += 1;
                 }
                 send.finish()?;
                 let mut ack = conn.accept_uni().await?;
-                let mut got = [0u8; 1];
+                let mut got = [0u8; 17];
                 ack.read_exact(&mut got).await?;
                 if got[0] != round as u8 {
                     return Err("wrong acknowledgment".into());
                 }
+                let measured = u64::from_le_bytes(got[1..9].try_into()?);
+                let received = u64::from_le_bytes(got[9..17].try_into()?);
+                if received != sent || measured > received {
+                    return Err("wrong receiver count".into());
+                }
                 if round > 0 {
-                    report_throughput("iroh", size, count, round, started.elapsed().as_secs_f64());
+                    report_throughput("iroh", size, measured, round);
                 }
             }
         }
@@ -166,25 +166,20 @@ async fn iroh_client(mode: Mode, size: usize, port: u16, control_file: &Path) ->
             let (mut send, mut recv) = conn.open_bi().await?;
             let mut sent = vec![0u8; size];
             let mut received = vec![0u8; size];
-            let mut sequence = 0u64;
-            for round in 1..=3 {
-                let count = SAMPLES + usize::from(round == 1) * WARMUP_RTT;
-                let mut samples = Vec::with_capacity(SAMPLES);
-                for sample in 0..count {
-                    sent[..8].copy_from_slice(&sequence.to_le_bytes());
-                    let started = Instant::now();
-                    send.write_all(&sent).await?;
-                    recv.read_exact(&mut received).await?;
-                    if sent != received {
-                        return Err("wrong echo".into());
-                    }
-                    if round != 1 || sample >= WARMUP_RTT {
-                        samples.push(started.elapsed().as_nanos() as u64);
-                    }
-                    sequence += 1;
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..WARMUP_RTT + SAMPLES {
+                sent[..8].copy_from_slice(&(sample as u64).to_le_bytes());
+                let started = Instant::now();
+                send.write_all(&sent).await?;
+                recv.read_exact(&mut received).await?;
+                if sent != received {
+                    return Err("wrong echo".into());
                 }
-                report_latency("iroh", size, round, &mut samples);
+                if sample >= WARMUP_RTT {
+                    samples.push(started.elapsed().as_nanos() as u64);
+                }
             }
+            report_latency("iroh", size, 1, &mut samples);
             send.finish()?;
         }
     }
@@ -228,21 +223,39 @@ async fn zenoh_peer(mode: Mode, role: Role, size: usize, port: u16) -> Result<()
         .await?;
         if mode == Mode::Throughput {
             for round in 0..4 {
-                let count = if round == 0 {
-                    warmup_count(size)
-                } else {
-                    throughput_count("zenoh", size)
-                };
-                for _ in 0..count {
+                let mut received = 0_u64;
+                let mut measured = 0_u64;
+                let mut started = None;
+                loop {
                     let sample = incoming.recv_async().await?;
-                    if sample.payload().len() != size {
+                    let length = sample.payload().len();
+                    if length == 1 {
+                        if sample.payload().to_bytes().as_ref() != [round as u8] {
+                            return Err("wrong end marker".into());
+                        }
+                        break;
+                    }
+                    if length != size {
                         return Err("wrong message size".into());
                     }
+                    let now = Instant::now();
+                    let start = *started.get_or_insert(now);
+                    received += 1;
+                    if now.duration_since(start) < round_duration(round) {
+                        measured += 1;
+                    }
                 }
-                outgoing.put([round as u8]).await?;
+                if received == 0 {
+                    return Err("empty round".into());
+                }
+                let mut result = [0_u8; 17];
+                result[0] = round as u8;
+                result[1..9].copy_from_slice(&measured.to_le_bytes());
+                result[9..17].copy_from_slice(&received.to_le_bytes());
+                outgoing.put(result).await?;
             }
         } else {
-            for _ in 0..WARMUP_RTT + 3 * SAMPLES {
+            for _ in 0..WARMUP_RTT + SAMPLES {
                 let sample = incoming.recv_async().await?;
                 if sample.payload().len() != size {
                     return Err("wrong request size".into());
@@ -266,44 +279,44 @@ async fn zenoh_peer(mode: Mode, role: Role, size: usize, port: u16) -> Result<()
         if mode == Mode::Throughput {
             let payload = ZBytes::from(vec![0u8; size]);
             for round in 0..4 {
-                let count = if round == 0 {
-                    warmup_count(size)
-                } else {
-                    throughput_count("zenoh", size)
-                };
                 let started = Instant::now();
-                for _ in 0..count {
+                let mut sent = 0_u64;
+                while started.elapsed() < round_duration(round) {
                     outgoing.put(payload.clone()).await?;
+                    sent += 1;
                 }
+                outgoing.put([round as u8]).await?;
                 let ack = incoming.recv_async().await?;
-                if ack.payload().to_bytes().as_ref() != [round as u8] {
+                let bytes = ack.payload().to_bytes();
+                let bytes = bytes.as_ref();
+                if bytes.len() != 17 || bytes[0] != round as u8 {
                     return Err("wrong acknowledgment".into());
                 }
+                let measured = u64::from_le_bytes(bytes[1..9].try_into()?);
+                let received = u64::from_le_bytes(bytes[9..17].try_into()?);
+                if received != sent || measured > received {
+                    return Err("wrong receiver count".into());
+                }
                 if round > 0 {
-                    report_throughput("zenoh", size, count, round, started.elapsed().as_secs_f64());
+                    report_throughput("zenoh", size, measured, round);
                 }
             }
         } else {
             let mut sent = vec![0u8; size];
-            let mut sequence = 0u64;
-            for round in 1..=3 {
-                let count = SAMPLES + usize::from(round == 1) * WARMUP_RTT;
-                let mut samples = Vec::with_capacity(SAMPLES);
-                for sample in 0..count {
-                    sent[..8].copy_from_slice(&sequence.to_le_bytes());
-                    let started = Instant::now();
-                    outgoing.put(ZBytes::from(sent.clone())).await?;
-                    let reply = incoming.recv_async().await?;
-                    if reply.payload().to_bytes().as_ref() != sent {
-                        return Err("wrong echo".into());
-                    }
-                    if round != 1 || sample >= WARMUP_RTT {
-                        samples.push(started.elapsed().as_nanos() as u64);
-                    }
-                    sequence += 1;
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..WARMUP_RTT + SAMPLES {
+                sent[..8].copy_from_slice(&(sample as u64).to_le_bytes());
+                let started = Instant::now();
+                outgoing.put(ZBytes::from(sent.clone())).await?;
+                let reply = incoming.recv_async().await?;
+                if reply.payload().to_bytes().as_ref() != sent {
+                    return Err("wrong echo".into());
                 }
-                report_latency("zenoh", size, round, &mut samples);
+                if sample >= WARMUP_RTT {
+                    samples.push(started.elapsed().as_nanos() as u64);
+                }
             }
+            report_latency("zenoh", size, 1, &mut samples);
         }
     }
     session.close().await?;

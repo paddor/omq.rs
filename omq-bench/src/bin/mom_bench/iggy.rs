@@ -238,28 +238,6 @@ pub(crate) async fn bench(args: &Args, token: &str, size: usize) -> Result<Bench
     Ok(result)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consumer_validation_rejects_gaps_duplicates_and_wrong_size() {
-        let mut message = make_message(Bytes::from_static(b"record")).unwrap();
-        let mut next_offset = 0;
-        message.header.offset = 0;
-        check_record(&message, 6, &mut next_offset).unwrap();
-        assert_eq!(next_offset, 1);
-        assert!(check_record(&message, 6, &mut next_offset).is_err());
-        message.header.offset = 2;
-        assert!(check_record(&message, 6, &mut next_offset).is_err());
-        message.header.offset = 1;
-        assert!(check_record(&message, 7, &mut next_offset).is_err());
-        assert_eq!(next_offset, 1);
-        check_record(&message, 6, &mut next_offset).unwrap();
-        assert_eq!(next_offset, 2);
-    }
-}
-
 pub(crate) async fn responder(
     url: &str,
     token: &str,
@@ -426,4 +404,26 @@ pub(crate) async fn latency(args: &Args, token: &str, size: usize) -> Result<Lat
     client.delete_stream(&Identifier::try_from(stream)?).await?;
     client.shutdown().await?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumer_validation_rejects_gaps_duplicates_and_wrong_size() {
+        let mut message = make_message(Bytes::from_static(b"record")).unwrap();
+        let mut next_offset = 0;
+        message.header.offset = 0;
+        check_record(&message, 6, &mut next_offset).unwrap();
+        assert_eq!(next_offset, 1);
+        assert!(check_record(&message, 6, &mut next_offset).is_err());
+        message.header.offset = 2;
+        assert!(check_record(&message, 6, &mut next_offset).is_err());
+        message.header.offset = 1;
+        assert!(check_record(&message, 7, &mut next_offset).is_err());
+        assert_eq!(next_offset, 1);
+        check_record(&message, 6, &mut next_offset).unwrap();
+        assert_eq!(next_offset, 2);
+    }
 }

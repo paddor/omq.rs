@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
 pub(crate) const COMPARISON_LATENCY_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
@@ -99,7 +100,7 @@ pub(crate) const C_TMQ: RGBColor = RGBColor(168, 85, 247);
 pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 pub(crate) const C_GRPC: RGBColor = RGBColor(244, 114, 182);
-pub(crate) const C_RABBITMQ: RGBColor = RGBColor(251, 146, 60);
+pub(crate) const C_RABBITMQ: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_AERON: RGBColor = RGBColor(148, 163, 184);
 pub(crate) const C_NATS: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_REDIS: RGBColor = RGBColor(132, 204, 22);
@@ -1366,6 +1367,64 @@ pub(crate) fn draw_latency_single_panel_with_versions(
     )
 }
 
+fn draw_mom_latency_whiskers<DB: DrawingBackend>(
+    chart: &mut ChartContext<
+        '_,
+        DB,
+        Cartesian2d<plotters::coord::types::RangedCoordf64, plotters::coord::types::RangedCoordf64>,
+    >,
+    present: &[&Impl],
+    sizes: &[u64],
+    lat: &LatencyMap,
+    lat_max: f64,
+) -> Result<(), plotters::drawing::DrawingAreaErrorKind<DB::ErrorType>> {
+    let mut offscale_counts = vec![0usize; sizes.len()];
+    for imp in present.iter().rev() {
+        let stroke = imp.color.mix(0.65).stroke_width(1);
+        for (index, size) in sizes.iter().enumerate() {
+            let Some(entry) = lat.get(size).and_then(|values| values.get(imp.key)) else {
+                continue;
+            };
+            let x = index as f64;
+            chart.draw_series([
+                PathElement::new(vec![(x, entry.p50), (x, entry.p999.min(lat_max))], stroke),
+                PathElement::new(vec![(x - 0.05, entry.p50), (x + 0.05, entry.p50)], stroke),
+            ])?;
+            if entry.p999 <= lat_max {
+                chart.draw_series([PathElement::new(
+                    vec![(x - 0.05, entry.p999), (x + 0.05, entry.p999)],
+                    stroke,
+                )])?;
+            } else {
+                let label_row = offscale_counts[index];
+                offscale_counts[index] += 1;
+                let (label_x, label_side) = if index + 1 == sizes.len() {
+                    (x - 0.06, HPos::Right)
+                } else {
+                    (x + 0.06, HPos::Left)
+                };
+                chart.draw_series([TriangleMarker::new(
+                    (x, lat_max - 10.0),
+                    5,
+                    imp.color.filled(),
+                )])?;
+                chart.draw_series([Text::new(
+                    format!("p99.9 {:.0} μs", entry.p999),
+                    (
+                        label_x,
+                        lat_max - 49.0 - (index % 2 + label_row * 2) as f64 * 20.0,
+                    ),
+                    ("sans-serif", 10)
+                        .into_font()
+                        .color(&imp.color)
+                        .pos(Pos::new(label_side, VPos::Center)),
+                )])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn draw_latency_brokered_with_versions(
     out_path: &Path,
     title: &str,
@@ -1383,16 +1442,18 @@ pub(crate) fn draw_latency_brokered_with_versions(
             })
         })
         .collect();
-    let max_p50 = lat
+    let max_p99 = lat
         .values()
         .flat_map(|values| values.values())
-        .map(|entry| entry.p50)
+        .map(|entry| entry.p99)
         .fold(0.0_f64, f64::max);
-    let lat_range = (0.0, nice_axis(max_p50 * 1.05, 6).0);
+    let lat_step_us = 20.0;
+    let lat_max = ((max_p99 * 1.2 / lat_step_us).ceil() * lat_step_us).max(lat_step_us);
+    let tick_intervals = (lat_max / lat_step_us) as u32;
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 460u32;
+    let chart_h = (tick_intervals * 22 + 86).max(900);
     let total_h = chart_h + table_h;
     let width = 850u32;
     let hardware = detect_hardware();
@@ -1402,7 +1463,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
 
     let mut chart = ChartBuilder::on(&chart_area)
         .caption(
-            "p50 round-trip latency (lower is better)",
+            "p99 round-trip latency; whiskers: p50 to p99.9 (off-scale values labeled)",
             ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
@@ -1410,7 +1471,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
         .margin_top(36)
         .margin_left(10)
         .margin_right(30)
-        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, lat_range.0..lat_range.1)?;
+        .build_cartesian_2d(-0.15..(sizes.len() - 1) as f64 + 0.15, 0.0..lat_max)?;
 
     chart
         .configure_mesh()
@@ -1420,14 +1481,22 @@ pub(crate) fn draw_latency_brokered_with_versions(
                 .get(value.round() as usize)
                 .map_or(String::new(), |&size| fmt_size(size))
         })
-        .y_labels(16)
-        .y_label_formatter(&|value| fmt_us(*value))
+        .y_labels(tick_intervals as usize + 1)
+        .y_label_formatter(&|value| {
+            if *value == 0.0 {
+                "0 μs".to_string()
+            } else {
+                fmt_us(*value)
+            }
+        })
         .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
         .draw()?;
+
+    draw_mom_latency_whiskers(&mut chart, &present, sizes, lat, lat_max)?;
 
     for imp in present.iter().rev() {
         let points: Vec<(f64, f64)> = sizes
@@ -1436,7 +1505,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
             .filter_map(|(index, size)| {
                 lat.get(size)?
                     .get(imp.key)
-                    .map(|value| (index as f64, value.p50))
+                    .map(|value| (index as f64, value.p99))
             })
             .collect();
         if points.is_empty() {

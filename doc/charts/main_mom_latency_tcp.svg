@@ -133,13 +133,13 @@ p50 round-trip latency (lower is better)
 <circle cx="519" cy="345" r="2.5" opacity="1" fill="#F472B6" stroke="none" stroke-width="1"/>
 <circle cx="669" cy="346" r="2.5" opacity="1" fill="#F472B6" stroke="none" stroke-width="1"/>
 <circle cx="819" cy="343" r="2.5" opacity="1" fill="#F472B6" stroke="none" stroke-width="1"/>
-<polyline fill="none" opacity="1" stroke="#FBBF24" stroke-width="2" points="70,405 219,399 369,409 519,409 669,408 819,398 "/>
-<circle cx="70" cy="405" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
-<circle cx="219" cy="399" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
-<circle cx="369" cy="409" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
-<circle cx="519" cy="409" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
-<circle cx="669" cy="408" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
-<circle cx="819" cy="398" r="2.5" opacity="1" fill="#FBBF24" stroke="none" stroke-width="1"/>
+<polyline fill="none" opacity="1" stroke="#FB923C" stroke-width="2" points="70,405 219,399 369,409 519,409 669,408 819,398 "/>
+<circle cx="70" cy="405" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
+<circle cx="219" cy="399" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
+<circle cx="369" cy="409" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
+<circle cx="519" cy="409" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
+<circle cx="669" cy="408" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
+<circle cx="819" cy="398" r="2.5" opacity="1" fill="#FB923C" stroke="none" stroke-width="1"/>
 <polyline fill="none" opacity="1" stroke="#EF4444" stroke-width="2" points="70,360 219,389 369,388 519,374 669,382 819,382 "/>
 <circle cx="70" cy="360" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
 <circle cx="219" cy="389" r="2.5" opacity="1" fill="#EF4444" stroke="none" stroke-width="1"/>
@@ -178,7 +178,7 @@ omq-tokio v0.24.0
 <text x="765" y="480" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 65%
 </text>
-<polyline fill="none" opacity="1" stroke="#FBBF24" stroke-width="2" points="78,502 92,502 "/>
+<polyline fill="none" opacity="1" stroke="#FB923C" stroke-width="2" points="78,502 92,502 "/>
 <text x="98" y="496" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
 OMQ / TCP
 </text>

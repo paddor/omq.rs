@@ -447,11 +447,13 @@ pub(crate) fn check_every(size: usize) -> u64 {
     u64::try_from((1024 * 1024 / size.max(1)).clamp(1, 1024)).unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn ticks_per_second() -> f64 {
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if ticks > 0 { ticks as f64 } else { 100.0 }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn process_cpu_secs(pid: u32) -> Result<f64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat.rfind(") ").context("bad proc stat")? + 2;
@@ -459,6 +461,11 @@ pub(crate) fn process_cpu_secs(pid: u32) -> Result<f64> {
     let utime: f64 = fields.get(11).context("missing utime")?.parse()?;
     let stime: f64 = fields.get(12).context("missing stime")?.parse()?;
     Ok((utime + stime) / ticks_per_second())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn process_cpu_secs(_pid: u32) -> Result<f64> {
+    bail!("MOM benchmarks require Linux process CPU counters")
 }
 
 pub(crate) fn self_cpu_secs() -> Result<f64> {

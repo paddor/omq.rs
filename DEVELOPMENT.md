@@ -273,6 +273,8 @@ cargo run --release -p omq-bench --features mom-bench --bin mom_bench -- \
   --warmup 1 --duration 3 --run-id mom-rust-timed-cpu-YYYYMMDD
 ```
 
+Set NATS `max_payload` to 8 MiB for the 4 MiB and 8 MiB chart sizes.
+
 Latency mode measures one request at a time and reports round-trip
 percentiles. gRPC uses unary echo, NATS uses native request/reply, RabbitMQ
 uses its RPC queue pattern, and Kafka, Redis Streams, and Iggy use paired
@@ -355,7 +357,8 @@ Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
 `doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
 `doc/charts/main_reqrep_tcp.svg` (REQ/REP latency). The MOM benchmark also
 feeds `doc/charts/main_mom_tcp.svg` (throughput) and
-`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). TCP only.
+`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). The MOM
+charts also load Aeron UDP and iroh QUIC rows when present; zenoh uses TCP.
 Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:
 
 ```sh

@@ -1,6 +1,7 @@
 use super::common::{
-    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, COMPARISON_LATENCY_SIZES, COMPARISON_SIZES, Impl,
-    draw_latency_single_panel, draw_throughput_dual_panel, load_latency, load_tput, out_dir,
+    self, C_LIBZMQ, C_OMQ_1T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_SPIN, COMPARISON_LATENCY_SIZES,
+    COMPARISON_SIZES, Impl, draw_latency_single_panel, draw_throughput_dual_panel, load_latency,
+    load_tput, out_dir,
 };
 
 const TCP_TPUT_IMPLS: &[Impl] = &[
@@ -68,10 +69,22 @@ const TCP_LAT_IMPLS: &[Impl] = &[
         color: C_OMQ_1T,
     },
     Impl {
+        key: "omq-tokio-1t-spin50",
+        label: "omq (50 μs spin)",
+        threads: "1 IO",
+        color: C_OMQ_SPIN,
+    },
+    Impl {
         key: "omq-tokio-ct",
         label: "omq",
         threads: "CT",
         color: C_OMQ_CT,
+    },
+    Impl {
+        key: "omq-tokio-exclusive",
+        label: "omq",
+        threads: "EXCL",
+        color: C_OMQ_EXCLUSIVE,
     },
 ];
 

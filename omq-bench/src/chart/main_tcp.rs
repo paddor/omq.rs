@@ -327,7 +327,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_mom_tcp.svg");
         draw_throughput_dual_panel_brokered_with_versions(
             &out,
-            "Producer/consumer throughput, loopback, 2-process",
+            "Producer/consumer throughput, loopback, one flow",
             TPUT_SIZES,
             MOM_IMPLS,
             &tput,
@@ -347,7 +347,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_mom_latency_tcp.svg");
         draw_latency_brokered_with_versions(
             &out,
-            "Sequential request/reply-like latency, loopback, 2-process",
+            "Sequential request/reply-like latency, loopback, one flow",
             LAT_SIZES,
             MOM_IMPLS,
             &lat,

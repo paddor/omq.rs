@@ -480,7 +480,7 @@ mod tests {
         eq.frame(&Message::single("abc"));
 
         assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
-        assert!(!eq.arena_bytes().is_empty());
+        assert_ne!(eq.arena_bytes(), []);
     }
 
     #[test]
@@ -582,7 +582,7 @@ mod tests {
 
         let raw = eq.uncommitted_arena();
         assert_eq!(raw.len(), eq.total_bytes());
-        assert!(!raw.is_empty());
+        assert_ne!(raw, []);
     }
 
     #[test]

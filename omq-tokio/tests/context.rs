@@ -930,7 +930,7 @@ fn blocking_socket_try_recv_many_into_empty_returns_would_block() {
         pull.try_recv_many_into(4, &mut out),
         Err(Error::WouldBlock)
     ));
-    assert!(out.is_empty());
+    assert_eq!(out, [] as [Message; 0]);
     assert_eq!(out.capacity(), capacity);
 }
 

@@ -91,7 +91,7 @@ mod tests {
         let batch = build_fan_out_frame(&mut eq, &msg, &mut chunks, 8, 8 * 1024);
 
         assert!(matches!(batch, FanOutFrame::Arena(_)));
-        assert!(chunks.is_empty());
+        assert_eq!(chunks, [] as [Bytes; 0]);
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         let batch = build_fan_out_frame(&mut eq, &msg, &mut chunks, 1, 8 * 1024);
 
         assert!(matches!(batch, FanOutFrame::Chunks(_)));
-        assert!(!chunks.is_empty());
+        assert_ne!(chunks, [] as [Bytes; 0]);
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod tests {
         let batch = build_fan_out_frame(&mut eq, &msg, &mut chunks, 32, 8 * 1024);
 
         assert!(matches!(batch, FanOutFrame::Arena(_)));
-        assert!(chunks.is_empty());
+        assert_eq!(chunks, [] as [Bytes; 0]);
     }
 
     #[test]

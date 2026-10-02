@@ -106,7 +106,7 @@ mod tests {
             assert!(!training.feed(&empty));
         }
         assert!(training.feed(&empty));
-        assert!(training.samples.is_empty());
+        assert_eq!(training.samples, [] as [Vec<u8>; 0]);
         assert!(training.train().is_none());
 
         for size in [1, MAX_SAMPLE_LEN - 1] {

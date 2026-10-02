@@ -541,11 +541,10 @@ fn run_push(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
         loop {
             send_fast(&push, Message::from_slice(&payload));
         }
-    } else {
-        let msg = Message::single(payload.clone());
-        loop {
-            send_fast(&push, msg.clone());
-        }
+    }
+    let msg = Message::single(payload.clone());
+    loop {
+        send_fast(&push, msg.clone());
     }
 }
 
@@ -704,12 +703,11 @@ fn run_multi_push(
                         send_fast(&sock, Message::from_slice(&p));
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
-                } else {
-                    let msg = Message::single(p);
-                    loop {
-                        send_fast(&sock, msg.clone());
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }
+                }
+                let msg = Message::single(p);
+                loop {
+                    send_fast(&sock, msg.clone());
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
         })
@@ -765,11 +763,10 @@ fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usize) {
         loop {
             send_fast(&pub_, Message::from_slice(&payload));
         }
-    } else {
-        let msg = Message::single(payload.clone());
-        loop {
-            send_fast(&pub_, msg.clone());
-        }
+    }
+    let msg = Message::single(payload.clone());
+    loop {
+        send_fast(&pub_, msg.clone());
     }
 }
 
@@ -795,8 +792,8 @@ fn run_multi_sub(
     let warmup_deadline = Instant::now() + warmup_duration();
     let warmup_handles: Vec<_> = sockets
         .iter()
-        .cloned()
         .map(|sock| {
+            let sock = sock.clone();
             std::thread::spawn(move || {
                 while Instant::now() < warmup_deadline {
                     while sock.try_recv().is_ok() {}
@@ -944,11 +941,10 @@ fn run_inproc(ctx: &omq_tokio::Context, name: String, size: usize, duration: Dur
             loop {
                 send_fast(&push, Message::from_slice(&payload));
             }
-        } else {
-            let msg = Message::single(payload.clone());
-            loop {
-                send_fast(&push, msg.clone());
-            }
+        }
+        let msg = Message::single(payload.clone());
+        loop {
+            send_fast(&push, msg.clone());
         }
     });
 

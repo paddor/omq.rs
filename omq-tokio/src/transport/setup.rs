@@ -26,6 +26,8 @@ impl Admission {
         }
     }
 
+    // Atomic::try_update is unstable on MSRV 1.93.
+    #[allow(deprecated)]
     pub(crate) fn try_acquire(&self) -> Option<Permit> {
         self.used
             .fetch_update(Ordering::Acquire, Ordering::Relaxed, |used| {

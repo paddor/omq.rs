@@ -348,7 +348,7 @@ mod tests {
         let mask = [0xFF; 4];
         let mut data: Vec<u8> = vec![];
         apply_mask(&mut data, mask);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
     }
 
     #[test]

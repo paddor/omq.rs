@@ -419,7 +419,7 @@ fn plain_push_pull_tcp() {
     assert_eq!(request[0], b"1.0");
     assert_eq!(request[2], b"global");
     assert_eq!(request[3], b"127.0.0.1");
-    assert!(request[4].is_empty());
+    assert_eq!(request[4], [] as [u8; 0]);
     assert_eq!(request[5], b"PLAIN");
     assert_eq!(request[6], b"user");
     assert_eq!(request[7], b"pass");
@@ -514,7 +514,7 @@ fn plain_zap_router_exposes_and_requires_routing_envelope() {
     let zap = start_zap_handler(ctx, ZMQ_ROUTER, |request| {
         assert_eq!(request.len(), 10);
         assert_eq!(request[0].len(), size_of::<u64>());
-        assert!(request[1].is_empty());
+        assert_eq!(request[1], [] as [u8; 0]);
         vec![
             request[0].clone(),
             Vec::new(),

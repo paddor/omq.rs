@@ -382,7 +382,7 @@ mod tests {
             Command::Ready(p) => {
                 assert!(p.socket_type.is_none());
                 assert!(p.identity.is_none());
-                assert!(p.other.is_empty());
+                assert_eq!(p.other, [] as [(String, Bytes); 0]);
             }
             _ => panic!(),
         }

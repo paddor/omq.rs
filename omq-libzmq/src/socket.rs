@@ -947,6 +947,8 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
 
     match result {
         Ok(Ok(())) => {
+            // Atomic::try_update is unstable on MSRV 1.93.
+            #[allow(deprecated)]
             let _ = sock
                 .connect_count
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

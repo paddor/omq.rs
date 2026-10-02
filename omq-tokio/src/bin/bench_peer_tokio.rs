@@ -328,11 +328,10 @@ async fn run_pub(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, peers: usi
         loop {
             pub_.send(Message::from_slice(&payload)).await.unwrap();
         }
-    } else {
-        let msg = Message::single(payload.clone());
-        loop {
-            pub_.send(msg.clone()).await.unwrap();
-        }
+    }
+    let msg = Message::single(payload.clone());
+    loop {
+        pub_.send(msg.clone()).await.unwrap();
     }
 }
 
@@ -458,11 +457,10 @@ async fn run_push_loop(sock: &Socket, payload: &Bytes) {
         loop {
             send_fast(sock, Message::from_slice(payload)).await;
         }
-    } else {
-        let msg = Message::single(payload.clone());
-        loop {
-            send_fast(sock, msg.clone()).await;
-        }
+    }
+    let msg = Message::single(payload.clone());
+    loop {
+        send_fast(sock, msg.clone()).await;
     }
 }
 

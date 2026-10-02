@@ -1257,18 +1257,17 @@ impl SpscAwareRecv {
                     () = &mut pipe_ready => continue,
                     () = &mut activated => continue,
                 }
-            } else {
-                match self.try_drain() {
-                    DrainResult::Message(msg) => return Ok(msg),
-                    DrainResult::Closed => return Err(Error::Closed),
-                    DrainResult::Empty => {}
-                }
+            }
+            match self.try_drain() {
+                DrainResult::Message(msg) => return Ok(msg),
+                DrainResult::Closed => return Err(Error::Closed),
+                DrainResult::Empty => {}
+            }
 
-                tokio::select! {
-                    biased;
-                    () = &mut pipe_ready => continue,
-                    () = &mut activated => continue,
-                }
+            tokio::select! {
+                biased;
+                () = &mut pipe_ready => continue,
+                () = &mut activated => continue,
             }
         }
     }

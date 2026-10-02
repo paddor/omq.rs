@@ -3300,7 +3300,7 @@ mod tests {
         let mut writer = ScriptedVectoredWriter::new(caps, 23_011);
         write_chunks(&mut writer, &mut chunks).await.unwrap();
 
-        assert!(chunks.is_empty());
+        assert_eq!(chunks, [] as [Bytes; 0]);
         assert_eq!(writer.out, expected);
     }
 

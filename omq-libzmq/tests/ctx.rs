@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 const ZMQ_PUSH: i32 = 8;
 const ZMQ_PULL: i32 = 7;
+const ZMQ_REQ: i32 = 3;
+const ZMQ_REP: i32 = 4;
 const ZMQ_IO_THREADS: i32 = 1;
 const ZMQ_MAX_SOCKETS: i32 = 2;
 const ZMQ_SOCKET_LIMIT: i32 = 3;
@@ -342,17 +344,38 @@ fn zero_io_threads_support_cross_thread_inproc_push_pull() {
 }
 
 #[test]
-fn zero_io_threads_reject_unsupported_transports() {
+fn zero_io_threads_run_req_rep_over_inproc() {
+    let ctx = zmq_init(0);
+    let rep = zmq_socket(ctx, ZMQ_REP);
+    let req = zmq_socket(ctx, ZMQ_REQ);
+    let addr = CString::new("inproc://zero-io-req-rep").unwrap();
+
+    assert_eq!(zmq_bind(rep, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(req, addr.as_ptr()), 0);
+    assert_eq!(zmq_send(req, b"ping".as_ptr().cast(), 4, 0), 4);
+
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(rep, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"ping");
+    assert_eq!(zmq_send(rep, b"pong".as_ptr().cast(), 4, 0), 4);
+    assert_eq!(zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
+    assert_eq!(&buf[..4], b"pong");
+
+    zmq_close(req);
+    zmq_close(rep);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn zero_io_threads_accept_other_transports() {
     let ctx = zmq_init(0);
     let pair = zmq_socket(ctx, 0);
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let tcp = CString::new("tcp://127.0.0.1:*").unwrap();
-    let inproc = CString::new("inproc://zero-io-unsupported").unwrap();
+    let inproc = CString::new("inproc://zero-io-pair").unwrap();
 
-    assert_eq!(zmq_bind(pair, inproc.as_ptr()), -1);
-    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
-    assert_eq!(zmq_bind(push, tcp.as_ptr()), -1);
-    assert_eq!(omq_zmq::zmq_errno(), libc::ENOTSUP);
+    assert_eq!(zmq_bind(pair, inproc.as_ptr()), 0);
+    assert_eq!(zmq_bind(push, tcp.as_ptr()), 0);
 
     zmq_close(pair);
     zmq_close(push);

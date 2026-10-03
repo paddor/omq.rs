@@ -33,6 +33,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   queue now waits on the calling thread instead of handing the wait to the
   IO thread. Blocking REQ/REP round trips between two threads take two
   thread wakes instead of four.
+- C API: `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a
+  PUSH/PULL-only mode. Every socket type and transport works on such a
+  context; `zmq_bind` and `zmq_connect` no longer return `ENOTSUP` for it.
+  Inproc PUSH/PULL now uses the shared inproc rings; the separate byte ring
+  (`inproc_bypass`) is removed.
 - Share verified TLS trust, identity, and server-name setup internally while
   isolating WSS's explicit insecure test override. Empty custom trust PEM now
   fails configuration validation.

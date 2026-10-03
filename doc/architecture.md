@@ -239,10 +239,10 @@ control calls still run on the context's IO thread.
 Connection setup still needs a tokio runtime: the socket actor, `bind`,
 `connect`, peer tasks, and subscription commands run as tasks. A `Context`
 with zero IO threads borrows the caller's runtime instead of starting a
-thread; the blocking API needs at least one owned IO thread. The C API accepts
-`ZMQ_IO_THREADS` set to 0 only for inproc PUSH and PULL, which then use a
-separate byte ring (`omq-libzmq/src/inproc_bypass.rs`). Other socket types and
-transports on such a context fail `zmq_bind` and `zmq_connect` with `ENOTSUP`.
+thread; the blocking API needs at least one owned IO thread. The C API treats
+`ZMQ_IO_THREADS` set to 0 as one IO thread. Direct inproc paths use the
+calling threads. C API REQ/REP receives and fallback paths still use relay
+tasks on the IO thread, which also serves setup and the control plane.
 
 HWM, fairness, and connect-before-bind still apply. Names belong to a context,
 so separate contexts may bind the same name.

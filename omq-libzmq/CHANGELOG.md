@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a PUSH/PULL-only
+  mode. Every socket type and transport works on such a context; `zmq_bind`
+  and `zmq_connect` no longer return `ENOTSUP` for it.
+- Inproc PUSH/PULL uses the bundled `omq-tokio` inproc rings. The separate
+  byte ring (`inproc_bypass`) is removed.
+
 ## [0.5.20] - 2026-09-27
 
 ### Changed

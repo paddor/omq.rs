@@ -1,7 +1,7 @@
 //! `zmq_send` / `zmq_recv` entry points.
 //!
 //! Send: direct `Handle::block_on(socket.send())`, no relay.
-//! Recv: bypass ring -> yring consumers -> block on `RecvNotify`.
+//! Recv: yring consumers -> block on `RecvNotify`.
 use std::ffi::c_int;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,54 +24,6 @@ fn checked_c_int_len(n: usize) -> Result<c_int, c_int> {
     c_int::try_from(n).map_err(|_| libc::EMSGSIZE)
 }
 
-/// Clear a bypass option if the peer has closed the pipe.
-///
-fn clear_stale_bypass<B: HasPipeClosed>(
-    bypass_cell: &crate::local_cell::LocalCell<Option<B>>,
-    installed: &std::sync::atomic::AtomicBool,
-) {
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let opt = unsafe { bypass_cell.get() };
-    if opt
-        .as_ref()
-        .is_some_and(|b| b.pipe_closed().load(std::sync::atomic::Ordering::Acquire))
-    {
-        *opt = None;
-        installed.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-
-fn clear_stale_recv_bypass(
-    bypass_cell: &crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassRecv>>,
-    installed: &std::sync::atomic::AtomicBool,
-) {
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    let opt = unsafe { bypass_cell.get() };
-    if opt
-        .as_ref()
-        .is_some_and(|b| b.pipe_closed().load(std::sync::atomic::Ordering::Acquire) && b.is_empty())
-    {
-        *opt = None;
-        installed.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-
-trait HasPipeClosed {
-    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool;
-}
-
-impl HasPipeClosed for crate::inproc_bypass::BypassSend {
-    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
-        &self.pipe.closed
-    }
-}
-
-impl HasPipeClosed for crate::inproc_bypass::BypassRecv {
-    fn pipe_closed(&self) -> &std::sync::atomic::AtomicBool {
-        &self.pipe.closed
-    }
-}
-
 pub(crate) enum SendMessageAttempt {
     Sent,
     Full(omq_tokio::Message),
@@ -80,7 +32,7 @@ pub(crate) enum SendMessageAttempt {
 /// Non-blocking full-message receive used by `zmq_proxy`.
 ///
 /// This reads the same libzmq-facing queues as `zmq_recv`: the direct yring
-/// consumers, plus the inproc byte bypass where applicable. It must not call
+/// consumers. It must not call
 /// `omq_tokio::Socket::try_recv`, because libzmq sockets install a custom
 /// recv sink and the async socket recv pipe is not the owner of that hot path.
 pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Message>, c_int> {
@@ -114,38 +66,6 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
         sock.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
-    crate::socket::adopt_pending_bypass_recv(sock);
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-    }
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-    {
-        // SAFETY: same socket-thread invariant as above.
-        if let Some(cons) = unsafe { sock.recv_cons.get() }
-            && let Some(popped) = try_pop_dual(cons, sock)
-        {
-            signal_recv_space_if_full(sock, popped.released_full_slot);
-            return Ok(Some(popped.message));
-        }
-        if let Some((ptr, len)) = bypass.peek() {
-            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-            let msg = omq_tokio::Message::single(Bytes::copy_from_slice(slice));
-            bypass.advance(len);
-            return Ok(Some(msg));
-        }
-        if bypass.pipe.closed.load(Ordering::Acquire) {
-            return Err(ETERM);
-        }
-        return Ok(None);
-    }
-
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
         return Err(ETERM);
@@ -159,8 +79,7 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
 
 /// Non-blocking full-message send used by `zmq_proxy`.
 ///
-/// Single-frame PUSH/PULL inproc messages take the byte bypass. Other
-/// messages go through the materialized omq-tokio socket so type-specific
+/// Messages go through the materialized omq-tokio socket so type-specific
 /// send behavior, including XSUB raw subscribe commands, stays in one place.
 pub(crate) fn try_send_message(
     sock: &Arc<OmqSocket>,
@@ -173,32 +92,6 @@ pub(crate) fn try_send_message(
         sock.ctx.zap.respond(sock.id, &response)?;
         return Ok(SendMessageAttempt::Sent);
     }
-    if msg.len() == 1 {
-        crate::socket::adopt_pending_bypass_send(sock);
-        if sock
-            .bypass_send_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            clear_stale_bypass(&sock.bypass_send, &sock.bypass_send_installed);
-        }
-        if sock
-            .bypass_send_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            && let Some(bypass) = unsafe { sock.bypass_send.get() }
-        {
-            let result = {
-                let data = msg.get(0).unwrap_or(&[]);
-                bypass.push(data)
-            };
-            return match result {
-                Ok(()) => Ok(SendMessageAttempt::Sent),
-                Err(libc::EAGAIN) => Ok(SendMessageAttempt::Full(msg)),
-                Err(e) => Err(e),
-            };
-        }
-    }
-
     let Some(inner) = sock.inner.get() else {
         return Err(ETERM);
     };
@@ -407,42 +300,6 @@ pub(crate) fn send_bytes(sock: &Arc<OmqSocket>, data: &[u8], flags: c_int) -> c_
             Ok(Err(ref e)) => fail(crate::error::map_omq_err(e)),
             Err(()) => fail(ETERM),
         };
-    }
-
-    // Inproc bypass: write raw bytes into the byte ring.
-    // Checked BEFORE Message construction to avoid heap allocation.
-    if flags & ZMQ_SNDMORE == 0 {
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        let accum = unsafe { sock.send_accum.get() };
-        if accum.is_empty() {
-            crate::socket::adopt_pending_bypass_send(sock);
-            if sock
-                .bypass_send_installed
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                clear_stale_bypass(&sock.bypass_send, &sock.bypass_send_installed);
-            }
-        }
-        if accum.is_empty()
-            && sock
-                .bypass_send_installed
-                .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: same socket-thread invariant as `send_accum`.
-            && let Some(bypass) = unsafe { sock.bypass_send.get() }
-        {
-            let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
-            let dontwait = (flags & ZMQ_DONTWAIT) != 0 || sndtimeo == 0;
-            if dontwait {
-                return match bypass.push(data) {
-                    Ok(()) => ret_len,
-                    Err(e) => fail(e),
-                };
-            }
-            return match bypass.push_blocking(data) {
-                Ok(()) => ret_len,
-                Err(e) => fail(e),
-            };
-        }
     }
 
     let sndtimeo = sock.sndtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
@@ -680,27 +537,6 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
         };
     }
 
-    // Inproc bypass fast path: copy from byte ring directly into user
-    // buffer. Zero intermediate Bytes allocation.
-    crate::socket::adopt_pending_bypass_recv(sock);
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-    }
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-    {
-        match recv_bypass_direct(sock, bypass, buf, buf_len, flags) {
-            Ok(n) => return n,
-            Err(e) => return fail(e),
-        }
-    }
-
     // Multipart drain: leftover frames use the Bytes-returning path.
     if sock.drain_nonempty.load(Ordering::Relaxed) {
         return zmq_recv_via_frame(sock, buf, buf_len, flags);
@@ -711,9 +547,6 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     // would do for inline messages.
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
-        if sock.ctx.zero_io_threads() && sock.socket_type == omq_tokio::SocketType::Pull {
-            return recv_wait_for_zero_io_bypass(sock, buf, buf_len, flags);
-        }
         return fail(ETERM);
     };
 
@@ -729,21 +562,6 @@ fn zmq_recv_impl(sock: &OmqSocket, buf: *mut libc::c_void, buf_len: usize, flags
     }
 
     match block_recv_result(sock, rcvtimeo, || {
-        crate::socket::adopt_pending_bypass_recv(sock);
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-        }
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-        {
-            return try_recv_bypass_or_yring(sock, bypass, buf, buf_len);
-        }
         let Some(popped) = try_pop_dual(cons, sock) else {
             return Ok(None);
         };
@@ -914,53 +732,8 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
         sock.drain_nonempty.store(false, Ordering::Relaxed);
     }
 
-    // Inproc bypass path: peek from byte ring, wrap in Bytes.
-    // Used by zmq_msg_recv (which needs an owned Bytes).
-    // zmq_recv uses recv_bypass_direct instead (zero alloc).
-    crate::socket::adopt_pending_bypass_recv(sock);
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-    }
-    if sock
-        .bypass_recv_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-        // SAFETY: libzmq sockets are accessed by at most one application thread.
-        && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-    {
-        // Drain yring first (messages from before bypass was installed,
-        // or multipart messages that went through the regular tokio path
-        // because the send-side bypass was skipped for SNDMORE batches).
-        // SAFETY: same socket-thread invariant as above.
-        if let Some(cons) = unsafe { sock.recv_cons.get() }
-            && let Some(popped) = try_pop_dual(cons, sock)
-        {
-            signal_recv_space_if_full(sock, popped.released_full_slot);
-            return decompose_message(sock, &popped.message);
-        }
-        if let Some(entry) = bypass.peek() {
-            let (ptr, len) = entry;
-            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-            let bytes = Bytes::copy_from_slice(slice);
-            bypass.advance(len);
-            mark_external_recv(sock);
-            return Ok((bytes, false));
-        }
-        if dontwait {
-            return Err(libc::EAGAIN);
-        }
-        // Fall through to the blocking recv path below: the message
-        // might arrive via the regular tokio path (yring/dual consumer)
-        // rather than the bypass ring.
-    }
-
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let Some(cons) = (unsafe { sock.recv_cons.get() }) else {
-        if sock.ctx.zero_io_threads() && sock.socket_type == omq_tokio::SocketType::Pull {
-            return pop_wait_for_zero_io_bypass(sock, flags);
-        }
         return Err(ETERM);
     };
 
@@ -974,30 +747,6 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
     }
 
     block_recv_result(sock, rcvtimeo, || {
-        crate::socket::adopt_pending_bypass_recv(sock);
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-        }
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-        {
-            if let Some((ptr, len)) = bypass.peek() {
-                let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-                let bytes = Bytes::copy_from_slice(slice);
-                bypass.advance(len);
-                mark_external_recv(sock);
-                return Ok(Some((bytes, false)));
-            }
-            if bypass.pipe.closed.load(Ordering::Acquire) {
-                return Err(ETERM);
-            }
-        }
         let Some(popped) = try_pop_dual(cons, sock) else {
             return Ok(None);
         };
@@ -1007,7 +756,7 @@ pub(crate) fn pop_recv_frame(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, b
 }
 
 /// Pop one complete SERVER message so `zmq_msg_recv` can preserve routing ID
-/// metadata. SERVER messages are always single-part and never use bypass.
+/// metadata. SERVER messages are always single-part.
 pub(crate) fn pop_recv_server_message(
     sock: &OmqSocket,
     flags: c_int,
@@ -1054,182 +803,6 @@ pub(crate) fn pop_recv_server_message_with_properties(
     pop_recv_server_message(sock, flags).map(|message| (message, None))
 }
 
-/// Zero-alloc recv for the inproc bypass: peek from byte ring,
-/// copy directly into the user's buffer, advance.
-fn recv_bypass_direct(
-    sock: &OmqSocket,
-    bypass: &mut crate::inproc_bypass::BypassRecv,
-    buf: *mut libc::c_void,
-    buf_len: usize,
-    flags: c_int,
-) -> Result<c_int, c_int> {
-    use std::sync::atomic::Ordering;
-
-    // Drain leftover frames from a partially-consumed multipart message.
-    if sock.drain_nonempty.load(Ordering::Relaxed) {
-        let Ok(mut drain) = sock.recv_drain.lock() else {
-            return Err(ETERM);
-        };
-        if let Some(frame) = drain.pop_front() {
-            let more = !drain.is_empty();
-            if !more {
-                sock.drain_nonempty.store(false, Ordering::Relaxed);
-            }
-            let frame_len = frame.len();
-            copy_to_buf(buf, buf_len, &frame);
-            return checked_c_int_len(frame_len);
-        }
-        sock.drain_nonempty.store(false, Ordering::Relaxed);
-    }
-
-    // Drain yring first (multipart messages that went through omq-tokio).
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    if let Some(cons) = unsafe { sock.recv_cons.get() }
-        && let Some(popped) = try_pop_dual(cons, sock)
-    {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        let start = msg_start_index(sock, &popped.message);
-        let data = popped.message.get(start).unwrap_or(&[]);
-        copy_to_buf(buf, buf_len, data);
-        stash_remaining_parts(sock, &popped.message, start);
-        mark_external_recv(sock);
-        return checked_c_int_len(data.len());
-    }
-
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
-
-    if let Some(n) = try_recv_bypass_or_yring(sock, bypass, buf, buf_len)? {
-        return Ok(n);
-    }
-
-    if dontwait {
-        return Err(libc::EAGAIN);
-    }
-
-    let n = block_recv_result(sock, rcvtimeo, || {
-        try_recv_bypass_or_yring(sock, bypass, buf, buf_len)
-    })?;
-    Ok(n)
-}
-
-fn recv_wait_for_zero_io_bypass(
-    sock: &OmqSocket,
-    buf: *mut libc::c_void,
-    buf_len: usize,
-    flags: c_int,
-) -> c_int {
-    use std::sync::atomic::Ordering;
-
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
-    if dontwait {
-        return fail(libc::EAGAIN);
-    }
-
-    match block_recv_result(sock, rcvtimeo, || {
-        crate::socket::adopt_pending_bypass_recv(sock);
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-        }
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-        {
-            return try_recv_bypass_or_yring(sock, bypass, buf, buf_len);
-        }
-        Ok(None)
-    }) {
-        Ok(n) => n,
-        Err(e) => fail(e),
-    }
-}
-
-fn pop_wait_for_zero_io_bypass(sock: &OmqSocket, flags: c_int) -> Result<(Bytes, bool), c_int> {
-    use std::sync::atomic::Ordering;
-
-    let rcvtimeo = sock.rcvtimeo_ms.load(Ordering::Relaxed);
-    let dontwait = (flags & ZMQ_DONTWAIT) != 0 || rcvtimeo == 0;
-    if dontwait {
-        return Err(libc::EAGAIN);
-    }
-
-    block_recv_result(sock, rcvtimeo, || {
-        crate::socket::adopt_pending_bypass_recv(sock);
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            clear_stale_recv_bypass(&sock.bypass_recv, &sock.bypass_recv_installed);
-        }
-        if sock
-            .bypass_recv_installed
-            .load(std::sync::atomic::Ordering::Acquire)
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            && let Some(bypass) = unsafe { sock.bypass_recv.get() }
-        {
-            if let Some((ptr, len)) = bypass.peek() {
-                let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-                let bytes = Bytes::copy_from_slice(slice);
-                bypass.advance(len);
-                return Ok(Some((bytes, false)));
-            }
-            if bypass.pipe.closed.load(Ordering::Acquire) {
-                return Err(ETERM);
-            }
-        }
-        Ok(None)
-    })
-}
-
-/// Try byte ring first, then pump yring. Returns payload length on success.
-#[inline]
-fn try_recv_bypass_or_yring(
-    sock: &OmqSocket,
-    bypass: &mut crate::inproc_bypass::BypassRecv,
-    buf: *mut libc::c_void,
-    buf_len: usize,
-) -> Result<Option<c_int>, c_int> {
-    if let Some((ptr, len)) = bypass.peek() {
-        let copy_len = len.min(buf_len);
-        if !buf.is_null() && copy_len > 0 {
-            // SAFETY: ptr/len valid for peeked entry; buf/buf_len from caller contract.
-            unsafe {
-                std::ptr::copy_nonoverlapping(ptr, buf.cast::<u8>(), copy_len);
-            }
-        }
-        bypass.advance(len);
-        mark_external_recv(sock);
-        return checked_c_int_len(len).map(Some);
-    }
-    // SAFETY: libzmq sockets are accessed by at most one application thread.
-    if let Some(cons) = unsafe { sock.recv_cons.get() }
-        && let Some(popped) = try_pop_dual(cons, sock)
-    {
-        signal_recv_space_if_full(sock, popped.released_full_slot);
-        let start = msg_start_index(sock, &popped.message);
-        let data = popped.message.get(start).unwrap_or(&[]);
-        let frame_len = data.len();
-        copy_to_buf(buf, buf_len, data);
-        stash_remaining_parts(sock, &popped.message, start);
-        mark_external_recv(sock);
-        return checked_c_int_len(frame_len).map(Some);
-    }
-    if bypass
-        .pipe
-        .closed
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return Err(ETERM);
-    }
-    Ok(None)
-}
-
 struct PoppedMessage {
     message: omq_tokio::Message,
     released_full_slot: bool,
@@ -1246,20 +819,28 @@ fn try_pop_dual(
     {
         cons.fast = new_cons;
     }
-    cons.fast
+    let (message, released_full_slot) = cons
+        .fast
         .prefetch_and_pop_with_full()
-        .map(|(item, released_full_slot)| PoppedMessage {
-            message: item,
-            released_full_slot,
-        })
-        .or_else(|| {
-            cons.pump
-                .prefetch_and_pop_with_full()
-                .map(|(item, released_full_slot)| PoppedMessage {
-                    message: item,
-                    released_full_slot,
-                })
-        })
+        .or_else(|| cons.pump.prefetch_and_pop_with_full())?;
+    settle_recv_fd(sock, cons);
+    Some(PoppedMessage {
+        message,
+        released_full_slot,
+    })
+}
+
+/// Keep `ZMQ_FD` level-triggered: once both rings are empty, reset the
+/// readiness counter. A message that lands in between is signaled again.
+fn settle_recv_fd(sock: &OmqSocket, cons: &crate::socket::RecvConsumers) {
+    if !cons.fast.is_empty() || !cons.pump.is_empty() {
+        return;
+    }
+    let notify = sock.notify.recv_notifier();
+    notify.drain();
+    if !cons.fast.is_empty() || !cons.pump.is_empty() {
+        notify.signal();
+    }
 }
 
 #[inline]

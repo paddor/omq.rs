@@ -56,18 +56,6 @@ pub(crate) struct OmqSocket {
     pub rcvtimeo_ms: AtomicI64,
     /// Accumulator for SNDMORE multipart assembly.
     pub send_accum: crate::local_cell::LocalCell<Vec<Bytes>>,
-    /// Lock-free inproc bypass (sender half). Set once during connect;
-    /// accessed only from the `zmq_send` caller thread (ZMQ's single-thread
-    /// contract per socket).
-    pub bypass_send: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassSend>>,
-    pub bypass_send_installed: AtomicBool,
-    pub pending_bypass_send: Mutex<Option<crate::inproc_bypass::BypassSend>>,
-    pub pending_bypass_send_ready: AtomicBool,
-    /// Lock-free inproc bypass (receiver half).
-    pub bypass_recv: crate::local_cell::LocalCell<Option<crate::inproc_bypass::BypassRecv>>,
-    pub bypass_recv_installed: AtomicBool,
-    pub pending_bypass_recv: Mutex<Option<crate::inproc_bypass::BypassRecv>>,
-    pub pending_bypass_recv_ready: AtomicBool,
     /// Leftover frames from a multipart recv (RCVMORE).
     pub recv_drain: Mutex<VecDeque<Bytes>>,
     /// True when `recv_drain` is non-empty. Checked without the lock so the
@@ -108,8 +96,6 @@ pub(crate) struct OmqSocket {
 impl OmqSocket {
     fn allow_thread_migration(&self) {
         self.send_accum.allow_thread_migration();
-        self.bypass_send.allow_thread_migration();
-        self.bypass_recv.allow_thread_migration();
         self.recv_cons.allow_thread_migration();
         self.authenticated_recv.allow_thread_migration();
         self.authenticated_recv_drain.allow_thread_migration();
@@ -169,148 +155,6 @@ where
     orx.recv().map_err(|_| ())
 }
 
-fn is_bypass_eligible(a: SocketType, b: SocketType) -> bool {
-    matches!(
-        (a, b),
-        (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)
-    )
-}
-
-fn zero_io_inproc_supported(sock: &OmqSocket, endpoint: &Endpoint) -> bool {
-    sock.ctx.zero_io_threads()
-        && matches!(endpoint, Endpoint::Inproc { .. })
-        && matches!(sock.socket_type, SocketType::Push | SocketType::Pull)
-}
-
-fn try_install_bypass(sender: &Arc<OmqSocket>, receiver: &Arc<OmqSocket>) {
-    let capacity = {
-        let Ok(s_ov) = sender.overlay.lock() else {
-            return;
-        };
-        let Ok(r_ov) = receiver.overlay.lock() else {
-            return;
-        };
-        let shwm = s_ov.send_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
-        let rhwm = r_ov.recv_hwm.unwrap_or(DEFAULT_HWM as u32) as usize;
-        shwm.min(rhwm).max(16)
-    };
-
-    let recv_notify = receiver.notify.recv_notifier();
-
-    // Byte ring capacity: enough for `capacity` messages at a generous
-    // average size. Rounded up to a power of two internally.
-    let byte_ring_cap = capacity * 1024;
-    let (bsend, brecv) = crate::inproc_bypass::create_bypass(byte_ring_cap, recv_notify);
-    if let Ok(mut pending) = sender.pending_bypass_send.lock() {
-        *pending = Some(bsend);
-        sender
-            .pending_bypass_send_ready
-            .store(true, Ordering::Release);
-        sender.notify.signal_send();
-    }
-    if let Ok(mut pending) = receiver.pending_bypass_recv.lock() {
-        *pending = Some(brecv);
-        receiver
-            .pending_bypass_recv_ready
-            .store(true, Ordering::Release);
-    }
-}
-
-pub(crate) fn adopt_pending_bypass_send(sock: &OmqSocket) {
-    if !sock.pending_bypass_send_ready.load(Ordering::Acquire) {
-        return;
-    }
-    if !sock.pending_bypass_send_ready.swap(false, Ordering::AcqRel) {
-        return;
-    }
-    let Some(bypass) = sock
-        .pending_bypass_send
-        .lock()
-        .ok()
-        .and_then(|mut p| p.take())
-    else {
-        return;
-    };
-    // SAFETY: adoption happens on the app-facing send owner thread.
-    *unsafe { sock.bypass_send.get() } = Some(bypass);
-    sock.bypass_send_installed.store(true, Ordering::Release);
-}
-
-pub(crate) fn adopt_pending_bypass_recv(sock: &OmqSocket) {
-    if !sock.pending_bypass_recv_ready.load(Ordering::Acquire) {
-        return;
-    }
-    if !sock.pending_bypass_recv_ready.swap(false, Ordering::AcqRel) {
-        return;
-    }
-    let Some(bypass) = sock
-        .pending_bypass_recv
-        .lock()
-        .ok()
-        .and_then(|mut p| p.take())
-    else {
-        return;
-    };
-    // SAFETY: adoption happens on the app-facing recv owner thread.
-    *unsafe { sock.bypass_recv.get() } = Some(bypass);
-    sock.bypass_recv_installed.store(true, Ordering::Release);
-}
-
-/// Register an inproc bind. If there are pending connectors, install
-/// bypass pipes for eligible pairs.
-fn register_inproc_bind(sock: &Arc<OmqSocket>, name: &str) {
-    let ctx = &sock.ctx;
-    let Ok(mut binds) = ctx.inproc_binds.lock() else {
-        return;
-    };
-    binds.insert(name.to_owned(), Arc::downgrade(sock));
-    drop(binds);
-
-    let Ok(mut waiting) = ctx.inproc_waiting.lock() else {
-        return;
-    };
-    let waiters = waiting.remove(name).unwrap_or_default();
-    drop(waiting);
-    for w in waiters {
-        if let Some(connector) = w.upgrade()
-            && is_bypass_eligible(connector.socket_type, sock.socket_type)
-        {
-            let (sender, receiver) = if connector.socket_type == SocketType::Push {
-                (&connector, sock)
-            } else {
-                (sock, &connector)
-            };
-            try_install_bypass(sender, receiver);
-        }
-    }
-}
-
-/// Register an inproc connect. If the binder exists, install bypass.
-fn register_inproc_connect(sock: &Arc<OmqSocket>, name: &str) {
-    let ctx = &sock.ctx;
-    let binder = ctx
-        .inproc_binds
-        .lock()
-        .ok()
-        .and_then(|g| g.get(name).and_then(std::sync::Weak::upgrade));
-
-    if let Some(binder) = binder {
-        if is_bypass_eligible(sock.socket_type, binder.socket_type) {
-            let (sender, receiver) = if sock.socket_type == SocketType::Push {
-                (sock, &binder)
-            } else {
-                (&binder, sock)
-            };
-            try_install_bypass(sender, receiver);
-        }
-    } else if let Ok(mut waiting) = ctx.inproc_waiting.lock() {
-        waiting
-            .entry(name.to_owned())
-            .or_default()
-            .push(Arc::downgrade(sock));
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
@@ -356,14 +200,6 @@ pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_vo
         sndtimeo_ms: AtomicI64::new(-1),
         rcvtimeo_ms: AtomicI64::new(-1),
         send_accum: crate::local_cell::LocalCell::new(Vec::new()),
-        bypass_send: crate::local_cell::LocalCell::new(None),
-        bypass_send_installed: AtomicBool::new(false),
-        pending_bypass_send: Mutex::new(None),
-        pending_bypass_send_ready: AtomicBool::new(false),
-        bypass_recv: crate::local_cell::LocalCell::new(None),
-        bypass_recv_installed: AtomicBool::new(false),
-        pending_bypass_recv: Mutex::new(None),
-        pending_bypass_recv_ready: AtomicBool::new(false),
         recv_drain: Mutex::new(VecDeque::new()),
         drain_nonempty: AtomicBool::new(false),
         recv_cons: crate::local_cell::LocalCell::new(None),
@@ -605,23 +441,6 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if let Some(h) = arc.recv_pump.get() {
         h.abort();
     }
-    // SAFETY: `zmq_close` reclaims the socket pointer, so no later user access
-    // can legally race this cleanup.
-    *unsafe { arc.bypass_send.get_unchecked() } = None;
-    arc.bypass_send_installed.store(false, Ordering::Release);
-    if let Ok(mut pending) = arc.pending_bypass_send.lock() {
-        *pending = None;
-    }
-    arc.pending_bypass_send_ready
-        .store(false, Ordering::Release);
-    // SAFETY: same close-time exclusive ownership as above.
-    *unsafe { arc.bypass_recv.get_unchecked() } = None;
-    arc.bypass_recv_installed.store(false, Ordering::Release);
-    if let Ok(mut pending) = arc.pending_bypass_recv.lock() {
-        *pending = None;
-    }
-    arc.pending_bypass_recv_ready
-        .store(false, Ordering::Release);
     let linger = arc
         .overlay
         .lock()
@@ -785,19 +604,6 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     };
     drop(ov);
 
-    if sock.ctx.zero_io_threads() {
-        if !zero_io_inproc_supported(sock, &endpoint) {
-            return fail(libc::ENOTSUP);
-        }
-        if let Endpoint::Inproc { .. } = endpoint {
-            register_inproc_bind(sock, &addr_str);
-            if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = Some(addr_str);
-            }
-            return 0;
-        }
-    }
-
     if let Err(error) = ensure_materialized(sock) {
         return fail(error);
     }
@@ -820,10 +626,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     match result {
         Ok(Ok(resolved)) => {
             if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = resolved.or(Some(addr_str.clone()));
-            }
-            if addr_str.starts_with("inproc://") {
-                register_inproc_bind(sock, &addr_str);
+                *ep = resolved.or(Some(addr_str));
             }
             0
         }
@@ -856,20 +659,6 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         }
     };
 
-    if sock.ctx.zero_io_threads() {
-        if !zero_io_inproc_supported(sock, &endpoint) {
-            return fail(libc::ENOTSUP);
-        }
-        if let Endpoint::Inproc { .. } = endpoint {
-            register_inproc_connect(sock, &addr_str);
-            sock.connect_count.fetch_add(1, Ordering::AcqRel);
-            if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = Some(addr_str);
-            }
-            return 0;
-        }
-    }
-
     if let Err(error) = ensure_materialized(sock) {
         return fail(error);
     }
@@ -891,10 +680,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
         Ok(Ok(())) => {
             sock.connect_count.fetch_add(1, Ordering::AcqRel);
             if let Ok(mut ep) = sock.last_endpoint.lock() {
-                *ep = Some(addr_str.clone());
-            }
-            if addr_str.starts_with("inproc://") {
-                register_inproc_connect(sock, &addr_str);
+                *ep = Some(addr_str);
             }
             0
         }

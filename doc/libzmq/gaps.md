@@ -243,14 +243,11 @@ down and reconnects.
 - **IPC wildcard address:** Cannot auto-generate a unique IPC path.
 - **TCP accept filter socket option:** `ZMQ_TCP_ACCEPT_FILTER` is unsupported;
   use a NULL ZAP domain for address-based admission policy.
-- **`ZMQ_IO_THREADS` set to 0:** Supported only for inproc PUSH and PULL,
-  which use a separate byte ring. Other socket types and transports fail
-  `zmq_bind` and `zmq_connect` with `ENOTSUP`. libzmq runs every socket type
-  over inproc without IO threads. NOTE: treating 0 as 1 and dropping
-  `omq-libzmq/src/inproc_bypass.rs` would run every socket type over the
-  inproc rings. That IO thread only handles connection setup; messages
-  stay on the calling threads, so a REQ/REP round trip still costs two
-  thread wakes, as with one IO thread today.
+- **`ZMQ_IO_THREADS` set to 0:** Runs one IO thread anyway for connection
+  setup, the control plane, and receive relay tasks. Direct inproc paths
+  stay on the calling threads; C API REQ/REP receives still use the IO
+  thread. libzmq starts no IO thread in this mode but always runs its
+  reaper thread.
 - **ROUTER handover:** Implemented. Always-on (libzmq gates behind
   `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with
   `DisconnectReason::Handover`. Applies to ROUTER and SERVER.

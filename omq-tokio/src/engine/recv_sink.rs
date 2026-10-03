@@ -117,15 +117,20 @@ impl std::fmt::Debug for AuthenticatedRecvSink {
 }
 
 /// Shared config for creating and recycling [`RecvSink::Yring`] instances.
-/// The actor refills `slot` with a fresh yring pair on peer disconnect;
-/// the external consumer picks up the new consumer from
-/// `pending_consumer`.
+/// Only the peer owning the direct sink may trigger its replacement.
+/// Unadopted replacement consumers retain queued messages across churn.
 pub struct RecvSinkConfig {
-    slot: std::sync::Mutex<Option<RecvSink>>,
+    slot: std::sync::Mutex<SinkSlot>,
     pending_consumer: std::sync::Mutex<Option<yring::Consumer<Message>>>,
     signal: Arc<dyn Fn() + Send + Sync>,
     space: Arc<StateSignal>,
     cap: usize,
+}
+
+#[derive(Debug)]
+struct SinkSlot {
+    sink: Option<RecvSink>,
+    owner_peer: Option<u64>,
 }
 
 impl std::fmt::Debug for RecvSinkConfig {
@@ -144,7 +149,10 @@ impl RecvSinkConfig {
         cap: usize,
     ) -> Self {
         Self {
-            slot: std::sync::Mutex::new(Some(initial_sink)),
+            slot: std::sync::Mutex::new(SinkSlot {
+                sink: Some(initial_sink),
+                owner_peer: None,
+            }),
             pending_consumer: std::sync::Mutex::new(None),
             signal,
             space,
@@ -152,35 +160,67 @@ impl RecvSinkConfig {
         }
     }
 
-    /// Create a fresh yring pair. Puts the `RecvSink` in `slot` and the
-    /// consumer in `pending_consumer`. No-op if the slot already contains
-    /// a sink.
+    /// Refill an unowned sink if its previous replacement was adopted.
     pub fn refill_sink(&self) {
-        let mut guard = self.slot.lock().unwrap();
-        if guard.is_some() {
+        let mut slot = self.slot.lock().unwrap();
+        if slot.owner_peer.is_none() {
+            self.refill_unowned(&mut slot);
+        }
+    }
+
+    fn refill_unowned(&self, slot: &mut SinkSlot) {
+        if slot.sink.is_some() {
+            return;
+        }
+        let mut pending = self.pending_consumer.lock().unwrap();
+        if pending.is_some() {
+            // Never discard a replacement ring before application adoption.
+            // New peers can use the bounded fallback receive path meanwhile.
             return;
         }
         let (prod, cons) = yring::spsc(self.cap);
-        let f = self.signal.clone();
-        *guard = Some(RecvSink::Yring(YringSink {
+        let signal = self.signal.clone();
+        slot.sink = Some(RecvSink::Yring(YringSink {
             producer: prod,
-            signal: Box::new(move || f()),
+            signal: Box::new(move || signal()),
             space: self.space.clone(),
         }));
-        *self.pending_consumer.lock().unwrap() = Some(cons);
+        *pending = Some(cons);
     }
 
     pub fn take_sink(&self) -> Option<RecvSink> {
+        self.take_for_owner(None)
+    }
+
+    pub(crate) fn take_sink_for_peer(&self, peer_id: u64) -> Option<RecvSink> {
+        self.take_for_owner(Some(peer_id))
+    }
+
+    fn take_for_owner(&self, peer_id: Option<u64>) -> Option<RecvSink> {
         let mut slot = self.slot.lock().unwrap();
-        if let Some(RecvSink::Authenticated(sink)) = slot.as_ref() {
+        if let Some(RecvSink::Authenticated(sink)) = slot.sink.as_ref() {
             return Some(RecvSink::Authenticated(sink.clone()));
         }
-        slot.take()
+        if slot.owner_peer.is_none() {
+            self.refill_unowned(&mut slot);
+        }
+        let sink = slot.sink.take()?;
+        slot.owner_peer = peer_id;
+        Some(sink)
+    }
+
+    pub(crate) fn peer_disconnected(&self, peer_id: u64) {
+        let mut slot = self.slot.lock().unwrap();
+        if slot.owner_peer != Some(peer_id) {
+            return;
+        }
+        slot.owner_peer = None;
+        self.refill_unowned(&mut slot);
     }
 
     pub(crate) fn authenticated_sink(&self) -> Option<RecvSink> {
         let slot = self.slot.lock().unwrap();
-        let RecvSink::Authenticated(sink) = slot.as_ref()? else {
+        let RecvSink::Authenticated(sink) = slot.sink.as_ref()? else {
             return None;
         };
         Some(RecvSink::Authenticated(sink.clone()))

@@ -261,3 +261,27 @@ fn req_delimiter_and_multipart_inproc() {
 fn req_delimiter_and_multipart_tcp() {
     req_malformed_reply("tcp");
 }
+
+#[test]
+fn fallback_disconnect_does_not_replace_a_live_direct_receive_ring() {
+    let mut sockets = Sockets::new();
+    let pull = sockets.socket(7);
+    let first = sockets.socket(8);
+    let second = sockets.socket(8);
+    let endpoint = bind(pull, "inproc");
+    assert_eq!(zmq_connect(first, endpoint.as_ptr()), 0);
+    send(first, b"direct");
+    assert_eq!(recv(pull), b"direct");
+    assert_eq!(zmq_connect(second, endpoint.as_ptr()), 0);
+    send(second, b"fallback");
+    assert_eq!(recv(pull), b"fallback");
+    assert_eq!(omq_zmq::zmq_disconnect(second, endpoint.as_ptr()), 0);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let third = sockets.socket(8);
+    assert_eq!(zmq_connect(third, endpoint.as_ptr()), 0);
+    send(third, b"replacement");
+    send(first, b"still-live");
+    let messages = [recv(pull), recv(pull)];
+    assert!(messages.iter().any(|message| message == b"still-live"));
+    assert!(messages.iter().any(|message| message == b"replacement"));
+}

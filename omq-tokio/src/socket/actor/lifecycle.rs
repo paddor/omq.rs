@@ -32,7 +32,7 @@ impl<'a> PeerLifecycle<'a> {
         self.publish_disconnect(peer.as_ref(), reason);
         self.driver.spsc.remove_empty_tcp_consumer(peer_id);
         self.invalidate_transmit_slot(peer.as_ref());
-        self.refill_recv_sink();
+        self.refill_recv_sink(peer_id);
         self.reset_type_state_if_last_peer();
         peer
     }
@@ -75,11 +75,11 @@ impl<'a> PeerLifecycle<'a> {
         }
     }
 
-    fn refill_recv_sink(&self) {
+    fn refill_recv_sink(&self, peer_id: u64) {
         // Refill the RecvSink slot so the next wire peer gets the fast
         // yring path instead of falling back to the recv pump.
         if let Some(ref config) = self.driver.recv_sink_config {
-            config.refill_sink();
+            config.peer_disconnected(peer_id);
         }
     }
 

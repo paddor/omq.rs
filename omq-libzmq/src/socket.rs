@@ -46,6 +46,17 @@ pub(crate) struct RecvConsumers {
     pub pump: yring::Consumer<omq_tokio::Message>,
 }
 
+impl RecvConsumers {
+    pub(crate) fn refresh(&mut self, config: Option<&Arc<omq_tokio::engine::RecvSinkConfig>>) {
+        if self.fast.is_disconnected()
+            && let Some(config) = config
+            && let Some(consumer) = config.try_take_pending_consumer()
+        {
+            self.fast = consumer;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct OmqSocket {
     pub id: u64,
@@ -94,6 +105,15 @@ pub(crate) struct OmqSocket {
 }
 
 impl OmqSocket {
+    pub(crate) fn recv_has_data(&self) -> bool {
+        // SAFETY: libzmq sockets are accessed by at most one application thread.
+        let Some(consumers) = unsafe { self.recv_cons.get() }.as_mut() else {
+            return false;
+        };
+        consumers.refresh(self.recv_sink_config.get());
+        !consumers.fast.is_empty() || !consumers.pump.is_empty()
+    }
+
     fn allow_thread_migration(&self) {
         self.send_accum.allow_thread_migration();
         self.recv_cons.allow_thread_migration();

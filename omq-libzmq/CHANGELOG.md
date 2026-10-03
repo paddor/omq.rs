@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fallback peer disconnect no longer replaces a live direct receive ring.
+  Pending replacement rings survive churn, and polling/`ZMQ_EVENTS` adopt
+  replacement consumers before reporting readiness.
 - REP replies retain the correct request route when multiple peers queue
   requests before the application replies. Peer, envelope, body, and ZAP
   properties stay associated through direct and relayed receives.

@@ -3744,6 +3744,45 @@ mod tests {
     }
 
     #[test]
+    fn receive_config_recycles_only_its_owner_and_retains_pending_queues() {
+        let (producer, mut initial_consumer) = yring::spsc(4);
+        let config = RecvSinkConfig::new(
+            RecvSink::Yring(YringSink {
+                producer,
+                signal: Box::new(|| {}),
+                space: Arc::new(StateSignal::new()),
+            }),
+            Arc::new(|| {}),
+            Arc::new(StateSignal::new()),
+            4,
+        );
+        let mut first = config.take_sink_for_peer(0).unwrap();
+        config.peer_disconnected(1);
+        assert!(config.take_sink_for_peer(2).is_none());
+        first.try_deliver(Message::single("first")).unwrap();
+        assert_eq!(
+            initial_consumer.prefetch_and_pop(),
+            Some(Message::single("first"))
+        );
+        drop(first);
+        config.peer_disconnected(0);
+        let mut second = config.take_sink_for_peer(2).unwrap();
+        second.try_deliver(Message::single("second")).unwrap();
+        drop(second);
+        config.peer_disconnected(2);
+        assert!(
+            config.take_sink_for_peer(3).is_none(),
+            "pending ring must survive churn"
+        );
+        let mut pending = config.try_take_pending_consumer().unwrap();
+        assert_eq!(pending.prefetch_and_pop(), Some(Message::single("second")));
+        let mut third = config.take_sink_for_peer(3).unwrap();
+        third.try_deliver(Message::single("third")).unwrap();
+        let mut newest = config.try_take_pending_consumer().unwrap();
+        assert_eq!(newest.prefetch_and_pop(), Some(Message::single("third")));
+    }
+
+    #[test]
     fn yring_sink_deferred_send_signals_once_per_flush() {
         let (producer, mut consumer) = yring::spsc(4);
         let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));

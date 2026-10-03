@@ -209,7 +209,7 @@ pub(super) fn spawn_byte_stream_connection(
 /// messages are relayed by the peer task. Sockets with a fan-in queue
 /// always have a port, so that queue never appears here.
 fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
-    let recv_sink = take_inproc_recv_sink(socket).or_else(|| {
+    let recv_sink = take_inproc_recv_sink(socket, peer_id).or_else(|| {
         socket
             .spsc
             .conflate_slot
@@ -388,7 +388,7 @@ fn inproc_port_sink(
     peer_id: u64,
     peer_send_hwm: usize,
 ) -> crate::engine::RecvSink {
-    let sink = take_inproc_recv_sink(socket)
+    let sink = take_inproc_recv_sink(socket, peer_id)
         .or_else(|| {
             socket
                 .spsc
@@ -806,7 +806,7 @@ fn attach_yring_recv_bypass(
     let sink = socket
         .recv_sink_config
         .as_ref()
-        .and_then(|cfg| cfg.take_sink())
+        .and_then(|cfg| cfg.take_sink_for_peer(peer_id))
         .unwrap_or_else(|| {
             if let Some(fanin) = &socket.spsc.fanin {
                 return fanin_recv_sink(fanin, &socket.recv_tx);
@@ -853,14 +853,14 @@ fn fanin_recv_sink(
     crate::engine::RecvSink::Channel(recv_tx.clone())
 }
 
-fn take_inproc_recv_sink(socket: &SocketDriver) -> Option<crate::engine::RecvSink> {
+fn take_inproc_recv_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
     if !can_bypass_actor_recv(socket.socket_type) || socket.socket_type == SocketType::Req {
         return None;
     }
     socket
         .recv_sink_config
         .as_ref()
-        .and_then(|cfg| cfg.take_sink())
+        .and_then(|cfg| cfg.take_sink_for_peer(peer_id))
 }
 
 fn spawn_wire_task(

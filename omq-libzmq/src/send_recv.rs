@@ -841,12 +841,7 @@ fn try_pop_dual(
     cons: &mut crate::socket::RecvConsumers,
     sock: &crate::socket::OmqSocket,
 ) -> Option<PoppedMessage> {
-    if cons.fast.is_disconnected()
-        && let Some(cfg) = sock.recv_sink_config.get()
-        && let Some(new_cons) = cfg.try_take_pending_consumer()
-    {
-        cons.fast = new_cons;
-    }
+    cons.refresh(sock.recv_sink_config.get());
     let mut released_full_slot = false;
     let mut budget = DrainBudget::WORKER;
     while !budget.exhausted() {

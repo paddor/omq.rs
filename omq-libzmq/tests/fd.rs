@@ -280,3 +280,43 @@ fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
     assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
+
+#[test]
+fn fd_and_events_observe_recycled_fast_ring_before_receive() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_rcvtimeo(pull, 1000);
+    assert_eq!(
+        zmq_bind(pull, c"inproc://fd-recycled-fast-ring".as_ptr()),
+        0
+    );
+    let fd = get_fd(pull);
+    for sequence in 0_u32..3 {
+        let push = zmq_socket(ctx, ZMQ_PUSH);
+        assert_eq!(
+            zmq_connect(push, c"inproc://fd-recycled-fast-ring".as_ptr()),
+            0
+        );
+        let payload = sequence.to_le_bytes();
+        assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 4);
+        assert!(fd_readable(fd, 1000));
+        let mut events = 0_i32;
+        let mut size = size_of::<i32>();
+        assert_eq!(
+            zmq_getsockopt(pull, 15, (&raw mut events).cast(), &raw mut size),
+            0
+        );
+        assert_ne!(events & 1, 0, "replacement data must appear in ZMQ_EVENTS");
+        let mut received = [0_u8; 4];
+        assert_eq!(
+            zmq_recv(pull, received.as_mut_ptr().cast(), received.len(), 0),
+            4
+        );
+        assert_eq!(received, payload);
+        assert!(!fd_readable(fd, 0));
+        assert_eq!(zmq_close(push), 0);
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}

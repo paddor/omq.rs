@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- External receive sink replacement follows its owning peer. Queued messages
+  in an unadopted replacement ring are retained across further disconnects.
 - REP receive queues keep each complete request and its peer route together;
   reply admission occurs when the application receives it. Compatibility
   relays can forward complete items without advancing REQ/REP state.

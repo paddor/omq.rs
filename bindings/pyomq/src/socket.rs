@@ -371,7 +371,7 @@ impl SocketInner {
             .as_ref()
             .unwrap()
             .socket
-            .clone())
+            .clone_shared())
     }
 
     pub fn ensure_blocking_id(&self) -> PyResult<u64> {

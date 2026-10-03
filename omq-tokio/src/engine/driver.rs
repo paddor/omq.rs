@@ -260,6 +260,34 @@ pub struct PeerDriverHandle {
     pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActorPeerDriverHandle {
+    /// Control-plane commands. Never carries application data.
+    pub inbox: mpsc::Sender<PeerDriverCommand>,
+    /// Fallback data plane for peers without a send pipe or transmit slot.
+    pub data_inbox: super::data_inbox::Sender,
+    pub cancel: CancellationToken,
+    pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
+    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    pub(crate) send_pipe: Option<SendPipeProducerHandle>,
+    /// Direct route into an inproc peer's receive queue.
+    pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
+}
+
+impl From<PeerDriverHandle> for ActorPeerDriverHandle {
+    fn from(handle: PeerDriverHandle) -> Self {
+        Self {
+            inbox: handle.inbox,
+            data_inbox: super::data_inbox::Sender::Legacy(handle.data_inbox),
+            cancel: handle.cancel,
+            transmit_slot: handle.transmit_slot,
+            direct_tcp_writer: handle.direct_tcp_writer,
+            send_pipe: handle.send_pipe,
+            inproc: handle.inproc,
+        }
+    }
+}
+
 /// Parsed ZMTP events and the final closure signal for standalone drivers.
 /// Socket-owned drivers reserve a separate lifecycle slot and publish protocol
 /// events independently of their bounded application-data lane.
@@ -513,7 +541,7 @@ where
     stream: T,
     connection: Connection,
     inbox: mpsc::Receiver<PeerDriverCommand>,
-    data_inbox: Option<mpsc::Receiver<PeerDriverData>>,
+    data_inbox: Option<super::data_inbox::Receiver>,
     /// Application-data output: one socket-owned fanring producer, or the
     /// caller's combined Tokio queue for a standalone driver.
     peer_out: PeerOutput,
@@ -752,6 +780,11 @@ where
     /// full or stalled outbound path cannot hide lifecycle commands.
     #[must_use]
     pub fn with_data_inbox(mut self, rx: mpsc::Receiver<PeerDriverData>) -> Self {
+        self.data_inbox = Some(super::data_inbox::Receiver::Legacy(rx));
+        self
+    }
+
+    pub(crate) fn with_actor_data_inbox(mut self, rx: super::data_inbox::Receiver) -> Self {
         self.data_inbox = Some(rx);
         self
     }
@@ -1271,7 +1304,9 @@ where
                         && pipe_batch.is_empty()
                         && deferred_data.is_none()
                         && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
-                        && data_inbox.as_ref().is_none_or(mpsc::Receiver::is_empty)
+                        && data_inbox
+                            .as_ref()
+                            .is_none_or(super::data_inbox::Receiver::is_empty)
                         && transmit_slot.as_ref().is_none_or(|slot| slot.is_empty())));
             #[cfg(feature = "ws")]
             let shutdown_ready = if shutdown_ready && connection.is_ws() {
@@ -1542,7 +1577,7 @@ fn publish_direct_idle(
     slot: Option<&PeerTransmitSlot>,
     local_empty: bool,
     pipe: Option<&SendPipeConsumer>,
-    data: Option<&mpsc::Receiver<PeerDriverData>>,
+    data: Option<&super::data_inbox::Receiver>,
     control: &mpsc::Receiver<PeerDriverCommand>,
 ) {
     let Some(slot) = slot else { return };
@@ -1555,7 +1590,7 @@ fn publish_direct_idle(
     writer.publish_idle(|| {
         slot.is_empty()
             && pipe.is_none_or(SendPipeConsumer::is_empty)
-            && data.is_none_or(mpsc::Receiver::is_empty)
+            && data.is_none_or(super::data_inbox::Receiver::is_empty)
             && control.is_empty()
     });
 }
@@ -1847,7 +1882,7 @@ fn handle_inbox_command(
 
 fn handle_data_inbox(
     first: PeerDriverData,
-    data_inbox: &mut mpsc::Receiver<PeerDriverData>,
+    data_inbox: &mut super::data_inbox::Receiver,
     outbound: &mut OutboundState,
     connection: &mut Connection,
     eq: &mut FrameBuffer,
@@ -1872,6 +1907,7 @@ fn handle_data_inbox(
         }
         PeerDriverData::SendEncoded(chunks) => eq.push_shared_chunks(&chunks),
     }
+    data_inbox.release_consumed();
     Ok(deferred)
 }
 

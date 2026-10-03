@@ -2,7 +2,7 @@
 
 use super::lane::LanePeerAdd;
 use super::{FanOutPeer, FanOutSend, PeerOutbound, SubscriptionSet};
-use crate::engine::PeerDriverHandle;
+use crate::engine::ActorPeerDriverHandle;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -11,7 +11,7 @@ impl FanOutSend {
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         io_thread: usize,
     ) {
         self.add_peer(peer_id, handle, false, io_thread);
@@ -20,7 +20,7 @@ impl FanOutSend {
     pub(crate) fn connection_added_any_groups(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         io_thread: usize,
     ) {
         self.add_peer(peer_id, handle, true, io_thread);
@@ -30,7 +30,7 @@ impl FanOutSend {
     fn add_peer(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         any_groups: bool,
         io_thread: usize,
     ) {
@@ -122,7 +122,7 @@ mod tests {
         compression: Option<CompressionKind>,
     ) -> (
         Arc<PeerTransmitSlot>,
-        PeerDriverHandle,
+        ActorPeerDriverHandle,
         mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
         peer_with_options(peer_id, framing, compression, &Options::default())
@@ -135,7 +135,7 @@ mod tests {
         options: &Options,
     ) -> (
         Arc<PeerTransmitSlot>,
-        PeerDriverHandle,
+        ActorPeerDriverHandle,
         mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
         let slot = PeerTransmitSlot::new(
@@ -152,9 +152,9 @@ mod tests {
         slot.handshake_done.store(true, Ordering::Release);
         let (inbox, _commands) = mpsc::channel(1);
         let (data_inbox, data) = mpsc::channel(1);
-        let handle = PeerDriverHandle {
+        let handle = ActorPeerDriverHandle {
             inbox,
-            data_inbox,
+            data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
             transmit_slot: Some(slot.clone()),
             direct_tcp_writer: None,

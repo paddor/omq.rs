@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::engine::signal::StateSignal;
-use crate::engine::{PeerDriverHandle, SendPipeError, SendPipeProducer};
+use crate::engine::{ActorPeerDriverHandle, SendPipeError, SendPipeProducer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 
@@ -124,7 +124,7 @@ impl ExclusiveSend {
     }
 
     #[expect(clippy::needless_pass_by_value)]
-    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: PeerDriverHandle) {
+    pub(crate) fn connection_added(&mut self, _peer_id: u64, handle: ActorPeerDriverHandle) {
         let send_pipe = handle
             .send_pipe
             .as_ref()
@@ -161,7 +161,7 @@ impl ExclusiveSend {
 #[cfg(test)]
 mod tests {
     use super::ExclusiveSend;
-    use crate::engine::{PeerDriverHandle, send_pipe};
+    use crate::engine::{ActorPeerDriverHandle, send_pipe};
     use omq_proto::error::TrySendError;
     use omq_proto::message::Message;
 
@@ -174,9 +174,9 @@ mod tests {
 
         send.connection_added(
             1,
-            PeerDriverHandle {
+            ActorPeerDriverHandle {
                 inbox: tokio::sync::mpsc::channel(1).0,
-                data_inbox: tokio::sync::mpsc::channel(1).0,
+                data_inbox: tokio::sync::mpsc::channel(1).0.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,
                 direct_tcp_writer: None,

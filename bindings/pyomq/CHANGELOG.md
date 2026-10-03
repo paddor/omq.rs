@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve one native send scope across internal blocking and proxy handle
+  copies, keeping fallback FIFO and capacity waits on the sending lane.
+
 - Keep REP peer, envelope, and body together until application receive.
   Sync polling and async relays no longer advance REQ/REP state early.
 - Reject request/reply sends until remaining receive frames are consumed.

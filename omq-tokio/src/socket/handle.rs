@@ -49,10 +49,11 @@ pub use omq_proto::error::TrySendError;
 /// so concurrent `recv` calls from different tasks are safe. Each
 /// message is delivered to exactly one caller. `send` goes through
 /// a per-socket `SendSubmitter` that serializes internally, so
-/// concurrent `send` calls are also safe. PEER socket clones own separate
-/// producer lanes per destination. Sequential sends through one clone preserve
+/// concurrent `send` calls are also safe. Fallback data inboxes and PEER sends
+/// use separate producer lanes per destination for each socket clone. Sequential sends through one clone preserve
 /// FIFO per destination; concurrent sends and distinct clones have no relative
-/// order. PEER bounds producer registrations and aggregate per-connection queued
+/// order. Fallback inboxes bound producer registrations and capacity per lane.
+/// PEER bounds producer registrations and aggregate per-connection queued
 /// payloads. PEER receives share one fair fan-in across all socket clones.
 #[derive(Clone, Debug)]
 pub struct Socket {
@@ -92,6 +93,16 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Copy an internal binding handle without creating another send lane.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            send_submitter: self.send_submitter.clone_shared(),
+        }
+    }
+
     /// Send one body to a RADIO group.
     pub async fn send_group(&self, group: impl Into<Bytes>, body: impl Into<Bytes>) -> Result<()> {
         if self.inner.socket_type != SocketType::Radio {

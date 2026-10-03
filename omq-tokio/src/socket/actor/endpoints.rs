@@ -186,7 +186,8 @@ impl SocketDriver {
 
         let cancel = self.cancel.child_token();
         let (inbox_tx, inbox_rx) = mpsc::channel(64);
-        let (data_inbox_tx, data_inbox_rx) = mpsc::channel(64);
+        let (data_inbox_tx, data_inbox_rx) =
+            crate::engine::data_inbox::channel(self.options.send_hwm.max(1) as usize);
         let task = spawn_radio_sender(sock, inbox_rx, data_inbox_rx, cancel.clone());
         let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
 

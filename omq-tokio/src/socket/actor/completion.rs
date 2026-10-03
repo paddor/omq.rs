@@ -334,7 +334,7 @@ mod tests {
                 ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
                 handle: PeerDriverHandle {
                     inbox,
-                    data_inbox,
+                    data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
                     transmit_slot: None,
                     direct_tcp_writer: None,

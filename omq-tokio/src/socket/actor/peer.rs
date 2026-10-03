@@ -288,6 +288,7 @@ impl SocketDriver {
             crate::engine::actor_output::PeerOutput::actor(peer_output),
             &self.cancel,
             completion,
+            self.options.send_hwm.max(1) as usize,
         );
 
         self.peers.insert(
@@ -634,7 +635,7 @@ impl SocketDriver {
 
     async fn replay_state_to_peer(
         &self,
-        handle: &crate::engine::PeerDriverHandle,
+        handle: &crate::engine::ActorPeerDriverHandle,
         subs_replay: Vec<bytes::Bytes>,
     ) {
         if supports_subscribe(self.socket_type) {
@@ -753,7 +754,7 @@ async fn relay_inbound(port: &crate::transport::inproc::InprocPort, pending: &mu
 /// inbox and the partner's channels until either side drops.
 pub(super) async fn inproc_peer_driver(
     inbox: mpsc::Receiver<crate::engine::PeerDriverCommand>,
-    data_inbox: mpsc::Receiver<crate::engine::PeerDriverData>,
+    data_inbox: crate::engine::data_inbox::Receiver,
     in_rx: mpsc::Receiver<InboundFrame>,
     out: mpsc::Sender<InboundFrame>,
     mut ctx: InprocDriverCtx,
@@ -766,7 +767,7 @@ pub(super) async fn inproc_peer_driver(
 #[expect(clippy::too_many_lines)]
 async fn inproc_peer_driver_body(
     mut inbox: mpsc::Receiver<crate::engine::PeerDriverCommand>,
-    mut data_inbox: mpsc::Receiver<crate::engine::PeerDriverData>,
+    mut data_inbox: crate::engine::data_inbox::Receiver,
     mut in_rx: mpsc::Receiver<InboundFrame>,
     out: mpsc::Sender<InboundFrame>,
     ctx: InprocDriverCtx,
@@ -1050,7 +1051,7 @@ mod tests {
     #[tokio::test]
     async fn inproc_completion_joins_with_its_handshake_mailbox_full() {
         let (commands, inbox) = mpsc::channel(1);
-        let (_data, data_inbox) = mpsc::channel(1);
+        let (_data, data_inbox) = crate::engine::data_inbox::channel(1);
         let (_incoming, in_rx) = mpsc::channel(1);
         let (out, mut outgoing) = mpsc::channel(1);
         let (peer_out, mut events) = mpsc::channel(1);
@@ -1104,7 +1105,7 @@ mod tests {
     async fn inproc_completion_counts_only_admitted_commands_and_messages() {
         for mode in ["close", "cancel", "abort"] {
             let (commands, inbox) = mpsc::channel(1);
-            let (_data, data_inbox) = mpsc::channel(1);
+            let (_data, data_inbox) = crate::engine::data_inbox::channel(1);
             let (incoming, in_rx) = mpsc::channel(2);
             let (out, _outgoing) = mpsc::channel(1);
             let (peer_out, mut events) = mpsc::channel(2);

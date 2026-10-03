@@ -16,7 +16,7 @@ use omq_proto::proto::Event as ZmtpEvent;
 
 use crate::engine::driver::DriverStream;
 use crate::engine::peer_completion::CompletionProgress;
-use crate::engine::{PeerDriverCommand, PeerDriverData, PeerDriverHandle};
+use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 
 pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     stream: T,
@@ -24,9 +24,10 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     peer_out: PeerOutput,
     cancel: &CancellationToken,
     completion: CompletionProgress,
-) -> (PeerDriverHandle, tokio::task::JoinHandle<()>) {
+    capacity: usize,
+) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
     let (inbox_tx, inbox_rx) = mpsc::channel(64);
-    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(64);
+    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
     let mut completion = completion.with_stream_disconnect();
@@ -44,7 +45,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
         let _ = completion.complete(None);
     });
     (
-        PeerDriverHandle {
+        ActorPeerDriverHandle {
             inbox: inbox_tx,
             data_inbox: data_inbox_tx,
             cancel: handle_cancel,
@@ -63,7 +64,7 @@ async fn run_body<T: DriverStream>(
     mut peer_out: PeerOutput,
     cancel: CancellationToken,
     mut inbox: mpsc::Receiver<PeerDriverCommand>,
-    mut data_inbox: mpsc::Receiver<PeerDriverData>,
+    mut data_inbox: crate::engine::data_inbox::Receiver,
     completion: &mut CompletionProgress,
 ) {
     let (mut reader, mut writer) = stream.split(false);
@@ -160,6 +161,7 @@ mod tests {
             events.into(),
             &CancellationToken::new(),
             completion,
+            64,
         );
         handle.inbox.try_send(PeerDriverCommand::Close).unwrap();
         tokio::time::timeout(Duration::from_millis(500), &mut task)
@@ -189,13 +191,16 @@ mod tests {
             let (stream, mut remote) = tokio::io::duplex(4096);
             let (events, mut event_inbox) = mpsc::channel(1);
             let (completion, finished) = CompletionProgress::reserve(7);
-            let (handle, mut task) = spawn(
+            let (mut handle, mut task) = spawn(
                 stream,
                 7,
                 events.into(),
                 &CancellationToken::new(),
                 completion,
+                64,
             );
+            handle.data_inbox =
+                crate::engine::data_inbox::SenderLanes::default().bind(&handle.data_inbox);
             // Leave the connect notification admitted in the one-slot mailbox.
             tokio::time::timeout(Duration::from_millis(500), async {
                 while event_inbox.len() != 1 {

@@ -47,13 +47,23 @@ pub struct Socket {
 }
 
 impl Socket {
+    /// Copy an internal binding handle while retaining its send lanes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            inner: self.inner.clone_shared(),
+            ctx: self.ctx.clone(),
+        }
+    }
+
     /// Send one body to a RADIO group.
     pub fn send_group(
         &self,
         group: impl Into<bytes::Bytes>,
         body: impl Into<bytes::Bytes>,
     ) -> Result<()> {
-        let socket = self.inner.clone();
+        let socket = self.inner.clone_shared();
         let group = group.into();
         let body = body.into();
         self.ctx
@@ -91,13 +101,13 @@ impl Socket {
     /// Returns the concrete endpoint. Wildcards such as `tcp://*:0` are
     /// expanded to the address selected by the OS.
     pub fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.bind(endpoint).await })
     }
 
     /// Bind this socket to an endpoint before `timeout` elapses.
     pub fn bind_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<Endpoint> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move {
             tokio::time::timeout(timeout, s.bind(endpoint))
                 .await
@@ -107,13 +117,13 @@ impl Socket {
 
     /// Connect this socket to an endpoint.
     pub fn connect(&self, endpoint: Endpoint) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.connect(endpoint).await })
     }
 
     /// Connect this socket to an endpoint before `timeout` elapses.
     pub fn connect_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move {
             tokio::time::timeout(timeout, s.connect(endpoint))
                 .await
@@ -248,55 +258,55 @@ impl Socket {
 
     /// Add a SUB prefix subscription.
     pub fn subscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         let p = prefix.into();
         self.ctx.block_on(async move { s.subscribe(p).await })
     }
 
     /// Remove a SUB prefix subscription.
     pub fn unsubscribe(&self, prefix: impl Into<bytes::Bytes>) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         let p = prefix.into();
         self.ctx.block_on(async move { s.unsubscribe(p).await })
     }
 
     /// Join a DISH group.
     pub fn join(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         let g = group.into();
         self.ctx.block_on(async move { s.join(g).await })
     }
 
     /// Leave a DISH group.
     pub fn leave(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         let g = group.into();
         self.ctx.block_on(async move { s.leave(g).await })
     }
 
     /// Stop listening on a previously bound endpoint.
     pub fn unbind(&self, endpoint: Endpoint) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.unbind(endpoint).await })
     }
 
     /// Stop dialing a previously connected endpoint.
     pub fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.disconnect(endpoint).await })
     }
 
     /// Return status for one live connection id.
     pub fn connection_info(&self, connection_id: u64) -> Result<Option<ConnectionStatus>> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.connection_info(connection_id).await })
     }
 
     /// Return status for one routing id.
     pub fn peer_info(&self, routing_id: u32) -> Result<Option<PeerInfo>> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.peer_info(routing_id).await })
     }
@@ -305,7 +315,7 @@ impl Socket {
     ///
     /// Returns the current ready-peer count.
     pub fn wait_connected(&self, min_peers: usize, timeout: Duration) -> Result<usize> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.wait_connected(min_peers, timeout).await })
     }
@@ -314,14 +324,14 @@ impl Socket {
     ///
     /// Returns the current subscription generation.
     pub fn wait_subscribed(&self, min_subscriptions: u64, timeout: Duration) -> Result<u64> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.wait_subscribed(min_subscriptions, timeout).await })
     }
 
     /// Return a snapshot of current connection statuses.
     pub fn connections(&self) -> Result<Vec<ConnectionStatus>> {
-        let s = self.inner.clone();
+        let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.connections().await })
     }
 

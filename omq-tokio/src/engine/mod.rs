@@ -12,6 +12,7 @@
 pub(crate) mod actor_output;
 pub(crate) mod codec;
 pub mod compression_pool;
+pub(crate) mod data_inbox;
 pub mod driver;
 pub(crate) mod framing;
 pub(crate) mod peer_completion;
@@ -24,6 +25,7 @@ pub(crate) mod signal;
 pub(crate) mod transmit_slot;
 pub(crate) mod write_ownership;
 
+pub(crate) use driver::ActorPeerDriverHandle;
 pub use driver::{
     AuthenticatedRecvItem, ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverData,
     PeerDriverHandle, PeerEvent, RecvSink, RecvSinkConfig, YringSink,

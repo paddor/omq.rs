@@ -21,6 +21,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Socket-owned fallback data inboxes use bounded fanring lanes, registered
+  lazily per socket clone and destination. Preserve exact lane HWMs, fan-out
+  publication admission, producer FIFO, and graceful close draining.
+
 - Socket-owned peer drivers send actor-bound application data through bounded
   fanring lanes, one per connection. Protocol events use a separate control
   mailbox; public standalone drivers retain their supplied Tokio event queue.

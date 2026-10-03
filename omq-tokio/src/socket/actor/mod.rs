@@ -49,7 +49,10 @@ use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
 use crate::engine::rate_limit::SharedIpRateLimiter;
-use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle};
+use crate::engine::{
+    ActorPeerDriverHandle as PeerDriverHandle, ConnectionDriver, PeerDriverCommand,
+    PeerDriverConfig,
+};
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely

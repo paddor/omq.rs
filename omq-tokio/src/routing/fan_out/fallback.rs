@@ -17,7 +17,7 @@ use omq_proto::message::Message;
 
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
-fn data_inbox(target: &PeerOutbound) -> Option<&tokio::sync::mpsc::Sender<PeerDriverData>> {
+fn data_inbox(target: &PeerOutbound) -> Option<&crate::engine::data_inbox::Sender> {
     match target {
         PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => Some(inbox),
         PeerOutbound::Inproc(_) => None,
@@ -26,7 +26,7 @@ fn data_inbox(target: &PeerOutbound) -> Option<&tokio::sync::mpsc::Sender<PeerDr
 
 /// Space held for one fallback peer until the publication commits.
 pub(super) enum Reserved<'a> {
-    Inbox(tokio::sync::mpsc::Permit<'a, PeerDriverData>),
+    Inbox(crate::engine::data_inbox::Permit<'a>),
     /// Inproc ring with free space. The publish lock keeps other senders
     /// of this socket out until the message is pushed.
     Inproc(&'a InprocSender),
@@ -273,6 +273,36 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn fanring_publication_reserves_all_clone_lanes_before_committing() {
+        use crate::engine::data_inbox::{SenderLanes, channel};
+        let scope = SenderLanes::default();
+        let (first, mut first_rx) = channel(1);
+        let (second, mut second_rx) = channel(1);
+        let first = scope.bind(&first);
+        let second = scope.bind(&second);
+        second
+            .try_send(PeerDriverData::SendMessage(Message::single("old")))
+            .unwrap();
+        let targets = [PeerOutbound::Inbox(first), PeerOutbound::Inbox(second)];
+        assert!(try_reserve_targets(&targets).is_none());
+        assert!(
+            first_rx.is_empty(),
+            "failed publication changed an earlier peer"
+        );
+        assert!(second_rx.recv().await.is_some());
+        let reserved = try_reserve_targets(&targets).unwrap();
+        for permit in reserved {
+            permit.send(Message::single("new"));
+        }
+        for receiver in [&mut first_rx, &mut second_rx] {
+            let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+                panic!("message")
+            };
+            assert_eq!(message.part_slice(0), Some(b"new".as_slice()));
+        }
+    }
+
     fn blocking_sender() -> super::super::FanOutSend {
         let options = omq_proto::Options {
             xpub_nodrop: true,
@@ -294,9 +324,9 @@ mod tests {
         let (data_inbox, data) = tokio::sync::mpsc::channel(1);
         sender.connection_added(
             id,
-            crate::engine::PeerDriverHandle {
+            crate::engine::ActorPeerDriverHandle {
                 inbox,
-                data_inbox,
+                data_inbox: data_inbox.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,
                 direct_tcp_writer: None,
@@ -391,7 +421,7 @@ mod tests {
         let (inbox, _rx) = tokio::sync::mpsc::channel(1);
         let target = PeerOutbound::Wire {
             slot: slot.clone(),
-            inbox,
+            inbox: inbox.into(),
             direct: None,
         };
         let mut deactivated = false;
@@ -464,12 +494,12 @@ mod tests {
         let targets = [
             PeerOutbound::Wire {
                 slot: slot1.clone(),
-                inbox: inbox1,
+                inbox: inbox1.into(),
                 direct: None,
             },
             PeerOutbound::Wire {
                 slot: slot2.clone(),
-                inbox: inbox2,
+                inbox: inbox2.into(),
                 direct: None,
             },
         ];
@@ -488,7 +518,7 @@ mod tests {
         let (inbox, _rx) = tokio::sync::mpsc::channel(1);
         PeerOutbound::Wire {
             slot: slot.clone(),
-            inbox,
+            inbox: inbox.into(),
             direct: None,
         }
     }

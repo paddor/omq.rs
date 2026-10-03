@@ -129,7 +129,7 @@ async fn run_message_probe(
             .send(PeerDriverCommand::ActivateDataPlane)
             .await
             .unwrap();
-        fanout.connection_added(id as u64, peer.handle.clone(), 0);
+        fanout.connection_added(id as u64, peer.handle.clone().into(), 0);
         if let Some(ack) = fanout.peer_subscribe(id as u64, Bytes::from_static(b"topic")) {
             ack.await.unwrap();
         }

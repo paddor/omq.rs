@@ -101,15 +101,17 @@ struct Lane {
 /// sends lock only that clone's destination producer, never the route table.
 #[derive(Debug)]
 pub(super) struct SenderLanes {
-    table: ArcSwap<FxHashMap<u64, Arc<Lane>>>,
-    update: Mutex<()>,
+    data: crate::engine::data_inbox::SenderLanes,
+    table: Arc<ArcSwap<FxHashMap<u64, Arc<Lane>>>>,
+    update: Arc<Mutex<()>>,
 }
 
 impl Default for SenderLanes {
     fn default() -> Self {
         Self {
-            table: ArcSwap::from_pointee(FxHashMap::default()),
-            update: Mutex::new(()),
+            data: crate::engine::data_inbox::SenderLanes::default(),
+            table: Arc::new(ArcSwap::from_pointee(FxHashMap::default())),
+            update: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -121,6 +123,14 @@ impl Clone for SenderLanes {
 }
 
 impl SenderLanes {
+    pub(super) fn clone_shared(&self) -> Self {
+        Self {
+            data: self.data.clone_shared(),
+            table: self.table.clone(),
+            update: self.update.clone(),
+        }
+    }
+
     fn get(
         &self,
         route: &Route,
@@ -365,7 +375,7 @@ impl PeerRoutes {
                 let mut target = route.target.lock().expect("peer send queue poisoned");
                 match target.as_mut() {
                     Some(target) => (
-                        target.try_send_prepared(message, preparation),
+                        target.try_send_prepared(message, preparation, &lanes.data),
                         target.space_available(),
                     ),
                     None => (Err(SendPipeError::Closed(message)), None),
@@ -421,6 +431,26 @@ impl PeerRoutes {
                             })
                     })
                     .await;
+            }
+            return;
+        }
+        let outbound = route
+            .target
+            .lock()
+            .expect("peer target poisoned")
+            .as_ref()
+            .and_then(|target| target.outbound(&lanes.data));
+        if let Some(outbound) = outbound {
+            if let Some(space) = outbound.inbox_space() {
+                space
+                    .wait_until(|| {
+                        self.admission_closed.load(Ordering::Acquire)
+                            || route.target.lock().expect("peer target poisoned").is_none()
+                            || outbound.send_ready()
+                    })
+                    .await;
+            } else {
+                outbound.wait_capacity().await;
             }
             return;
         }

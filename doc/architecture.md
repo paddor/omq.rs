@@ -143,6 +143,46 @@ from the caller after normal send admission. A partial write transfers its
 remaining output to the driver. This is a specialized path; routing and queue
 ownership still follow the socket's ordinary rules.
 
+Fallback driver data inboxes use Coordinated fanring queues. Each socket clone
+lazily registers one producer per destination. Each lane holds at most
+`min(64, send_hwm)` messages, including reservations; non-power-of-two HWMs
+remain exact. Each destination allows 64 producer lanes plus its unused
+registrar. Retired lanes count until the driver reclaims them. A clone prunes
+closed destinations when adding a new cache entry.
+
+Publication reserves every required fallback lane before enqueuing anything.
+Each reservation holds its producer lock through commit, so another send
+through that clone cannot take the checked slot. Capacity waits register with
+the actual producer's `poll_ready` and observe close and route replacement.
+Graceful close stops admission and drains accepted messages and reservations;
+immediate teardown destroys unread payloads even if idle clones remain alive.
+Public standalone drivers retain their supplied Tokio inboxes. Internal
+binding and proxy handle copies share the original send scope to preserve
+direct/fallback FIFO and wait on the same capacity as their sends.
+
+A serial Linux VM comparison against the preceding actor-lane implementation
+used the same 64-byte messages, HWM 1000, pinned runtimes, warmup, and confirmed
+delivery barriers. Three alternating pairs gave these medians. The forced
+fallback echo used a latency-profile ROUTER and a throughput-profile DEALER;
+TCP ran for 10 seconds and WS for 3 seconds. One-way throughput and ping-pong
+latency kept both sockets in the throughput profile.
+
+| Probe | Before | After |
+| --- | --- | --- |
+| Forced TCP echo | 92.956 k/s | 89.612 k/s |
+| Forced WS echo | 342.982 k/s | 328.755 k/s |
+| TCP one-way throughput | 1.432 M/s | 1.419 M/s |
+| WS one-way throughput | 1.234 M/s | 1.218 M/s |
+| TCP ping-pong p99 | 68.162 us | 66.831 us |
+| WS ping-pong p99 | 67.440 us | 68.149 us |
+
+The fallback lane model costs 3.6% TCP and 4.1% WS throughput in these forced
+probes. CPU per message rose 4.7% and 3.5%; TCP switches per message rose 21.8%,
+with substantial variation between runs. TCP profiles were dominated by
+kernel socket locks. This migration provides separate producer capacity and
+bounded registration; these measurements do not establish a speedup or
+Windows performance.
+
 ## Routing and fan-out
 
 | Policy | Socket types | Destination |

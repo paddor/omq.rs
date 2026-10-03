@@ -360,7 +360,7 @@ impl ContextInner {
                 }
             }
             let linger = linger.map(|limit| limit.saturating_sub(started.elapsed()));
-            let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
+            let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone_shared());
             let _ = s.close_with_linger(linger).await;
             let _ = otx.send(());
         });
@@ -477,7 +477,7 @@ pub fn blocking_proxy(
         .and_then(|inner| inner.ensure_blocking_socket().ok());
 
     let (tx, rx) = flume::unbounded();
-    for (side, socket) in [(0_u8, fe.clone()), (1, be.clone())] {
+    for (side, socket) in [(0_u8, fe.clone_shared()), (1, be.clone_shared())] {
         let tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = socket.recv() {
@@ -487,7 +487,7 @@ pub fn blocking_proxy(
             }
         });
     }
-    if let Some(socket) = ctrl.clone() {
+    if let Some(socket) = ctrl.as_ref().map(omq_tokio::blocking::Socket::clone_shared) {
         let tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = socket.recv() {

@@ -3,23 +3,39 @@ use std::sync::Arc;
 use crate::engine::send_pipe::SendPreparation;
 use crate::engine::signal::StateSignal;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
-use crate::engine::{PeerDriverData, PeerDriverHandle, SendPipeError};
+use crate::engine::{ActorPeerDriverHandle, PeerDriverData, SendPipeError};
 use omq_proto::message::Message;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PeerOutbound {
     Wire {
         slot: Arc<PeerTransmitSlot>,
-        inbox: tokio::sync::mpsc::Sender<PeerDriverData>,
+        inbox: crate::engine::data_inbox::Sender,
         direct: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     },
-    Inbox(tokio::sync::mpsc::Sender<PeerDriverData>),
+    Inbox(crate::engine::data_inbox::Sender),
     /// Direct delivery into an inproc peer's receive queue.
     Inproc(crate::transport::inproc::InprocSender),
 }
 
 impl PeerOutbound {
-    pub(crate) fn from_handle(handle: &PeerDriverHandle) -> Self {
+    pub(crate) fn bind(&self, lanes: &crate::engine::data_inbox::SenderLanes) -> Self {
+        match self {
+            Self::Wire {
+                slot,
+                inbox,
+                direct,
+            } => Self::Wire {
+                slot: slot.clone(),
+                inbox: lanes.bind(inbox),
+                direct: direct.clone(),
+            },
+            Self::Inbox(inbox) => Self::Inbox(lanes.bind(inbox)),
+            Self::Inproc(sender) => Self::Inproc(sender.clone()),
+        }
+    }
+
+    pub(crate) fn from_handle(handle: &ActorPeerDriverHandle) -> Self {
         if let Some(sender) = &handle.inproc {
             return Self::Inproc(sender.clone());
         }
@@ -74,6 +90,9 @@ impl PeerOutbound {
         let message = preparation.prepare(msg);
         if let Some((slot, mut state)) = direct {
             if state.try_send(slot, &message) == TryFrameResult::Ok {
+                // Release reserved producer capacity before the payload's
+                // destructor can call a binding buffer owner.
+                drop(permit);
                 return Ok(());
             }
             state.queued();
@@ -102,7 +121,7 @@ impl PeerOutbound {
             Self::Wire { inbox, .. } | Self::Inbox(inbox) => inbox,
             Self::Inproc(sender) => return sender.has_space(),
         };
-        !self.is_alive() || inbox.capacity() > 0
+        !self.is_alive() || inbox.send_ready()
     }
 
     pub(crate) async fn wait_capacity(&self) {
@@ -112,7 +131,7 @@ impl PeerOutbound {
         };
         // The permit is only a wake condition; routing is retried afterward.
         // reserve() registers and rechecks capacity, including inproc inboxes.
-        drop(inbox.reserve().await);
+        inbox.wait_capacity().await;
     }
 
     pub(crate) fn requires_per_peer_encoding(&self) -> bool {
@@ -133,18 +152,25 @@ impl PeerOutbound {
 
     pub(crate) fn is_empty(&self) -> bool {
         match self {
-            Self::Wire { slot, inbox, .. } => {
-                slot.is_empty() && inbox.capacity() == inbox.max_capacity()
-            }
-            Self::Inbox(tx) => tx.capacity() == tx.max_capacity(),
+            Self::Wire { slot, inbox, .. } => slot.is_empty() && inbox.is_empty(),
+            Self::Inbox(tx) => tx.is_empty(),
             Self::Inproc(sender) => sender.is_empty(),
+        }
+    }
+
+    pub(crate) fn inbox_space(&self) -> Option<Arc<StateSignal>> {
+        match self {
+            Self::Wire { inbox, .. } | Self::Inbox(inbox) => inbox.space(),
+            Self::Inproc(sender) => Some(sender.space()),
         }
     }
 
     pub(crate) fn space_available(&self) -> Option<Arc<StateSignal>> {
         match self {
-            Self::Wire { slot, .. } => Some(slot.space_available.clone()),
-            Self::Inbox(_) => None,
+            Self::Wire { slot, inbox, .. } => {
+                inbox.space().or_else(|| Some(slot.space_available.clone()))
+            }
+            Self::Inbox(inbox) => inbox.space(),
             Self::Inproc(sender) => Some(sender.space()),
         }
     }
@@ -184,7 +210,7 @@ mod tests {
         let (inbox, mut rx) = tokio::sync::mpsc::channel(4);
         let target = PeerOutbound::Wire {
             slot: slot.clone(),
-            inbox,
+            inbox: inbox.into(),
             direct: Some(Arc::new(DirectTcpWriter::new(tcp))),
         };
         assert_eq!(
@@ -210,7 +236,7 @@ mod tests {
     #[test]
     fn inbox_peer_outbound_reports_queued_messages() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let target = PeerOutbound::Inbox(tx.clone());
+        let target = PeerOutbound::Inbox(tx.clone().into());
 
         assert!(target.is_empty());
         tx.try_send(PeerDriverData::SendMessage(Message::from_slice(b"queued")))

@@ -6,6 +6,67 @@ use super::*;
 use crate::engine::send_pipe;
 
 #[tokio::test]
+async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
+    let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
+    let mut send = IdentitySend::new(SocketType::Router, &options);
+    let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
+    let handle = ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0,
+        data_inbox,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        transmit_slot: None,
+        direct_tcp_writer: None,
+        send_pipe: None,
+        inproc: None,
+    };
+    send.connection_added(7, handle, Bytes::from_static(b"id"), false);
+    let first = send.submitter();
+    first.try_send(Message::multipart(["id", "first"])).unwrap();
+    let shared = first.clone_shared();
+    assert!(matches!(
+        shared.try_send(Message::multipart(["id", "next"])),
+        Err(TrySendError::Full(_))
+    ));
+    let independent = first.clone();
+    independent
+        .try_send(Message::multipart(["id", "independent"]))
+        .unwrap();
+    let waiting = shared.wait_peer_send_progress(7);
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    let mut accepted = Vec::new();
+    for _ in 0..2 {
+        let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+            panic!("raw message")
+        };
+        accepted.push(message.part_bytes(0).unwrap());
+    }
+    accepted.sort();
+    assert_eq!(
+        accepted,
+        [
+            Bytes::from_static(b"first"),
+            Bytes::from_static(b"independent")
+        ]
+    );
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap();
+    shared.try_send(Message::multipart(["id", "next"])).unwrap();
+    let closing = shared.wait_peer_send_progress(7);
+    tokio::pin!(closing);
+    assert!(closing.as_mut().now_or_never().is_none());
+    send.stop_admission();
+    tokio::time::timeout(Duration::from_secs(1), closing)
+        .await
+        .unwrap();
+    let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+        panic!("raw message")
+    };
+    assert_eq!(message, Message::single("next"));
+}
+
+#[tokio::test]
 async fn routed_progress_wait_registers_without_an_application_identity_frame() {
     for socket_type in [SocketType::Rep, SocketType::Server] {
         for action in 0..3 {
@@ -108,9 +169,9 @@ fn try_send_reports_full_and_preserves_routing_frame() {
     let submitter = send.submitter();
 
     let (pipe_tx, _pipe_rx) = send_pipe(1);
-    let handle = PeerDriverHandle {
+    let handle = ActorPeerDriverHandle {
         inbox: tokio::sync::mpsc::channel(1).0,
-        data_inbox: tokio::sync::mpsc::channel(1).0,
+        data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
         direct_tcp_writer: None,
@@ -480,10 +541,10 @@ async fn closed_peer_pipe_is_unroutable_when_mandatory() {
     assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
 }
 
-fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
-    PeerDriverHandle {
+fn peer_handle(pipe: SendPipeProducer) -> ActorPeerDriverHandle {
+    ActorPeerDriverHandle {
         inbox: tokio::sync::mpsc::channel(1).0,
-        data_inbox: tokio::sync::mpsc::channel(1).0,
+        data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
         direct_tcp_writer: None,

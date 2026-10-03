@@ -29,7 +29,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::engine::{PeerDriverHandle, SendPipeConsumer};
+use crate::engine::{ActorPeerDriverHandle, SendPipeConsumer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -96,6 +96,15 @@ pub(crate) enum SendSubmitter {
 }
 
 impl SendSubmitter {
+    pub(crate) fn clone_shared(&self) -> Self {
+        match self {
+            Self::Identity(s) => Self::Identity(s.clone_shared()),
+            Self::FanOut(s) => Self::FanOut(s.clone_shared()),
+            Self::Latency(s) => Self::Latency(s.clone_shared()),
+            _ => self.clone(),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         match self {
             Self::None => {}
@@ -274,7 +283,7 @@ impl SendStrategy {
         &mut self,
         peer_id: u64,
         route_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         peer_identity: Bytes,
         is_inproc: bool,
         io_thread: usize,
@@ -295,7 +304,7 @@ impl SendStrategy {
     pub(crate) fn connection_added_any_groups(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         io_thread: usize,
     ) {
         if let Self::FanOut(s) = self {

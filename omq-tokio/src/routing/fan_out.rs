@@ -69,6 +69,7 @@ impl FanOutMutePolicy {
 
 #[derive(Debug)]
 pub(crate) struct Submitter {
+    data_lanes: crate::engine::data_inbox::SenderLanes,
     lanes: Arc<FanOutLanes>,
     lane_peer_count: Arc<AtomicUsize>,
     fallback_peer_count: Arc<AtomicUsize>,
@@ -86,18 +87,7 @@ pub(crate) struct Submitter {
 
 impl Clone for Submitter {
     fn clone(&self) -> Self {
-        Self {
-            lanes: self.lanes.clone(),
-            lane_peer_count: self.lane_peer_count.clone(),
-            fallback_peer_count: self.fallback_peer_count.clone(),
-            inner: self.inner.clone(),
-            publish: self.publish.clone(),
-            generation: self.generation.clone(),
-            mode: self.mode,
-            send_count: self.send_count.clone(),
-            xpub_nodrop: self.xpub_nodrop,
-            mute_policy: self.mute_policy,
-        }
+        self.copy_with_lanes(self.data_lanes.clone())
     }
 }
 
@@ -131,8 +121,28 @@ fn deactivate_fanout_target(
 }
 
 impl Submitter {
+    pub(crate) fn clone_shared(&self) -> Self {
+        self.copy_with_lanes(self.data_lanes.clone_shared())
+    }
+
     pub(crate) fn shutdown(&self) {
         self.lanes.shutdown();
+    }
+
+    fn copy_with_lanes(&self, data_lanes: crate::engine::data_inbox::SenderLanes) -> Self {
+        Self {
+            data_lanes,
+            lanes: self.lanes.clone(),
+            lane_peer_count: self.lane_peer_count.clone(),
+            fallback_peer_count: self.fallback_peer_count.clone(),
+            inner: self.inner.clone(),
+            publish: self.publish.clone(),
+            generation: self.generation.clone(),
+            mode: self.mode,
+            send_count: self.send_count.clone(),
+            xpub_nodrop: self.xpub_nodrop,
+            mute_policy: self.mute_policy,
+        }
     }
 
     fn deactivate_target(&self, target: &PeerOutbound) {
@@ -162,7 +172,7 @@ impl Submitter {
                         group,
                     )
             })
-            .map(|peer| peer.target.clone())
+            .map(|peer| peer.target.bind(&self.data_lanes))
             .collect();
         let has_lane_peers = g.peers.values().any(|peer| peer.lane.is_some());
         (targets, has_lane_peers)
@@ -457,6 +467,7 @@ impl FanOutSend {
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
+            data_lanes: crate::engine::data_inbox::SenderLanes::default(),
             lanes: self.lanes.clone(),
             lane_peer_count: self.lane_peer_count.clone(),
             fallback_peer_count: self.fallback_peer_count.clone(),

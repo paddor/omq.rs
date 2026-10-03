@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::engine::signal::StateSignal;
 use crate::engine::{
-    PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
+    ActorPeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
 };
 use omq_proto::error::Result;
 use omq_proto::message::Message;
@@ -469,7 +469,7 @@ impl RoundRobinSend {
     pub(crate) fn connection_added(
         &mut self,
         route_id: u64,
-        handle: &PeerDriverHandle,
+        handle: &ActorPeerDriverHandle,
         _is_inproc: bool,
     ) {
         let mut active = self.active.lock().expect("round_robin active");
@@ -538,7 +538,7 @@ impl RoundRobinSend {
 #[cfg(test)]
 mod tests {
     use super::{ActivePipe, ActivePipes, RoundRobinSend};
-    use crate::engine::PeerDriverHandle;
+    use crate::engine::ActorPeerDriverHandle;
     use crate::engine::send_pipe::send_pipe;
     use omq_proto::message::Message;
     use omq_proto::options::Options;
@@ -662,9 +662,9 @@ mod tests {
         let (send_pipe, mut send_pipe_rx) = send_pipe(1);
         let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
         let (data_inbox, _data_inbox_rx) = tokio::sync::mpsc::channel(1);
-        let handle = PeerDriverHandle {
+        let handle = ActorPeerDriverHandle {
             inbox,
-            data_inbox,
+            data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
             transmit_slot: None,
             direct_tcp_writer: None,

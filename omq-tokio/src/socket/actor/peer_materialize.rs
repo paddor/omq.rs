@@ -84,8 +84,9 @@ pub(super) fn spawn_byte_stream_connection(
     };
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) =
-        mpsc::channel(PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize));
+    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
+        PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
+    );
     let child_cancel = socket.cancel.child_token();
     let driver_cfg = peer_driver_config(socket);
     let workload_profile = workload_profile(socket);
@@ -123,7 +124,7 @@ pub(super) fn spawn_byte_stream_connection(
         setup.as_ref().and_then(|state| state.deadline),
         setup.as_ref().map(|state| state.cancel.clone()),
     )
-    .with_data_inbox(data_inbox_rx)
+    .with_actor_data_inbox(data_inbox_rx)
     .with_socket_close_state(socket.recv_tx.clone())
     .with_receive_profile(
         crate::engine::driver::ReceiveProfile::from_workload_for_socket(
@@ -265,8 +266,9 @@ pub(super) fn spawn_inproc_peer(
     }
 
     let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
-    let (data_inbox_tx, data_inbox_rx) =
-        mpsc::channel(PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize));
+    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
+        PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
+    );
     let child_cancel = socket.cancel.child_token();
     let peer_props = omq_proto::proto::command::PeerProperties::default()
         .with_socket_type(conn.peer.socket_type)

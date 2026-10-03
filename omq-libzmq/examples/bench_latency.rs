@@ -1,13 +1,6 @@
-//! Round-trip latency benchmark: single REQ/REP pair over inproc.
+//! C API round-trip latency and single-thread PUSH/PULL cost over inproc.
 //!
-//! This is the primary target of the pump-removal in Part 2. The old path:
-//!   C → `send_tx` channel → pump task wakes → `Socket::send`
-//! New path:
-//!   C → `run_on`/`with_socket` → `Socket::send` directly on io thread
-//!
-//! Run: `cargo run --example bench_latency --release -p omq-libzmq`
-//!
-//! Note: On Windows, IPC transport is not supported; only inproc is used.
+//! Run: `cargo run --release --example bench_latency -p omq-libzmq`
 
 use std::ffi::CString;
 use std::time::Instant;
@@ -24,12 +17,13 @@ const ZMQ_PULL: i32 = 7;
 const ZMQ_RCVTIMEO: i32 = 27;
 
 fn set_rcvtimeo(sock: *mut libc::c_void, ms: i32) {
-    zmq_setsockopt(
+    let result = zmq_setsockopt(
         sock,
         ZMQ_RCVTIMEO,
         (&raw const ms).cast(),
         std::mem::size_of::<i32>(),
     );
+    assert_eq!(result, 0);
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -43,8 +37,8 @@ fn bench_req_rep_inproc(iters: usize) {
     let rep = zmq_socket(ctx, ZMQ_REP);
 
     let addr = CString::new("inproc://bench-rtt").unwrap();
-    zmq_bind(rep, addr.as_ptr());
-    zmq_connect(req, addr.as_ptr());
+    assert_eq!(zmq_bind(rep, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(req, addr.as_ptr()), 0);
     std::thread::sleep(std::time::Duration::from_millis(20));
     set_rcvtimeo(req, 5000);
     set_rcvtimeo(rep, 5000);
@@ -59,24 +53,22 @@ fn bench_req_rep_inproc(iters: usize) {
         let rep = rep_raw as *mut libc::c_void;
         for _ in 0..iters + iters / 10 {
             let rc = zmq_recv(rep, buf.as_mut_ptr().cast(), buf.len(), 0);
-            if rc < 0 {
-                break;
-            }
-            zmq_send(rep, reply.as_ptr().cast(), reply.len(), 0);
+            assert_eq!(rc, 4);
+            assert_eq!(zmq_send(rep, reply.as_ptr().cast(), reply.len(), 0), 4);
         }
     });
 
     // warmup
     for _ in 0..iters / 10 {
-        zmq_send(req, payload.as_ptr().cast(), payload.len(), 0);
-        zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert_eq!(zmq_send(req, payload.as_ptr().cast(), payload.len(), 0), 4);
+        assert_eq!(zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
     }
 
     let mut latencies = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t = Instant::now();
-        zmq_send(req, payload.as_ptr().cast(), payload.len(), 0);
-        zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0);
+        assert_eq!(zmq_send(req, payload.as_ptr().cast(), payload.len(), 0), 4);
+        assert_eq!(zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0), 4);
         latencies.push(t.elapsed().as_nanos() as u64);
     }
 
@@ -92,9 +84,9 @@ fn bench_req_rep_inproc(iters: usize) {
         latencies.iter().sum::<u64>() as f64 / iters as f64,
     );
 
-    zmq_close(req);
-    zmq_close(rep);
-    zmq_ctx_term(ctx);
+    assert_eq!(zmq_close(req), 0);
+    assert_eq!(zmq_close(rep), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
 fn bench_push_pull_throughput(msg_size: usize, iters: usize) {
@@ -103,33 +95,46 @@ fn bench_push_pull_throughput(msg_size: usize, iters: usize) {
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
     let addr = CString::new("inproc://bench-tput").unwrap();
-    zmq_bind(pull, addr.as_ptr());
-    zmq_connect(push, addr.as_ptr());
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
     std::thread::sleep(std::time::Duration::from_millis(20));
     set_rcvtimeo(pull, 5000);
 
+    let expected = i32::try_from(msg_size).expect("message size fits C API");
     let payload: Vec<u8> = (0..msg_size).map(|i| i as u8).collect();
     let mut recv_buf = vec![0u8; msg_size];
 
     // warmup
     for _ in 0..iters / 10 {
-        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
-        zmq_recv(pull, recv_buf.as_mut_ptr().cast(), recv_buf.len(), 0);
+        assert_eq!(
+            zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+            expected
+        );
+        assert_eq!(
+            zmq_recv(pull, recv_buf.as_mut_ptr().cast(), recv_buf.len(), 0),
+            expected
+        );
     }
 
     let t = Instant::now();
     for _ in 0..iters {
-        zmq_send(push, payload.as_ptr().cast(), payload.len(), 0);
-        zmq_recv(pull, recv_buf.as_mut_ptr().cast(), recv_buf.len(), 0);
+        assert_eq!(
+            zmq_send(push, payload.as_ptr().cast(), payload.len(), 0),
+            expected
+        );
+        assert_eq!(
+            zmq_recv(pull, recv_buf.as_mut_ptr().cast(), recv_buf.len(), 0),
+            expected
+        );
     }
     let elapsed = t.elapsed();
     let ns_per = elapsed.as_nanos() as f64 / iters as f64;
     let gbps = (msg_size as f64 * iters as f64) / elapsed.as_secs_f64() / f64::from(1_u32 << 30);
     println!("PUSH/PULL inproc  sz={msg_size:>7}  {ns_per:8.0}ns/msg  {gbps:5.2} GB/s");
 
-    zmq_close(push);
-    zmq_close(pull);
-    zmq_ctx_term(ctx);
+    assert_eq!(zmq_close(push), 0);
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
 fn main() {

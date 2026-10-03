@@ -196,6 +196,22 @@ static IMPLS: &[ImplDef] = &[
         env: &[("OMQ_IO_THREADS", "1")],
     },
     ImplDef {
+        name: "omq-tokio-2ut-blocking",
+        binary_from: Some("omq-tokio-1t"),
+        prefix: "q",
+        class: Some(ImplClass::Classic),
+        main: false,
+        transports: &[Inproc],
+        inproc_tput_subcmd: "inproc-2ut-blocking",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: false,
+        env: &[("OMQ_IO_THREADS", "1")],
+    },
+    ImplDef {
         name: "omq-tokio-exclusive",
         binary_from: Some("omq-tokio-ct"),
         prefix: "E",
@@ -702,6 +718,7 @@ fn chrono_like_utc_now() -> String {
 // ---- Cell functions -------------------------------------------------------
 
 struct CellResult {
+    blocking_inproc: Option<parse::BlockingInprocStats>,
     msgs_s: f64,
     mbps: f64,
     elapsed: f64,
@@ -718,6 +735,7 @@ struct CellResult {
 
 fn zero_result(duration: f64) -> CellResult {
     CellResult {
+        blocking_inproc: None,
         msgs_s: 0.0,
         mbps: 0.0,
         elapsed: duration,
@@ -796,11 +814,17 @@ fn run_throughput_once(
             Duration::from_secs(duration as u64 + 30),
         ) && let Some(r) = parse::parse_throughput(&out, size)
         {
+            let blocking_inproc = parse::parse_blocking_inproc_stats(&out);
+            let measured_cpu = blocking_inproc
+                .as_ref()
+                .and_then(|stats| stats.cpu_seconds)
+                .unwrap_or(cpu);
             return CellResult {
+                blocking_inproc,
                 msgs_s: r.msgs_s,
                 mbps: r.mbps,
                 elapsed: r.elapsed,
-                push_cpu: Some(cpu),
+                push_cpu: Some(measured_cpu),
                 pull_cpu: None,
                 peer_min: None,
                 peer_max: None,
@@ -869,6 +893,7 @@ fn run_throughput_once(
 
     match parse::parse_throughput(&output, size) {
         Some(r) => CellResult {
+            blocking_inproc: None,
             msgs_s: r.msgs_s,
             mbps: r.mbps,
             elapsed: r.elapsed,
@@ -949,6 +974,7 @@ fn run_pubsub_once(
         ) && let Some(r) = parse::parse_throughput(&out, size)
         {
             return CellResult {
+                blocking_inproc: None,
                 msgs_s: r.msgs_s,
                 mbps: r.mbps,
                 elapsed: r.elapsed,
@@ -1037,6 +1063,7 @@ fn run_pubsub_once(
 
     match parse::parse_multi_throughput(&output, size, peers) {
         Some(r) => CellResult {
+            blocking_inproc: None,
             msgs_s: r.msgs_s,
             mbps: r.mbps,
             elapsed: r.elapsed,
@@ -1206,6 +1233,7 @@ fn run_fanout_once(
     };
 
     CellResult {
+        blocking_inproc: None,
         msgs_s: total_msgs / elapsed / peers as f64,
         mbps: total_msgs * size as f64 / elapsed / 1_000_000.0,
         elapsed,
@@ -1348,6 +1376,7 @@ fn run_fanin_once(
         .as_deref()
         .and_then(|output| parse::parse_multi_throughput(output, size, peers));
     CellResult {
+        blocking_inproc: None,
         msgs_s: r.msgs_s,
         mbps: r.mbps,
         elapsed: r.elapsed,
@@ -1713,6 +1742,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         };
 
                         let row = ComparisonRow {
+                            blocking_inproc: result.blocking_inproc,
                             run_id: run_id.clone(),
                             impl_name: impl_name.to_string(),
                             kind: "throughput".to_string(),
@@ -1805,6 +1835,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                             match result {
                                 Some(lat) => {
                                     let row = ComparisonRow {
+                                        blocking_inproc: None,
                                         run_id: run_id.clone(),
                                         impl_name: impl_name.to_string(),
                                         kind: "latency".to_string(),
@@ -1907,6 +1938,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         };
 
                         let row = ComparisonRow {
+                            blocking_inproc: None,
                             run_id: run_id.clone(),
                             impl_name: impl_name.to_string(),
                             kind: "pub_sub".to_string(),
@@ -1996,6 +2028,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         );
 
                         let row = ComparisonRow {
+                            blocking_inproc: None,
                             run_id: run_id.clone(),
                             impl_name: impl_name.to_string(),
                             kind: "fan_out".to_string(),
@@ -2090,6 +2123,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                         };
 
                         let row = ComparisonRow {
+                            blocking_inproc: None,
                             run_id: run_id.clone(),
                             impl_name: impl_name.to_string(),
                             kind: "fan_in".to_string(),
@@ -2186,6 +2220,7 @@ pub(crate) fn run(args: ComparisonsArgs) {
                     };
 
                     let row = ComparisonRow {
+                        blocking_inproc: None,
                         run_id: run_id.clone(),
                         impl_name: impl_name.to_string(),
                         kind: "pub_sub".to_string(),

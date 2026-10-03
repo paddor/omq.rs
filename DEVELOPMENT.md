@@ -229,6 +229,22 @@ For direct blocking-peer experiments, `OMQ_BENCH_RECV_SPIN_US=50` sets
 zero disables spinning, including for REQ/REP's default latency profile.
 Use separate experiment data files when comparing spin budgets.
 
+`omq-tokio-2ut-blocking` measures inproc with two application threads using
+blocking send and receive, without spinning. `OMQ_BENCH_HWM` sets both
+endpoints' send and receive HWM (default 1000). The peer also accepts HWM
+as its optional final argument. Its measured interval excludes setup and
+shutdown. On Unix, JSONL rows include CPU seconds, context switches, and
+context switches per message under `blocking_inproc`, alongside the HWM
+and rounded ring capacity. Other platforms omit unsupported usage counters.
+
+```sh
+OMQ_BENCH_HWM=8 cargo run --release -p omq-bench -- run comparisons \
+  --impl omq-tokio-2ut-blocking --transport inproc --sizes 64 \
+  --no-latency --no-pubsub --id blocking-hwm8
+cargo run --release -p omq-tokio --bin omq_bench_peer_blocking -- \
+  inproc-2ut-blocking lwm 64 3 1000
+```
+
 The comparison runner also exposes `--impl omq-tokio-1t-spin50` as a latency-only
 variant, alongside `omq-tokio-1t` and `omq-tokio-ct`. Its 50 us spin budget applies
 to both receiving endpoints. Pair and profile selection is available for OMQ

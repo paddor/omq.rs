@@ -15,6 +15,7 @@ use omq_tokio::endpoint::Host;
 use omq_tokio::{Endpoint, Message, Options, SocketType, TrySendError, blocking};
 use std::net::Ipv4Addr;
 
+mod blocking_inproc;
 mod latency_common;
 
 fn multi_pull_drain_batch(size: usize) -> usize {
@@ -169,6 +170,17 @@ fn main() {
             let duration: f64 = args[4].parse().expect("duration_secs");
             run_inproc_2ut(&ctx, name, size, Duration::from_secs_f64(duration));
         }
+        Some("inproc-2ut-blocking") => {
+            let name = args[2].clone();
+            let size: usize = args[3].parse().expect("msg_size");
+            let duration: f64 = args[4].parse().expect("duration_secs");
+            let hwm = args
+                .get(5)
+                .cloned()
+                .or_else(|| std::env::var("OMQ_BENCH_HWM").ok());
+            let hwm = hwm.map_or(1000, |value| value.parse().expect("hwm"));
+            blocking_inproc::run(&ctx, name, size, Duration::from_secs_f64(duration), hwm);
+        }
         Some("inproc-latency") => {
             let name = args[2].clone();
             let size: usize = args[3].parse().expect("msg_size");
@@ -190,6 +202,9 @@ fn main() {
             eprintln!("       bench_peer_blocking req <addr> <size> <iterations> <warmup>");
             eprintln!("       bench_peer_blocking inproc <name> <size> <duration_secs>");
             eprintln!("       bench_peer_blocking inproc-2ut <name> <size> <duration_secs>");
+            eprintln!(
+                "       bench_peer_blocking inproc-2ut-blocking <name> <size> <duration_secs> [hwm]"
+            );
             eprintln!(
                 "       bench_peer_blocking inproc-latency <name> <size> <iterations> <warmup>"
             );

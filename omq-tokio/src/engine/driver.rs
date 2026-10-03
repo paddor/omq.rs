@@ -3756,6 +3756,14 @@ mod tests {
             space: Arc::new(StateSignal::new()),
         };
         let mut pending = false;
+        // Wake hints stay conservative until the consumer acknowledges their
+        // activation with an empty check. Prime that registration first.
+        sink.try_send_deferred(Message::single("warmup"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(consumer.prefetch_and_pop(), Some(Message::single("warmup")));
+        assert_eq!(consumer.prefetch_and_pop(), None);
+        signals.store(0, Ordering::Relaxed);
 
         sink.try_send_deferred(Message::single("a"), &mut pending)
             .unwrap();
@@ -3767,6 +3775,32 @@ mod tests {
         sink.flush_pending(&mut pending);
         assert_eq!(signals.load(Ordering::Relaxed), 1);
         assert_eq!(consumer.prefetch(), 2);
+        sink.try_send_deferred(Message::single("c"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            1,
+            "nonempty queue needs no extra wake"
+        );
+        for expected in ["a", "b", "c"] {
+            assert_eq!(consumer.prefetch_and_pop(), Some(Message::single(expected)));
+        }
+        assert_eq!(consumer.prefetch_and_pop(), None);
+        sink.try_send_deferred(Message::single("d"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            2,
+            "registered empty consumer must wake"
+        );
+        sink.flush_and_signal();
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            2,
+            "nothing flushed needs no wake"
+        );
     }
 
     /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out

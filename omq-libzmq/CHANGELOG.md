@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Direct receive sinks signal only when yring wake hints request it;
+  streaming inproc receives avoid an eventfd write for each message.
 - `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a PUSH/PULL-only
   mode. Every socket type and transport works on such a context; `zmq_bind`
   and `zmq_connect` no longer return `ENOTSUP` for it.

@@ -218,3 +218,65 @@ fn fd_not_readable_after_recv() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+#[test]
+fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    for socket in [push, pull] {
+        for (option, value) in [(17, 0_i32), (23, 8), (24, 8), (27, 1000), (28, 1000)] {
+            assert_eq!(
+                omq_zmq::zmq_setsockopt(
+                    socket,
+                    option,
+                    (&raw const value).cast(),
+                    size_of::<i32>()
+                ),
+                0
+            );
+        }
+    }
+    assert_eq!(
+        zmq_bind(pull, c"inproc://fd-concurrent-batches".as_ptr()),
+        0
+    );
+    assert_eq!(
+        zmq_connect(push, c"inproc://fd-concurrent-batches".as_ptr()),
+        0
+    );
+    let fd = get_fd(pull);
+    let (batch_tx, batch_rx) = std::sync::mpsc::channel();
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+    let push_address = push as usize;
+    let sender = std::thread::spawn(move || {
+        let push = push_address as *mut c_void;
+        for round in 0_u32..128 {
+            for index in 0_u32..16 {
+                let message = (round * 16 + index).to_le_bytes();
+                assert_eq!(zmq_send(push, message.as_ptr().cast(), message.len(), 0), 4);
+            }
+            batch_tx.send(()).unwrap();
+            drained_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+    });
+    for round in 0_u32..128 {
+        assert!(fd_readable(fd, 1000), "batch {round} lost its data wake");
+        batch_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for index in 0_u32..16 {
+            assert!(fd_readable(fd, 0), "pending batch must remain readable");
+            let mut message = [0_u8; 4];
+            assert_eq!(
+                zmq_recv(pull, message.as_mut_ptr().cast(), message.len(), 0),
+                4
+            );
+            assert_eq!(u32::from_le_bytes(message), round * 16 + index);
+        }
+        assert!(!fd_readable(fd, 0), "drained batch must reset its FD");
+        drained_tx.send(()).unwrap();
+    }
+    sender.join().unwrap();
+    assert_eq!(zmq_close(push), 0);
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}

@@ -228,8 +228,12 @@ impl std::fmt::Debug for YringSink {
 impl YringSink {
     #[inline]
     pub(super) fn flush_and_signal(&mut self) {
-        self.producer.flush();
-        (self.signal)();
+        if let yring::FlushResult::Flushed {
+            was_empty: true, ..
+        } = self.producer.flush_and_check()
+        {
+            (self.signal)();
+        }
     }
 
     #[inline]
@@ -485,8 +489,12 @@ impl RecvSink {
                     }
                     // Field-level borrows: notified holds sink.space,
                     // but producer and signal are disjoint fields.
-                    sink.producer.flush();
-                    (sink.signal)();
+                    if let yring::FlushResult::Flushed {
+                        was_empty: true, ..
+                    } = sink.producer.flush_and_check()
+                    {
+                        (sink.signal)();
+                    }
                     return true;
                 }
             }

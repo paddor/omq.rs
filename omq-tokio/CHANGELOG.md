@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Yring receive sinks use queue wake hints for immediate, deferred, and
+  full-queue retry flushes, preserving empty-queue waiter registration.
+
 ### Fixed
 
 - REP receive queues keep each complete request and its peer route together;

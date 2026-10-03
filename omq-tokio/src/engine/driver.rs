@@ -263,7 +263,7 @@ pub struct PeerDriverHandle {
 #[derive(Debug, Clone)]
 pub(crate) struct ActorPeerDriverHandle {
     /// Control-plane commands. Never carries application data.
-    pub inbox: mpsc::Sender<PeerDriverCommand>,
+    pub inbox: super::control_inbox::Sender,
     /// Fallback data plane for peers without a send pipe or transmit slot.
     pub data_inbox: super::data_inbox::Sender,
     pub cancel: CancellationToken,
@@ -277,7 +277,7 @@ pub(crate) struct ActorPeerDriverHandle {
 impl From<PeerDriverHandle> for ActorPeerDriverHandle {
     fn from(handle: PeerDriverHandle) -> Self {
         Self {
-            inbox: handle.inbox,
+            inbox: handle.inbox.into(),
             data_inbox: super::data_inbox::Sender::Legacy(handle.data_inbox),
             cancel: handle.cancel,
             transmit_slot: handle.transmit_slot,
@@ -540,7 +540,7 @@ where
 {
     stream: T,
     connection: Connection,
-    inbox: mpsc::Receiver<PeerDriverCommand>,
+    inbox: super::control_inbox::Receiver,
     data_inbox: Option<super::data_inbox::Receiver>,
     /// Application-data output: one socket-owned fanring producer, or the
     /// caller's combined Tokio queue for a standalone driver.
@@ -618,7 +618,7 @@ where
         Self::with_output_config(
             stream,
             connection,
-            inbox,
+            inbox.into(),
             peer_out.into(),
             peer_id,
             cancel,
@@ -629,7 +629,7 @@ where
     pub(crate) fn with_actor_config(
         stream: T,
         connection: Connection,
-        inbox: mpsc::Receiver<PeerDriverCommand>,
+        inbox: impl Into<super::control_inbox::Receiver>,
         peer_out: DataSender,
         peer_id: u64,
         cancel: CancellationToken,
@@ -638,7 +638,7 @@ where
         Self::with_output_config(
             stream,
             connection,
-            inbox,
+            inbox.into(),
             PeerOutput::actor(peer_out),
             peer_id,
             cancel,
@@ -649,7 +649,7 @@ where
     fn with_output_config(
         stream: T,
         connection: Connection,
-        inbox: mpsc::Receiver<PeerDriverCommand>,
+        inbox: super::control_inbox::Receiver,
         peer_out: PeerOutput,
         peer_id: u64,
         cancel: CancellationToken,
@@ -948,6 +948,7 @@ where
             .expect("codec control output");
         let control_credit = event_out.reserve();
         tokio::pin!(control_credit);
+        let mut activation_budget = DrainBudget::new(64, 64 * 1024);
         loop {
             if !peer_events.drive(
                 &mut connection,
@@ -991,6 +992,7 @@ where
                 }
 
                 cmd = inbox.recv() => {
+                    let before = connection.pending_transmit_size();
                     match handle_pre_activation_inbox_command(
                         cmd,
                         &mut connection,
@@ -1000,6 +1002,11 @@ where
                         PreActivationStep::Continue => {}
                         PreActivationStep::Activate => break,
                         PreActivationStep::Close => return Ok(()),
+                    }
+                    if !activation_budget.account(connection.pending_transmit_size().saturating_sub(before)) {
+                        inbox.release_consumed();
+                        tokio::task::yield_now().await;
+                        activation_budget.reset();
                     }
                 }
 
@@ -1121,6 +1128,11 @@ where
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
+            }
+
+            inbox.release_consumed();
+            if control_exhausted {
+                tokio::task::yield_now().await;
             }
 
             if pending_input_error.is_none() && connection.is_closed() && graceful_close.is_none() {
@@ -1296,6 +1308,7 @@ where
             }
 
             let shutdown_ready = graceful_close.is_some()
+                && inbox.is_empty()
                 && pending_write.is_empty()
                 && eq.is_empty()
                 && !connection.has_pending_transmit()
@@ -1578,7 +1591,7 @@ fn publish_direct_idle(
     local_empty: bool,
     pipe: Option<&SendPipeConsumer>,
     data: Option<&super::data_inbox::Receiver>,
-    control: &mpsc::Receiver<PeerDriverCommand>,
+    control: &super::control_inbox::Receiver,
 ) {
     let Some(slot) = slot else { return };
     let Some(writer) = slot.direct_writer() else {

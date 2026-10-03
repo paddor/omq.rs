@@ -344,7 +344,7 @@ mod tests {
         let (data_inbox, data_rx) = tokio::sync::mpsc::channel(1);
         (
             ActorPeerDriverHandle {
-                inbox,
+                inbox: inbox.into(),
                 data_inbox: data_inbox.into(),
                 cancel: CancellationToken::new(),
                 transmit_slot: Some(slot),
@@ -417,7 +417,7 @@ mod tests {
             for id in 0..peers {
                 let (data_inbox, receiver) = tokio::sync::mpsc::channel(1);
                 let handle = ActorPeerDriverHandle {
-                    inbox: tokio::sync::mpsc::channel(1).0,
+                    inbox: tokio::sync::mpsc::channel(1).0.into(),
                     data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
                     transmit_slot: None,

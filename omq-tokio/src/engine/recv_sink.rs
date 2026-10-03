@@ -437,131 +437,7 @@ impl RecvSink {
         }
     }
 
-    /// Non-blocking push. Returns the message back if the yring is full.
-    /// Channel variant always succeeds (awaits space).
-    pub(crate) async fn try_send(&mut self, m: Message) -> Option<Message> {
-        if let Self::Server(server) = self {
-            let routed = m.with_routing_id(server.routing_id);
-            let _ = server.sink.send_plain(routed).await;
-            return None;
-        }
-        self.try_send_plain(m).await
-    }
-
-    async fn try_send_plain(&mut self, m: Message) -> Option<Message> {
-        match self {
-            Self::Fanin(sink) => {
-                let _ = sink.push(m);
-                None
-            }
-            Self::Peer(_) => unreachable!("PEER receives never fall back through the actor"),
-            Self::Channel(pipe) => {
-                let _ = pipe.send(m).await;
-                None
-            }
-            Self::Yring(sink) => match sink.producer.push(m) {
-                Ok(()) => {
-                    sink.flush_and_signal();
-                    None
-                }
-                Err(returned) => Some(returned),
-            },
-            Self::Authenticated(sink) => {
-                let peer_properties = sink
-                    .peer_properties
-                    .clone()
-                    .expect("authenticated sink activated after handshake");
-                match sink.sender.try_send(AuthenticatedRecvItem {
-                    message: m,
-                    peer_properties,
-                }) {
-                    Ok(()) => {
-                        (sink.signal)();
-                        None
-                    }
-                    Err(
-                        mpsc::error::TrySendError::Full(item)
-                        | mpsc::error::TrySendError::Closed(item),
-                    ) => Some(item.message),
-                }
-            }
-            Self::Conflate(slot) => {
-                let _ = slot.send_latest(m);
-                None
-            }
-            Self::Rep(_) => unreachable!("REP uses the blocking direct path"),
-            Self::Server(_) => unreachable!("nested SERVER sink"),
-        }
-    }
-
-    async fn send_plain(&mut self, m: Message) -> bool {
-        match self {
-            Self::Fanin(sink) => sink.push(m),
-            Self::Peer(sink) => {
-                let alive = sink.push(m);
-                sink.flush();
-                alive
-            }
-            Self::Channel(pipe) => pipe.send(m).await.is_ok(),
-            Self::Yring(sink) => {
-                let mut msg = m;
-                loop {
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
-                    } else {
-                        sink.flush_and_signal();
-                        return true;
-                    }
-                    if sink.producer.is_consumer_dropped() {
-                        return false;
-                    }
-                    let seen = sink.space.generation();
-                    let changed = sink.space.changed_after(seen);
-                    tokio::pin!(changed);
-                    if let Err(returned) = sink.producer.push(msg) {
-                        msg = returned;
-                        tokio::select! {
-                            biased;
-                            () = changed => {}
-                            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                        }
-                        continue;
-                    }
-                    // Field-level borrows: notified holds sink.space,
-                    // but producer and signal are disjoint fields.
-                    if let yring::FlushResult::Flushed {
-                        was_empty: true, ..
-                    } = sink.producer.flush_and_check()
-                    {
-                        (sink.signal)();
-                    }
-                    return true;
-                }
-            }
-            Self::Authenticated(sink) => {
-                let peer_properties = sink
-                    .peer_properties
-                    .clone()
-                    .expect("authenticated sink activated after handshake");
-                if sink
-                    .sender
-                    .send(AuthenticatedRecvItem {
-                        message: m,
-                        peer_properties,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-                (sink.signal)();
-                true
-            }
-            Self::Conflate(slot) => slot.send_latest(m),
-            Self::Rep(_) | Self::Server(_) => unreachable!("wrapped sink uses routed send"),
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) async fn send(&mut self, m: Message) -> bool {
         let mut message = m;
         loop {
@@ -719,7 +595,7 @@ impl RecvSink {
         }
     }
 
-    pub(super) async fn receive_space_ready(&mut self) {
+    pub(crate) async fn receive_space_ready(&mut self) {
         let mut unwrapped = self;
         loop {
             unwrapped = match unwrapped {
@@ -778,15 +654,6 @@ impl RecvSink {
             Self::Peer(sink) => sink.retry_pending(),
             Self::Fanin(sink) => sink.retry_pending(),
             _ => true,
-        }
-    }
-
-    pub(crate) async fn peer_space_ready(&mut self) {
-        if let Self::Fanin(sink) = self {
-            sink.ready().await;
-        }
-        if let Self::Peer(sink) = self {
-            sink.ready().await;
         }
     }
 }

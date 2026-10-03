@@ -12,6 +12,7 @@
 pub(crate) mod actor_output;
 pub(crate) mod codec;
 pub mod compression_pool;
+pub(crate) mod control_inbox;
 pub(crate) mod data_inbox;
 pub mod driver;
 pub(crate) mod framing;
@@ -22,6 +23,7 @@ mod recv_sink;
 pub(crate) use recv_sink::reserve_authenticated;
 pub(crate) mod send_pipe;
 pub(crate) mod signal;
+pub(crate) mod single_inbox;
 pub(crate) mod transmit_slot;
 pub(crate) mod write_ownership;
 

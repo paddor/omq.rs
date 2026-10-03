@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     AnyStream, ConnectionConfig, ConnectionDriver, Endpoint, InprocConn, PeerDriverConfig,
-    PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType, ZmtpConnection, mpsc,
+    PeerDriverHandle, PeerEntry, PeerIdent, Role, SocketDriver, SocketType, ZmtpConnection,
     peer_ident_socket_addr,
 };
 use crate::engine::codec::{CodecProfile, CodecSetup};
@@ -83,7 +83,7 @@ pub(super) fn spawn_byte_stream_connection(
         return;
     };
 
-    let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
         PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
     );
@@ -265,7 +265,7 @@ pub(super) fn spawn_inproc_peer(
         return;
     }
 
-    let (inbox_tx, inbox_rx) = mpsc::channel(PEER_INBOX_CAP);
+    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(PEER_INBOX_CAP);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(
         PEER_INBOX_CAP.min(socket.options.send_hwm.max(1) as usize),
     );

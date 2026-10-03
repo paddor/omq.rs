@@ -11,7 +11,7 @@ async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
     let mut send = IdentitySend::new(SocketType::Router, &options);
     let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
     let handle = ActorPeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0,
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox,
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
@@ -170,7 +170,7 @@ fn try_send_reports_full_and_preserves_routing_frame() {
 
     let (pipe_tx, _pipe_rx) = send_pipe(1);
     let handle = ActorPeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0,
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
@@ -543,7 +543,7 @@ async fn closed_peer_pipe_is_unroutable_when_mandatory() {
 
 fn peer_handle(pipe: SendPipeProducer) -> ActorPeerDriverHandle {
     ActorPeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0,
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
         data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,

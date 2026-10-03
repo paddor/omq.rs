@@ -175,7 +175,7 @@ mod tests {
         send.connection_added(
             1,
             ActorPeerDriverHandle {
-                inbox: tokio::sync::mpsc::channel(1).0,
+                inbox: tokio::sync::mpsc::channel(1).0.into(),
                 data_inbox: tokio::sync::mpsc::channel(1).0.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,

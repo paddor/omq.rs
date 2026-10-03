@@ -663,7 +663,7 @@ mod tests {
         let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
         let (data_inbox, _data_inbox_rx) = tokio::sync::mpsc::channel(1);
         let handle = ActorPeerDriverHandle {
-            inbox,
+            inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
             transmit_slot: None,

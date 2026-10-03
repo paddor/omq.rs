@@ -7,13 +7,13 @@
 //! identity are exchanged during connect, not over the wire, so the
 //! synthesized handshake completes immediately.
 //!
-//! Each direction of a connection is one `yring`. The sending socket
+//! Direct message paths use one `yring` per direction. The sending socket
 //! pushes from the calling thread and the receiving socket drains it
 //! from its own `recv`, so no task runs in between. The ring holds the
 //! sender's `Options::send_hwm` plus the receiver's `Options::recv_hwm`
-//! messages. A pair of `mpsc` channels carries commands (SUBSCRIBE,
-//! JOIN, ...) between the two peer tasks, and messages for the socket
-//! types that still route through their peer task.
+//! messages. Separate Coordinated fanring lanes carry commands (SUBSCRIBE,
+//! JOIN, ...) and messages for socket types that still route through their
+//! peer task. Registry requests retain their multi-producer Tokio queue.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,106 @@ use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
 
 use crate::engine::send_pipe::SendPreparation;
 use crate::engine::signal::StateSignal;
+use crate::engine::single_inbox;
 use crate::engine::{RecvSink, SendPipeConsumer, SendPipeError};
+
+/// Separate bounded command and message lanes for one inproc direction.
+/// Copies share the same physical producers.
+#[derive(Debug, Clone)]
+pub struct RelaySender {
+    pub(crate) control: single_inbox::Sender<omq_proto::proto::Command>,
+    pub(crate) data: single_inbox::Sender<Message>,
+}
+
+/// Receive half of an inproc relay. Commands remain reachable when data fills.
+#[derive(Debug)]
+pub struct RelayReceiver {
+    pub(crate) control: Box<single_inbox::Receiver<omq_proto::proto::Command>>,
+    pub(crate) data: Box<single_inbox::Receiver<Message>>,
+}
+
+pub(crate) fn relay_channel(capacity: usize) -> (RelaySender, RelayReceiver) {
+    let (control_tx, control_rx) = single_inbox::channel(capacity);
+    let (data_tx, data_rx) = single_inbox::channel(capacity);
+    (
+        RelaySender {
+            control: control_tx,
+            data: data_tx,
+        },
+        RelayReceiver {
+            control: Box::new(control_rx),
+            data: Box::new(data_rx),
+        },
+    )
+}
+
+impl RelaySender {
+    /// Enqueue a parsed frame into its bounded lane.
+    ///
+    /// # Errors
+    /// Returns the frame when the partner has closed its receive half.
+    pub async fn send(
+        &self,
+        frame: InboundFrame,
+    ) -> core::result::Result<(), mpsc::error::SendError<InboundFrame>> {
+        match frame {
+            InboundFrame::Message(message) => self
+                .data
+                .send(message)
+                .await
+                .map_err(|error| mpsc::error::SendError(InboundFrame::Message(error.0))),
+            InboundFrame::Command(command) => {
+                self.control.send(*command).await.map_err(|error| {
+                    mpsc::error::SendError(InboundFrame::Command(Box::new(error.0)))
+                })
+            }
+        }
+    }
+
+    /// Enqueue without waiting, preserving the frame on full or closed lanes.
+    ///
+    /// # Errors
+    /// Returns the frame when its lane is full or the partner has closed.
+    pub fn try_send(
+        &self,
+        frame: InboundFrame,
+    ) -> core::result::Result<(), mpsc::error::TrySendError<InboundFrame>> {
+        use mpsc::error::TrySendError::{Closed, Full};
+        match frame {
+            InboundFrame::Message(message) => {
+                self.data.try_send(message).map_err(|error| match error {
+                    Full(message) => Full(InboundFrame::Message(message)),
+                    Closed(message) => Closed(InboundFrame::Message(message)),
+                })
+            }
+            InboundFrame::Command(command) => {
+                self.control
+                    .try_send(*command)
+                    .map_err(|error| match error {
+                        Full(command) => Full(InboundFrame::Command(Box::new(command))),
+                        Closed(command) => Closed(InboundFrame::Command(Box::new(command))),
+                    })
+            }
+        }
+    }
+}
+
+impl RelayReceiver {
+    /// Receive a parsed frame, preferring commands when both lanes are ready.
+    pub async fn recv(&mut self) -> Option<InboundFrame> {
+        tokio::select! {
+            biased;
+            command = self.control.recv() => match command {
+                Some(command) => Some(InboundFrame::Command(Box::new(command))),
+                None => self.data.recv().await.map(InboundFrame::Message),
+            },
+            message = self.data.recv() => match message {
+                Some(message) => Some(InboundFrame::Message(message)),
+                None => self.control.recv().await.map(|command| InboundFrame::Command(Box::new(command))),
+            },
+        }
+    }
+}
 
 /// What one socket tells its inproc peers at connect time.
 #[derive(Debug, Clone, Copy)]
@@ -369,8 +468,8 @@ impl InprocSender {
 /// without a direct route, relayed messages.
 #[derive(Debug)]
 pub struct InprocConn {
-    pub out: mpsc::Sender<InboundFrame>,
-    pub in_rx: mpsc::Receiver<InboundFrame>,
+    pub out: RelaySender,
+    pub in_rx: RelayReceiver,
     pub peer: InprocPeerSnapshot,
     /// The peer's send HWM, for sizing this socket's receive ring.
     pub(crate) peer_send_hwm: usize,
@@ -380,7 +479,7 @@ pub struct InprocConn {
     pub(crate) outbound: Option<Arc<InprocPort>>,
 }
 
-/// Capacity of the command and relay channels of one connection.
+/// Capacity of each command and relay-data lane of one connection.
 pub const DEFAULT_INPROC_HWM: usize = 1024;
 
 /// Sent from `connect` to `accept` through the registry. Carries
@@ -389,8 +488,8 @@ pub const DEFAULT_INPROC_HWM: usize = 1024;
 /// returns its own snapshot to the connector.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
-    listener_to_connector_tx: mpsc::Sender<InboundFrame>,
+    connector_to_listener_rx: RelayReceiver,
+    listener_to_connector_tx: RelaySender,
     connector_config: RecvConfig,
     connector_to_listener_port: Arc<InprocPort>,
     listener_to_connector_port: Arc<InprocPort>,
@@ -480,8 +579,8 @@ pub(crate) async fn connect(
     .ok_or_else(|| Error::InvalidEndpoint(format!("no inproc binding: {name}")))?;
 
     // (connector→listener) and (listener→connector) directions.
-    let (c2l_tx, c2l_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
-    let (l2c_tx, l2c_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
+    let (c2l_tx, c2l_rx) = relay_channel(DEFAULT_INPROC_HWM);
+    let (l2c_tx, l2c_rx) = relay_channel(DEFAULT_INPROC_HWM);
     let (ack_tx, ack_rx) = oneshot::channel();
     let c2l_port = InprocPort::new();
     let l2c_port = InprocPort::new();

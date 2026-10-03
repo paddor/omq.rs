@@ -8,6 +8,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Breaking
 
+- `InprocConn::out` and `InprocConn::in_rx` expose `RelaySender` and
+  `RelayReceiver` with separate command/data lanes instead of Tokio halves.
+
 - WS/WSS ready connections default to at most 1024 per socket, configurable
   through `Options::ws.max_ready_peers` (C: `OMQ_WS_MAX_READY_PEERS`). Other
   transports have separate admission; identity handover reuses a ready slot.
@@ -20,6 +23,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   queues, and reconnect fencing remain unchanged.
 
 ### Changed
+
+- Socket-owned protocol inboxes and inproc relays use one Coordinated
+  fanring producer per lane. Bounded lifecycle slots keep activation and
+  shutdown reachable; inproc commands remain separate from relay messages.
 
 - Socket-owned fallback data inboxes use bounded fanring lanes, registered
   lazily per socket clone and destination. Preserve exact lane HWMs, fan-out
@@ -74,6 +81,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   with `Socket::peer_info()`.
 
 ### Fixed
+
+- Finite native linger includes actor command admission, so blocked
+  subscription forwarding cannot prevent close from reaching its deadline.
 
 - Full actor receive queues no longer block another peer's handshake or XPUB
   subscription state. XPUB notifications remain bounded and preserve each

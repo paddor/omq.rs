@@ -325,7 +325,7 @@ mod tests {
         sender.connection_added(
             id,
             crate::engine::ActorPeerDriverHandle {
-                inbox,
+                inbox: inbox.into(),
                 data_inbox: data_inbox.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,

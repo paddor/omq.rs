@@ -1125,19 +1125,11 @@ impl Socket {
             linger,
         };
         let zero_linger = matches!(effective_linger, Some(std::time::Duration::ZERO));
-        if zero_linger {
+        let ack = if zero_linger {
             match self.inner.cmd_tx.try_send(close) {
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.inner.cancel.cancel();
-                }
+                Err(mpsc::error::TrySendError::Full(_)) => self.inner.cancel.cancel(),
             }
-        } else {
-            let _ = self.inner.cmd_tx.send(close).await;
-        }
-        // Even if the driver is already gone, the channel may be closed; we
-        // treat that as "already closed" (success).
-        let ack = if zero_linger {
             tokio::select! {
                 biased;
                 res = rx => Some(res),
@@ -1147,7 +1139,22 @@ impl Socket {
                 }
             }
         } else {
-            Some(rx.await)
+            let complete = async {
+                let _ = self.inner.cmd_tx.send(close).await;
+                rx.await
+            };
+            // Include admission: a full protocol inbox can block the actor's
+            // current command before it can start its own linger timer.
+            if let Some(duration) = effective_linger {
+                if let Ok(result) = tokio::time::timeout(duration, complete).await {
+                    Some(result)
+                } else {
+                    self.inner.cancel.cancel();
+                    None
+                }
+            } else {
+                Some(complete.await)
+            }
         };
         let res = match ack {
             Some(Ok(res)) => res,

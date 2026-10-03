@@ -123,6 +123,15 @@ data record awaiting its protocol prefix and one application receive awaiting
 space. Standalone public connection drivers retain their supplied Tokio event
 queue and combined event ordering.
 
+Actor-to-driver protocol inboxes use one bounded Coordinated fanring producer
+with 64 command slots. Internal handle copies share that physical producer.
+One activation slot and one close slot keep lifecycle commands reachable when
+protocol forwarding is blocked. Graceful close drains accepted protocol
+commands; immediate close preempts them. Standalone driver inputs retain their
+caller-supplied Tokio channels. The shared actor control mailbox, authenticated
+receive queues, context jobs, and multi-producer inproc registry requests remain
+on Tokio.
+
 A Linux VM comparison used 64-byte ROUTER/DEALER traffic, HWM 1000, and two
 current-thread runtimes pinned to separate CPUs. Three alternating serial
 pairs compared the prior shared Tokio mailbox with the batched per-driver
@@ -325,6 +334,45 @@ inproc subscriber's ring in turn; fan-out lanes serve wire peers only. With
 `conflate` keep their own send queue and their peer task relays each message
 into the same ring. PEER connections and authenticated C-API sockets still run
 through their peer tasks.
+
+Each inproc direction has separate bounded fanring command and relay-data
+lanes, with one physical producer each and 1024 slots per lane. Forwarding
+retains at most one pending command and one bounded data batch. Incoming
+application backpressure retains one message while local lifecycle commands,
+remote protocol commands, cancellation, and deadlines remain selected.
+XPUB notifications wait behind an older pending application message on the
+same actor data lane. `InprocConn` exposes `RelaySender`/`RelayReceiver` with
+parsed-frame send/receive methods.
+
+These async fanring receives release consumed credits per call. They do not
+apply the native direct yring LWM policy. Bounded synchronous drains explicitly
+release partial credits before yielding. Finite native close starts its caller
+deadline before actor command admission; expiry cancels the driver tree even
+when a subscription handler is blocked on protocol capacity.
+
+A matched Linux comparison measured the control migration against the prior
+commit, using three alternating serial pairs and 64-byte messages. TCP/WS
+throughput used three-second windows at HWM 1000. RTT used 10,000 measured
+round trips after 2,000 warmups. PEER relay RTT used two application runtimes
+pinned to separate CPUs sharing one owned IO thread. Direct blocking inproc
+used two application threads restricted to CPUs 0/1, with HWM 8 or 1000.
+Dependency versions matched. Medians were:
+
+| Gate | Before | After |
+| --- | --- | --- |
+| TCP throughput | 1.395 M/s | 1.425 M/s |
+| WS throughput | 1.210 M/s | 1.215 M/s |
+| TCP RTT p99 | 68.650 us | 68.486 us |
+| WS RTT p99 | 68.286 us | 70.751 us |
+| PEER inproc relay RTT p50 / p99 | 49.470 / 58.400 us | 53.935 / 62.912 us |
+| Direct inproc throughput, HWM 1000 | 6.901 M/s | 6.909 M/s |
+| Direct inproc throughput, HWM 8 | 3.222 M/s | 3.647 M/s |
+
+The relay model costs 9.0% p50, 7.7% p99, and 9.4% CPU per round trip in
+this comparison; WS p99 rises 3.6%. Small-ring direct results vary across
+runs. These measurements do not establish a relay speedup. Matched relay
+profiles had no lost samples and showed syscall, wake-registration, and
+queue-readiness costs. Windows runtime measurements remain pending PR CI.
 
 A blocking `send` that finds its queue full waits on the calling thread and is
 woken by the peer that frees space. Blocking `bind`, `connect`, and the other

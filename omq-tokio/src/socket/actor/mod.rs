@@ -39,7 +39,7 @@ use super::udp::{
 use crate::routing::{
     RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
-use crate::transport::{InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent};
+use crate::transport::{InprocConn, InprocPeerSnapshot, PeerIdent};
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
 use omq_proto::error::{Error, Result};

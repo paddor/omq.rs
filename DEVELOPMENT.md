@@ -60,6 +60,10 @@ for workspace and Python binding checks until that API is published. Put
 Windows binding paths use the same portable queue API; Windows runtime checks
 remain deferred to PR CI.
 
+Python async capacity waits also require `AsyncProducer::poll_ready()`
+(fanring commit `e6334b8`). In `bindings/pyomq`, use paths
+`../../../fanring/yring` and `../../../fanring` for the same overrides.
+
 Keep these overrides local. Registry dependencies must be published before OMQ
 CI or packaging can resolve them without overrides. Refresh binding lockfiles
 against the registry after publishing a new queue version.

@@ -6,6 +6,7 @@
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,7 +27,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     completion: CompletionProgress,
     capacity: usize,
 ) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
-    let (inbox_tx, inbox_rx) = mpsc::channel(64);
+    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
@@ -63,7 +64,7 @@ async fn run_body<T: DriverStream>(
     peer_id: u64,
     mut peer_out: PeerOutput,
     cancel: CancellationToken,
-    mut inbox: mpsc::Receiver<PeerDriverCommand>,
+    mut inbox: crate::engine::control_inbox::Receiver,
     mut data_inbox: crate::engine::data_inbox::Receiver,
     completion: &mut CompletionProgress,
 ) {
@@ -74,7 +75,15 @@ async fn run_body<T: DriverStream>(
     let mut pending_event = Some(Message::single(Bytes::new()));
     let mut closing = false;
     let mut deadline: Option<std::time::Instant> = None;
+    let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
     loop {
+        if budget.exhausted() {
+            inbox.release_consumed();
+            data_inbox.release_consumed();
+            budget.reset();
+            tokio::task::yield_now().await;
+        }
+        let _ = budget.account(0);
         if let Some(message) = pending_event.take() {
             match peer_out.try_send(peer_id, message, false) {
                 Ok(()) => completion.note_event(),
@@ -82,7 +91,7 @@ async fn run_body<T: DriverStream>(
                 Err(crate::engine::SendPipeError::Closed(_)) => return,
             }
         }
-        if closing && pending.is_none() && data_inbox.is_empty() {
+        if closing && pending.is_none() && inbox.is_empty() && data_inbox.is_empty() {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {},
@@ -126,12 +135,16 @@ async fn run_body<T: DriverStream>(
             n = reader.read(&mut buf), if !closing && pending_event.is_none() => {
                 match n {
                     Ok(0) | Err(_) => return,
-                    Ok(n) => pending_event = Some(Message::single(Bytes::copy_from_slice(&buf[..n]))),
+                    Ok(n) => {
+                        let _ = budget.account(n);
+                        pending_event = Some(Message::single(Bytes::copy_from_slice(&buf[..n])));
+                    }
                 }
             },
             data = data_inbox.recv(), if pending.is_none() => {
                 match data {
                     Some(PeerDriverData::SendMessage(mut message)) => {
+                        let _ = budget.account(message.byte_len());
                         let data = message.pop_front().unwrap_or_default();
                         if data.is_empty() { return; }
                         pending = Some(data);

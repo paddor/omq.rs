@@ -153,7 +153,7 @@ mod tests {
         let (inbox, _commands) = mpsc::channel(1);
         let (data_inbox, data) = mpsc::channel(1);
         let handle = ActorPeerDriverHandle {
-            inbox,
+            inbox: inbox.into(),
             data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
             transmit_slot: Some(slot.clone()),

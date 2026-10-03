@@ -21,6 +21,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Socket-owned peer drivers send actor-bound application data through bounded
+  fanring lanes, one per connection. Protocol events use a separate control
+  mailbox; public standalone drivers retain their supplied Tokio event queue.
+
 - pyomq admits eligible async sends and receives directly, preserving fallback
   FIFO, bounded workers, and external REQ/REP admission. Ready asyncio polls
   avoid executor dispatch. Windows native callbacks defer Python hooks until
@@ -66,6 +70,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   with `Socket::peer_info()`.
 
 ### Fixed
+
+- Full actor receive queues no longer block another peer's handshake or XPUB
+  subscription state. XPUB notifications remain bounded and preserve each
+  peer's FIFO through receive backpressure and driver completion.
 
 - REP splits the request envelope at the first empty frame, like libzmq.
   Requests whose body had an empty second part lost their leading parts.

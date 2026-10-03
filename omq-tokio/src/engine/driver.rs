@@ -19,6 +19,7 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut
 use omq_proto::proto::{Command, Connection, Event};
 use omq_proto::{MessageRateLimit, WorkloadProfile};
 
+use super::actor_output::{DataSender, PeerOutput};
 use super::compression_pool::CompressionPool;
 use super::peer_completion::CompletionProgress;
 use super::peer_events::PeerEventDispatch;
@@ -260,8 +261,8 @@ pub struct PeerDriverHandle {
 }
 
 /// Parsed ZMTP events and the final closure signal for standalone drivers.
-/// Socket-owned byte-stream drivers use a separate reserved lifecycle slot
-/// for closure and retain this channel for ordered protocol events.
+/// Socket-owned drivers reserve a separate lifecycle slot and publish protocol
+/// events independently of their bounded application-data lane.
 #[derive(Debug)]
 pub enum PeerEvent {
     Event(Event),
@@ -513,10 +514,14 @@ where
     connection: Connection,
     inbox: mpsc::Receiver<PeerDriverCommand>,
     data_inbox: Option<mpsc::Receiver<PeerDriverData>>,
-    /// Shared multi-producer channel feeding the `SocketDriver`'s
-    /// per-peer event loop. Each entry is tagged with the `peer_id`
-    /// this driver was assigned; the receiver dispatches on that.
-    peer_out: mpsc::Sender<(u64, PeerEvent)>,
+    /// Application-data output: one socket-owned fanring producer, or the
+    /// caller's combined Tokio queue for a standalone driver.
+    peer_out: PeerOutput,
+    notify_xpub: bool,
+    /// Socket-owned drivers publish codec protocol events independently of
+    /// the bounded application-data mailbox. Standalone drivers keep their
+    /// supplied combined channel and its event ordering.
+    peer_control: Option<mpsc::Sender<(u64, PeerEvent)>>,
     completion: CompletionProgress,
     peer_id: u64,
     cancel: CancellationToken,
@@ -582,6 +587,46 @@ where
         cancel: CancellationToken,
         config: PeerDriverConfig,
     ) -> Self {
+        Self::with_output_config(
+            stream,
+            connection,
+            inbox,
+            peer_out.into(),
+            peer_id,
+            cancel,
+            config,
+        )
+    }
+
+    pub(crate) fn with_actor_config(
+        stream: T,
+        connection: Connection,
+        inbox: mpsc::Receiver<PeerDriverCommand>,
+        peer_out: DataSender,
+        peer_id: u64,
+        cancel: CancellationToken,
+        config: PeerDriverConfig,
+    ) -> Self {
+        Self::with_output_config(
+            stream,
+            connection,
+            inbox,
+            PeerOutput::actor(peer_out),
+            peer_id,
+            cancel,
+            config,
+        )
+    }
+
+    fn with_output_config(
+        stream: T,
+        connection: Connection,
+        inbox: mpsc::Receiver<PeerDriverCommand>,
+        peer_out: PeerOutput,
+        peer_id: u64,
+        cancel: CancellationToken,
+        config: PeerDriverConfig,
+    ) -> Self {
         Self {
             stream,
             connection,
@@ -592,6 +637,8 @@ where
             cancel,
             config,
             completion: CompletionProgress::default(),
+            peer_control: None,
+            notify_xpub: false,
             setup_deadline: None,
             setup_cancel: None,
             encoder: None,
@@ -612,6 +659,16 @@ where
     /// Reserve lifecycle publication independently of the actor's data mailbox.
     pub(crate) fn with_completion(mut self, completion: CompletionProgress) -> Self {
         self.completion = completion;
+        self
+    }
+
+    pub(crate) fn with_actor_control(
+        mut self,
+        control: mpsc::Sender<(u64, PeerEvent)>,
+        notify_xpub: bool,
+    ) -> Self {
+        self.notify_xpub = notify_xpub;
+        self.peer_control = Some(control);
         self
     }
 
@@ -754,13 +811,16 @@ where
     /// Standalone drivers send a final `PeerEvent::Closed` on their supplied
     /// channel. Both preserve the earlier admitted event prefix.
     pub async fn run(mut self) -> Result<()> {
-        let peer_out = self.peer_out.clone();
+        let peer_out = self.peer_out.legacy_sender();
         let peer_id = self.peer_id;
         let mut completion = std::mem::take(&mut self.completion);
         let result = self.run_inner_body(&mut completion).await;
         let error = result.as_ref().err().map(close_error_reason);
         if let Err(error) = completion.complete(error) {
-            let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
+            let _ = peer_out
+                .expect("standalone event output")
+                .send((peer_id, PeerEvent::Closed { error }))
+                .await;
         }
         result
     }
@@ -772,7 +832,9 @@ where
             mut connection,
             mut inbox,
             mut data_inbox,
-            peer_out,
+            mut peer_out,
+            peer_control,
+            notify_xpub,
             peer_id,
             cancel,
             config,
@@ -845,16 +907,23 @@ where
         let mut pending_large = None;
         let mut pending_input_error = None;
 
-        let mut peer_events = PeerEventDispatch::default();
-        let actor_credit = peer_out.reserve();
-        tokio::pin!(actor_credit);
+        let mut peer_events = PeerEventDispatch::for_xpub(notify_xpub);
+        let legacy_events = peer_out.legacy_sender();
+        let event_out = peer_control
+            .as_ref()
+            .or(legacy_events.as_ref())
+            .expect("codec control output");
+        let control_credit = event_out.reserve();
+        tokio::pin!(control_credit);
         loop {
             if !peer_events.drive(
                 &mut connection,
-                &peer_out,
+                event_out,
                 peer_id,
                 recv_direct.as_mut(),
                 completion,
+                &mut peer_out,
+                pending_receive.is_none(),
             ) {
                 return Ok(());
             }
@@ -901,12 +970,18 @@ where
                     }
                 }
 
-                permit = &mut actor_credit, if peer_events.has_pending() => {
+                permit = &mut control_credit, if peer_events.control_ready(&mut peer_out, pending_receive.is_none()) => {
                     match permit {
-                        Ok(permit) => peer_events.send_reserved(permit, peer_id, completion),
+                        Ok(permit) => {
+                            if !peer_events.send_reserved(permit, peer_id, completion, &mut peer_out) { return Ok(()); }
+                        }
                         Err(_) => return Ok(()),
                     }
-                    actor_credit.set(peer_out.reserve());
+                    control_credit.set(event_out.reserve());
+                }
+
+                result = peer_out.ready(), if peer_events.notification_pending() && !peer_out.has_capacity() => {
+                    if result.is_err() { return Ok(()); }
                 }
 
                 () = async { setup_cancel.as_ref().unwrap().cancelled().await; }, if setup_cancel.is_some() => {
@@ -1050,16 +1125,17 @@ where
                 data_inbox.as_ref(),
                 &inbox,
             );
-            // An older pending message already owns actor-mailbox admission.
-            // Reads are paused until it is delivered; do not poll a newer event
-            // into a competing reservation on that same mailbox.
-            if pending_receive.is_none()
+            // Protocol events on a separate mailbox remain reachable while
+            // data waits. Standalone combined mailboxes retain their prefix.
+            if (peer_control.is_some() || pending_receive.is_none())
                 && !peer_events.drive(
                     &mut connection,
-                    &peer_out,
+                    event_out,
                     peer_id,
                     recv_direct.as_mut(),
                     completion,
+                    &mut peer_out,
+                    pending_receive.is_none(),
                 )
             {
                 return Ok(());
@@ -1067,11 +1143,11 @@ where
             if pending_input_error.is_some() && !peer_events.blocked() {
                 return Err(pending_input_error.take().unwrap());
             }
+            peer_out.set_control_prefix(peer_events.control_prefix());
             if peer_events.blocked() {
                 // Preserve the codec-event prefix before decoded messages.
             } else if discard_receive {
                 if pending_receive.take().is_some() {
-                    actor_credit.set(peer_out.reserve());
                     authenticated_credit
                         .set(super::reserve_authenticated(authenticated_sender.as_ref()));
                 }
@@ -1083,7 +1159,7 @@ where
                     receive_profile,
                     MessageDelivery {
                         sink: &mut recv_direct,
-                        peer_out: &peer_out,
+                        peer_out: &mut peer_out,
                         peer_id,
                         completion,
                         pending: &mut pending_receive,
@@ -1255,20 +1331,28 @@ where
                     }
                 },
 
-                permit = &mut actor_credit,
-                    if peer_events.has_pending() || (pending_receive.is_some() && recv_direct.is_none()) => {
+                permit = &mut control_credit, if peer_events.control_ready(&mut peer_out, pending_receive.is_none()) => {
                     match permit {
                         Ok(permit) => {
-                            if peer_events.has_pending() {
-                                peer_events.send_reserved(permit, peer_id, completion);
-                            } else {
-                                permit.send((peer_id, PeerEvent::Event(Event::Message(pending_receive.take().unwrap()))));
-                                completion.note_event();
-                            }
+                            if !peer_events.send_reserved(permit, peer_id, completion, &mut peer_out) { return Ok(()); }
                         }
                         Err(_) => return Ok(()),
                     }
-                    actor_credit.set(peer_out.reserve());
+                    control_credit.set(event_out.reserve());
+                }
+
+                result = peer_out.ready(),
+                    if (pending_receive.is_some() && recv_direct.is_none())
+                        || (pending_receive.is_none() && peer_events.notification_pending() && !peer_out.has_capacity()) => {
+                    if result.is_err() { return Ok(()); }
+                    peer_out.set_control_prefix(peer_events.control_prefix());
+                    if recv_direct.is_none() && let Some(message) = pending_receive.take() {
+                        match peer_out.try_send(peer_id, message, false) {
+                            Ok(()) => completion.note_event(),
+                            Err(super::SendPipeError::Full(message)) => pending_receive = Some(message),
+                            Err(super::SendPipeError::Closed(_)) => return Ok(()),
+                        }
+                    }
                 }
 
                 permit = &mut authenticated_credit,
@@ -1490,7 +1574,7 @@ struct ReceiveRateLimiters<'a> {
 
 struct MessageDelivery<'a> {
     sink: &'a mut Option<RecvSink>,
-    peer_out: &'a mpsc::Sender<(u64, PeerEvent)>,
+    peer_out: &'a mut PeerOutput,
     peer_id: u64,
     completion: &'a mut CompletionProgress,
     pending: &'a mut Option<Message>,
@@ -1532,20 +1616,13 @@ impl MessageDelivery<'_> {
         let result = if let Some(sink) = self.sink {
             sink.try_send_with_flush_mode(message, defer, pending_flush)
         } else {
-            match self
-                .peer_out
-                .try_send((self.peer_id, PeerEvent::Event(Event::Message(message))))
-            {
+            match self.peer_out.try_send(self.peer_id, message, false) {
                 Ok(()) => {
                     self.completion.note_event();
                     Ok(())
                 }
-                Err(mpsc::error::TrySendError::Full((
-                    _,
-                    PeerEvent::Event(Event::Message(message)),
-                ))) => Err(TrySendError::Full(message)),
-                Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
-                Err(mpsc::error::TrySendError::Full(_)) => unreachable!("message delivery"),
+                Err(super::SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
+                Err(super::SendPipeError::Closed(_)) => Err(TrySendError::Closed),
             }
         };
         match result {
@@ -5397,6 +5474,7 @@ mod tests {
             .unwrap();
         let mut sink = Some(RecvSink::Peer(sink));
         let (events, _rx) = mpsc::channel(1);
+        let mut events = PeerOutput::from(events);
         let mut pending = None;
         for _ in 0..8 {
             assert_eq!(
@@ -5406,7 +5484,7 @@ mod tests {
                     ReceiveProfile::Throughput,
                     MessageDelivery {
                         sink: &mut sink,
-                        peer_out: &events,
+                        peer_out: &mut events,
                         peer_id: 0,
                         completion: &mut CompletionProgress::default(),
                         pending: &mut pending,

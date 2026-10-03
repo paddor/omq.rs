@@ -95,6 +95,49 @@ fan-out lanes perform encoding, compression, and wire I/O. Receive paths that
 need actor-owned routing state, including REP and ROUTER, pass through the
 actor. Other receive paths can deliver to the socket queue directly.
 
+Socket-owned drivers publish decoded messages through one bounded fanring lane
+per driver, registered when the connection is materialized. The actor owns the
+Coordinated receiver and shares no producer among drivers. Lane capacity is
+256 messages; fan-in rotates between ready lanes while preserving each
+driver's FIFO. The actor polls async readiness for the first item, then drains
+under 64-message and 64-KiB budgets, with time checks, before checking control
+again. A complete final message may cross the byte limit. The actor releases
+partial credits before ending that drain. Async receives themselves
+release consumed credits on each poll; native blocking receive LWM batching
+does not carry over automatically.
+
+Codec handshake and command events use a separate bounded control mailbox.
+The actor checks it under message, byte, and time budgets each iteration,
+including while an application receive waits for space. Driver data records
+carry their admitted protocol prefix, so observing separate queue publications
+cannot deliver a message before its preceding protocol events. Reserved peer
+completions count both queues and retain peer routing state until their
+admitted data and pending application receives finish.
+
+XPUB subscription state is control; its application notification uses the
+driver's data lane. The sole producer checks notification capacity before
+publishing the command and notification together, without an intervening
+await. A full notification lane pauses that peer's input while other drivers'
+handshakes and subscriptions remain reachable. The actor retains at most one
+data record awaiting its protocol prefix and one application receive awaiting
+space. Standalone public connection drivers retain their supplied Tokio event
+queue and combined event ordering.
+
+A Linux VM comparison used 64-byte ROUTER/DEALER traffic, HWM 1000, and two
+current-thread runtimes pinned to separate CPUs. Three alternating serial
+pairs compared the prior shared Tokio mailbox with the batched per-driver
+lanes. Throughput used three-second windows after warmup and included tail
+delivery; latency used 10,000 echo round trips after 2,000 warmup trips.
+Dependency versions matched. Medians were:
+
+| Transport | Throughput before / after | CPU us/message before / after | RTT p99 before / after |
+| --- | --- | --- | --- |
+| TCP | 1.026 / 1.433 M/s | 1.170 / 0.878 | 64.958 / 66.399 us |
+| WS | 0.905 / 1.222 M/s | 1.327 / 1.026 | 66.954 / 68.145 us |
+
+These are local measurements. The throughput gain does not imply lower
+round-trip latency or Windows performance.
+
 A latency-profile plain-TCP route may attempt one immediate nonblocking write
 from the caller after normal send admission. A partial write transfers its
 remaining output to the driver. This is a specialized path; routing and queue

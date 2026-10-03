@@ -103,14 +103,21 @@ pub(super) fn spawn_byte_stream_connection(
         .and_then(|setup| setup.encoder.passthrough_info())
         .map(|(s, t)| (s.clone(), t));
 
-    let peer_driver = ConnectionDriver::with_config(
+    let Ok(peer_output) = socket.peer_out_tx.try_register() else {
+        return;
+    };
+    let peer_driver = ConnectionDriver::with_actor_config(
         stream,
         codec,
         inbox_rx,
-        socket.peer_out_tx.clone(),
+        peer_output,
         peer_id,
         child_cancel.clone(),
         driver_cfg,
+    )
+    .with_actor_control(
+        socket.peer_control_tx.clone(),
+        socket.socket_type == SocketType::XPub,
     )
     .with_setup_deadline(
         setup.as_ref().and_then(|state| state.deadline),
@@ -186,6 +193,7 @@ pub(super) fn spawn_byte_stream_connection(
             pending_handshake: true,
             handshake_admission: setup.map(|state| state.admission),
             handled_events: 0,
+            handled_control: 0,
             completion: None,
             identity: bytes::Bytes::new(),
             info: None,
@@ -329,6 +337,7 @@ pub(super) fn spawn_inproc_peer(
             pending_handshake: false,
             handshake_admission: None,
             handled_events: 0,
+            handled_control: 0,
             completion: None,
             identity: bytes::Bytes::new(),
             info: None,
@@ -351,13 +360,18 @@ pub(super) fn spawn_inproc_peer(
     let (completion, receiver) =
         crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
     socket.peer_completions.push(receiver);
+    let Ok(peer_output) = socket.peer_out_tx.try_register() else {
+        return;
+    };
     let driver = inproc_peer_driver(
         inbox_rx,
         data_inbox_rx,
         in_rx,
         out,
         InprocDriverCtx {
-            peer_out: socket.peer_out_tx.clone(),
+            peer_out: crate::engine::actor_output::PeerOutput::actor(peer_output),
+            notify_xpub: socket.socket_type == SocketType::XPub,
+            peer_control: socket.peer_control_tx.clone(),
             completion,
             peer_id,
             cancel: child_cancel,

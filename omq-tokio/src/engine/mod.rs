@@ -4,16 +4,18 @@
 //! The driver owns the stream and the codec and runs a `tokio::select!`
 //! loop over socket read/write, separate control and fallback-data inboxes,
 //! and cancellation.
-//! Events produced by the codec are forwarded on a `mpsc::Sender<Event>`.
+//! Socket-owned drivers separate codec control from per-driver fanring data
+//! lanes. Standalone drivers retain the caller's combined Tokio event queue.
 //!
 //! The socket actor composes one of these per peer.
 
+pub(crate) mod actor_output;
 pub(crate) mod codec;
 pub mod compression_pool;
 pub mod driver;
 pub(crate) mod framing;
 pub(crate) mod peer_completion;
-mod peer_events;
+pub(crate) mod peer_events;
 pub(crate) mod rate_limit;
 mod recv_sink;
 pub(crate) use recv_sink::reserve_authenticated;

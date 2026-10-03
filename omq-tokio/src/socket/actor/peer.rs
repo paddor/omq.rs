@@ -279,10 +279,13 @@ impl SocketDriver {
             crate::engine::peer_completion::CompletionProgress::reserve(peer_id);
         self.peer_completions.push(receiver);
 
+        let Ok(peer_output) = self.peer_out_tx.try_register() else {
+            return;
+        };
         let (handle, task) = crate::transport::stream_raw::spawn(
             stream,
             peer_id,
-            self.peer_out_tx.clone(),
+            crate::engine::actor_output::PeerOutput::actor(peer_output),
             &self.cancel,
             completion,
         );
@@ -297,6 +300,7 @@ impl SocketDriver {
                 pending_handshake: false,
                 handshake_admission: None,
                 handled_events: 0,
+                handled_control: 0,
                 completion: None,
                 identity: identity.clone(),
                 info: None,
@@ -516,18 +520,12 @@ impl SocketDriver {
                 self.monitor.publish(MonitorEvent::SubscribeReceived {
                     prefix: prefix.clone(),
                 });
-                if self.socket_type == SocketType::XPub {
-                    self.stage_receive(peer_id, xpub_notification(0x01, &prefix));
-                }
             }
             Command::Cancel(prefix) => {
                 self.send_strategy.peer_cancel(peer_id, &prefix);
                 self.monitor.publish(MonitorEvent::UnsubscribeReceived {
                     prefix: prefix.clone(),
                 });
-                if self.socket_type == SocketType::XPub {
-                    self.stage_receive(peer_id, xpub_notification(0x00, &prefix));
-                }
             }
             Command::Join(group) => {
                 self.send_strategy.peer_join(peer_id, &group);
@@ -564,7 +562,7 @@ impl SocketDriver {
         }));
     }
 
-    fn stage_receive(&mut self, peer_id: u64, message: Message) {
+    pub(super) fn stage_receive(&mut self, peer_id: u64, message: Message) {
         debug_assert!(self.pending_receive.is_none());
         let properties = if self.authenticated_recv_sink.is_some() {
             let Some(properties) = self
@@ -702,7 +700,9 @@ impl SocketDriver {
 /// Inproc fast path connection driver context. Replaces the
 /// `engine::ConnectionDriver` / ZMTP codec stack for in-process peers.
 pub(super) struct InprocDriverCtx {
-    pub(super) peer_out: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    pub(super) peer_out: crate::engine::actor_output::PeerOutput,
+    pub(super) notify_xpub: bool,
+    pub(super) peer_control: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
     pub(super) completion: crate::engine::peer_completion::CompletionProgress,
     pub(super) peer_id: u64,
     pub(super) cancel: tokio_util::sync::CancellationToken,
@@ -776,7 +776,9 @@ async fn inproc_peer_driver_body(
     use omq_proto::proto::greeting::ZMTP_MINOR;
 
     let InprocDriverCtx {
-        peer_out,
+        mut peer_out,
+        peer_control,
+        notify_xpub,
         peer_id,
         cancel,
         peer_props,
@@ -792,6 +794,11 @@ async fn inproc_peer_driver_body(
     } = ctx;
     let _port_guard = InprocPortGuard(inbound.clone());
     let mut pending_in: Option<Message> = None;
+    let mut pending_notification = None;
+    let mut pending_control = None;
+    let control_credit = peer_control.reserve();
+    tokio::pin!(control_credit);
+    let mut control_prefix = 1;
     let mut send_pipe_batch = Vec::new();
     let mut pending_out = std::collections::VecDeque::new();
     let mut data_plane_active = false;
@@ -819,7 +826,7 @@ async fn inproc_peer_driver_body(
         // Synthesized handshake. Same event the codec would emit;
         // runs through the same handle_peer_event path.
         if emit_event(
-            &peer_out,
+            &peer_control,
             peer_id,
             ZmtpEvent::HandshakeSucceeded {
                 peer_minor: ZMTP_MINOR,
@@ -833,6 +840,7 @@ async fn inproc_peer_driver_body(
             return;
         }
 
+        peer_out.set_control_prefix(control_prefix);
         loop {
             if !discard_receive && recv_sink.as_mut().is_some_and(|sink| !sink.retry_peer_pending()) {
                 if socket_close_state.is_closed() {
@@ -914,7 +922,26 @@ async fn inproc_peer_driver_body(
                 () = async { outbound.as_ref().unwrap().deliver_backlog().await; }, if data_plane_active && outbound.as_ref().is_some_and(|sender| !sender.is_empty()) => {}
                 () = async { relay_inbound(inbound.as_deref().unwrap(), &mut pending_in).await; }, if pending_in.is_some() => {}
                 () = async { recv_sink.as_mut().unwrap().peer_space_ready().await; }, if recv_blocked => {}
-                frame = in_rx.recv(), if data_plane_active && !recv_blocked && pending_in.is_none() => match frame {
+                permit = &mut control_credit,
+                    if pending_control.is_some() && (pending_notification.is_none() || peer_out.has_capacity()) => {
+                    let Ok(permit) = permit else { return; };
+                    permit.send((peer_id, PeerEvent::Event(pending_control.take().unwrap())));
+                    completion.note_event();
+                    control_prefix = control_prefix.wrapping_add(1);
+                    peer_out.set_control_prefix(control_prefix);
+                    if let Some(notification) = pending_notification.take() {
+                        match peer_out.try_send(peer_id, notification, true) {
+                            Ok(()) => completion.note_event(),
+                            Err(crate::engine::SendPipeError::Full(_)) => unreachable!("single producer retained notification capacity"),
+                            Err(crate::engine::SendPipeError::Closed(_)) => return,
+                        }
+                    }
+                    control_credit.set(peer_control.reserve());
+                }
+                result = peer_out.ready(), if pending_notification.is_some() && !peer_out.has_capacity() => {
+                    if result.is_err() { return; }
+                }
+                frame = in_rx.recv(), if data_plane_active && !recv_blocked && pending_in.is_none() && pending_control.is_none() => match frame {
                     Some(_) if close_requested || discard_receive => {},
                     Some(InboundFrame::Message(m)) if inbound.is_some() => {
                         match inbound.as_ref().unwrap().try_send(m) {
@@ -947,7 +974,7 @@ async fn inproc_peer_driver_body(
                             && !route_inproc_message(
                                 m,
                                 recv_direct.as_ref(),
-                                &peer_out,
+                                &mut peer_out,
                                 peer_id,
                                 completion,
                             )
@@ -961,12 +988,11 @@ async fn inproc_peer_driver_body(
                         }
                     }
                     Some(InboundFrame::Command(c)) => {
-                        if emit_event(&peer_out, peer_id, ZmtpEvent::Command(*c), completion)
-                            .await
-                            .is_err()
-                        {
-                            return;
+                        let event = ZmtpEvent::Command(*c);
+                        if notify_xpub {
+                            pending_notification = crate::engine::peer_events::xpub_notification(&event);
                         }
+                        pending_control = Some(event);
                     }
                     None => return,
                 },
@@ -983,30 +1009,27 @@ async fn inproc_peer_driver_body(
 async fn route_inproc_message(
     m: Message,
     recv_direct: Option<&std::sync::Arc<crate::socket::recv::SharedRecvPipe>>,
-    peer_out: &mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    peer_out: &mut crate::engine::actor_output::PeerOutput,
     peer_id: u64,
     completion: &mut crate::engine::peer_completion::CompletionProgress,
 ) -> bool {
-    use crate::engine::PeerEvent;
     if let Some(pipe) = recv_direct {
         return pipe.send(m).await.is_ok();
     }
-    if peer_out
-        .send((peer_id, PeerEvent::Event(ZmtpEvent::Message(m))))
-        .await
-        .is_err()
-    {
-        return false;
+    let mut pending = m;
+    loop {
+        match peer_out.try_send(peer_id, pending, false) {
+            Ok(()) => {
+                completion.note_event();
+                return true;
+            }
+            Err(crate::engine::SendPipeError::Full(message)) => pending = message,
+            Err(crate::engine::SendPipeError::Closed(_)) => return false,
+        }
+        if peer_out.ready().await.is_err() {
+            return false;
+        }
     }
-    completion.note_event();
-    true
-}
-
-fn xpub_notification(tag: u8, prefix: &bytes::Bytes) -> Message {
-    let mut b = bytes::BytesMut::with_capacity(1 + prefix.len());
-    b.extend_from_slice(&[tag]);
-    b.extend_from_slice(prefix);
-    Message::single(b.freeze())
 }
 
 /// Spawn the socket driver actor. With a multi-thread IO pool, this
@@ -1041,7 +1064,9 @@ mod tests {
             in_rx,
             out,
             InprocDriverCtx {
-                peer_out,
+                peer_control: peer_out.clone(),
+                peer_out: peer_out.into(),
+                notify_xpub: false,
                 completion,
                 peer_id: 7,
                 cancel: CancellationToken::new(),
@@ -1094,7 +1119,9 @@ mod tests {
                 in_rx,
                 out,
                 InprocDriverCtx {
-                    peer_out,
+                    peer_control: peer_out.clone(),
+                    peer_out: peer_out.into(),
+                    notify_xpub: false,
                     completion,
                     peer_id: 7,
                     cancel: cancel.clone(),

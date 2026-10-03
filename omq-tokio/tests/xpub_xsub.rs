@@ -19,6 +19,107 @@ fn tcp_loopback(port: u16) -> Endpoint {
 }
 
 #[tokio::test]
+async fn xpub_full_notifications_preserve_fifo_and_allow_another_peer() {
+    for transport in [
+        "tcp",
+        "inproc",
+        #[cfg(feature = "ws")]
+        "ws",
+    ] {
+        let publisher = Socket::new(
+            SocketType::XPub,
+            Options::default().recv_hwm(1).linger(Duration::ZERO),
+        );
+        let endpoint = if transport == "inproc" {
+            "inproc://xpub-full-notifications".to_owned()
+        } else {
+            format!("{transport}://127.0.0.1:0")
+        };
+        let endpoint = publisher.bind(endpoint.parse().unwrap()).await.unwrap();
+        let busy = Socket::new(SocketType::Sub, Options::default().linger(Duration::ZERO));
+        busy.connect(endpoint.clone()).await.unwrap();
+        busy.wait_connected(1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let producer = tokio::spawn(async move {
+            for tag in [1, 0] {
+                for index in 0..512 {
+                    let topic = format!("topic-{index:04}");
+                    if tag == 1 {
+                        busy.subscribe(topic).await.unwrap();
+                    } else {
+                        busy.unsubscribe(topic).await.unwrap();
+                    }
+                }
+            }
+            busy
+        });
+        publisher
+            .wait_subscribed(200, Duration::from_secs(2))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut monitor = publisher.monitor();
+        let fresh = Socket::new(SocketType::Sub, Options::default().linger(Duration::ZERO));
+        fresh.subscribe("fresh").await.unwrap();
+        fresh.connect(endpoint).await.unwrap();
+        publisher
+            .wait_connected(2, Duration::from_secs(1))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let omq_tokio::MonitorEvent::SubscribeReceived { prefix } =
+                    monitor.recv().await.unwrap()
+                    && prefix.as_ref() == b"fresh"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("fresh subscription blocked by another peer's notifications");
+        publisher.send(Message::single("fresh body")).await.unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(1), fresh.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.part_slice(0), Some(b"fresh body".as_slice()));
+
+        let mut busy_notifications = Vec::new();
+        let mut fresh_notifications = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..1025 {
+                let notification = publisher.recv().await.unwrap();
+                let bytes = notification.part_bytes(0).unwrap();
+                if bytes.as_ref() == b"\x01fresh" {
+                    fresh_notifications += 1;
+                } else {
+                    busy_notifications.push(bytes);
+                }
+            }
+            let busy = producer.await.unwrap();
+            busy.close().await.unwrap();
+        })
+        .await
+        .expect("XPUB notifications were lost or their producer remained blocked");
+        assert_eq!(fresh_notifications, 1);
+        for (index, notification) in busy_notifications.into_iter().enumerate() {
+            let tag = u8::from(index < 512);
+            let mut expected = vec![tag];
+            expected.extend_from_slice(format!("topic-{:04}", index % 512).as_bytes());
+            assert_eq!(
+                notification.as_ref(),
+                expected,
+                "{transport}, notification {index}"
+            );
+        }
+        fresh.close().await.unwrap();
+        publisher.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn pub_filters_by_subscriber_prefix() {
     let pub_ = Socket::new(SocketType::Pub, Options::default());
     let mut pub_mon = pub_.monitor();

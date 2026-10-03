@@ -93,12 +93,15 @@ pub(crate) struct Materialized {
     pub id: u64,
     fork_gen: u32,
     pub socket: Arc<omq_tokio::Socket>,
-    pub send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
-    pub recv_cons: Mutex<yring::Consumer<omq_tokio::Message>>,
+    pub send_queue: Arc<crate::send::SendQueue>,
+    pub send_pump: JoinHandle<()>,
+    pub recv_cons: Arc<Mutex<crate::recv::RecvConsumers>>,
+    pub recv_config: Option<Arc<omq_tokio::engine::RecvSinkConfig>>,
+    pub recv_wakeup: Option<JoinHandle<()>>,
+    pub send_wakeup: Option<JoinHandle<()>>,
     pub recv_ready: Arc<ReadinessSignal>,
     pub send_ready: Arc<ReadinessSignal>,
     pub recv_space: Arc<omq_tokio::engine::StateSignal>,
-    pub send_pump: JoinHandle<()>,
     pub recv_pump: JoinHandle<()>,
 }
 
@@ -179,38 +182,133 @@ impl SocketInner {
         if slot.as_ref().is_some_and(|m| m.fork_gen == fork_gen) {
             return Ok(());
         }
-        *slot = None;
+        // Inherited tasks/queue locks may belong to vanished parent threads.
+        // Match the blocking materialization's fork recovery contract.
+        if let Some(inherited) = slot.take() {
+            std::mem::forget(inherited);
+        }
         let opts = self.overlay.lock().unwrap().to_options()?;
-        let send_cap = opts.send_hwm.max(1) as usize;
         let recv_cap = opts.recv_hwm.max(1) as usize;
-        let (send_prod, send_cons) = yring::async_spsc(send_cap);
-        let (recv_prod, recv_cons) = yring::spsc(recv_cap);
+        let (recv_prod, pump_cons) = yring::spsc(recv_cap);
+        let (fast_prod, fast_cons) = yring::spsc(recv_cap);
         let recv_ready = Arc::new(ReadinessSignal::new());
         let send_ready = Arc::new(ReadinessSignal::new());
+        let send_signal = send_ready.clone();
+        let (send_callback, send_wakeup) = crate::notify::native_callback(
+            Arc::new(move || send_signal.signal()),
+            &self.ctx.runtime_handle()?,
+        );
+        let (send_queue, send_cons) =
+            crate::send::SendQueue::new(opts.send_hwm.max(1) as usize, send_callback);
         let recv_space = Arc::new(omq_tokio::engine::StateSignal::new());
+        let (callback, recv_wakeup) = crate::notify::receive_callback(
+            recv_ready.clone(),
+            crate::runtime::global_recv_signal(),
+            &self.ctx.runtime_handle()?,
+        );
+        let latency = matches!(
+            self.socket_type,
+            omq_tokio::SocketType::Req
+                | omq_tokio::SocketType::Rep
+                | omq_tokio::SocketType::Pair
+                | omq_tokio::SocketType::Channel
+        );
+        let recv_config = (!opts.conflate && (latency || recv_cap >= 256)).then(|| {
+            let signal = callback.clone();
+            Arc::new(omq_tokio::engine::RecvSinkConfig::new(
+                omq_tokio::engine::RecvSink::Yring(omq_tokio::engine::YringSink {
+                    producer: fast_prod,
+                    signal: Box::new(move || signal()),
+                    space: recv_space.clone(),
+                }),
+                callback,
+                recv_space.clone(),
+                recv_cap,
+            ))
+        });
         let socket_type = self.socket_type;
         let (id, socket, send_pump, recv_pump) = self.ctx.materialize(
             socket_type,
             opts,
+            send_queue.clone(),
             send_cons,
+            send_ready.clone(),
             recv_prod,
             recv_ready.clone(),
-            send_ready.clone(),
             recv_space.clone(),
+            recv_config.clone(),
         )?;
         *slot = Some(Materialized {
             id,
             fork_gen,
             socket,
-            send_prod: Mutex::new(send_prod),
-            recv_cons: Mutex::new(recv_cons),
+            send_queue,
+            send_pump,
+            recv_cons: Arc::new(Mutex::new(crate::recv::RecvConsumers::new(
+                fast_cons, pump_cons,
+            ))),
+            recv_config,
+            recv_wakeup,
+            send_wakeup,
             recv_ready,
             send_ready,
             recv_space,
-            send_pump,
             recv_pump,
         });
         Ok(())
+    }
+
+    /// Take transport items under queue locks; admit and drop them outside
+    /// those locks, since Python buffer exporters can reenter on release.
+    pub(crate) fn try_external_recv(&self) -> PyResult<Option<omq_tokio::Message>> {
+        self.materialize()?;
+        let mut bytes = 0;
+        for _ in 0..256 {
+            let (popped, protocol_socket) = {
+                let guard = self.materialized.read().unwrap();
+                let state = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+                let request_reply = matches!(
+                    self.socket_type,
+                    omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+                );
+                if request_reply && state.send_queue.protocol_pending.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                let popped = {
+                    let mut consumers = state.recv_cons.lock().unwrap();
+                    consumers.refresh(state.recv_config.as_ref());
+                    consumers.try_pop()
+                };
+                if popped.as_ref().is_some_and(|(_, was_full)| *was_full) {
+                    state.recv_space.notify_changed();
+                }
+                (popped, request_reply.then(|| state.socket.clone()))
+            };
+            let Some((message, _)) = popped else {
+                return Ok(None);
+            };
+            let Some(socket) = protocol_socket else {
+                return Ok(Some(message));
+            };
+            bytes += message.byte_len();
+            if let Some(message) = socket.prepare_external_recv(message) {
+                return Ok(Some(message));
+            }
+            if bytes >= 1024 * 1024 {
+                break;
+            }
+        }
+        let ready = self
+            .materialized
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|state| state.recv_ready.clone());
+        // A bounded malformed scan must retain readiness for the next poll.
+        if let Some(ready) = ready {
+            ready.force_wake();
+        }
+        Ok(None)
     }
 
     pub fn ensure_id(&self) -> PyResult<u64> {
@@ -407,6 +505,15 @@ impl SocketInner {
     }
 
     #[cfg(windows)]
+    fn wakeup_signals(&self) -> Option<(Arc<ReadinessSignal>, Arc<ReadinessSignal>)> {
+        self.materialized
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|state| (state.recv_ready.clone(), state.send_ready.clone()))
+    }
+
+    #[cfg(windows)]
     pub fn set_wakeup_hooks(
         &self,
         recv_async: Option<Py<PyAny>>,
@@ -414,56 +521,47 @@ impl SocketInner {
         send_async: Option<Py<PyAny>>,
         send_event: Option<Py<PyAny>>,
     ) {
-        let materialized_guard = self.materialized.read().unwrap();
-        if let Some(materialized) = materialized_guard.as_ref() {
-            materialized
-                .recv_ready
-                .set_wakeup_hooks(recv_async, recv_event);
-            materialized
-                .send_ready
-                .set_wakeup_hooks(send_async, send_event);
+        if let Some((recv, send)) = self.wakeup_signals() {
+            recv.set_wakeup_hooks(recv_async, recv_event);
+            send.set_wakeup_hooks(send_async, send_event);
         }
     }
 
     #[cfg(windows)]
     pub fn set_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
-        let materialized_guard = self.materialized.read().unwrap();
-        if let Some(materialized) = materialized_guard.as_ref() {
+        if let Some((recv, send)) = self.wakeup_signals() {
             if let Some(mode) = recv_mode {
-                materialized.recv_ready.set_wakeup_mode(mode);
+                recv.set_wakeup_mode(mode);
             }
             if let Some(mode) = send_mode {
-                materialized.send_ready.set_wakeup_mode(mode);
+                send.set_wakeup_mode(mode);
             }
         }
     }
 
     #[cfg(windows)]
     pub fn clear_wakeup_modes(&self, recv_mode: Option<u32>, send_mode: Option<u32>) {
-        let materialized_guard = self.materialized.read().unwrap();
-        if let Some(materialized) = materialized_guard.as_ref() {
+        if let Some((recv, send)) = self.wakeup_signals() {
             if let Some(mode) = recv_mode {
-                materialized.recv_ready.clear_wakeup_mode(mode);
+                recv.clear_wakeup_mode(mode);
             }
             if let Some(mode) = send_mode {
-                materialized.send_ready.clear_wakeup_mode(mode);
+                send.clear_wakeup_mode(mode);
             }
         }
     }
 
     #[cfg(windows)]
     pub fn mark_recv_wakeup_drain_complete(&self) {
-        let materialized_guard = self.materialized.read().unwrap();
-        if let Some(materialized) = materialized_guard.as_ref() {
-            materialized.recv_ready.mark_drain_complete();
+        if let Some((recv, _)) = self.wakeup_signals() {
+            recv.mark_drain_complete();
         }
     }
 
     #[cfg(windows)]
     pub fn mark_send_wakeup_drain_complete(&self) {
-        let materialized_guard = self.materialized.read().unwrap();
-        if let Some(materialized) = materialized_guard.as_ref() {
-            materialized.send_ready.mark_drain_complete();
+        if let Some((_, send)) = self.wakeup_signals() {
+            send.mark_drain_complete();
         }
     }
 }
@@ -1107,9 +1205,7 @@ impl Socket {
         }
         if let Some(m) = self.inner.take_materialized() {
             let ctx = self.inner.ctx.clone();
-            py.detach(|| {
-                ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump, linger)
-            });
+            py.detach(|| ctx.destroy_socket(m, linger));
         }
         Ok(())
     }
@@ -1134,6 +1230,15 @@ impl Socket {
 
 impl Socket {
     fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message) -> PyResult<()> {
+        if matches!(
+            self.inner.socket_type,
+            omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+        ) && !self.inner.rxbuf.lock().unwrap().is_empty()
+        {
+            return Err(map_err(PError::Protocol(
+                "receive remaining multipart frames before sending".into(),
+            )));
+        }
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
         let fork_gen = FORK_GEN.load(Ordering::Acquire);
@@ -1197,7 +1302,13 @@ impl Socket {
                 Some(msgs.remove(0))
             }
         };
-        if let Some(msg) = cached {
+        if let Some(msg) = cached
+            && let Some(msg) = self
+                .inner
+                .ensure_blocking_socket()?
+                .into_async()
+                .prepare_external_recv(msg)
+        {
             return Ok(msg);
         }
         let sock = self.inner.ensure_blocking_socket()?;
@@ -1270,7 +1381,13 @@ impl Socket {
                 Some(msgs.remove(0))
             }
         };
-        if let Some(msg) = cached {
+        if let Some(msg) = cached
+            && let Some(msg) = self
+                .inner
+                .ensure_blocking_socket()?
+                .into_async()
+                .prepare_external_recv(msg)
+        {
             return Ok(msg);
         }
         let sock = self.inner.ensure_blocking_socket()?;

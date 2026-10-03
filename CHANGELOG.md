@@ -21,6 +21,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- pyomq admits eligible async sends and receives directly, preserving fallback
+  FIFO, bounded workers, and external REQ/REP admission. Ready asyncio polls
+  avoid executor dispatch. Windows native callbacks defer Python hooks until
+  producer and binding locks are released.
+
 - Inproc messages no longer pass through an I/O thread. Each direction of an
   inproc connection is one `yring` that holds the sender's `send_hwm` plus the
   receiver's `recv_hwm` messages. `send` pushes into it on the calling thread

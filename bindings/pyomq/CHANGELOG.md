@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Require published `yring` 0.3.18 instead of a sibling checkout.
+- Admit eligible async sends directly into native queues, preserving FIFO
+  behind accepted fallback sends through native admission. Keep bounded
+  workers for pre-ready/full sends and small throughput queues.
+- Deliver eligible async receives through recyclable external sinks and
+  avoid executor dispatch for already-ready asyncio polls.
+
+### Fixed
+
+- Keep REP peer, envelope, and body together until application receive.
+  Sync polling and async relays no longer advance REQ/REP state early.
+- Reject request/reply sends until remaining receive frames are consumed.
+- Dispatch Windows native readiness hooks outside producer and binding locks;
+  preserve callback coalescing, follow-up wakes, and shutdown cancellation.
 
 ## [0.22.0] - 2026-09-19
 ### Added

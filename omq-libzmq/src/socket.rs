@@ -410,13 +410,14 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
 
     let inner = Arc::new(ctx.socket_with_recv_sink_config(socket_type, opts, recv_sink_cfg));
 
-    // Recv pump: relay from async_channel into the pump yring.
-    // Handles second+ peers whose drivers push to async_channel.
+    // Relay complete transport items into the pump yring. Request/reply
+    // validation and admission belong to the application receive path.
+    // Handles peers whose drivers push to the internal receive queues.
     // For the single-peer case, the async_channel stays empty
     // and this task idles.
     let s_recv = inner.clone();
     let recv_pump = tokio::spawn(async move {
-        while let Ok(msg) = s_recv.recv().await {
+        while let Ok(msg) = s_recv.recv_for_external_recv().await {
             push_to_pump(&mut pump_prod, msg, recv_notify, &recv_space).await;
         }
     });

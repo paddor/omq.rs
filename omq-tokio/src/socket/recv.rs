@@ -190,13 +190,7 @@ pub(crate) struct TcpYringConsumer {
     pub batch_remaining: AtomicUsize,
     pub space: Arc<StateSignal>,
     pub peer_id: u64,
-    /// REP over inproc: the ring holds whole requests. The drain splits
-    /// off the envelope and queues it as the next reply route.
-    pub rep: Option<RepPending>,
 }
-
-/// REP request envelopes awaiting their reply, oldest first.
-pub(crate) type RepPending = Arc<Mutex<VecDeque<(u64, crate::routing::RepEnvelope)>>>;
 
 impl std::fmt::Debug for TcpYringConsumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -565,51 +559,15 @@ fn drain_peer_source(
     budget: &mut DrainBudget,
     limit: DrainLimit,
 ) -> SourceDrain {
-    match &peer.rep {
-        Some(pending) => drain_rep_requests(peer, pending),
-        None => drain_peer_consumer(
-            &peer.consumer,
-            &peer.batch_remaining,
-            latency,
-            batch,
-            budget,
-            limit,
-            || peer.space.notify_changed(),
-        ),
-    }
-}
-
-/// Pop one REP request. The caller returns its body next, so its envelope
-/// goes to the front of the reply routes.
-fn drain_rep_requests(peer: &TcpYringConsumer, pending: &RepPending) -> SourceDrain {
-    let Ok(mut consumer) = peer.consumer.try_lock() else {
-        return SourceDrain::default();
-    };
-    let mut remaining = peer.batch_remaining.load(Ordering::Relaxed);
-    let mut released = false;
-    let message = loop {
-        let (request, freed) = drain_yring_one(&mut consumer, &mut remaining);
-        released |= freed;
-        let Some(request) = request else {
-            break None;
-        };
-        // A request without a delimiter is dropped, like libzmq.
-        if let Some((envelope, body)) = crate::routing::split_rep_request(&request) {
-            pending
-                .lock()
-                .expect("rep pending")
-                .push_front((peer.peer_id, envelope));
-            break Some(body);
-        }
-    };
-    if released {
-        peer.space.notify_changed();
-    }
-    peer.batch_remaining.store(remaining, Ordering::Relaxed);
-    SourceDrain {
-        message,
-        disconnected: consumer.is_disconnected(),
-    }
+    drain_peer_consumer(
+        &peer.consumer,
+        &peer.batch_remaining,
+        latency,
+        batch,
+        budget,
+        limit,
+        || peer.space.notify_changed(),
+    )
 }
 
 fn drain_peer_consumer<F: FnMut()>(
@@ -1478,7 +1436,6 @@ mod tests {
                 batch_remaining: AtomicUsize::new(0),
                 space: Arc::new(crate::engine::signal::StateSignal::new()),
                 peer_id,
-                rep: None,
             }),
         )
     }
@@ -1507,7 +1464,6 @@ mod tests {
                     batch_remaining: AtomicUsize::new(0),
                     space: Arc::new(crate::engine::signal::StateSignal::new()),
                     peer_id: id as u64,
-                    rep: None,
                 }));
         }
         let (pipe, consumer, notify, space) = recv_pipe(capacity, waker);

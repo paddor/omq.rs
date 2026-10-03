@@ -685,3 +685,19 @@ async fn rep_keeps_empty_body_parts_throughput_profile_tcp() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn req_full_returns_unmodified_application_message() {
+    let req = Socket::new(SocketType::Req, Options::default());
+    let endpoint = req.bind(inproc_ep("req-full-original-body")).await.unwrap();
+    let original = Message::multipart(["", "body", "tail"]);
+    let Err(omq_tokio::TrySendError::Full(returned)) = req.try_send(original.clone()) else {
+        panic!("bound REQ without peers must mute");
+    };
+    assert_eq!(returned, original);
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.connect(endpoint).await.unwrap();
+    req.wait_connected(1, Duration::from_secs(1)).await.unwrap();
+    req.try_send(returned).unwrap();
+    assert_eq!(rep.recv().await.unwrap(), original);
+}

@@ -247,7 +247,9 @@ pub(super) fn spawn_inproc_peer(
         return;
     }
     let peer_id = next_peer_id(socket);
-    if socket.socket_type == SocketType::Server && server_routing_id(peer_id).is_none() {
+    if matches!(socket.socket_type, SocketType::Server | SocketType::Rep)
+        && server_routing_id(peer_id).is_none()
+    {
         return;
     }
 
@@ -401,10 +403,7 @@ fn inproc_port_sink(
             let recv_signal = socket.spsc.recv_signal.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();
             let space = Arc::new(StateSignal::new());
-            // REP requests stay whole in the ring. The receive path splits
-            // each envelope off as it hands out the body.
-            let rep = (socket.socket_type == SocketType::Rep).then(|| socket.rep_pending.clone());
-            PeerLifecycle::new(socket).register_tcp_consumer(consumer, space.clone(), peer_id, rep);
+            PeerLifecycle::new(socket).register_tcp_consumer(consumer, space.clone(), peer_id);
             crate::engine::RecvSink::Yring(crate::engine::YringSink {
                 producer,
                 signal: Box::new(move || {
@@ -414,7 +413,9 @@ fn inproc_port_sink(
                 space,
             })
         });
-    if socket.socket_type == SocketType::Server {
+    if socket.socket_type == SocketType::Rep {
+        crate::engine::RecvSink::rep(sink, peer_id)
+    } else if socket.socket_type == SocketType::Server {
         crate::engine::RecvSink::server(
             sink,
             server_routing_id(peer_id).expect("SERVER peer ID checked"),
@@ -456,7 +457,9 @@ fn allocate_peer_id(socket: &mut SocketDriver) -> Option<u64> {
         return None;
     }
     let peer_id = next_peer_id(socket);
-    if socket.socket_type == SocketType::Server && server_routing_id(peer_id).is_none() {
+    if matches!(socket.socket_type, SocketType::Server | SocketType::Rep)
+        && server_routing_id(peer_id).is_none()
+    {
         return None;
     }
     Some(peer_id)
@@ -762,7 +765,6 @@ fn attach_recv_bypass(
     } else if rep_latency {
         peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
             crate::engine::RecvSink::Channel(socket.recv_tx.clone()),
-            socket.rep_pending.clone(),
             peer_id,
         ))
     } else if socket.socket_type == SocketType::Server {
@@ -787,11 +789,7 @@ fn attach_yring_recv_bypass(
         .and_then(|config| config.authenticated_sink())
     {
         return if rep_latency {
-            peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
-                sink,
-                socket.rep_pending.clone(),
-                peer_id,
-            ))
+            peer_driver.with_recv_sink(crate::engine::RecvSink::rep(sink, peer_id))
         } else if socket.socket_type == SocketType::Server {
             peer_driver.with_recv_sink(crate::engine::RecvSink::server(
                 sink,
@@ -826,16 +824,12 @@ fn attach_yring_recv_bypass(
                 }),
                 space: space.clone(),
             });
-            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id, None);
+            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id);
             sink
         });
 
     if rep_latency {
-        peer_driver.with_recv_sink(crate::engine::RecvSink::rep(
-            sink,
-            socket.rep_pending.clone(),
-            peer_id,
-        ))
+        peer_driver.with_recv_sink(crate::engine::RecvSink::rep(sink, peer_id))
     } else if socket.socket_type == SocketType::Server {
         peer_driver.with_recv_sink(crate::engine::RecvSink::server(
             sink,

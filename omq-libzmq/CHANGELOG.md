@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- REP replies retain the correct request route when multiple peers queue
+  requests before the application replies. Peer, envelope, body, and ZAP
+  properties stay associated through direct and relayed receives.
+- REQ receive relays no longer unlock the send state before application
+  receive. Malformed replies are discarded, empty body frames are retained,
+  and incomplete multipart receives reject sends with `EFSM`.
+
 ### Changed
 
 - `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a PUSH/PULL-only

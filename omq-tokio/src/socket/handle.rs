@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
+use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
@@ -70,9 +71,7 @@ struct Inner {
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
-    /// REP request envelopes, one per queued request body, and the
-    /// envelope of the request being answered.
-    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
+    /// Peer and envelope of the request admitted by application receive.
     rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
@@ -205,7 +204,6 @@ impl Socket {
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
-        let rep_pending = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
@@ -220,7 +218,6 @@ impl Socket {
             send_strategy,
             spsc.clone(),
             type_state,
-            rep_pending.clone(),
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),
@@ -242,15 +239,13 @@ impl Socket {
                     recv_pipe_notify,
                     recv_pipe_space,
                     spsc,
-                    // REP pairs each body with its envelope as it leaves
-                    // the queue, so it never stages a batch.
+                    // REP admits one complete request per receive call.
                     latency_profile || socket_type == SocketType::Rep,
                     recv_batching,
                     recv_spin,
                 ),
                 monitor,
                 send_submitter,
-                rep_pending,
                 rep_current,
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
@@ -281,33 +276,35 @@ impl Socket {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Read a complete transport item without advancing request/reply state.
+    /// Compatibility receive relays must defer admission to their application.
     #[doc(hidden)]
-    pub fn mark_req_reply_received_for_external_recv(&self) {
-        if self.inner.socket_type == SocketType::Req {
-            self.inner
-                .req_awaiting_reply
-                .store(false, Ordering::Release);
-        }
+    pub async fn recv_for_external_recv(&self) -> Result<Message> {
+        self.inner.recv_rx.recv().await
     }
 
+    /// Validate and admit a transport item at application receive. REP carries
+    /// its peer ID, envelope, and body together through every receive queue.
     #[doc(hidden)]
-    pub fn mark_rep_request_received_for_external_recv(&self) {
-        if self.inner.socket_type == SocketType::Rep {
-            self.admit_rep_request();
+    pub fn prepare_external_recv(&self, mut message: Message) -> Option<Message> {
+        match self.inner.socket_type {
+            SocketType::Req => {
+                if message.len() < 2 || !message.pop_front()?.is_empty() {
+                    return None;
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                Some(message)
+            }
+            SocketType::Rep => {
+                let peer_id = u64::from(message.routing_id()?.checked_sub(1)?);
+                let (envelope, body) = crate::routing::split_rep_request(&message)?;
+                *self.inner.rep_current.lock().expect("rep current") = Some((peer_id, envelope));
+                Some(body)
+            }
+            _ => Some(message),
         }
-    }
-
-    /// Make the oldest received request's envelope the reply target. The
-    /// receive queue holds REP bodies; drivers and the actor already split
-    /// the envelope at the first empty frame.
-    fn admit_rep_request(&self) {
-        let request = self
-            .inner
-            .rep_pending
-            .lock()
-            .expect("rep pending")
-            .pop_front();
-        *self.inner.rep_current.lock().expect("rep current") = request;
     }
 
     /// Bind to an endpoint. Returns the resolved endpoint once the
@@ -495,7 +492,15 @@ impl Socket {
                         .req_awaiting_reply
                         .store(false, Ordering::Release);
                 }
-                result
+                match result {
+                    Err(TrySendError::Full(mut returned)) => {
+                        // Full returns the original application message so
+                        // retrying never prepends a second REQ delimiter.
+                        let _ = returned.pop_front();
+                        Err(TrySendError::Full(returned))
+                    }
+                    other => other,
+                }
             }
             SocketType::Rep => {
                 let mut current = self.inner.rep_current.lock().expect("rep identity");
@@ -576,48 +581,40 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.recv().await?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.recv().await?;
-                self.admit_rep_request();
-                Ok(msg)
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.recv().await;
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.recv().await?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.recv().await,
+            if !budget.account(byte_len) {
+                tokio::task::yield_now().await;
+                budget.reset();
+            }
         }
     }
 
-    /// Blocking receive for sync callers. The calling thread registers
-    /// itself and parks until data arrives.
+    /// Blocking receive for sync callers. Register the caller and park until
+    /// a valid complete message arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.blocking_recv()?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.blocking_recv()?;
-                self.admit_rep_request();
-                Ok(msg)
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv();
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.blocking_recv()?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.blocking_recv(),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -625,28 +622,22 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let Some(mut msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
-                    return Ok(None);
-                };
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(Some(msg));
-            },
-            SocketType::Rep => {
-                let Some(msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
-                    return Ok(None);
-                };
-                self.admit_rep_request();
-                Ok(Some(msg))
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv_cancelable(cancel);
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let Some(message) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
+                return Ok(None);
+            };
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(Some(message));
             }
-            _ => self.inner.recv_rx.blocking_recv_cancelable(cancel),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -655,66 +646,50 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let Some(mut msg) = self
-                    .inner
-                    .recv_rx
-                    .blocking_recv_registered_cancelable(cancel)?
-                else {
-                    return Ok(None);
-                };
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(Some(msg));
-            },
-            SocketType::Rep => {
-                let Some(msg) = self
-                    .inner
-                    .recv_rx
-                    .blocking_recv_registered_cancelable(cancel)?
-                else {
-                    return Ok(None);
-                };
-                self.admit_rep_request();
-                Ok(Some(msg))
-            }
-            _ => self
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self
                 .inner
                 .recv_rx
-                .blocking_recv_registered_cancelable(cancel),
+                .blocking_recv_registered_cancelable(cancel);
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let Some(message) = self
+                .inner
+                .recv_rx
+                .blocking_recv_registered_cancelable(cancel)?
+            else {
+                return Ok(None);
+            };
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(Some(message));
+            }
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
-    /// Blocking receive with a timeout for sync callers.
     pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
-        let now = std::time::Instant::now();
-        let Some(deadline) = now.checked_add(timeout) else {
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv_timeout(timeout);
+        }
+        let Some(deadline) = std::time::Instant::now().checked_add(timeout) else {
             return self.blocking_recv();
         };
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
-                self.admit_rep_request();
-                Ok(msg)
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.blocking_recv_until(deadline)?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.blocking_recv_timeout(timeout),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -870,25 +845,20 @@ impl Socket {
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
-        if self.inner.socket_type == SocketType::Req {
-            loop {
-                let mut msg = self.inner.recv_rx.try_recv()?;
-                if let Some(delim) = msg.pop_front()
-                    && delim.is_empty()
-                {
-                    self.inner
-                        .req_awaiting_reply
-                        .store(false, Ordering::Release);
-                    return Ok(msg);
-                }
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.try_recv();
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.try_recv()?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
+            }
+            if !budget.account(byte_len) {
+                return Err(Error::WouldBlock);
             }
         }
-        if self.inner.socket_type == SocketType::Rep {
-            let msg = self.inner.recv_rx.try_recv()?;
-            self.admit_rep_request();
-            return Ok(msg);
-        }
-        self.inner.recv_rx.try_recv()
     }
 
     /// Subscribe to a topic prefix. Only valid on SUB / XSUB sockets; other

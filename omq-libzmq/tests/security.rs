@@ -1102,3 +1102,68 @@ fn omq_fixed_plain_credentials_validate_c_inputs() {
     zmq_close(pull);
     zmq_ctx_term(ctx);
 }
+
+#[test]
+fn plain_zap_rep_keeps_queued_request_routes_and_properties_together() {
+    let ctx = zmq_ctx_new();
+    let context_address = ctx as usize;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let zap = std::thread::spawn(move || {
+        let handler = zmq_socket(context_address as *mut c_void, ZMQ_REP);
+        set_timeo(handler, 5000);
+        assert_eq!(zmq_bind(handler, c"inproc://zeromq.zap.01".as_ptr()), 0);
+        ready_tx.send(()).unwrap();
+        for _ in 0..2 {
+            let request = recv_multipart(handler);
+            assert_eq!(request.len(), 8);
+            send_multipart(
+                handler,
+                &[b"1.0", &request[1], b"200", b"OK", &request[6], b""],
+            );
+        }
+        assert_eq!(zmq_close(handler), 0);
+    });
+    ready_rx.recv().unwrap();
+    let rep = zmq_socket(ctx, ZMQ_REP);
+    set_i32(rep, ZMQ_LINGER, 0);
+    set_i32(rep, ZMQ_PLAIN_SERVER, 1);
+    set_bytes(rep, ZMQ_ZAP_DOMAIN, b"global");
+    set_timeo(rep, 5000);
+    let endpoint = helpers::bind_random_tcp(rep);
+    let clients = [zmq_socket(ctx, ZMQ_REQ), zmq_socket(ctx, ZMQ_REQ)];
+    for (client, user) in clients.iter().zip([b"alice".as_slice(), b"bob".as_slice()]) {
+        set_i32(*client, ZMQ_LINGER, 0);
+        set_bytes(*client, ZMQ_PLAIN_USERNAME, user);
+        set_bytes(*client, ZMQ_PLAIN_PASSWORD, b"secret");
+        set_timeo(*client, 5000);
+        assert_eq!(zmq_connect(*client, endpoint.as_ptr()), 0);
+        assert_eq!(
+            zmq_send(*client, user.as_ptr().cast(), user.len(), 0),
+            i32::try_from(user.len()).unwrap()
+        );
+    }
+    zap.join().unwrap();
+    // Both connections have queued requests; each body keeps its own ZAP ID.
+    for _ in 0..2 {
+        let mut request = ZmqMsg::new();
+        assert!(zmq_msg_recv(request.0.as_mut_ptr().cast(), rep, 0) > 0);
+        let body = msg_bytes(&mut request);
+        assert_eq!(msg_property(&request, c"User-Id"), Some(body.clone()));
+        assert_eq!(
+            zmq_send(rep, body.as_ptr().cast(), body.len(), 0),
+            i32::try_from(body.len()).unwrap()
+        );
+        assert_eq!(zmq_msg_close(request.0.as_mut_ptr().cast()), 0);
+    }
+    for (client, expected) in clients.iter().zip([b"alice".as_slice(), b"bob".as_slice()]) {
+        let mut reply = [0_u8; 8];
+        assert_eq!(
+            zmq_recv(*client, reply.as_mut_ptr().cast(), reply.len(), 0),
+            i32::try_from(expected.len()).unwrap()
+        );
+        assert_eq!(&reply[..expected.len()], expected);
+        assert_eq!(zmq_close(*client), 0);
+    }
+    assert_eq!(zmq_close(rep), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}

@@ -3720,6 +3720,30 @@ mod tests {
     }
 
     #[test]
+    fn full_rep_sink_returns_original_message_without_internal_route() {
+        let (producer, mut consumer) = yring::spsc(1);
+        let mut sink = RecvSink::rep(
+            RecvSink::Yring(YringSink {
+                producer,
+                signal: Box::new(|| {}),
+                space: Arc::new(StateSignal::new()),
+            }),
+            7,
+        );
+        sink.try_deliver(Message::multipart(["", "first"])).unwrap();
+        let original = Message::multipart(["", "second"]).with_routing_id(99);
+        let Err(omq_proto::TrySendError::Full(returned)) = sink.try_deliver(original.clone())
+        else {
+            panic!("full sink must return the request");
+        };
+        assert_eq!(returned, original);
+        assert_eq!(returned.routing_id(), Some(99));
+        let received = consumer.prefetch_and_pop().unwrap();
+        assert_eq!(received.routing_id(), Some(8));
+        assert_eq!(received.get(1), Some(b"first".as_slice()));
+    }
+
+    #[test]
     fn yring_sink_deferred_send_signals_once_per_flush() {
         let (producer, mut consumer) = yring::spsc(4);
         let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4346,11 +4370,10 @@ mod tests {
     #[expect(clippy::too_many_lines)]
     async fn full_receive_sink_controls(kind: &str) {
         let (server_stream, client_stream) = tokio::io::duplex(4096);
-        let (pipe, _pipe_receiver, _, _) =
+        let (pipe, mut pipe_receiver, _, _) =
             crate::socket::recv::recv_pipe(1, crate::socket::recv::BlockingRecvWaker::new());
         let (producer, _yring_receiver) = yring::spsc(1);
         let (authenticated, _authenticated_receiver) = RecvSink::authenticated(1, Arc::new(|| {}));
-        let envelopes = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let sink = match kind {
             "channel" => Some(RecvSink::Channel(pipe.clone())),
             "yring" => Some(RecvSink::Yring(YringSink {
@@ -4360,11 +4383,7 @@ mod tests {
             })),
             "authenticated" => Some(authenticated),
             "server" => Some(RecvSink::server(RecvSink::Channel(pipe.clone()), 7)),
-            "rep" => Some(RecvSink::rep(
-                RecvSink::Channel(pipe.clone()),
-                envelopes.clone(),
-                1,
-            )),
+            "rep" => Some(RecvSink::rep(RecvSink::Channel(pipe.clone()), 1)),
             "actor" => None,
             _ => unreachable!(),
         };
@@ -4443,11 +4462,13 @@ mod tests {
             if name == "CONTROL" && body == b"reverse"[..])
         );
         if kind == "rep" {
-            assert_eq!(
-                envelopes.lock().unwrap().len(),
-                1,
-                "only admitted requests may publish an envelope"
-            );
+            let request = pipe_receiver
+                .prefetch_and_pop()
+                .expect("one admitted request");
+            assert_eq!(request.routing_id(), Some(2));
+            assert_eq!(request.get(0), Some(b"".as_slice()));
+            assert_eq!(request.get(1), Some([0_u8; 128].as_slice()));
+            assert!(pipe_receiver.prefetch_and_pop().is_none());
         }
         server_control.send(PeerDriverCommand::Close).await.unwrap();
         tokio::time::timeout(Duration::from_millis(500), server_control.closed())

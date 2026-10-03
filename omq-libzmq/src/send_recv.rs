@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use omq_tokio::flow::DrainBudget;
 
 use crate::consts::{ZMQ_DONTWAIT, ZMQ_SNDMORE};
 use crate::error::{ETERM, fail, map_omq_err};
@@ -48,10 +49,7 @@ pub(crate) fn try_recv_message(sock: &OmqSocket) -> Result<Option<omq_tokio::Mes
 
     if authenticated_recv_configured(sock) {
         let item = try_recv_authenticated_message(sock)?;
-        if item.is_some() {
-            mark_external_recv(sock);
-        }
-        return Ok(item.map(|item| item.into_parts().0));
+        return Ok(item.map(|item| item.0));
     }
 
     if sock.drain_nonempty.load(Ordering::Relaxed) {
@@ -105,7 +103,7 @@ pub(crate) fn try_send_message(
         Ok(()) => Ok(SendMessageAttempt::Sent),
         Err(omq_tokio::TrySendError::Full(msg)) => Ok(SendMessageAttempt::Full(msg)),
         Err(omq_tokio::TrySendError::Closed) => Err(ETERM),
-        Err(omq_tokio::TrySendError::Error(e)) => Err(map_omq_err(&e)),
+        Err(omq_tokio::TrySendError::Error(e)) => Err(map_send_err(sock, &e)),
     }
 }
 
@@ -184,6 +182,16 @@ fn wait_for_ready_peer(sock: &OmqSocket, sndtimeo: i64) -> Result<(), c_int> {
 }
 
 fn ensure_libzmq_send_route(sock: &OmqSocket, flags: c_int, sndtimeo: i64) -> Result<(), c_int> {
+    if matches!(
+        sock.socket_type,
+        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+    ) && (sock
+        .drain_nonempty
+        .load(std::sync::atomic::Ordering::Relaxed)
+        || authenticated_recv_has_more(sock))
+    {
+        return Err(crate::error::EFSM);
+    }
     if !round_robin_send_mutes_without_ready_peer(sock) {
         return Ok(());
     }
@@ -360,6 +368,18 @@ pub(crate) fn send_message(
     submit_message(sock, msg, ret_len, flags, sndtimeo)
 }
 
+fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int {
+    if matches!(
+        sock.socket_type,
+        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+    ) && matches!(error, omq_tokio::Error::Protocol(_))
+    {
+        crate::error::EFSM
+    } else {
+        map_omq_err(error)
+    }
+}
+
 fn submit_message(
     sock: &Arc<OmqSocket>,
     msg: omq_tokio::Message,
@@ -375,7 +395,7 @@ fn submit_message(
     match inner.try_send(msg) {
         Ok(()) => ret_len,
         Err(omq_tokio::TrySendError::Closed) => fail(ETERM),
-        Err(omq_tokio::TrySendError::Error(ref error)) => fail(crate::error::map_omq_err(error)),
+        Err(omq_tokio::TrySendError::Error(ref error)) => fail(map_send_err(sock, error)),
         Err(omq_tokio::TrySendError::Full(_)) if dontwait => fail(libc::EAGAIN),
         Err(omq_tokio::TrySendError::Full(mut msg)) => {
             for i in 0..8 {
@@ -388,7 +408,7 @@ fn submit_message(
                     Ok(()) => return ret_len,
                     Err(omq_tokio::TrySendError::Closed) => return fail(ETERM),
                     Err(omq_tokio::TrySendError::Error(ref error)) => {
-                        return fail(crate::error::map_omq_err(error));
+                        return fail(map_send_err(sock, error));
                     }
                     Err(omq_tokio::TrySendError::Full(returned)) => msg = returned,
                 }
@@ -586,7 +606,6 @@ fn recv_msg_to_buf(
     let data = m.get(start).unwrap_or(&[]);
     copy_to_buf(buf, buf_len, data);
     stash_remaining_parts(sock, m, start);
-    mark_external_recv(sock);
     match checked_c_int_len(data.len()) {
         Ok(n) => n,
         Err(e) => fail(e),
@@ -651,24 +670,34 @@ pub(crate) fn authenticated_recv_has_more(sock: &OmqSocket) -> bool {
     !unsafe { sock.authenticated_recv_drain.get() }.is_empty()
 }
 
-fn try_recv_authenticated_message(
-    sock: &OmqSocket,
-) -> Result<Option<omq_tokio::engine::AuthenticatedRecvItem>, c_int> {
+type AuthenticatedMessage = (omq_tokio::Message, Arc<omq_tokio::proto::PeerProperties>);
+
+fn try_recv_authenticated_message(sock: &OmqSocket) -> Result<Option<AuthenticatedMessage>, c_int> {
     // SAFETY: libzmq sockets are accessed by at most one application thread.
     let Some(receiver) = (unsafe { sock.authenticated_recv.get() }).as_mut() else {
         return Err(ETERM);
     };
-    match receiver.try_recv() {
-        Ok(item) => Ok(Some(item)),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
-        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Err(ETERM),
+    let mut budget = DrainBudget::WORKER;
+    while !budget.exhausted() {
+        match receiver.try_recv() {
+            Ok(item) => {
+                let (message, properties) = item.into_parts();
+                let _ = budget.account(message.byte_len());
+                if let Some(message) = prepare_external_recv(sock, message) {
+                    return Ok(Some((message, properties)));
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Err(ETERM),
+        }
     }
+    Ok(None)
 }
 
 fn pop_authenticated_message(
     sock: &OmqSocket,
     flags: c_int,
-) -> Result<omq_tokio::engine::AuthenticatedRecvItem, c_int> {
+) -> Result<AuthenticatedMessage, c_int> {
     let rcvtimeo = sock.rcvtimeo_ms.load(std::sync::atomic::Ordering::Relaxed);
     if let Some(item) = try_recv_authenticated_message(sock)? {
         return Ok(item);
@@ -695,7 +724,7 @@ pub(crate) fn pop_recv_frame_with_properties(
     }
 
     let item = pop_authenticated_message(sock, flags)?;
-    let (message, properties) = item.into_parts();
+    let (message, properties) = item;
     let start = msg_start_index(sock, &message);
     let frame = message.part_bytes(start).unwrap_or_default();
     for index in start + 1..message.len() {
@@ -703,7 +732,6 @@ pub(crate) fn pop_recv_frame_with_properties(
             drain.push_back((part, properties.clone()));
         }
     }
-    mark_external_recv(sock);
     Ok((frame, !drain.is_empty(), Some(properties)))
 }
 
@@ -797,7 +825,7 @@ pub(crate) fn pop_recv_server_message_with_properties(
 > {
     if authenticated_recv_configured(sock) {
         let item = pop_authenticated_message(sock, flags)?;
-        let (message, properties) = item.into_parts();
+        let (message, properties) = item;
         return Ok((message, Some(properties)));
     }
     pop_recv_server_message(sock, flags).map(|message| (message, None))
@@ -819,15 +847,38 @@ fn try_pop_dual(
     {
         cons.fast = new_cons;
     }
-    let (message, released_full_slot) = cons
-        .fast
-        .prefetch_and_pop_with_full()
-        .or_else(|| cons.pump.prefetch_and_pop_with_full())?;
-    settle_recv_fd(sock, cons);
-    Some(PoppedMessage {
-        message,
-        released_full_slot,
-    })
+    let mut released_full_slot = false;
+    let mut budget = DrainBudget::WORKER;
+    while !budget.exhausted() {
+        let Some((message, released)) = cons
+            .fast
+            .prefetch_and_pop_with_full()
+            .or_else(|| cons.pump.prefetch_and_pop_with_full())
+        else {
+            break;
+        };
+        released_full_slot |= released;
+        let _ = budget.account(message.byte_len());
+        settle_recv_fd(sock, cons);
+        if let Some(message) = prepare_external_recv(sock, message) {
+            return Some(PoppedMessage {
+                message,
+                released_full_slot,
+            });
+        }
+    }
+    signal_recv_space_if_full(sock, released_full_slot);
+    if !cons.fast.is_empty() || !cons.pump.is_empty() {
+        sock.notify.recv_notifier().signal();
+    }
+    None
+}
+
+fn prepare_external_recv(
+    sock: &OmqSocket,
+    message: omq_tokio::Message,
+) -> Option<omq_tokio::Message> {
+    sock.inner.get()?.prepare_external_recv(message)
 }
 
 /// Keep `ZMQ_FD` level-triggered: once both rings are empty, reset the
@@ -848,26 +899,7 @@ fn msg_start_index(sock: &OmqSocket, msg: &omq_tokio::Message) -> usize {
     if sock.socket_type == omq_tokio::SocketType::Dish && msg.len() >= 2 {
         return 1;
     }
-    if sock.socket_type == omq_tokio::SocketType::Req
-        && msg.len() >= 2
-        && msg.get(0).is_some_and(<[u8]>::is_empty)
-    {
-        return 1;
-    }
     0
-}
-
-fn mark_external_recv(sock: &OmqSocket) {
-    let Some(inner) = sock.inner.get() else {
-        return;
-    };
-    match sock.socket_type {
-        omq_tokio::SocketType::Req => inner.mark_req_reply_received_for_external_recv(),
-        omq_tokio::SocketType::Rep if authenticated_recv_configured(sock) => {
-            inner.mark_rep_request_received_for_external_recv();
-        }
-        _ => {}
-    }
 }
 
 fn stash_remaining_parts(sock: &OmqSocket, msg: &omq_tokio::Message, start: usize) {
@@ -893,7 +925,6 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
     let start = msg_start_index(sock, msg);
     if nparts <= 1 && start == 0 {
         let head = msg.part_bytes(0).unwrap_or_default();
-        mark_external_recv(sock);
         return Ok((head, false));
     }
 
@@ -912,7 +943,6 @@ fn decompose_message(sock: &OmqSocket, msg: &omq_tokio::Message) -> Result<(Byte
         }
     }
 
-    mark_external_recv(sock);
     Ok((head, remaining < nparts))
 }
 

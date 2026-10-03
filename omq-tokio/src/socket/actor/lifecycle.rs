@@ -42,14 +42,12 @@ impl<'a> PeerLifecycle<'a> {
         consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,
         peer_id: u64,
-        rep: Option<crate::socket::recv::RepPending>,
     ) {
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
             consumer: std::sync::Mutex::new(consumer),
             batch_remaining: std::sync::atomic::AtomicUsize::new(0),
             space,
             peer_id,
-            rep,
         });
         self.driver.spsc.tcp_consumers.write().unwrap().push(entry);
         self.bump_recv_consumers();

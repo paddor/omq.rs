@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- REP receive queues keep each complete request and its peer route together;
+  reply admission occurs when the application receives it. Compatibility
+  relays can forward complete items without advancing REQ/REP state.
+- A muted REQ `try_send` returns the original application message, so retries
+  prepend exactly one delimiter.
+
 ## [0.24.0] - 2026-09-27
 
 ### Breaking

@@ -1,6 +1,5 @@
 //! Receive queue admission and bounded pending delivery for connection drivers.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +8,6 @@ use omq_proto::message::Message;
 use tokio::sync::mpsc;
 
 use super::signal::StateSignal;
-use crate::routing::RepEnvelope;
 
 pub(crate) async fn reserve_authenticated(
     sender: Option<&mpsc::Sender<AuthenticatedRecvItem>>,
@@ -37,13 +35,12 @@ pub enum RecvSink {
     Peer(crate::socket::peer_recv::PeerRecvSink),
 }
 
-/// REP's latency receive path: perform identity/envelope handling in the
-/// connection driver, before the message reaches the socket actor.
+/// Keep the peer route attached to the complete request until application
+/// receive. No envelope side queue may depend on receive-source ordering.
 #[derive(Debug)]
 pub struct RepRecvSink {
     sink: Box<RecvSink>,
-    pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
-    peer_id: u64,
+    routing_id: u32,
 }
 
 impl RepRecvSink {
@@ -52,22 +49,21 @@ impl RepRecvSink {
         message: Message,
         pending_flush: &mut bool,
     ) -> core::result::Result<(), TrySendError> {
-        let Some((envelope, body)) = crate::routing::split_rep_request(&message) else {
-            return Ok(());
-        };
-        // Publish envelope and body as one admission. The user can drain
-        // the body immediately, but its envelope lock waits until here.
-        let mut pending = self.pending.lock().expect("rep pending");
-        pending.push_back((self.peer_id, envelope));
-        match self.sink.try_send_unwrapped(body, false, pending_flush) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                pending.pop_back();
-                Err(match error {
-                    TrySendError::Full(_) => TrySendError::Full(message),
-                    other => other,
-                })
+        let original_routing_id = message.routing_id();
+        let result = self.sink.try_send_unwrapped(
+            message.with_routing_id(self.routing_id),
+            false,
+            pending_flush,
+        );
+        match result {
+            Err(TrySendError::Full(mut returned)) => {
+                let _ = returned.take_routing_id();
+                if let Some(routing_id) = original_routing_id {
+                    returned = returned.with_routing_id(routing_id);
+                }
+                Err(TrySendError::Full(returned))
             }
+            other => other,
         }
     }
 }
@@ -357,14 +353,9 @@ impl RecvSink {
         permit: mpsc::Permit<'_, AuthenticatedRecvItem>,
     ) -> bool {
         match self {
-            Self::Rep(rep) => {
-                let Some((envelope, body)) = crate::routing::split_rep_request(&message) else {
-                    return true;
-                };
-                let mut pending = rep.pending.lock().expect("rep pending");
-                pending.push_back((rep.peer_id, envelope));
-                rep.sink.send_reserved(body, permit)
-            }
+            Self::Rep(rep) => rep
+                .sink
+                .send_reserved(message.with_routing_id(rep.routing_id), permit),
             Self::Server(server) => server
                 .sink
                 .send_reserved(message.with_routing_id(server.routing_id), permit),
@@ -380,15 +371,10 @@ impl RecvSink {
         }
     }
 
-    pub(crate) fn rep(
-        sink: RecvSink,
-        pending: std::sync::Arc<std::sync::Mutex<VecDeque<(u64, RepEnvelope)>>>,
-        peer_id: u64,
-    ) -> Self {
+    pub(crate) fn rep(sink: RecvSink, peer_id: u64) -> Self {
         Self::Rep(RepRecvSink {
             sink: Box::new(sink),
-            pending,
-            peer_id,
+            routing_id: u32::try_from(peer_id + 1).expect("REP peer ID checked"),
         })
     }
 

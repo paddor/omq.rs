@@ -343,16 +343,8 @@ impl SocketDriver {
                     return;
                 }
                 if self.socket_type == SocketType::Rep {
-                    // Split at the first empty frame, like libzmq. The
-                    // envelope queue and the receive queue stay in step.
-                    let Some((envelope, body)) = crate::routing::split_rep_request(&msg) else {
-                        return;
-                    };
-                    self.rep_pending
-                        .lock()
-                        .expect("rep pending")
-                        .push_back((peer_id, envelope));
-                    self.stage_receive(peer_id, body);
+                    let routing_id = u32::try_from(peer_id + 1).expect("REP peer ID checked");
+                    self.stage_receive(peer_id, msg.with_routing_id(routing_id));
                     return;
                 }
                 if self.handle_legacy_subscribe(peer_id, &msg) {

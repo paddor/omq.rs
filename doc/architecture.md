@@ -214,7 +214,10 @@ the receiver's receive HWM. `send` pushes into it on the calling thread, and
 the receiving socket's `recv` drains it, so no I/O thread touches a message
 once the peers are connected. The receive path applies the socket type's rules
 as it drains: ROUTER messages carry the peer identity, SERVER messages the
-routing ID, and REP splits the request envelope from the body.
+routing ID. REP retains the complete request plus its peer route in the
+same queue item, then splits the envelope and admits the reply route at
+application receive. Compatibility receive relays forward these items without
+advancing REQ/REP state.
 
 ```text
  sender thread                         receiver thread

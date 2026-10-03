@@ -49,6 +49,7 @@ pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOpt
 // working.
 pub use omq_proto::endpoint;
 pub use omq_proto::error;
+pub use omq_proto::flow;
 pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;

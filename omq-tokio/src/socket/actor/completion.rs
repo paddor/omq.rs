@@ -206,7 +206,6 @@ mod tests {
             crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool),
             crate::socket::recv::SpscHandles::new(blocking, false),
             Arc::new(std::sync::Mutex::new(super::super::TypeState::new())),
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
             Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -8,6 +8,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Breaking
 
+- `InprocConn::out` and `InprocConn::in_rx` expose `RelaySender` and
+  `RelayReceiver` with separate command/data lanes instead of Tokio halves.
+
 - WS/WSS ready connections default to at most 1024 per socket, configurable
   through `Options::ws.max_ready_peers` (C: `OMQ_WS_MAX_READY_PEERS`). Other
   transports have separate admission; identity handover reuses a ready slot.
@@ -21,6 +24,40 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Socket-owned protocol inboxes and inproc relays use one Coordinated
+  fanring producer per lane. Bounded lifecycle slots keep activation and
+  shutdown reachable; inproc commands remain separate from relay messages.
+
+- Socket-owned fallback data inboxes use bounded fanring lanes, registered
+  lazily per socket clone and destination. Preserve exact lane HWMs, fan-out
+  publication admission, producer FIFO, and graceful close draining.
+
+- Socket-owned peer drivers send actor-bound application data through bounded
+  fanring lanes, one per connection. Protocol events use a separate control
+  mailbox; public standalone drivers retain their supplied Tokio event queue.
+
+- pyomq admits eligible async sends and receives directly, preserving fallback
+  FIFO, bounded workers, and external REQ/REP admission. Ready asyncio polls
+  avoid executor dispatch. Windows native callbacks defer Python hooks until
+  producer and binding locks are released.
+
+- Inproc messages no longer pass through an I/O thread. Each direction of an
+  inproc connection is one `yring` that holds the sender's `send_hwm` plus the
+  receiver's `recv_hwm` messages. `send` pushes into it on the calling thread
+  and the peer's `recv` drains it. This applies to round-robin, exclusive,
+  identity-routed, and fan-out sends (PUSH, DEALER, REQ, REP, ROUTER, PAIR,
+  CLIENT, SERVER, CHANNEL, SCATTER, PUB, XPUB, RADIO). A publisher matches
+  subscriptions and pushes into each inproc subscriber's ring on the calling
+  thread; `xpub_nodrop` waits per subscriber. PEER and `conflate` senders
+  still relay through their peer task. A blocking `send` that hits a full
+  queue now waits on the calling thread instead of handing the wait to the
+  IO thread. Blocking REQ/REP round trips between two threads take two
+  thread wakes instead of four.
+- C API: `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a
+  PUSH/PULL-only mode. Every socket type and transport works on such a
+  context; `zmq_bind` and `zmq_connect` no longer return `ENOTSUP` for it.
+  Inproc PUSH/PULL now uses the shared inproc rings; the separate byte ring
+  (`inproc_bypass`) is removed.
 - Share verified TLS trust, identity, and server-name setup internally while
   isolating WSS's explicit insecure test override. Empty custom trust PEM now
   fails configuration validation.
@@ -44,6 +81,13 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   with `Socket::peer_info()`.
 
 ### Fixed
+
+- Finite native linger includes actor command admission, so blocked
+  subscription forwarding cannot prevent close from reaching its deadline.
+
+- Full actor receive queues no longer block another peer's handshake or XPUB
+  subscription state. XPUB notifications remain bounded and preserve each
+  peer's FIFO through receive backpressure and driver completion.
 
 - REP splits the request envelope at the first empty frame, like libzmq.
   Requests whose body had an empty second part lost their leading parts.

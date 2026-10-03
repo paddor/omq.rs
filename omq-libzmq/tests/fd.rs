@@ -73,19 +73,19 @@ fn fd_not_readable_when_empty() {
 }
 
 #[test]
-fn fd_not_signaled_by_empty_inproc_bypass_install() {
+fn fd_not_signaled_by_empty_inproc_connect() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
 
-    let addr = CString::new("inproc://test-fd-empty-bypass-install").unwrap();
+    let addr = CString::new("inproc://test-fd-empty-connect").unwrap();
     zmq_bind(pull, addr.as_ptr());
 
     let fd = get_fd(pull);
     assert!(fd >= 0);
     assert!(
         !fd_readable(fd, 0),
-        "fd should not be readable before bypass install"
+        "fd should not be readable before connect"
     );
 
     zmq_connect(push, addr.as_ptr());
@@ -93,7 +93,7 @@ fn fd_not_signaled_by_empty_inproc_bypass_install() {
 
     assert!(
         !fd_readable(fd, 0),
-        "empty inproc bypass install must not signal ZMQ_FD"
+        "an inproc connect without messages must not signal ZMQ_FD"
     );
 
     set_rcvtimeo(push, 1000);
@@ -217,4 +217,106 @@ fn fd_not_readable_after_recv() {
     zmq_close(push);
     zmq_close(pull);
     zmq_ctx_term(ctx);
+}
+
+#[test]
+fn fd_and_blocking_receives_rearm_between_concurrent_batches() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    for socket in [push, pull] {
+        for (option, value) in [(17, 0_i32), (23, 8), (24, 8), (27, 1000), (28, 1000)] {
+            assert_eq!(
+                omq_zmq::zmq_setsockopt(
+                    socket,
+                    option,
+                    (&raw const value).cast(),
+                    size_of::<i32>()
+                ),
+                0
+            );
+        }
+    }
+    assert_eq!(
+        zmq_bind(pull, c"inproc://fd-concurrent-batches".as_ptr()),
+        0
+    );
+    assert_eq!(
+        zmq_connect(push, c"inproc://fd-concurrent-batches".as_ptr()),
+        0
+    );
+    let fd = get_fd(pull);
+    let (batch_tx, batch_rx) = std::sync::mpsc::channel();
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+    let push_address = push as usize;
+    let sender = std::thread::spawn(move || {
+        let push = push_address as *mut c_void;
+        for round in 0_u32..128 {
+            for index in 0_u32..16 {
+                let message = (round * 16 + index).to_le_bytes();
+                assert_eq!(zmq_send(push, message.as_ptr().cast(), message.len(), 0), 4);
+            }
+            batch_tx.send(()).unwrap();
+            drained_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+    });
+    for round in 0_u32..128 {
+        assert!(fd_readable(fd, 1000), "batch {round} lost its data wake");
+        batch_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for index in 0_u32..16 {
+            assert!(fd_readable(fd, 0), "pending batch must remain readable");
+            let mut message = [0_u8; 4];
+            assert_eq!(
+                zmq_recv(pull, message.as_mut_ptr().cast(), message.len(), 0),
+                4
+            );
+            assert_eq!(u32::from_le_bytes(message), round * 16 + index);
+        }
+        assert!(!fd_readable(fd, 0), "drained batch must reset its FD");
+        drained_tx.send(()).unwrap();
+    }
+    sender.join().unwrap();
+    assert_eq!(zmq_close(push), 0);
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn fd_and_events_observe_recycled_fast_ring_before_receive() {
+    let ctx = zmq_ctx_new();
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_rcvtimeo(pull, 1000);
+    assert_eq!(
+        zmq_bind(pull, c"inproc://fd-recycled-fast-ring".as_ptr()),
+        0
+    );
+    let fd = get_fd(pull);
+    for sequence in 0_u32..3 {
+        let push = zmq_socket(ctx, ZMQ_PUSH);
+        assert_eq!(
+            zmq_connect(push, c"inproc://fd-recycled-fast-ring".as_ptr()),
+            0
+        );
+        let payload = sequence.to_le_bytes();
+        assert_eq!(zmq_send(push, payload.as_ptr().cast(), payload.len(), 0), 4);
+        assert!(fd_readable(fd, 1000));
+        let mut events = 0_i32;
+        let mut size = size_of::<i32>();
+        assert_eq!(
+            zmq_getsockopt(pull, 15, (&raw mut events).cast(), &raw mut size),
+            0
+        );
+        assert_ne!(events & 1, 0, "replacement data must appear in ZMQ_EVENTS");
+        let mut received = [0_u8; 4];
+        assert_eq!(
+            zmq_recv(pull, received.as_mut_ptr().cast(), received.len(), 0),
+            4
+        );
+        assert_eq!(received, payload);
+        assert!(!fd_readable(fd, 0));
+        assert_eq!(zmq_close(push), 0);
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
 }

@@ -49,10 +49,6 @@ impl WindowsWakeupState {
         }
     }
 
-    fn set_hooks(&mut self, async_callback: Option<Py<PyAny>>, sync_event: Option<Py<PyAny>>) {
-        self.hooks.set(async_callback, sync_event);
-    }
-
     fn set_mode(&mut self, mode: u32) {
         self.hooks.set_mode(mode);
     }
@@ -215,8 +211,15 @@ impl WindowsSignal {
         async_callback: Option<Py<PyAny>>,
         sync_event: Option<Py<PyAny>>,
     ) {
-        let mut state = self.state.lock().unwrap();
-        state.set_hooks(async_callback, sync_event);
+        let previous = {
+            let mut state = self.state.lock().unwrap();
+            (
+                std::mem::replace(&mut state.hooks.async_callback, async_callback),
+                std::mem::replace(&mut state.hooks.sync_event, sync_event),
+            )
+        };
+        // Python hook finalizers may reenter this signal or close the socket.
+        drop(previous);
     }
 
     pub(crate) fn set_wakeup_mode(&self, mode: u32) {
@@ -244,11 +247,6 @@ pub(crate) struct WakeupHooks {
 }
 
 impl WakeupHooks {
-    fn set(&mut self, async_callback: Option<Py<PyAny>>, sync_event: Option<Py<PyAny>>) {
-        self.async_callback = async_callback;
-        self.sync_event = sync_event;
-    }
-
     fn set_mode(&mut self, mode: u32) {
         if mode == 0 {
             self.mode = 0;

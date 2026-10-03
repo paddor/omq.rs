@@ -1255,7 +1255,6 @@ pub extern "C" fn zmq_getsockopt(
         }
         ZMQ_EVENTS => {
             let mut events = ZMQ_POLLOUT; // optimistic: always writable
-            crate::socket::adopt_pending_bypass_recv(sock_arc);
             let drain_nonempty = if sock_arc
                 .zap_handler
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -1266,20 +1265,10 @@ pub extern "C" fn zmq_getsockopt(
                     .drain_nonempty
                     .load(std::sync::atomic::Ordering::Relaxed)
             };
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            let recv_cons_has_data = unsafe { sock_arc.recv_cons.get() }
-                .as_ref()
-                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
-            // SAFETY: same socket-thread invariant as above.
-            let bypass_recv_has_data = unsafe { sock_arc.bypass_recv.get() }
-                .as_ref()
-                .is_some_and(|br| !br.is_empty());
+            let recv_cons_has_data = sock_arc.recv_has_data();
             let authenticated_recv_has_data =
                 crate::send_recv::authenticated_recv_has_data(sock_arc);
-            let has_data = drain_nonempty
-                || recv_cons_has_data
-                || bypass_recv_has_data
-                || authenticated_recv_has_data;
+            let has_data = drain_nonempty || recv_cons_has_data || authenticated_recv_has_data;
             if has_data {
                 events |= ZMQ_POLLIN;
             }

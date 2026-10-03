@@ -6,25 +6,29 @@
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::engine::actor_output::PeerOutput;
 use omq_proto::message::Message;
+#[cfg(test)]
 use omq_proto::proto::Event as ZmtpEvent;
 
 use crate::engine::driver::DriverStream;
 use crate::engine::peer_completion::CompletionProgress;
-use crate::engine::{PeerDriverCommand, PeerDriverData, PeerDriverHandle, PeerEvent};
+use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 
 pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     stream: T,
     peer_id: u64,
-    peer_out: mpsc::Sender<(u64, PeerEvent)>,
+    peer_out: PeerOutput,
     cancel: &CancellationToken,
     completion: CompletionProgress,
-) -> (PeerDriverHandle, tokio::task::JoinHandle<()>) {
-    let (inbox_tx, inbox_rx) = mpsc::channel(64);
-    let (data_inbox_tx, data_inbox_rx) = mpsc::channel(64);
+    capacity: usize,
+) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
+    let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
+    let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
     let child_cancel = cancel.child_token();
     let handle_cancel = child_cancel.clone();
     let mut completion = completion.with_stream_disconnect();
@@ -42,13 +46,14 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
         let _ = completion.complete(None);
     });
     (
-        PeerDriverHandle {
+        ActorPeerDriverHandle {
             inbox: inbox_tx,
             data_inbox: data_inbox_tx,
             cancel: handle_cancel,
             transmit_slot: None,
             direct_tcp_writer: None,
             send_pipe: None,
+            inproc: None,
         },
         task,
     )
@@ -57,10 +62,10 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
 async fn run_body<T: DriverStream>(
     stream: T,
     peer_id: u64,
-    peer_out: mpsc::Sender<(u64, PeerEvent)>,
+    mut peer_out: PeerOutput,
     cancel: CancellationToken,
-    mut inbox: mpsc::Receiver<PeerDriverCommand>,
-    mut data_inbox: mpsc::Receiver<PeerDriverData>,
+    mut inbox: crate::engine::control_inbox::Receiver,
+    mut data_inbox: crate::engine::data_inbox::Receiver,
     completion: &mut CompletionProgress,
 ) {
     let (mut reader, mut writer) = stream.split(false);
@@ -70,23 +75,23 @@ async fn run_body<T: DriverStream>(
     let mut pending_event = Some(Message::single(Bytes::new()));
     let mut closing = false;
     let mut deadline: Option<std::time::Instant> = None;
-    let credit = peer_out.reserve();
-    tokio::pin!(credit);
+    let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
     loop {
+        if budget.exhausted() {
+            inbox.release_consumed();
+            data_inbox.release_consumed();
+            budget.reset();
+            tokio::task::yield_now().await;
+        }
+        let _ = budget.account(0);
         if let Some(message) = pending_event.take() {
-            match peer_out.try_send((peer_id, PeerEvent::Event(ZmtpEvent::Message(message)))) {
+            match peer_out.try_send(peer_id, message, false) {
                 Ok(()) => completion.note_event(),
-                Err(mpsc::error::TrySendError::Full((
-                    _,
-                    PeerEvent::Event(ZmtpEvent::Message(message)),
-                ))) => {
-                    pending_event = Some(message);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => return,
-                Err(_) => unreachable!("STREAM event admission"),
+                Err(crate::engine::SendPipeError::Full(message)) => pending_event = Some(message),
+                Err(crate::engine::SendPipeError::Closed(_)) => return,
             }
         }
-        if closing && pending.is_none() && data_inbox.is_empty() {
+        if closing && pending.is_none() && inbox.is_empty() && data_inbox.is_empty() {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {},
@@ -112,11 +117,8 @@ async fn run_body<T: DriverStream>(
                     }
                 }
             },
-            permit = &mut credit, if pending_event.is_some() => {
-                let Ok(permit) = permit else { return; };
-                permit.send((peer_id, PeerEvent::Event(ZmtpEvent::Message(pending_event.take().unwrap()))));
-                completion.note_event();
-                credit.set(peer_out.reserve());
+            result = peer_out.ready(), if pending_event.is_some() => {
+                if result.is_err() { return; }
             },
             written = async {
                 writer.write(&pending.as_ref().unwrap()[pending_offset..]).await
@@ -133,12 +135,16 @@ async fn run_body<T: DriverStream>(
             n = reader.read(&mut buf), if !closing && pending_event.is_none() => {
                 match n {
                     Ok(0) | Err(_) => return,
-                    Ok(n) => pending_event = Some(Message::single(Bytes::copy_from_slice(&buf[..n]))),
+                    Ok(n) => {
+                        let _ = budget.account(n);
+                        pending_event = Some(Message::single(Bytes::copy_from_slice(&buf[..n])));
+                    }
                 }
             },
             data = data_inbox.recv(), if pending.is_none() => {
                 match data {
                     Some(PeerDriverData::SendMessage(mut message)) => {
+                        let _ = budget.account(message.byte_len());
                         let data = message.pop_front().unwrap_or_default();
                         if data.is_empty() { return; }
                         pending = Some(data);
@@ -154,6 +160,7 @@ async fn run_body<T: DriverStream>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::PeerEvent;
     use std::time::{Duration, Instant};
 
     #[tokio::test]
@@ -161,7 +168,14 @@ mod tests {
         let (stream, mut remote) = tokio::io::duplex(1024);
         let (events, mut event_inbox) = mpsc::channel(1);
         let (completion, finished) = CompletionProgress::reserve(7);
-        let (handle, mut task) = spawn(stream, 7, events, &CancellationToken::new(), completion);
+        let (handle, mut task) = spawn(
+            stream,
+            7,
+            events.into(),
+            &CancellationToken::new(),
+            completion,
+            64,
+        );
         handle.inbox.try_send(PeerDriverCommand::Close).unwrap();
         tokio::time::timeout(Duration::from_millis(500), &mut task)
             .await
@@ -190,8 +204,16 @@ mod tests {
             let (stream, mut remote) = tokio::io::duplex(4096);
             let (events, mut event_inbox) = mpsc::channel(1);
             let (completion, finished) = CompletionProgress::reserve(7);
-            let (handle, mut task) =
-                spawn(stream, 7, events, &CancellationToken::new(), completion);
+            let (mut handle, mut task) = spawn(
+                stream,
+                7,
+                events.into(),
+                &CancellationToken::new(),
+                completion,
+                64,
+            );
+            handle.data_inbox =
+                crate::engine::data_inbox::SenderLanes::default().bind(&handle.data_inbox);
             // Leave the connect notification admitted in the one-slot mailbox.
             tokio::time::timeout(Duration::from_millis(500), async {
                 while event_inbox.len() != 1 {

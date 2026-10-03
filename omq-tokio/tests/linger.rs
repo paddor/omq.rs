@@ -627,3 +627,61 @@ async fn linger_completes_within_timeout_after_peer_disconnect() {
         "close took {elapsed:?}, expected ≤ linger({LINGER:?}) + 500 ms"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finite_linger_interrupts_a_saturated_inproc_subscription_handler() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let publisher = Socket::new(SocketType::XPub, Options::default().recv_hwm(1));
+    let endpoint = publisher
+        .bind(inproc_ep("linger-subscription-flood"))
+        .await
+        .unwrap();
+    let subscriber = Socket::new(SocketType::Sub, Options::default());
+    subscriber.connect(endpoint).await.unwrap();
+    subscriber
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let producer = subscriber.clone();
+    let progress = sent.clone();
+    let flood = tokio::spawn(async move {
+        for n in 0..4000 {
+            if producer.subscribe(format!("flood-{n}")).await.is_err() {
+                return;
+            }
+            progress.fetch_add(1, Ordering::Release);
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sent.load(Ordering::Acquire) <= 1024 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        sent.load(Ordering::Acquire) < 4000,
+        "notification backpressure must reach the subscriber"
+    );
+    let emergency = subscriber.clone();
+    let closed = tokio::time::timeout(
+        Duration::from_millis(500),
+        subscriber.close_with_linger(Some(Duration::from_millis(50))),
+    )
+    .await;
+    // Cleanup remains reachable even when the finite close regression fails.
+    emergency
+        .close_with_linger(Some(Duration::ZERO))
+        .await
+        .unwrap();
+    flood.abort();
+    let _ = flood.await;
+    publisher.close().await.unwrap();
+    closed
+        .expect("finite linger must include actor command admission")
+        .unwrap();
+}

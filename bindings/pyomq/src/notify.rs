@@ -1,5 +1,70 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Native callbacks can run while an inproc producer owns its queue lock.
+/// Windows Python hooks must be dispatched outside the producer call stack.
+pub(crate) fn receive_callback(
+    ready: Arc<ReadinessSignal>,
+    all_ready: Arc<ReadinessSignal>,
+    _runtime: &tokio::runtime::Handle,
+) -> (
+    Arc<dyn Fn() + Send + Sync>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        ready.signal();
+        all_ready.signal();
+    });
+    native_callback(callback, _runtime)
+}
+
+pub(crate) fn native_callback(
+    callback: Arc<dyn Fn() + Send + Sync>,
+    _runtime: &tokio::runtime::Handle,
+) -> (
+    Arc<dyn Fn() + Send + Sync>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    #[cfg(unix)]
+    {
+        (callback, None)
+    }
+    #[cfg(windows)]
+    {
+        let (wake, task) = deferred_callback(callback, _runtime);
+        (wake, Some(task))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn deferred_callback(
+    callback: Arc<dyn Fn() + Send + Sync>,
+    runtime: &tokio::runtime::Handle,
+) -> (Arc<dyn Fn() + Send + Sync>, tokio::task::JoinHandle<()>) {
+    let pending = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(omq_tokio::engine::StateSignal::new());
+    let task_pending = pending.clone();
+    let task_signal = signal.clone();
+    let task = runtime.spawn(async move {
+        loop {
+            task_signal
+                .wait_until(|| task_pending.load(Ordering::Acquire))
+                .await;
+            // Clear before dispatch: a wake during a Python callback keeps
+            // a fresh permit for the next iteration.
+            if task_pending.swap(false, Ordering::AcqRel) {
+                callback();
+            }
+        }
+    });
+    let wake = Arc::new(move || {
+        if !pending.swap(true, Ordering::AcqRel) {
+            signal.notify_changed();
+        }
+    });
+    (wake, task)
+}
 
 #[cfg(windows)]
 use pyo3::prelude::*;
@@ -178,6 +243,47 @@ impl ReadinessSignal {
 mod tests {
     use super::{CallbackDispatch, ReadinessSignal};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn native_callback_defers_hooks_and_preserves_a_wake_during_dispatch() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Mutex};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        type Wake = Arc<dyn Fn() + Send + Sync>;
+        let followup = Arc::new(Mutex::new(None::<Wake>));
+        let callback_calls = calls.clone();
+        let callback_followup = followup.clone();
+        let callback = Arc::new(move || {
+            if callback_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                let wake = callback_followup.lock().unwrap().clone().unwrap();
+                wake();
+            }
+        });
+        let (wake, task) = super::deferred_callback(callback, runtime.handle());
+        *followup.lock().unwrap() = Some(wake.clone());
+        for _ in 0..32 {
+            wake();
+        }
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "producer must never invoke hooks"
+        );
+        runtime.block_on(async {
+            tokio::task::yield_now().await;
+        });
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "one coalesced batch and its followup"
+        );
+        task.abort();
+        followup.lock().unwrap().take();
+    }
 
     #[test]
     fn parking_state_tracks_wait_loop() {

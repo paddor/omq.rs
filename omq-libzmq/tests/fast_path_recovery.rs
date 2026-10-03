@@ -23,11 +23,11 @@ fn set_timeo(sock: *mut c_void, ms: i32) {
 }
 
 #[test]
-fn inproc_bypass_recovers_after_disconnect_reconnect() {
+fn inproc_recovers_after_disconnect_reconnect() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    let addr = CString::new("inproc://bypass-recovery").unwrap();
+    let addr = CString::new("inproc://recovery").unwrap();
 
     zmq_bind(pull, addr.as_ptr());
     zmq_connect(push, addr.as_ptr());
@@ -59,11 +59,11 @@ fn inproc_bypass_recovers_after_disconnect_reconnect() {
 }
 
 #[test]
-fn inproc_bypass_multi_churn() {
+fn inproc_multi_churn() {
     let ctx = zmq_ctx_new();
     let push = zmq_socket(ctx, ZMQ_PUSH);
     let pull = zmq_socket(ctx, ZMQ_PULL);
-    let addr = CString::new("inproc://bypass-multi-churn").unwrap();
+    let addr = CString::new("inproc://multi-churn").unwrap();
 
     zmq_bind(pull, addr.as_ptr());
     set_timeo(pull, 2000);

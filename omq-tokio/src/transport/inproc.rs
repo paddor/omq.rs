@@ -3,19 +3,20 @@
 //! `inproc://name` endpoints are resolved via the owning context's
 //! registry. Unlike TCP/IPC, **inproc skips the ZMTP codec
 //! entirely** - both ends are in the same process, so we exchange
-//! parsed `Message` / `Command` values directly through a pair of
-//! `mpsc` channels rather than serialising bytes through a duplex
-//! stream and re-parsing on the other side. The peer's socket
-//! type and identity are exchanged during connect, not over the
-//! wire, so the synthesized handshake completes immediately.
+//! parsed `Message` values directly. The peer's socket type and
+//! identity are exchanged during connect, not over the wire, so the
+//! synthesized handshake completes immediately.
 //!
-//! Buffer capacity (whole messages, not bytes) defaults to
-//! `Options::send_hwm` at the `SocketDriver` layer where each
-//! channel is wired up.
+//! Direct message paths use one `yring` per direction. The sending socket
+//! pushes from the calling thread and the receiving socket drains it
+//! from its own `recv`, so no task runs in between. The ring holds the
+//! sender's `Options::send_hwm` plus the receiver's `Options::recv_hwm`
+//! messages. Separate Coordinated fanring lanes carry commands (SUBSCRIBE,
+//! JOIN, ...) and messages for socket types that still route through their
+//! peer task. Registry requests retain their multi-producer Tokio queue.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::{Condvar, Mutex as StdMutex};
 
 use rustc_hash::FxHashMap;
 
@@ -26,174 +27,459 @@ use tokio::sync::mpsc;
 use omq_proto::Message;
 use omq_proto::error::{Error, Result};
 use omq_proto::inproc::{InboundFrame, InprocPeerSnapshot};
-use omq_proto::proto::SocketType;
 
-use crate::engine::signal::{DataSignal, StateSignal};
-use crate::socket::fanin::{Fanin, Producer};
+use crate::engine::send_pipe::SendPreparation;
+use crate::engine::signal::StateSignal;
+use crate::engine::single_inbox;
+use crate::engine::{RecvSink, SendPipeConsumer, SendPipeError};
 
-/// Sender-side SPSC state for inproc fast path.
-#[derive(Debug)]
-pub(crate) struct BlockingSpace {
-    // Guarded generation closes the check-then-park race around Condvar.
-    generation: StdMutex<u64>,
-    changed: Condvar,
-}
-
-impl BlockingSpace {
-    pub(crate) fn new() -> Self {
-        Self {
-            generation: StdMutex::new(0),
-            changed: Condvar::new(),
-        }
-    }
-
-    pub(crate) fn notify(&self) {
-        let mut generation = self.generation.lock().unwrap();
-        *generation = generation.wrapping_add(1);
-        drop(generation);
-        self.changed.notify_all();
-    }
-
-    pub(crate) fn wait_until(&self, mut is_full: impl FnMut() -> bool) {
-        while is_full() {
-            let mut generation = self.generation.lock().unwrap();
-            if !is_full() {
-                return;
-            }
-            let seen = *generation;
-            while seen == *generation && is_full() {
-                generation = self.changed.wait(generation).unwrap();
-            }
-        }
-    }
-}
-
-/// Sender-side SPSC state for inproc fast path.
-#[allow(private_interfaces)]
-#[derive(Debug)]
-pub struct InprocTx {
-    // Async sockets may move between runtime worker threads. Serialize access
-    // while retaining the SPSC ring's single active producer.
-    pub(crate) producer: ParkingMutex<InprocProducer>,
-    pub(crate) recv_signal: Arc<DataSignal>,
-    pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
-    pub max_message_size: Option<usize>,
-    pub space_notify: Arc<StateSignal>,
-    pub(crate) blocking_space: Arc<BlockingSpace>,
-    pub(crate) blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
-}
-
-#[derive(Debug)]
-pub(crate) enum InprocProducer {
-    Yring(yring::Producer<Message>),
-    Fanin(Producer),
-}
-impl InprocProducer {
-    pub(crate) fn is_full(&mut self) -> bool {
-        match self {
-            Self::Yring(p) => p.is_full(),
-            Self::Fanin(p) => p.is_full(),
-        }
-    }
-    pub(crate) fn is_consumer_dropped(&self) -> bool {
-        match self {
-            Self::Yring(p) => p.is_consumer_dropped(),
-            Self::Fanin(p) => p.is_closed(),
-        }
-    }
-    pub(crate) fn push_and_flush(&mut self, item: Message) -> std::result::Result<(), Message> {
-        match self {
-            Self::Yring(p) => p.push_and_flush(item),
-            Self::Fanin(p) => p.try_send(item),
-        }
-    }
-}
-
+/// Separate bounded command and message lanes for one inproc direction.
+/// Copies share the same physical producers.
 #[derive(Debug, Clone)]
-pub(crate) struct RecvConfig {
-    pub signal: Arc<DataSignal>,
-    pub blocking: Arc<crate::socket::recv::BlockingRecvWaker>,
-    pub max_message_size: Option<usize>,
-    pub fanin: Option<Arc<Fanin>>,
+pub struct RelaySender {
+    pub(crate) control: single_inbox::Sender<omq_proto::proto::Command>,
+    pub(crate) data: single_inbox::Sender<Message>,
 }
 
-impl InprocTx {
-    fn fanin(producer: Producer, recv: RecvConfig) -> Arc<Self> {
+/// Receive half of an inproc relay. Commands remain reachable when data fills.
+#[derive(Debug)]
+pub struct RelayReceiver {
+    pub(crate) control: Box<single_inbox::Receiver<omq_proto::proto::Command>>,
+    pub(crate) data: Box<single_inbox::Receiver<Message>>,
+}
+
+pub(crate) fn relay_channel(capacity: usize) -> (RelaySender, RelayReceiver) {
+    let (control_tx, control_rx) = single_inbox::channel(capacity);
+    let (data_tx, data_rx) = single_inbox::channel(capacity);
+    (
+        RelaySender {
+            control: control_tx,
+            data: data_tx,
+        },
+        RelayReceiver {
+            control: Box::new(control_rx),
+            data: Box::new(data_rx),
+        },
+    )
+}
+
+impl RelaySender {
+    /// Enqueue a parsed frame into its bounded lane.
+    ///
+    /// # Errors
+    /// Returns the frame when the partner has closed its receive half.
+    pub async fn send(
+        &self,
+        frame: InboundFrame,
+    ) -> core::result::Result<(), mpsc::error::SendError<InboundFrame>> {
+        match frame {
+            InboundFrame::Message(message) => self
+                .data
+                .send(message)
+                .await
+                .map_err(|error| mpsc::error::SendError(InboundFrame::Message(error.0))),
+            InboundFrame::Command(command) => {
+                self.control.send(*command).await.map_err(|error| {
+                    mpsc::error::SendError(InboundFrame::Command(Box::new(error.0)))
+                })
+            }
+        }
+    }
+
+    /// Enqueue without waiting, preserving the frame on full or closed lanes.
+    ///
+    /// # Errors
+    /// Returns the frame when its lane is full or the partner has closed.
+    pub fn try_send(
+        &self,
+        frame: InboundFrame,
+    ) -> core::result::Result<(), mpsc::error::TrySendError<InboundFrame>> {
+        use mpsc::error::TrySendError::{Closed, Full};
+        match frame {
+            InboundFrame::Message(message) => {
+                self.data.try_send(message).map_err(|error| match error {
+                    Full(message) => Full(InboundFrame::Message(message)),
+                    Closed(message) => Closed(InboundFrame::Message(message)),
+                })
+            }
+            InboundFrame::Command(command) => {
+                self.control
+                    .try_send(*command)
+                    .map_err(|error| match error {
+                        Full(command) => Full(InboundFrame::Command(Box::new(command))),
+                        Closed(command) => Closed(InboundFrame::Command(Box::new(command))),
+                    })
+            }
+        }
+    }
+}
+
+impl RelayReceiver {
+    /// Receive a parsed frame, preferring commands when both lanes are ready.
+    pub async fn recv(&mut self) -> Option<InboundFrame> {
+        tokio::select! {
+            biased;
+            command = self.control.recv() => match command {
+                Some(command) => Some(InboundFrame::Command(Box::new(command))),
+                None => self.data.recv().await.map(InboundFrame::Message),
+            },
+            message = self.data.recv() => match message {
+                Some(message) => Some(InboundFrame::Message(message)),
+                None => self.control.recv().await.map(|command| InboundFrame::Command(Box::new(command))),
+            },
+        }
+    }
+}
+
+/// What one socket tells its inproc peers at connect time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RecvConfig {
+    /// The peer's send path may push into this socket's receive ring
+    /// from its own threads.
+    pub direct: bool,
+    /// This socket's send HWM. The peer adds it to its receive HWM to
+    /// size the ring for this socket's sends.
+    pub send_hwm: usize,
+}
+
+/// One connection's entry into the receiving socket's queue.
+///
+/// The receiving socket opens the port with the sink for this connection.
+/// The peer's send path then delivers from the calling thread, with no
+/// task on either side in between.
+pub(crate) struct InprocPort {
+    state: ParkingMutex<PortState>,
+    /// Notified when the port opens or closes.
+    changed: Arc<StateSignal>,
+}
+
+enum PortState {
+    Pending,
+    Open(Box<OpenPort>),
+    Closed,
+}
+
+/// Receive-side state installed when the receiving peer becomes ready.
+pub(crate) struct OpenPort {
+    pub(crate) sink: RecvSink,
+    /// ROUTER receive: identity frame prepended to every message.
+    pub(crate) identity: Option<bytes::Bytes>,
+    pub(crate) max_message_size: Option<usize>,
+    /// Cancels the receiving peer after a protocol violation.
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+}
+
+impl std::fmt::Debug for InprocPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &*self.state.lock() {
+            PortState::Pending => "pending",
+            PortState::Open(_) => "open",
+            PortState::Closed => "closed",
+        };
+        f.debug_struct("InprocPort")
+            .field("state", &state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InprocPort {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            space_notify: producer.space(),
-            blocking_space: producer.blocking_space(),
-            producer: ParkingMutex::new(InprocProducer::Fanin(producer)),
-            recv_signal: recv.signal,
-            recv_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            max_message_size: recv.max_message_size,
-            blocking_recv_waker: recv.blocking,
+            state: ParkingMutex::new(PortState::Pending),
+            changed: Arc::new(StateSignal::new()),
         })
     }
 
-    pub(crate) fn wait_for_space(&self) {
-        self.blocking_space
-            .wait_until(|| self.producer.lock().is_full());
+    /// Start accepting messages. A port that already closed stays closed.
+    pub(crate) fn open(&self, open: OpenPort) {
+        let mut state = self.state.lock();
+        if matches!(*state, PortState::Pending) {
+            *state = PortState::Open(Box::new(open));
+        }
+        drop(state);
+        self.changed.notify_changed();
+    }
+
+    pub(crate) fn close(&self) {
+        Self::close_locked(&mut self.state.lock(), &self.changed);
+    }
+
+    fn close_locked(state: &mut PortState, changed: &StateSignal) {
+        if let PortState::Open(mut open) = std::mem::replace(state, PortState::Closed)
+            && let Some(space) = open.sink.direct_space()
+        {
+            space.notify_changed();
+        }
+        changed.notify_changed();
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(*self.state.lock(), PortState::Closed)
+    }
+
+    /// Deliver one message into the receiving socket's queue.
+    pub(crate) fn try_send(&self, msg: Message) -> std::result::Result<(), SendPipeError> {
+        let mut state = self.state.lock();
+        let open = match &mut *state {
+            PortState::Pending => return Err(SendPipeError::Full(msg)),
+            PortState::Closed => return Err(SendPipeError::Closed(msg)),
+            PortState::Open(open) => open,
+        };
+        if open
+            .max_message_size
+            .is_some_and(|max| msg.max_message_size_len() > max)
+        {
+            // The receiver drops the connection and the message with it.
+            open.cancel.cancel();
+            Self::close_locked(&mut state, &self.changed);
+            return Ok(());
+        }
+        let prefixed = open.identity.is_some();
+        let msg = match &open.identity {
+            Some(identity) => Message::with_prefix(identity.clone(), msg),
+            None => msg,
+        };
+        match open.sink.try_deliver(msg) {
+            Ok(()) => Ok(()),
+            Err(omq_proto::error::TrySendError::Full(mut msg)) => {
+                if prefixed {
+                    msg.pop_front_payload();
+                }
+                Err(SendPipeError::Full(msg))
+            }
+            Err(_) => {
+                // The receiving socket closed its queue. The message is
+                // lost like any other message queued behind the closure.
+                Self::close_locked(&mut state, &self.changed);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether a send can make progress now. A closed port reports `true`
+    /// so a waiting sender retries and observes the closure.
+    pub(crate) fn has_space(&self) -> bool {
+        self.admission() != Admission::Full
+    }
+
+    /// What a send would run into right now, in one lock.
+    pub(crate) fn admission(&self) -> Admission {
+        match &mut *self.state.lock() {
+            PortState::Pending => Admission::Full,
+            PortState::Open(open) => {
+                if open.sink.direct_has_space() {
+                    Admission::Ready
+                } else {
+                    Admission::Full
+                }
+            }
+            PortState::Closed => Admission::Closed,
+        }
+    }
+
+    /// Signal that changes when a retry can make progress.
+    pub(crate) fn space(&self) -> Arc<StateSignal> {
+        match &mut *self.state.lock() {
+            PortState::Open(open) => open
+                .sink
+                .direct_space()
+                .unwrap_or_else(|| self.changed.clone()),
+            _ => self.changed.clone(),
+        }
     }
 }
 
-/// Receiver-side SPSC state for inproc fast path.
-#[allow(private_interfaces)]
+/// Outcome a send would have right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Ready,
+    Full,
+    Closed,
+}
+
+/// Send half of a direct inproc route.
+///
+/// Every send pushes into the connection's ring, which the peer socket
+/// drains on its own threads. Messages left in a connect-side pipe from
+/// before the peer was ready are moved into the ring first, in order.
+#[derive(Debug, Clone)]
+pub(crate) struct InprocSender {
+    inner: Arc<SenderInner>,
+}
+
 #[derive(Debug)]
-pub struct InprocRx {
-    pub consumer: Mutex<yring::Consumer<Message>>,
-    pub batch_remaining: std::sync::atomic::AtomicUsize,
-    pub(crate) recv_signal: Arc<DataSignal>,
-    pub recv_ready: Arc<std::sync::atomic::AtomicBool>,
-    pub space_notify: Arc<StateSignal>,
-    pub(crate) blocking_space: Arc<BlockingSpace>,
+struct SenderInner {
+    port: Arc<InprocPort>,
+    backlog: ParkingMutex<Backlog>,
+    /// True until the connect-side pipe is empty. Written under the
+    /// backlog lock; the send fast path reads it without the lock.
+    backlog_pending: std::sync::atomic::AtomicBool,
 }
 
-fn is_spsc_eligible(a: SocketType, b: SocketType) -> bool {
-    // PAIR+PAIR cannot share a single SPSC ring because both sides
-    // receive: concurrent recv on both sockets would compete for
-    // messages from the same ring, causing messages to reach the
-    // wrong socket. PUSH/PULL is safe because only the PULL side
-    // consumes.
-    // OPTIMIZE: REQ/REP inproc currently falls back to the mpsc/IO-driver
-    // path because both sockets receive and REP needs peer metadata.
-    // A dedicated bidirectional fast path could carry peer id with each
-    // message and remove the extra IO-thread hop in blocking latency runs.
-    matches!(
-        (a, b),
-        (SocketType::Push, SocketType::Pull) | (SocketType::Pull, SocketType::Push)
-    )
+#[derive(Debug)]
+struct Backlog {
+    pre_ready: Option<SendPipeConsumer>,
+    /// Message taken from `pre_ready` that the ring did not accept yet.
+    stalled: Option<Message>,
+    batch: Vec<Message>,
 }
 
-fn is_recv_side(t: SocketType) -> bool {
-    matches!(
-        t,
-        SocketType::Pull
-            | SocketType::Dealer
-            | SocketType::Sub
-            | SocketType::XSub
-            | SocketType::Pair
-            | SocketType::Client
-            | SocketType::Channel
-            | SocketType::Gather
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flush {
+    Done,
+    Stalled,
+    Closed,
+}
+
+impl InprocSender {
+    pub(crate) fn new(port: Arc<InprocPort>, pre_ready: Option<SendPipeConsumer>) -> Self {
+        Self {
+            inner: Arc::new(SenderInner {
+                port,
+                backlog_pending: std::sync::atomic::AtomicBool::new(pre_ready.is_some()),
+                backlog: ParkingMutex::new(Backlog {
+                    pre_ready,
+                    stalled: None,
+                    batch: Vec::new(),
+                }),
+            }),
+        }
+    }
+
+    pub(crate) fn try_send_prepared(
+        &self,
+        mut msg: Message,
+        preparation: SendPreparation,
+    ) -> std::result::Result<(), SendPipeError> {
+        if self.has_backlog() {
+            match self.flush_backlog() {
+                Flush::Done => {}
+                Flush::Stalled => return Err(SendPipeError::Full(msg)),
+                Flush::Closed => return Err(SendPipeError::Closed(msg)),
+            }
+        }
+        if !matches!(preparation, SendPreparation::StripIdentity) {
+            return self.inner.port.try_send(msg);
+        }
+        let Some(identity) = msg.pop_front_payload() else {
+            return self.inner.port.try_send(msg);
+        };
+        // The caller gets the routed message back when it was not admitted.
+        let restore = |msg| Message::with_prefix(identity.as_bytes(), msg);
+        self.inner.port.try_send(msg).map_err(|error| match error {
+            SendPipeError::Full(msg) => SendPipeError::Full(restore(msg)),
+            SendPipeError::Closed(msg) => SendPipeError::Closed(restore(msg)),
+        })
+    }
+
+    fn has_backlog(&self) -> bool {
+        self.inner.backlog_pending.load(Ordering::Acquire)
+    }
+
+    /// Move the connect-side backlog into the ring. The owning send
+    /// strategy stops writing to that pipe before this sender is used,
+    /// so an empty pipe is final.
+    fn flush_backlog(&self) -> Flush {
+        let mut backlog = self.inner.backlog.lock();
+        loop {
+            if let Some(msg) = backlog.stalled.take() {
+                match self.inner.port.try_send(msg) {
+                    Ok(()) => {}
+                    Err(SendPipeError::Full(msg)) => {
+                        backlog.stalled = Some(msg);
+                        return Flush::Stalled;
+                    }
+                    Err(SendPipeError::Closed(_)) => {
+                        backlog.pre_ready = None;
+                        self.inner.backlog_pending.store(false, Ordering::Release);
+                        return Flush::Closed;
+                    }
+                }
+            }
+            let Backlog {
+                pre_ready, batch, ..
+            } = &mut *backlog;
+            let drained = pre_ready
+                .as_mut()
+                .map_or(0, |consumer| consumer.drain_into(batch, 1, usize::MAX));
+            if drained == 0 {
+                backlog.pre_ready = None;
+                self.inner.backlog_pending.store(false, Ordering::Release);
+                return Flush::Done;
+            }
+            backlog.stalled = backlog.batch.pop();
+        }
+    }
+
+    /// Deliver the connect-side backlog, waiting for the ring to open.
+    pub(crate) async fn deliver_backlog(&self) {
+        while self.has_backlog() {
+            let space = self.inner.port.space();
+            let seen = space.generation();
+            if self.flush_backlog() != Flush::Stalled {
+                return;
+            }
+            space.changed_after(seen).await;
+        }
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        !self.inner.port.is_closed()
+    }
+
+    /// No accepted message is waiting on the sending side.
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.has_backlog()
+    }
+
+    /// Whether a send can make progress now.
+    pub(crate) fn has_space(&self) -> bool {
+        self.inner.port.has_space()
+    }
+
+    /// What a send would run into right now. A pending backlog counts
+    /// as full: it goes first.
+    pub(crate) fn admission(&self) -> Admission {
+        if self.has_backlog() {
+            return Admission::Full;
+        }
+        self.inner.port.admission()
+    }
+
+    pub(crate) fn space(&self) -> Arc<StateSignal> {
+        self.inner.port.space()
+    }
+
+    /// Wait until a send can make progress or the route closed.
+    pub(crate) async fn wait_space(&self) {
+        loop {
+            let space = self.space();
+            let seen = space.generation();
+            if self.has_space() {
+                return;
+            }
+            space.changed_after(seen).await;
+        }
+    }
 }
 
 /// What `connect` / `accept` hand back to the `SocketDriver` instead
-/// of a byte stream. `out` is the channel WE send into;
-/// `in_rx` is what WE receive from.
+/// of a byte stream. `out` and `in_rx` carry commands and, for peers
+/// without a direct route, relayed messages.
 #[derive(Debug)]
 pub struct InprocConn {
-    pub out: mpsc::Sender<InboundFrame>,
-    pub in_rx: mpsc::Receiver<InboundFrame>,
+    pub out: RelaySender,
+    pub in_rx: RelayReceiver,
     pub peer: InprocPeerSnapshot,
-    pub tx: Option<Arc<InprocTx>>,
-    pub rx: Option<Arc<InprocRx>>,
-    pub(crate) recv_fanin: Option<Arc<InprocTx>>,
+    /// The peer's send HWM, for sizing this socket's receive ring.
+    pub(crate) peer_send_hwm: usize,
+    /// Port this socket opens for the peer's direct sends.
+    pub(crate) inbound: Option<Arc<InprocPort>>,
+    /// Port the peer opens for this socket's direct sends.
+    pub(crate) outbound: Option<Arc<InprocPort>>,
 }
 
-/// Default per-direction inflight-message capacity. Holds whole
-/// messages, not bytes - the original duplex-byte-stream impl had
-/// a 64 KiB byte budget; this is the message-count equivalent.
+/// Capacity of each command and relay-data lane of one connection.
 pub const DEFAULT_INPROC_HWM: usize = 1024;
 
 /// Sent from `connect` to `accept` through the registry. Carries
@@ -202,21 +488,18 @@ pub const DEFAULT_INPROC_HWM: usize = 1024;
 /// returns its own snapshot to the connector.
 struct InprocConnectRequest {
     connector: InprocPeerSnapshot,
-    connector_to_listener_rx: mpsc::Receiver<InboundFrame>,
-    listener_to_connector_tx: mpsc::Sender<InboundFrame>,
-    connector_recv_signal: Arc<DataSignal>,
-    connector_blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
-    connector_max_message_size: Option<usize>,
-    connector_fanin: Option<Arc<Fanin>>,
+    connector_to_listener_rx: RelayReceiver,
+    listener_to_connector_tx: RelaySender,
+    connector_config: RecvConfig,
+    connector_to_listener_port: Arc<InprocPort>,
+    listener_to_connector_port: Arc<InprocPort>,
     accept_ack: oneshot::Sender<InprocAck>,
 }
 
-type InprocAck = (
-    InprocPeerSnapshot,
-    Option<Arc<InprocTx>>,
-    Option<Arc<InprocRx>>,
-    Option<Arc<InprocTx>>,
-);
+struct InprocAck {
+    listener: InprocPeerSnapshot,
+    listener_config: RecvConfig,
+}
 
 #[derive(Debug)]
 struct InprocBinding {
@@ -255,10 +538,7 @@ pub(crate) fn bind(
     registry: Arc<InprocRegistry>,
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_signal: Arc<DataSignal>,
-    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
-    max_message_size: Option<usize>,
-    fanin: Option<Arc<Fanin>>,
+    config: RecvConfig,
 ) -> Result<InprocListener> {
     let (tx, rx) = mpsc::channel(32);
     let binding_id = registry.next_binding_id();
@@ -281,22 +561,16 @@ pub(crate) fn bind(
             name: name.to_string(),
         },
         snapshot,
-        recv_signal,
-        blocking_recv_waker,
-        max_message_size,
-        fanin,
+        config,
         incoming: rx,
     })
 }
 
-pub(crate) async fn connect_with_max_message_size(
+pub(crate) async fn connect(
     registry: &InprocRegistry,
     name: &str,
     snapshot: InprocPeerSnapshot,
-    recv_signal: Arc<DataSignal>,
-    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
-    max_message_size: Option<usize>,
-    fanin: Option<Arc<Fanin>>,
+    config: RecvConfig,
 ) -> Result<InprocConn> {
     let req_tx = {
         let reg = registry.binds.lock().expect("inproc registry poisoned");
@@ -305,18 +579,19 @@ pub(crate) async fn connect_with_max_message_size(
     .ok_or_else(|| Error::InvalidEndpoint(format!("no inproc binding: {name}")))?;
 
     // (connector→listener) and (listener→connector) directions.
-    let (c2l_tx, c2l_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
-    let (l2c_tx, l2c_rx) = mpsc::channel::<InboundFrame>(DEFAULT_INPROC_HWM);
+    let (c2l_tx, c2l_rx) = relay_channel(DEFAULT_INPROC_HWM);
+    let (l2c_tx, l2c_rx) = relay_channel(DEFAULT_INPROC_HWM);
     let (ack_tx, ack_rx) = oneshot::channel();
+    let c2l_port = InprocPort::new();
+    let l2c_port = InprocPort::new();
 
     let request = InprocConnectRequest {
         connector: snapshot,
         connector_to_listener_rx: c2l_rx,
         listener_to_connector_tx: l2c_tx,
-        connector_recv_signal: recv_signal,
-        connector_blocking_recv_waker: blocking_recv_waker,
-        connector_max_message_size: max_message_size,
-        connector_fanin: fanin,
+        connector_config: config,
+        connector_to_listener_port: c2l_port.clone(),
+        listener_to_connector_port: l2c_port.clone(),
         accept_ack: ack_tx,
     };
 
@@ -324,17 +599,17 @@ pub(crate) async fn connect_with_max_message_size(
         .send(request)
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc binding closed: {name}")))?;
-    let (listener_snapshot, tx, rx, recv_fanin) = ack_rx
+    let ack = ack_rx
         .await
         .map_err(|_| Error::InvalidEndpoint(format!("inproc accept dropped: {name}")))?;
 
     Ok(InprocConn {
         out: c2l_tx,
         in_rx: l2c_rx,
-        peer: listener_snapshot,
-        recv_fanin,
-        tx,
-        rx,
+        peer: ack.listener,
+        peer_send_hwm: ack.listener_config.send_hwm,
+        inbound: config.direct.then_some(l2c_port),
+        outbound: ack.listener_config.direct.then_some(c2l_port),
     })
 }
 
@@ -346,10 +621,7 @@ pub struct InprocListener {
     name: String,
     endpoint: omq_proto::endpoint::Endpoint,
     snapshot: InprocPeerSnapshot,
-    recv_signal: Arc<DataSignal>,
-    blocking_recv_waker: Arc<crate::socket::recv::BlockingRecvWaker>,
-    max_message_size: Option<usize>,
-    fanin: Option<Arc<Fanin>>,
+    config: RecvConfig,
     incoming: mpsc::Receiver<InprocConnectRequest>,
 }
 
@@ -372,90 +644,26 @@ impl InprocListener {
             connector,
             connector_to_listener_rx,
             listener_to_connector_tx,
-            connector_recv_signal,
-            connector_blocking_recv_waker,
-            connector_max_message_size,
-            connector_fanin,
+            connector_config,
+            connector_to_listener_port,
+            listener_to_connector_port,
             accept_ack,
         } = req;
-        if !is_spsc_eligible(self.snapshot.socket_type, connector.socket_type) {
-            let _ = accept_ack.send((self.snapshot.clone(), None, None, None));
-            return Ok(InprocConn {
-                out: listener_to_connector_tx,
-                in_rx: connector_to_listener_rx,
-                peer: connector,
-                tx: None,
-                rx: None,
-                recv_fanin: None,
-            });
-        }
-        let listener_is_recv = is_recv_side(self.snapshot.socket_type);
-        let recv = if listener_is_recv {
-            RecvConfig {
-                signal: self.recv_signal.clone(),
-                blocking: self.blocking_recv_waker.clone(),
-                max_message_size: self.max_message_size,
-                fanin: self.fanin.clone(),
-            }
-        } else {
-            RecvConfig {
-                signal: connector_recv_signal,
-                blocking: connector_blocking_recv_waker,
-                max_message_size: connector_max_message_size,
-                fanin: connector_fanin,
-            }
-        };
-        let (tx, rx) = inproc_pipe(recv)?;
-        let recv_fanin = rx.is_none().then(|| tx.clone());
-        let (listener_tx, listener_rx, listener_fanin, connector_tx, connector_rx, connector_fanin) =
-            if listener_is_recv {
-                (None, rx, recv_fanin, Some(tx), None, None)
-            } else {
-                (Some(tx), None, None, None, rx, recv_fanin)
-            };
-        let _ = accept_ack.send((
-            self.snapshot.clone(),
-            connector_tx,
-            connector_rx,
-            connector_fanin,
-        ));
+        let _ = accept_ack.send(InprocAck {
+            listener: self.snapshot.clone(),
+            listener_config: self.config,
+        });
         Ok(InprocConn {
             out: listener_to_connector_tx,
             in_rx: connector_to_listener_rx,
             peer: connector,
-            tx: listener_tx,
-            rx: listener_rx,
-            recv_fanin: listener_fanin,
+            peer_send_hwm: connector_config.send_hwm,
+            inbound: self.config.direct.then_some(connector_to_listener_port),
+            outbound: connector_config
+                .direct
+                .then_some(listener_to_connector_port),
         })
     }
-}
-
-fn inproc_pipe(recv: RecvConfig) -> Result<(Arc<InprocTx>, Option<Arc<InprocRx>>)> {
-    if let Some(fanin) = &recv.fanin {
-        let producer = fanin.register().ok_or(Error::Closed)?;
-        return Ok((InprocTx::fanin(producer, recv), None));
-    }
-    let (p, c) = yring::spsc(DEFAULT_INPROC_HWM);
-    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let blocking_space = Arc::new(BlockingSpace::new());
-    let tx = Arc::new(InprocTx {
-        producer: ParkingMutex::new(InprocProducer::Yring(p)),
-        recv_signal: recv.signal,
-        recv_ready: ready.clone(),
-        max_message_size: recv.max_message_size,
-        space_notify: Arc::new(StateSignal::new()),
-        blocking_space: blocking_space.clone(),
-        blocking_recv_waker: recv.blocking,
-    });
-    let rx = Arc::new(InprocRx {
-        consumer: Mutex::new(c),
-        batch_remaining: std::sync::atomic::AtomicUsize::new(0),
-        recv_signal: tx.recv_signal.clone(),
-        recv_ready: ready,
-        space_notify: tx.space_notify.clone(),
-        blocking_space,
-    });
-    Ok((tx, Some(rx)))
 }
 
 impl Drop for InprocListener {
@@ -484,29 +692,15 @@ mod tests {
         }
     }
 
-    fn notify() -> Arc<DataSignal> {
-        Arc::new(DataSignal::new())
-    }
-
-    fn waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
-        crate::socket::recv::BlockingRecvWaker::new()
+    fn config() -> RecvConfig {
+        RecvConfig {
+            direct: false,
+            send_hwm: 1000,
+        }
     }
 
     fn registry() -> Arc<InprocRegistry> {
         Arc::new(InprocRegistry::new())
-    }
-
-    #[test]
-    fn blocking_space_rechecks_before_parking() {
-        let space = BlockingSpace::new();
-        let mut calls = 0usize;
-
-        space.wait_until(|| {
-            calls += 1;
-            calls == 1
-        });
-
-        assert_eq!(calls, 2);
     }
 
     #[tokio::test]
@@ -516,23 +710,16 @@ mod tests {
             registry.clone(),
             "test-bca",
             snap(SocketType::Pull),
-            notify(),
-            waker(),
-            None,
-            None,
+            config(),
         )
         .unwrap();
-        let n = notify();
         let connector_registry = registry.clone();
         let connector = tokio::spawn(async move {
-            connect_with_max_message_size(
+            connect(
                 &connector_registry,
                 "test-bca",
                 snap(SocketType::Push),
-                n,
-                waker(),
-                None,
-                None,
+                config(),
             )
             .await
         });
@@ -569,22 +756,11 @@ mod tests {
             registry.clone(),
             "test-dup",
             snap(SocketType::Pair),
-            notify(),
-            waker(),
-            None,
-            None,
+            config(),
         )
         .unwrap();
         assert!(matches!(
-            bind(
-                registry,
-                "test-dup",
-                snap(SocketType::Pair),
-                notify(),
-                waker(),
-                None,
-                None
-            ),
+            bind(registry, "test-dup", snap(SocketType::Pair), config()),
             Err(Error::InvalidEndpoint(_))
         ));
     }
@@ -592,14 +768,11 @@ mod tests {
     #[tokio::test]
     async fn connect_without_bind_fails() {
         assert!(matches!(
-            connect_with_max_message_size(
+            connect(
                 &registry(),
                 "test-unbound",
                 snap(SocketType::Push),
-                notify(),
-                waker(),
-                None,
-                None,
+                config()
             )
             .await,
             Err(Error::InvalidEndpoint(_))
@@ -614,22 +787,10 @@ mod tests {
                 registry.clone(),
                 "test-drop",
                 snap(SocketType::Pair),
-                notify(),
-                waker(),
-                None,
-                None,
+                config(),
             )
             .unwrap();
         }
-        let _l2 = bind(
-            registry,
-            "test-drop",
-            snap(SocketType::Pair),
-            notify(),
-            waker(),
-            None,
-            None,
-        )
-        .unwrap();
+        let _l2 = bind(registry, "test-drop", snap(SocketType::Pair), config()).unwrap();
     }
 }

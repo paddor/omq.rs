@@ -29,7 +29,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::engine::{PeerDriverHandle, SendPipeConsumer};
+use crate::engine::{ActorPeerDriverHandle, SendPipeConsumer};
 use omq_proto::error::{Error, Result};
 use omq_proto::message::Message;
 use omq_proto::options::Options;
@@ -96,6 +96,15 @@ pub(crate) enum SendSubmitter {
 }
 
 impl SendSubmitter {
+    pub(crate) fn clone_shared(&self) -> Self {
+        match self {
+            Self::Identity(s) => Self::Identity(s.clone_shared()),
+            Self::FanOut(s) => Self::FanOut(s.clone_shared()),
+            Self::Latency(s) => Self::Latency(s.clone_shared()),
+            _ => self.clone(),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         match self {
             Self::None => {}
@@ -218,6 +227,12 @@ impl SendSubmitter {
             Self::Identity(s) => s.wait_send_progress(msg).await,
         }
     }
+
+    pub(crate) async fn wait_peer_send_progress(&self, peer_id: u64) {
+        if let Self::Identity(submitter) = self {
+            submitter.wait_peer_send_progress(peer_id).await;
+        }
+    }
 }
 
 impl SendStrategy {
@@ -268,7 +283,7 @@ impl SendStrategy {
         &mut self,
         peer_id: u64,
         route_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         peer_identity: Bytes,
         is_inproc: bool,
         io_thread: usize,
@@ -289,7 +304,7 @@ impl SendStrategy {
     pub(crate) fn connection_added_any_groups(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         io_thread: usize,
     ) {
         if let Self::FanOut(s) = self {
@@ -372,6 +387,17 @@ impl SendStrategy {
             Self::RoundRobin(_) | Self::Exclusive(_) => true,
             Self::Identity(s) => s.needs_peer_send_pipe(),
             Self::None | Self::Latency(_) | Self::FanOut(_) => false,
+        }
+    }
+
+    /// Whether sends to an inproc peer can go straight into its receive
+    /// queue. Fan-out publishes to inproc peers from the calling thread;
+    /// its lanes only serve wire peers. PEER lanes keep their own queues.
+    pub(crate) fn supports_inproc_direct(&self) -> bool {
+        match self {
+            Self::RoundRobin(_) | Self::Latency(_) | Self::Exclusive(_) | Self::FanOut(_) => true,
+            Self::Identity(s) => s.supports_inproc_direct(),
+            Self::None => false,
         }
     }
 

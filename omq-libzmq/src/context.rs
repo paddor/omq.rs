@@ -4,7 +4,6 @@ use std::ffi::{c_int, c_void};
 #[cfg(unix)]
 use std::sync::Once;
 
-use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
@@ -27,11 +26,6 @@ pub(crate) struct OmqContext {
     pub blocky: AtomicBool,
     pub zero_copy_recv: AtomicBool,
     thread_name_prefix: Mutex<Option<String>>,
-    /// Zmq-layer inproc registry. Maps inproc name to the bound `OmqSocket`.
-    pub(crate) inproc_binds: Mutex<FxHashMap<String, std::sync::Weak<crate::socket::OmqSocket>>>,
-    /// Pending inproc connect requests waiting for a bind.
-    pub(crate) inproc_waiting:
-        Mutex<FxHashMap<String, Vec<std::sync::Weak<crate::socket::OmqSocket>>>>,
     pub(crate) zap: Arc<crate::zap::ZapService>,
     owns_io_context: bool,
 }
@@ -75,8 +69,6 @@ impl OmqContext {
             blocky: AtomicBool::new(true),
             zero_copy_recv: AtomicBool::new(true),
             thread_name_prefix: Mutex::new(None),
-            inproc_binds: Mutex::new(FxHashMap::default()),
-            inproc_waiting: Mutex::new(FxHashMap::default()),
             zap: Arc::new(crate::zap::ZapService::default()),
             owns_io_context: true,
         })
@@ -97,8 +89,6 @@ impl OmqContext {
             blocky: AtomicBool::new(true),
             zero_copy_recv: AtomicBool::new(true),
             thread_name_prefix: Mutex::new(None),
-            inproc_binds: Mutex::new(FxHashMap::default()),
-            inproc_waiting: Mutex::new(FxHashMap::default()),
             zap: Arc::new(crate::zap::ZapService::default()),
             owns_io_context: false,
         });
@@ -119,10 +109,9 @@ impl OmqContext {
         if self.is_effectively_terminated() {
             return None;
         }
-        let n = self.configured_io_threads.load(Ordering::Acquire);
-        if n <= 0 {
-            return None;
-        }
+        // ZMQ_IO_THREADS=0 still runs one IO thread for connection setup,
+        // the control plane, and receive paths that need a relay task.
+        let n = self.configured_io_threads.load(Ordering::Acquire).max(1);
         let thread_name_prefix = self
             .thread_name_prefix
             .lock()
@@ -165,10 +154,6 @@ impl OmqContext {
                 .ctx
                 .get()
                 .is_some_and(omq_tokio::Context::is_terminated)
-    }
-
-    pub(crate) fn zero_io_threads(&self) -> bool {
-        self.configured_io_threads.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn socket_opened(&self) {

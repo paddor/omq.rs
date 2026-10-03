@@ -907,3 +907,63 @@ async fn server_handover_evicts_old_peer() {
     assert_eq!(got, Message::single("pong"));
     assert!(got.routing_id().is_some());
 }
+
+#[tokio::test]
+async fn handshake_progresses_while_router_receive_is_full() {
+    let mut transports = vec!["tcp", "inproc"];
+    if cfg!(feature = "ws") {
+        transports.push("ws");
+    }
+    for transport in transports {
+        let router = Socket::new(
+            SocketType::Router,
+            Options::default().recv_hwm(1).linger(Duration::ZERO),
+        );
+        let endpoint = router
+            .bind("tcp://127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let busy = Socket::new(
+            SocketType::Dealer,
+            Options::default().send_hwm(2048).linger(Duration::ZERO),
+        );
+        busy.connect(endpoint.clone()).await.unwrap();
+        router
+            .wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        busy.wait_connected(1, Duration::from_secs(2))
+            .await
+            .unwrap();
+        for _ in 0..1024 {
+            busy.send(Message::single("backlog")).await.unwrap();
+        }
+        // Allow the actor to fill its receive pipe and retain a pending item.
+        // No application receive frees capacity before the second handshake.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let endpoint = if transport == "tcp" {
+            endpoint
+        } else {
+            let name = if transport == "inproc" {
+                format!("inproc://actor-control-full-{}", std::process::id())
+            } else {
+                "ws://127.0.0.1:0".to_owned()
+            };
+            router.bind(name.parse().unwrap()).await.unwrap()
+        };
+        let newcomer = Socket::new(
+            SocketType::Dealer,
+            Options::default().linger(Duration::ZERO),
+        );
+        newcomer.connect(endpoint).await.unwrap();
+        router
+            .wait_connected(2, Duration::from_secs(1))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{transport} handshake stranded by receive backlog: {error}")
+            });
+        newcomer.close().await.unwrap();
+        busy.close().await.unwrap();
+        router.close().await.unwrap();
+    }
+}

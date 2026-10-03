@@ -18,10 +18,12 @@ src/
                     wait_any, proxy
   socket.rs         sync Socket + SocketInner + ReadinessSignal (platform
                     abstraction) + Monitor (connection event stream)
-  socket_async.rs   AsyncSocket: send (sync yring push), _try_recv,
+  socket_async.rs   AsyncSocket: native admission, fallback send, _try_recv,
                     platform-specific recv wakeup integration
+  send.rs           bounded fallback admission and in-flight FIFO barrier
+  recv.rs           fair direct/fallback receive drain and sink recycling
+  notify.rs         ReadinessSignal: platform-agnostic public API
   notify/
-    mod.rs          ReadinessSignal: platform-agnostic public API
     unix.rs         Unix signal backend: eventfd on Linux, pipe elsewhere
     windows.rs      Windows WindowsSignal: Win32 event handles + async callback
   context.rs        Context / AsyncContext (stateless factories)
@@ -60,22 +62,30 @@ same core, so sync and asyncio wrappers can share `inproc://` names
 without Python-side endpoint rewriting. The native registry stores weak
 refs, so keys do not keep contexts alive.
 
-### Why the yring relay is needed
+### Direct admission and bounded fallback
 
-Although `omq_tokio::Socket` can be shared across threads, its
-`send()`/`recv()` methods are async and require the tokio runtime's
-scheduler to be actively polling. The socket's internal driver tasks
-(ConnectionDriver, actor loop) are spawned with `tokio::spawn` and
-need the I/O driver to make progress. Python threads have no tokio
-runtime context. Calling `Handle::block_on(socket.send(msg))` from a
-non-runtime thread would deadlock: the future pushes into an internal
-queue, but the driver task that drains that queue isn't being polled.
+Python calls native `Socket::try_send` without a Tokio runtime context. Native
+admission queues the message; drivers own wire framing and I/O. Async sends
+use this path for REQ/REP/PAIR/CHANNEL and send capacities at least 256. Small
+throughput queues retain the send relay to overlap Python and IO work.
 
-The yring SPSC relay bridges the two worlds: Python does a fast
-lock-free ring push/pop (no syscall, no async context needed), and
-pump tasks on the tokio thread relay between the rings and the actual
-`socket.send()`/`recv().await` calls. This also gives natural batching
-and avoids per-message cross-thread notifications.
+Full or pre-ready sends enter a bounded async yring drained by a send worker.
+The queued count includes the worker's in-flight native send, so later inline
+sends cannot overtake it. Native admission runs outside binding locks because
+dropping a Python buffer exporter may reenter the binding. Accepted sends keep
+progressing even when the caller ignores the returned future.
+
+REQ/REP/PAIR/CHANNEL and receive capacities at least 256 use an external native
+receive sink unless conflate is enabled. Inproc producers, and eligible wire
+drivers, publish directly into the Python receive ring. Other peers use the
+bounded receive relay. Python alternates available sources and adopts a new
+direct consumer only after its old producer disconnects and the ring drains.
+Small throughput queues retain the receive relay for pipeline overlap.
+
+REQ and REP retain the complete transport item until application receive.
+Polling and receive relays do not change protocol state. Application receive
+validates REQ delimiters or admits the REP peer/envelope/body together. A
+multipart receive must finish before the next request or reply send.
 
 ### Dispatch for non-I/O operations
 
@@ -102,25 +112,30 @@ Materialization:
 2. Create yring producer/consumer pairs (capacities from SNDHWM/RCVHWM).
 3. Post job to the tokio thread: build the socket from the context's
    native `ContextCore`, spawn send and recv pump tasks.
-4. Store `Materialized { id, socket, send_prod, recv_cons, recv_ready,
-   send_ready, recv_space, send_pump, recv_pump }` in the `SocketInner`.
+4. Store native socket, send admission queue, direct/fallback receive drain,
+   readiness signals, sink config, and task handles in `SocketInner`.
+5. On fork recovery, forget inherited runtime/task state before creating the
+   child socket; inherited queue locks may belong to vanished threads.
 
 This lets Python code do `setsockopt` freely before the socket exists
 on the tokio thread.
 
-## Queue relay (yring pumps)
+## Fallback queue workers
 
-Each materialized socket has two pump tasks on the tokio thread:
+Each materialized async socket retains bounded send and receive workers.
+Direct traffic does not pass through these workers. Both yield after 256
+messages or 1 MiB to preserve runtime progress.
 
-**Send pump.** Drains the `AsyncProducer<Message>` (fed from Python)
-into `socket.send()`. Yields every 256 messages to prevent a single
-high-volume socket from starving others on the runtime.
+The send worker drains an `AsyncConsumer<Message>` into native `send()`.
+`AsyncProducer::poll_ready()` registers full-queue wakes; stream receives
+release capacity before returning each item. Completion clears the in-flight
+FIFO barrier without acquiring the producer mutex. REQ/REP completion wakes
+receivers waiting for native send admission.
 
-**Recv pump.** Drains `socket.recv()` into a `Producer<Message>` (read
-by Python). On ring-full, waits on `recv_space` (`StateSignal`, signaled
-by the Python consumer after draining). After pushing, signals the
-per-socket `ReadinessSignal` and the process-global recv signal used by
-`wait_any`.
+The receive worker uses `recv_for_external_recv()` and preserves complete
+transport items. It flushes with yring wake hints and signals socket/global
+readiness only when required. A full relay waits on `recv_space`; the Python
+consumer publishes popped credits and notifies registered producers.
 
 ## ReadinessSignal abstraction
 
@@ -160,7 +175,7 @@ the park.
 
 **Async integration:** Python's `asyncio.py` calls `_recv_fd()` to get
 a dup'd backend fd, then registers it with `loop.add_reader(callback)`.
-The recv pump writes the fd whenever it pushes a message; the kernel
+Direct sinks and receive relays write the fd when wake hints require it; the kernel
 wakes the event loop, `callback` fires, and `_try_recv()` is invoked.
 
 ### Windows backend: WindowsSignal (Win32 event handles + async callbacks)
@@ -178,7 +193,11 @@ wakeup model (`notify/windows.rs`).
   duplicate callbacks and preserves one follow-up wake while a drain is queued
   or running.
 
-All fields are protected by one mutex. A callback dispatch is claimed while
+Backend fields are protected by one mutex. Native receive and send-space
+callbacks first set an atomic pending flag and notify a Tokio dispatch task.
+That task invokes Python hooks outside native producer and binding locks.
+Hook replacement also drops old Python references outside the backend mutex.
+ A callback dispatch is claimed while
 holding that mutex. The claim remains valid if Python clears the wake mode
 before the producer acquires the GIL. Callback invocation failures release the
 claim so later readiness changes can retry.
@@ -208,52 +227,16 @@ The recv and send signals have independent modes: async code sets
 send to ASYNC, while sync code can set recv to SYNC simultaneously.
 
 
-## Sync send path
+## Sync send and recv
 
-```
-Socket.send(bytes, flags)
-  -> build_or_buffer(bytes, flags)
-      if SNDMORE: buffer frame, return
-      else: assemble Message from buffered frames + this frame
-  -> send_message(msg)
-      prod.push_and_flush(msg)
-      if Ok: done (fast path, GIL held)
-      if Err (ring full): release GIL, loop:
-          sleep 10 us, retry push_and_flush
-          check SNDTIMEO deadline -> raise EAGAIN on timeout
-```
+Sync sockets use the native blocking API. Sends first try native admission,
+then release the GIL while waiting for capacity, respecting SNDTIMEO. Receives
+use native blocking waits and RCVTIMEO. Multipart remainders live in `rxbuf`;
+`recv()` returns one frame and `recv_multipart()` returns the remainder.
 
-SNDMORE frames accumulate in a `SendBuffer` (`Vec<Bytes>`). The final
-`send` (no SNDMORE flag) flushes all buffered frames plus the final
-frame into one multipart `Message`. (Platform-independent; yring is
-populated by both Unix and Windows backends.)
-
-## Sync recv path
-
-```
-Socket.recv(flags)
-  -> if rxbuf not empty: pop head frame, return (no lock contention)
-  -> recv_message()
-      lock consumer, try pop (fast path)
-      if Some(msg): return first frame, store rest in rxbuf
-      else:
-          # Platform: Unix uses ReadinessSignal.wait_timeout() + poll(2)
-          # Platform: Windows uses ReadinessSignal.wait_timeout() with Win32 handles
-          release GIL, slow path:
-              park_begin()
-              re-check consumer (closes race)
-              loop:
-                  wait_timeout(100 ms or remaining RCVTIMEO)
-                  re-check consumer
-                  if msg: park_end(), return
-                  check RCVTIMEO deadline -> raise EAGAIN
-```
-
-Each `recv()` returns one frame. If the message is multipart, remaining
-frames go into `rxbuf` and are returned by subsequent `recv()` calls.
-`recv_multipart()` returns all frames at once. Both platforms use
-`ReadinessSignal.wait_timeout()`, which internally handles eventfd/pipe
-on Unix or Win32 event handles on Windows.
+Sync polling may stage a raw item using `try_recv_for_external_recv()`.
+`prepare_external_recv()` runs only when the application consumes that item,
+so polling cannot advance REQ/REP state or select a REP reply route.
 
 ## Async send/recv
 
@@ -262,57 +245,18 @@ mechanisms. No Rust futures are bridged to Python asyncio.
 
 ### Async send with backpressure
 
-**Happy path (ring not full):**
+A send first attempts inline native admission when eligible and when no older
+fallback is queued or in flight. Full native admission queues the original
+message into the bounded fallback. If that ring is full, the binding registers
+its send-space waker and returns EAGAIN with a `PendingSend` holding the already
+converted message and tracker. Retries reuse those values; cancellation drops
+them outside binding locks.
 
-```
-AsyncSocket.send(data, flags)
-  -> prod.push_and_flush(msg)
-      if Ok: return
-```
-
-The send yring is an `AsyncProducer`, allowing non-blocking push from
-Python.
-
-**Backpressure (ring full):**
-
-```
-AsyncSocket.send(data, flags)
-  -> prod.push_and_flush(msg)
-      if Err(ring full):
-        raise EAGAIN to Python wrapper
-```
-
-Python wrapper (`asyncio.py`) catches EAGAIN and enters the waiter queue
-pattern:
-
-1. Calls `_add_waitable(try_fn=socket.send, waiters=_send_waiters, set_mode)`.
-2. `set_mode` lambda calls `_set_wakeup_modes(send_mode=WAKEUP_MODE_ASYNC)`.
-3. Appends a waiter closure to `_send_waiters` deque.
-4. Returns future for caller to await.
-
-**Wakeup path (Unix):**
-- Waiter future is pending.
-- recv pump on tokio thread finishes forwarding a message, freeing ring space.
-- recv pump calls `send_ready.signal()`.
-- `EventFdSignal.signal()` writes to the backend fd (because `parking=true`).
-- Kernel wakes asyncio event loop via epoll/select.
-- Loop fires the registered callback, which calls `_drain_send_waiters()`.
-- `_drain_send_waiters()` pops waiters from queue and invokes each:
-  - Waiter calls `try_fn()` (socket.send) -> succeeds, future resolved.
-- After draining, calls `_mark_send_drain_complete()` to clear Rust callback state.
-
-**Wakeup path (Windows):**
-- Waiter future is pending.
-- recv pump on tokio thread finishes forwarding a message, freeing ring space.
-- recv pump calls `send_ready.signal()`.
-- `WindowsSignal.signal()` sees `mode & WAKEUP_MODE_ASYNC` and directly
-  invokes the Python callback (stored during `set_wakeup_hooks()`).
-- Callback is `_schedule_send_drain`, which calls
-  `loop.call_soon_threadsafe(self._drain_send_waiters)`.
-- Asyncio loop invokes `_drain_send_waiters()` in main thread context:
-  - Pops waiters and invokes each, same as Unix.
-- After draining, calls `_mark_send_drain_complete()` which finishes the
-  callback claim and re-triggers if follow-up work arrived.
+The Python wrapper queues a waiter and arms send readiness before retrying.
+Releasing a fallback slot wakes registered senders. Unix signals the fd;
+Windows defers Python hook dispatch to its notification task, then schedules
+`_drain_send_waiters` through `loop.call_soon_threadsafe`. Close forces wakeups,
+releases unaccepted pending values, and drains accepted sends within linger.
 
 ### Async recv with waiter queue
 
@@ -334,7 +278,8 @@ This is called once; Rust stores callbacks and event handles.
 
 ```
 AsyncSocket._try_recv()
-  -> socket.recv_nowait() from yring
+  -> refresh and fairly drain direct/fallback yring sources
+  -> prepare_external_recv() at application admission
       if Some(msg): return msg
       else: return None
 ```
@@ -350,7 +295,7 @@ Similar to send: appends waiter, sets mode, returns future.
 
 **Wakeup path (Unix):**
 - Waiter future is pending, registered with `loop.add_reader(fd, callback)`.
-- send pump on tokio thread drains yring, calls `recv_ready.signal()`.
+- Direct producer or receive relay publishes data and signals when required.
 - `EventFdSignal.signal()` writes to the backend fd.
 - Kernel wakes asyncio event loop.
 - Registered fd callback fires:
@@ -362,9 +307,9 @@ Similar to send: appends waiter, sets mode, returns future.
 
 **Wakeup path (Windows):**
 - Waiter future is pending.
-- send pump on tokio thread drains yring, calls `recv_ready.signal()`.
-- `WindowsSignal.signal()` sees `mode & WAKEUP_MODE_ASYNC` and directly
-  invokes the Python callback (`_schedule_recv_drain`).
+- Direct producer or receive relay publishes data and signals when required.
+- Notification task calls `WindowsSignal.signal()` outside producer locks.
+  With `mode & WAKEUP_MODE_ASYNC`, it invokes `_schedule_recv_drain`.
 - Callback queues `_drain_recv_waiters()` to the asyncio event loop.
 - Event loop invokes `_drain_recv_waiters()` in main thread context:
   - Pops waiters and invokes each.
@@ -447,18 +392,10 @@ mismatch.
 
 ## Proxy
 
-`runtime::proxy()` takes exclusive control of the participating sockets:
-
-1. Abort send/recv pumps on frontend, backend, and optional
-   capture/control sockets.
-2. Drain any buffered messages from the yring queues.
-3. Spawn `proxy_loop()` on the tokio runtime with `futures::select!` on
-   `fe.recv()`, `be.recv()`, and optional `ctrl.recv()`.
-4. Forward messages between frontend and backend. Capture socket
-   receives copies of all forwarded messages.
-5. Control commands: PAUSE (spin-wait for RESUME), TERMINATE/KILL (exit
-   loop).
-6. Block the calling Python thread until the loop exits.
+`runtime::proxy_handles()` uses native blocking sockets through the native
+proxy implementation. Python releases the GIL while forwarding. Capture and
+control behavior follow the native proxy; no Python message conversion is
+required for forwarded items.
 
 ## Socket options
 
@@ -523,3 +460,22 @@ that drains the tokio broadcast channel into a `flume::Receiver`. A
 
 - `Poller` registers POLLIN only; POLLOUT is ignored.
 - `wait_any` returns socket IDs, not file descriptors.
+
+## Direct-path measurements
+
+Linux inproc, three paired two-second samples, event loop on CPU 0 and initial
+runtime threads on CPU 1. Baseline is the committed receive/wake changes before
+this binding refactor. Rates include draining the pipeline tail. These results
+do not establish Windows performance.
+
+| Workload | Before | After | CPU seconds before/after |
+| --- | --- | --- | --- |
+| Async PUSH/PULL, 64 B, HWM1000 | 0.536 M/s | 0.521 M/s | 3.301 / 2.000 |
+| Async PUSH/PULL, 64 B, HWM8 | 0.180 M/s | 0.177 M/s | 3.133 / 2.793 |
+| Async REQ/REP, 4 B, p50 | 80.750 us | 77.120 us | 2.466 / 1.997 |
+| Async ready poll per receive | 11,492/s | 218,836/s | 2.513 / 2.015 |
+
+Default throughput changed -2.8% while CPU use fell 39%. Small-HWM throughput
+changed -1.9% while CPU use fell 11%; its switches rose from 57,821 to 92,130
+per sample. Small throughput queues retain both relays to preserve pipeline
+overlap. Ready polling avoids executor dispatch; pending polls still use it.

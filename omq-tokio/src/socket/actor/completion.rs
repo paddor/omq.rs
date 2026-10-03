@@ -10,6 +10,111 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 impl SocketDriver {
+    /// Check protocol control before the biased select, even with a full
+    /// application receive pipe or continuously ready caller commands.
+    pub(super) async fn drain_peer_control(&mut self) {
+        let Ok((mut peer_id, mut output)) = self.peer_control_rx.try_recv() else {
+            return;
+        };
+        let mut budget = DrainBudget::new(64, 64 * 1024);
+        let started = Instant::now();
+        loop {
+            let bytes = match &output {
+                PeerEvent::Event(event) => crate::engine::peer_events::event_work_bytes(event),
+                PeerEvent::Closed { error } => {
+                    size_of::<PeerEvent>() + error.as_ref().map_or(0, String::len)
+                }
+            };
+            self.handle_peer_control(peer_id, output).await;
+            if !budget.account(bytes) || started.elapsed() >= Duration::from_millis(1) {
+                break;
+            }
+            let Ok(next) = self.peer_control_rx.try_recv() else {
+                break;
+            };
+            (peer_id, output) = next;
+        }
+    }
+
+    pub(super) async fn handle_peer_control(&mut self, peer_id: u64, output: PeerEvent) {
+        if matches!(output, PeerEvent::Event(_))
+            && let Some(peer) = self.peers.get_mut(&peer_id)
+        {
+            peer.handled_control = peer.handled_control.wrapping_add(1);
+        }
+        self.handle_peer_output(peer_id, output).await;
+    }
+
+    /// Separate queues can be observed between two producer publications.
+    /// Retain one data item until its earlier protocol events are handled.
+    pub(super) async fn retry_peer_data(&mut self) {
+        if self.pending_receive.is_some() {
+            return;
+        }
+        let Some(data) = &self.pending_peer_data else {
+            return;
+        };
+        if self
+            .peers
+            .get(&data.peer_id)
+            .is_some_and(|peer| peer.handled_control < data.control_prefix)
+        {
+            return;
+        }
+        let data = self.pending_peer_data.take().unwrap();
+        if data.notification {
+            if let Some(peer) = self.peers.get_mut(&data.peer_id) {
+                peer.handled_events = peer.handled_events.wrapping_add(1);
+                if peer.ready && !self.closing {
+                    self.stage_receive(data.peer_id, data.message);
+                }
+            }
+            self.retire_completed_peer(data.peer_id).await;
+        } else {
+            self.handle_peer_output(
+                data.peer_id,
+                PeerEvent::Event(omq_proto::proto::Event::Message(data.message)),
+            )
+            .await;
+        }
+    }
+
+    /// Poll once for readiness, then consume a bounded batch without repeating
+    /// select and async-waker registration for every already published item.
+    /// Return partial credits before the next control turn or receive wait.
+    pub(super) async fn drain_peer_data(
+        &mut self,
+        mut data: crate::engine::actor_output::ActorData,
+    ) {
+        let mut budget = DrainBudget::new(64, 64 * 1024);
+        let started = Instant::now();
+        let mut yield_pending = false;
+        loop {
+            let bytes = data.message.byte_len();
+            self.pending_peer_data = Some(data);
+            self.retry_peer_data().await;
+            let remains = budget.account(bytes);
+            if self.pending_receive.is_some() || self.pending_peer_data.is_some() || self.closing {
+                break;
+            }
+            if !remains
+                || (budget.msgs().is_multiple_of(16)
+                    && started.elapsed() >= Duration::from_millis(1))
+            {
+                yield_pending = true;
+                break;
+            }
+            let Ok(next) = self.peer_out_rx.as_mut().unwrap().try_recv() else {
+                break;
+            };
+            data = next;
+        }
+        self.peer_out_rx.as_mut().unwrap().release_consumed();
+        if yield_pending {
+            tokio::task::yield_now().await;
+        }
+    }
+
     async fn ready_peer_completion(
         &mut self,
     ) -> Option<Result<PeerCompletion, tokio::sync::oneshot::error::RecvError>> {
@@ -206,7 +311,6 @@ mod tests {
             crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool),
             crate::socket::recv::SpscHandles::new(blocking, false),
             Arc::new(std::sync::Mutex::new(super::super::TypeState::new())),
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -229,12 +333,13 @@ mod tests {
                 options: Arc::new(driver.options.clone()),
                 ident: PeerIdent::Socket("127.0.0.1:12345".parse().unwrap()),
                 handle: PeerDriverHandle {
-                    inbox,
-                    data_inbox,
+                    inbox: inbox.into(),
+                    data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
                     transmit_slot: None,
                     direct_tcp_writer: None,
                     send_pipe: None,
+                    inproc: None,
                 },
                 ready: false,
                 pending_handshake: true,
@@ -246,17 +351,124 @@ mod tests {
                     .unwrap(),
                 ),
                 handled_events: 0,
+                handled_control: 0,
                 completion: None,
                 identity: bytes::Bytes::new(),
                 info: None,
                 endpoint: "tcp://127.0.0.1:12345".parse::<Endpoint>().unwrap(),
                 is_client: false,
                 route_id: peer_id,
-                spsc: None,
+                inproc_inbound: None,
                 task: None,
                 io_thread: 0,
             },
         );
+    }
+
+    #[tokio::test]
+    async fn data_waits_for_its_control_prefix_and_completion_keeps_notifications() {
+        let (mut driver, mut receive) = fixture_for(SocketType::XPub);
+        insert_pending_peer(&mut driver, 7);
+        let peer = driver.peers.get_mut(&7).unwrap();
+        peer.ready = true;
+        peer.handled_control = 1;
+        peer.handled_events = 1;
+        driver.pending_peer_data = Some(crate::engine::actor_output::ActorData {
+            peer_id: 7,
+            message: Message::single("\x01topic"),
+            notification: true,
+            control_prefix: 2,
+        });
+        driver.retry_peer_data().await;
+        assert!(driver.pending_peer_data.is_some());
+        assert_eq!(receive.prefetch(), 0);
+        driver
+            .handle_peer_control(
+                7,
+                PeerEvent::Event(Event::Command(Command::Subscribe(
+                    bytes::Bytes::from_static(b"topic"),
+                ))),
+            )
+            .await;
+        driver
+            .handle_peer_completion(PeerCompletion {
+                peer_id: 7,
+                admitted_events: 3,
+                error: None,
+                stream_disconnect: StreamDisconnect::None,
+            })
+            .await;
+        assert!(driver.peers.contains_key(&7));
+        for _ in 0..16 {
+            driver.recv_tx.try_send(Message::single("filler")).unwrap();
+        }
+        driver.retry_peer_data().await;
+        assert!(driver.pending_peer_data.is_none());
+        assert!(driver.pending_receive.is_some());
+        assert!(driver.peers.contains_key(&7));
+        receive.prefetch();
+        receive.pop().unwrap();
+        receive.release();
+        driver.retry_pending_receive();
+        driver.retire_completed_peer(7).await;
+        assert!(!driver.peers.contains_key(&7));
+        receive.prefetch();
+        for _ in 0..15 {
+            receive.pop().unwrap();
+        }
+        receive.prefetch();
+        assert_eq!(
+            receive.pop().unwrap().part_slice(0),
+            Some(b"\x01topic".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_data_batches_bound_count_and_bytes_and_return_partial_credits() {
+        for (size, expected) in [(1, 64), (40 * 1024, 2)] {
+            let (mut driver, _old_receive) = fixture();
+            let (pipe, _receive, _, _) =
+                crate::socket::recv::recv_pipe(256, driver.spsc.blocking_recv_waker.clone());
+            driver.recv_tx = pipe;
+            insert_pending_peer(&mut driver, 7);
+            driver.peers.get_mut(&7).unwrap().ready = true;
+            driver
+                .recv_strategy
+                .connection_added(7, bytes::Bytes::from_static(b"peer"));
+            let mut output = crate::engine::actor_output::PeerOutput::actor(
+                driver.peer_out_tx.try_register().unwrap(),
+            );
+            let body = bytes::Bytes::from(vec![0; size]);
+            for _ in 0..256 {
+                output
+                    .try_send(7, Message::single(body.clone()), false)
+                    .unwrap();
+            }
+            assert!(matches!(
+                output.try_send(7, Message::single(body.clone()), false),
+                Err(crate::engine::SendPipeError::Full(_))
+            ));
+            let first = driver
+                .peer_out_rx
+                .as_mut()
+                .unwrap()
+                .recv_async()
+                .await
+                .unwrap();
+            driver.drain_peer_data(first).await;
+            let actual = driver.peers.get(&7).unwrap().handled_events;
+            assert!(actual > 0 && actual <= expected);
+            assert!(driver.pending_receive.is_none());
+            for _ in 0..actual {
+                output
+                    .try_send(7, Message::single(body.clone()), false)
+                    .unwrap();
+            }
+            assert!(matches!(
+                output.try_send(7, Message::single(body), false),
+                Err(crate::engine::SendPipeError::Full(_))
+            ));
+        }
     }
 
     #[tokio::test]

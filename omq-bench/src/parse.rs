@@ -5,6 +5,43 @@ pub(crate) struct ThroughputResult {
     pub pull_cpu: Option<f64>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BlockingInprocStats {
+    pub hwm: u32,
+    pub ring_capacity: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_switches: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_switches_per_message: Option<f64>,
+}
+
+pub(crate) fn parse_blocking_inproc_stats(output: &str) -> Option<BlockingInprocStats> {
+    let count: f64 = output.split_whitespace().next()?.parse().ok()?;
+    if count <= 0.0 || !count.is_finite() {
+        return None;
+    }
+    let stats = output
+        .lines()
+        .find_map(|line| line.strip_prefix("blocking-stats "))?;
+    let field = |name: &str| {
+        stats.split_whitespace().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name).then_some(value)
+        })
+    };
+    let context_switches: Option<u64> =
+        field("context_switches").and_then(|value| value.parse().ok());
+    Some(BlockingInprocStats {
+        hwm: field("hwm")?.parse().ok()?,
+        ring_capacity: field("ring_capacity")?.parse().ok()?,
+        cpu_seconds: field("cpu_seconds").and_then(|value| value.parse().ok()),
+        context_switches,
+        context_switches_per_message: context_switches.map(|switches| switches as f64 / count),
+    })
+}
+
 pub(crate) struct MultiThroughputResult {
     pub msgs_s: f64,
     pub mbps: f64,
@@ -124,4 +161,37 @@ pub(crate) fn parse_latency(output: &str) -> Option<LatencyResult> {
         req_cpu,
         elapsed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_blocking_inproc_stats, parse_throughput};
+
+    #[test]
+    fn blocking_stats_preserve_throughput_and_normalize_switches() {
+        let output = "1000 0.5 64\nblocking-stats hwm=8 ring_capacity=16 cpu_seconds=0.6 context_switches=50\n";
+        let rate = parse_throughput(output, 64).unwrap();
+        assert!((rate.msgs_s - 2000.0).abs() < f64::EPSILON);
+        let stats = parse_blocking_inproc_stats(output).unwrap();
+        assert_eq!(stats.hwm, 8);
+        assert_eq!(stats.ring_capacity, 16);
+        assert_eq!(stats.cpu_seconds, Some(0.6));
+        assert_eq!(stats.context_switches_per_message, Some(0.05));
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("\"context_switches\":50"));
+    }
+
+    #[test]
+    fn blocking_stats_allow_platforms_without_usage_counters() {
+        let output = "256 1.0 16\nblocking-stats hwm=1000 ring_capacity=2048\n";
+        let stats = parse_blocking_inproc_stats(output).unwrap();
+        assert_eq!(stats.cpu_seconds, None);
+        assert_eq!(stats.context_switches_per_message, None);
+        assert!((parse_throughput(output, 16).unwrap().msgs_s - 256.0).abs() < f64::EPSILON);
+        assert!(parse_blocking_inproc_stats("256 1.0 16").is_none());
+        assert!(
+            parse_blocking_inproc_stats("0 1.0 16\nblocking-stats hwm=8 ring_capacity=16")
+                .is_none()
+        );
+    }
 }

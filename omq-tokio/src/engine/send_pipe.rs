@@ -73,6 +73,8 @@ enum SendPipeProducerInner {
     Peer(super::peer_send::Producer),
     Queue(yring::Producer<Message>),
     Conflate(Arc<ConflateState>),
+    /// Direct delivery into an inproc peer's receive queue.
+    Inproc(crate::transport::inproc::InprocSender),
 }
 
 #[derive(Debug)]
@@ -176,6 +178,18 @@ pub(crate) fn peer_send_pipe(
     )
 }
 
+/// Producer that delivers straight into an inproc peer's receive queue.
+/// There is no consumer half: nothing is queued on the sending side.
+pub(crate) fn inproc_send_pipe(sender: crate::transport::inproc::InprocSender) -> SendPipeProducer {
+    SendPipeProducer {
+        inner: SendPipeProducerInner::Inproc(sender),
+        direct_slot: None,
+        data_signal: Arc::new(DataSignal::new()),
+        space_available: Arc::new(StateSignal::new()),
+        above_lwm: Arc::new(AtomicBool::new(false)),
+    }
+}
+
 impl SendPipeProducer {
     pub(crate) fn set_direct_slot(&mut self, slot: Arc<PeerTransmitSlot>) {
         assert!(matches!(self.inner, SendPipeProducerInner::Peer(_)));
@@ -212,6 +226,7 @@ impl SendPipeProducer {
     pub(crate) fn registration_space(&self) -> Arc<StateSignal> {
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.registration_space(),
+            SendPipeProducerInner::Inproc(sender) => sender.space(),
             _ => self.space_available.clone(),
         }
     }
@@ -246,6 +261,13 @@ impl SendPipeProducer {
             }
             return result;
         }
+        if let SendPipeProducerInner::Inproc(sender) = &self.inner {
+            let result = sender.try_send_prepared(msg, preparation);
+            if matches!(result, Err(SendPipeError::Full(_))) {
+                self.above_lwm.store(true, Ordering::Release);
+            }
+            return result;
+        }
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             return self.try_send_conflate(msg, preparation);
         };
@@ -274,6 +296,23 @@ impl SendPipeProducer {
         messages: &mut VecDeque<Message>,
         max: usize,
     ) -> core::result::Result<usize, SendPipeError> {
+        if matches!(self.inner, SendPipeProducerInner::Inproc(_)) {
+            let mut count = 0usize;
+            while count < max {
+                let Some(msg) = messages.pop_front() else {
+                    break;
+                };
+                match self.try_send(msg) {
+                    Ok(()) => count += 1,
+                    Err(SendPipeError::Full(msg) | SendPipeError::Closed(msg)) if count > 0 => {
+                        messages.push_front(msg);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(count);
+        }
         let SendPipeProducerInner::Queue(producer) = &mut self.inner else {
             let Some(msg) = messages.pop_front() else {
                 return Ok(0);
@@ -350,6 +389,7 @@ impl SendPipeProducer {
             SendPipeProducerInner::Conflate(state) => {
                 !state.consumer_dropped.load(Ordering::Acquire)
             }
+            SendPipeProducerInner::Inproc(sender) => sender.is_alive(),
         }
     }
 
@@ -360,6 +400,7 @@ impl SendPipeProducer {
             SendPipeProducerInner::Conflate(state) => {
                 state.slot.lock().expect("conflate send pipe").is_none()
             }
+            SendPipeProducerInner::Inproc(sender) => sender.is_empty(),
         }
     }
 
@@ -370,12 +411,14 @@ impl SendPipeProducer {
                 producer.len() <= producer.capacity() / SEND_PIPE_LWM_DIVISOR
             }
             SendPipeProducerInner::Conflate(_) => true,
+            SendPipeProducerInner::Inproc(sender) => sender.has_space(),
         }
     }
 
     pub(crate) fn space_available(&self) -> Arc<StateSignal> {
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.space(),
+            SendPipeProducerInner::Inproc(sender) => sender.space(),
             _ => self.space_available.clone(),
         }
     }
@@ -384,7 +427,7 @@ impl SendPipeProducer {
 impl Drop for SendPipeProducer {
     fn drop(&mut self) {
         match &mut self.inner {
-            SendPipeProducerInner::Peer(_) => {}
+            SendPipeProducerInner::Peer(_) | SendPipeProducerInner::Inproc(_) => {}
             SendPipeProducerInner::Queue(producer) => producer.close(),
             SendPipeProducerInner::Conflate(state) => {
                 state.producer_dropped.store(true, Ordering::Release);

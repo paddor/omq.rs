@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::engine::signal::StateSignal;
 use crate::engine::{
-    PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
+    ActorPeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeMode, SendPipeProducer,
 };
 use omq_proto::error::Result;
 use omq_proto::message::Message;
@@ -469,11 +469,14 @@ impl RoundRobinSend {
     pub(crate) fn connection_added(
         &mut self,
         route_id: u64,
-        handle: &PeerDriverHandle,
+        handle: &ActorPeerDriverHandle,
         _is_inproc: bool,
     ) {
         let mut active = self.active.lock().expect("round_robin active");
-        if active.has_pipe(route_id) {
+        // A direct inproc route replaces the connect-side pipe. Dropping
+        // that producer ends the pipe, and the route delivers what it still
+        // holds before any later message.
+        if active.has_pipe(route_id) && handle.inproc.is_none() {
             self.active_changed.notify_changed();
             return;
         }
@@ -535,7 +538,7 @@ impl RoundRobinSend {
 #[cfg(test)]
 mod tests {
     use super::{ActivePipe, ActivePipes, RoundRobinSend};
-    use crate::engine::PeerDriverHandle;
+    use crate::engine::ActorPeerDriverHandle;
     use crate::engine::send_pipe::send_pipe;
     use omq_proto::message::Message;
     use omq_proto::options::Options;
@@ -659,13 +662,14 @@ mod tests {
         let (send_pipe, mut send_pipe_rx) = send_pipe(1);
         let (inbox, _inbox_rx) = tokio::sync::mpsc::channel(1);
         let (data_inbox, _data_inbox_rx) = tokio::sync::mpsc::channel(1);
-        let handle = PeerDriverHandle {
-            inbox,
-            data_inbox,
+        let handle = ActorPeerDriverHandle {
+            inbox: inbox.into(),
+            data_inbox: data_inbox.into(),
             cancel: CancellationToken::new(),
             transmit_slot: None,
             direct_tcp_writer: None,
             send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(send_pipe)))),
+            inproc: None,
         };
         send.connection_added(7, &handle, false);
 

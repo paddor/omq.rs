@@ -95,10 +95,102 @@ fan-out lanes perform encoding, compression, and wire I/O. Receive paths that
 need actor-owned routing state, including REP and ROUTER, pass through the
 actor. Other receive paths can deliver to the socket queue directly.
 
+Socket-owned drivers publish decoded messages through one bounded fanring lane
+per driver, registered when the connection is materialized. The actor owns the
+Coordinated receiver and shares no producer among drivers. Lane capacity is
+256 messages; fan-in rotates between ready lanes while preserving each
+driver's FIFO. The actor polls async readiness for the first item, then drains
+under 64-message and 64-KiB budgets, with time checks, before checking control
+again. A complete final message may cross the byte limit. The actor releases
+partial credits before ending that drain. Async receives themselves
+release consumed credits on each poll; native blocking receive LWM batching
+does not carry over automatically.
+
+Codec handshake and command events use a separate bounded control mailbox.
+The actor checks it under message, byte, and time budgets each iteration,
+including while an application receive waits for space. Driver data records
+carry their admitted protocol prefix, so observing separate queue publications
+cannot deliver a message before its preceding protocol events. Reserved peer
+completions count both queues and retain peer routing state until their
+admitted data and pending application receives finish.
+
+XPUB subscription state is control; its application notification uses the
+driver's data lane. The sole producer checks notification capacity before
+publishing the command and notification together, without an intervening
+await. A full notification lane pauses that peer's input while other drivers'
+handshakes and subscriptions remain reachable. The actor retains at most one
+data record awaiting its protocol prefix and one application receive awaiting
+space. Standalone public connection drivers retain their supplied Tokio event
+queue and combined event ordering.
+
+Actor-to-driver protocol inboxes use one bounded Coordinated fanring producer
+with 64 command slots. Internal handle copies share that physical producer.
+One activation slot and one close slot keep lifecycle commands reachable when
+protocol forwarding is blocked. Graceful close drains accepted protocol
+commands; immediate close preempts them. Standalone driver inputs retain their
+caller-supplied Tokio channels. The shared actor control mailbox, authenticated
+receive queues, context jobs, and multi-producer inproc registry requests remain
+on Tokio.
+
+A Linux VM comparison used 64-byte ROUTER/DEALER traffic, HWM 1000, and two
+current-thread runtimes pinned to separate CPUs. Three alternating serial
+pairs compared the prior shared Tokio mailbox with the batched per-driver
+lanes. Throughput used three-second windows after warmup and included tail
+delivery; latency used 10,000 echo round trips after 2,000 warmup trips.
+Dependency versions matched. Medians were:
+
+| Transport | Throughput before / after | CPU us/message before / after | RTT p99 before / after |
+| --- | --- | --- | --- |
+| TCP | 1.026 / 1.433 M/s | 1.170 / 0.878 | 64.958 / 66.399 us |
+| WS | 0.905 / 1.222 M/s | 1.327 / 1.026 | 66.954 / 68.145 us |
+
+These are local measurements. The throughput gain does not imply lower
+round-trip latency or Windows performance.
+
 A latency-profile plain-TCP route may attempt one immediate nonblocking write
 from the caller after normal send admission. A partial write transfers its
 remaining output to the driver. This is a specialized path; routing and queue
 ownership still follow the socket's ordinary rules.
+
+Fallback driver data inboxes use Coordinated fanring queues. Each socket clone
+lazily registers one producer per destination. Each lane holds at most
+`min(64, send_hwm)` messages, including reservations; non-power-of-two HWMs
+remain exact. Each destination allows 64 producer lanes plus its unused
+registrar. Retired lanes count until the driver reclaims them. A clone prunes
+closed destinations when adding a new cache entry.
+
+Publication reserves every required fallback lane before enqueuing anything.
+Each reservation holds its producer lock through commit, so another send
+through that clone cannot take the checked slot. Capacity waits register with
+the actual producer's `poll_ready` and observe close and route replacement.
+Graceful close stops admission and drains accepted messages and reservations;
+immediate teardown destroys unread payloads even if idle clones remain alive.
+Public standalone drivers retain their supplied Tokio inboxes. Internal
+binding and proxy handle copies share the original send scope to preserve
+direct/fallback FIFO and wait on the same capacity as their sends.
+
+A serial Linux VM comparison against the preceding actor-lane implementation
+used the same 64-byte messages, HWM 1000, pinned runtimes, warmup, and confirmed
+delivery barriers. Three alternating pairs gave these medians. The forced
+fallback echo used a latency-profile ROUTER and a throughput-profile DEALER;
+TCP ran for 10 seconds and WS for 3 seconds. One-way throughput and ping-pong
+latency kept both sockets in the throughput profile.
+
+| Probe | Before | After |
+| --- | --- | --- |
+| Forced TCP echo | 92.956 k/s | 89.612 k/s |
+| Forced WS echo | 342.982 k/s | 328.755 k/s |
+| TCP one-way throughput | 1.432 M/s | 1.419 M/s |
+| WS one-way throughput | 1.234 M/s | 1.218 M/s |
+| TCP ping-pong p99 | 68.162 us | 66.831 us |
+| WS ping-pong p99 | 67.440 us | 68.149 us |
+
+The fallback lane model costs 3.6% TCP and 4.1% WS throughput in these forced
+probes. CPU per message rose 4.7% and 3.5%; TCP switches per message rose 21.8%,
+with substantial variation between runs. TCP profiles were dominated by
+kernel socket locks. This migration provides separate producer capacity and
+bounded registration; these measurements do not establish a speedup or
+Windows performance.
 
 ## Routing and fan-out
 
@@ -109,9 +201,10 @@ ownership still follow the socket's ordinary rules.
 | Identity or reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
 | Exclusive | PAIR, CHANNEL | One peer |
 
-Round-robin byte-stream and inproc peers have bounded per-peer send pipes.
-Connect-side pipes exist before the remote endpoint binds, so messages sent
-before READY retain their order through handshake and reconnect. A bind-side
+Round-robin byte-stream peers have bounded per-peer send pipes; inproc peers
+push into their connection's ring (see [Inproc](#inproc)). Connect-side pipes
+exist before the remote endpoint binds, so messages sent before READY retain
+their order through handshake and reconnect. A bind-side
 socket without a ready pipe is mute. HWM limits each pipe's queued messages;
 it does not cap total socket memory.
 
@@ -207,10 +300,95 @@ through a change. Neither signal owns messages.
 
 ### Inproc
 
-Inproc transfers owned messages without ZMTP framing or kernel I/O. Peers
-across threads use send pipes; eligible same-thread peers use direct queue
-access. HWM, fairness, and connect-before-bind still apply. Names belong to a
-context, so separate contexts may bind the same name.
+Inproc transfers owned messages without ZMTP framing or kernel I/O. Each
+direction of a connection is one `yring` that holds the sender's send HWM plus
+the receiver's receive HWM. `send` pushes into it on the calling thread, and
+the receiving socket's `recv` drains it, so no I/O thread touches a message
+once the peers are connected. The receive path applies the socket type's rules
+as it drains: ROUTER messages carry the peer identity, SERVER messages the
+routing ID. REP retains the complete request plus its peer route in the
+same queue item, then splits the envelope and admits the reply route at
+application receive. Compatibility receive relays forward these items without
+advancing REQ/REP state.
+
+Native drains publish popped credits at the ring's LWM or when their cached
+window ends. Full-producer wake hints avoid unnecessary capacity broadcasts.
+Bulk budget boundaries and empty drains release partial credits before handing
+control elsewhere. Ring release policy stays in OMQ; yring only reports wakes.
+Blocking receivers register individual OS-thread waiters after an empty drain.
+Concurrent socket clones cannot replace one another's waiter; ready receives
+skip registration.
+
+```text
+ sender thread                         receiver thread
+
+ send(Message) -> routing -> [ yring: send HWM + receive HWM ] -> recv()
+```
+
+A connect-side socket queues sends in its pre-ready pipe until the peer binds.
+Those messages move into the ring first, in order. Peer tasks still exchange
+commands (SUBSCRIBE, JOIN) and report connection state. Fan-out senders (PUB,
+XPUB, RADIO) match subscriptions on the calling thread and push into each
+inproc subscriber's ring in turn; fan-out lanes serve wire peers only. With
+`xpub_nodrop`, `send` waits for each full subscriber separately. Senders with
+`conflate` keep their own send queue and their peer task relays each message
+into the same ring. PEER connections and authenticated C-API sockets still run
+through their peer tasks.
+
+Each inproc direction has separate bounded fanring command and relay-data
+lanes, with one physical producer each and 1024 slots per lane. Forwarding
+retains at most one pending command and one bounded data batch. Incoming
+application backpressure retains one message while local lifecycle commands,
+remote protocol commands, cancellation, and deadlines remain selected.
+XPUB notifications wait behind an older pending application message on the
+same actor data lane. `InprocConn` exposes `RelaySender`/`RelayReceiver` with
+parsed-frame send/receive methods.
+
+These async fanring receives release consumed credits per call. They do not
+apply the native direct yring LWM policy. Bounded synchronous drains explicitly
+release partial credits before yielding. Finite native close starts its caller
+deadline before actor command admission; expiry cancels the driver tree even
+when a subscription handler is blocked on protocol capacity.
+
+A matched Linux comparison measured the control migration against the prior
+commit, using three alternating serial pairs and 64-byte messages. TCP/WS
+throughput used three-second windows at HWM 1000. RTT used 10,000 measured
+round trips after 2,000 warmups. PEER relay RTT used two application runtimes
+pinned to separate CPUs sharing one owned IO thread. Direct blocking inproc
+used two application threads restricted to CPUs 0/1, with HWM 8 or 1000.
+Dependency versions matched. Medians were:
+
+| Gate | Before | After |
+| --- | --- | --- |
+| TCP throughput | 1.395 M/s | 1.425 M/s |
+| WS throughput | 1.210 M/s | 1.215 M/s |
+| TCP RTT p99 | 68.650 us | 68.486 us |
+| WS RTT p99 | 68.286 us | 70.751 us |
+| PEER inproc relay RTT p50 / p99 | 49.470 / 58.400 us | 53.935 / 62.912 us |
+| Direct inproc throughput, HWM 1000 | 6.901 M/s | 6.909 M/s |
+| Direct inproc throughput, HWM 8 | 3.222 M/s | 3.647 M/s |
+
+The relay model costs 9.0% p50, 7.7% p99, and 9.4% CPU per round trip in
+this comparison; WS p99 rises 3.6%. Small-ring direct results vary across
+runs. These measurements do not establish a relay speedup. Matched relay
+profiles had no lost samples and showed syscall, wake-registration, and
+queue-readiness costs. Windows runtime measurements remain pending PR CI.
+
+A blocking `send` that finds its queue full waits on the calling thread and is
+woken by the peer that frees space. Blocking `bind`, `connect`, and the other
+control calls still run on the context's IO thread.
+
+Connection setup still needs a tokio runtime: the socket actor, `bind`,
+`connect`, peer tasks, and subscription commands run as tasks. A `Context`
+with zero IO threads borrows the caller's runtime instead of starting a
+thread; the blocking API needs at least one owned IO thread. The C API treats
+`ZMQ_IO_THREADS` set to 0 as one IO thread. Direct inproc paths use the
+calling threads, including C API inproc REQ/REP with the direct receive sink.
+Additional peers use receive relays when that sink is occupied. The IO
+thread serves those fallback paths, setup, and the control plane.
+
+HWM, fairness, and connect-before-bind still apply. Names belong to a context,
+so separate contexts may bind the same name.
 
 ### Caller-driven exclusive sockets
 

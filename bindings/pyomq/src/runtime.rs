@@ -4,23 +4,16 @@
 //! the tokio runtime and background thread. `term()` shuts it down
 //! (aborts all pumps, drops the handle).
 //!
-//! omq-tokio::Socket is Send + Sync, so Python-side wrappers hold an
-//! `Arc<Socket>` directly in `SocketInner`. However, the socket's internal
-//! driver tasks (ConnectionDriver, actor loop) are spawned via
-//! tokio::spawn and need the tokio scheduler actively polling to make
-//! progress. Python threads have no tokio runtime context, so they
-//! cannot call socket.send()/recv() directly.
-//!
-//! Asyncio sockets use a yring relay. Synchronous sockets use the
-//! blocking API from `omq_tokio`, which owns its receive pipe and IO
-//! thread directly.
+//! Python async wrappers call native try_send and drain external receive sinks
+//! directly where eligible. Bounded workers retain pre-ready/backpressured
+//! sends and fallback receives. Synchronous wrappers use the native blocking
+//! API. Driver tasks and control operations still run on the context runtime.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
 use omq_tokio::Socket as InnerSocket;
 use pyo3::prelude::*;
 use tokio::runtime::Handle;
@@ -205,11 +198,13 @@ impl ContextInner {
         &self,
         socket_type: omq_tokio::SocketType,
         options: omq_tokio::Options,
+        send_queue: Arc<crate::send::SendQueue>,
         send_cons: yring::AsyncConsumer<omq_tokio::Message>,
+        send_ready: Arc<ReadinessSignal>,
         mut recv_prod: yring::Producer<omq_tokio::Message>,
         recv_ready: Arc<ReadinessSignal>,
-        send_ready: Arc<ReadinessSignal>,
         recv_space: Arc<omq_tokio::engine::StateSignal>,
+        recv_config: Option<Arc<omq_tokio::engine::RecvSinkConfig>>,
     ) -> PyResult<(u64, Arc<InnerSocket>, JoinHandle<()>, JoinHandle<()>)> {
         let ctx = self.runtime_context()?;
         let handle = ctx.handle().clone();
@@ -217,36 +212,59 @@ impl ContextInner {
         let recv_all_signal = global_recv_signal();
         handle.spawn(async move {
             let id = next_id();
-            let sock = Arc::new(ctx.socket(socket_type, options));
+            let sock = Arc::new(match recv_config {
+                Some(config) => ctx.socket_with_recv_sink_config(socket_type, options, config),
+                None => ctx.socket(socket_type, options),
+            });
 
-            const SEND_YIELD_INTERVAL: u32 = 256;
             let send_socket = sock.clone();
+            let send_recv_ready = recv_ready.clone();
+            let send_all_ready = recv_all_signal.clone();
             let send_pump = tokio::spawn(async move {
                 futures::pin_mut!(send_cons);
-                let mut batch = 0u32;
-                while let Some(msg) = futures::StreamExt::next(&mut send_cons).await {
-                    let _ = send_socket.send(msg).await;
-                    send_cons.as_mut().get_mut().release();
-                    send_ready.signal();
-                    batch += 1;
-                    if batch >= SEND_YIELD_INTERVAL {
-                        batch = 0;
+                let mut count = 0;
+                let mut bytes = 0;
+                while let Some(message) = futures::StreamExt::next(&mut send_cons).await {
+                    bytes += message.byte_len();
+                    count += 1;
+                    let _ = send_socket.send(message).await;
+                    send_queue.complete();
+                    if matches!(
+                        send_socket.socket_type(),
+                        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+                    ) {
+                        send_recv_ready.signal();
+                        send_all_ready.signal();
+                    }
+                    if count >= 256 || bytes >= 1024 * 1024 {
+                        count = 0;
+                        bytes = 0;
                         tokio::task::yield_now().await;
                     }
                 }
                 send_ready.signal();
             });
-
             let recv_socket = sock.clone();
             let recv_pump = tokio::spawn(async move {
-                while let Ok(msg) = recv_socket.recv().await {
+                let mut count = 0;
+                let mut bytes = 0;
+                while let Ok(msg) = recv_socket.recv_for_external_recv().await {
+                    bytes += msg.byte_len();
+                    count += 1;
                     let mut pending_msg = msg;
                     loop {
                         match recv_prod.push(pending_msg) {
                             Ok(()) => {
-                                recv_prod.flush();
-                                recv_ready.signal();
-                                recv_all_signal.signal();
+                                if matches!(
+                                    recv_prod.flush_and_check(),
+                                    yring::FlushResult::Flushed {
+                                        was_empty: true,
+                                        ..
+                                    }
+                                ) {
+                                    recv_ready.signal();
+                                    recv_all_signal.signal();
+                                }
                                 break;
                             }
                             Err(returned) => {
@@ -256,9 +274,16 @@ impl ContextInner {
                                 tokio::pin!(changed);
                                 match recv_prod.push(pending_msg) {
                                     Ok(()) => {
-                                        recv_prod.flush();
-                                        recv_ready.signal();
-                                        recv_all_signal.signal();
+                                        if matches!(
+                                            recv_prod.flush_and_check(),
+                                            yring::FlushResult::Flushed {
+                                                was_empty: true,
+                                                ..
+                                            }
+                                        ) {
+                                            recv_ready.signal();
+                                            recv_all_signal.signal();
+                                        }
                                         break;
                                     }
                                     Err(returned2) => {
@@ -268,6 +293,11 @@ impl ContextInner {
                                 }
                             }
                         }
+                    }
+                    if count >= 256 || bytes >= 1024 * 1024 {
+                        count = 0;
+                        bytes = 0;
+                        tokio::task::yield_now().await;
                     }
                 }
             });
@@ -285,14 +315,26 @@ impl ContextInner {
     /// spawned tasks were aborted. Just drop the socket.
     pub fn destroy_socket(
         &self,
-        sock: Arc<InnerSocket>,
-        send_prod: Mutex<yring::AsyncProducer<omq_tokio::Message>>,
-        send_pump: JoinHandle<()>,
-        recv_pump: JoinHandle<()>,
+        materialized: crate::socket::Materialized,
         linger: Option<Duration>,
     ) {
+        let crate::socket::Materialized {
+            socket: sock,
+            send_queue,
+            send_pump,
+            recv_pump,
+            recv_wakeup,
+            send_wakeup,
+            ..
+        } = materialized;
         recv_pump.abort();
-        drop(send_prod);
+        if let Some(wakeup) = recv_wakeup {
+            wakeup.abort();
+        }
+        if let Some(wakeup) = send_wakeup {
+            wakeup.abort();
+        }
+        send_queue.close();
         let handle = match self.runtime_handle() {
             Ok(h) => h,
             Err(_) => return,
@@ -318,7 +360,7 @@ impl ContextInner {
                 }
             }
             let linger = linger.map(|limit| limit.saturating_sub(started.elapsed()));
-            let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone());
+            let s = Arc::try_unwrap(sock).unwrap_or_else(|arc| (*arc).clone_shared());
             let _ = s.close_with_linger(linger).await;
             let _ = otx.send(());
         });
@@ -412,89 +454,6 @@ fn drop_or_forget_foreign(state: RuntimeState) {
     }
 }
 
-#[allow(dead_code)]
-fn drain_recv_ring(inner: &Arc<crate::socket::SocketInner>) -> Vec<omq_tokio::Message> {
-    let materialized_guard = inner.materialized.read().unwrap();
-    let Some(materialized) = materialized_guard.as_ref() else {
-        return vec![];
-    };
-    let mut cons = materialized.recv_cons.lock().unwrap();
-    let mut msgs = Vec::new();
-    while let Some(msg) = cons.prefetch_and_pop() {
-        msgs.push(msg);
-    }
-    if !msgs.is_empty() {
-        materialized.recv_space.notify_changed();
-    }
-    msgs
-}
-
-#[allow(dead_code)]
-fn push_to_capture(cap: &Arc<crate::socket::SocketInner>, msg: &omq_tokio::Message) {
-    let copy = omq_tokio::Message::multipart(msg.iter());
-    let materialized_guard = cap.materialized.read().unwrap();
-    if let Some(materialized) = materialized_guard.as_ref() {
-        let mut prod = materialized.send_prod.lock().unwrap();
-        let _ = prod.push_and_flush(copy);
-    }
-}
-
-/// Run a forwarding proxy between two sockets on the tokio thread.
-#[allow(dead_code)]
-pub fn proxy(
-    ctx: &Arc<ContextInner>,
-    fe_inner: Arc<crate::socket::SocketInner>,
-    be_inner: Arc<crate::socket::SocketInner>,
-    cap_inner: Option<Arc<crate::socket::SocketInner>>,
-    ctrl_inner: Option<Arc<crate::socket::SocketInner>>,
-) {
-    let fe_materialized_guard = fe_inner.materialized.read().unwrap();
-    let fe_materialized = fe_materialized_guard.as_ref().unwrap();
-    fe_materialized.send_pump.abort();
-    fe_materialized.recv_pump.abort();
-    let fe_sock = fe_materialized.socket.clone();
-    drop(fe_materialized_guard);
-
-    let be_materialized_guard = be_inner.materialized.read().unwrap();
-    let be_materialized = be_materialized_guard.as_ref().unwrap();
-    be_materialized.send_pump.abort();
-    be_materialized.recv_pump.abort();
-    let be_sock = be_materialized.socket.clone();
-    drop(be_materialized_guard);
-
-    let ctrl_sock = ctrl_inner.as_ref().map(|ctrl| {
-        let materialized_guard = ctrl.materialized.read().unwrap();
-        let materialized = materialized_guard.as_ref().unwrap();
-        materialized.send_pump.abort();
-        materialized.recv_pump.abort();
-        materialized.socket.clone()
-    });
-
-    let fe_drained = drain_recv_ring(&fe_inner);
-    let be_drained = drain_recv_ring(&be_inner);
-
-    ctx.spawn_blocking(async move {
-        for msg in fe_drained {
-            if let Some(ref cap) = cap_inner {
-                push_to_capture(cap, &msg);
-            }
-            if be_sock.send(msg).await.is_err() {
-                return;
-            }
-        }
-        for msg in be_drained {
-            if let Some(ref cap) = cap_inner {
-                push_to_capture(cap, &msg);
-            }
-            if fe_sock.send(msg).await.is_err() {
-                return;
-            }
-        }
-
-        proxy_loop(&fe_sock, &be_sock, &cap_inner, &ctrl_sock).await;
-    });
-}
-
 /// Forward messages using the native blocking sockets. The synchronous
 /// Python proxy runs in its caller's thread, so this loop may block there.
 #[allow(dead_code)]
@@ -518,7 +477,7 @@ pub fn blocking_proxy(
         .and_then(|inner| inner.ensure_blocking_socket().ok());
 
     let (tx, rx) = flume::unbounded();
-    for (side, socket) in [(0_u8, fe.clone()), (1, be.clone())] {
+    for (side, socket) in [(0_u8, fe.clone_shared()), (1, be.clone_shared())] {
         let tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = socket.recv() {
@@ -528,7 +487,7 @@ pub fn blocking_proxy(
             }
         });
     }
-    if let Some(socket) = ctrl.clone() {
+    if let Some(socket) = ctrl.as_ref().map(omq_tokio::blocking::Socket::clone_shared) {
         let tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(msg) = socket.recv() {
@@ -592,115 +551,6 @@ pub fn proxy_handles(
     ctx.spawn_blocking(async move { proxy.run().await })
 }
 
-#[allow(dead_code)]
-const PROXY_BATCH: usize = 64;
-
-#[allow(dead_code)]
-async fn proxy_drain_and_forward(
-    from: &Arc<InnerSocket>,
-    to: &Arc<InnerSocket>,
-    first: omq_tokio::Message,
-    cap: &Option<Arc<crate::socket::SocketInner>>,
-) -> bool {
-    if let Some(c) = cap {
-        push_to_capture(c, &first);
-    }
-    if to.send(first).await.is_err() {
-        return false;
-    }
-    for _ in 1..PROXY_BATCH {
-        let Ok(msg) = from.try_recv() else { break };
-        if let Some(c) = cap {
-            push_to_capture(c, &msg);
-        }
-        if to.send(msg).await.is_err() {
-            return false;
-        }
-    }
-    true
-}
-
-#[allow(dead_code)]
-async fn proxy_loop(
-    fe: &Arc<InnerSocket>,
-    be: &Arc<InnerSocket>,
-    cap: &Option<Arc<crate::socket::SocketInner>>,
-    ctrl: &Option<Arc<InnerSocket>>,
-) {
-    loop {
-        enum Action {
-            FeToBe(omq_tokio::Message),
-            BeToFe(omq_tokio::Message),
-            Control(omq_tokio::Message),
-            Done,
-        }
-
-        let action = if let Some(ctrl_sock) = ctrl {
-            futures::select! {
-                msg = fe.recv().fuse() => match msg {
-                    Ok(m) => Action::FeToBe(m),
-                    Err(_) => Action::Done,
-                },
-                msg = be.recv().fuse() => match msg {
-                    Ok(m) => Action::BeToFe(m),
-                    Err(_) => Action::Done,
-                },
-                msg = ctrl_sock.recv().fuse() => match msg {
-                    Ok(m) => Action::Control(m),
-                    Err(_) => Action::Done,
-                },
-            }
-        } else {
-            futures::select! {
-                msg = fe.recv().fuse() => match msg {
-                    Ok(m) => Action::FeToBe(m),
-                    Err(_) => Action::Done,
-                },
-                msg = be.recv().fuse() => match msg {
-                    Ok(m) => Action::BeToFe(m),
-                    Err(_) => Action::Done,
-                },
-            }
-        };
-
-        match action {
-            Action::FeToBe(msg) => {
-                if !proxy_drain_and_forward(fe, be, msg, cap).await {
-                    return;
-                }
-            }
-            Action::BeToFe(msg) => {
-                if !proxy_drain_and_forward(be, fe, msg, cap).await {
-                    return;
-                }
-            }
-            Action::Control(msg) => {
-                let cmd: Vec<u8> = msg.iter().next().unwrap_or_default().to_vec();
-                match cmd.as_slice() {
-                    b"TERMINATE" | b"KILL" => return,
-                    b"PAUSE" => {
-                        if let Some(ctrl_sock) = ctrl {
-                            loop {
-                                let Ok(m) = ctrl_sock.recv().await else {
-                                    return;
-                                };
-                                let c: Vec<u8> = m.iter().next().unwrap_or_default().to_vec();
-                                match c.as_slice() {
-                                    b"RESUME" => break,
-                                    b"TERMINATE" | b"KILL" => return,
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Action::Done => return,
-        }
-    }
-}
-
 /// Block the calling thread until at least one of the given sockets has
 /// an inbound message ready (or until `timeout_ms` elapses).
 pub fn wait_any(
@@ -723,14 +573,15 @@ pub fn wait_any(
                 }
                 let materialized_guard = inner.materialized.read().unwrap();
                 if let Some(materialized) = materialized_guard.as_ref() {
-                    let cons = materialized.recv_cons.lock().unwrap();
-                    !cons.is_empty()
+                    let mut consumers = materialized.recv_cons.lock().unwrap();
+                    consumers.refresh(materialized.recv_config.as_ref());
+                    consumers.has_data()
                 } else {
                     drop(materialized_guard);
                     let Ok(sock) = inner.ensure_blocking_socket() else {
                         return false;
                     };
-                    match sock.try_recv() {
+                    match sock.into_async().try_recv_for_external_recv() {
                         Ok(msg) => {
                             inner.rxmsgs.lock().unwrap().push(msg);
                             true

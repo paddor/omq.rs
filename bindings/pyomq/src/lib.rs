@@ -13,7 +13,9 @@ mod notify;
 mod options;
 #[cfg(feature = "curve")]
 mod peer_info;
+mod recv;
 mod runtime;
+mod send;
 mod socket;
 mod socket_async;
 mod tracker;

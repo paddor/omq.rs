@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use plotters::coord::ranged1d::{DefaultFormatting, KeyPointHint, Ranged, ValueFormatter};
+use plotters::coord::types::RangedCoordf64;
 use plotters::prelude::*;
 
 pub(crate) const COMPARISON_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
@@ -117,7 +119,7 @@ pub(crate) fn fmt_gbps(v: f64) -> String {
 
 pub(crate) fn fmt_us(v: f64) -> String {
     if v > 0.0 {
-        format!("{v:.0} μs")
+        format!("{v:.0} \u{03bc}s")
     } else {
         String::new()
     }
@@ -1066,6 +1068,25 @@ pub(crate) fn draw_gbs_panel(
     Ok(())
 }
 
+struct LatencyAxis(RangedCoordf64);
+
+impl Ranged for LatencyAxis {
+    type ValueType = f64;
+    type FormatOption = DefaultFormatting;
+
+    fn map(&self, value: &f64, limit: (i32, i32)) -> i32 {
+        self.0.map(value, limit)
+    }
+
+    fn key_points<Hint: KeyPointHint>(&self, _hint: Hint) -> Vec<f64> {
+        (0..=250).step_by(25).map(f64::from).collect()
+    }
+
+    fn range(&self) -> std::ops::Range<f64> {
+        self.0.range()
+    }
+}
+
 pub(crate) fn draw_latency_single_panel(
     out_path: &Path,
     title: &str,
@@ -1075,6 +1096,7 @@ pub(crate) fn draw_latency_single_panel(
     cpu: &BTreeMap<String, CpuData>,
     lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let axis: RangedCoordf64 = (lat_range.0..lat_range.1).into();
     draw_latency_single_panel_with_version_mode(
         out_path,
         title,
@@ -1082,7 +1104,8 @@ pub(crate) fn draw_latency_single_panel(
         impls,
         lat,
         cpu,
-        lat_range,
+        axis,
+        340,
         LegendVersionMode::Hide,
     )
 }
@@ -1094,7 +1117,6 @@ pub(crate) fn draw_latency_single_panel_with_versions(
     impls: &[Impl],
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
-    lat_range: (f64, f64),
 ) -> Result<(), Box<dyn std::error::Error>> {
     draw_latency_single_panel_with_version_mode(
         out_path,
@@ -1103,20 +1125,22 @@ pub(crate) fn draw_latency_single_panel_with_versions(
         impls,
         lat,
         cpu,
-        lat_range,
+        LatencyAxis((0.0..250.0).into()),
+        600,
         LegendVersionMode::ShowOtherImpls,
     )
 }
 
 #[expect(clippy::too_many_arguments)]
-fn draw_latency_single_panel_with_version_mode(
+fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
     out_path: &Path,
     title: &str,
     sizes: &[u64],
     impls: &[Impl],
     lat: &LatencyMap,
     cpu: &BTreeMap<String, CpuData>,
-    lat_range: (f64, f64),
+    lat_axis: Y,
+    chart_h: u32,
     version_mode: LegendVersionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
@@ -1130,7 +1154,6 @@ fn draw_latency_single_panel_with_version_mode(
 
     let row_h = 16u32;
     let table_h = 20 + present.len() as u32 * row_h + 10;
-    let chart_h = 340u32;
     let total_h = chart_h + table_h;
     let width = 850u32;
     let hw_label = detect_hardware();
@@ -1150,7 +1173,7 @@ fn draw_latency_single_panel_with_version_mode(
         .margin_top(36)
         .margin_left(10)
         .margin_right(30)
-        .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_range.0..lat_range.1)?;
+        .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_axis)?;
 
     chart
         .configure_mesh()

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::{
     ConnectionStatus, DialerEntry, DisconnectReason, Endpoint, Error, ListenerEntry, MonitorEvent,
     PeerIdent, PeerInfo, Result, SocketDriver, SocketType, UdpDialerEntry, UdpListenerEntry,
-    bind_any, fake_handle, mpsc, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
+    bind_any, fake_handle, reject_encrypted_inproc, spawn_dish_listener, spawn_radio_sender,
     supports_groups, supports_subscribe,
 };
 use crate::socket::actor::lifecycle::PeerLifecycle;
@@ -185,8 +185,9 @@ impl SocketDriver {
         self.next_peer_id += 1;
 
         let cancel = self.cancel.child_token();
-        let (inbox_tx, inbox_rx) = mpsc::channel(64);
-        let (data_inbox_tx, data_inbox_rx) = mpsc::channel(64);
+        let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
+        let (data_inbox_tx, data_inbox_rx) =
+            crate::engine::data_inbox::channel(self.options.send_hwm.max(1) as usize);
         let task = spawn_radio_sender(sock, inbox_rx, data_inbox_rx, cancel.clone());
         let handle = fake_handle(inbox_tx, data_inbox_tx, cancel.clone());
 
@@ -347,7 +348,7 @@ impl SocketDriver {
             &self.inproc_registry,
             &endpoint,
             &snapshot,
-            &self.spsc.inproc_config(options.max_message_size),
+            &self.inproc_config(&options),
             #[cfg(feature = "ws")]
             &options,
             #[cfg(feature = "ws")]
@@ -427,7 +428,7 @@ impl SocketDriver {
                 tx: self.internal_tx.clone(),
                 monitor: self.monitor.clone(),
                 snapshot: self.inproc_snapshot(),
-                recv: self.spsc.inproc_config(options.max_message_size),
+                recv: self.inproc_config(&options),
                 registry: self.inproc_registry.clone(),
                 setup,
                 first_deadline,

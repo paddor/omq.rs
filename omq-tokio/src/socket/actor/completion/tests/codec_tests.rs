@@ -119,7 +119,7 @@ async fn attach_on_route(
         },
     };
     driver.handle_internal_event(event).await;
-    let (id, event) = driver.peer_out_rx.recv().await.unwrap();
+    let (id, event) = driver.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
@@ -141,7 +141,7 @@ async fn attach_on_route(
         )))
         .await
         .unwrap();
-    let (id, event) = driver.peer_out_rx.recv().await.unwrap();
+    let (id, event) = driver.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::Command(Command::Subscribe(_)))

@@ -20,9 +20,220 @@
 //!   let both loads read stale values, and the consumer parks with the item
 //!   queued (`tests/loom_signal.rs`).
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
+
+/// Poll `future` on the calling thread and park it between wakeups.
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
+
+/// Registered OS threads awaiting socket data. Ready receives never register.
+///
+/// Each call owns its waiter. A producer wakes every armed caller once; one
+/// caller cannot replace another clone's thread or consume its wake token.
+#[derive(Debug)]
+pub(crate) struct BlockingSignal {
+    active: AtomicUsize,
+    waiters: Mutex<Vec<Arc<BlockingThread>>>,
+}
+
+#[derive(Debug)]
+struct BlockingThread {
+    thread: std::thread::Thread,
+    armed: AtomicBool,
+}
+
+pub(crate) struct BlockingWaiter<'a> {
+    signal: &'a BlockingSignal,
+    state: Arc<BlockingThread>,
+}
+
+impl BlockingSignal {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            waiters: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub(crate) fn register(&self) -> BlockingWaiter<'_> {
+        let state = Arc::new(BlockingThread {
+            thread: std::thread::current(),
+            armed: AtomicBool::new(true),
+        });
+        let mut waiters = self.waiters.lock().unwrap();
+        waiters.push(state.clone());
+        self.active.fetch_add(1, Ordering::SeqCst);
+        BlockingWaiter {
+            signal: self,
+            state,
+        }
+    }
+
+    /// Publication precedes this call. Registration precedes the receiver's
+    /// recheck. The fences prevent both sides from missing one another.
+    #[inline]
+    pub(crate) fn wake(&self) {
+        fence(Ordering::SeqCst);
+        if self.active.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        for waiter in self.waiters.lock().unwrap().iter() {
+            if waiter.armed.swap(false, Ordering::AcqRel) {
+                waiter.thread.unpark();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_waiter(&self, thread: std::thread::ThreadId) -> bool {
+        self.waiters
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|waiter| waiter.thread.id() == thread && waiter.armed.load(Ordering::Acquire))
+    }
+}
+
+impl BlockingWaiter<'_> {
+    pub(crate) fn park(&self) {
+        if self.state.armed.load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+
+    pub(crate) fn park_timeout(&self, timeout: std::time::Duration) {
+        if self.state.armed.load(Ordering::Acquire) {
+            std::thread::park_timeout(timeout);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn prepare_sleep(&self) {
+        // Order registration before the queue recheck, including rearming an
+        // existing waiter after a spurious wake or another clone's drain.
+        self.state.armed.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+    }
+}
+
+impl Drop for BlockingWaiter<'_> {
+    fn drop(&mut self) {
+        let mut waiters = self.signal.waiters.lock().unwrap();
+        waiters.retain(|waiter| !Arc::ptr_eq(waiter, &self.state));
+        self.signal.active.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Cancellation handle for blocking receive calls.
+#[derive(Debug)]
+pub struct BlockingRecvCancel {
+    canceled: AtomicBool,
+    registered: AtomicBool,
+    thread: Mutex<Option<std::thread::Thread>>,
+}
+
+impl BlockingRecvCancel {
+    /// Create a cancel handle in the active state.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            canceled: AtomicBool::new(false),
+            registered: AtomicBool::new(false),
+            thread: Mutex::new(None),
+        }
+    }
+
+    /// Cancel current and future receive waits.
+    #[inline]
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.lock().unwrap().clone() {
+            thread.unpark();
+        }
+    }
+
+    /// Returns whether this handle has been canceled.
+    #[inline]
+    #[must_use]
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn register(&self, thread: &std::thread::Thread) {
+        *self.thread.lock().unwrap() = Some(thread.clone());
+        self.registered.store(true, Ordering::Release);
+        if self.is_canceled() {
+            thread.unpark();
+        }
+    }
+
+    /// Register the current OS thread once for repeated cancelable receives.
+    ///
+    /// This avoids per-call registration when a foreign binding owns the
+    /// blocking socket thread.
+    pub fn register_current_thread_once(&self) {
+        if self
+            .registered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let thread = std::thread::current();
+        *self.thread.lock().unwrap() = Some(thread.clone());
+        if self.is_canceled() {
+            thread.unpark();
+        }
+    }
+
+    #[inline]
+    fn unregister(&self) {
+        *self.thread.lock().unwrap() = None;
+        self.registered.store(false, Ordering::Release);
+    }
+}
+
+impl Default for BlockingRecvCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct BlockingRecvCancelGuard<'a> {
+    pub(crate) cancel: &'a BlockingRecvCancel,
+}
+
+impl Drop for BlockingRecvCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.cancel.unregister();
+    }
+}
 
 const IDLE: u8 = 0;
 const PENDING: u8 = 1;
@@ -230,6 +441,11 @@ impl StateSignal {
             return;
         }
         notified.await;
+    }
+
+    /// Wait on the calling OS thread until caller state or generation changes.
+    pub fn wait_until_blocking(&self, ready: impl FnMut() -> bool) {
+        block_on(self.wait_until(ready));
     }
 
     pub async fn wait_until(&self, mut ready: impl FnMut() -> bool) {

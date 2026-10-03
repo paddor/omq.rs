@@ -243,6 +243,12 @@ down and reconnects.
 - **IPC wildcard address:** Cannot auto-generate a unique IPC path.
 - **TCP accept filter socket option:** `ZMQ_TCP_ACCEPT_FILTER` is unsupported;
   use a NULL ZAP domain for address-based admission policy.
+- **`ZMQ_IO_THREADS` set to 0:** Runs one IO thread anyway for connection
+  setup, the control plane, and receive relay tasks. Direct inproc paths
+  stay on the calling threads, including REQ/REP with the direct receive
+  sink. Additional peers can use IO-thread receive relays. libzmq starts
+  no IO thread in this mode but always runs its
+  reaper thread.
 - **ROUTER handover:** Implemented. Always-on (libzmq gates behind
   `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with
   `DisconnectReason::Handover`. Applies to ROUTER and SERVER.

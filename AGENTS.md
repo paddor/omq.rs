@@ -81,13 +81,22 @@ PUB fan-out lane workers
 `DrainBudget::WORKER`). All producer-to-consumer signaling uses
 `DataSignal` (transmit slot, send pipe, lane workers).
 
-**Inproc.** No ZMTP. Inproc and byte-stream round-robin peers both
-register `yring` send pipes. Byte-stream consumers drain in
-`ConnectionDriver`; inproc consumers drain in `inproc_peer_driver` and
-forward to the socket inbound queue. Same-thread delivery uses direct
-`yring::ProducerOwner` access where applicable. Connect-side
-round-robin endpoints allocate a pre-ready send pipe at `connect()`;
-bind-side round-robin sockets with no ready pipe mute like libzmq.
+**Inproc.** No ZMTP. Each direction of a connection is one `yring`
+sized `send_hwm` (sender) + `recv_hwm` (receiver). The receiving
+socket owns it: the consumer is a per-peer source of `SpscAwareRecv`,
+the producer sits behind an `InprocPort` that the peer's send strategy
+pushes into from the calling thread (`InprocSender`, used through
+`SendPipeProducer` and `PeerOutbound`). No IO-thread task touches a
+message. ROUTER identity and SERVER routing ID are attached at the
+port; REP envelopes are split in the receive drain. Fan-out senders
+treat inproc subscribers as fallback peers: the calling thread matches
+subscriptions and pushes into each ring (lanes serve wire peers only).
+`inproc_peer_driver` carries commands and lifecycle only, plus a relay
+into the port for senders without a direct route (PEER, `conflate`).
+Connect-side round-robin endpoints allocate a pre-ready send pipe at
+`connect()`; its content moves into the ring first when the peer is
+ready. Bind-side round-robin sockets with no ready pipe mute like
+libzmq.
 
 ## Build / test / bench / charts / releasing
 

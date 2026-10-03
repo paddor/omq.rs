@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native receive rings publish consumed slots at LWM and cached-window
+  boundaries, waking full producers while the remaining window drains. Partial
+  credits publish before receive parks or a bounded bulk drain returns.
+- Blocking waits share signal-module machinery. Ready receives skip OS thread
+  registration; parked calls retain independent waiters across socket clones.
 - Yring receive sinks use queue wake hints for immediate, deferred, and
   full-queue retry flushes, preserving empty-queue waiter registration.
 
 ### Fixed
 
+- Concurrent blocking receives cannot replace another clone's parked thread.
+  Canceling, timing out, or closing one call preserves other active waiters.
 - External receive sink replacement follows its owning peer. Queued messages
   in an unadopted replacement ring are retained across further disconnects.
 - REP receive queues keep each complete request and its peer route together;

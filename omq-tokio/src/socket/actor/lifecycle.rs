@@ -43,9 +43,12 @@ impl<'a> PeerLifecycle<'a> {
         space: Arc<StateSignal>,
         peer_id: u64,
     ) {
+        let capacity = consumer.capacity();
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
+            capacity,
             consumer: std::sync::Mutex::new(consumer),
             batch_remaining: std::sync::atomic::AtomicUsize::new(0),
+            batch_popped: std::sync::atomic::AtomicUsize::new(0),
             space,
             peer_id,
         });

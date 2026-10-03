@@ -49,10 +49,16 @@ Loom models, and Miri checks in that workspace.
 For coordinated local changes, override published queue dependencies explicitly:
 
 ```sh
-cargo --config 'patch.crates-io.yring.path="../fanring/yring"' \
-  --config 'patch.crates-io.fanring.path="../fanring"' \
-  test -p omq-tokio
+cargo test --config 'patch.crates-io.yring.path="../fanring/yring"' \
+  --config 'patch.crates-io.fanring.path="../fanring"' -p omq-tokio
 ```
+
+Native receive release hints currently require the sibling yring change
+`Consumer::release_with_full()` (fanring commit `1c92d51`). Use the overrides
+for workspace and Python binding checks until that API is published. Put
+`--config` after the Cargo subcommand so clippy and nextest forward it. OMQ's
+Windows binding paths use the same portable queue API; Windows runtime checks
+remain deferred to PR CI.
 
 Keep these overrides local. Registry dependencies must be published before OMQ
 CI or packaging can resolve them without overrides. Refresh binding lockfiles

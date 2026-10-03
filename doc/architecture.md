@@ -219,6 +219,14 @@ same queue item, then splits the envelope and admits the reply route at
 application receive. Compatibility receive relays forward these items without
 advancing REQ/REP state.
 
+Native drains publish popped credits at the ring's LWM or when their cached
+window ends. Full-producer wake hints avoid unnecessary capacity broadcasts.
+Bulk budget boundaries and empty drains release partial credits before handing
+control elsewhere. Ring release policy stays in OMQ; yring only reports wakes.
+Blocking receivers register individual OS-thread waiters after an empty drain.
+Concurrent socket clones cannot replace one another's waiter; ready receives
+skip registration.
+
 ```text
  sender thread                         receiver thread
 

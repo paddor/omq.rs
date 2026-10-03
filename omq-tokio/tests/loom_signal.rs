@@ -387,42 +387,44 @@ fn assert_compressed_payloads_follow_dict(entries: &[ModelFanoutEntry]) {
 
 #[derive(Debug)]
 struct ModelBlockingRecvWaker {
-    registered: AtomicBool,
-    sleeping: AtomicBool,
+    active: AtomicUsize,
+    armed: AtomicBool,
+    thread: Mutex<bool>,
     unparked: AtomicBool,
 }
 
 impl ModelBlockingRecvWaker {
     fn new() -> Self {
         Self {
-            registered: AtomicBool::new(false),
-            sleeping: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            armed: AtomicBool::new(false),
+            thread: Mutex::new(false),
             unparked: AtomicBool::new(false),
         }
     }
 
     fn register(&self) {
-        self.registered.store(true, Ordering::Release);
+        let mut thread = self.thread.lock().unwrap();
+        *thread = true;
+        self.armed.store(true, Ordering::Relaxed);
+        self.active.fetch_add(1, Ordering::SeqCst);
     }
 
     fn prepare_sleep(&self) {
-        self.sleeping.store(true, Ordering::Release);
+        self.armed.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
     }
 
     fn cancel_sleep(&self) {
-        self.sleeping.store(false, Ordering::Release);
+        self.armed.store(false, Ordering::Release);
     }
 
     fn wake(&self) {
-        if !self.sleeping.load(Ordering::Acquire) {
+        fence(Ordering::SeqCst);
+        if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
-        if self
-            .sleeping
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            && self.registered.load(Ordering::Acquire)
-        {
+        if *self.thread.lock().unwrap() && self.armed.swap(false, Ordering::AcqRel) {
             self.unparked.store(true, Ordering::Release);
         }
     }
@@ -618,6 +620,46 @@ fn blocking_recv_cancel_registration_cannot_lose_cancel_wake() {
             "cancel racing with thread registration must leave an unpark token"
         );
     });
+}
+
+#[test]
+fn blocking_recv_lazy_registration_and_rearm_cannot_lose_publication() {
+    for rearm in [false, true] {
+        loom::model(move || {
+            let waker = Arc::new(ModelBlockingRecvWaker::new());
+            if rearm {
+                waker.register();
+                waker.cancel_sleep();
+            }
+            let message = Arc::new(AtomicBool::new(false));
+            let receiver = {
+                let waker = waker.clone();
+                let message = message.clone();
+                thread::spawn(move || {
+                    if !rearm {
+                        waker.register();
+                    }
+                    waker.prepare_sleep();
+                    // Exactly one queue recheck before parking, with no final
+                    // load that could hide a missing publication wake.
+                    message.load(Ordering::Acquire)
+                })
+            };
+            let sender = {
+                let waker = waker.clone();
+                thread::spawn(move || {
+                    message.store(true, Ordering::Release);
+                    waker.wake();
+                })
+            };
+            let observed = receiver.join().unwrap();
+            sender.join().unwrap();
+            assert!(
+                observed || waker.was_unparked(),
+                "registered receiver lost publication"
+            );
+        });
+    }
 }
 
 #[test]

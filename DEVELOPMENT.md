@@ -54,14 +54,14 @@ cargo test --config 'patch.crates-io.yring.path="../fanring/yring"' \
 ```
 
 Native receive release hints currently require the sibling yring change
-`Consumer::release_with_full()` (fanring commit `1c92d51`). Use the overrides
+`Consumer::release_with_full()` (fanring commit `aa102ac`). Use the overrides
 for workspace and Python binding checks until that API is published. Put
 `--config` after the Cargo subcommand so clippy and nextest forward it. OMQ's
 Windows binding paths use the same portable queue API; Windows runtime checks
 remain deferred to PR CI.
 
 Python async capacity waits also require `AsyncProducer::poll_ready()`
-(fanring commit `e6334b8`). In `bindings/pyomq`, use paths
+(fanring commit `57e0732`). In `bindings/pyomq`, use paths
 `../../../fanring/yring` and `../../../fanring` for the same overrides.
 
 Keep these overrides local. Registry dependencies must be published before OMQ

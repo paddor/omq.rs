@@ -283,6 +283,13 @@ impl Socket {
         self.inner.recv_rx.recv().await
     }
 
+    /// Nonblocking transport receive for compatibility polling/staging.
+    /// Admission still belongs to the later application receive.
+    #[doc(hidden)]
+    pub fn try_recv_for_external_recv(&self) -> Result<Message> {
+        self.inner.recv_rx.try_recv()
+    }
+
     /// Validate and admit a transport item at application receive. REP carries
     /// its peer ID, envelope, and body together through every receive queue.
     #[doc(hidden)]
@@ -569,6 +576,24 @@ impl Socket {
     pub async fn wait_send_progress_for(&self, msg: &Message) {
         if self.inner.socket_type == SocketType::XSub && xsub_raw_command(msg).is_ok() {
             let _ = self.inner.cmd_tx.reserve().await;
+            return;
+        }
+        let routed_peer = match self.inner.socket_type {
+            SocketType::Rep => self
+                .inner
+                .rep_current
+                .lock()
+                .expect("rep identity")
+                .as_ref()
+                .map(|(peer_id, _)| *peer_id),
+            SocketType::Server => msg
+                .routing_id()
+                .and_then(|id| id.checked_sub(1))
+                .map(u64::from),
+            _ => None,
+        };
+        if let Some(peer_id) = routed_peer {
+            self.send_submitter.wait_peer_send_progress(peer_id).await;
             return;
         }
         self.send_submitter.wait_send_progress(msg).await;

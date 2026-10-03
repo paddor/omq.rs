@@ -5,6 +5,61 @@ use std::time::Duration;
 use super::*;
 use crate::engine::send_pipe;
 
+#[tokio::test]
+async fn routed_progress_wait_registers_without_an_application_identity_frame() {
+    for socket_type in [SocketType::Rep, SocketType::Server] {
+        for action in 0..3 {
+            let options =
+                Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+            let mut send = IdentitySend::new(socket_type, &options);
+            let (producer, mut consumer) = send_pipe(1);
+            send.connection_added(7, peer_handle(producer), Bytes::from_static(b"peer"), false);
+            let submitter = send.submitter();
+            let message = Message::single("body");
+            submitter
+                .try_send_rep(7, &RepEnvelope::new(), message.clone())
+                .unwrap();
+            assert!(matches!(
+                submitter.try_send_rep(7, &RepEnvelope::new(), message),
+                Err(TrySendError::Full(_))
+            ));
+            let wait = submitter.wait_peer_send_progress(7);
+            tokio::pin!(wait);
+            assert!(wait.as_mut().now_or_never().is_none());
+            let _replacement = match action {
+                0 => {
+                    assert_eq!(consumer.drain_into(&mut Vec::new(), 1, usize::MAX), 1);
+                    None
+                }
+                1 => {
+                    drop(consumer);
+                    None
+                }
+                _ => {
+                    send.connection_removed(7);
+                    let (producer, consumer) = send_pipe(1);
+                    send.connection_added(
+                        7,
+                        peer_handle(producer),
+                        Bytes::from_static(b"replacement"),
+                        false,
+                    );
+                    Some(consumer)
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(1), wait)
+                .await
+                .unwrap();
+            assert!(
+                submitter
+                    .wait_peer_send_progress(7)
+                    .now_or_never()
+                    .is_some()
+            );
+        }
+    }
+}
+
 #[test]
 fn throughput_identity_uses_peer_pipe_not_transmit_slot() {
     let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);

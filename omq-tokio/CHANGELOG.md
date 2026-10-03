@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compatibility polls can stage raw transport receives without admitting
+  REQ/REP state. Routed send waits use REP peers and SERVER routing ids
+  instead of interpreting an application body as an identity frame.
+
 - Concurrent blocking receives cannot replace another clone's parked thread.
   Canceling, timing out, or closing one call preserves other active waiters.
 - External receive sink replacement follows its owning peer. Queued messages

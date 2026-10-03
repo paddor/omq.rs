@@ -218,6 +218,12 @@ impl SendSubmitter {
             Self::Identity(s) => s.wait_send_progress(msg).await,
         }
     }
+
+    pub(crate) async fn wait_peer_send_progress(&self, peer_id: u64) {
+        if let Self::Identity(submitter) = self {
+            submitter.wait_peer_send_progress(peer_id).await;
+        }
+    }
 }
 
 impl SendStrategy {

@@ -317,6 +317,52 @@ impl Submitter {
         !Arc::ptr_eq(waiting, &pipe.space_available()) || !pipe.is_alive() || pipe.is_below_lwm()
     }
 
+    pub(crate) async fn wait_peer_send_progress(&self, peer_id: u64) {
+        let (space, inbox, direct) = {
+            let state = self.inner.lock().expect("identity inner poisoned");
+            let Some(peer) = state.peers.get(&peer_id) else {
+                return;
+            };
+            let inbox = match &peer.target {
+                PeerTarget::Inbox(inbox) => Some(inbox.clone()),
+                _ => None,
+            };
+            let direct = match &peer.target {
+                PeerTarget::Direct(target) => Some(target.clone()),
+                _ => None,
+            };
+            (peer.target.space_available(), inbox, direct)
+        };
+        if let Some(space) = space {
+            space
+                .wait_until(|| {
+                    let state = self.inner.lock().expect("identity inner poisoned");
+                    state.closed
+                        || state.peers.get(&peer_id).is_none_or(|peer| {
+                            if peer
+                                .target
+                                .space_available()
+                                .is_none_or(|current| !Arc::ptr_eq(&current, &space))
+                            {
+                                return true;
+                            }
+                            match &peer.target {
+                                PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
+                                    !pipe.is_alive() || pipe.is_below_lwm()
+                                }
+                                PeerTarget::Direct(target) => target.send_ready(),
+                                PeerTarget::Inbox(_) => true,
+                            }
+                        })
+                })
+                .await;
+        } else if let Some(inbox) = inbox {
+            let _ = inbox.reserve().await;
+        } else if let Some(direct) = direct {
+            direct.wait_capacity().await;
+        }
+    }
+
     pub(crate) async fn send_rep(
         &self,
         peer_id: u64,

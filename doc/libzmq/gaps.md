@@ -245,8 +245,9 @@ down and reconnects.
   use a NULL ZAP domain for address-based admission policy.
 - **`ZMQ_IO_THREADS` set to 0:** Runs one IO thread anyway for connection
   setup, the control plane, and receive relay tasks. Direct inproc paths
-  stay on the calling threads; C API REQ/REP receives still use the IO
-  thread. libzmq starts no IO thread in this mode but always runs its
+  stay on the calling threads, including REQ/REP with the direct receive
+  sink. Additional peers can use IO-thread receive relays. libzmq starts
+  no IO thread in this mode but always runs its
   reaper thread.
 - **ROUTER handover:** Implemented. Always-on (libzmq gates behind
   `ZMQ_ROUTER_HANDOVER`). Old connection is evicted with

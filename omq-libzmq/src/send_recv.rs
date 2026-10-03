@@ -845,11 +845,7 @@ fn try_pop_dual(
     let mut released_full_slot = false;
     let mut budget = DrainBudget::WORKER;
     while !budget.exhausted() {
-        let Some((message, released)) = cons
-            .fast
-            .prefetch_and_pop_with_full()
-            .or_else(|| cons.pump.prefetch_and_pop_with_full())
-        else {
+        let Some((message, released)) = cons.try_pop() else {
             break;
         };
         released_full_slot |= released;
@@ -958,6 +954,71 @@ mod tests {
 
     const ZMQ_PUSH: c_int = 8;
     const ZMQ_ENOTSUP: c_int = crate::error::ENOTSUP;
+
+    #[test]
+    fn direct_inproc_req_rep_progresses_while_io_runtime_is_paused() {
+        let ctx = crate::zmq_ctx_new();
+        assert_eq!(crate::zmq_ctx_set(ctx, 1, 0), 0);
+        let req = crate::zmq_socket(ctx, 3);
+        let rep = crate::zmq_socket(ctx, 4);
+        for socket in [req, rep] {
+            for (option, value) in [(17, 0_i32), (27, 250), (28, 250)] {
+                assert_eq!(
+                    crate::zmq_setsockopt(
+                        socket,
+                        option,
+                        (&raw const value).cast(),
+                        size_of::<i32>()
+                    ),
+                    0
+                );
+            }
+        }
+        assert_eq!(
+            crate::zmq_bind(rep, c"inproc://req-rep-with-paused-io".as_ptr()),
+            0
+        );
+        assert_eq!(
+            crate::zmq_connect(req, c"inproc://req-rep-with-paused-io".as_ptr()),
+            0
+        );
+        let mut received = [0_u8; 4];
+        // Finish both endpoints' READY transition before pausing setup/control.
+        for (sender, receiver) in [(req, rep), (rep, req)] {
+            assert_eq!(crate::zmq_send(sender, b"warm".as_ptr().cast(), 4, 0), 4);
+            assert_eq!(
+                crate::zmq_recv(receiver, received.as_mut_ptr().cast(), received.len(), 0),
+                4
+            );
+        }
+        // SAFETY: ctx is a live context returned by zmq_ctx_new.
+        let context = unsafe { &*ctx.cast::<Arc<crate::context::OmqContext>>() };
+        let handle = context.handle().unwrap();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let paused = handle.spawn(async move {
+            paused_tx.send(()).unwrap();
+            // Disconnect on a failed assertion also releases the runtime.
+            let _ = resume_rx.recv_timeout(Duration::from_secs(3));
+        });
+        paused_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        for (sender, receiver, body) in [(req, rep, b"ping"), (rep, req, b"pong")] {
+            assert_eq!(
+                crate::zmq_send(sender, body.as_ptr().cast(), body.len(), 0),
+                4
+            );
+            assert_eq!(
+                crate::zmq_recv(receiver, received.as_mut_ptr().cast(), received.len(), 0),
+                4
+            );
+            assert_eq!(&received, body);
+        }
+        resume_tx.send(()).unwrap();
+        handle.block_on(paused).unwrap();
+        assert_eq!(crate::zmq_close(req), 0);
+        assert_eq!(crate::zmq_close(rep), 0);
+        assert_eq!(crate::zmq_ctx_term(ctx), 0);
+    }
 
     #[test]
     fn iovec_apis_are_link_compatible_stubs() {

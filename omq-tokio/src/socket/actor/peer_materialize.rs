@@ -216,6 +216,9 @@ fn inproc_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::Rec
             .as_ref()
             .map(|slot| crate::engine::RecvSink::Conflate(slot.clone()))
     });
+    if socket.socket_type == SocketType::Rep {
+        return recv_sink.map(|sink| crate::engine::RecvSink::rep(sink, peer_id));
+    }
     if socket.socket_type != SocketType::Server {
         return recv_sink;
     }
@@ -854,7 +857,7 @@ fn fanin_recv_sink(
 }
 
 fn take_inproc_recv_sink(socket: &SocketDriver, peer_id: u64) -> Option<crate::engine::RecvSink> {
-    if !can_bypass_actor_recv(socket.socket_type) || socket.socket_type == SocketType::Req {
+    if !can_bypass_actor_recv(socket.socket_type) && socket.socket_type != SocketType::Rep {
         return None;
     }
     socket

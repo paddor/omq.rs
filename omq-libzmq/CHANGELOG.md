@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Busy direct receive queues no longer starve queued fallback messages.
 - A fallback peer disconnect no longer replaces a live direct receive ring.
   Pending replacement rings survive churn, and polling/`ZMQ_EVENTS` adopt
   replacement consumers before reporting readiness.
@@ -21,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Inproc REQ/REP uses the C receive sink directly when available, avoiding
+  receive relay scheduling on the single-peer path.
 - Direct receive sinks signal only when yring wake hints request it;
   streaming inproc receives avoid an eventfd write for each message.
 - `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a PUSH/PULL-only

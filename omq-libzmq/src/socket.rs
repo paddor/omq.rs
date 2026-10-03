@@ -44,9 +44,29 @@ pub(crate) struct RecvConsumers {
     pub fast: yring::Consumer<omq_tokio::Message>,
     /// Filled by the recv pump task (fallback for second+ peers).
     pub pump: yring::Consumer<omq_tokio::Message>,
+    prefer_pump: bool,
 }
 
 impl RecvConsumers {
+    #[expect(
+        clippy::len_zero,
+        reason = "is_empty registers waiters; this snapshot only selects the next source"
+    )]
+    pub(crate) fn try_pop(&mut self) -> Option<(omq_tokio::Message, bool)> {
+        // This length snapshot selects the next source only. Failed pops
+        // still register both rings' empty waiters before the caller parks.
+        if self.prefer_pump && self.pump.len() > 0 {
+            self.prefer_pump = false;
+            return self.pump.prefetch_and_pop_with_full();
+        }
+        if let Some(message) = self.fast.prefetch_and_pop_with_full() {
+            self.prefer_pump = true;
+            return Some(message);
+        }
+        self.prefer_pump = false;
+        self.pump.prefetch_and_pop_with_full()
+    }
+
     pub(crate) fn refresh(&mut self, config: Option<&Arc<omq_tokio::engine::RecvSinkConfig>>) {
         if self.fast.is_disconnected()
             && let Some(config) = config
@@ -391,6 +411,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     *unsafe { sock.recv_cons.get_unchecked() } = Some(RecvConsumers {
         fast: fast_cons,
         pump: pump_cons,
+        prefer_pump: false,
     });
 
     let recv_space = Arc::new(StateSignal::new());

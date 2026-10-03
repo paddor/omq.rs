@@ -285,3 +285,28 @@ fn fallback_disconnect_does_not_replace_a_live_direct_receive_ring() {
     assert!(messages.iter().any(|message| message == b"still-live"));
     assert!(messages.iter().any(|message| message == b"replacement"));
 }
+
+#[test]
+fn direct_receive_does_not_starve_queued_fallback_messages() {
+    let mut sockets = Sockets::new();
+    let pull = sockets.socket(7);
+    let first = sockets.socket(8);
+    let second = sockets.socket(8);
+    let endpoint = bind(pull, "inproc");
+    assert_eq!(zmq_connect(first, endpoint.as_ptr()), 0);
+    send(first, b"warmup-direct");
+    assert_eq!(recv(pull), b"warmup-direct");
+    assert_eq!(zmq_connect(second, endpoint.as_ptr()), 0);
+    send(second, b"warmup-fallback");
+    assert_eq!(recv(pull), b"warmup-fallback");
+    for _ in 0..100 {
+        send(first, b"busy-direct");
+    }
+    send(second, b"queued-fallback");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let messages = [recv(pull), recv(pull)];
+    assert!(
+        messages.iter().any(|message| message == b"queued-fallback"),
+        "a continuously readable direct ring must not starve the relay ring"
+    );
+}

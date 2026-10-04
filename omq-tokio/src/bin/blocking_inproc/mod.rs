@@ -107,10 +107,8 @@ impl Usage {
         // SAFETY: getrusage succeeded and initialized every field read below.
         let usage = unsafe { usage.assume_init() };
         Some(Self {
-            cpu_seconds: usage.ru_utime.tv_sec as f64
-                + usage.ru_utime.tv_usec as f64 / 1_000_000.0
-                + usage.ru_stime.tv_sec as f64
-                + usage.ru_stime.tv_usec as f64 / 1_000_000.0,
+            cpu_seconds: super::timeval_secs(&usage.ru_utime)
+                + super::timeval_secs(&usage.ru_stime),
             context_switches: u64::try_from(usage.ru_nvcsw + usage.ru_nivcsw)
                 .expect("context switches"),
         })

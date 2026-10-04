@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve decoded WebSocket messages preceding peer CLOSE while receive
+  admission waits for space. Local close still bounds receive and wire drains.
 - Compatibility polls can stage raw transport receives without admitting
   REQ/REP state. Routed send waits use REP peers and SERVER routing ids
   instead of interpreting an application body as an identity frame.

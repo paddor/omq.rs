@@ -328,6 +328,7 @@ struct PendingWrite {
 struct GracefulClose {
     deadline: Option<Instant>,
     ws_close_started: bool,
+    discard_receive: bool,
 }
 
 impl PendingWrite {
@@ -1141,11 +1142,14 @@ where
                 graceful_close = Some(GracefulClose {
                     deadline: Instant::now().checked_add(Duration::from_secs(10)),
                     ws_close_started: true,
+                    discard_receive: false,
                 });
             }
 
-            if graceful_close.is_some() {
-                discard_receive = true;
+            if let Some(close) = graceful_close {
+                // Local close retires receives; a peer CLOSE preserves the
+                // decoded message prefix, including blocked receive admission.
+                discard_receive |= close.discard_receive;
                 if let Some(data) = &mut data_inbox {
                     data.close();
                 }
@@ -1309,6 +1313,10 @@ where
 
             let shutdown_ready = graceful_close.is_some()
                 && inbox.is_empty()
+                && (discard_receive
+                    || (pending_receive.is_none()
+                        && !recv_direct.as_ref().is_some_and(RecvSink::peer_blocked)
+                        && !peer_events.blocked()))
                 && pending_write.is_empty()
                 && eq.is_empty()
                 && !connection.has_pending_transmit()
@@ -1875,6 +1883,7 @@ fn handle_inbox_command(
         Some(PeerDriverCommand::DrainAndClose { deadline }) => {
             match graceful_close {
                 Some(close) => {
+                    close.discard_receive = true;
                     close.deadline = match (close.deadline, deadline) {
                         (Some(current), Some(requested)) => Some(current.min(requested)),
                         (current, requested) => current.or(requested),
@@ -1884,6 +1893,7 @@ fn handle_inbox_command(
                     *graceful_close = Some(GracefulClose {
                         deadline,
                         ws_close_started: false,
+                        discard_receive: true,
                     });
                 }
             }
@@ -5099,6 +5109,92 @@ mod tests {
             .await
             .expect("server teardown stalled")
             .expect("server driver panicked");
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
+        use omq_proto::proto::connection::WsRole;
+
+        for direct in [false, true] {
+            let mut push = Connection::new(
+                ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
+            );
+            let mut pull = Connection::new(
+                ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
+            );
+            for _ in 0..10 {
+                let push_out = drain_transmit(&mut push);
+                let pull_out = drain_transmit(&mut pull);
+                if !push_out.is_empty() {
+                    pull.handle_input(Bytes::from(push_out)).unwrap();
+                }
+                if !pull_out.is_empty() {
+                    push.handle_input(Bytes::from(pull_out)).unwrap();
+                }
+            }
+            assert!(push.is_ready() && pull.is_ready());
+            while pull.poll_event().is_some() {}
+            let messages = [
+                Message::single("before close"),
+                Message::single("last message"),
+            ];
+            for message in &messages {
+                push.send_message(message).unwrap();
+            }
+            push.send_ws_close(1000);
+            let wire = drain_transmit(&mut push);
+            let (stream, mut remote) = tokio::io::duplex(4096);
+            // Supply both messages and CLOSE in one read, independent of TCP timing.
+            remote.write_all(&wire).await.unwrap();
+            let (commands, inbox) = mpsc::channel(4);
+            let (events, mut event_inbox) = mpsc::channel(1);
+            let (producer, mut consumer) = yring::spsc(1);
+            let space = Arc::new(StateSignal::new());
+            let mut driver =
+                ConnectionDriver::new(stream, pull, inbox, events, 1, CancellationToken::new());
+            if direct {
+                driver = driver.with_recv_sink(RecvSink::Yring(YringSink {
+                    producer,
+                    signal: Box::new(|| {}),
+                    space: space.clone(),
+                }));
+            }
+            commands
+                .send(PeerDriverCommand::ActivateDataPlane)
+                .await
+                .unwrap();
+            let task = tokio::spawn(driver.run());
+            tokio::task::yield_now().await;
+            for expected in messages {
+                let received = tokio::time::timeout(Duration::from_secs(1), async {
+                    if direct {
+                        loop {
+                            if let Some(message) = consumer.prefetch_and_pop() {
+                                consumer.release();
+                                space.notify_changed();
+                                break message;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    } else {
+                        let (_, event) = event_inbox.recv().await.unwrap();
+                        let PeerEvent::Event(Event::Message(message)) = event else {
+                            panic!("peer closed before delivering {expected:?}: {event:?}");
+                        };
+                        message
+                    }
+                })
+                .await
+                .expect("peer CLOSE discarded a preceding message");
+                assert_eq!(received, expected);
+            }
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("peer CLOSE did not finish after receive admission")
+                .unwrap()
+                .unwrap();
+        }
     }
 
     #[cfg(feature = "ws")]

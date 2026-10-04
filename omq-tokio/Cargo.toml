@@ -34,9 +34,9 @@ soak = []
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
-fanring = { version = "0.3.7", features = ["async"] }
+fanring = { version = "0.3.8", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.28.1", default-features = false }
-yring = "0.3.18"
+yring = "0.3.19"
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Require published `yring` 0.3.18 instead of a sibling checkout.
+- Require `yring` 0.3.19 for batched release wake hints and async capacity waits.
 - Admit eligible async sends directly into native queues, preserving FIFO
   behind accepted fallback sends through native admission. Keep bounded
   workers for pre-ready/full sends and small throughput queues.

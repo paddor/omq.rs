@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Require `yring` 0.3.19 for batched release wake hints.
 - Inproc REQ/REP uses the C receive sink directly when available, avoiding
   receive relay scheduling on the single-peer path.
 - Direct receive sinks signal only when yring wake hints request it;

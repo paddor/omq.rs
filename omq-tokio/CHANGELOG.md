@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Require `fanring` 0.3.8 and `yring` 0.3.19 for batched release wake hints.
 - Native receive rings publish consumed slots at LWM and cached-window
   boundaries, waking full producers while the remaining window drains. Partial
   credits publish before receive parks or a bounded bulk drain returns.

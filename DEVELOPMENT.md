@@ -53,20 +53,17 @@ cargo test --config 'patch.crates-io.yring.path="../fanring/yring"' \
   --config 'patch.crates-io.fanring.path="../fanring"' -p omq-tokio
 ```
 
-Native receive release hints currently require the sibling yring change
-`Consumer::release_with_full()` (fanring commit `aa102ac`). Use the overrides
-for workspace and Python binding checks until that API is published. Put
-`--config` after the Cargo subcommand so clippy and nextest forward it. OMQ's
-Windows binding paths use the same portable queue API; Windows runtime checks
-remain deferred to PR CI.
-
-Python async capacity waits also require `AsyncProducer::poll_ready()`
-(fanring commit `57e0732`). In `bindings/pyomq`, use paths
+OMQ requires `fanring` 0.3.8 and `yring` 0.3.19 for
+`Consumer::release_with_full()` and `AsyncProducer::poll_ready()`.
+Workspace and binding builds resolve these APIs from the registry. Put
+`--config` after the Cargo subcommand so clippy and nextest forward local
+overrides. In `bindings/pyomq`, use paths
 `../../../fanring/yring` and `../../../fanring` for the same overrides.
 
 Keep these overrides local. Registry dependencies must be published before OMQ
 CI or packaging can resolve them without overrides. Refresh binding lockfiles
-against the registry after publishing a new queue version.
+against the registry after publishing a new queue version. PR CI covers native
+and Python binding tests on Windows as well as Linux and macOS.
 
 Full sweep:
 

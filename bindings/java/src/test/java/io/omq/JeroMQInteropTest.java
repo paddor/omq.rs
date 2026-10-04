@@ -38,12 +38,18 @@ final class JeroMQInteropTest {
     void jeroMqPushTalksToOmqPull() {
         try (ZContext zcontext = new ZContext();
              Context context = OMQ.context();
-             Socket pull = context.socket(SocketType.PULL)) {
+             Socket pull = context.socket(SocketType.PULL);
+             Monitor monitor = pull.monitor()) {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             ZMQ.Socket push = zcontext.createSocket(org.zeromq.SocketType.PUSH);
             try {
                 push.connect(endpoint);
-                pull.waitConnected(1, Duration.ofSeconds(5));
+                try {
+                    pull.waitConnected(1, Duration.ofSeconds(5));
+                } catch (TimeoutException timeout) {
+                    dumpHandshakeState(monitor, endpoint);
+                    throw timeout;
+                }
                 assertEquals(true, push.send("hello-omq".getBytes(StandardCharsets.UTF_8), 0));
 
                 Message received = pull.receive(Duration.ofSeconds(5)).orElseThrow();
@@ -52,5 +58,25 @@ final class JeroMQInteropTest {
                 push.close();
             }
         }
+    }
+
+    private static void dumpHandshakeState(Monitor monitor, String endpoint) {
+        System.err.println("[DEBUG-jero] Timeout waiting for " + endpoint);
+        for (int i = 0; i < 64; i++) {
+            MonitorEvent event = monitor.tryReceive().orElse(null);
+            if (event == null) {
+                break;
+            }
+            System.err.println("[DEBUG-jero] OMQ " + event.type() + " "
+                    + event.endpoint().orElse("") + " " + event.reason().orElse(""));
+        }
+        Thread.getAllStackTraces().forEach((thread, stack) -> {
+            if (thread.getName().contains("iothread")) {
+                System.err.println("[DEBUG-jero] " + thread.getName() + " " + thread.getState());
+                for (StackTraceElement frame : stack) {
+                    System.err.println("[DEBUG-jero] " + frame);
+                }
+            }
+        });
     }
 }

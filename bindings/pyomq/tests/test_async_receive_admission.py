@@ -33,11 +33,15 @@ def test_sync_poll_does_not_admit_request_or_reply(inproc_endpoint):
             req.send(b"partial-reply")
         assert req.recv() == b"tail"
     finally:
-        req.close(); rep.close(); ctx.term()
+        req.close()
+        rep.close()
+        ctx.term()
 
 
 @pytest.mark.parametrize("transport", ["tcp", "ipc", "inproc", "mixed"])
-async def test_queued_rep_requests_keep_their_peer(transport, ipc_endpoint, inproc_endpoint):
+async def test_queued_rep_requests_keep_their_peer(
+    transport, ipc_endpoint, inproc_endpoint
+):
     ctx = azmq.Context()
     rep = ctx.socket(pyomq.REP)
     requests = [ctx.socket(pyomq.REQ) for _ in range(2)]
@@ -45,8 +49,12 @@ async def test_queued_rep_requests_keep_their_peer(transport, ipc_endpoint, inpr
     try:
         for sock in sockets:
             sock.linger = 0
-        endpoint = {"tcp": "tcp://127.0.0.1:0", "ipc": ipc_endpoint,
-                    "inproc": inproc_endpoint, "mixed": inproc_endpoint}[transport]
+        endpoint = {
+            "tcp": "tcp://127.0.0.1:0",
+            "ipc": ipc_endpoint,
+            "inproc": inproc_endpoint,
+            "mixed": inproc_endpoint,
+        }[transport]
         rep.bind(endpoint)
         endpoint = rep.last_endpoint
         for index, request in enumerate(requests):
@@ -54,23 +62,28 @@ async def test_queued_rep_requests_keep_their_peer(transport, ipc_endpoint, inpr
                 rep.bind("tcp://127.0.0.1:0")
                 endpoint = rep.last_endpoint
             request.connect(endpoint)
-        await asyncio.sleep(.05)
+        await asyncio.sleep(0.05)
         await requests[0].send_multipart([b"first", b"body"])
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         await requests[1].send_multipart([b"second", b"body"])
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         for _ in range(2):
             message = await asyncio.wait_for(rep.recv_multipart(), 2)
             destination = 0 if message[0] == b"first" else 1
             await rep.send_multipart(message)
-            assert await asyncio.wait_for(requests[destination].recv_multipart(), 1) == message
+            assert (
+                await asyncio.wait_for(requests[destination].recv_multipart(), 1)
+                == message
+            )
     finally:
         for sock in sockets:
             sock.close()
         ctx.term()
 
 
-async def test_req_state_changes_only_after_complete_application_receive(inproc_endpoint):
+async def test_req_state_changes_only_after_complete_application_receive(
+    inproc_endpoint,
+):
     ctx = azmq.Context()
     req, rep = ctx.socket(pyomq.REQ), ctx.socket(pyomq.REP)
     try:
@@ -80,7 +93,7 @@ async def test_req_state_changes_only_after_complete_application_receive(inproc_
         await req.send(b"request")
         assert await rep.recv() == b"request"
         await rep.send_multipart([b"reply", b"tail"])
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         with pytest.raises(pyomq.ZMQError):
             req.send(b"too-early")
         assert await req.recv() == b"reply"
@@ -90,7 +103,9 @@ async def test_req_state_changes_only_after_complete_application_receive(inproc_
         await req.send(b"next")
         assert await rep.recv() == b"next"
     finally:
-        req.close(); rep.close(); ctx.term()
+        req.close()
+        rep.close()
+        ctx.term()
 
 
 async def test_inline_and_backpressured_sends_keep_fifo(inproc_endpoint):
@@ -102,11 +117,13 @@ async def test_inline_and_backpressured_sends_keep_fifo(inproc_endpoint):
         pull.rcvhwm = 2
         pull.bind(inproc_endpoint)
         push.connect(inproc_endpoint)
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
+
         # Fill the native destination and leave an eager fallback in flight.
         async def send_all():
             for index in range(32):
                 await push.send(str(index).encode())
+
         sender = asyncio.create_task(send_all())
         received = []
         for _ in range(32):
@@ -116,7 +133,9 @@ async def test_inline_and_backpressured_sends_keep_fifo(inproc_endpoint):
         await push.send(b"inline-again")
         assert await pull.recv() == b"inline-again"
     finally:
-        push.close(); pull.close(); ctx.term()
+        push.close()
+        pull.close()
+        ctx.term()
 
 
 async def test_direct_sink_survives_fallback_disconnect_and_recycles(inproc_endpoint):
@@ -132,7 +151,7 @@ async def test_direct_sink_survives_fallback_disconnect_and_recycles(inproc_endp
             await producers[index].send(str(index).encode())
             assert await asyncio.wait_for(pull.recv(), 2) == str(index).encode()
         producers[1].close()
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         producers[2].linger = 0
         producers[2].connect(inproc_endpoint)
         await producers[2].send(b"fallback")
@@ -140,7 +159,7 @@ async def test_direct_sink_survives_fallback_disconnect_and_recycles(inproc_endp
         messages = [await asyncio.wait_for(pull.recv(), 2) for _ in range(2)]
         assert set(messages) == {b"fallback", b"original"}
         producers[0].close()
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         replacement = ctx.socket(pyomq.PUSH)
         producers.append(replacement)
         replacement.linger = 0
@@ -151,10 +170,13 @@ async def test_direct_sink_survives_fallback_disconnect_and_recycles(inproc_endp
     finally:
         for producer in producers:
             producer.close()
-        pull.close(); ctx.term()
+        pull.close()
+        ctx.term()
 
 
-async def test_rep_cannot_send_a_queued_request_before_application_receive(inproc_endpoint):
+async def test_rep_cannot_send_a_queued_request_before_application_receive(
+    inproc_endpoint,
+):
     ctx = azmq.Context()
     req, rep = ctx.socket(pyomq.REQ), ctx.socket(pyomq.REP)
     try:
@@ -162,7 +184,7 @@ async def test_rep_cannot_send_a_queued_request_before_application_receive(inpro
         rep.bind(inproc_endpoint)
         req.connect(inproc_endpoint)
         await req.send_multipart([b"request", b"tail"])
-        await asyncio.sleep(.03)
+        await asyncio.sleep(0.03)
         with pytest.raises(pyomq.ZMQError):
             rep.send(b"too-early")
         assert bytes(await rep.recv(copy=False)) == b"request"
@@ -172,4 +194,6 @@ async def test_rep_cannot_send_a_queued_request_before_application_receive(inpro
         await rep.send(b"reply")
         assert await req.recv() == b"reply"
     finally:
-        req.close(); rep.close(); ctx.term()
+        req.close()
+        rep.close()
+        ctx.term()

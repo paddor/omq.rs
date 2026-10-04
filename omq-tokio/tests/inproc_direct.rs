@@ -106,7 +106,7 @@ fn req_router_and_dealer_rep_keep_their_envelopes_without_the_io_thread() {
     req.send(Message::single("ping")).unwrap();
     let request = router.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(request.len(), 3);
-    assert!(request.part_slice(1).unwrap().is_empty());
+    assert_eq!(request.part_slice(1).unwrap(), []);
     assert_eq!(body(&request, 2), b"ping");
     let identity = request.part_bytes(0).unwrap();
     router
@@ -130,7 +130,7 @@ fn req_router_and_dealer_rep_keep_their_envelopes_without_the_io_thread() {
     let reply = dealer.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(reply.len(), 3);
     assert_eq!(body(&reply, 0), b"route");
-    assert!(reply.part_slice(1).unwrap().is_empty());
+    assert_eq!(reply.part_slice(1).unwrap(), []);
     assert_eq!(body(&reply, 2), b"pong");
     drop(release);
 }

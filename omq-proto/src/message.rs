@@ -58,6 +58,10 @@ enum PayloadInner {
         data: [u8; MAX_INLINE_PAYLOAD],
     },
     Single(Bytes),
+    Accounted {
+        bytes: Bytes,
+        retained: usize,
+    },
     Shared(SharedOwner),
 }
 
@@ -76,6 +80,39 @@ impl Payload {
     pub fn from_bytes(b: Bytes) -> Self {
         Self {
             inner: PayloadInner::Single(b),
+        }
+    }
+
+    /// Wrap bytes with a conservative bound on their retained allocation.
+    /// `retained` must include the entire backing allocation, including bytes
+    /// outside this view. Callers that cannot determine it must use
+    /// [`from_bytes`](Self::from_bytes) instead.
+    ///
+    /// Panics when the bound is smaller than the visible payload.
+    pub fn from_bytes_with_retained_size(bytes: Bytes, retained: usize) -> Self {
+        assert!(retained >= bytes.len());
+        Self {
+            inner: PayloadInner::Accounted { bytes, retained },
+        }
+    }
+
+    /// Conservative retained allocation size, excluding the `Payload` value.
+    /// `None` means an opaque byte owner whose allocation cannot be measured.
+    pub fn retained_size(&self) -> Option<usize> {
+        match &self.inner {
+            PayloadInner::Empty | PayloadInner::Inline { .. } => Some(0),
+            PayloadInner::Single(_) => None,
+            // Include a conservative allowance for Bytes' shared owner and
+            // adapters in addition to the backing buffer itself.
+            PayloadInner::Accounted { retained, .. } => Some(retained.saturating_add(128)),
+            PayloadInner::Shared(owner) => owner.retained_size(),
+        }
+    }
+
+    fn bound_storage(&mut self) {
+        if self.retained_size().is_none() {
+            let bytes = Bytes::copy_from_slice(self.as_slice());
+            *self = Self::from_bytes_with_retained_size(bytes, self.len());
         }
     }
 
@@ -103,7 +140,7 @@ impl Payload {
         if src.len() <= MAX_INLINE_PAYLOAD {
             Self::inline(src)
         } else {
-            Self::from_bytes(Bytes::copy_from_slice(src))
+            Self::from_bytes_with_retained_size(Bytes::copy_from_slice(src), src.len())
         }
     }
 
@@ -128,6 +165,7 @@ impl Payload {
             PayloadInner::Empty => 0,
             PayloadInner::Inline { len, .. } => *len as usize,
             PayloadInner::Single(b) => b.len(),
+            PayloadInner::Accounted { bytes, .. } => bytes.len(),
             PayloadInner::Shared(owner) => owner.len(),
         }
     }
@@ -144,6 +182,7 @@ impl Payload {
     pub fn as_chunk(&self) -> Option<&Bytes> {
         match &self.inner {
             PayloadInner::Single(b) => Some(b),
+            PayloadInner::Accounted { bytes, .. } => Some(bytes),
             _ => None,
         }
     }
@@ -159,6 +198,7 @@ impl Payload {
             PayloadInner::Empty => Bytes::new(),
             PayloadInner::Inline { data, len } => Bytes::copy_from_slice(&data[..*len as usize]),
             PayloadInner::Single(b) => b.clone(),
+            PayloadInner::Accounted { bytes, .. } => bytes.clone(),
             PayloadInner::Shared(owner) => Bytes::from_owner(owner.clone()),
         }
     }
@@ -170,6 +210,7 @@ impl Payload {
             PayloadInner::Empty => &[],
             PayloadInner::Inline { data, len } => &data[..*len as usize],
             PayloadInner::Single(b) => b,
+            PayloadInner::Accounted { bytes, .. } => bytes,
             PayloadInner::Shared(owner) => owner.as_ref(),
         }
     }
@@ -359,6 +400,54 @@ pub struct Message {
 }
 
 impl Message {
+    /// Conservative storage retained by this message, including its value,
+    /// multipart table capacity, and each payload's allocation backing.
+    /// Shared allocations are counted separately for each view. Returns
+    /// `None` when any backing allocation is opaque.
+    pub fn retained_size(&self) -> Option<usize> {
+        let extra = match &self.inner {
+            MessageInner::Empty
+            | MessageInner::Inline { .. }
+            | MessageInner::RoutedEmpty { .. }
+            | MessageInner::RoutedInline { .. } => 0,
+            MessageInner::Single(payload) => payload.retained_size()?,
+            MessageInner::EmptyDelimitedBytes(_) | MessageInner::RoutedBytes { .. } => return None,
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                parts.iter().try_fold(
+                    parts
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Payload>()),
+                    |total, payload| Some(total.saturating_add(payload.retained_size()?)),
+                )?
+            }
+        };
+        Some(std::mem::size_of::<Self>().saturating_add(extra))
+    }
+
+    /// Copy payloads with opaque allocation backing into exactly sized
+    /// storage. Known backing remains shared. Preserves frames and routing.
+    pub fn bound_storage(&mut self) {
+        match &mut self.inner {
+            MessageInner::Single(payload) => payload.bound_storage(),
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                for payload in parts.iter_mut() {
+                    payload.bound_storage();
+                }
+            }
+            MessageInner::EmptyDelimitedBytes(bytes) => {
+                self.inner =
+                    MessageInner::Multi(vec![Payload::new(), Payload::from_slice(bytes)].into());
+            }
+            MessageInner::RoutedBytes { data, routing_id } => {
+                self.inner = MessageInner::RoutedMulti {
+                    routing_id: *routing_id,
+                    parts: vec![Payload::from_slice(data)].into(),
+                };
+            }
+            _ => {}
+        }
+    }
+
     /// Create an empty message.
     #[inline]
     pub fn new() -> Self {
@@ -685,7 +774,7 @@ impl Message {
     /// Remove and return the first part as `Bytes`.
     pub fn pop_front(&mut self) -> Option<Bytes> {
         self.pop_front_payload().map(|payload| match payload.inner {
-            PayloadInner::Single(bytes) => bytes,
+            PayloadInner::Single(bytes) | PayloadInner::Accounted { bytes, .. } => bytes,
             _ => payload.as_bytes(),
         })
     }
@@ -1267,6 +1356,40 @@ pub fn generated_identity(id: u64) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_storage_is_bounded_without_losing_frames_or_routing() {
+        let huge = Bytes::from(vec![7; 1024 * 1024]);
+        let mut message = Message::multipart([huge.slice(..100), Bytes::new()]).with_routing_id(3);
+        assert_eq!(message.retained_size(), None);
+        message.bound_storage();
+        assert_eq!(message.routing_id(), Some(3));
+        assert_eq!(message.len(), 2);
+        assert_eq!(message.part_slice(0), Some([7; 100].as_slice()));
+        assert_eq!(message.part_slice(1), Some([].as_slice()));
+        assert!(message.retained_size().unwrap() < 1024);
+        assert_ne!(message.part_slice(0).unwrap().as_ptr(), huge.as_ptr());
+        let size = message.retained_size();
+        let pointer = message.part_slice(0).unwrap().as_ptr();
+        message.bound_storage();
+        assert_eq!(message.retained_size(), size);
+        assert_eq!(message.part_slice(0).unwrap().as_ptr(), pointer);
+        assert_eq!(message.clone().retained_size(), size);
+    }
+
+    #[test]
+    fn accounted_storage_keeps_large_backing_charge_and_ownership() {
+        let huge = Bytes::from(vec![7; 4096]);
+        let payload = Payload::from_bytes_with_retained_size(huge.slice(..100), 4096);
+        let mut message = Message::from(payload);
+        let size = message.retained_size().unwrap();
+        assert!(size >= 4096);
+        message.bound_storage();
+        assert_eq!(message.retained_size(), Some(size));
+        assert_eq!(message.part_slice(0).unwrap().as_ptr(), huge.as_ptr());
+        assert_eq!(std::mem::size_of::<Message>(), 64);
+        assert_eq!(std::mem::size_of::<Payload>(), 64);
+    }
 
     #[test]
     fn try_as_parts_exact_match() {

@@ -259,7 +259,8 @@ impl ChunkedInputBuf {
         if n <= MAX_INLINE_PAYLOAD {
             Payload::inline(&buf)
         } else {
-            Payload::from_bytes(buf.freeze())
+            let capacity = buf.capacity();
+            Payload::from_bytes_with_retained_size(buf.freeze(), capacity)
         }
     }
 }

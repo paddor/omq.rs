@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Payload and message retained-storage accounting, including multipart table
+  capacity, and bounded copies for payloads with opaque allocation backing.
+- Shared payload owners can report their allocation bound. Supplied codec
+  payloads can preserve their storage accounting through frame assembly.
+
 ## [0.28.1] - 2026-09-27
 
 ### Changed

@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- PEER `recv_from`, `try_recv_from`, and `unshift` retain one message at the
+  front of a physical source while other sources continue. Generation-safe
+  receive receipts preserve FIFO across concurrent receivers and keep the
+  receive charge until acceptance, discard, or connection retirement.
+
 ### Changed
+
+- PEER receive admission charges retained allocation backing and multipart
+  table capacity. Opaque byte owners are copied into bounded storage; known
+  pooled receive buffers retain their capacity charge without copying.
+- PEER receive bounds apply independently to each physical source. A paused
+  source holds one message while its bounded ring fills, stopping transport
+  reads and propagating backpressure without consuming other lanes' capacity
+  or requiring application credits.
 
 - Require `fanring` 0.3.8 and `yring` 0.3.19 for batched release wake hints.
 - Native receive rings publish consumed slots at LWM and cached-window

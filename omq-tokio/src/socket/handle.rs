@@ -93,6 +93,51 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Receive from any unpaused PEER connection (`None`) or one exact source.
+    /// Returns the body without an identity prefix; the receipt exposes the
+    /// logical identity. Keep the receipt until accepting or discarding the
+    /// body, or return both with [`unshift`](Self::unshift). Other receivers
+    /// cannot overtake this message on its source while the receipt is live.
+    ///
+    /// Targeted waits wake only for that source and end with `Closed` after
+    /// disconnect, handover, or socket close. Cancellation consumes nothing.
+    /// ROUTER supports `None` with an inert receipt; targeting requires PEER.
+    pub async fn recv_from(
+        &self,
+        source: Option<&super::ReceiveSource>,
+    ) -> Result<(super::ReceiveReceipt, Message)> {
+        if self.inner.socket_type == SocketType::Router && source.is_none() {
+            let mut message = self.recv().await?;
+            return Ok((super::ReceiveReceipt::inert(message.pop_front()), message));
+        }
+        self.inner.recv_rx.recv_from(source).await
+    }
+
+    /// Nonblocking form of [`recv_from`](Self::recv_from).
+    pub fn try_recv_from(
+        &self,
+        source: Option<&super::ReceiveSource>,
+    ) -> Result<(super::ReceiveReceipt, Message)> {
+        if self.inner.socket_type == SocketType::Router && source.is_none() {
+            let mut message = self.try_recv()?;
+            return Ok((super::ReceiveReceipt::inert(message.pop_front()), message));
+        }
+        self.inner.recv_rx.try_recv_from(source)
+    }
+
+    /// Hold a received message ahead of its source's queued messages. Fair
+    /// and ordinary receives skip the source until a targeted receive takes
+    /// the held message and its new receipt is released. No new byte permit
+    /// is reserved. A stale or oversized return preserves caller ownership
+    /// through [`UnshiftError`](super::UnshiftError).
+    pub fn unshift(
+        &self,
+        receipt: super::ReceiveReceipt,
+        message: Message,
+    ) -> std::result::Result<(), super::UnshiftError> {
+        self.inner.recv_rx.unshift(receipt, message)
+    }
+
     /// Copy an internal binding handle without creating another send lane.
     #[doc(hidden)]
     #[must_use]

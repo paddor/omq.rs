@@ -578,6 +578,46 @@ fn drain_yring_one(
 }
 
 impl SpscAwareRecv {
+    pub(crate) async fn recv_from(
+        &self,
+        source: Option<&super::peer_recv::ReceiveSource>,
+    ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
+        let peer = self
+            .peer_recv
+            .as_ref()
+            .ok_or_else(|| Error::Protocol("source-aware receive requires PEER".into()))?;
+        super::peer_recv::PeerReceiver::recv_from(peer, source).await
+    }
+
+    pub(crate) fn try_recv_from(
+        &self,
+        source: Option<&super::peer_recv::ReceiveSource>,
+    ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
+        let peer = self
+            .peer_recv
+            .as_ref()
+            .ok_or_else(|| Error::Protocol("source-aware receive requires PEER".into()))?;
+        peer.lock()
+            .expect("PEER receive poisoned")
+            .try_recv_from(source)
+    }
+
+    pub(crate) fn unshift(
+        &self,
+        receipt: super::peer_recv::ReceiveReceipt,
+        message: Message,
+    ) -> std::result::Result<(), super::peer_recv::UnshiftError> {
+        let Some(peer) = &self.peer_recv else {
+            return Err(super::peer_recv::UnshiftError {
+                error: Error::Protocol("unshift requires PEER".into()),
+                message,
+            });
+        };
+        peer.lock()
+            .expect("PEER receive poisoned")
+            .unshift(receipt, message)
+    }
+
     pub(crate) fn new(
         recv_consumer: yring::Consumer<Message>,
         recv_pipe_notify: Arc<DataSignal>,

@@ -21,6 +21,7 @@ pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
 };
+pub use peer_recv::{ReceiveReceipt, ReceiveSource, UnshiftError};
 
 pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<std::time::Instant> {
     std::time::Instant::now().checked_add(timeout)

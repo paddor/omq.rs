@@ -9,6 +9,12 @@ use std::sync::Arc;
 /// unique slot. Payload bytes and their length must remain unchanged while
 /// borrowed or shared. The payload captures the length at construction.
 pub trait PayloadOwner: AsRef<[u8]> + Send + Sync + 'static {
+    /// Conservative size of the entire retained allocation. The default
+    /// reports unknown backing. Include unused capacity and aliased storage.
+    fn retained_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Release one payload reference, not necessarily the last reference.
     ///
     /// Called once for each owned payload view, including empty payloads. Cloning
@@ -39,6 +45,14 @@ impl SharedOwner {
     #[inline]
     pub(super) fn len(&self) -> usize {
         self.len
+    }
+
+    pub(super) fn retained_size(&self) -> Option<usize> {
+        self.owner
+            .as_ref()
+            .expect("live payload owner")
+            .retained_size()
+            .map(|size| size.max(self.len))
     }
 }
 

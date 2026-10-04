@@ -4,6 +4,51 @@ use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, fence};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 
+#[test]
+fn source_claim_racing_close_cannot_hide_control_work() {
+    loom::model(|| {
+        const LIVE: u8 = 1;
+        const CLAIMED: u8 = 2;
+        let status = Arc::new(AtomicU8::new(LIVE));
+        let pending = Arc::new(AtomicBool::new(false));
+        let closer = {
+            let status = status.clone();
+            let pending = pending.clone();
+            thread::spawn(move || {
+                if status.fetch_and(!LIVE, Ordering::AcqRel) & CLAIMED != 0 {
+                    pending.swap(true, Ordering::Release);
+                }
+            })
+        };
+        if status.fetch_or(CLAIMED, Ordering::AcqRel) & LIVE == 0 {
+            pending.swap(true, Ordering::Release);
+        }
+        closer.join().unwrap();
+        assert!(pending.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn source_receipt_release_racing_control_scan_is_resumed_or_pending() {
+    loom::model(|| {
+        const CLAIMED: u8 = 4;
+        let status = Arc::new(AtomicU8::new(CLAIMED));
+        let pending = Arc::new(AtomicBool::new(false));
+        let releaser = {
+            let status = status.clone();
+            let pending = pending.clone();
+            thread::spawn(move || {
+                status.fetch_and(!CLAIMED, Ordering::AcqRel);
+                pending.swap(true, Ordering::Release);
+            })
+        };
+        let resumed =
+            pending.swap(false, Ordering::AcqRel) && status.load(Ordering::Acquire) & CLAIMED == 0;
+        releaser.join().unwrap();
+        assert!(resumed || pending.load(Ordering::Acquire));
+    });
+}
+
 #[derive(Debug, Default)]
 struct StateSignalState {
     generation: u64,

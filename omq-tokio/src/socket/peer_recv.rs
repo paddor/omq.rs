@@ -1,7 +1,7 @@
 //! Socket-owned PEER fan-in. Each connection owns a bounded producer;
 //! ordinary receives share one fair receiver with reconnect fencing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Wake;
 
@@ -16,6 +16,8 @@ use crate::engine::signal::{DataSignal, StateSignal};
 
 mod budget;
 mod sink;
+mod source;
+pub use source::{ReceiveReceipt, ReceiveSource, UnshiftError};
 #[cfg(test)]
 mod tests;
 use budget::{Budget, QueuedMessage};
@@ -25,8 +27,10 @@ pub(crate) use sink::PeerRecvSink;
 struct RecvLimits {
     // Includes disconnected queues awaiting draining.
     peers: usize,
+    // Per connection, including its one claimed or held message.
     messages: usize,
-    // Payload bytes plus per-frame storage. Identity is stored once per peer.
+    // Retained allocation backing and frame tables, per connection.
+    // Identity is stored once per peer.
     bytes: usize,
 }
 
@@ -48,6 +52,8 @@ pub(crate) struct PeerReceiver {
     yield_pending: bool,
     async_waiters: usize,
     handoff_pending: bool,
+    paused: Vec<PausedSource>,
+    observed_empty: bool,
 }
 
 /// Registration spans only the async wait, never a drain. Cancellation must
@@ -60,7 +66,7 @@ impl Drop for ReceiveWaiter<'_> {
         let mut receiver = self.0.lock().expect("PEER receive poisoned");
         receiver.async_waiters -= 1;
         receiver.handoff_pending = false;
-        if !receiver.is_empty() {
+        if !receiver.is_empty() && (!receiver.observed_empty || !receiver.shared.data.is_idle()) {
             receiver.wake_waiter();
         }
     }
@@ -72,7 +78,9 @@ struct RecvShared {
     closed: AtomicBool,
     data: Arc<DataSignal>,
     blocking: Arc<super::recv::BlockingRecvWaker>,
-    budget: Arc<Budget>,
+    // Observation only. One source never consumes another source's capacity.
+    messages: Arc<AtomicUsize>,
+    control_pending: AtomicBool,
 }
 
 /// Cold registration and shutdown only. Ready-peer selection belongs to fanring.
@@ -83,6 +91,11 @@ struct Registration {
 }
 
 impl RecvShared {
+    fn source_changed(&self) {
+        self.control_pending.swap(true, Ordering::Release);
+        self.mark();
+    }
+
     fn mark(&self) {
         self.data.mark();
         self.blocking.wake();
@@ -98,9 +111,51 @@ impl RecvShared {
 struct QueueState {
     identity: Bytes,
     // Identity handover invalidates the old queue before publishing its replacement.
-    current: AtomicBool,
+    status: AtomicU8,
     space: StateSignal,
     cancel: CancellationToken,
+    lane: mpsc::LaneId,
+    data: StateSignal,
+    budget: Arc<Budget>,
+}
+
+impl QueueState {
+    const CURRENT: u8 = 1;
+    const CONNECTED: u8 = 2;
+    const CLAIMED: u8 = 4;
+    const LIVE: u8 = Self::CURRENT | Self::CONNECTED;
+
+    fn current(&self) -> bool {
+        self.status.load(Ordering::Acquire) & Self::CURRENT != 0
+    }
+
+    fn live(&self) -> bool {
+        self.status.load(Ordering::Acquire) & Self::LIVE == Self::LIVE
+    }
+
+    fn claim(&self) -> bool {
+        // Claim and retirement modify the same atomic. Whichever runs second
+        // observes the first and requests a control scan.
+        self.status.fetch_or(Self::CLAIMED, Ordering::AcqRel) & Self::LIVE == Self::LIVE
+    }
+
+    fn release_claim(&self) -> bool {
+        self.status.fetch_and(!Self::CLAIMED, Ordering::AcqRel) & Self::CLAIMED != 0
+    }
+
+    fn retire(&self) -> bool {
+        self.status.fetch_and(!Self::CURRENT, Ordering::AcqRel) & Self::CLAIMED != 0
+    }
+
+    fn disconnect(&self) -> bool {
+        self.status.fetch_and(!Self::CONNECTED, Ordering::AcqRel) & Self::CLAIMED != 0
+    }
+}
+
+#[derive(Debug)]
+struct PausedSource {
+    state: Arc<QueueState>,
+    held: Option<QueuedMessage>,
 }
 
 impl Wake for QueueState {
@@ -134,7 +189,7 @@ impl RecvItem {
 pub(crate) struct PeerRecvRoutes {
     shared: Arc<RecvShared>,
     previous: FxHashMap<Bytes, Weak<QueueState>>,
-    max_peers: usize,
+    limits: RecvLimits,
 }
 
 impl PeerRecvRoutes {
@@ -162,7 +217,8 @@ impl PeerRecvRoutes {
             closed: AtomicBool::new(false),
             data: handles.recv_signal.clone(),
             blocking: handles.blocking_recv_waker.clone(),
-            budget: Arc::new(Budget::new(limits.messages, limits.bytes)),
+            messages: Arc::new(AtomicUsize::new(0)),
+            control_pending: AtomicBool::new(false),
         });
         let receiver = PeerReceiver {
             shared: shared.clone(),
@@ -170,12 +226,14 @@ impl PeerRecvRoutes {
             yield_pending: false,
             async_waiters: 0,
             handoff_pending: false,
+            paused: Vec::new(),
+            observed_empty: true,
         };
         (
             Self {
                 shared,
                 previous: FxHashMap::default(),
-                max_peers: limits.peers,
+                limits,
             },
             receiver,
         )
@@ -198,7 +256,7 @@ impl PeerRecvRoutes {
         // still count until fanring observes them disconnected and empty.
         let Ok(producer) = registration
             .registrar
-            .try_register_bounded(self.max_peers.saturating_add(1))
+            .try_register_bounded(self.limits.peers.saturating_add(1))
         else {
             return Err(Error::Protocol(
                 "PEER receive closed or peer queue limit reached".into(),
@@ -212,9 +270,16 @@ impl PeerRecvRoutes {
             .retain(|state| state.strong_count() != 0);
         let state = Arc::new(QueueState {
             identity: identity.clone(),
-            current: AtomicBool::new(true),
+            status: AtomicU8::new(QueueState::LIVE),
             space: StateSignal::new(),
             cancel,
+            lane: producer.lane(),
+            data: StateSignal::new(),
+            budget: Arc::new(Budget::new(
+                self.limits.messages,
+                self.limits.bytes,
+                self.shared.messages.clone(),
+            )),
         });
         registration.states.push(Arc::downgrade(&state));
         if let Some(previous) = self
@@ -222,9 +287,14 @@ impl PeerRecvRoutes {
             .insert(identity, Arc::downgrade(&state))
             .and_then(|state| state.upgrade())
         {
-            previous.current.store(false, Ordering::Release);
+            let claimed = previous.retire();
             previous.cancel.cancel();
             previous.space.notify_changed();
+            previous.data.notify_changed();
+            previous.budget.space.notify_changed();
+            if claimed {
+                self.shared.source_changed();
+            }
         }
         drop(registration);
         Ok(PeerRecvSink::new(producer, state, self.shared.clone()))
@@ -233,9 +303,10 @@ impl PeerRecvRoutes {
     pub(crate) fn close_receive(&self) {
         self.shared.closed.store(true, Ordering::Release);
         self.shared.wake_all();
-        self.shared.budget.space.notify_changed();
         for state in self.previous.values().filter_map(Weak::upgrade) {
             state.space.notify_changed();
+            state.data.notify_changed();
+            state.budget.space.notify_changed();
         }
     }
 }
@@ -267,7 +338,7 @@ impl PeerReceiver {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.shared.budget.is_empty()
+        self.shared.messages.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -283,11 +354,13 @@ impl PeerReceiver {
         for state in states.into_iter().filter_map(|state| state.upgrade()) {
             state.cancel.cancel();
             state.space.notify_changed();
+            state.data.notify_changed();
+            state.budget.space.notify_changed();
         }
         // Coordinated teardown reclaims unread payloads even while senders
         // remain alive. Never run payload drops under the registration lock.
         self.receiver.take();
-        self.shared.budget.space.notify_changed();
+        self.paused.clear();
         self.shared.wake_all();
     }
 
@@ -297,6 +370,7 @@ impl PeerReceiver {
 
     /// Receive one currently queued message without waiting.
     pub(crate) fn try_recv(&mut self) -> Result<Message> {
+        self.process_source_changes();
         self.shared.data.begin_drain();
         let mut budget = DrainBudget::WORKER;
         self.drain_one(&mut budget)
@@ -308,7 +382,8 @@ impl PeerReceiver {
         while !budget.exhausted() {
             if let Ok(item) = receiver.try_recv_fair() {
                 let _ = budget.account(item.budget_bytes());
-                if item.state.current.load(Ordering::Acquire) {
+                if item.state.current() {
+                    self.observed_empty = false;
                     let message =
                         Message::with_prefix(item.state.identity.clone(), item.body.into_message());
                     // Another caller may already be parked on this batch's
@@ -316,8 +391,9 @@ impl PeerReceiver {
                     self.wake_waiter();
                     return Ok(message);
                 }
-                // Dropping a stale generation returns its aggregate permit.
+                // Dropping a stale generation releases its source's storage.
             } else {
+                self.observed_empty = true;
                 receiver.release_consumed();
                 if self.shared.data.clear_after(true) {
                     self.shared.blocking.wake();
@@ -368,6 +444,7 @@ impl PeerReceiver {
     }
 
     fn drain_many(&mut self, mut budget: DrainBudget, out: &mut Vec<Message>) -> Result<usize> {
+        self.process_source_changes();
         let start = out.len();
         self.shared.data.begin_drain();
         let mut error = None;

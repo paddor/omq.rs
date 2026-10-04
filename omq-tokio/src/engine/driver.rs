@@ -2237,12 +2237,15 @@ impl PendingLargeRead {
 
     fn finish(self, connection: &mut Connection, pool: &Arc<RecvBufPool>) -> Result<()> {
         debug_assert!(self.complete());
+        let capacity = self.buf.capacity();
         let payload = if self.pooled {
             pool.wrap(self.buf)
         } else {
             self.buf.freeze()
         };
-        connection.supply_payload(payload)
+        connection.supply_payload_frame(omq_proto::message::Payload::from_bytes_with_retained_size(
+            payload, capacity,
+        ))
     }
 }
 

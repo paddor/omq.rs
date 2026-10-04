@@ -240,6 +240,53 @@ each connection. The application drains them fairly while preserving order
 within each peer. PEER uses the same socket-owned receive model; application
 workers choose how to dispatch received identities.
 
+PEER also exposes `recv_from(None)` for a fair source-aware receive and
+`recv_from(Some(&source))` for one physical connection generation. The result
+is `(ReceiveReceipt, Message)` with the identity on the receipt and the body
+in the message. A live receipt prevents all other receivers, including
+ordinary `recv` and bulk receive, from overtaking that source. Drop the
+receipt after application admission to return its receive memory charge and
+resume the source. `unshift(receipt, message)` transfers the same charge into
+one OMQ-owned side slot. Fair receives skip it; targeted receives take the
+held frame first. Each source has at most one held frame. Fanring stores only
+the lane's paused flag; OMQ owns the frame, its memory charge, and its
+connection-generation claim. Repeated returns preserve the pause and FIFO order.
+
+Targeted waits use per-source readiness and claim/lifecycle changes; unrelated
+peers do not wake them. Disconnect, identity handover, and socket close end
+the wait. A stale return retains caller ownership through `UnshiftError` and
+cannot attach data to a replacement connection. Held frames are discarded on
+retirement; queued stale frames drain within the usual count and byte budgets.
+Retirement and receipt release coalesce through per-source flags. A control
+scan visits at most the socket's peer limit; held bytes stay inside its receive
+budget. No event queue retains historical connection generations.
+Outgoing replies, peer commands, and cancellation continue while input pauses.
+While drainage is paused, the source's bounded ring fills naturally, then its
+driver stops reading that transport. Sender queues fill in turn. Resuming
+makes the lane eligible for drainage. Subsequent pops publish consumed ring
+slots in the existing release batches, with partial batches flushed before
+parking. Retained-memory charges return when messages or receipts are dropped;
+byte-bound waits can wake on each release. Producers fill bounded queues
+without application grants or a credit protocol.
+
+Each PEER source's receive bound includes queued messages, live receipts, and
+side slots. Charges include multipart table capacity and conservative allocation
+backing, including pooled capacity beyond the visible frame. Payloads with
+unknown backing are copied into bounded storage before admission. These
+charges are distinct from per-connection parsing buffers and the driver's
+one pending input message. Configure `max_message_size` to bound each such
+message; its default is unlimited. Sources have independent count and byte
+bounds; one paused source cannot consume another source's capacity. The socket
+bounds the number of registered lanes, so its queued and held messages are
+bounded by the per-source bound times that limit, plus fixed ring storage.
+Application-owned messages/receipts and transport queues have their own
+lifetimes and bounds. The shared message count observes receive ownership and
+never gates another source's admission.
+`Message` and `Payload` remain 64 bytes. Source-aware receipts currently apply
+to PEER; ROUTER's untargeted form supplies an inert receipt and its identity.
+PULL/GATHER require an adapter for their direct inproc rings before exposing
+the same source contract.
+
 A receive queue holds `Message` values, not notifications. Consumed slots
 return capacity to producers. Capacity updates can be batched, but a receiver
 must publish available space before parking. A full application queue pauses

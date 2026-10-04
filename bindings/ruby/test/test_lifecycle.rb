@@ -17,7 +17,7 @@ class LifecycleTest < Minitest::Test
   end
 
   def test_curve_callback_workers_stop_on_close
-    baseline = Thread.list.length
+    workers = []
     10.times do
       public_key, secret_key = OMQ::Rust.curve_keypair
       socket = OMQ.rs(
@@ -27,15 +27,19 @@ class LifecycleTest < Minitest::Test
         curve_publickey: public_key,
         curve_secretkey: secret_key,
       )
+      before = auth_workers
       socket.set_curve_auth { true }
+      created = auth_workers - before
+      assert_equal 1, created.length
+      workers.concat(created)
       socket.close
     end
 
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-    while Thread.list.length > baseline && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    while workers.any?(&:alive?) && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
       Thread.pass
     end
-    assert_operator Thread.list.length, :<=, baseline
+    assert_empty workers.select(&:alive?)
   end
 
   def test_curve_callback_workers_release_after_authentication
@@ -67,18 +71,22 @@ class LifecycleTest < Minitest::Test
   end
 
   def test_curve_callback_workers_do_not_deadlock_gc
-    baseline = Thread.list.length
+    baseline = auth_workers.length
     10.times { abandon_curve_callback_socket }
 
     GC.start(full_mark: true, immediate_sweep: true)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-    while Thread.list.length > baseline && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    while auth_workers.length > baseline && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
       Thread.pass
     end
-    assert_operator Thread.list.length, :<=, baseline + 1
+    assert_operator auth_workers.length, :<=, baseline + 1
   end
 
   private
+
+  def auth_workers
+    Thread.list.select { |thread| thread.name == "omq-auth" }
+  end
 
   def abandon_socket
     OMQ.rs(:pull, linger: 0)

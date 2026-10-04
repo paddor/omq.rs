@@ -368,10 +368,13 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     opts.xpub_nodrop = true;
     let publisher = ctx.socket(SocketType::Pub, opts.clone());
     let mut mon = publisher.monitor();
+    // Keep subscriber drivers outside the publisher's pool so its four
+    // initial connections train every IO lane before the late peer arrives.
+    let subscriber_ctx = Context::current();
     let decoded_subs: Vec<_> = (0..4)
-        .map(|_| ctx.socket(SocketType::Sub, opts.clone()))
+        .map(|_| subscriber_ctx.socket(SocketType::Sub, opts.clone()))
         .collect();
-    let raw = ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
+    let raw = subscriber_ctx.socket(SocketType::Sub, Options::default().recv_hwm(64));
 
     publisher.bind(zstd_loopback(0)).await.unwrap();
     let ep = loop {
@@ -386,12 +389,11 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
         }
     };
 
-    for sub in &decoded_subs {
+    for (index, sub) in decoded_subs.iter().enumerate() {
         sub.connect(ep.clone()).await.unwrap();
         sub.subscribe(Bytes::new()).await.unwrap();
+        expect_subscribed(&publisher, (index + 1) as u64, "decoded subscriber").await;
     }
-
-    expect_subscribed(&publisher, decoded_subs.len() as u64, "decoded subscribers").await;
 
     let payload = |seq: u64| {
         Bytes::from(format!(
@@ -405,6 +407,12 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     for (idx, sub) in decoded_subs.iter().enumerate() {
         expect_payload_seq_at_least(sub, 127, &format!("decoded sub {idx} training tail")).await;
     }
+
+    // An unrelated connection shifts the least-loaded lane for the late peer.
+    let (load_peer, load_ep) = pull_on_loopback().await;
+    let load = ctx.socket(SocketType::Push, Options::default());
+    load.connect(load_ep).await.unwrap();
+    expect_connected(&load, 1, "load peer").await;
 
     raw.connect(tcp_from_zstd(&ep)).await.unwrap();
     expect_connected(&raw, 1, "raw subscriber").await;
@@ -441,6 +449,11 @@ async fn run_pub_sub_zstd_io_lane_auto_train_dict_for_late_subscriber(mode: Fano
     for sub in decoded_subs {
         sub.close_with_linger(Some(Duration::ZERO)).await.unwrap();
     }
+    load.close_with_linger(Some(Duration::ZERO)).await.unwrap();
+    load_peer
+        .close_with_linger(Some(Duration::ZERO))
+        .await
+        .unwrap();
     publisher
         .close_with_linger(Some(Duration::ZERO))
         .await

@@ -641,11 +641,20 @@ module OMQ
         return if closed?
 
         ensure_materialized
-        event = @native.try_recv_monitor
-        return event if event
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout if timeout
 
-        wait_for_native_fd(@native.monitor_fd, timeout, "monitor receive timed out")
-        @native.try_recv_monitor
+        loop do
+          return if closed?
+
+          fd = @native.monitor_fd
+          event = @native.try_recv_monitor
+          return event if event
+
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC) if deadline
+          raise IO::TimeoutError, "monitor receive timed out" if remaining && remaining <= 0
+
+          wait_for_native_fd(fd, remaining, "monitor receive timed out")
+        end
       end
 
       # Attempts to receive monitor event without blocking.

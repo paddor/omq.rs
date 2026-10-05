@@ -9,6 +9,11 @@
   `omq-tokio` 0.23/0.24, and published `yring` 0.3.18.
   Workspace checks now exercise the current core through local patches.
 
+### Fixed
+
+- Subscribe to monitor events before socket materialization returns. Arm monitor
+  waits before polling and retry stale wakes within the receive deadline.
+
 ## [0.2.1] - 2026-09-19
 
 ### Changed

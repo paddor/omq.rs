@@ -182,16 +182,31 @@ impl Submitter {
             return Err(Error::Unroutable);
         }
         let identity = msg.pop_front_payload().expect("nonempty message");
-        let mut retry = self.try_send_to(identity.as_slice(), msg)?;
+        self.send_to(identity.as_slice(), msg).await
+    }
+
+    pub(crate) async fn send_to(&self, identity: &[u8], msg: Message) -> Result<()> {
+        let mut retry = self.try_send_to(identity, msg)?;
         loop {
             match retry {
                 Ok(()) => return Ok(()),
                 Err(SendRetry::Full(returned, space)) => {
-                    retry = self
-                        .retry_full(identity.as_slice(), returned, space)
-                        .await?;
+                    retry = self.retry_full(identity, returned, space).await?;
                 }
             }
+        }
+    }
+
+    pub(crate) fn try_send_to_message(
+        &self,
+        identity: &[u8],
+        msg: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        match self.try_send_to(identity, msg) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(SendRetry::Full(msg, _))) => Err(TrySendError::Full(msg)),
+            Err(Error::Closed) => Err(TrySendError::Closed),
+            Err(error) => Err(TrySendError::Error(error)),
         }
     }
 

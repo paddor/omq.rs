@@ -57,7 +57,7 @@ pub use omq_proto::proto;
 pub use context::{Context, ContextConfig, ContextCore};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
-    ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveReceipt, ReceiveSource,
-    Socket, UnshiftError,
+    ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,
+    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveReceipt,
+    ReceiveSource, Socket, UnshiftError,
 };

@@ -127,6 +127,26 @@ impl SendSubmitter {
         }
     }
 
+    pub(crate) async fn send_to(&self, identity: &[u8], msg: Message) -> Result<()> {
+        match self {
+            Self::Identity(s) => s.send_to(identity, msg).await,
+            _ => Err(Error::Protocol("identity route unavailable".into())),
+        }
+    }
+
+    pub(crate) fn try_send_to(
+        &self,
+        identity: &[u8],
+        msg: Message,
+    ) -> core::result::Result<(), omq_proto::error::TrySendError> {
+        match self {
+            Self::Identity(s) => s.try_send_to_message(identity, msg),
+            _ => Err(omq_proto::error::TrySendError::Error(Error::Protocol(
+                "identity route unavailable".into(),
+            ))),
+        }
+    }
+
     pub(crate) async fn send_rep_to_peer(
         &self,
         peer_id: u64,

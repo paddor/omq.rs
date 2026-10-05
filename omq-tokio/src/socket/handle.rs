@@ -93,6 +93,56 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// View a ROUTER or PEER socket through its identity-routing API.
+    pub fn identity_routing(&self) -> Result<super::identity::IdentitySocket> {
+        super::identity::IdentitySocket::try_from(self)
+    }
+
+    /// Send a body to a ROUTER or PEER identity without an identity part.
+    pub async fn send_to(&self, identity: impl AsRef<[u8]>, body: Message) -> Result<()> {
+        self.check_identity_routing()?;
+        if body.is_empty() {
+            return Err(Error::Protocol("send_to requires a message body".into()));
+        }
+        if self
+            .inner
+            .send_ops
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(SEND_YIELD_INTERVAL)
+        {
+            tokio::task::yield_now().await;
+        }
+        self.send_submitter.send_to(identity.as_ref(), body).await
+    }
+
+    /// Nonblocking identity send. `Full` returns the unchanged body.
+    pub fn try_send_to(
+        &self,
+        identity: impl AsRef<[u8]>,
+        body: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        self.check_identity_routing().map_err(TrySendError::Error)?;
+        if body.is_empty() {
+            return Err(TrySendError::Error(Error::Protocol(
+                "try_send_to requires a message body".into(),
+            )));
+        }
+        self.send_submitter.try_send_to(identity.as_ref(), body)
+    }
+
+    fn check_identity_routing(&self) -> Result<()> {
+        if matches!(
+            self.inner.socket_type,
+            SocketType::Router | SocketType::Peer
+        ) {
+            Ok(())
+        } else {
+            Err(Error::Protocol(
+                "identity routing requires a ROUTER or PEER socket".into(),
+            ))
+        }
+    }
+
     /// Receive from any unpaused PEER connection (`None`) or one exact source.
     /// Returns the body without an identity prefix; the receipt exposes the
     /// logical identity. Keep the receipt until accepting or discarding the

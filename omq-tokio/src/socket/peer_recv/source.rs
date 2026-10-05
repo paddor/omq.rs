@@ -57,6 +57,11 @@ impl ReceiveReceipt {
         self.identity.as_deref()
     }
 
+    /// Clone the logical peer identity without copying its allocation.
+    pub fn identity_bytes(&self) -> Option<Bytes> {
+        self.identity.clone()
+    }
+
     pub(in crate::socket) fn inert(identity: Option<Bytes>) -> Self {
         Self {
             source: None,

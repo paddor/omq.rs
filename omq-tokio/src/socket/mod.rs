@@ -10,6 +10,7 @@ pub(crate) mod actor;
 pub(crate) mod dispatch;
 pub(crate) mod fanin;
 pub mod handle;
+pub mod identity;
 pub mod monitor;
 pub(crate) mod peer_recv;
 pub(crate) mod recv;
@@ -17,6 +18,7 @@ pub(crate) mod type_state;
 pub(crate) mod udp;
 
 pub use handle::Socket;
+pub use identity::IdentitySocket;
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,

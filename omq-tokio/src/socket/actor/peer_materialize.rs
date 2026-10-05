@@ -418,6 +418,17 @@ fn inproc_port_sink(
         .unwrap_or_else(|| {
             let cap =
                 (socket.options.recv_hwm.max(1) as usize).saturating_add(peer_send_hwm.max(1));
+            if let Some(fanin) = &socket.spsc.fanin
+                && fanin.source_aware()
+            {
+                if let Some(producer) = fanin.register_with_capacity(cap) {
+                    return crate::engine::RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+                        producer,
+                    ));
+                }
+                socket.recv_tx.close();
+                return crate::engine::RecvSink::Channel(socket.recv_tx.clone());
+            }
             let (producer, consumer) = yring::spsc(cap);
             let recv_signal = socket.spsc.recv_signal.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();
@@ -860,7 +871,7 @@ fn attach_yring_recv_bypass(
 }
 
 fn fanin_recv_sink(
-    fanin: &crate::socket::fanin::Fanin,
+    fanin: &Arc<crate::socket::fanin::Fanin>,
     recv_tx: &Arc<crate::socket::recv::SharedRecvPipe>,
 ) -> crate::engine::RecvSink {
     if let Some(producer) = fanin.register() {
@@ -900,7 +911,7 @@ fn spawn_wire_task(
         } else {
             peer_driver
         };
-        let _ = peer_driver.run().await;
+        let _ = Box::pin(peer_driver.run()).await;
     });
     if let Some(peer) = socket.peers.get_mut(&peer_id) {
         peer.task = Some(task);

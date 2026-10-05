@@ -5,6 +5,75 @@ use loom::sync::{Arc, Mutex};
 use loom::thread;
 
 #[test]
+fn publication_fence_covers_async_and_blocking_waiter_registration() {
+    loom::model(|| {
+        let published = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicUsize::new(0));
+        let woke = Arc::new(AtomicBool::new(false));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let producer = {
+            let published = published.clone();
+            let active = active.clone();
+            let woke = woke.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                published.store(true, Ordering::Release);
+                signal.mark();
+                // Reuse mark's fence before checking blocking registration.
+                if active.load(Ordering::Acquire) != 0 {
+                    woke.store(true, Ordering::Release);
+                }
+            })
+        };
+        let blocking = {
+            let published = published.clone();
+            let active = active.clone();
+            thread::spawn(move || {
+                active.fetch_add(1, Ordering::SeqCst);
+                fence(Ordering::SeqCst);
+                published.load(Ordering::Acquire)
+            })
+        };
+        signal.begin_drain();
+        let ready = published.load(Ordering::Acquire);
+        signal.clear_after(!ready);
+        producer.join().unwrap();
+        assert!(ready || !signal.is_idle());
+        assert!(blocking.join().unwrap() || woke.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn targeted_source_waiter_registration_cannot_miss_publication() {
+    loom::model(|| {
+        let published = Arc::new(AtomicBool::new(false));
+        let waiters = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let producer = {
+            let published = published.clone();
+            let waiters = waiters.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                published.store(true, Ordering::Release);
+                // DataSignal::mark orders queue publication before this load.
+                fence(Ordering::SeqCst);
+                if waiters.load(Ordering::Acquire) != 0 {
+                    signal.mark();
+                }
+            })
+        };
+        waiters.fetch_add(1, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        signal.begin_drain();
+        let ready = published.load(Ordering::Acquire);
+        signal.clear_after(!ready);
+        producer.join().unwrap();
+        assert!(ready || !signal.is_idle());
+        waiters.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+#[test]
 fn source_claim_racing_close_cannot_hide_control_work() {
     loom::model(|| {
         const LIVE: u8 = 1;

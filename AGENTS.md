@@ -134,6 +134,10 @@ Lints: `missing_debug_implementations` = **deny**,
 
 ## Conventions
 
+- `doc/architecture.md` describes current components, ownership, and data flow.
+  Rewrite existing explanations when architecture changes. No change history,
+  benchmark results, verification notes, tuning constants, or implementation
+  walkthroughs.
 - Rust 2024 edition, MSRV **1.93**. ASCII-only source.
 - `main` branch is protected. All changes go through PRs.
 - Commit messages describe OMQ changes and checks only. Do not mention

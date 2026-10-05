@@ -5330,8 +5330,8 @@ mod tests {
             0,
             CancellationToken::new(),
         );
-        tokio::spawn(async move { s.run().await });
-        tokio::spawn(async move { c.run().await });
+        tokio::spawn(Box::pin(s.run()));
+        tokio::spawn(Box::pin(c.run()));
 
         let _ = c_inbox_tx; // keep inbox open
         let _ = s_inbox_tx;

@@ -197,7 +197,7 @@ async fn post_handshake_error_command_drops_connection() {
     let (evt_tx, mut evt_rx) = mpsc::channel::<(u64, PeerEvent)>(8);
     let driver =
         ConnectionDriver::new(stream, codec, inbox_rx, evt_tx, 0, CancellationToken::new());
-    tokio::spawn(async move { driver.run().await });
+    tokio::spawn(Box::pin(driver.run()));
 
     loop {
         match tokio::time::timeout(Duration::from_millis(500), evt_rx.recv())

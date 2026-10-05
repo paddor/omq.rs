@@ -21,6 +21,54 @@ async fn connected(socket: &Socket) {
     socket.wait_connected(1, DEADLINE).await.unwrap();
 }
 
+#[tokio::test]
+async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
+    let context = Context::new();
+    let server = context
+        .socket(SocketType::Peer, options("server"))
+        .identity_routing()
+        .unwrap();
+    let endpoint = server
+        .bind(Endpoint::Inproc {
+            name: "identity-source-view".into(),
+        })
+        .await
+        .unwrap();
+    let client = context
+        .socket(SocketType::Peer, options("client"))
+        .identity_routing()
+        .unwrap();
+    client.connect(endpoint).await.unwrap();
+    connected(&client).await;
+    connected(&server).await;
+    client
+        .send_to("server", Message::single("held"))
+        .await
+        .unwrap();
+    let (receipt, message) = server.recv_from_source(None).await.unwrap();
+    let source = receipt.source().unwrap().clone();
+    assert_eq!(receipt.identity(), Some(b"client".as_slice()));
+    server.unshift(receipt, message).unwrap();
+    server
+        .send_to("client", Message::single("reply while paused"))
+        .await
+        .unwrap();
+    let (identity, message) = client.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"server");
+    assert_eq!(message, Message::single("reply while paused"));
+    let (receipt, message) = server.try_recv_from_source(Some(&source)).unwrap();
+    assert_eq!(message, Message::single("held"));
+    drop(receipt);
+    client
+        .try_send_to("server", Message::single("accepted"))
+        .unwrap();
+    let (identity, message) = server.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"client");
+    assert_eq!(message, Message::single("accepted"));
+    server.into_inner().close().await.unwrap();
+    client.into_inner().close().await.unwrap();
+}
+
 async fn source_backpressure(endpoint: Endpoint) {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let server = context.socket(SocketType::Peer, options("server"));

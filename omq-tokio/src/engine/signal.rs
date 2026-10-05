@@ -98,6 +98,13 @@ impl BlockingSignal {
     #[inline]
     pub(crate) fn wake(&self) {
         fence(Ordering::SeqCst);
+        self.wake_after_fence();
+    }
+
+    /// Publication must precede a `SeqCst` fence before calling this method.
+    /// A preceding `DataSignal::mark` already provides that fence.
+    #[inline]
+    pub(crate) fn wake_after_fence(&self) {
         if self.active.load(Ordering::Acquire) == 0 {
             return;
         }

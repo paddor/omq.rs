@@ -143,15 +143,17 @@ impl Socket {
         }
     }
 
-    /// Receive from any unpaused PEER connection (`None`) or one exact source.
-    /// Returns the body without an identity prefix; the receipt exposes the
-    /// logical identity. Keep the receipt until accepting or discarding the
+    /// Receive from any unpaused PEER, PULL, or GATHER connection (`None`),
+    /// or one exact source. PEER returns the body without an identity prefix;
+    /// its receipt exposes the logical identity. PULL and GATHER receipts have
+    /// no logical identity. Keep the receipt until accepting or discarding the
     /// body, or return both with [`unshift`](Self::unshift). Other receivers
     /// cannot overtake this message on its source while the receipt is live.
     ///
     /// Targeted waits wake only for that source and end with `Closed` after
     /// disconnect, handover, or socket close. Cancellation consumes nothing.
-    /// ROUTER supports `None` with an inert receipt; targeting requires PEER.
+    /// ROUTER supports `None` with an inert receipt. Conflate and external
+    /// receive sinks do not support source claims.
     pub async fn recv_from(
         &self,
         source: Option<&super::ReceiveSource>,
@@ -185,6 +187,12 @@ impl Socket {
         receipt: super::ReceiveReceipt,
         message: Message,
     ) -> std::result::Result<(), super::UnshiftError> {
+        if self.inner.socket_type == SocketType::Gather && message.len() != 1 {
+            return Err(super::UnshiftError {
+                error: Error::Protocol("GATHER unshift requires a single-frame message".into()),
+                message,
+            });
+        }
         self.inner.recv_rx.unshift(receipt, message)
     }
 
@@ -1365,7 +1373,13 @@ fn recv_handles(
         );
     let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
     if supports_recv_batching(socket_type) && !conflate_recv && native {
-        spsc.fanin = Some(super::fanin::Fanin::new(
+        let source_aware = matches!(socket_type, SocketType::Pull | SocketType::Gather);
+        let constructor = if source_aware {
+            super::fanin::Fanin::new_source_aware
+        } else {
+            super::fanin::Fanin::new
+        };
+        spsc.fanin = Some(constructor(
             options.recv_hwm.max(16) as usize,
             spsc.recv_signal.clone(),
             spsc.blocking_recv_waker.clone(),

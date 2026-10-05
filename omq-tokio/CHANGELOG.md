@@ -9,20 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- PEER `recv_from`, `try_recv_from`, and `unshift` retain one message at the
-  front of a physical source while other sources continue. Generation-safe
-  receive receipts preserve FIFO across concurrent receivers and keep the
-  receive charge until acceptance, discard, or connection retirement.
+- PEER, PULL, and GATHER support per-source backpressure through `recv_from`,
+  `try_recv_from`, and `unshift`. Receives return a message and a receipt:
+  keeping the receipt pauses its source; dropping it resumes drainage.
+  Returning both holds one message for targeted retry while other sources
+  continue. Claims preserve FIFO across socket clones and reject stale
+  receipts after reconnect.
 
 ### Changed
 
+- PULL/GATHER inproc ports enqueue directly into fanring lanes from the caller
+  thread. Each lane keeps the combined sender and receiver HWM; wire lanes keep
+  the receiver HWM. Plain receive slots still contain only `Message`.
 - PEER receive admission charges retained allocation backing and multipart
   table capacity. Opaque byte owners are copied into bounded storage; known
   pooled receive buffers retain their capacity charge without copying.
-- PEER receive bounds apply independently to each physical source. A paused
-  source holds one message while its bounded ring fills, stopping transport
-  reads and propagating backpressure without consuming other lanes' capacity
-  or requiring application credits.
+- PEER, PULL, and GATHER receive bounds apply independently to each physical
+  source. A paused source holds one message while its bounded ring fills,
+  stopping transport reads and propagating backpressure without consuming
+  other lanes' capacity or requiring application credits.
 
 - Require `fanring` 0.3.8 and `yring` 0.3.19 for batched release wake hints.
 - Native receive rings publish consumed slots at LWM and cached-window

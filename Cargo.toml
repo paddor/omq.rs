@@ -43,7 +43,3 @@ debug = "line-tables-only"
 
 [profile.release]
 debug = "line-tables-only"
-
-[patch.crates-io]
-fanring = { path = "../fanring" }
-yring = { path = "../fanring/yring" }

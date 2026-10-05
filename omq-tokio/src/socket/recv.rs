@@ -582,10 +582,15 @@ impl SpscAwareRecv {
         &self,
         source: Option<&super::peer_recv::ReceiveSource>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
-        let peer = self
-            .peer_recv
-            .as_ref()
-            .ok_or_else(|| Error::Protocol("source-aware receive requires PEER".into()))?;
+        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+            return fanin.recv_from(source).await;
+        }
+        let peer = self.peer_recv.as_ref().ok_or_else(|| {
+            Error::Protocol(
+                "source-aware receive requires native PEER, PULL, or GATHER without conflate"
+                    .into(),
+            )
+        })?;
         super::peer_recv::PeerReceiver::recv_from(peer, source).await
     }
 
@@ -593,10 +598,15 @@ impl SpscAwareRecv {
         &self,
         source: Option<&super::peer_recv::ReceiveSource>,
     ) -> Result<(super::peer_recv::ReceiveReceipt, Message)> {
-        let peer = self
-            .peer_recv
-            .as_ref()
-            .ok_or_else(|| Error::Protocol("source-aware receive requires PEER".into()))?;
+        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+            return fanin.try_recv_from(source);
+        }
+        let peer = self.peer_recv.as_ref().ok_or_else(|| {
+            Error::Protocol(
+                "source-aware receive requires native PEER, PULL, or GATHER without conflate"
+                    .into(),
+            )
+        })?;
         peer.lock()
             .expect("PEER receive poisoned")
             .try_recv_from(source)
@@ -607,9 +617,14 @@ impl SpscAwareRecv {
         receipt: super::peer_recv::ReceiveReceipt,
         message: Message,
     ) -> std::result::Result<(), super::peer_recv::UnshiftError> {
+        if let Some(fanin) = self.fanin.as_ref().filter(|fanin| fanin.source_aware()) {
+            return fanin.unshift(receipt, message);
+        }
         let Some(peer) = &self.peer_recv else {
             return Err(super::peer_recv::UnshiftError {
-                error: Error::Protocol("unshift requires PEER".into()),
+                error: Error::Protocol(
+                    "unshift requires native PEER, PULL, or GATHER without conflate".into(),
+                ),
                 message,
             });
         };
@@ -1132,6 +1147,11 @@ impl SpscAwareRecv {
                     .peer_recv
                     .as_deref()
                     .map(super::peer_recv::PeerReceiver::wait);
+                let _fanin_waiter = self
+                    .fanin
+                    .as_deref()
+                    .filter(|fanin| fanin.source_aware())
+                    .map(super::fanin::Fanin::wait);
                 tokio::select! {
                     biased;
                     () = &mut recv_ready => continue,

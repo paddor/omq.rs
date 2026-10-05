@@ -34,7 +34,7 @@ soak = []
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
 [dependencies]
-fanring = { version = "0.3.8", features = ["async"] }
+fanring = { version = "0.3.8", git = "https://github.com/paddor/fanring.rs", rev = "c1fd6be625778e9e3eb440f18ac6638d78dcd2ca", features = ["async"] }
 omq-proto = { path = "../omq-proto", version = "0.28.1", default-features = false }
 yring = "0.3.19"
 arc-swap = "1.7.1"
@@ -90,6 +90,10 @@ path = "tests/latency_send.rs"
 [[test]]
 name = "peer_recv"
 path = "tests/peer_recv.rs"
+
+[[test]]
+name = "pull_recv"
+path = "tests/pull_recv.rs"
 
 [[bench]]
 name = "omq_exclusive_latency"

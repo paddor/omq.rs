@@ -10,13 +10,28 @@ use super::{
 /// has a different source even when it has the same logical identity.
 #[derive(Clone)]
 pub struct ReceiveSource {
+    inner: SourceOwner,
+}
+
+#[derive(Clone)]
+enum SourceOwner {
+    Peer(PeerSource),
+    Fanin(super::super::fanin::Source),
+}
+
+#[derive(Clone)]
+struct PeerSource {
     state: Arc<QueueState>,
     shared: Weak<RecvShared>,
 }
 
 impl PartialEq for ReceiveSource {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.state, &other.state)
+        match (&self.inner, &other.inner) {
+            (SourceOwner::Peer(a), SourceOwner::Peer(b)) => Arc::ptr_eq(&a.state, &b.state),
+            (SourceOwner::Fanin(a), SourceOwner::Fanin(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -24,26 +39,61 @@ impl Eq for ReceiveSource {}
 
 impl std::hash::Hash for ReceiveSource {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::hash::Hash::hash(&Arc::as_ptr(&self.state), state);
+        match &self.inner {
+            SourceOwner::Peer(source) => {
+                std::hash::Hash::hash(&0_u8, state);
+                std::hash::Hash::hash(&Arc::as_ptr(&source.state), state);
+            }
+            SourceOwner::Fanin(source) => {
+                std::hash::Hash::hash(&1_u8, state);
+                std::hash::Hash::hash(source, state);
+            }
+        }
     }
 }
 
 impl std::fmt::Debug for ReceiveSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReceiveSource")
-            .field("identity", &self.state.identity)
-            .finish_non_exhaustive()
+        match &self.inner {
+            SourceOwner::Peer(source) => f
+                .debug_struct("ReceiveSource")
+                .field("identity", &source.state.identity)
+                .finish_non_exhaustive(),
+            SourceOwner::Fanin(source) => source.fmt(f),
+        }
     }
 }
 
-/// Owns a source's FIFO claim and receive memory charge. Drop after admitting
-/// or discarding the message to release its charge and resume that source.
-/// While live, all other receive calls skip this source.
+impl ReceiveSource {
+    fn peer(&self) -> Result<&PeerSource> {
+        match &self.inner {
+            SourceOwner::Peer(source) => Ok(source),
+            SourceOwner::Fanin(_) => Err(Error::Protocol(
+                "receive source belongs to another socket".into(),
+            )),
+        }
+    }
+
+    pub(in crate::socket) fn fanin(&self) -> Result<&super::super::fanin::Source> {
+        match &self.inner {
+            SourceOwner::Fanin(source) => Ok(source),
+            SourceOwner::Peer(_) => Err(Error::Protocol(
+                "receive source belongs to another socket".into(),
+            )),
+        }
+    }
+}
+
+/// Owns a source's FIFO claim. PEER also retains its receive memory charge.
+/// Drop after admitting or discarding the message to resume that source.
+/// While live, all other receive calls skip this source. PULL and GATHER use
+/// their bounded lane storage plus this one claimed message.
 #[derive(Debug)]
 pub struct ReceiveReceipt {
     source: Option<ReceiveSource>,
     identity: Option<Bytes>,
     permit: Option<Permit>,
+    fanin_bytes: usize,
 }
 
 impl ReceiveReceipt {
@@ -67,19 +117,49 @@ impl ReceiveReceipt {
             source: None,
             identity,
             permit: None,
+            fanin_bytes: 0,
         }
+    }
+
+    pub(in crate::socket) fn from_fanin(source: super::super::fanin::Source, bytes: usize) -> Self {
+        Self {
+            source: Some(ReceiveSource {
+                inner: SourceOwner::Fanin(source),
+            }),
+            identity: None,
+            permit: None,
+            fanin_bytes: bytes,
+        }
+    }
+
+    pub(in crate::socket) fn fanin_claim(&self) -> Result<(&super::super::fanin::Source, usize)> {
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| Error::Protocol("unshift requires a source-aware receipt".into()))?;
+        Ok((source.fanin()?, self.fanin_bytes))
+    }
+
+    pub(in crate::socket) fn forget_claim(&mut self) {
+        self.source = None;
     }
 }
 
 impl Drop for ReceiveReceipt {
     fn drop(&mut self) {
-        if self.permit.is_some()
-            && let Some(source) = &self.source
-            && source.state.release_claim()
-            && let Some(shared) = source.shared.upgrade()
-        {
-            shared.source_changed();
-            source.state.data.notify_changed();
+        if let Some(source) = &self.source {
+            match &source.inner {
+                SourceOwner::Peer(source) => {
+                    if self.permit.is_some()
+                        && source.state.release_claim()
+                        && let Some(shared) = source.shared.upgrade()
+                    {
+                        shared.source_changed();
+                        source.state.data.notify_changed();
+                    }
+                }
+                SourceOwner::Fanin(source) => source.release_claim(),
+            }
         }
     }
 }
@@ -135,7 +215,7 @@ impl PeerReceiver {
         }
     }
 
-    fn belongs(&self, source: &ReceiveSource) -> bool {
+    fn belongs(&self, source: &PeerSource) -> bool {
         source
             .shared
             .upgrade()
@@ -147,6 +227,7 @@ impl PeerReceiver {
         &mut self,
         source: Option<&ReceiveSource>,
     ) -> Result<(ReceiveReceipt, Message)> {
+        let source = source.map(ReceiveSource::peer).transpose()?;
         self.process_source_changes();
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
@@ -236,10 +317,13 @@ impl PeerReceiver {
             ReceiveReceipt {
                 identity: Some(state.identity.clone()),
                 source: Some(ReceiveSource {
-                    state,
-                    shared: Arc::downgrade(shared),
+                    inner: SourceOwner::Peer(PeerSource {
+                        state,
+                        shared: Arc::downgrade(shared),
+                    }),
                 }),
                 permit: Some(permit),
+                fanin_bytes: 0,
             },
             message,
         )
@@ -249,13 +333,14 @@ impl PeerReceiver {
         receiver: &Mutex<Self>,
         source: Option<&ReceiveSource>,
     ) -> Result<(ReceiveReceipt, Message)> {
+        let peer_source = source.map(ReceiveSource::peer).transpose()?;
         let shared = receiver
             .lock()
             .expect("PEER receive poisoned")
             .shared
             .clone();
         loop {
-            let seen = source.map(|source| source.state.data.generation());
+            let seen = peer_source.map(|source| source.state.data.generation());
             let (result, yielded) = {
                 let mut receiver = receiver.lock().expect("PEER receive poisoned");
                 let result = receiver.try_recv_from(source);
@@ -269,7 +354,7 @@ impl PeerReceiver {
                 tokio::task::yield_now().await;
                 continue;
             }
-            if let Some(source) = source {
+            if let Some(source) = peer_source {
                 source
                     .state
                     .data
@@ -290,7 +375,11 @@ impl PeerReceiver {
         self.process_source_changes();
         let error = if self.shared.closed.load(Ordering::Acquire) {
             Some(Error::Closed)
-        } else if let Some(source) = &receipt.source {
+        } else if let Some(source) = receipt
+            .source
+            .as_ref()
+            .and_then(|source| source.peer().ok())
+        {
             if !self.belongs(source) {
                 Some(Error::Protocol("receipt belongs to another socket".into()))
             } else if !source.state.live() {
@@ -306,7 +395,12 @@ impl PeerReceiver {
         if let Some(error) = error {
             return Err(UnshiftError { error, message });
         }
-        let source = receipt.source.as_ref().expect("validated receipt");
+        let source = receipt
+            .source
+            .as_ref()
+            .expect("validated receipt")
+            .peer()
+            .expect("validated source");
         let Some(entry) = self
             .paused
             .iter_mut()

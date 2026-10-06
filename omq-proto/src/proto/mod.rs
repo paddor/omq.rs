@@ -65,6 +65,15 @@ pub enum SocketType {
 }
 
 impl SocketType {
+    /// Socket types whose application bodies must contain exactly one frame.
+    /// RADIO/DISH carry a separate group frame. PEER supports OMQ multipart.
+    pub(crate) const fn requires_single_frame(self) -> bool {
+        matches!(
+            self,
+            Self::Client | Self::Server | Self::Scatter | Self::Gather | Self::Channel
+        )
+    }
+
     /// Wire-level name used in the READY command's `Socket-Type` property.
     pub const fn as_str(self) -> &'static str {
         match self {

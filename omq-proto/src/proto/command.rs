@@ -190,6 +190,9 @@ pub fn decode(body: Bytes) -> Result<Command> {
         return Err(Error::Protocol("command truncated in name".into()));
     }
     let name = body.slice(1..=name_len);
+    if name.is_empty() || !name.iter().all(u8::is_ascii_alphabetic) {
+        return Err(Error::Protocol("invalid command name".into()));
+    }
     let body = body.slice(1 + name_len..);
 
     let cmd = match name.as_ref() {
@@ -249,7 +252,7 @@ pub(crate) fn encode_properties_inner(props: &PeerProperties, out: &mut BytesMut
 fn write_property(out: &mut BytesMut, name: &[u8], value: &[u8]) {
     assert!(u8::try_from(name.len()).is_ok(), "property name too long");
     assert!(
-        u32::try_from(value.len()).is_ok(),
+        i32::try_from(value.len()).is_ok(),
         "property value too long"
     );
     out.put_u8(name.len() as u8);
@@ -278,13 +281,18 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
             ));
         }
         let value_len =
-            u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap()) as usize;
+            u32::from_be_bytes(body[1 + name_len..1 + name_len + 4].try_into().unwrap());
+        if value_len > i32::MAX as u32 {
+            return Err(Error::Protocol("READY property value too large".into()));
+        }
+        let value_len = value_len as usize;
         let val_start = 1 + name_len + 4;
-        if body.len() < val_start + value_len {
+        if value_len > body.len() - val_start {
             return Err(Error::Protocol("READY property value truncated".into()));
         }
-        let value = body.slice(val_start..val_start + value_len);
-        body = body.slice(val_start + value_len..);
+        let val_end = val_start + value_len;
+        let value = body.slice(val_start..val_end);
+        body = body.slice(val_end..);
 
         // Safe: we validated ASCII alphanumeric + [-_.+] above.
         let name_str = std::str::from_utf8(&name).expect("validated ASCII");
@@ -302,6 +310,9 @@ pub(crate) fn decode_properties_inner(mut body: Bytes) -> Result<PeerProperties>
         } else if name_str.eq_ignore_ascii_case("Identity") {
             if props.identity.is_some() {
                 return Err(Error::Protocol("duplicate Identity property".into()));
+            }
+            if value.len() > 255 || value.first() == Some(&0) {
+                return Err(Error::Protocol("invalid peer identity".into()));
             }
             if !value.is_empty() {
                 props.identity = Some(value);
@@ -346,6 +357,12 @@ fn decode_error(body: Bytes) -> Result<Command> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_empty_and_non_alphabetic_command_names() {
+        for wire in [&b"\x00"[..], &b"\x03A1B"[..], &b"\x01\xff"[..]] {
+            assert!(super::decode(bytes::Bytes::copy_from_slice(wire)).is_err());
+        }
+    }
     use super::*;
 
     #[expect(clippy::needless_pass_by_value)]
@@ -520,6 +537,58 @@ mod tests {
         assert!(matches!(
             decode_properties_inner(body.freeze()),
             Err(Error::Protocol(msg)) if msg.contains("duplicate Identity")
+        ));
+    }
+
+    #[test]
+    fn rejects_metadata_values_above_int32_max() {
+        for length in [0x8000_0000u32, u32::MAX] {
+            let mut body = BytesMut::new();
+            body.extend_from_slice(b"\x01X");
+            body.put_u32(length);
+            assert!(matches!(
+                decode_properties_inner(body.freeze()),
+                Err(Error::Protocol(reason)) if reason.contains("value too large")
+            ));
+        }
+    }
+
+    #[test]
+    fn truncated_metadata_at_int32_max_returns_protocol_error() {
+        let mut body = BytesMut::new();
+        body.extend_from_slice(b"\x01X");
+        body.put_u32(i32::MAX as u32);
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(reason)) if reason.contains("truncated")
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_peer_identity() {
+        let mut body = BytesMut::new();
+        write_property(&mut body, b"Identity", &[b'x'; 256]);
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(reason)) if reason.contains("identity")
+        ));
+    }
+
+    #[test]
+    fn accepts_maximum_peer_identity() {
+        let mut body = BytesMut::new();
+        write_property(&mut body, b"Identity", &[b'x'; 255]);
+        let properties = decode_properties_inner(body.freeze()).unwrap();
+        assert_eq!(properties.identity.unwrap().len(), 255);
+    }
+
+    #[test]
+    fn rejects_reserved_peer_identity() {
+        let mut body = BytesMut::new();
+        write_property(&mut body, b"Identity", b"\0reserved");
+        assert!(matches!(
+            decode_properties_inner(body.freeze()),
+            Err(Error::Protocol(reason)) if reason.contains("identity")
         ));
     }
 

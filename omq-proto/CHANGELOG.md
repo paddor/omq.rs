@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shared payload owners can report their allocation bound. Supplied codec
   payloads can preserve their storage accounting through frame assembly.
 
+### Fixed
+
+- Enforce metadata bounds without 32-bit overflow. Reject oversized or
+  reserved identities, malformed command names, and invalid greeting role
+  flags.
+- Derive greeting roles from the security mechanism, negotiate newer major
+  versions correctly, and encode ZMTP 3.0 subscriptions as data frames.
+- Count duplicate subscriptions and discard multipart input on single-frame
+  sockets. Incompatible socket types receive ERROR before closure.
+- Expose received PING TTL for transport timeout handling; further peer input
+  clears it.
+
 ## [0.28.1] - 2026-09-27
 
 ### Changed

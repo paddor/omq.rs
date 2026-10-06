@@ -63,8 +63,8 @@ use super::greeting::{self, Greeting, MechanismName};
 use super::mechanism::FrameTransform;
 use super::mechanism::{MechanismSetup, SecurityMechanism};
 
-/// Which side of the TCP pairing we are. Informational; determines the
-/// `as-server` greeting bit (bind side = server, connect side = client).
+/// Which side of the transport pairing we are. Security roles are selected
+/// independently by [`MechanismSetup`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Server,
@@ -283,6 +283,8 @@ pub struct Connection {
     messages: VecDeque<Message>,
     pending_parts: Parts,
     pending_size: usize,
+    discarding_multipart: bool,
+    peer_heartbeat_ttl: u16,
     /// A bounded parser turn left buffered work for the next driver turn.
     input_pending: bool,
     /// WebSocket role for this connection. `None` = ZMTP byte-stream.
@@ -325,6 +327,8 @@ impl Connection {
             messages: VecDeque::new(),
             pending_parts: Vec::new().into(),
             pending_size: 0,
+            discarding_multipart: false,
+            peer_heartbeat_ttl: 0,
             input_pending: false,
             #[cfg(feature = "ws")]
             ws_role,
@@ -380,8 +384,7 @@ impl Connection {
 
     fn queue_greeting(&mut self) {
         let mech = self.config.mechanism_name();
-        // RFC 23: "When a peer uses the NULL security mechanism, the as-server field MUST be zero."
-        let as_server = mech != MechanismName::NULL && self.config.role == Role::Server;
+        let as_server = self.config.mechanism.as_server();
         let g = Greeting::current(mech, as_server);
         let mut buf = BytesMut::new();
         g.encode(&mut buf);
@@ -470,6 +473,14 @@ impl Connection {
     /// The peer's negotiated ZMTP minor version (valid after handshake).
     pub fn peer_minor(&self) -> u8 {
         self.peer_minor
+    }
+
+    /// Silence allowance advertised by the latest received PING. Any further
+    /// input clears it. The I/O backend owns the timer and must suspend it
+    /// while local receive backpressure prevents reading.
+    pub fn peer_heartbeat_ttl(&self) -> Option<std::time::Duration> {
+        (self.peer_heartbeat_ttl != 0)
+            .then(|| std::time::Duration::from_millis(u64::from(self.peer_heartbeat_ttl) * 100))
     }
 }
 
@@ -748,6 +759,29 @@ mod tests {
                     [5, 6, 7, 8],
                 ))
                 .is_err()
+        );
+        assert!(connection.poll_message().is_none());
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn ws_single_frame_discard_does_not_leak_final_frame() {
+        use super::super::ws_codec::{OP_BINARY_CODE, OP_PING_CODE};
+        let mut connection = ready_ws_connection();
+        connection.config.socket_type = SocketType::Channel;
+        for (opcode, body) in [
+            (OP_BINARY_CODE, &b"\x01first"[..]),
+            (OP_PING_CODE, &b"alive"[..]),
+            (OP_BINARY_CODE, &b"\x00last"[..]),
+            (OP_BINARY_CODE, &b"\x00ok"[..]),
+        ] {
+            connection
+                .handle_input(masked_ws_frame(true, opcode, body, [1, 2, 3, 4]))
+                .unwrap();
+        }
+        assert_eq!(
+            connection.poll_message().unwrap().part_bytes(0).unwrap(),
+            b"ok".as_slice()
         );
         assert!(connection.poll_message().is_none());
     }

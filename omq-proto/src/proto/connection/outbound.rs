@@ -165,6 +165,17 @@ impl Connection {
                 "send_command before handshake complete".into(),
             ));
         }
+        if self.peer_minor == 0 {
+            let (tag, prefix) = match cmd {
+                Command::Subscribe(prefix) => (1, prefix),
+                Command::Cancel(prefix) => (0, prefix),
+                _ => return self.write_outbound_commands(std::slice::from_ref(cmd)),
+            };
+            let mut body = BytesMut::with_capacity(1 + prefix.len());
+            body.extend_from_slice(&[tag]);
+            body.extend_from_slice(prefix);
+            return self.send_message(&Message::single(body.freeze()));
+        }
         self.write_outbound_commands(std::slice::from_ref(cmd))
     }
 

@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel one subscription copy at a time, preserving remaining duplicates in
+  receive filtering.
+- Reject oversized and NUL-prefixed identities immediately without overwriting
+  the previous value. Wire receives inherit ZMTP framing and heartbeat fixes.
+
 - Stop retries after fatal authentication refusals. Default ROUTER sends drop
   full-destination messages; mandatory sends retain blocking and `Again` behavior.
 - Map empty nonblocking receives to `Again` instead of an internal error.

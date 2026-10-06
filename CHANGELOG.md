@@ -108,6 +108,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Fix ZMTP metadata bounds on 32-bit targets, mechanism greeting roles,
+  duplicate subscription counts and replay, single-frame receive filtering,
+  version negotiation, legacy subscriptions, identity validation, and received
+  PING TTL. Malformed command names and greeting roles are rejected;
+  incompatible peers receive ERROR before closure.
+
 - Stop automatic retries after fatal handshake ERROR responses while preserving
   retries after temporary authentication and transport failures.
 - Default ROUTER sends drop complete messages to full destination queues.

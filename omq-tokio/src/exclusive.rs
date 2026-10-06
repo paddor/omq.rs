@@ -65,6 +65,11 @@ impl Options {
                 self.identity.len()
             )));
         }
+        if self.identity.first() == Some(&0) {
+            return Err(Error::Config(
+                "exclusive socket identity must not start with a zero byte".into(),
+            ));
+        }
         if self.connect_timeout.is_zero() {
             return Err(Error::Config(
                 "exclusive socket connect_timeout must be non-zero".into(),
@@ -127,9 +132,23 @@ struct LiveConnection {
     read_buf: BytesMut,
     write_buf: BytesMut,
     last_ping: Instant,
+    last_input: Instant,
     heartbeat_deadline: Option<Instant>,
     ping_sequence: u64,
     peer_identity: Bytes,
+}
+
+impl LiveConnection {
+    fn silence_deadline(&self) -> Option<Instant> {
+        let peer = self
+            .connection
+            .peer_heartbeat_ttl()
+            .and_then(|ttl| self.last_input.checked_add(ttl));
+        match (self.heartbeat_deadline, peer) {
+            (Some(local), Some(peer)) => Some(local.min(peer)),
+            (local, peer) => local.or(peer),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -342,14 +361,15 @@ impl Socket {
         let now = Instant::now();
         let live = self.live.as_mut().expect("connected");
         if live
-            .heartbeat_deadline
+            .silence_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
             let error = Error::Timeout;
             self.mark_disconnected(&error);
             return Err(error);
         }
-        if let Some(interval) = self.options.heartbeat_interval
+        if live.connection.peer_minor() >= 1
+            && let Some(interval) = self.options.heartbeat_interval
             && now.duration_since(live.last_ping) >= interval
         {
             queue_ping(
@@ -609,6 +629,7 @@ async fn establish_connected_live(
         read_buf: BytesMut::with_capacity(4 * 1024),
         write_buf: BytesMut::with_capacity(4 * 1024),
         last_ping: now,
+        last_input: now,
         heartbeat_deadline: None,
         ping_sequence: 0,
         peer_identity: Bytes::new(),
@@ -639,6 +660,7 @@ async fn establish_bound_live(
         read_buf: BytesMut::with_capacity(4 * 1024),
         write_buf: BytesMut::with_capacity(4 * 1024),
         last_ping: now,
+        last_input: now,
         heartbeat_deadline: None,
         ping_sequence: 0,
         peer_identity: Bytes::new(),
@@ -707,8 +729,10 @@ async fn recv_live(
             return Ok(message);
         }
 
-        let ping_deadline = heartbeat_interval.map(|interval| live.last_ping + interval);
-        let heartbeat_deadline = live.heartbeat_deadline;
+        let ping_deadline = heartbeat_interval
+            .filter(|_| live.connection.peer_minor() >= 1)
+            .map(|interval| live.last_ping + interval);
+        let heartbeat_deadline = live.silence_deadline();
         tokio::select! {
             biased;
             result = read_live_once(live) => {
@@ -770,6 +794,7 @@ fn queue_ping(
 }
 
 fn note_inbound_traffic(live: &mut LiveConnection) {
+    live.last_input = Instant::now();
     live.heartbeat_deadline = None;
 }
 
@@ -900,6 +925,7 @@ mod tests {
                 read_buf: BytesMut::with_capacity(4 * 1024),
                 write_buf: BytesMut::with_capacity(4 * 1024),
                 last_ping: now,
+                last_input: now,
                 heartbeat_deadline: None,
                 ping_sequence: 0,
                 peer_identity: generated_identity(0),
@@ -927,6 +953,7 @@ mod tests {
                 read_buf: BytesMut::with_capacity(4 * 1024),
                 write_buf: BytesMut::with_capacity(4 * 1024),
                 last_ping: now,
+                last_input: now,
                 heartbeat_deadline: None,
                 ping_sequence: 0,
                 peer_identity: generated_identity(0),

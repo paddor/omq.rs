@@ -1083,7 +1083,6 @@ where
                 .handshake_timeout
                 .and_then(|d| last_input.checked_add(d))
         });
-        let hb_interval = config.heartbeat_interval;
         let hb_timeout = config
             .heartbeat_timeout
             .or(config.heartbeat_interval)
@@ -1092,7 +1091,6 @@ where
             .heartbeat_ttl
             .and_then(|d| u16::try_from(d.as_millis() / 100).ok())
             .unwrap_or(0);
-        let mut hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
         let mut hb_probe = HeartbeatProbe::default();
         let mut was_recv_blocked = false;
         let mut graceful_close = None;
@@ -1237,6 +1235,10 @@ where
         }
 
         enable_transmit_slot_after_handshake(transmit_slot.as_deref(), &connection);
+        let hb_interval = config
+            .heartbeat_interval
+            .filter(|_| connection.peer_minor() >= 1);
+        let mut hb_deadline = hb_interval.and_then(|d| Instant::now().checked_add(d));
         let authenticated_sender = recv_direct
             .as_ref()
             .and_then(RecvSink::authenticated_sender);
@@ -1530,6 +1532,10 @@ where
                 last_input = Instant::now();
             }
             was_recv_blocked = recv_blocked;
+            let peer_ttl_deadline = connection
+                .peer_heartbeat_ttl()
+                .filter(|_| !recv_blocked && graceful_close.is_none())
+                .and_then(|ttl| last_input.checked_add(ttl));
 
             publish_direct_idle(
                 transmit_slot.as_deref(),
@@ -1720,6 +1726,10 @@ where
                 }, if send_pipe_rx.is_some() && pipe_batch.is_empty() && can_accept_data => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                 },
+
+                () = sleep_until_opt(peer_ttl_deadline), if peer_ttl_deadline.is_some() && pending_input_error.is_none() => {
+                    return Err(Error::Timeout);
+                }
 
                 // Heartbeat tick: enabled only post-handshake when
                 // `heartbeat_interval` is set. Uses a persistent pinned
@@ -4464,7 +4474,7 @@ mod tests {
         for sequence in 0..3 {
             client_control
                 .send(PeerDriverCommand::SendCommand(Command::Unknown {
-                    name: format!("IN{sequence}").into(),
+                    name: format!("IN{}", char::from(b'A' + sequence)).into(),
                     body: Bytes::from_static(b"blocked"),
                 }))
                 .await
@@ -4498,7 +4508,7 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap();
-                let expected = format!("IN{sequence}");
+                let expected = format!("IN{}", char::from(b'A' + sequence));
                 assert!(matches!(event,
                     PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
                         if name == expected.as_bytes() && body == b"blocked"[..]));
@@ -4614,7 +4624,7 @@ mod tests {
         for sequence in 0..3 {
             client_control
                 .send(PeerDriverCommand::SendCommand(Command::Unknown {
-                    name: format!("IN{sequence}").into(),
+                    name: format!("IN{}", char::from(b'A' + sequence)).into(),
                     body: Bytes::from_static(b"blocked"),
                 }))
                 .await
@@ -4635,7 +4645,7 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap();
-                let expected = format!("IN{sequence}");
+                let expected = format!("IN{}", char::from(b'A' + sequence));
                 assert!(matches!(event,
                     PeerEvent::Event(Event::Command(Command::Unknown { name, body }))
                         if name == expected.as_bytes() && body == b"blocked"[..]));

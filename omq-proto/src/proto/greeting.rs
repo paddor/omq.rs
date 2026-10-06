@@ -202,7 +202,11 @@ pub(crate) fn try_decode(buf: &mut ChunkedInputBuf) -> Result<Option<(Greeting, 
         }
     }
     let mechanism = MechanismName::from_padded(&mech_raw);
-    let as_server = raw[32] != 0;
+    let as_server = match raw[32] {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::Protocol("invalid as-server flag".into())),
+    };
     Ok(Some((
         Greeting {
             major,

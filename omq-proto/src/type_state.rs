@@ -115,6 +115,9 @@ impl TypeState {
     /// - `Ok(Some(msg))` with the user-visible body.
     /// - `Ok(None)` to silently drop (malformed or out-of-order).
     pub fn post_recv(&mut self, t: SocketType, msg: Message) -> Result<Option<Message>> {
+        if t.requires_single_frame() && msg.len() != 1 {
+            return Ok(None);
+        }
         match t {
             SocketType::Req => {
                 if !self.req_awaiting_reply {

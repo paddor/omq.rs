@@ -541,3 +541,66 @@ ctx.term()
     })
     .await;
 }
+
+#[tokio::test]
+async fn curve_client_binds_and_pyzmq_security_server_connects() {
+    if skip_if_no_pyzmq_curve() {
+        return;
+    }
+    let server = CurveKeypair::generate();
+    let public = server.public.to_z85();
+    let secret = server.secret.to_z85();
+    let client = Socket::new(
+        SocketType::Pair,
+        Options::default()
+            .curve_client(CurveKeypair::generate(), server.public)
+            .linger(Duration::ZERO),
+    );
+    let port = bind_loopback(&client).await;
+    let script = r#"
+import os, zmq
+ctx = zmq.Context()
+s = ctx.socket(zmq.PAIR)
+s.rcvtimeo = s.sndtimeo = 5000
+s.curve_server = True
+s.curve_publickey = os.environ['SRV_PUB'].encode()
+s.curve_secretkey = os.environ['SRV_SEC'].encode()
+s.connect(f"tcp://127.0.0.1:{os.environ['PORT']}")
+assert s.recv() == b"reversed"
+s.send(b"encrypted")
+s.close(linger=1000)
+ctx.term()
+"#;
+    let child = python3_command()
+        .args(["-c", script])
+        .env("PORT", port.to_string())
+        .env("SRV_PUB", public)
+        .env("SRV_SEC", secret)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    client
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    client.send(Message::single("reversed")).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .part_bytes(0)
+            .unwrap()
+            .as_ref(),
+        b"encrypted"
+    );
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

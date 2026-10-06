@@ -9,7 +9,7 @@ in other languages) to link against omq instead of libzmq.
 ## Features
 
 - **Transports:** `inproc://`, `tcp://`, `ipc://` (including Windows named
-  pipes), `ws://`, `wss://`
+  pipes), `ws://`, `wss://`, and `quic://` with the optional `quic` feature
 - **Socket Types:** Standard ZMQ types except DGRAM (PUSH/PULL, PUB/SUB,
   REQ/REP, DEALER/ROUTER, etc.)
 - **Security:** NULL, PLAIN, and CURVE policy through standard ZAP; CURVE
@@ -65,6 +65,12 @@ see [doc/compatibility.md](doc/compatibility.md). The bundled
 `libomq_zmq.so` also exposes a small `omq_*` extension API for context sharing
 and native async multipart sends. It is OMQ-specific, outside the libzmq ABI,
 and documented in [doc/compatibility.md](doc/compatibility.md).
+
+## QUIC
+
+Build with `--features quic` for `quic://` endpoints;
+`zmq_has("quic")` reports availability. See
+[QUIC options](doc/compatibility.md#quic-options) for certificate and trust setup.
 
 ## Build
 

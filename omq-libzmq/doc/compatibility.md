@@ -12,6 +12,7 @@ performance, or support for every draft/platform feature.
   timer, atomic counter, stopwatch, thread helper, Curve/Z85, and monitor v1
   APIs are exported.
 - Transports: `inproc://`, `tcp://`, `ipc://`, `ws://`, and `wss://`.
+  The optional `quic` feature adds `quic://` for native OMQ peers.
 - Security mechanisms: NULL, PLAIN, CURVE. GSSAPI option constants exist for
   ABI compatibility but GSSAPI authentication is not implemented.
 - Socket types: PAIR, PUB/SUB, REQ/REP, DEALER/ROUTER, PULL/PUSH, XPUB/XSUB,
@@ -35,7 +36,7 @@ performance, or support for every draft/platform feature.
   non-null signal mask returns `ENOTSUP`.
 - `zmq_poller_fd()` returns `EINVAL`; the poller is implemented over
   `zmq_poll()` and has no native fd.
-- QUIC, SCTP, VMCI, NORM, PGM/EPGM, and DGRAM transports are not implemented.
+- SCTP, VMCI, NORM, PGM/EPGM, and DGRAM transports are not implemented.
 
 ## Option Behavior
 
@@ -63,6 +64,28 @@ Unnamed contexts use background thread names such as `OMQ0/IO/0`. Contexts
 configured with more than one IO thread also have an `OMQ0/Control` thread.
 `ZMQ_THREAD_NAME_PREFIX` replaces the generated `OMQ0` context name and must be
 set before creating a socket.
+
+### QUIC options
+
+Build with the `quic` feature and check availability with `zmq_has("quic")`.
+The following OMQ extensions work through `zmq_setsockopt()` and
+`zmq_getsockopt()`:
+
+| Option | Type | Purpose |
+| --- | --- | --- |
+| `OMQ_QUIC_CERT_PEM` | PEM bytes | Listener certificate chain |
+| `OMQ_QUIC_KEY_PEM` | PEM bytes | Listener private key |
+| `OMQ_QUIC_TRUST_PEM` | PEM bytes | Connector trust anchors |
+| `OMQ_QUIC_TRUST_SYSTEM` | `int32_t` | Use system roots; default 1 |
+| `OMQ_QUIC_SERVER_NAME` | String bytes | Override the verified server name |
+| `OMQ_QUIC_STREAM_WINDOW` | `int32_t` | Receive window in bytes; 16 KiB to 256 MiB, default 1 MiB |
+| `OMQ_QUIC_MAX_READY_PEERS` | `int32_t` | Ready QUIC peer limit per socket; positive, default 1024 |
+
+Set these options before the backend socket is materialized by bind,
+connect, or other I/O. Later changes fail with `EBUSY`; builds without
+`quic` reject these options with `EINVAL`. Server certificate verification
+is always enabled. See [quic-rfc.md](../../doc/quic-rfc.md) for TLS,
+liveness, and endpoint behavior.
 
 ## OMQ extension API
 

@@ -2,7 +2,7 @@
 
 Connect threads, processes, hosts, and languages without a broker. OMQ gives
 you the same small send/recv model across in-process queues, IPC, TCP,
-WebSocket, compressed links, and language boundaries.
+QUIC, WebSocket, compressed links, and language boundaries.
 
 OMQ follows [ZeroMQ](https://zeromq.org): same socket patterns, compatible
 wire protocol, and libzmq-style APIs. The core is memory-safe Rust and does
@@ -11,16 +11,16 @@ not depend on libzmq, libsodium, or a C compiler.
 - Messaging patterns for pipelines, publish/subscribe, request/reply,
   routed services, exclusive peers, and raw streams.
 - Transports for threads, processes, hosts, browsers, and compressed links:
-  inproc, IPC, TCP, UDP, WebSocket, `lz4+tcp://`, `lz4+ws://`, and
-  `zstd+tcp://`.
+  inproc, IPC, TCP, UDP, QUIC, WebSocket,
+  `lz4+tcp://`, `lz4+ws://`, and `zstd+tcp://`.
 - Security for open, password-authenticated, and encrypted connections:
-  NULL, PLAIN, and CURVE.
+  NULL, PLAIN, CURVE, and verified TLS for QUIC and secure WebSocket.
 - Near-linear I/O scalability with OMQ-owned background threads on Linux,
   macOS, and Windows.
 - No C compiler, no libzmq, no libsodium.
 - Native bindings and compatibility APIs:
   - [C/C++](omq-libzmq/)
-  - [Crystal](https://github.com/paddor/omq-binding.cr) and pure Crystal [OMQ.cr](https://github.com/paddor/omq.cr)
+  - [Crystal](https://github.com/paddor/omq-binding.cr)
   - [BEAM: Erlang, Elixir, and Gleam](bindings/beam/)
   - [Go](bindings/go/)
   - [Java](bindings/java/)
@@ -127,12 +127,13 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `lz4`             | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
 | `zstd`            | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
+| `quic`            | QUIC (`quic://`) transport ([example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
 
 ## Design highlights
 
 | Feature | Details |
 |---------|---------|
-| **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out; no async, no traits on the hot path. Mirrors `rustls::ConnectionCommon`. |
+| **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out. No async. |
 | **Message-count HWM** | `send_hwm`/`recv_hwm` count complete messages, not bytes. Send HWM is per outbound pipe/ring, so total native buffered messages can exceed one `send_hwm` when several pipes or transmit slots exist. |
 | **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
 | **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
@@ -168,7 +169,7 @@ covered by integration tests. The suite is layered:
 - **700+ Rust tests** across socket types, transports, mechanisms, and
   libzmq-compatible C API behavior.
 - **Feature-gated coverage** for PLAIN, CURVE, LZ4, and pyzmq/libzmq
-  interop. WebSocket has dedicated tests and soak coverage.
+  interop. QUIC and WebSocket have dedicated tests and soak coverage.
 - **Protocol fuzzing** (~1M iterations in the default opt-in run, with
   longer runs configurable): hand-rolled fuzz of the wire parser and the
   socket-action state machine.
@@ -209,6 +210,8 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   notes for no-peer sends, linger, and HWM.
 - [doc/lz4-rfc.md](doc/lz4-rfc.md): LZ4 compression transport wire
   format and dictionary shipping rules.
+- [doc/quic-rfc.md](doc/quic-rfc.md): native QUIC transport, TLS verification,
+  liveness, and reconnect rules.
 
 ## Platform and requirements
 

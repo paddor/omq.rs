@@ -857,8 +857,12 @@ class Poller:
         t = None if (timeout is None or timeout < 0) else int(timeout)
         if ready:
             t = 0
-        loop = asyncio.get_running_loop()
-        ready_ids = await loop.run_in_executor(None, _native.wait_any, pollin_socks, t)
+        ready_ids = _native.wait_any(pollin_socks, 0)
+        if not ready_ids and t != 0:
+            loop = asyncio.get_running_loop()
+            ready_ids = await loop.run_in_executor(
+                None, _native.wait_any, pollin_socks, t
+            )
         for rid in ready_ids:
             ready[rid] = ready.get(rid, 0) | POLLIN
         return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]

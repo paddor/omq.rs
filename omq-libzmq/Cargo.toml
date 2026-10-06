@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 omq-tokio = { path = "../omq-tokio", version = "0.24.0", features = ["plain", "curve", "lz4", "zstd", "ws"] }
-yring = "0.3.18"
+yring = "0.3.20"
 tokio = { version = "1.52", features = ["rt", "sync", "time"] }
 bytes = "1.12.0"
 flume = { version = "0.12", default-features = false, features = ["async"] }
@@ -146,3 +146,7 @@ path = "tests/util.rs"
 [[test]]
 name = "omq_libzmq_xpub_xsub"
 path = "tests/xpub_xsub.rs"
+
+[[test]]
+name = "omq_libzmq_req_rep_admission"
+path = "tests/req_rep_admission.rs"

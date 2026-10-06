@@ -182,6 +182,7 @@ pub fn allowed_keys(value: VALUE) -> RbResult<omq_proto::Authenticator> {
 }
 
 pub fn callback(callback: VALUE) -> RbResult<(omq_proto::Authenticator, AuthWorker)> {
+    let thread_name = rb::new_utf8_string("omq-auth")?;
     let (sender, receiver) = flume::unbounded();
     let notify = Arc::new(PipeNotify::new());
     let data = Box::new(WorkerData {
@@ -219,13 +220,15 @@ pub fn callback(callback: VALUE) -> RbResult<(omq_proto::Authenticator, AuthWork
         auth_notify.notify();
         result.recv().unwrap_or(false)
     });
-    Ok((
-        authenticator,
-        AuthWorker {
-            sender,
-            notify,
-            callback,
-            thread,
-        },
-    ))
+    let worker = AuthWorker {
+        sender,
+        notify,
+        callback,
+        thread,
+    };
+    if let Err(error) = rb::call_method_1(thread, c"name=", thread_name) {
+        worker.stop();
+        return Err(error);
+    }
+    Ok((authenticator, worker))
 }

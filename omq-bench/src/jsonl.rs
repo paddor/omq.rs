@@ -62,6 +62,8 @@ pub(crate) fn append_jsonl<T: Serialize>(path: &Path, row: &T) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ComparisonRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_inproc: Option<crate::parse::BlockingInprocStats>,
     pub run_id: String,
     #[serde(rename = "impl")]
     pub impl_name: String,

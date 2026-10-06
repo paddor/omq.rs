@@ -16,11 +16,10 @@ use rustc_hash::FxHashSet;
 
 use bytes::Bytes;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{PeerDriverCommand, PeerDriverData, PeerDriverHandle};
+use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand, PeerDriverData};
 use crate::transport::udp;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
@@ -96,8 +95,8 @@ pub(crate) fn spawn_dish_listener(
 /// programming error; drop silently).
 pub(crate) fn spawn_radio_sender(
     sock: UdpSocket,
-    mut inbox_rx: mpsc::Receiver<PeerDriverCommand>,
-    mut data_inbox_rx: mpsc::Receiver<PeerDriverData>,
+    mut inbox_rx: crate::engine::control_inbox::Receiver,
+    mut data_inbox_rx: crate::engine::data_inbox::Receiver,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -105,8 +104,16 @@ pub(crate) fn spawn_radio_sender(
         let mut control_open = true;
         let mut closing = false;
         let mut deadline: Option<std::time::Instant> = None;
+        let mut budget = omq_proto::flow::DrainBudget::new(64, 64 * 1024);
         loop {
-            if closing && pending.is_none() && data_inbox_rx.is_empty() {
+            if budget.exhausted() {
+                inbox_rx.release_consumed();
+                data_inbox_rx.release_consumed();
+                budget.reset();
+                tokio::task::yield_now().await;
+            }
+            let _ = budget.account(0);
+            if closing && pending.is_none() && inbox_rx.is_empty() && data_inbox_rx.is_empty() {
                 break;
             }
             tokio::select! {
@@ -136,6 +143,7 @@ pub(crate) fn spawn_radio_sender(
                 }
                 data = data_inbox_rx.recv(), if pending.is_none() => match data {
                     Some(PeerDriverData::SendMessage(m)) => {
+                        let _ = budget.account(m.byte_len());
                         if m.len() != 2 {
                             continue;
                         }
@@ -153,20 +161,21 @@ pub(crate) fn spawn_radio_sender(
     })
 }
 
-/// Build a [`PeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's
+/// Build a [`ActorPeerDriverHandle`] for a synthetic UDP RADIO peer. The handle's
 /// inbox feeds the sender task; its cancellation token tears the task
 /// down on `disconnect` / socket close.
 pub(crate) fn fake_handle(
-    inbox: mpsc::Sender<PeerDriverCommand>,
-    data_inbox: mpsc::Sender<PeerDriverData>,
+    inbox: crate::engine::control_inbox::Sender,
+    data_inbox: crate::engine::data_inbox::Sender,
     cancel: CancellationToken,
-) -> PeerDriverHandle {
-    PeerDriverHandle {
+) -> ActorPeerDriverHandle {
+    ActorPeerDriverHandle {
         inbox,
         data_inbox,
         cancel,
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: None,
+        inproc: None,
     }
 }

@@ -1,8 +1,8 @@
 //! One reserved lifecycle result per materialized peer driver.
 //!
 //! Publication cannot wait on the actor's data mailbox. The result carries
-//! the number of events actually admitted there, so the actor can retain
-//! peer state until that ordered prefix has been handled.
+//! the number of events actually admitted to the control and data queues, so
+//! the actor retains peer state until both admitted prefixes are handled.
 
 use tokio::sync::oneshot;
 

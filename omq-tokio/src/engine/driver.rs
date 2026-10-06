@@ -19,6 +19,7 @@ use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut
 use omq_proto::proto::{Command, Connection, Event};
 use omq_proto::{MessageRateLimit, WorkloadProfile};
 
+use super::actor_output::{DataSender, PeerOutput};
 use super::compression_pool::CompressionPool;
 use super::peer_completion::CompletionProgress;
 use super::peer_events::PeerEventDispatch;
@@ -255,11 +256,41 @@ pub struct PeerDriverHandle {
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
     pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
     pub(crate) send_pipe: Option<SendPipeProducerHandle>,
+    /// Direct route into an inproc peer's receive queue.
+    pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActorPeerDriverHandle {
+    /// Control-plane commands. Never carries application data.
+    pub inbox: super::control_inbox::Sender,
+    /// Fallback data plane for peers without a send pipe or transmit slot.
+    pub data_inbox: super::data_inbox::Sender,
+    pub cancel: CancellationToken,
+    pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
+    pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
+    pub(crate) send_pipe: Option<SendPipeProducerHandle>,
+    /// Direct route into an inproc peer's receive queue.
+    pub(crate) inproc: Option<crate::transport::inproc::InprocSender>,
+}
+
+impl From<PeerDriverHandle> for ActorPeerDriverHandle {
+    fn from(handle: PeerDriverHandle) -> Self {
+        Self {
+            inbox: handle.inbox.into(),
+            data_inbox: super::data_inbox::Sender::Legacy(handle.data_inbox),
+            cancel: handle.cancel,
+            transmit_slot: handle.transmit_slot,
+            direct_tcp_writer: handle.direct_tcp_writer,
+            send_pipe: handle.send_pipe,
+            inproc: handle.inproc,
+        }
+    }
 }
 
 /// Parsed ZMTP events and the final closure signal for standalone drivers.
-/// Socket-owned byte-stream drivers use a separate reserved lifecycle slot
-/// for closure and retain this channel for ordered protocol events.
+/// Socket-owned drivers reserve a separate lifecycle slot and publish protocol
+/// events independently of their bounded application-data lane.
 #[derive(Debug)]
 pub enum PeerEvent {
     Event(Event),
@@ -297,6 +328,7 @@ struct PendingWrite {
 struct GracefulClose {
     deadline: Option<Instant>,
     ws_close_started: bool,
+    discard_receive: bool,
 }
 
 impl PendingWrite {
@@ -509,12 +541,16 @@ where
 {
     stream: T,
     connection: Connection,
-    inbox: mpsc::Receiver<PeerDriverCommand>,
-    data_inbox: Option<mpsc::Receiver<PeerDriverData>>,
-    /// Shared multi-producer channel feeding the `SocketDriver`'s
-    /// per-peer event loop. Each entry is tagged with the `peer_id`
-    /// this driver was assigned; the receiver dispatches on that.
-    peer_out: mpsc::Sender<(u64, PeerEvent)>,
+    inbox: super::control_inbox::Receiver,
+    data_inbox: Option<super::data_inbox::Receiver>,
+    /// Application-data output: one socket-owned fanring producer, or the
+    /// caller's combined Tokio queue for a standalone driver.
+    peer_out: PeerOutput,
+    notify_xpub: bool,
+    /// Socket-owned drivers publish codec protocol events independently of
+    /// the bounded application-data mailbox. Standalone drivers keep their
+    /// supplied combined channel and its event ordering.
+    peer_control: Option<mpsc::Sender<(u64, PeerEvent)>>,
     completion: CompletionProgress,
     peer_id: u64,
     cancel: CancellationToken,
@@ -580,6 +616,46 @@ where
         cancel: CancellationToken,
         config: PeerDriverConfig,
     ) -> Self {
+        Self::with_output_config(
+            stream,
+            connection,
+            inbox.into(),
+            peer_out.into(),
+            peer_id,
+            cancel,
+            config,
+        )
+    }
+
+    pub(crate) fn with_actor_config(
+        stream: T,
+        connection: Connection,
+        inbox: impl Into<super::control_inbox::Receiver>,
+        peer_out: DataSender,
+        peer_id: u64,
+        cancel: CancellationToken,
+        config: PeerDriverConfig,
+    ) -> Self {
+        Self::with_output_config(
+            stream,
+            connection,
+            inbox.into(),
+            PeerOutput::actor(peer_out),
+            peer_id,
+            cancel,
+            config,
+        )
+    }
+
+    fn with_output_config(
+        stream: T,
+        connection: Connection,
+        inbox: super::control_inbox::Receiver,
+        peer_out: PeerOutput,
+        peer_id: u64,
+        cancel: CancellationToken,
+        config: PeerDriverConfig,
+    ) -> Self {
         Self {
             stream,
             connection,
@@ -590,6 +666,8 @@ where
             cancel,
             config,
             completion: CompletionProgress::default(),
+            peer_control: None,
+            notify_xpub: false,
             setup_deadline: None,
             setup_cancel: None,
             encoder: None,
@@ -610,6 +688,16 @@ where
     /// Reserve lifecycle publication independently of the actor's data mailbox.
     pub(crate) fn with_completion(mut self, completion: CompletionProgress) -> Self {
         self.completion = completion;
+        self
+    }
+
+    pub(crate) fn with_actor_control(
+        mut self,
+        control: mpsc::Sender<(u64, PeerEvent)>,
+        notify_xpub: bool,
+    ) -> Self {
+        self.notify_xpub = notify_xpub;
+        self.peer_control = Some(control);
         self
     }
 
@@ -693,6 +781,11 @@ where
     /// full or stalled outbound path cannot hide lifecycle commands.
     #[must_use]
     pub fn with_data_inbox(mut self, rx: mpsc::Receiver<PeerDriverData>) -> Self {
+        self.data_inbox = Some(super::data_inbox::Receiver::Legacy(rx));
+        self
+    }
+
+    pub(crate) fn with_actor_data_inbox(mut self, rx: super::data_inbox::Receiver) -> Self {
         self.data_inbox = Some(rx);
         self
     }
@@ -752,13 +845,16 @@ where
     /// Standalone drivers send a final `PeerEvent::Closed` on their supplied
     /// channel. Both preserve the earlier admitted event prefix.
     pub async fn run(mut self) -> Result<()> {
-        let peer_out = self.peer_out.clone();
+        let peer_out = self.peer_out.legacy_sender();
         let peer_id = self.peer_id;
         let mut completion = std::mem::take(&mut self.completion);
         let result = self.run_inner_body(&mut completion).await;
         let error = result.as_ref().err().map(close_error_reason);
         if let Err(error) = completion.complete(error) {
-            let _ = peer_out.send((peer_id, PeerEvent::Closed { error })).await;
+            let _ = peer_out
+                .expect("standalone event output")
+                .send((peer_id, PeerEvent::Closed { error }))
+                .await;
         }
         result
     }
@@ -770,7 +866,9 @@ where
             mut connection,
             mut inbox,
             mut data_inbox,
-            peer_out,
+            mut peer_out,
+            peer_control,
+            notify_xpub,
             peer_id,
             cancel,
             config,
@@ -843,16 +941,24 @@ where
         let mut pending_large = None;
         let mut pending_input_error = None;
 
-        let mut peer_events = PeerEventDispatch::default();
-        let actor_credit = peer_out.reserve();
-        tokio::pin!(actor_credit);
+        let mut peer_events = PeerEventDispatch::for_xpub(notify_xpub);
+        let legacy_events = peer_out.legacy_sender();
+        let event_out = peer_control
+            .as_ref()
+            .or(legacy_events.as_ref())
+            .expect("codec control output");
+        let control_credit = event_out.reserve();
+        tokio::pin!(control_credit);
+        let mut activation_budget = DrainBudget::new(64, 64 * 1024);
         loop {
             if !peer_events.drive(
                 &mut connection,
-                &peer_out,
+                event_out,
                 peer_id,
                 recv_direct.as_mut(),
                 completion,
+                &mut peer_out,
+                pending_receive.is_none(),
             ) {
                 return Ok(());
             }
@@ -887,6 +993,7 @@ where
                 }
 
                 cmd = inbox.recv() => {
+                    let before = connection.pending_transmit_size();
                     match handle_pre_activation_inbox_command(
                         cmd,
                         &mut connection,
@@ -897,14 +1004,25 @@ where
                         PreActivationStep::Activate => break,
                         PreActivationStep::Close => return Ok(()),
                     }
+                    if !activation_budget.account(connection.pending_transmit_size().saturating_sub(before)) {
+                        inbox.release_consumed();
+                        tokio::task::yield_now().await;
+                        activation_budget.reset();
+                    }
                 }
 
-                permit = &mut actor_credit, if peer_events.has_pending() => {
+                permit = &mut control_credit, if peer_events.control_ready(&mut peer_out, pending_receive.is_none()) => {
                     match permit {
-                        Ok(permit) => peer_events.send_reserved(permit, peer_id, completion),
+                        Ok(permit) => {
+                            if !peer_events.send_reserved(permit, peer_id, completion, &mut peer_out) { return Ok(()); }
+                        }
                         Err(_) => return Ok(()),
                     }
-                    actor_credit.set(peer_out.reserve());
+                    control_credit.set(event_out.reserve());
+                }
+
+                result = peer_out.ready(), if peer_events.notification_pending() && !peer_out.has_capacity() => {
+                    if result.is_err() { return Ok(()); }
                 }
 
                 () = async { setup_cancel.as_ref().unwrap().cancelled().await; }, if setup_cancel.is_some() => {
@@ -1013,17 +1131,25 @@ where
                 }
             }
 
+            inbox.release_consumed();
+            if control_exhausted {
+                tokio::task::yield_now().await;
+            }
+
             if pending_input_error.is_none() && connection.is_closed() && graceful_close.is_none() {
                 // Peer-initiated WS CLOSE is a disconnect: stop accepting data
                 // and finish the already-staged wire prefix plus the reply.
                 graceful_close = Some(GracefulClose {
                     deadline: Instant::now().checked_add(Duration::from_secs(10)),
                     ws_close_started: true,
+                    discard_receive: false,
                 });
             }
 
-            if graceful_close.is_some() {
-                discard_receive = true;
+            if let Some(close) = graceful_close {
+                // Local close retires receives; a peer CLOSE preserves the
+                // decoded message prefix, including blocked receive admission.
+                discard_receive |= close.discard_receive;
                 if let Some(data) = &mut data_inbox {
                     data.close();
                 }
@@ -1048,16 +1174,17 @@ where
                 data_inbox.as_ref(),
                 &inbox,
             );
-            // An older pending message already owns actor-mailbox admission.
-            // Reads are paused until it is delivered; do not poll a newer event
-            // into a competing reservation on that same mailbox.
-            if pending_receive.is_none()
+            // Protocol events on a separate mailbox remain reachable while
+            // data waits. Standalone combined mailboxes retain their prefix.
+            if (peer_control.is_some() || pending_receive.is_none())
                 && !peer_events.drive(
                     &mut connection,
-                    &peer_out,
+                    event_out,
                     peer_id,
                     recv_direct.as_mut(),
                     completion,
+                    &mut peer_out,
+                    pending_receive.is_none(),
                 )
             {
                 return Ok(());
@@ -1065,11 +1192,11 @@ where
             if pending_input_error.is_some() && !peer_events.blocked() {
                 return Err(pending_input_error.take().unwrap());
             }
+            peer_out.set_control_prefix(peer_events.control_prefix());
             if peer_events.blocked() {
                 // Preserve the codec-event prefix before decoded messages.
             } else if discard_receive {
                 if pending_receive.take().is_some() {
-                    actor_credit.set(peer_out.reserve());
                     authenticated_credit
                         .set(super::reserve_authenticated(authenticated_sender.as_ref()));
                 }
@@ -1081,7 +1208,7 @@ where
                     receive_profile,
                     MessageDelivery {
                         sink: &mut recv_direct,
-                        peer_out: &peer_out,
+                        peer_out: &mut peer_out,
                         peer_id,
                         completion,
                         pending: &mut pending_receive,
@@ -1185,6 +1312,11 @@ where
             }
 
             let shutdown_ready = graceful_close.is_some()
+                && inbox.is_empty()
+                && (discard_receive
+                    || (pending_receive.is_none()
+                        && !recv_direct.as_ref().is_some_and(RecvSink::peer_blocked)
+                        && !peer_events.blocked()))
                 && pending_write.is_empty()
                 && eq.is_empty()
                 && !connection.has_pending_transmit()
@@ -1193,7 +1325,9 @@ where
                         && pipe_batch.is_empty()
                         && deferred_data.is_none()
                         && send_pipe_rx.as_ref().is_none_or(SendPipeConsumer::is_empty)
-                        && data_inbox.as_ref().is_none_or(mpsc::Receiver::is_empty)
+                        && data_inbox
+                            .as_ref()
+                            .is_none_or(super::data_inbox::Receiver::is_empty)
                         && transmit_slot.as_ref().is_none_or(|slot| slot.is_empty())));
             #[cfg(feature = "ws")]
             let shutdown_ready = if shutdown_ready && connection.is_ws() {
@@ -1253,20 +1387,28 @@ where
                     }
                 },
 
-                permit = &mut actor_credit,
-                    if peer_events.has_pending() || (pending_receive.is_some() && recv_direct.is_none()) => {
+                permit = &mut control_credit, if peer_events.control_ready(&mut peer_out, pending_receive.is_none()) => {
                     match permit {
                         Ok(permit) => {
-                            if peer_events.has_pending() {
-                                peer_events.send_reserved(permit, peer_id, completion);
-                            } else {
-                                permit.send((peer_id, PeerEvent::Event(Event::Message(pending_receive.take().unwrap()))));
-                                completion.note_event();
-                            }
+                            if !peer_events.send_reserved(permit, peer_id, completion, &mut peer_out) { return Ok(()); }
                         }
                         Err(_) => return Ok(()),
                     }
-                    actor_credit.set(peer_out.reserve());
+                    control_credit.set(event_out.reserve());
+                }
+
+                result = peer_out.ready(),
+                    if (pending_receive.is_some() && recv_direct.is_none())
+                        || (pending_receive.is_none() && peer_events.notification_pending() && !peer_out.has_capacity()) => {
+                    if result.is_err() { return Ok(()); }
+                    peer_out.set_control_prefix(peer_events.control_prefix());
+                    if recv_direct.is_none() && let Some(message) = pending_receive.take() {
+                        match peer_out.try_send(peer_id, message, false) {
+                            Ok(()) => completion.note_event(),
+                            Err(super::SendPipeError::Full(message)) => pending_receive = Some(message),
+                            Err(super::SendPipeError::Closed(_)) => return Ok(()),
+                        }
+                    }
                 }
 
                 permit = &mut authenticated_credit,
@@ -1456,8 +1598,8 @@ fn publish_direct_idle(
     slot: Option<&PeerTransmitSlot>,
     local_empty: bool,
     pipe: Option<&SendPipeConsumer>,
-    data: Option<&mpsc::Receiver<PeerDriverData>>,
-    control: &mpsc::Receiver<PeerDriverCommand>,
+    data: Option<&super::data_inbox::Receiver>,
+    control: &super::control_inbox::Receiver,
 ) {
     let Some(slot) = slot else { return };
     let Some(writer) = slot.direct_writer() else {
@@ -1469,7 +1611,7 @@ fn publish_direct_idle(
     writer.publish_idle(|| {
         slot.is_empty()
             && pipe.is_none_or(SendPipeConsumer::is_empty)
-            && data.is_none_or(mpsc::Receiver::is_empty)
+            && data.is_none_or(super::data_inbox::Receiver::is_empty)
             && control.is_empty()
     });
 }
@@ -1488,7 +1630,7 @@ struct ReceiveRateLimiters<'a> {
 
 struct MessageDelivery<'a> {
     sink: &'a mut Option<RecvSink>,
-    peer_out: &'a mpsc::Sender<(u64, PeerEvent)>,
+    peer_out: &'a mut PeerOutput,
     peer_id: u64,
     completion: &'a mut CompletionProgress,
     pending: &'a mut Option<Message>,
@@ -1530,20 +1672,13 @@ impl MessageDelivery<'_> {
         let result = if let Some(sink) = self.sink {
             sink.try_send_with_flush_mode(message, defer, pending_flush)
         } else {
-            match self
-                .peer_out
-                .try_send((self.peer_id, PeerEvent::Event(Event::Message(message))))
-            {
+            match self.peer_out.try_send(self.peer_id, message, false) {
                 Ok(()) => {
                     self.completion.note_event();
                     Ok(())
                 }
-                Err(mpsc::error::TrySendError::Full((
-                    _,
-                    PeerEvent::Event(Event::Message(message)),
-                ))) => Err(TrySendError::Full(message)),
-                Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
-                Err(mpsc::error::TrySendError::Full(_)) => unreachable!("message delivery"),
+                Err(super::SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
+                Err(super::SendPipeError::Closed(_)) => Err(TrySendError::Closed),
             }
         };
         match result {
@@ -1748,6 +1883,7 @@ fn handle_inbox_command(
         Some(PeerDriverCommand::DrainAndClose { deadline }) => {
             match graceful_close {
                 Some(close) => {
+                    close.discard_receive = true;
                     close.deadline = match (close.deadline, deadline) {
                         (Some(current), Some(requested)) => Some(current.min(requested)),
                         (current, requested) => current.or(requested),
@@ -1757,6 +1893,7 @@ fn handle_inbox_command(
                     *graceful_close = Some(GracefulClose {
                         deadline,
                         ws_close_started: false,
+                        discard_receive: true,
                     });
                 }
             }
@@ -1768,7 +1905,7 @@ fn handle_inbox_command(
 
 fn handle_data_inbox(
     first: PeerDriverData,
-    data_inbox: &mut mpsc::Receiver<PeerDriverData>,
+    data_inbox: &mut super::data_inbox::Receiver,
     outbound: &mut OutboundState,
     connection: &mut Connection,
     eq: &mut FrameBuffer,
@@ -1793,6 +1930,7 @@ fn handle_data_inbox(
         }
         PeerDriverData::SendEncoded(chunks) => eq.push_shared_chunks(&chunks),
     }
+    data_inbox.release_consumed();
     Ok(deferred)
 }
 
@@ -2099,12 +2237,15 @@ impl PendingLargeRead {
 
     fn finish(self, connection: &mut Connection, pool: &Arc<RecvBufPool>) -> Result<()> {
         debug_assert!(self.complete());
+        let capacity = self.buf.capacity();
         let payload = if self.pooled {
             pool.wrap(self.buf)
         } else {
             self.buf.freeze()
         };
-        connection.supply_payload(payload)
+        connection.supply_payload_frame(omq_proto::message::Payload::from_bytes_with_retained_size(
+            payload, capacity,
+        ))
     }
 }
 
@@ -3718,6 +3859,69 @@ mod tests {
     }
 
     #[test]
+    fn full_rep_sink_returns_original_message_without_internal_route() {
+        let (producer, mut consumer) = yring::spsc(1);
+        let mut sink = RecvSink::rep(
+            RecvSink::Yring(YringSink {
+                producer,
+                signal: Box::new(|| {}),
+                space: Arc::new(StateSignal::new()),
+            }),
+            7,
+        );
+        sink.try_deliver(Message::multipart(["", "first"])).unwrap();
+        let original = Message::multipart(["", "second"]).with_routing_id(99);
+        let Err(omq_proto::TrySendError::Full(returned)) = sink.try_deliver(original.clone())
+        else {
+            panic!("full sink must return the request");
+        };
+        assert_eq!(returned, original);
+        assert_eq!(returned.routing_id(), Some(99));
+        let received = consumer.prefetch_and_pop().unwrap();
+        assert_eq!(received.routing_id(), Some(8));
+        assert_eq!(received.get(1), Some(b"first".as_slice()));
+    }
+
+    #[test]
+    fn receive_config_recycles_only_its_owner_and_retains_pending_queues() {
+        let (producer, mut initial_consumer) = yring::spsc(4);
+        let config = RecvSinkConfig::new(
+            RecvSink::Yring(YringSink {
+                producer,
+                signal: Box::new(|| {}),
+                space: Arc::new(StateSignal::new()),
+            }),
+            Arc::new(|| {}),
+            Arc::new(StateSignal::new()),
+            4,
+        );
+        let mut first = config.take_sink_for_peer(0).unwrap();
+        config.peer_disconnected(1);
+        assert!(config.take_sink_for_peer(2).is_none());
+        first.try_deliver(Message::single("first")).unwrap();
+        assert_eq!(
+            initial_consumer.prefetch_and_pop(),
+            Some(Message::single("first"))
+        );
+        drop(first);
+        config.peer_disconnected(0);
+        let mut second = config.take_sink_for_peer(2).unwrap();
+        second.try_deliver(Message::single("second")).unwrap();
+        drop(second);
+        config.peer_disconnected(2);
+        assert!(
+            config.take_sink_for_peer(3).is_none(),
+            "pending ring must survive churn"
+        );
+        let mut pending = config.try_take_pending_consumer().unwrap();
+        assert_eq!(pending.prefetch_and_pop(), Some(Message::single("second")));
+        let mut third = config.take_sink_for_peer(3).unwrap();
+        third.try_deliver(Message::single("third")).unwrap();
+        let mut newest = config.try_take_pending_consumer().unwrap();
+        assert_eq!(newest.prefetch_and_pop(), Some(Message::single("third")));
+    }
+
+    #[test]
     fn yring_sink_deferred_send_signals_once_per_flush() {
         let (producer, mut consumer) = yring::spsc(4);
         let signals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3730,6 +3934,14 @@ mod tests {
             space: Arc::new(StateSignal::new()),
         };
         let mut pending = false;
+        // Wake hints stay conservative until the consumer acknowledges their
+        // activation with an empty check. Prime that registration first.
+        sink.try_send_deferred(Message::single("warmup"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(consumer.prefetch_and_pop(), Some(Message::single("warmup")));
+        assert_eq!(consumer.prefetch_and_pop(), None);
+        signals.store(0, Ordering::Relaxed);
 
         sink.try_send_deferred(Message::single("a"), &mut pending)
             .unwrap();
@@ -3741,6 +3953,32 @@ mod tests {
         sink.flush_pending(&mut pending);
         assert_eq!(signals.load(Ordering::Relaxed), 1);
         assert_eq!(consumer.prefetch(), 2);
+        sink.try_send_deferred(Message::single("c"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            1,
+            "nonempty queue needs no extra wake"
+        );
+        for expected in ["a", "b", "c"] {
+            assert_eq!(consumer.prefetch_and_pop(), Some(Message::single(expected)));
+        }
+        assert_eq!(consumer.prefetch_and_pop(), None);
+        sink.try_send_deferred(Message::single("d"), &mut pending)
+            .unwrap();
+        sink.flush_pending(&mut pending);
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            2,
+            "registered empty consumer must wake"
+        );
+        sink.flush_and_signal();
+        assert_eq!(
+            signals.load(Ordering::Relaxed),
+            2,
+            "nothing flushed needs no wake"
+        );
     }
 
     /// Adapter: pull `(u64, PeerEvent::Event)` off the shared peer-out
@@ -3823,6 +4061,7 @@ mod tests {
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             EventAdapter { rx: c_evt_rx },
             PeerDriverHandle {
@@ -3832,6 +4071,7 @@ mod tests {
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             EventAdapter { rx: s_evt_rx },
         )
@@ -4342,11 +4582,10 @@ mod tests {
     #[expect(clippy::too_many_lines)]
     async fn full_receive_sink_controls(kind: &str) {
         let (server_stream, client_stream) = tokio::io::duplex(4096);
-        let (pipe, _pipe_receiver, _, _) =
+        let (pipe, mut pipe_receiver, _, _) =
             crate::socket::recv::recv_pipe(1, crate::socket::recv::BlockingRecvWaker::new());
         let (producer, _yring_receiver) = yring::spsc(1);
         let (authenticated, _authenticated_receiver) = RecvSink::authenticated(1, Arc::new(|| {}));
-        let envelopes = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let sink = match kind {
             "channel" => Some(RecvSink::Channel(pipe.clone())),
             "yring" => Some(RecvSink::Yring(YringSink {
@@ -4356,11 +4595,7 @@ mod tests {
             })),
             "authenticated" => Some(authenticated),
             "server" => Some(RecvSink::server(RecvSink::Channel(pipe.clone()), 7)),
-            "rep" => Some(RecvSink::rep(
-                RecvSink::Channel(pipe.clone()),
-                envelopes.clone(),
-                1,
-            )),
+            "rep" => Some(RecvSink::rep(RecvSink::Channel(pipe.clone()), 1)),
             "actor" => None,
             _ => unreachable!(),
         };
@@ -4439,11 +4674,13 @@ mod tests {
             if name == "CONTROL" && body == b"reverse"[..])
         );
         if kind == "rep" {
-            assert_eq!(
-                envelopes.lock().unwrap().len(),
-                1,
-                "only admitted requests may publish an envelope"
-            );
+            let request = pipe_receiver
+                .prefetch_and_pop()
+                .expect("one admitted request");
+            assert_eq!(request.routing_id(), Some(2));
+            assert_eq!(request.get(0), Some(b"".as_slice()));
+            assert_eq!(request.get(1), Some([0_u8; 128].as_slice()));
+            assert!(pipe_receiver.prefetch_and_pop().is_none());
         }
         server_control.send(PeerDriverCommand::Close).await.unwrap();
         tokio::time::timeout(Duration::from_millis(500), server_control.closed())
@@ -4879,6 +5116,92 @@ mod tests {
 
     #[cfg(feature = "ws")]
     #[tokio::test]
+    async fn peer_ws_close_preserves_coalesced_messages_through_backpressure() {
+        use omq_proto::proto::connection::WsRole;
+
+        for direct in [false, true] {
+            let mut push = Connection::new(
+                ConnectionConfig::new(Role::Server, SocketType::Push).ws_role(WsRole::Server),
+            );
+            let mut pull = Connection::new(
+                ConnectionConfig::new(Role::Client, SocketType::Pull).ws_role(WsRole::Client),
+            );
+            for _ in 0..10 {
+                let push_out = drain_transmit(&mut push);
+                let pull_out = drain_transmit(&mut pull);
+                if !push_out.is_empty() {
+                    pull.handle_input(Bytes::from(push_out)).unwrap();
+                }
+                if !pull_out.is_empty() {
+                    push.handle_input(Bytes::from(pull_out)).unwrap();
+                }
+            }
+            assert!(push.is_ready() && pull.is_ready());
+            while pull.poll_event().is_some() {}
+            let messages = [
+                Message::single("before close"),
+                Message::single("last message"),
+            ];
+            for message in &messages {
+                push.send_message(message).unwrap();
+            }
+            push.send_ws_close(1000);
+            let wire = drain_transmit(&mut push);
+            let (stream, mut remote) = tokio::io::duplex(4096);
+            // Supply both messages and CLOSE in one read, independent of TCP timing.
+            remote.write_all(&wire).await.unwrap();
+            let (commands, inbox) = mpsc::channel(4);
+            let (events, mut event_inbox) = mpsc::channel(1);
+            let (producer, mut consumer) = yring::spsc(1);
+            let space = Arc::new(StateSignal::new());
+            let mut driver =
+                ConnectionDriver::new(stream, pull, inbox, events, 1, CancellationToken::new());
+            if direct {
+                driver = driver.with_recv_sink(RecvSink::Yring(YringSink {
+                    producer,
+                    signal: Box::new(|| {}),
+                    space: space.clone(),
+                }));
+            }
+            commands
+                .send(PeerDriverCommand::ActivateDataPlane)
+                .await
+                .unwrap();
+            let task = tokio::spawn(driver.run());
+            tokio::task::yield_now().await;
+            for expected in messages {
+                let received = tokio::time::timeout(Duration::from_secs(1), async {
+                    if direct {
+                        loop {
+                            if let Some(message) = consumer.prefetch_and_pop() {
+                                consumer.release();
+                                space.notify_changed();
+                                break message;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    } else {
+                        let (_, event) = event_inbox.recv().await.unwrap();
+                        let PeerEvent::Event(Event::Message(message)) = event else {
+                            panic!("peer closed before delivering {expected:?}: {event:?}");
+                        };
+                        message
+                    }
+                })
+                .await
+                .expect("peer CLOSE discarded a preceding message");
+                assert_eq!(received, expected);
+            }
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("peer CLOSE did not finish after receive admission")
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
     async fn graceful_ws_close_drains_data_waits_for_reply_and_keeps_original_deadline() {
         use omq_proto::proto::connection::WsRole;
 
@@ -5007,8 +5330,8 @@ mod tests {
             0,
             CancellationToken::new(),
         );
-        tokio::spawn(async move { s.run().await });
-        tokio::spawn(async move { c.run().await });
+        tokio::spawn(Box::pin(s.run()));
+        tokio::spawn(Box::pin(c.run()));
 
         let _ = c_inbox_tx; // keep inbox open
         let _ = s_inbox_tx;
@@ -5299,6 +5622,7 @@ mod tests {
             .unwrap();
         let mut sink = Some(RecvSink::Peer(sink));
         let (events, _rx) = mpsc::channel(1);
+        let mut events = PeerOutput::from(events);
         let mut pending = None;
         for _ in 0..8 {
             assert_eq!(
@@ -5308,7 +5632,7 @@ mod tests {
                     ReceiveProfile::Throughput,
                     MessageDelivery {
                         sink: &mut sink,
-                        peer_out: &events,
+                        peer_out: &mut events,
                         peer_id: 0,
                         completion: &mut CompletionProgress::default(),
                         pending: &mut pending,

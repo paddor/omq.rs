@@ -1,10 +1,13 @@
 use std::cell::RefCell;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 
-use crate::engine::PeerDriverData;
+use crate::engine::send_pipe::SendPreparation;
 use crate::engine::transmit_slot::{PeerTransmitSlot, TryFrameResult};
+use crate::engine::{PeerDriverData, SendPipeError};
 use crate::routing::peer_outbound::PeerOutbound;
+use crate::transport::inproc::{Admission, InprocSender};
 use omq_proto::error::Result;
 use omq_proto::fan_out_frame::{
     FanOutFrame, clear_fan_out_frame, encode_fan_out_message, finish_fan_out_frame,
@@ -14,26 +17,77 @@ use omq_proto::message::Message;
 
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
-fn data_inbox(target: &PeerOutbound) -> &tokio::sync::mpsc::Sender<PeerDriverData> {
+fn data_inbox(target: &PeerOutbound) -> Option<&crate::engine::data_inbox::Sender> {
     match target {
-        PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => inbox,
+        PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => Some(inbox),
+        PeerOutbound::Inproc(_) => None,
+    }
+}
+
+/// Space held for one fallback peer until the publication commits.
+pub(super) enum Reserved<'a> {
+    Inbox(crate::engine::data_inbox::Permit<'a>),
+    /// Inproc ring with free space. The publish lock keeps other senders
+    /// of this socket out until the message is pushed.
+    Inproc(&'a InprocSender),
+}
+
+impl Reserved<'_> {
+    pub(super) fn send(self, msg: Message) {
+        match self {
+            Self::Inbox(permit) => permit.send(PeerDriverData::SendMessage(msg)),
+            Self::Inproc(sender) => {
+                let _ = sender.try_send_prepared(msg, SendPreparation::Plain);
+            }
+        }
     }
 }
 
 /// Reserve the entire fallback publication before changing any peer queue.
 /// Closed peers are ignored; full live peers must cause try-send to retry.
+/// The caller holds the publish lock until every reservation is sent.
 pub(super) fn try_reserve_targets(
     targets: &[PeerOutbound],
-) -> Option<smallvec::SmallVec<[tokio::sync::mpsc::Permit<'_, PeerDriverData>; 8]>> {
-    let mut permits = smallvec::SmallVec::new();
+) -> Option<smallvec::SmallVec<[Reserved<'_>; 8]>> {
+    let mut reserved = smallvec::SmallVec::new();
     for target in targets {
-        match data_inbox(target).try_reserve() {
-            Ok(permit) => permits.push(permit),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return None,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+        match target {
+            PeerOutbound::Inproc(sender) => match sender.admission() {
+                Admission::Ready => reserved.push(Reserved::Inproc(sender)),
+                Admission::Full => return None,
+                Admission::Closed => {}
+            },
+            PeerOutbound::Wire { inbox, .. } | PeerOutbound::Inbox(inbox) => {
+                match inbox.try_reserve() {
+                    Ok(permit) => reserved.push(Reserved::Inbox(permit)),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return None,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+                }
+            }
         }
     }
-    Some(permits)
+    Some(reserved)
+}
+
+/// Wait until one fallback peer has taken the message or closed.
+async fn deliver_blocking(target: &PeerOutbound, mut msg: Message, publish: &Mutex<()>) {
+    let PeerOutbound::Inproc(sender) = target else {
+        if let Some(inbox) = data_inbox(target) {
+            let _ = inbox.send(PeerDriverData::SendMessage(msg)).await;
+        }
+        return;
+    };
+    loop {
+        let sent = {
+            let _publishing = publish.lock().expect("fanout publish poisoned");
+            sender.try_send_prepared(msg, SendPreparation::Plain)
+        };
+        match sent {
+            Ok(()) | Err(SendPipeError::Closed(_)) => return,
+            Err(SendPipeError::Full(returned)) => msg = returned,
+        }
+        sender.wait_space().await;
+    }
 }
 
 /// Each peer waits independently. A stalled peer cannot delay publication
@@ -42,11 +96,12 @@ pub(super) async fn dispatch_blocking(
     targets: &[PeerOutbound],
     msg: &Message,
     lanes: &super::lane::FanOutLanes,
+    publish: &Mutex<()>,
 ) {
     use futures::{StreamExt, stream::FuturesUnordered};
     let mut pending = FuturesUnordered::new();
     for target in targets {
-        pending.push(data_inbox(target).send(PeerDriverData::SendMessage(msg.clone())));
+        pending.push(deliver_blocking(target, msg.clone(), publish));
     }
     let mut budget = omq_proto::flow::DrainBudget::WORKER;
     while !pending.is_empty() {
@@ -80,7 +135,11 @@ pub(super) fn dispatch_to_targets(
             _ => Ok(()),
         },
         _ => {
-            if targets.iter().any(PeerOutbound::requires_per_peer_encoding) {
+            // Inproc rings and inboxes take the message itself, so a set
+            // without a wire peer has nothing to encode.
+            if targets.iter().any(PeerOutbound::requires_per_peer_encoding)
+                || !targets.iter().any(PeerOutbound::is_wire)
+            {
                 for t in targets {
                     if t.try_encode(msg) == TryFrameResult::Full
                         && mute_policy == FanOutMutePolicy::DropNewest
@@ -150,6 +209,9 @@ fn push_to_peers(
             PeerOutbound::Inbox(tx) => {
                 let _ = tx.try_send(PeerDriverData::SendMessage(msg.clone()));
             }
+            PeerOutbound::Inproc(sender) => {
+                let _ = sender.try_send_prepared(msg.clone(), SendPreparation::Plain);
+            }
         }
     }
 }
@@ -211,6 +273,36 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn fanring_publication_reserves_all_clone_lanes_before_committing() {
+        use crate::engine::data_inbox::{SenderLanes, channel};
+        let scope = SenderLanes::default();
+        let (first, mut first_rx) = channel(1);
+        let (second, mut second_rx) = channel(1);
+        let first = scope.bind(&first);
+        let second = scope.bind(&second);
+        second
+            .try_send(PeerDriverData::SendMessage(Message::single("old")))
+            .unwrap();
+        let targets = [PeerOutbound::Inbox(first), PeerOutbound::Inbox(second)];
+        assert!(try_reserve_targets(&targets).is_none());
+        assert!(
+            first_rx.is_empty(),
+            "failed publication changed an earlier peer"
+        );
+        assert!(second_rx.recv().await.is_some());
+        let reserved = try_reserve_targets(&targets).unwrap();
+        for permit in reserved {
+            permit.send(Message::single("new"));
+        }
+        for receiver in [&mut first_rx, &mut second_rx] {
+            let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+                panic!("message")
+            };
+            assert_eq!(message.part_slice(0), Some(b"new".as_slice()));
+        }
+    }
+
     fn blocking_sender() -> super::super::FanOutSend {
         let options = omq_proto::Options {
             xpub_nodrop: true,
@@ -232,13 +324,14 @@ mod tests {
         let (data_inbox, data) = tokio::sync::mpsc::channel(1);
         sender.connection_added(
             id,
-            crate::engine::PeerDriverHandle {
-                inbox,
-                data_inbox,
+            crate::engine::ActorPeerDriverHandle {
+                inbox: inbox.into(),
+                data_inbox: data_inbox.into(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 transmit_slot: None,
                 direct_tcp_writer: None,
                 send_pipe: None,
+                inproc: None,
             },
             0,
         );
@@ -328,7 +421,7 @@ mod tests {
         let (inbox, _rx) = tokio::sync::mpsc::channel(1);
         let target = PeerOutbound::Wire {
             slot: slot.clone(),
-            inbox,
+            inbox: inbox.into(),
             direct: None,
         };
         let mut deactivated = false;
@@ -401,12 +494,12 @@ mod tests {
         let targets = [
             PeerOutbound::Wire {
                 slot: slot1.clone(),
-                inbox: inbox1,
+                inbox: inbox1.into(),
                 direct: None,
             },
             PeerOutbound::Wire {
                 slot: slot2.clone(),
-                inbox: inbox2,
+                inbox: inbox2.into(),
                 direct: None,
             },
         ];
@@ -425,7 +518,7 @@ mod tests {
         let (inbox, _rx) = tokio::sync::mpsc::channel(1);
         PeerOutbound::Wire {
             slot: slot.clone(),
-            inbox,
+            inbox: inbox.into(),
             direct: None,
         }
     }

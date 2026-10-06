@@ -506,6 +506,12 @@ impl Connection {
     /// length does not match what `begin_supplied_payload` returned.
     /// Mechanism / decode errors propagate as-is.
     pub fn supply_payload(&mut self, payload: Bytes) -> Result<()> {
+        self.supply_payload_frame(Payload::from_bytes(payload))
+    }
+
+    /// Supply an owning payload with its allocation accounting intact.
+    /// State and length requirements are the same as [`Self::supply_payload`].
+    pub fn supply_payload_frame(&mut self, payload: Payload) -> Result<()> {
         let (flags, expected_len) = match self.state {
             State::AwaitingSuppliedPayload { flags, payload_len } => (flags, payload_len),
             State::Closed => return Err(Error::Closed),
@@ -523,7 +529,7 @@ impl Connection {
             )));
         }
         self.state = State::Ready;
-        self.decode_assembled_frame(flags, Payload::from_bytes(payload))?;
+        self.decode_assembled_frame(flags, payload)?;
         // Drive in case in_buf still holds further frames the caller
         // pushed before deciding to switch back to direct-recv.
         self.drive()

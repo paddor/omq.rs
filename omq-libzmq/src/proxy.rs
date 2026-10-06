@@ -1,8 +1,8 @@
 //! `zmq_proxy` / `zmq_proxy_steerable`.
 //!
 //! The C binding cannot run `omq_tokio::Proxy` directly. libzmq sockets
-//! install a yring recv sink and an optional inproc byte bypass, so the
-//! async `Socket::recv` pipe is not the authoritative inbound queue. This
+//! install a yring recv sink, so the async `Socket::recv` pipe is not the
+//! authoritative inbound queue. This
 //! proxy uses the same message-level policy as the tokio proxy, but its I/O
 //! adapters read and write through libzmq's queues.
 

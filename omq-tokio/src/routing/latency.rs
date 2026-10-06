@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::engine::{PeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
+use crate::engine::{ActorPeerDriverHandle, SendPipeConsumer, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
@@ -43,6 +43,7 @@ pub(crate) struct LatencySend {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
+    data_lanes: crate::engine::data_inbox::SenderLanes,
     state: Arc<Mutex<State>>,
     changed: Arc<crate::engine::signal::StateSignal>,
     closed: Arc<AtomicBool>,
@@ -60,6 +61,7 @@ impl LatencySend {
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
+            data_lanes: crate::engine::data_inbox::SenderLanes::default(),
             state: self.state.clone(),
             changed: self.changed.clone(),
             closed: self.closed.clone(),
@@ -75,7 +77,7 @@ impl LatencySend {
         rx
     }
 
-    pub(crate) fn connection_added(&mut self, route_id: u64, handle: &PeerDriverHandle) {
+    pub(crate) fn connection_added(&mut self, route_id: u64, handle: &ActorPeerDriverHandle) {
         let mut state = self.state.lock().expect("latency send state");
         state.remove_peer(route_id);
         state.peers.push(Peer {
@@ -122,6 +124,15 @@ impl LatencySend {
 }
 
 impl Submitter {
+    pub(crate) fn clone_shared(&self) -> Self {
+        Self {
+            data_lanes: self.data_lanes.clone_shared(),
+            state: self.state.clone(),
+            changed: self.changed.clone(),
+            closed: self.closed.clone(),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         let mut state = self.state.lock().expect("latency send state");
@@ -151,7 +162,7 @@ impl Submitter {
                 state
                     .peers
                     .iter()
-                    .map(|peer| peer.target.clone())
+                    .map(|peer| peer.target.bind(&self.data_lanes))
                     .collect::<smallvec::SmallVec<[PeerOutbound; 1]>>(),
                 state.space_available(),
             )
@@ -183,7 +194,10 @@ impl Submitter {
                 return true;
             }
             let state = self.state.lock().expect("latency send state");
-            state.peers.iter().any(|peer| peer.target.send_ready())
+            state
+                .peers
+                .iter()
+                .any(|peer| peer.target.bind(&self.data_lanes).send_ready())
                 || (state.peers.is_empty()
                     && state
                         .pending
@@ -218,7 +232,11 @@ impl Submitter {
         for _ in 0..count {
             let index = state.cursor % count;
             state.cursor = (index + 1) % count;
-            match state.peers[index].target.try_send(msg) {
+            match state.peers[index]
+                .target
+                .bind(&self.data_lanes)
+                .try_send(msg)
+            {
                 Ok(()) => return Ok(()),
                 Err(SendPipeError::Full(returned) | SendPipeError::Closed(returned)) => {
                     msg = returned;
@@ -301,7 +319,7 @@ mod tests {
 
     use super::{LatencySend, Peer};
     use crate::engine::transmit_slot::PeerTransmitSlot;
-    use crate::engine::{PeerDriverCommand, PeerDriverHandle};
+    use crate::engine::{ActorPeerDriverHandle, PeerDriverCommand};
     use crate::routing::peer_outbound::PeerOutbound;
     use omq_proto::frame_buffer::ARENA_THRESHOLD;
     use omq_proto::message::Message;
@@ -317,7 +335,7 @@ mod tests {
     fn direct_peer_handle(
         slot: Arc<PeerTransmitSlot>,
     ) -> (
-        PeerDriverHandle,
+        ActorPeerDriverHandle,
         tokio::sync::mpsc::Receiver<crate::engine::PeerDriverData>,
     ) {
         let (tcp, _peer) = tcp_pair();
@@ -325,13 +343,14 @@ mod tests {
         let (inbox, _rx) = tokio::sync::mpsc::channel::<PeerDriverCommand>(1);
         let (data_inbox, data_rx) = tokio::sync::mpsc::channel(1);
         (
-            PeerDriverHandle {
-                inbox,
-                data_inbox,
+            ActorPeerDriverHandle {
+                inbox: inbox.into(),
+                data_inbox: data_inbox.into(),
                 cancel: CancellationToken::new(),
                 transmit_slot: Some(slot),
                 direct_tcp_writer: Some(Arc::new(direct)),
                 send_pipe: None,
+                inproc: None,
             },
             data_rx,
         )
@@ -397,13 +416,14 @@ mod tests {
             let mut receivers = Vec::new();
             for id in 0..peers {
                 let (data_inbox, receiver) = tokio::sync::mpsc::channel(1);
-                let handle = PeerDriverHandle {
-                    inbox: tokio::sync::mpsc::channel(1).0,
-                    data_inbox,
+                let handle = ActorPeerDriverHandle {
+                    inbox: tokio::sync::mpsc::channel(1).0.into(),
+                    data_inbox: data_inbox.into(),
                     cancel: CancellationToken::new(),
                     transmit_slot: None,
                     direct_tcp_writer: None,
                     send_pipe: None,
+                    inproc: None,
                 };
                 send.connection_added(id, &handle);
                 receivers.push(receiver);

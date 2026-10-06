@@ -32,7 +32,7 @@ impl PeerRecvSink {
     }
 
     fn alive(&self) -> bool {
-        self.state.current.load(Ordering::Acquire)
+        self.state.current()
             && self
                 .producer
                 .as_ref()
@@ -43,12 +43,15 @@ impl PeerRecvSink {
         self.pending.is_some()
     }
 
-    pub(crate) fn push(&mut self, message: Message) -> bool {
+    pub(crate) fn push(&mut self, mut message: Message) -> bool {
         assert!(
             self.pending.is_none(),
             "drain must stop at a full PEER queue"
         );
-        if !self.alive() || self.shared.budget.oversize(&message) {
+        // Keep unknown byte owners from pinning arbitrarily large backing
+        // allocations behind a small visible frame. Known buffers stay shared.
+        message.bound_storage();
+        if !self.alive() || self.state.budget.oversize(&message) {
             return false;
         }
         // Socket close stops application admission immediately, but outbound
@@ -62,7 +65,7 @@ impl PeerRecvSink {
             self.pending = Some(message);
             return true;
         }
-        let message = match self.shared.budget.reserve(message) {
+        let message = match self.state.budget.reserve(message) {
             Ok(message) => message,
             Err(message) => {
                 self.pending = Some(message);
@@ -99,13 +102,14 @@ impl PeerRecvSink {
             // Coordinated fanring publishes each entry. External notification
             // remains one coalesced mark per driver batch, never per push.
             self.shared.mark();
+            self.state.data.notify_changed();
         }
     }
 
     pub(crate) async fn ready(&mut self) {
         self.flush();
         let seen = self.state.space.generation();
-        let budget_seen = self.shared.budget.space.generation();
+        let budget_seen = self.state.budget.space.generation();
         if self.shared.closed.load(Ordering::Acquire) || !self.alive() {
             return;
         }
@@ -118,9 +122,9 @@ impl PeerRecvSink {
         {
             self.state.space.changed_after(seen).await;
         } else if let Some(message) = &self.pending
-            && !self.shared.budget.room(message.max_message_size_len())
+            && !self.state.budget.room(super::Budget::charge(message))
         {
-            self.shared.budget.space.changed_after(budget_seen).await;
+            self.state.budget.space.changed_after(budget_seen).await;
         }
     }
 }
@@ -133,6 +137,10 @@ impl Drop for PeerRecvSink {
         self.producer.take();
         // Release the unqueued payload before waking the application.
         self.pending.take();
+        if self.state.disconnect() {
+            self.shared.source_changed();
+        }
+        self.state.data.notify_changed();
         self.state.space.notify_changed();
         self.shared.mark();
     }

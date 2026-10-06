@@ -3,6 +3,7 @@ package io.omq;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -42,6 +43,9 @@ final class JeroMQInteropTest {
             String endpoint = pull.bind("tcp://127.0.0.1:0");
             ZMQ.Socket push = zcontext.createSocket(org.zeromq.SocketType.PUSH);
             try {
+                // JeroMQ 0.6 can lose selector registration during connector
+                // handoff. Let its handshake timer retry within our deadline.
+                assertTrue(push.setHandshakeIvl(1_000));
                 push.connect(endpoint);
                 pull.waitConnected(1, Duration.ofSeconds(5));
                 assertEquals(true, push.send("hello-omq".getBytes(StandardCharsets.UTF_8), 0));

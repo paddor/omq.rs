@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use bytes::Bytes;
 use omq_proto::endpoint::Endpoint;
 use omq_proto::error::{Error, Result};
+use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
@@ -18,7 +19,7 @@ use omq_proto::type_state::TypeState;
 
 use super::actor::{CloseLinger, SocketCommand, SocketDriver, spawn_driver};
 use super::monitor::{ConnectionStatus, MonitorPublisher, MonitorStream, PeerInfo};
-use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles, SpscPush};
+use super::recv::{BlockingRecvCancel, SpscAwareRecv, SpscHandles};
 use crate::routing::{RepEnvelope, SendStrategy, SendSubmitter};
 use crate::transport::inproc::InprocRegistry;
 
@@ -48,10 +49,11 @@ pub use omq_proto::error::TrySendError;
 /// so concurrent `recv` calls from different tasks are safe. Each
 /// message is delivered to exactly one caller. `send` goes through
 /// a per-socket `SendSubmitter` that serializes internally, so
-/// concurrent `send` calls are also safe. PEER socket clones own separate
-/// producer lanes per destination. Sequential sends through one clone preserve
+/// concurrent `send` calls are also safe. Fallback data inboxes and PEER sends
+/// use separate producer lanes per destination for each socket clone. Sequential sends through one clone preserve
 /// FIFO per destination; concurrent sends and distinct clones have no relative
-/// order. PEER bounds producer registrations and aggregate per-connection queued
+/// order. Fallback inboxes bound producer registrations and capacity per lane.
+/// PEER bounds producer registrations and aggregate per-connection queued
 /// payloads. PEER receives share one fair fan-in across all socket clones.
 #[derive(Clone, Debug)]
 pub struct Socket {
@@ -70,9 +72,7 @@ struct Inner {
     /// Pre-built submitter for socket types that bypass the actor on send.
     /// Cloned from the `SendStrategy` before the driver is spawned.
     send_submitter: SendSubmitter,
-    /// REP request envelopes, one per queued request body, and the
-    /// envelope of the request being answered.
-    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
+    /// Peer and envelope of the request admitted by application receive.
     rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
@@ -93,6 +93,119 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// View a ROUTER or PEER socket through its identity-routing API.
+    pub fn identity_routing(&self) -> Result<super::identity::IdentitySocket> {
+        super::identity::IdentitySocket::try_from(self)
+    }
+
+    /// Send a body to a ROUTER or PEER identity without an identity part.
+    pub async fn send_to(&self, identity: impl AsRef<[u8]>, body: Message) -> Result<()> {
+        self.check_identity_routing()?;
+        if body.is_empty() {
+            return Err(Error::Protocol("send_to requires a message body".into()));
+        }
+        if self
+            .inner
+            .send_ops
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(SEND_YIELD_INTERVAL)
+        {
+            tokio::task::yield_now().await;
+        }
+        self.send_submitter.send_to(identity.as_ref(), body).await
+    }
+
+    /// Nonblocking identity send. `Full` returns the unchanged body.
+    pub fn try_send_to(
+        &self,
+        identity: impl AsRef<[u8]>,
+        body: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        self.check_identity_routing().map_err(TrySendError::Error)?;
+        if body.is_empty() {
+            return Err(TrySendError::Error(Error::Protocol(
+                "try_send_to requires a message body".into(),
+            )));
+        }
+        self.send_submitter.try_send_to(identity.as_ref(), body)
+    }
+
+    fn check_identity_routing(&self) -> Result<()> {
+        if matches!(
+            self.inner.socket_type,
+            SocketType::Router | SocketType::Peer
+        ) {
+            Ok(())
+        } else {
+            Err(Error::Protocol(
+                "identity routing requires a ROUTER or PEER socket".into(),
+            ))
+        }
+    }
+
+    /// Receive from any unpaused PEER, PULL, or GATHER connection (`None`),
+    /// or one exact source. PEER returns the body without an identity prefix;
+    /// its receipt exposes the logical identity. PULL and GATHER receipts have
+    /// no logical identity. Keep the receipt until accepting or discarding the
+    /// body, or return both with [`unshift`](Self::unshift). Other receivers
+    /// cannot overtake this message on its source while the receipt is live.
+    ///
+    /// Targeted waits wake only for that source and end with `Closed` after
+    /// disconnect, handover, or socket close. Cancellation consumes nothing.
+    /// ROUTER supports `None` with an inert receipt. Conflate and external
+    /// receive sinks do not support source claims.
+    pub async fn recv_from(
+        &self,
+        source: Option<&super::ReceiveSource>,
+    ) -> Result<(super::ReceiveReceipt, Message)> {
+        if self.inner.socket_type == SocketType::Router && source.is_none() {
+            let mut message = self.recv().await?;
+            return Ok((super::ReceiveReceipt::inert(message.pop_front()), message));
+        }
+        self.inner.recv_rx.recv_from(source).await
+    }
+
+    /// Nonblocking form of [`recv_from`](Self::recv_from).
+    pub fn try_recv_from(
+        &self,
+        source: Option<&super::ReceiveSource>,
+    ) -> Result<(super::ReceiveReceipt, Message)> {
+        if self.inner.socket_type == SocketType::Router && source.is_none() {
+            let mut message = self.try_recv()?;
+            return Ok((super::ReceiveReceipt::inert(message.pop_front()), message));
+        }
+        self.inner.recv_rx.try_recv_from(source)
+    }
+
+    /// Hold a received message ahead of its source's queued messages. Fair
+    /// and ordinary receives skip the source until a targeted receive takes
+    /// the held message and its new receipt is released. No new byte permit
+    /// is reserved. A stale or oversized return preserves caller ownership
+    /// through [`UnshiftError`](super::UnshiftError).
+    pub fn unshift(
+        &self,
+        receipt: super::ReceiveReceipt,
+        message: Message,
+    ) -> std::result::Result<(), super::UnshiftError> {
+        if self.inner.socket_type == SocketType::Gather && message.len() != 1 {
+            return Err(super::UnshiftError {
+                error: Error::Protocol("GATHER unshift requires a single-frame message".into()),
+                message,
+            });
+        }
+        self.inner.recv_rx.unshift(receipt, message)
+    }
+
+    /// Copy an internal binding handle without creating another send lane.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            send_submitter: self.send_submitter.clone_shared(),
+        }
+    }
+
     /// Send one body to a RADIO group.
     pub async fn send_group(&self, group: impl Into<Bytes>, body: impl Into<Bytes>) -> Result<()> {
         if self.inner.socket_type != SocketType::Radio {
@@ -205,7 +318,6 @@ impl Socket {
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
-        let rep_pending = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let rep_current = Arc::new(Mutex::new(None));
         let req_awaiting_reply = Arc::new(AtomicBool::new(false));
         let subscribe_count = Arc::new(AtomicU64::new(0));
@@ -220,7 +332,6 @@ impl Socket {
             send_strategy,
             spsc.clone(),
             type_state,
-            rep_pending.clone(),
             req_awaiting_reply.clone(),
             recv_sink_config,
             subscribe_count.clone(),
@@ -242,13 +353,13 @@ impl Socket {
                     recv_pipe_notify,
                     recv_pipe_space,
                     spsc,
-                    latency_profile,
+                    // REP admits one complete request per receive call.
+                    latency_profile || socket_type == SocketType::Rep,
                     recv_batching,
                     recv_spin,
                 ),
                 monitor,
                 send_submitter,
-                rep_pending,
                 rep_current,
                 req_awaiting_reply,
                 send_ops: AtomicU32::new(0),
@@ -279,33 +390,42 @@ impl Socket {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Read a complete transport item without advancing request/reply state.
+    /// Compatibility receive relays must defer admission to their application.
     #[doc(hidden)]
-    pub fn mark_req_reply_received_for_external_recv(&self) {
-        if self.inner.socket_type == SocketType::Req {
-            self.inner
-                .req_awaiting_reply
-                .store(false, Ordering::Release);
-        }
+    pub async fn recv_for_external_recv(&self) -> Result<Message> {
+        self.inner.recv_rx.recv().await
     }
 
+    /// Nonblocking transport receive for compatibility polling/staging.
+    /// Admission still belongs to the later application receive.
     #[doc(hidden)]
-    pub fn mark_rep_request_received_for_external_recv(&self) {
-        if self.inner.socket_type == SocketType::Rep {
-            self.admit_rep_request();
-        }
+    pub fn try_recv_for_external_recv(&self) -> Result<Message> {
+        self.inner.recv_rx.try_recv()
     }
 
-    /// Make the oldest received request's envelope the reply target. The
-    /// receive queue holds REP bodies; drivers and the actor already split
-    /// the envelope at the first empty frame.
-    fn admit_rep_request(&self) {
-        let request = self
-            .inner
-            .rep_pending
-            .lock()
-            .expect("rep pending")
-            .pop_front();
-        *self.inner.rep_current.lock().expect("rep current") = request;
+    /// Validate and admit a transport item at application receive. REP carries
+    /// its peer ID, envelope, and body together through every receive queue.
+    #[doc(hidden)]
+    pub fn prepare_external_recv(&self, mut message: Message) -> Option<Message> {
+        match self.inner.socket_type {
+            SocketType::Req => {
+                if message.len() < 2 || !message.pop_front()?.is_empty() {
+                    return None;
+                }
+                self.inner
+                    .req_awaiting_reply
+                    .store(false, Ordering::Release);
+                Some(message)
+            }
+            SocketType::Rep => {
+                let peer_id = u64::from(message.routing_id()?.checked_sub(1)?);
+                let (envelope, body) = crate::routing::split_rep_request(&message)?;
+                *self.inner.rep_current.lock().expect("rep current") = Some((peer_id, envelope));
+                Some(body)
+            }
+            _ => Some(message),
+        }
     }
 
     /// Bind to an endpoint. Returns the resolved endpoint once the
@@ -455,14 +575,10 @@ impl Socket {
                     .await
             }
             SocketType::Server => self.send_submitter.send_server(msg).await,
-            SocketType::Router | SocketType::Peer | SocketType::Stream => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                self.send_submitter.send(msg).await
-            }
             SocketType::XSub => self.send_xsub_raw_command(&msg).await,
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)?;
-                self.send_spsc_or_submit(msg).await
+                self.send_submitter.send(msg).await
             }
         }
     }
@@ -497,7 +613,15 @@ impl Socket {
                         .req_awaiting_reply
                         .store(false, Ordering::Release);
                 }
-                result
+                match result {
+                    Err(TrySendError::Full(mut returned)) => {
+                        // Full returns the original application message so
+                        // retrying never prepends a second REQ delimiter.
+                        let _ = returned.pop_front();
+                        Err(TrySendError::Full(returned))
+                    }
+                    other => other,
+                }
             }
             SocketType::Rep => {
                 let mut current = self.inner.rep_current.lock().expect("rep identity");
@@ -514,20 +638,11 @@ impl Socket {
                 result
             }
             SocketType::Server => self.send_submitter.try_send_server(msg),
-            SocketType::Router => {
-                check_pre_send_frame_count(self.inner.socket_type, &msg)
-                    .map_err(TrySendError::Error)?;
-                self.send_submitter.try_send(msg)
-            }
             SocketType::XSub => self.try_send_xsub_raw_command(msg),
             _ => {
                 check_pre_send_frame_count(self.inner.socket_type, &msg)
                     .map_err(TrySendError::Error)?;
-                match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                    SpscPush::Sent => Ok(()),
-                    SpscPush::Full { msg, .. } => Err(TrySendError::Full(msg)),
-                    SpscPush::Unavailable(msg) => self.send_submitter.try_send(msg),
-                }
+                self.send_submitter.try_send(msg)
             }
         }
     }
@@ -571,17 +686,28 @@ impl Socket {
         }
     }
 
-    pub(crate) fn wait_for_spsc_space(&self, msg: &Message) -> bool {
-        self.inner.recv_rx.wait_for_spsc_space(msg)
-    }
-
     #[doc(hidden)]
     pub async fn wait_send_progress_for(&self, msg: &Message) {
         if self.inner.socket_type == SocketType::XSub && xsub_raw_command(msg).is_ok() {
             let _ = self.inner.cmd_tx.reserve().await;
             return;
         }
-        if self.inner.recv_rx.wait_for_spsc_space_async(msg).await {
+        let routed_peer = match self.inner.socket_type {
+            SocketType::Rep => self
+                .inner
+                .rep_current
+                .lock()
+                .expect("rep identity")
+                .as_ref()
+                .map(|(peer_id, _)| *peer_id),
+            SocketType::Server => msg
+                .routing_id()
+                .and_then(|id| id.checked_sub(1))
+                .map(u64::from),
+            _ => None,
+        };
+        if let Some(peer_id) = routed_peer {
+            self.send_submitter.wait_peer_send_progress(peer_id).await;
             return;
         }
         self.send_submitter.wait_send_progress(msg).await;
@@ -594,48 +720,40 @@ impl Socket {
     /// Receive the next message. Blocks until one is available or the socket
     /// is closed.
     pub async fn recv(&self) -> Result<Message> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.recv().await?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.recv().await?;
-                self.admit_rep_request();
-                Ok(msg)
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.recv().await;
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.recv().await?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.recv().await,
+            if !budget.account(byte_len) {
+                tokio::task::yield_now().await;
+                budget.reset();
+            }
         }
     }
 
-    /// Blocking receive for sync callers. The calling thread registers
-    /// itself and parks until data arrives.
+    /// Blocking receive for sync callers. Register the caller and park until
+    /// a valid complete message arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.blocking_recv()?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.blocking_recv()?;
-                self.admit_rep_request();
-                Ok(msg)
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv();
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.blocking_recv()?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.blocking_recv(),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -643,28 +761,22 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let Some(mut msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
-                    return Ok(None);
-                };
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(Some(msg));
-            },
-            SocketType::Rep => {
-                let Some(msg) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
-                    return Ok(None);
-                };
-                self.admit_rep_request();
-                Ok(Some(msg))
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv_cancelable(cancel);
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let Some(message) = self.inner.recv_rx.blocking_recv_cancelable(cancel)? else {
+                return Ok(None);
+            };
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(Some(message));
             }
-            _ => self.inner.recv_rx.blocking_recv_cancelable(cancel),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -673,66 +785,50 @@ impl Socket {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let Some(mut msg) = self
-                    .inner
-                    .recv_rx
-                    .blocking_recv_registered_cancelable(cancel)?
-                else {
-                    return Ok(None);
-                };
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(Some(msg));
-            },
-            SocketType::Rep => {
-                let Some(msg) = self
-                    .inner
-                    .recv_rx
-                    .blocking_recv_registered_cancelable(cancel)?
-                else {
-                    return Ok(None);
-                };
-                self.admit_rep_request();
-                Ok(Some(msg))
-            }
-            _ => self
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self
                 .inner
                 .recv_rx
-                .blocking_recv_registered_cancelable(cancel),
+                .blocking_recv_registered_cancelable(cancel);
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let Some(message) = self
+                .inner
+                .recv_rx
+                .blocking_recv_registered_cancelable(cancel)?
+            else {
+                return Ok(None);
+            };
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(Some(message));
+            }
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
-    /// Blocking receive with a timeout for sync callers.
     pub(crate) fn blocking_recv_timeout(&self, timeout: std::time::Duration) -> Result<Message> {
-        let now = std::time::Instant::now();
-        let Some(deadline) = now.checked_add(timeout) else {
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.blocking_recv_timeout(timeout);
+        }
+        let Some(deadline) = std::time::Instant::now().checked_add(timeout) else {
             return self.blocking_recv();
         };
-        match self.inner.socket_type {
-            SocketType::Req => loop {
-                let mut msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
-                match msg.pop_front() {
-                    Some(delim) if delim.is_empty() => {}
-                    _ => continue,
-                }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
-                return Ok(msg);
-            },
-            SocketType::Rep => {
-                let msg = self.inner.recv_rx.blocking_recv_until(deadline)?;
-                self.admit_rep_request();
-                Ok(msg)
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.blocking_recv_until(deadline)?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
             }
-            _ => self.inner.recv_rx.blocking_recv_timeout(timeout),
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
         }
     }
 
@@ -888,25 +984,20 @@ impl Socket {
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
     pub fn try_recv(&self) -> Result<Message> {
-        if self.inner.socket_type == SocketType::Req {
-            loop {
-                let mut msg = self.inner.recv_rx.try_recv()?;
-                if let Some(delim) = msg.pop_front()
-                    && delim.is_empty()
-                {
-                    self.inner
-                        .req_awaiting_reply
-                        .store(false, Ordering::Release);
-                    return Ok(msg);
-                }
+        if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
+            return self.inner.recv_rx.try_recv();
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            let message = self.inner.recv_rx.try_recv()?;
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(message);
+            }
+            if !budget.account(byte_len) {
+                return Err(Error::WouldBlock);
             }
         }
-        if self.inner.socket_type == SocketType::Rep {
-            let msg = self.inner.recv_rx.try_recv()?;
-            self.admit_rep_request();
-            return Ok(msg);
-        }
-        self.inner.recv_rx.try_recv()
     }
 
     /// Subscribe to a topic prefix. Only valid on SUB / XSUB sockets; other
@@ -1137,19 +1228,11 @@ impl Socket {
             linger,
         };
         let zero_linger = matches!(effective_linger, Some(std::time::Duration::ZERO));
-        if zero_linger {
+        let ack = if zero_linger {
             match self.inner.cmd_tx.try_send(close) {
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.inner.cancel.cancel();
-                }
+                Err(mpsc::error::TrySendError::Full(_)) => self.inner.cancel.cancel(),
             }
-        } else {
-            let _ = self.inner.cmd_tx.send(close).await;
-        }
-        // Even if the driver is already gone, the channel may be closed; we
-        // treat that as "already closed" (success).
-        let ack = if zero_linger {
             tokio::select! {
                 biased;
                 res = rx => Some(res),
@@ -1159,7 +1242,22 @@ impl Socket {
                 }
             }
         } else {
-            Some(rx.await)
+            let complete = async {
+                let _ = self.inner.cmd_tx.send(close).await;
+                rx.await
+            };
+            // Include admission: a full protocol inbox can block the actor's
+            // current command before it can start its own linger timer.
+            if let Some(duration) = effective_linger {
+                if let Ok(result) = tokio::time::timeout(duration, complete).await {
+                    Some(result)
+                } else {
+                    self.inner.cancel.cancel();
+                    None
+                }
+            } else {
+                Some(complete.await)
+            }
         };
         let res = match ack {
             Some(Ok(res)) => res,
@@ -1275,7 +1373,13 @@ fn recv_handles(
         );
     let mut spsc = SpscHandles::new(blocking_recv_waker, conflate_recv);
     if supports_recv_batching(socket_type) && !conflate_recv && native {
-        spsc.fanin = Some(super::fanin::Fanin::new(
+        let source_aware = matches!(socket_type, SocketType::Pull | SocketType::Gather);
+        let constructor = if source_aware {
+            super::fanin::Fanin::new_source_aware
+        } else {
+            super::fanin::Fanin::new
+        };
+        spsc.fanin = Some(constructor(
             options.recv_hwm.max(16) as usize,
             spsc.recv_signal.clone(),
             spsc.blocking_recv_waker.clone(),
@@ -1333,37 +1437,6 @@ impl Socket {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(TrySendError::Full(msg)),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TrySendError::Closed),
-        }
-    }
-
-    async fn send_spsc_or_submit(&self, mut msg: Message) -> Result<()> {
-        loop {
-            match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                SpscPush::Sent => return Ok(()),
-                SpscPush::Unavailable(returned) => {
-                    return self.send_submitter.send(returned).await;
-                }
-                SpscPush::Full {
-                    msg: returned,
-                    space,
-                    ..
-                } => {
-                    msg = returned;
-                    let seen = space.generation();
-                    let changed = space.changed_after(seen);
-                    tokio::pin!(changed);
-                    match self.inner.recv_rx.try_push_spsc_or_full(msg) {
-                        SpscPush::Sent => return Ok(()),
-                        SpscPush::Unavailable(returned) => {
-                            return self.send_submitter.send(returned).await;
-                        }
-                        SpscPush::Full { msg: returned, .. } => {
-                            changed.await;
-                            msg = returned;
-                        }
-                    }
-                }
-            }
         }
     }
 }

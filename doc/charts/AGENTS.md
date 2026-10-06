@@ -23,12 +23,18 @@ Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
-| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, omq EXCL, tmq, zmq.rs, rzmq, rzmq-iouring |
-| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
+| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, omq MT, tmq, zmq.rs, rzmq, rzmq-iouring |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, tmq, zmq.rs, rzmq, rzmq-iouring |
+| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO/2IO/3IO/4IO, tmq, zmq.rs, rzmq, rzmq-iouring |
 
-PUSH/PULL sizes: 16B..4MiB (14 points). PUB/SUB sizes: 16B..16KiB
-(6 points, 64 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
+PUSH/PULL sizes: 16B..8MiB (15 points). PUB/SUB sizes: 16B..16KiB
+(6 points, 32 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
+
+MT uses Tokio's multithread application runtime with one worker per available
+CPU. The legend shows workers per process (6 on the current chart VM).
+
+The main REQ/REP latency chart uses a 600 px panel with a Y axis from
+0 to 250 μs in 25 μs steps.
 
 The `omq-tokio-1t-spin50` latency series sets `recv_spin` to 50 μs on both
 endpoints, with one owned IO thread per process. Main and comparison REQ/REP
@@ -50,8 +56,8 @@ Data: `comparisons.jsonl`. OMQ vs libzmq only.
 
 Main and comparison latency charts plot p99 round-trip latency with whiskers
 from p50 to p99.9. Each point and its whiskers come from the same cached run.
-The Y axis includes the full whisker range. All latency charts include CT.
-Sizes: 16B, 64B, 256B, 1KiB, 4KiB, 16KiB.
+Comparison Y axes include the full whisker range. All latency charts include CT.
+Sizes: 16B, 64B, 256B, 1KiB, 4KiB.
 
 ## PUB/SUB charts (2 files)
 

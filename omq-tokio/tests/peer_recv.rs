@@ -21,6 +21,246 @@ async fn connected(socket: &Socket) {
     socket.wait_connected(1, DEADLINE).await.unwrap();
 }
 
+#[tokio::test]
+async fn identity_view_preserves_targeted_claims_and_explicit_body_sends() {
+    let context = Context::new();
+    let server = context
+        .socket(SocketType::Peer, options("server"))
+        .identity_routing()
+        .unwrap();
+    let endpoint = server
+        .bind(Endpoint::Inproc {
+            name: "identity-source-view".into(),
+        })
+        .await
+        .unwrap();
+    let client = context
+        .socket(SocketType::Peer, options("client"))
+        .identity_routing()
+        .unwrap();
+    client.connect(endpoint).await.unwrap();
+    connected(&client).await;
+    connected(&server).await;
+    client
+        .send_to("server", Message::single("held"))
+        .await
+        .unwrap();
+    let (receipt, message) = server.recv_from_source(None).await.unwrap();
+    let source = receipt.source().unwrap().clone();
+    assert_eq!(receipt.identity(), Some(b"client".as_slice()));
+    server.unshift(receipt, message).unwrap();
+    server
+        .send_to("client", Message::single("reply while paused"))
+        .await
+        .unwrap();
+    let (identity, message) = client.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"server");
+    assert_eq!(message, Message::single("reply while paused"));
+    let (receipt, message) = server.try_recv_from_source(Some(&source)).unwrap();
+    assert_eq!(message, Message::single("held"));
+    drop(receipt);
+    client
+        .try_send_to("server", Message::single("accepted"))
+        .unwrap();
+    let (identity, message) = server.recv_from().await.unwrap();
+    assert_eq!(identity.as_ref(), b"client");
+    assert_eq!(message, Message::single("accepted"));
+    server.into_inner().close().await.unwrap();
+    client.into_inner().close().await.unwrap();
+}
+
+async fn source_backpressure(endpoint: Endpoint) {
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let server = context.socket(SocketType::Peer, options("server"));
+    let endpoint = server.bind(endpoint).await.unwrap();
+    let a = context.socket(SocketType::Peer, options("a"));
+    let b = context.socket(SocketType::Peer, options("b"));
+    a.connect(endpoint.clone()).await.unwrap();
+    b.connect(endpoint).await.unwrap();
+    connected(&a).await;
+    connected(&b).await;
+    server.wait_connected(2, DEADLINE).await.unwrap();
+    a.send(Message::multipart(["server", "held"]))
+        .await
+        .unwrap();
+    let (receipt, message) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.identity(), Some(b"a".as_slice()));
+    let source = receipt.source().unwrap().clone();
+    // Another application handle cannot overtake a live receipt.
+    let receiving = server.clone();
+    a.send(Message::multipart(["server", "next"]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        receiving.try_recv_from(Some(&source)),
+        Err(Error::WouldBlock)
+    ));
+    server.unshift(receipt, message).unwrap();
+    // Saturate only A. Outbound replies and B must remain usable.
+    saturate(&a, "server").await;
+    b.send(Message::multipart(["server", "healthy"]))
+        .await
+        .unwrap();
+    let healthy = tokio::time::timeout(DEADLINE, receiving.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(healthy.part_slice(0), Some(b"b".as_slice()));
+    assert_eq!(healthy.part_slice(1), Some(b"healthy".as_slice()));
+    server
+        .send(Message::multipart(["a", "reply while paused"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(DEADLINE, a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
+    for _ in 0..3 {
+        let (receipt, message) = receiving.try_recv_from(Some(&source)).unwrap();
+        assert_eq!(message.part_slice(0), Some(b"held".as_slice()));
+        assert!(matches!(server.try_recv(), Err(Error::WouldBlock)));
+        receiving.unshift(receipt, message).unwrap();
+    }
+    let (receipt, _) = server.try_recv_from(Some(&source)).unwrap();
+    drop(receipt);
+    let next = tokio::time::timeout(DEADLINE, receiving.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.part_slice(1), Some(b"next".as_slice()));
+    // A targeted wait on an outstanding claim must terminate on close.
+    let (receipt, _) = server.recv_from(Some(&source)).await.unwrap();
+    let mut waiting = Box::pin(receiving.recv_from(Some(&source)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), waiting.as_mut())
+            .await
+            .is_err()
+    );
+    server.close().await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(DEADLINE, waiting).await.unwrap(),
+        Err(Error::Closed)
+    ));
+    drop(receipt);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+async fn large_source_backpressure(endpoint: Endpoint) {
+    const SIZE: usize = 8 * 1024 * 1024;
+    let context = Context::with_config(ContextConfig { io_threads: 2 });
+    let server = context.socket(
+        SocketType::Peer,
+        options("server").max_message_size(SIZE + 1024),
+    );
+    let endpoint = server.bind(endpoint).await.unwrap();
+    let a = context.socket(SocketType::Peer, options("a").max_message_size(SIZE + 1024));
+    let b = context.socket(SocketType::Peer, options("b").max_message_size(SIZE + 1024));
+    a.connect(endpoint.clone()).await.unwrap();
+    b.connect(endpoint).await.unwrap();
+    server.wait_connected(2, DEADLINE).await.unwrap();
+    connected(&a).await;
+    connected(&b).await;
+    let payload = Bytes::from(vec![7; SIZE]);
+    a.send(Message::multipart([
+        Bytes::from_static(b"server"),
+        payload.clone(),
+    ]))
+    .await
+    .unwrap();
+    let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.identity(), Some(b"a".as_slice()));
+    let source = receipt.source().unwrap().clone();
+    server.unshift(receipt, body).unwrap();
+
+    tokio::time::timeout(DEADLINE, async {
+        // Inproc's bounded relay has 1024 slots in addition to socket queues.
+        for _ in 0..4096 {
+            let message = Message::multipart([Bytes::from_static(b"server"), payload.clone()]);
+            match tokio::time::timeout(Duration::from_millis(100), a.send(message)).await {
+                Err(_) => return,
+                Ok(result) => result.unwrap(),
+            }
+        }
+        panic!("paused large-message source did not backpressure");
+    })
+    .await
+    .unwrap();
+
+    for _ in 0..3 {
+        b.send(Message::multipart([
+            Bytes::from_static(b"server"),
+            payload.clone(),
+        ]))
+        .await
+        .unwrap();
+        let (receipt, body) = tokio::time::timeout(DEADLINE, server.recv_from(None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.identity(), Some(b"b".as_slice()));
+        assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
+        drop((receipt, body));
+        let (receipt, body) = server.try_recv_from(Some(&source)).unwrap();
+        assert_eq!(body.part_slice(0).unwrap().len(), SIZE);
+        server.unshift(receipt, body).unwrap();
+    }
+    server
+        .send(Message::multipart(["a", "reply while paused"]))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(DEADLINE, a.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.part_slice(1), Some(b"reply while paused".as_slice()));
+
+    let (receipt, body) = server.try_recv_from(Some(&source)).unwrap();
+    drop((receipt, body));
+    let next = tokio::time::timeout(DEADLINE, server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.part_slice(0), Some(b"a".as_slice()));
+    assert_eq!(next.part_slice(1).unwrap().len(), SIZE);
+    server.close().await.unwrap();
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_paused_large_source_keeps_other_sources_and_replies_progressing() {
+    large_source_backpressure(test_support::tcp_loopback(0)).await;
+}
+
+#[tokio::test]
+async fn inproc_paused_large_source_keeps_other_sources_and_replies_progressing() {
+    large_source_backpressure(Endpoint::Inproc {
+        name: "large-source-backpressure".into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn tcp_source_receipts_propagate_pressure_and_keep_other_peers_progressing() {
+    source_backpressure(test_support::tcp_loopback(0)).await;
+}
+
+#[tokio::test]
+async fn inproc_source_receipts_propagate_pressure_and_keep_other_peers_progressing() {
+    source_backpressure(Endpoint::Inproc {
+        name: "peer-source-backpressure".into(),
+    })
+    .await;
+}
+
 async fn exercise(endpoint: Endpoint) {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let server = context.socket(SocketType::Peer, options("server"));

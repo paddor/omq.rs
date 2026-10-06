@@ -1,7 +1,7 @@
 //! `zmq_poll` -- multiplexed I/O readiness.
 //!
 //! Three-phase algorithm:
-//! 1. `check_immediate`: scan yring consumers and bypass rings (zero syscalls).
+//! 1. `check_immediate`: scan yring consumers (zero syscalls).
 //! 2. `PollWaiter::wait`: block on OS events (`poll()` on Unix, WFMO on Windows).
 //! 3. `accumulate_buffered`: pick up messages that arrived while blocking.
 //!
@@ -44,23 +44,12 @@ fn check_immediate(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            crate::socket::adopt_pending_bypass_recv(sock);
             let drain_nonempty = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            let recv_cons_has_data = unsafe { sock.recv_cons.get() }
-                .as_ref()
-                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
-            // SAFETY: same socket-thread invariant as above.
-            let bypass_recv_has_data = unsafe { sock.bypass_recv.get() }
-                .as_ref()
-                .is_some_and(|br| !br.is_empty());
+            let recv_cons_has_data = sock.recv_has_data();
             let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock);
-            let has_buffered = drain_nonempty
-                || recv_cons_has_data
-                || bypass_recv_has_data
-                || authenticated_recv_has_data;
+            let has_buffered = drain_nonempty || recv_cons_has_data || authenticated_recv_has_data;
             if has_buffered {
                 item.revents |= ZMQ_POLLIN;
             }
@@ -85,24 +74,15 @@ fn accumulate_buffered(items: &mut [ZmqPollItem]) -> i32 {
         let sock = unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) };
 
         if (item.events & ZMQ_POLLIN) != 0 {
-            crate::socket::adopt_pending_bypass_recv(sock);
             let drain_nonempty = sock
                 .drain_nonempty
                 .load(std::sync::atomic::Ordering::Relaxed);
 
-            // SAFETY: libzmq sockets are accessed by at most one application thread.
-            let cons_ptr = &*unsafe { sock.recv_cons.get() };
-            let recv_cons_has_data = cons_ptr
-                .as_ref()
-                .is_some_and(|c| !c.fast.is_empty() || !c.pump.is_empty());
+            let recv_cons_has_data = sock.recv_has_data();
 
-            let bypass_recv_has_data = crate::notify::has_bypass_data(sock);
             let authenticated_recv_has_data = crate::send_recv::authenticated_recv_has_data(sock);
 
-            let has_buffered = drain_nonempty
-                || recv_cons_has_data
-                || bypass_recv_has_data
-                || authenticated_recv_has_data;
+            let has_buffered = drain_nonempty || recv_cons_has_data || authenticated_recv_has_data;
 
             if has_buffered {
                 if item.revents == 0 {

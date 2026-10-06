@@ -37,9 +37,9 @@ use super::udp::{
     spawn_dish_listener, spawn_radio_sender,
 };
 use crate::routing::{
-    RecvStrategy, RepEnvelope, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
+    RecvStrategy, SendStrategy, max_peer_count, supports_groups, supports_subscribe,
 };
-use crate::transport::{InboundFrame, InprocConn, InprocPeerSnapshot, PeerIdent};
+use crate::transport::{InprocConn, InprocPeerSnapshot, PeerIdent};
 use omq_proto::endpoint::Endpoint;
 use omq_proto::endpoint::reject_encrypted_inproc;
 use omq_proto::error::{Error, Result};
@@ -49,7 +49,10 @@ use omq_proto::proto::connection::{ConnectionConfig, Role};
 use omq_proto::proto::{Connection as ZmtpConnection, Event as ZmtpEvent, SocketType};
 
 use crate::engine::rate_limit::SharedIpRateLimiter;
-use crate::engine::{ConnectionDriver, PeerDriverCommand, PeerDriverConfig, PeerDriverHandle};
+use crate::engine::{
+    ActorPeerDriverHandle as PeerDriverHandle, ConnectionDriver, PeerDriverCommand,
+    PeerDriverConfig,
+};
 
 /// Byte-stream dispatch across TCP-shaped transports (TCP and IPC).
 /// Inproc does NOT go through this - it skips the ZMTP codec entirely
@@ -166,6 +169,7 @@ struct PeerEntry {
     pending_handshake: bool,
     handshake_admission: Option<crate::transport::setup::PendingHandshake>,
     handled_events: u64,
+    handled_control: u64,
     completion: Option<crate::engine::peer_completion::PeerCompletion>,
     /// Set on `HandshakeSucceeded` (the peer's READY property or server-
     /// generated default). Stays empty if the peer sent no identity.
@@ -182,8 +186,11 @@ struct PeerEntry {
     /// Send-strategy route id. For connect-side round-robin pipes this is
     /// allocated at `connect()` time and can differ from the peer id.
     route_id: u64,
-    /// SPSC ring for this inproc peer (None for wire/stream peers).
-    spsc: Option<Arc<crate::transport::inproc::InprocTx>>,
+    /// Inproc receive port and its sink, opened once this peer is ready.
+    inproc_inbound: Option<(
+        Arc<crate::transport::inproc::InprocPort>,
+        crate::transport::inproc::OpenPort,
+    )>,
     task: Option<JoinHandle<()>>,
     /// Logical data IO thread index used by routing. The driver future owns
     /// its load reservation; raw STREAM currently runs on the actor runtime.
@@ -233,8 +240,11 @@ pub(crate) struct SocketDriver {
     /// connection driver. Each entry is `(peer_id, PeerEvent)`. This
     /// replaces the per-connection shim task that used to wrap
     /// `Event` values into `InternalEvent::PeerEvent`.
-    peer_out_tx: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
-    peer_out_rx: mpsc::Receiver<(u64, crate::engine::PeerEvent)>,
+    peer_out_tx: crate::engine::actor_output::DataSender,
+    peer_out_rx: Option<crate::engine::actor_output::DataReceiver>,
+    pending_peer_data: Option<crate::engine::actor_output::ActorData>,
+    peer_control_tx: mpsc::Sender<(u64, crate::engine::PeerEvent)>,
+    peer_control_rx: mpsc::Receiver<(u64, crate::engine::PeerEvent)>,
     /// One pre-reserved result per materialized driver. No data
     /// mailbox slot or additional publisher task is needed at teardown.
     peer_completions: FuturesUnordered<
@@ -255,7 +265,6 @@ pub(crate) struct SocketDriver {
     /// handle so `Socket::send` can call `pre_send` without an actor hop.
     type_state: Arc<Mutex<TypeState>>,
     /// REP latency route: envelopes for requests waiting in the receive pipe.
-    rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Shared with the socket handle for lock-free
     /// send/recv on REQ. Actor resets on peer disconnect.
     req_awaiting_reply: Arc<AtomicBool>,
@@ -301,7 +310,6 @@ impl SocketDriver {
         send_strategy: SendStrategy,
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
-        rep_pending: Arc<Mutex<std::collections::VecDeque<(u64, RepEnvelope)>>>,
         req_awaiting_reply: Arc<AtomicBool>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
@@ -310,7 +318,8 @@ impl SocketDriver {
         inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(128);
-        let (peer_out_tx, peer_out_rx) = mpsc::channel(256);
+        let (peer_out_tx, peer_out_rx) = fanring::mpsc::channel_with_policy(256);
+        let (peer_control_tx, peer_control_rx) = mpsc::channel(256);
         let recv_strategy = RecvStrategy::for_socket_type(socket_type);
         let authenticated_recv_sink = recv_sink_config
             .as_ref()
@@ -331,7 +340,10 @@ impl SocketDriver {
             internal_tx,
             internal_rx,
             peer_out_tx,
-            peer_out_rx,
+            peer_out_rx: Some(peer_out_rx),
+            pending_peer_data: None,
+            peer_control_tx,
+            peer_control_rx,
             peer_completions: FuturesUnordered::new(),
             stream_disconnects: std::collections::VecDeque::new(),
             next_peer_id: 0,
@@ -342,7 +354,6 @@ impl SocketDriver {
             send_strategy,
             recv_strategy,
             type_state,
-            rep_pending,
             req_awaiting_reply,
             monitor,
             subscriptions: Vec::new(),
@@ -391,6 +402,8 @@ impl SocketDriver {
                 self.retire_completed_peer(peer_id).await;
             }
             self.drain_peer_completions().await;
+            self.drain_peer_control().await;
+            self.retry_peer_data().await;
             self.drain_stream_disconnects().await;
             if self.request_peer_close_if_drained().await {
                 self.teardown().await;
@@ -437,6 +450,9 @@ impl SocketDriver {
                         self.handle_peer_completion(completion).await;
                     }
                 }
+                Some((peer_id, event)) = self.peer_control_rx.recv() => {
+                    self.handle_peer_control(peer_id, event).await;
+                }
                 permit = &mut authenticated_credit,
                     if self.pending_receive.is_some() && authenticated_sender.is_some() => {
                     match permit {
@@ -454,8 +470,9 @@ impl SocketDriver {
                 }
                 () = self.recv_tx.space_ready(),
                     if self.pending_receive.is_some() && authenticated_sender.is_none() => {}
-                Some((peer_id, peer_out)) = self.peer_out_rx.recv(), if self.pending_receive.is_none() => {
-                    self.handle_peer_output(peer_id, peer_out).await;
+                Ok(data) = std::future::poll_fn(|context| self.peer_out_rx.as_mut().unwrap().poll_recv(context)),
+                    if self.pending_receive.is_none() && self.pending_peer_data.is_none() => {
+                    self.drain_peer_data(data).await;
                 }
                 () = tokio::task::yield_now(),
                     if !self.stream_disconnects.is_empty() && self.pending_receive.is_none() => {}
@@ -579,9 +596,6 @@ impl SocketDriver {
         self.close_deadline = linger.and_then(|d| Instant::now().checked_add(d));
         self.cmd_rx.close();
         self.send_strategy.stop_admission();
-        self.spsc
-            .send_ring_available
-            .store(false, std::sync::atomic::Ordering::Release);
         self.cancel_pending_endpoints(None);
         self.close_peers_requested = false;
         self.close_ack = ack;
@@ -677,7 +691,9 @@ impl SocketDriver {
     async fn teardown(&mut self) {
         self.cmd_rx.close();
         self.internal_rx.close();
-        self.peer_out_rx.close();
+        self.peer_out_rx.take();
+        self.pending_peer_data.take();
+        self.peer_control_rx.close();
         self.pending_endpoints.clear();
         self.send_strategy.shutdown();
         self.ready_peer_count_shared

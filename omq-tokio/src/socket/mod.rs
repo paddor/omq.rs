@@ -10,6 +10,7 @@ pub(crate) mod actor;
 pub(crate) mod dispatch;
 pub(crate) mod fanin;
 pub mod handle;
+pub mod identity;
 pub mod monitor;
 pub(crate) mod peer_recv;
 pub(crate) mod recv;
@@ -17,10 +18,12 @@ pub(crate) mod type_state;
 pub(crate) mod udp;
 
 pub use handle::Socket;
+pub use identity::IdentitySocket;
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
 };
+pub use peer_recv::{ReceiveReceipt, ReceiveSource, UnshiftError};
 
 pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<std::time::Instant> {
     std::time::Instant::now().checked_add(timeout)

@@ -145,7 +145,7 @@ fn proxy_small_message() {
 }
 
 #[test]
-fn proxy_retries_pending_after_bypass_backpressure() {
+fn proxy_retries_pending_after_inproc_backpressure() {
     const N: usize = 64;
 
     let ctx = zmq_ctx_new();

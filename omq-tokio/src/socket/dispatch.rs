@@ -19,9 +19,6 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-#[cfg(test)]
-use crate::engine::signal::DataSignal;
-
 /// Caller-side TCP writer for the latency profile. It uses a duplicated
 /// nonblocking descriptor, so sends do not enter the connection driver's
 /// reactor loop.
@@ -547,10 +544,7 @@ pub(super) async fn bind_any(
                 inproc_registry.clone(),
                 name,
                 snapshot.clone(),
-                recv.signal.clone(),
-                recv.blocking.clone(),
-                recv.max_message_size,
-                recv.fanin.clone(),
+                *recv,
             )?);
             let resolved = listener.local_endpoint().clone();
             Ok(BoundListener {
@@ -655,16 +649,8 @@ pub(super) async fn connect_any(
     }
     match endpoint {
         Endpoint::Inproc { name } => {
-            let conn = inproc_transport::connect_with_max_message_size(
-                inproc_registry,
-                name,
-                snapshot.clone(),
-                recv.signal.clone(),
-                recv.blocking.clone(),
-                recv.max_message_size,
-                recv.fanin.clone(),
-            )
-            .await?;
+            let conn =
+                inproc_transport::connect(inproc_registry, name, snapshot.clone(), *recv).await?;
             Ok(AnyConn::Inproc {
                 conn,
                 peer_ident: PeerIdent::Inproc(name.clone()),
@@ -717,14 +703,6 @@ mod tests {
         }
     }
 
-    fn recv_signal() -> Arc<DataSignal> {
-        Arc::new(DataSignal::new())
-    }
-
-    fn blocking_recv_waker() -> Arc<crate::socket::recv::BlockingRecvWaker> {
-        crate::socket::recv::BlockingRecvWaker::new()
-    }
-
     async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
         #[cfg(feature = "ws")]
         let ws_options = omq_proto::Options::default();
@@ -734,10 +712,8 @@ mod tests {
             endpoint,
             &snapshot(),
             &inproc_transport::RecvConfig {
-                signal: recv_signal(),
-                blocking: blocking_recv_waker(),
-                max_message_size: None,
-                fanin: None,
+                direct: false,
+                send_hwm: 1000,
             },
             #[cfg(feature = "ws")]
             &ws_options,

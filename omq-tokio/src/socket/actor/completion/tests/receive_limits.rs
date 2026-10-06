@@ -67,7 +67,7 @@ async fn receive_boundary(
             options,
         })
         .await;
-    let (id, event) = actor.peer_out_rx.recv().await.unwrap();
+    let (id, event) = actor.peer_control_rx.recv().await.unwrap();
     assert!(matches!(
         event,
         PeerEvent::Event(Event::HandshakeSucceeded { .. })
@@ -95,11 +95,15 @@ async fn receive_boundary(
     for wire in wire {
         data.send(PeerDriverData::SendMessage(wire)).await.unwrap();
     }
-    let (received_id, received) = actor.peer_out_rx.recv().await.unwrap();
-    assert_eq!(received_id, id);
-    let PeerEvent::Event(Event::Message(received)) = received else {
-        panic!("{received:?}")
-    };
+    let received = actor
+        .peer_out_rx
+        .as_mut()
+        .unwrap()
+        .recv_async()
+        .await
+        .unwrap();
+    assert_eq!(received.peer_id, id);
+    let received = received.message;
     assert_eq!(received, message);
 
     // Compressible oversize bodies must fail the decoded budget even when
@@ -125,8 +129,8 @@ async fn receive_boundary(
         "{completion:?}"
     );
     assert!(matches!(
-        actor.peer_out_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
+        actor.peer_out_rx.as_mut().unwrap().try_recv(),
+        Err(fanring::mpsc::TryRecvError::Empty)
     ));
     actor
         .peers

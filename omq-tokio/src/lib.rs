@@ -49,6 +49,7 @@ pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOpt
 // working.
 pub use omq_proto::endpoint;
 pub use omq_proto::error;
+pub use omq_proto::flow;
 pub use omq_proto::message;
 pub use omq_proto::options;
 pub use omq_proto::proto;
@@ -56,6 +57,7 @@ pub use omq_proto::proto;
 pub use context::{Context, ContextConfig, ContextCore};
 pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
-    ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorStream,
-    MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, Socket,
+    ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,
+    MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveReceipt,
+    ReceiveSource, Socket, UnshiftError,
 };

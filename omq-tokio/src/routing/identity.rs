@@ -21,7 +21,7 @@ use bytes::Bytes;
 
 use crate::engine::send_pipe::SendPreparation;
 use crate::engine::signal::StateSignal;
-use crate::engine::{PeerDriverData, PeerDriverHandle, SendPipeError, SendPipeProducer};
+use crate::engine::{ActorPeerDriverHandle, PeerDriverData, SendPipeError, SendPipeProducer};
 use crate::routing::peer_outbound::PeerOutbound;
 use crate::routing::{RepEnvelope, rep_reply_with_envelope};
 use omq_proto::error::{Error, Result, TrySendError};
@@ -42,23 +42,36 @@ enum PeerTarget {
     Pipe(SendPipeProducer),
     RepInproc(SendPipeProducer),
     Direct(PeerOutbound),
-    Inbox(tokio::sync::mpsc::Sender<PeerDriverData>),
+    Inbox(crate::engine::data_inbox::Sender),
 }
 
 impl PeerTarget {
-    fn try_send(&mut self, msg: Message) -> core::result::Result<(), SendPipeError> {
-        self.try_send_prepared(msg, SendPreparation::Plain)
+    fn outbound(&self, lanes: &crate::engine::data_inbox::SenderLanes) -> Option<PeerOutbound> {
+        match self {
+            Self::Direct(target) => Some(target.bind(lanes)),
+            Self::Inbox(sender) => Some(PeerOutbound::Inbox(lanes.bind(sender))),
+            Self::Pipe(_) | Self::RepInproc(_) => None,
+        }
+    }
+
+    fn try_send(
+        &mut self,
+        msg: Message,
+        lanes: &crate::engine::data_inbox::SenderLanes,
+    ) -> core::result::Result<(), SendPipeError> {
+        self.try_send_prepared(msg, SendPreparation::Plain, lanes)
     }
 
     fn try_send_prepared(
         &mut self,
         msg: Message,
         preparation: SendPreparation,
+        lanes: &crate::engine::data_inbox::SenderLanes,
     ) -> core::result::Result<(), SendPipeError> {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.try_send_prepared(msg, preparation),
-            Self::Direct(target) => target.try_send_prepared(msg, preparation),
-            Self::Inbox(tx) => match tx.try_reserve() {
+            Self::Direct(target) => target.bind(lanes).try_send_prepared(msg, preparation),
+            Self::Inbox(tx) => match lanes.bind(tx).try_reserve() {
                 Ok(permit) => {
                     permit.send(PeerDriverData::SendMessage(preparation.prepare(msg)));
                     Ok(())
@@ -77,7 +90,7 @@ impl PeerTarget {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => Some(p.space_available()),
             Self::Direct(target) => target.space_available(),
-            Self::Inbox(_) => None,
+            Self::Inbox(tx) => tx.space(),
         }
     }
 
@@ -85,13 +98,14 @@ impl PeerTarget {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.is_empty(),
             Self::Direct(target) => target.is_empty(),
-            Self::Inbox(tx) => tx.capacity() == tx.max_capacity(),
+            Self::Inbox(tx) => tx.is_empty(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Submitter {
+    data_lanes: crate::engine::data_inbox::SenderLanes,
     inner: Arc<Mutex<IdentityInner>>,
     router_mandatory: bool,
     peer: Option<Arc<peer::PeerRoutes>>,
@@ -99,6 +113,16 @@ pub(crate) struct Submitter {
 }
 
 impl Submitter {
+    pub(crate) fn clone_shared(&self) -> Self {
+        Self {
+            data_lanes: self.data_lanes.clone_shared(),
+            inner: self.inner.clone(),
+            router_mandatory: self.router_mandatory,
+            peer: self.peer.clone(),
+            lanes: self.lanes.clone_shared(),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         if let Some(peer) = &self.peer {
             peer.shutdown();
@@ -138,7 +162,7 @@ impl Submitter {
         };
         match peer
             .target
-            .try_send_prepared(msg, SendPreparation::StripIdentity)
+            .try_send_prepared(msg, SendPreparation::StripIdentity, &self.data_lanes)
         {
             Ok(()) => Ok(()),
             Err(SendPipeError::Full(returned)) => Err(TrySendError::Full(returned)),
@@ -158,16 +182,31 @@ impl Submitter {
             return Err(Error::Unroutable);
         }
         let identity = msg.pop_front_payload().expect("nonempty message");
-        let mut retry = self.try_send_to(identity.as_slice(), msg)?;
+        self.send_to(identity.as_slice(), msg).await
+    }
+
+    pub(crate) async fn send_to(&self, identity: &[u8], msg: Message) -> Result<()> {
+        let mut retry = self.try_send_to(identity, msg)?;
         loop {
             match retry {
                 Ok(()) => return Ok(()),
                 Err(SendRetry::Full(returned, space)) => {
-                    retry = self
-                        .retry_full(identity.as_slice(), returned, space)
-                        .await?;
+                    retry = self.retry_full(identity, returned, space).await?;
                 }
             }
+        }
+    }
+
+    pub(crate) fn try_send_to_message(
+        &self,
+        identity: &[u8],
+        msg: Message,
+    ) -> core::result::Result<(), TrySendError> {
+        match self.try_send_to(identity, msg) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(SendRetry::Full(msg, _))) => Err(TrySendError::Full(msg)),
+            Err(Error::Closed) => Err(TrySendError::Closed),
+            Err(error) => Err(TrySendError::Error(error)),
         }
     }
 
@@ -251,48 +290,27 @@ impl Submitter {
             tokio::task::yield_now().await;
             return;
         };
-        let waiting = {
-            let g = self.inner.lock().expect("identity inner poisoned");
-            g.identity_to_peer
+        let (peer_id, waiting, outbound) = {
+            let state = self.inner.lock().expect("identity inner poisoned");
+            let peer = state
+                .identity_to_peer
                 .get(identity)
-                .and_then(|id| g.peers.get(id))
-                .and_then(|peer| {
-                    peer.target.space_available().map(|signal| {
-                        (
-                            signal,
-                            matches!(peer.target, PeerTarget::Pipe(_) | PeerTarget::RepInproc(_)),
-                        )
-                    })
-                })
+                .and_then(|id| state.peers.get(id));
+            match peer {
+                Some(peer) => (
+                    *state.identity_to_peer.get(identity).unwrap(),
+                    peer.target.space_available(),
+                    peer.target.outbound(&self.data_lanes),
+                ),
+                None => return,
+            }
         };
-        if let Some((notified, true)) = &waiting {
-            notified
-                .wait_until(|| self.peer_pipe_ready(identity, notified))
+        if let Some(target) = outbound {
+            self.wait_outbound(peer_id, &target, Some(identity)).await;
+        } else if let Some(space) = waiting {
+            space
+                .wait_until(|| self.peer_pipe_ready(identity, &space))
                 .await;
-        } else if let Some((notified, false)) = waiting {
-            notified
-                .wait_until(|| {
-                    let state = self.inner.lock().expect("identity inner poisoned");
-                    if state.closed {
-                        return true;
-                    }
-                    let peer = state
-                        .identity_to_peer
-                        .get(identity)
-                        .and_then(|id| state.peers.get(id));
-                    peer.is_none_or(|peer| match &peer.target {
-                        PeerTarget::Direct(target) => {
-                            target.send_ready()
-                                || target
-                                    .space_available()
-                                    .is_none_or(|space| !Arc::ptr_eq(&space, &notified))
-                        }
-                        _ => true,
-                    })
-                })
-                .await;
-        } else {
-            tokio::task::yield_now().await;
         }
     }
 
@@ -317,6 +335,64 @@ impl Submitter {
         !Arc::ptr_eq(waiting, &pipe.space_available()) || !pipe.is_alive() || pipe.is_below_lwm()
     }
 
+    pub(crate) async fn wait_peer_send_progress(&self, peer_id: u64) {
+        let (space, outbound) = {
+            let state = self.inner.lock().expect("identity inner poisoned");
+            let Some(peer) = state.peers.get(&peer_id) else {
+                return;
+            };
+            (
+                peer.target.space_available(),
+                peer.target.outbound(&self.data_lanes),
+            )
+        };
+        if let Some(target) = outbound {
+            self.wait_outbound(peer_id, &target, None).await;
+        } else if let Some(space) = space {
+            space
+                .wait_until(|| {
+                    let state = self.inner.lock().expect("identity inner poisoned");
+                    state.closed
+                        || state
+                            .peers
+                            .get(&peer_id)
+                            .is_none_or(|peer| match &peer.target {
+                                PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
+                                    !Arc::ptr_eq(&space, &pipe.space_available())
+                                        || !pipe.is_alive()
+                                        || pipe.is_below_lwm()
+                                }
+                                _ => true,
+                            })
+                })
+                .await;
+        }
+    }
+
+    async fn wait_outbound(&self, peer_id: u64, target: &PeerOutbound, identity: Option<&[u8]>) {
+        let Some(space) = target.inbox_space() else {
+            target.wait_capacity().await;
+            return;
+        };
+        space
+            .wait_until(|| {
+                let state = self.inner.lock().expect("identity inner poisoned");
+                if state.closed
+                    || identity.is_some_and(|id| state.identity_to_peer.get(id) != Some(&peer_id))
+                    || state.peers.get(&peer_id).is_none_or(|peer| {
+                        peer.target
+                            .space_available()
+                            .is_none_or(|next| !Arc::ptr_eq(&space, &next))
+                    })
+                {
+                    return true;
+                }
+                drop(state);
+                target.send_ready()
+            })
+            .await;
+    }
+
     pub(crate) async fn send_rep(
         &self,
         peer_id: u64,
@@ -331,7 +407,7 @@ impl Submitter {
                 Err(TrySendError::Error(error)) => return Err(error),
                 Err(TrySendError::Closed) => return Err(Error::Closed),
             }
-            tokio::task::yield_now().await;
+            self.wait_peer_send_progress(peer_id).await;
         }
     }
 
@@ -362,7 +438,7 @@ impl Submitter {
             }
             return Ok(());
         };
-        match peer.target.try_send(msg) {
+        match peer.target.try_send(msg, &self.data_lanes) {
             Err(SendPipeError::Full(m)) => Err(TrySendError::Full(m)),
             Err(SendPipeError::Closed(_)) if closed => Err(TrySendError::Closed),
             Ok(()) | Err(SendPipeError::Closed(_)) => Ok(()),
@@ -393,7 +469,7 @@ impl Submitter {
             }
             return Ok(Ok(()));
         };
-        match peer.target.try_send(msg) {
+        match peer.target.try_send(msg, &self.data_lanes) {
             Ok(()) => Ok(Ok(())),
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
@@ -416,10 +492,13 @@ impl Submitter {
         msg: Message,
     ) -> Result<core::result::Result<(), SendRetry>> {
         let mut g = self.inner.lock().expect("identity inner poisoned");
+        if g.closed {
+            return Err(Error::Closed);
+        }
         let Some(peer) = g.peers.get_mut(&peer_id) else {
             return Err(Error::Unroutable);
         };
-        match peer.target.try_send(msg) {
+        match peer.target.try_send(msg, &self.data_lanes) {
             Ok(()) => Ok(Ok(())),
             Err(SendPipeError::Closed(_)) => Err(Error::Unroutable),
             Err(SendPipeError::Full(returned)) => {
@@ -502,6 +581,7 @@ impl IdentitySend {
 
     pub(crate) fn submitter(&self) -> Submitter {
         Submitter {
+            data_lanes: crate::engine::data_inbox::SenderLanes::default(),
             inner: self.inner.clone(),
             router_mandatory: self.router_mandatory,
             peer: self.peer.clone(),
@@ -517,11 +597,15 @@ impl IdentitySend {
         self.latency_profile
     }
 
+    pub(crate) fn supports_inproc_direct(&self) -> bool {
+        self.peer.is_none()
+    }
+
     #[expect(clippy::needless_pass_by_value)]
     pub(crate) fn connection_added(
         &mut self,
         peer_id: u64,
-        handle: PeerDriverHandle,
+        handle: ActorPeerDriverHandle,
         identity: Bytes,
         is_inproc: bool,
     ) {

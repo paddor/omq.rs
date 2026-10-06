@@ -49,14 +49,21 @@ Loom models, and Miri checks in that workspace.
 For coordinated local changes, override published queue dependencies explicitly:
 
 ```sh
-cargo --config 'patch.crates-io.yring.path="../fanring/yring"' \
-  --config 'patch.crates-io.fanring.path="../fanring"' \
-  test -p omq-tokio
+cargo test --config 'patch.crates-io.yring.path="../fanring/yring"' \
+  --config 'patch.crates-io.fanring.path="../fanring"' -p omq-tokio
 ```
+
+OMQ requires `fanring` 0.3.9 and `yring` 0.3.20 for
+`Consumer::release_with_full()` and `AsyncProducer::poll_ready()`.
+Workspace and binding builds resolve these APIs from the registry. Put
+`--config` after the Cargo subcommand so clippy and nextest forward local
+overrides. In `bindings/pyomq`, use paths
+`../../../fanring/yring` and `../../../fanring` for the same overrides.
 
 Keep these overrides local. Registry dependencies must be published before OMQ
 CI or packaging can resolve them without overrides. Refresh binding lockfiles
-against the registry after publishing a new queue version.
+against the registry after publishing a new queue version. PR CI covers native
+and Python binding tests on Windows as well as Linux and macOS.
 
 Full sweep:
 
@@ -228,6 +235,22 @@ For direct blocking-peer experiments, `OMQ_BENCH_RECV_SPIN_US=50` sets
 `Options::recv_spin(Duration::from_micros(50))` on both endpoints. Unset or
 zero disables spinning, including for REQ/REP's default latency profile.
 Use separate experiment data files when comparing spin budgets.
+
+`omq-tokio-2ut-blocking` measures inproc with two application threads using
+blocking send and receive, without spinning. `OMQ_BENCH_HWM` sets both
+endpoints' send and receive HWM (default 1000). The peer also accepts HWM
+as its optional final argument. Its measured interval excludes setup and
+shutdown. On Unix, JSONL rows include CPU seconds, context switches, and
+context switches per message under `blocking_inproc`, alongside the HWM
+and rounded ring capacity. Other platforms omit unsupported usage counters.
+
+```sh
+OMQ_BENCH_HWM=8 cargo run --release -p omq-bench -- run comparisons \
+  --impl omq-tokio-2ut-blocking --transport inproc --sizes 64 \
+  --no-latency --no-pubsub --id blocking-hwm8
+cargo run --release -p omq-tokio --bin omq_bench_peer_blocking -- \
+  inproc-2ut-blocking lwm 64 3 1000
+```
 
 The comparison runner also exposes `--impl omq-tokio-1t-spin50` as a latency-only
 variant, alongside `omq-tokio-1t` and `omq-tokio-ct`. Its 50 us spin budget applies

@@ -5,6 +5,122 @@ use std::time::Duration;
 use super::*;
 use crate::engine::send_pipe;
 
+#[tokio::test]
+async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
+    let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
+    let mut send = IdentitySend::new(SocketType::Router, &options);
+    let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
+    let handle = ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        transmit_slot: None,
+        direct_tcp_writer: None,
+        send_pipe: None,
+        inproc: None,
+    };
+    send.connection_added(7, handle, Bytes::from_static(b"id"), false);
+    let first = send.submitter();
+    first.try_send(Message::multipart(["id", "first"])).unwrap();
+    let shared = first.clone_shared();
+    assert!(matches!(
+        shared.try_send(Message::multipart(["id", "next"])),
+        Err(TrySendError::Full(_))
+    ));
+    let independent = first.clone();
+    independent
+        .try_send(Message::multipart(["id", "independent"]))
+        .unwrap();
+    let waiting = shared.wait_peer_send_progress(7);
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    let mut accepted = Vec::new();
+    for _ in 0..2 {
+        let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+            panic!("raw message")
+        };
+        accepted.push(message.part_bytes(0).unwrap());
+    }
+    accepted.sort();
+    assert_eq!(
+        accepted,
+        [
+            Bytes::from_static(b"first"),
+            Bytes::from_static(b"independent")
+        ]
+    );
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap();
+    shared.try_send(Message::multipart(["id", "next"])).unwrap();
+    let closing = shared.wait_peer_send_progress(7);
+    tokio::pin!(closing);
+    assert!(closing.as_mut().now_or_never().is_none());
+    send.stop_admission();
+    tokio::time::timeout(Duration::from_secs(1), closing)
+        .await
+        .unwrap();
+    let PeerDriverData::SendMessage(message) = receiver.recv().await.unwrap() else {
+        panic!("raw message")
+    };
+    assert_eq!(message, Message::single("next"));
+}
+
+#[tokio::test]
+async fn routed_progress_wait_registers_without_an_application_identity_frame() {
+    for socket_type in [SocketType::Rep, SocketType::Server] {
+        for action in 0..3 {
+            let options =
+                Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
+            let mut send = IdentitySend::new(socket_type, &options);
+            let (producer, mut consumer) = send_pipe(1);
+            send.connection_added(7, peer_handle(producer), Bytes::from_static(b"peer"), false);
+            let submitter = send.submitter();
+            let message = Message::single("body");
+            submitter
+                .try_send_rep(7, &RepEnvelope::new(), message.clone())
+                .unwrap();
+            assert!(matches!(
+                submitter.try_send_rep(7, &RepEnvelope::new(), message),
+                Err(TrySendError::Full(_))
+            ));
+            let wait = submitter.wait_peer_send_progress(7);
+            tokio::pin!(wait);
+            assert!(wait.as_mut().now_or_never().is_none());
+            let _replacement = match action {
+                0 => {
+                    assert_eq!(consumer.drain_into(&mut Vec::new(), 1, usize::MAX), 1);
+                    None
+                }
+                1 => {
+                    drop(consumer);
+                    None
+                }
+                _ => {
+                    send.connection_removed(7);
+                    let (producer, consumer) = send_pipe(1);
+                    send.connection_added(
+                        7,
+                        peer_handle(producer),
+                        Bytes::from_static(b"replacement"),
+                        false,
+                    );
+                    Some(consumer)
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(1), wait)
+                .await
+                .unwrap();
+            assert!(
+                submitter
+                    .wait_peer_send_progress(7)
+                    .now_or_never()
+                    .is_some()
+            );
+        }
+    }
+}
+
 #[test]
 fn throughput_identity_uses_peer_pipe_not_transmit_slot() {
     let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Throughput);
@@ -53,13 +169,14 @@ fn try_send_reports_full_and_preserves_routing_frame() {
     let submitter = send.submitter();
 
     let (pipe_tx, _pipe_rx) = send_pipe(1);
-    let handle = PeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0,
-        data_inbox: tokio::sync::mpsc::channel(1).0,
+    let handle = ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe_tx)))),
+        inproc: None,
     };
     send.connection_added(1, handle, Bytes::from_static(b"id"), false);
 
@@ -424,13 +541,14 @@ async fn closed_peer_pipe_is_unroutable_when_mandatory() {
     assert!(send.peer_for_identity(&Bytes::from_static(b"id")).is_none());
 }
 
-fn peer_handle(pipe: SendPipeProducer) -> PeerDriverHandle {
-    PeerDriverHandle {
-        inbox: tokio::sync::mpsc::channel(1).0,
-        data_inbox: tokio::sync::mpsc::channel(1).0,
+fn peer_handle(pipe: SendPipeProducer) -> ActorPeerDriverHandle {
+    ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox: tokio::sync::mpsc::channel(1).0.into(),
         cancel: tokio_util::sync::CancellationToken::new(),
         transmit_slot: None,
         direct_tcp_writer: None,
         send_pipe: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(pipe)))),
+        inproc: None,
     }
 }

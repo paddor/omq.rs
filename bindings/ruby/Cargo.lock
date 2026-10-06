@@ -303,9 +303,9 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "fanring"
-version = "0.3.7"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1a77573cda392ec06cdcb8e4033ea298b8b120242ed38734f7718119b41e756"
+checksum = "9a0a001924e64ade2c902a95dae33873344f5406798209408f19ae2504b6671a"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -1400,9 +1400,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.18"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ad40d31fd5e9026696958c858f08ff1b11bd441ead80a328e133a9761db498c"
+checksum = "4591d9911df5ce299e6a33e65efe20d35d81c7c40f5be2d20092256187973763"
 dependencies = [
  "atomic-waker",
  "futures-core",

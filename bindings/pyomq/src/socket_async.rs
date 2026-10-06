@@ -3,12 +3,11 @@
 //! The Python-side `pyomq.asyncio.Socket` drives send/recv through
 //! direct methods that never leave the calling thread:
 //!
-//! - **Send**: `_send_direct` pushes into the send yring (EAGAIN if
-//!   full). The send pump relays to the omq Socket on the tokio thread.
-//! - **Recv**: `_try_recv` pops from the recv yring (returns `None` if
-//!   empty). `_recv_fd` returns a dup'd Unix readiness fd that becomes
-//!   readable when the recv pump pushes a message. The Python asyncio
-//!   wrapper registers this fd with `loop.add_reader` to wake the coroutine.
+//! - **Send**: native try_send when eligible, with a bounded eager fallback
+//!   and an in-flight FIFO barrier. Full fallback retains converted values.
+//! - **Recv**: fairly drain direct and fallback receive rings, then admit
+//!   REQ/REP at application receive. Unix readiness uses an fd; Windows
+//!   dispatches Python hooks from notification tasks outside producer locks.
 //!
 //! Control-plane ops (bind, connect, subscribe, ...) use the sync
 //! dispatch helpers (block on a tokio oneshot).
@@ -37,7 +36,7 @@ pub struct AsyncSocket {
 }
 
 /// Allocated only after queue backpressure. Owns the fully converted message.
-pub(crate) type PendingMessage = Mutex<Option<omq_proto::Message>>;
+pub(crate) type PendingMessage = Mutex<Option<omq_tokio::Message>>;
 
 #[pyclass(module = "pyomq._native")]
 pub(crate) struct PendingSend {
@@ -50,23 +49,23 @@ pub(crate) struct PendingSend {
 impl PendingSend {
     fn retry(&mut self) -> PyResult<Option<Py<PyAny>>> {
         self.inner.materialize()?;
-        let guard = self.inner.materialized.read().unwrap();
-        let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
-        let mut pending = self.message.lock().unwrap();
-        let message = pending
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("send already completed"))?;
-        match materialized
-            .send_prod
-            .lock()
-            .unwrap()
-            .push_and_flush(message)
-        {
+        let (socket, queue) = {
+            let guard = self.inner.materialized.read().unwrap();
+            let state = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+            (state.socket.clone(), state.send_queue.clone())
+        };
+        let message =
+            self.message.lock().unwrap().take().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("send already completed")
+            })?;
+        match queue.try_send(&socket, message) {
             Ok(()) => Ok(self.tracker.take()),
-            Err(message) => {
-                *pending = Some(message);
+            Err(omq_tokio::TrySendError::Full(message)) => {
+                *self.message.lock().unwrap() = Some(message);
                 Err(timeout_err())
             }
+            Err(omq_tokio::TrySendError::Closed) => Err(map_err(PError::Closed)),
+            Err(omq_tokio::TrySendError::Error(error)) => Err(map_err(error)),
         }
     }
 
@@ -86,16 +85,23 @@ fn submit(
     tracker: Option<Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     inner.materialize()?;
-    let guard = inner.materialized.read().unwrap();
-    let materialized = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
-    match materialized
-        .send_prod
-        .lock()
-        .unwrap()
-        .push_and_flush(message)
+    if matches!(
+        inner.socket_type,
+        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+    ) && !inner.rxbuf.lock().unwrap().is_empty()
     {
+        return Err(map_err(PError::Protocol(
+            "receive remaining multipart frames before sending".into(),
+        )));
+    }
+    let (socket, queue) = {
+        let guard = inner.materialized.read().unwrap();
+        let state = guard.as_ref().ok_or_else(|| map_err(PError::Closed))?;
+        (state.socket.clone(), state.send_queue.clone())
+    };
+    match queue.try_send(&socket, message) {
         Ok(()) => Ok(tracker),
-        Err(message) => {
+        Err(omq_tokio::TrySendError::Full(message)) => {
             let message = Arc::new(Mutex::new(Some(message)));
             let mut pending_sends = inner.pending_sends.lock().unwrap();
             if pending_sends.len() == pending_sends.capacity() {
@@ -106,6 +112,7 @@ fn submit(
                 pending_sends.reserve(live);
             }
             pending_sends.push(Arc::downgrade(&message));
+            drop(pending_sends);
             let pending = Py::new(
                 py,
                 PendingSend {
@@ -118,6 +125,8 @@ fn submit(
             error.value(py).setattr("_pending_send", pending)?;
             Err(error)
         }
+        Err(omq_tokio::TrySendError::Closed) => Err(map_err(PError::Closed)),
+        Err(omq_tokio::TrySendError::Error(error)) => Err(map_err(error)),
     }
 }
 
@@ -329,14 +338,7 @@ impl AsyncSocket {
         if let Some(head) = self.inner.pop_rxbuf_head() {
             return Ok(PyBytes::new(py, &head).into_any());
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard
-            .as_ref()
-            .ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = materialized.recv_cons.lock().unwrap();
-        if let Some(msg) = cons.prefetch_and_pop() {
-            materialized.recv_space.notify_changed();
+        if let Some(msg) = self.inner.try_external_recv()? {
             if dish {
                 let (_, body) = split_dish_message(msg)?;
                 return Ok(PyBytes::new(py, &body).into_any());
@@ -362,14 +364,7 @@ impl AsyncSocket {
         if let Some((head, more)) = self.inner.pop_rxbuf_head_with_more() {
             return Ok(Bound::new(py, Frame::from_bytes_more(head, more))?.into_any());
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard
-            .as_ref()
-            .ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = materialized.recv_cons.lock().unwrap();
-        if let Some(msg) = cons.prefetch_and_pop() {
-            materialized.recv_space.notify_changed();
+        if let Some(msg) = self.inner.try_external_recv()? {
             if dish {
                 let (group, body) = split_dish_message(msg)?;
                 return Ok(Bound::new(
@@ -404,14 +399,7 @@ impl AsyncSocket {
                 PyList::new(py, leftover.into_iter().map(|b| PyBytes::new(py, &b)))?.into_any(),
             );
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard
-            .as_ref()
-            .ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = materialized.recv_cons.lock().unwrap();
-        if let Some(msg) = cons.prefetch_and_pop() {
-            materialized.recv_space.notify_changed();
+        if let Some(msg) = self.inner.try_external_recv()? {
             if dish {
                 let (_, body) = split_dish_message(msg)?;
                 return Ok(PyList::new(py, [PyBytes::new(py, &body)])?.into_any());
@@ -429,14 +417,7 @@ impl AsyncSocket {
         if !leftover.is_empty() {
             return Ok(conversions::frames_to_pylist(py, leftover)?.into_any());
         }
-        self.inner.materialize()?;
-        let materialized_guard = self.inner.materialized.read().unwrap();
-        let materialized = materialized_guard
-            .as_ref()
-            .ok_or_else(|| map_err(PError::Closed))?;
-        let mut cons = materialized.recv_cons.lock().unwrap();
-        if let Some(msg) = cons.prefetch_and_pop() {
-            materialized.recv_space.notify_changed();
+        if let Some(msg) = self.inner.try_external_recv()? {
             if dish {
                 let (group, body) = split_dish_message(msg)?;
                 let frame = Bound::new(
@@ -657,7 +638,7 @@ impl AsyncSocket {
         };
         let ctx = self.inner.ctx.clone();
         py.detach(|| {
-            ctx.destroy_socket(m.socket, m.send_prod, m.send_pump, m.recv_pump, linger);
+            ctx.destroy_socket(m, linger);
         });
         Ok(())
     }

@@ -4,6 +4,120 @@ use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, fence};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 
+#[test]
+fn publication_fence_covers_async_and_blocking_waiter_registration() {
+    loom::model(|| {
+        let published = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicUsize::new(0));
+        let woke = Arc::new(AtomicBool::new(false));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let producer = {
+            let published = published.clone();
+            let active = active.clone();
+            let woke = woke.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                published.store(true, Ordering::Release);
+                signal.mark();
+                // Reuse mark's fence before checking blocking registration.
+                if active.load(Ordering::Acquire) != 0 {
+                    woke.store(true, Ordering::Release);
+                }
+            })
+        };
+        let blocking = {
+            let published = published.clone();
+            let active = active.clone();
+            thread::spawn(move || {
+                active.fetch_add(1, Ordering::SeqCst);
+                fence(Ordering::SeqCst);
+                published.load(Ordering::Acquire)
+            })
+        };
+        signal.begin_drain();
+        let ready = published.load(Ordering::Acquire);
+        signal.clear_after(!ready);
+        producer.join().unwrap();
+        assert!(ready || !signal.is_idle());
+        assert!(blocking.join().unwrap() || woke.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn targeted_source_waiter_registration_cannot_miss_publication() {
+    loom::model(|| {
+        let published = Arc::new(AtomicBool::new(false));
+        let waiters = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::new(AtomicDataSignal::new(AtomicDataSignal::IDLE, true));
+        let producer = {
+            let published = published.clone();
+            let waiters = waiters.clone();
+            let signal = signal.clone();
+            thread::spawn(move || {
+                published.store(true, Ordering::Release);
+                // DataSignal::mark orders queue publication before this load.
+                fence(Ordering::SeqCst);
+                if waiters.load(Ordering::Acquire) != 0 {
+                    signal.mark();
+                }
+            })
+        };
+        waiters.fetch_add(1, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        signal.begin_drain();
+        let ready = published.load(Ordering::Acquire);
+        signal.clear_after(!ready);
+        producer.join().unwrap();
+        assert!(ready || !signal.is_idle());
+        waiters.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+#[test]
+fn source_claim_racing_close_cannot_hide_control_work() {
+    loom::model(|| {
+        const LIVE: u8 = 1;
+        const CLAIMED: u8 = 2;
+        let status = Arc::new(AtomicU8::new(LIVE));
+        let pending = Arc::new(AtomicBool::new(false));
+        let closer = {
+            let status = status.clone();
+            let pending = pending.clone();
+            thread::spawn(move || {
+                if status.fetch_and(!LIVE, Ordering::AcqRel) & CLAIMED != 0 {
+                    pending.swap(true, Ordering::Release);
+                }
+            })
+        };
+        if status.fetch_or(CLAIMED, Ordering::AcqRel) & LIVE == 0 {
+            pending.swap(true, Ordering::Release);
+        }
+        closer.join().unwrap();
+        assert!(pending.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn source_receipt_release_racing_control_scan_is_resumed_or_pending() {
+    loom::model(|| {
+        const CLAIMED: u8 = 4;
+        let status = Arc::new(AtomicU8::new(CLAIMED));
+        let pending = Arc::new(AtomicBool::new(false));
+        let releaser = {
+            let status = status.clone();
+            let pending = pending.clone();
+            thread::spawn(move || {
+                status.fetch_and(!CLAIMED, Ordering::AcqRel);
+                pending.swap(true, Ordering::Release);
+            })
+        };
+        let resumed =
+            pending.swap(false, Ordering::AcqRel) && status.load(Ordering::Acquire) & CLAIMED == 0;
+        releaser.join().unwrap();
+        assert!(resumed || pending.load(Ordering::Acquire));
+    });
+}
+
 #[derive(Debug, Default)]
 struct StateSignalState {
     generation: u64,
@@ -387,42 +501,44 @@ fn assert_compressed_payloads_follow_dict(entries: &[ModelFanoutEntry]) {
 
 #[derive(Debug)]
 struct ModelBlockingRecvWaker {
-    registered: AtomicBool,
-    sleeping: AtomicBool,
+    active: AtomicUsize,
+    armed: AtomicBool,
+    thread: Mutex<bool>,
     unparked: AtomicBool,
 }
 
 impl ModelBlockingRecvWaker {
     fn new() -> Self {
         Self {
-            registered: AtomicBool::new(false),
-            sleeping: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            armed: AtomicBool::new(false),
+            thread: Mutex::new(false),
             unparked: AtomicBool::new(false),
         }
     }
 
     fn register(&self) {
-        self.registered.store(true, Ordering::Release);
+        let mut thread = self.thread.lock().unwrap();
+        *thread = true;
+        self.armed.store(true, Ordering::Relaxed);
+        self.active.fetch_add(1, Ordering::SeqCst);
     }
 
     fn prepare_sleep(&self) {
-        self.sleeping.store(true, Ordering::Release);
+        self.armed.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
     }
 
     fn cancel_sleep(&self) {
-        self.sleeping.store(false, Ordering::Release);
+        self.armed.store(false, Ordering::Release);
     }
 
     fn wake(&self) {
-        if !self.sleeping.load(Ordering::Acquire) {
+        fence(Ordering::SeqCst);
+        if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
-        if self
-            .sleeping
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            && self.registered.load(Ordering::Acquire)
-        {
+        if *self.thread.lock().unwrap() && self.armed.swap(false, Ordering::AcqRel) {
             self.unparked.store(true, Ordering::Release);
         }
     }
@@ -618,6 +734,46 @@ fn blocking_recv_cancel_registration_cannot_lose_cancel_wake() {
             "cancel racing with thread registration must leave an unpark token"
         );
     });
+}
+
+#[test]
+fn blocking_recv_lazy_registration_and_rearm_cannot_lose_publication() {
+    for rearm in [false, true] {
+        loom::model(move || {
+            let waker = Arc::new(ModelBlockingRecvWaker::new());
+            if rearm {
+                waker.register();
+                waker.cancel_sleep();
+            }
+            let message = Arc::new(AtomicBool::new(false));
+            let receiver = {
+                let waker = waker.clone();
+                let message = message.clone();
+                thread::spawn(move || {
+                    if !rearm {
+                        waker.register();
+                    }
+                    waker.prepare_sleep();
+                    // Exactly one queue recheck before parking, with no final
+                    // load that could hide a missing publication wake.
+                    message.load(Ordering::Acquire)
+                })
+            };
+            let sender = {
+                let waker = waker.clone();
+                thread::spawn(move || {
+                    message.store(true, Ordering::Release);
+                    waker.wake();
+                })
+            };
+            let observed = receiver.join().unwrap();
+            sender.join().unwrap();
+            assert!(
+                observed || waker.was_unparked(),
+                "registered receiver lost publication"
+            );
+        });
+    }
 }
 
 #[test]

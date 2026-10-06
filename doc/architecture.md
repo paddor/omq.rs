@@ -95,10 +95,19 @@ fan-out lanes perform encoding, compression, and wire I/O. Receive paths that
 need actor-owned routing state, including REP and ROUTER, pass through the
 actor. Other receive paths can deliver to the socket queue directly.
 
-A latency-profile plain-TCP route may attempt one immediate nonblocking write
-from the caller after normal send admission. A partial write transfers its
-remaining output to the driver. This is a specialized path; routing and queue
-ownership still follow the socket's ordinary rules.
+Driver-to-actor data uses bounded fanring lanes, one producer per connection.
+The actor owns the receive drain and processes ready lanes fairly. Handshakes
+and protocol commands use a separate control mailbox, so data backpressure
+cannot hide connection management or shutdown. Delivery preserves each
+connection's protocol ordering.
+
+Actor-to-driver commands and application data have separate bounded queues.
+Application handles enqueue raw messages; drivers own their encoding and
+transmission. Closing a socket either drains accepted output within its linger
+deadline or cancels the driver tasks.
+
+A latency-profile plain-TCP route can perform one immediate nonblocking write
+from the caller. The connection driver owns any unfinished output.
 
 ## Routing and fan-out
 
@@ -109,20 +118,21 @@ ownership still follow the socket's ordinary rules.
 | Identity or reply route | ROUTER, REP, SERVER, PEER | Selected peer or saved request route |
 | Exclusive | PAIR, CHANNEL | One peer |
 
-Round-robin byte-stream and inproc peers have bounded per-peer send pipes.
-Connect-side pipes exist before the remote endpoint binds, so messages sent
-before READY retain their order through handshake and reconnect. A bind-side
+Round-robin byte-stream peers have bounded per-peer send pipes; inproc peers
+push into their connection's ring (see [Inproc](#inproc)). Connect-side pipes
+exist before the remote endpoint binds, so messages sent before READY retain
+their order through handshake and reconnect. A bind-side
 socket without a ready pipe is mute. HWM limits each pipe's queued messages;
 it does not cap total socket memory.
 
-Fan-out sends enter lane 0. Owned contexts distribute publications across
-lanes on their I/O threads; borrowed contexts use one lane. Each lane matches
+Owned contexts distribute publications across fan-out lanes on their I/O
+threads; borrowed contexts use one lane. Each lane matches
 subscribers or groups before encoding. Peers with compatible codec settings
 can share encoded output within that lane. Connection-specific transforms
-remain with the peer's driver.
+run on the peer's driver.
 
 ```text
- caller -> lane 0 -> match + encode -> peer slots -> drivers
+ caller -> fan-out lane -> match + encode -> peer slots -> drivers
                     |
                     +-> other lanes -> match + encode -> peer slots
 
@@ -137,21 +147,31 @@ changes or shutdown.
 ROUTER selects peers by identity, SERVER by routing ID, and REP by the saved
 request route. PEER combines identity routing in both directions. Socket
 clones share the receive drain; outbound PEER sends use per-clone,
-per-destination producers consumed by the existing connection driver. A
+per-destination producers consumed by the connection driver. A
 replacement identity invalidates the old route and its queued receive data.
 
 ## Receive ownership and backpressure
 
-PULL, GATHER, SUB, and XSUB use socket-owned fan-in queues with a producer for
-each connection. The application drains them fairly while preserving order
-within each peer. PEER uses the same socket-owned receive model; application
-workers choose how to dispatch received identities.
+PULL, GATHER, SUB, XSUB, and PEER own their receive queues. Each connection
+has an independent bounded lane. Applications drain the lanes fairly, with
+FIFO order within each connection. Socket clones share the receive drain;
+application worker selection belongs to the application.
 
-A receive queue holds `Message` values, not notifications. Consumed slots
-return capacity to producers. Capacity updates can be batched, but a receiver
-must publish available space before parking. A full application queue pauses
-further inbound data while the driver remains able to service local control,
-outbound writes, cancellation, and close.
+PEER, PULL, and GATHER let the application claim a receive source while deciding
+whether to admit its message. Receipt lifetime controls the claim; the receiving
+socket enforces the pause and owns any returned message. A claim pauses that
+connection's drainage while other sources, outbound traffic, and control work
+continue. Claims belong to a physical
+connection generation, so a reconnect cannot inherit a held message.
+
+Backpressure propagates through bounded queues. A full connection lane stops
+transport reads; transport buffers and sender queues then fill. Resuming the
+source allows drainage and frees queue capacity. PEER bounds retained memory
+per source; PULL and GATHER use message-count HWMs. Socket memory also includes
+held messages and transport buffers.
+
+The [receive backpressure contract](receive-backpressure.md) describes source
+receipts, retries, and socket-type constraints.
 
 Round-robin and exclusive sends normally wait for space when mute; nonblocking
 sends report `Full`. Fan-out sockets apply their configured drop or block
@@ -170,17 +190,15 @@ Small message bodies can live inline in `Message` or `Payload`. Larger bodies
 use shared storage; cloning a message need not copy its payload. Multipart
 messages retain part descriptors and shared body owners.
 
-`FrameBuffer` stores headers and small bodies in an arena. Large bodies remain
-external shared chunks for gather writes. Partial writes retain their chunks
-and offsets until completion. Native byte-stream receives can hand owned read
-storage to the decoder; direct reads into final payload storage are available
-for eligible large frames. Transforms and WebSocket masking can still require
-copies.
+`FrameBuffer` owns encoded headers and small bodies. Large bodies use shared
+chunks for gather writes. Drivers retain unfinished output until its wire
+write completes. Received storage passes from the transport through the codec
+to the application message.
 
 Compression transforms complete messages before ZMTP framing. Peer-routed
-sends encode on their connection driver, with optional offload for larger
-work. Fan-out lanes encode independently and share results with compatible
-peers. Dictionary shipment remains ordered and scoped to each connection.
+sends encode on their connection driver, which can delegate compute work to
+worker tasks. Fan-out lanes encode independently and share results with
+compatible peers. Dictionary shipment is ordered and scoped to each connection.
 The [LZ4 RFC](lz4-rfc.md) and [Zstd RFC](zstd-rfc.md) define their wire formats.
 
 Endpoint URIs select carriers and optional transforms. Bind/connect capture
@@ -197,20 +215,38 @@ queues and are serviced regardless of data volume. A full receive queue or
 actor mailbox keeps its pending item owned while the task waits for capacity;
 retries preserve message order and do not repeat decoding.
 
-`DataSignal` coalesces producer wakeups for send pipes, transmit slots, and
-fan-out lanes. Consumers clear and rearm it around each bounded drain; work
-remaining after a budget expires schedules another turn. `StateSignal` tracks
-capacity and route changes with a generation counter so waiters cannot sleep
-through a change. Neither signal owns messages.
+`DataSignal` coalesces data-available notifications. `StateSignal` reports
+capacity and route changes. Signals schedule work; queues own the messages.
 
 ## Other execution paths
 
 ### Inproc
 
-Inproc transfers owned messages without ZMTP framing or kernel I/O. Peers
-across threads use send pipes; eligible same-thread peers use direct queue
-access. HWM, fairness, and connect-before-bind still apply. Names belong to a
-context, so separate contexts may bind the same name.
+Inproc transfers owned messages without ZMTP framing or kernel I/O. The
+receiving socket owns a bounded queue for each connection direction, sized
+from the sender's send HWM and receiver's receive HWM. Direct sends enqueue on
+the sender's calling thread; application receives drain on the receiver's
+calling thread. PULL/GATHER drain their inproc queues through the same fanring
+receiver as wire connections.
+
+```text
+ sender thread                              receiver thread
+
+ send(Message) -> routing -> [ bounded connection queue ] -> recv()
+```
+
+The receive path applies socket-type routing and request/reply rules. ROUTER
+messages carry the peer identity, SERVER messages carry a routing ID, and REP
+admits the saved reply route when the application receives the request.
+
+Connection setup, subscription commands, and lifecycle management run on the
+context runtime. Relay paths, including PEER and conflate, forward messages
+through peer tasks. Their data and control queues are separate, so a blocked
+application receive does not prevent cancellation or shutdown.
+
+Connect-side sends queue until the peer binds, then enter the connection queue
+in order. Fan-out senders match subscriptions on the calling thread and enqueue
+into each inproc subscriber's queue. Contexts have separate inproc namespaces.
 
 ### Caller-driven exclusive sockets
 
@@ -224,7 +260,7 @@ and heartbeat work. Its send and replay contract differs from regular sockets.
 `Proxy` composes two sockets without another socket type or unbounded
 forwarding queue. It retains a pending message in each direction when the
 target is full and retries it before reading more from that source. Socket
-HWM and routing policy remain authoritative.
+HWM and routing policy govern forwarding.
 
 ### C and language bindings
 

@@ -1,4 +1,5 @@
 //! Socket-owned fan-in. Drivers own producers; only the application drains.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Wake, Waker};
 
@@ -11,14 +12,23 @@ use omq_proto::{
 
 use super::recv::{BlockingRecvWaker, recv_budget_bytes};
 use crate::engine::signal::{DataSignal, StateSignal};
-use crate::transport::inproc::BlockingSpace;
+
+mod source;
+pub(crate) use source::Source;
+use source::{ReceiveState, SourceRegistration};
 
 #[derive(Debug)]
 pub(crate) struct Fanin {
     registrar: Mutex<mpsc::Sender<Message>>,
-    receiver: Mutex<Option<mpsc::Receiver<Message>>>,
+    receiver: Mutex<Option<ReceiveState>>,
     signal: Arc<DataSignal>,
     blocking: Arc<BlockingRecvWaker>,
+    /// Set once any producer registered. Stays set: a dropped producer's
+    /// lane may still hold messages.
+    registered: AtomicBool,
+    source_aware: bool,
+    source_pending: AtomicBool,
+    closed: AtomicBool,
 }
 
 impl Fanin {
@@ -27,20 +37,73 @@ impl Fanin {
         signal: Arc<DataSignal>,
         blocking: Arc<BlockingRecvWaker>,
     ) -> Arc<Self> {
+        Self::build(capacity, signal, blocking, false)
+    }
+
+    pub(crate) fn new_source_aware(
+        capacity: usize,
+        signal: Arc<DataSignal>,
+        blocking: Arc<BlockingRecvWaker>,
+    ) -> Arc<Self> {
+        Self::build(capacity, signal, blocking, true)
+    }
+
+    fn build(
+        capacity: usize,
+        signal: Arc<DataSignal>,
+        blocking: Arc<BlockingRecvWaker>,
+        source_aware: bool,
+    ) -> Arc<Self> {
         let (sender, rx) = mpsc::channel(capacity);
         Arc::new(Self {
             registrar: Mutex::new(sender),
-            receiver: Mutex::new(Some(rx)),
+            receiver: Mutex::new(Some(ReceiveState::new(rx))),
             signal,
             blocking,
+            registered: AtomicBool::new(false),
+            source_aware,
+            source_pending: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         })
     }
 
-    pub(crate) fn register(&self) -> Option<Producer> {
-        let sender = self.registrar.lock().unwrap().try_clone()?;
+    /// Whether a producer ever registered. Until then the queue is empty
+    /// and the receive path can skip it.
+    pub(crate) fn has_registered(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn source_aware(&self) -> bool {
+        self.source_aware
+    }
+
+    pub(crate) fn register(self: &Arc<Self>) -> Option<Producer> {
+        self.register_capacity(None)
+    }
+
+    pub(crate) fn register_with_capacity(self: &Arc<Self>, capacity: usize) -> Option<Producer> {
+        self.register_capacity(Some(capacity))
+    }
+
+    fn register_capacity(self: &Arc<Self>, capacity: Option<usize>) -> Option<Producer> {
+        let registrar = self.registrar.lock().unwrap();
+        let sender = match capacity {
+            Some(capacity) => registrar.try_register_with_capacity(capacity).ok()?,
+            None => registrar.try_clone()?,
+        };
+        let source = if self.source_aware {
+            let mut guard = self.receiver.lock().unwrap();
+            let state = guard.as_mut()?;
+            state.process_changes(self);
+            state.reclaim_sources();
+            state.scan_lanes |= capacity.is_some();
+            Some(state.register(self, sender.lane()))
+        } else {
+            None
+        };
+        self.registered.store(true, Ordering::Release);
         let space = Arc::new(SpaceWake {
             signal: Arc::new(StateSignal::new()),
-            blocking: Arc::new(BlockingSpace::new()),
         });
         Some(Producer {
             sender,
@@ -48,6 +111,8 @@ impl Fanin {
             blocking: self.blocking.clone(),
             waker: Waker::from(space.clone()),
             space,
+            external_ready: self.source_aware && capacity.is_some(),
+            source,
         })
     }
 
@@ -58,9 +123,12 @@ impl Fanin {
         batching: bool,
     ) -> Result<usize> {
         let mut guard = self.receiver.lock().unwrap();
-        let rx = guard.as_mut().ok_or(Error::Closed)?;
+        let state = guard.as_mut().ok_or(Error::Closed)?;
+        state.process_changes(self);
         let start = out.len();
         self.signal.begin_drain();
+        state.poll_sources(true);
+        let rx = &mut state.receiver;
         let observed_empty = if batching {
             Self::drain_bulk(rx, out, &mut budget)
         } else {
@@ -69,10 +137,13 @@ impl Fanin {
         if observed_empty && self.signal.clear_after(true) {
             self.blocking.wake();
         }
+        state.observed_empty = observed_empty;
         let count = out.len() - start;
+        state.until_poll = state.until_poll.saturating_sub(count);
         if count == 0 {
             Err(Error::WouldBlock)
         } else {
+            state.wake_waiter(self);
             Ok(count)
         }
     }
@@ -124,27 +195,47 @@ impl Fanin {
 
     pub(crate) fn try_recv(&self) -> Result<Message> {
         let mut guard = self.receiver.lock().unwrap();
-        let receiver = guard.as_mut().ok_or(Error::Closed)?;
-        self.signal.begin_drain();
-        let result = receiver.try_recv_fair();
+        let state = guard.as_mut().ok_or(Error::Closed)?;
+        state.process_changes(self);
+        if !state.scan_lanes {
+            self.signal.begin_drain();
+        }
+        state.poll_sources(false);
+        let mut result = state.receiver.try_recv_fair();
+        if result.is_err() && state.scan_lanes {
+            // An externally signaled lane may have published after the last
+            // bounded readiness poll. Fence and scan before claiming empty.
+            self.signal.begin_drain();
+            state.poll_sources(true);
+            result = state.receiver.try_recv_fair();
+        }
         if let Ok(item) = result {
             // Keep fanring's bounded slot-release batches. Forcing a release
             // here wakes the producer after every message, even while this
             // consumer is still draining. Fair rotation is unchanged.
+            state.observed_empty = false;
+            state.until_poll = state.until_poll.saturating_sub(1);
+            state.wake_waiter(self);
             Ok(item)
         } else {
             // Publish partial credits before the caller can park. Bulk calls
             // still release all consumed slots before returning to the caller.
-            receiver.release_consumed();
+            state.receiver.release_consumed();
             if self.signal.clear_after(true) {
                 self.blocking.wake();
             }
+            state.observed_empty = true;
             Err(Error::WouldBlock)
         }
     }
 
     pub(crate) fn close(&self) {
-        self.receiver.lock().unwrap().take();
+        self.closed.store(true, Ordering::Release);
+        let state = self.receiver.lock().unwrap().take();
+        if let Some(state) = &state {
+            state.close_sources();
+        }
+        drop(state);
         self.signal.wake_all();
         self.blocking.wake();
     }
@@ -153,7 +244,6 @@ impl Fanin {
 #[derive(Debug)]
 struct SpaceWake {
     signal: Arc<StateSignal>,
-    blocking: Arc<BlockingSpace>,
 }
 impl Wake for SpaceWake {
     fn wake(self: Arc<Self>) {
@@ -161,7 +251,6 @@ impl Wake for SpaceWake {
     }
     fn wake_by_ref(self: &Arc<Self>) {
         self.signal.notify_changed();
-        self.blocking.notify();
     }
 }
 
@@ -172,14 +261,25 @@ pub(crate) struct Producer {
     blocking: Arc<BlockingRecvWaker>,
     space: Arc<SpaceWake>,
     waker: Waker,
+    external_ready: bool,
+    // Dropped after sender, so disconnect is visible before the external wake.
+    source: Option<SourceRegistration>,
 }
 impl Producer {
     pub(crate) fn try_send(&mut self, item: Message) -> std::result::Result<(), Message> {
-        self.sender
-            .try_send(item)
-            .map_err(mpsc::TrySendError::into_inner)?;
+        let result = if self.external_ready {
+            // Inproc already uses the socket's fenced DataSignal handoff.
+            // The consumer polls these lanes; no second readiness RMW.
+            self.sender.try_send_unsignaled(item)
+        } else {
+            self.sender.try_send(item)
+        };
+        result.map_err(mpsc::TrySendError::into_inner)?;
         self.signal.mark();
-        self.blocking.wake();
+        self.blocking.wake_after_fence();
+        if let Some(source) = &self.source {
+            source.published();
+        }
         Ok(())
     }
     #[inline]
@@ -191,7 +291,10 @@ impl Producer {
     fn flush(&mut self) {
         self.sender.flush();
         self.signal.mark();
-        self.blocking.wake();
+        self.blocking.wake_after_fence();
+        if let Some(source) = &self.source {
+            source.published();
+        }
     }
     pub(crate) fn is_full(&mut self) -> bool {
         self.sender
@@ -204,9 +307,6 @@ impl Producer {
     pub(crate) fn space(&self) -> Arc<StateSignal> {
         self.space.signal.clone()
     }
-    pub(crate) fn blocking_space(&self) -> Arc<BlockingSpace> {
-        self.space.blocking.clone()
-    }
 }
 
 impl Drop for Producer {
@@ -216,14 +316,8 @@ impl Drop for Producer {
 }
 
 #[derive(Debug)]
-enum SinkProducer {
-    Owned(Producer),
-    Shared(Arc<crate::transport::inproc::InprocTx>),
-}
-
-#[derive(Debug)]
 pub(crate) struct Sink {
-    producer: SinkProducer,
+    producer: Producer,
     pending: Option<Message>,
     space: Arc<StateSignal>,
 }
@@ -231,30 +325,14 @@ impl Sink {
     pub(crate) fn owned(producer: Producer) -> Self {
         let space = producer.space();
         Self {
-            producer: SinkProducer::Owned(producer),
-            pending: None,
-            space,
-        }
-    }
-    pub(crate) fn shared(producer: Arc<crate::transport::inproc::InprocTx>) -> Self {
-        let space = producer.space_notify.clone();
-        Self {
-            producer: SinkProducer::Shared(producer),
+            producer,
             pending: None,
             space,
         }
     }
     #[inline]
     fn with_producer<T>(&mut self, f: impl FnOnce(&mut Producer) -> T) -> T {
-        match &mut self.producer {
-            SinkProducer::Owned(producer) => f(producer),
-            SinkProducer::Shared(producer) => match &mut *producer.producer.lock() {
-                crate::transport::inproc::InprocProducer::Fanin(producer) => f(producer),
-                crate::transport::inproc::InprocProducer::Yring(_) => {
-                    unreachable!("fan-in producer required")
-                }
-            },
-        }
+        f(&mut self.producer)
     }
     pub(crate) fn push(&mut self, message: Message) -> bool {
         self.push_mode::<false>(message)
@@ -287,6 +365,17 @@ impl Sink {
     }
     pub(crate) fn blocked(&self) -> bool {
         self.pending.is_some()
+    }
+    /// Take back a message that `push` retained because the queue was full.
+    pub(crate) fn take_pending(&mut self) -> Option<Message> {
+        self.pending.take()
+    }
+    /// Report fullness and register the space waker when full.
+    pub(crate) fn is_full(&mut self) -> bool {
+        self.with_producer(Producer::is_full)
+    }
+    pub(crate) fn space(&self) -> Arc<StateSignal> {
+        self.space.clone()
     }
     pub(crate) fn retry_pending(&mut self) -> bool {
         self.pending.take().is_none_or(|message| self.push(message))

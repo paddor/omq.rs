@@ -179,9 +179,9 @@ impl Proxy {
 
             let fe_wait_msg = fe_pending.as_ref().map(|pending| pending.msg.clone());
             let be_wait_msg = be_pending.as_ref().map(|pending| pending.msg.clone());
-            let frontend = self.frontend.clone();
-            let backend = self.backend.clone();
-            let control = self.control.clone();
+            let frontend = self.frontend.clone_shared();
+            let backend = self.backend.clone_shared();
+            let control = self.control.as_ref().map(Socket::clone_shared);
 
             tokio::select! {
                 biased;
@@ -197,9 +197,9 @@ impl Proxy {
                         None => return Ok(ProxyExit::Closed),
                     }
                 }
-                () = wait_for_send_progress(backend.clone(), fe_wait_msg),
+                () = wait_for_send_progress(backend.clone_shared(), fe_wait_msg),
                     if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_some() => {}
-                () = wait_for_send_progress(frontend.clone(), be_wait_msg),
+                () = wait_for_send_progress(frontend.clone_shared(), be_wait_msg),
                     if state == ProxyState::Active && be_to_fe_enabled && be_pending.is_some() => {}
                 msg = frontend.recv(),
                     if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_none() => {

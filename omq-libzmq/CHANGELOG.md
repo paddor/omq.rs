@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Busy direct receive queues no longer starve queued fallback messages.
+- A fallback peer disconnect no longer replaces a live direct receive ring.
+  Pending replacement rings survive churn, and polling/`ZMQ_EVENTS` adopt
+  replacement consumers before reporting readiness.
+- REP replies retain the correct request route when multiple peers queue
+  requests before the application replies. Peer, envelope, body, and ZAP
+  properties stay associated through direct and relayed receives.
+- REQ receive relays no longer unlock the send state before application
+  receive. Malformed replies are discarded, empty body frames are retained,
+  and incomplete multipart receives reject sends with `EFSM`.
+
+### Changed
+
+- Require `yring` 0.3.19 for batched release wake hints.
+- Inproc REQ/REP uses the C receive sink directly when available, avoiding
+  receive relay scheduling on the single-peer path.
+- Direct receive sinks signal only when yring wake hints request it;
+  streaming inproc receives avoid an eventfd write for each message.
+- `ZMQ_IO_THREADS` set to 0 runs one IO thread instead of a PUSH/PULL-only
+  mode. Every socket type and transport works on such a context; `zmq_bind`
+  and `zmq_connect` no longer return `ENOTSUP` for it.
+- Inproc PUSH/PULL uses the bundled `omq-tokio` inproc rings. The separate
+  byte ring (`inproc_bypass`) is removed.
+
 ## [0.5.20] - 2026-09-27
 
 ### Changed

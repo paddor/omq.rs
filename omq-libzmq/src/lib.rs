@@ -28,7 +28,6 @@ mod consts;
 mod context;
 pub mod curve;
 mod error;
-mod inproc_bypass;
 mod local_cell;
 mod msg;
 mod notify;

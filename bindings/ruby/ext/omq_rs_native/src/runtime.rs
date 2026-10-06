@@ -363,10 +363,9 @@ pub fn materialize(
             }
         });
 
-        let monitor_sock = sock.clone();
+        let mut stream = sock.monitor();
         let peer_ready_sock = sock.clone();
         let monitor_pump = tokio::spawn(async move {
-            let mut stream = monitor_sock.monitor();
             let mut peer_count: u32 = 0;
             let mut had_peers = false;
             let mut peer_connected_fired = false;

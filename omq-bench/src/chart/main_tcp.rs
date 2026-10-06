@@ -1,6 +1,7 @@
 use super::common::{
-    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T, C_OMQ_CT, C_OMQ_MT, C_OMQ_SPIN,
-    C_RZMQ, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl, draw_latency_single_panel_with_versions,
+    C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T, C_OMQ_CT, C_OMQ_MT,
+    C_OMQ_SPIN, C_R0Z, C_RZMQ, C_RZMQ_IOURING, C_ZMQRS, Impl,
+    draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -37,10 +38,16 @@ const PUSHPULL_IMPLS: &[Impl] = &[
         color: C_OMQ_MT,
     },
     Impl {
-        key: "tmq",
-        label: "tmq",
+        key: "r0z-async",
+        label: "r0z-async",
         threads: "1 IO",
-        color: C_TMQ,
+        color: C_R0Z,
+    },
+    Impl {
+        key: "monocoque-tokio-ct",
+        label: "monocoque",
+        threads: "CT",
+        color: C_MONOCOQUE,
     },
     Impl {
         key: "zmq.rs",
@@ -88,10 +95,16 @@ const REQREP_IMPLS: &[Impl] = &[
         color: C_OMQ_CT,
     },
     Impl {
-        key: "tmq",
-        label: "tmq",
+        key: "r0z-async",
+        label: "r0z-async",
         threads: "1 IO",
-        color: C_TMQ,
+        color: C_R0Z,
+    },
+    Impl {
+        key: "monocoque-tokio-ct",
+        label: "monocoque",
+        threads: "CT",
+        color: C_MONOCOQUE,
     },
     Impl {
         key: "zmq.rs",
@@ -151,10 +164,16 @@ const PUBSUB_IMPLS: &[Impl] = &[
         color: C_OMQ_4T,
     },
     Impl {
-        key: "tmq",
-        label: "tmq",
+        key: "r0z-async",
+        label: "r0z-async",
         threads: "1 IO",
-        color: C_TMQ,
+        color: C_R0Z,
+    },
+    Impl {
+        key: "monocoque-tokio-ct",
+        label: "monocoque",
+        threads: "CT + 1 worker",
+        color: C_MONOCOQUE,
     },
     Impl {
         key: "zmq.rs",

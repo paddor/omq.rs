@@ -1,10 +1,10 @@
-//! Two-process throughput peer for tmq.
+//! Two-process throughput peer for r0z-async.
 //!
 //! Usage:
-//!   tmq_bench_peer push <addr> <msg_size_bytes>
-//!   tmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
-//!   tmq_bench_peer rep  <addr> <msg_size_bytes>
-//!   tmq_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
+//!   r0z_bench_peer push <addr> <msg_size_bytes>
+//!   r0z_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+//!   r0z_bench_peer rep  <addr> <msg_size_bytes>
+//!   r0z_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
 //!
 //! <addr>: a port number (-> tcp://127.0.0.1:<port>) or a full ZMQ address.
 //!
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, Stream, StreamExt};
-use tmq::{Context, Message, Multipart};
+use r0z_async::{Context, Message, Multipart};
 
 fn cpu_time_secs() -> f64 {
     let mut usage = libc::rusage {
@@ -61,8 +61,8 @@ fn report_bound_port(port: u16) {
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         return;
     };
-    let ctx = zmq::Context::new();
-    let push = ctx.socket(zmq::PUSH).expect("coord push");
+    let ctx = r0z::Context::new();
+    let push = ctx.socket(r0z::PUSH).expect("coord push");
     push.set_linger(0).ok();
     push.connect(&coord_ep).expect("coord connect");
     let msg = format!("READY {port}");
@@ -146,7 +146,7 @@ fn print_multi_result(per_socket: &[u64], elapsed: f64, size: usize, cpu: f64) {
 
 async fn measure_stream<S>(socket: &mut S, duration: Duration) -> (u64, f64, f64)
 where
-    S: Stream<Item = tmq::Result<Multipart>> + Unpin,
+    S: Stream<Item = r0z_async::Result<Multipart>> + Unpin,
 {
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
@@ -246,12 +246,12 @@ async fn main() {
             run_multi_push(&addr, size, count, duration).await;
         }
         _ => {
-            eprintln!("usage: tmq_bench_peer push <addr> <size>");
-            eprintln!("       tmq_bench_peer pull <addr> <size> <duration_secs>");
-            eprintln!("       tmq_bench_peer pub <addr> <size>");
-            eprintln!("       tmq_bench_peer sub <addr> <size> <duration_secs>");
-            eprintln!("       tmq_bench_peer rep <addr> <size>");
-            eprintln!("       tmq_bench_peer req <addr> <size> <iterations> <warmup>");
+            eprintln!("usage: r0z_bench_peer push <addr> <size>");
+            eprintln!("       r0z_bench_peer pull <addr> <size> <duration_secs>");
+            eprintln!("       r0z_bench_peer pub <addr> <size>");
+            eprintln!("       r0z_bench_peer sub <addr> <size> <duration_secs>");
+            eprintln!("       r0z_bench_peer rep <addr> <size>");
+            eprintln!("       r0z_bench_peer req <addr> <size> <iterations> <warmup>");
             std::process::exit(1);
         }
     }
@@ -259,7 +259,7 @@ async fn main() {
 
 async fn run_push(addr: &str, coord_port: Option<u16>, size: usize) {
     let ctx = Context::new();
-    let mut socket = tmq::push(&ctx).bind(addr).expect("push bind");
+    let mut socket = r0z_async::push(&ctx).bind(addr).expect("push bind");
     if let Some(port) = coord_port {
         report_bound_port(port);
     }
@@ -274,7 +274,7 @@ async fn run_push(addr: &str, coord_port: Option<u16>, size: usize) {
 
 async fn run_push_connect(addr: &str, size: usize) {
     let ctx = Context::new();
-    let mut socket = tmq::push(&ctx).connect(addr).expect("push connect");
+    let mut socket = r0z_async::push(&ctx).connect(addr).expect("push connect");
     wait_for_start_barrier().await;
     let payload = vec![b'x'; size];
     loop {
@@ -286,7 +286,7 @@ async fn run_push_connect(addr: &str, size: usize) {
 
 async fn run_pull(addr: &str, size: usize, duration: Duration) {
     let ctx = Context::new();
-    let mut socket = tmq::pull(&ctx).connect(addr).expect("pull connect");
+    let mut socket = r0z_async::pull(&ctx).connect(addr).expect("pull connect");
 
     wait_for_start_barrier().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -298,7 +298,7 @@ async fn run_pull(addr: &str, size: usize, duration: Duration) {
 
 async fn run_pull_bind(addr: &str, coord_port: Option<u16>, size: usize, duration: Duration) {
     let ctx = Context::new();
-    let mut socket = tmq::pull(&ctx).bind(addr).expect("pull bind");
+    let mut socket = r0z_async::pull(&ctx).bind(addr).expect("pull bind");
     if let Some(port) = coord_port {
         report_bound_port(port);
     }
@@ -313,7 +313,7 @@ async fn run_pull_bind(addr: &str, coord_port: Option<u16>, size: usize, duratio
 
 async fn run_pub(addr: &str, coord_port: Option<u16>, size: usize) {
     let ctx = Context::new();
-    let mut socket = tmq::publish(&ctx).bind(addr).expect("pub bind");
+    let mut socket = r0z_async::publish(&ctx).bind(addr).expect("pub bind");
     if let Some(port) = coord_port {
         report_bound_port(port);
     }
@@ -328,7 +328,7 @@ async fn run_pub(addr: &str, coord_port: Option<u16>, size: usize) {
 
 async fn run_sub(addr: &str, size: usize, duration: Duration) {
     let ctx = Context::new();
-    let mut socket = tmq::subscribe(&ctx)
+    let mut socket = r0z_async::subscribe(&ctx)
         .connect(addr)
         .expect("sub connect")
         .subscribe(b"")
@@ -344,29 +344,37 @@ async fn run_sub(addr: &str, size: usize, duration: Duration) {
 
 async fn run_rep(addr: &str, coord_port: Option<u16>) {
     let ctx = Context::new();
-    let mut receiver = tmq::reply(&ctx).bind(addr).expect("rep bind");
+    let mut socket = r0z_async::reply(&ctx).bind(addr).expect("rep bind");
     if let Some(port) = coord_port {
         report_bound_port(port);
     }
-    while let Ok((msg, sender)) = receiver.recv().await {
-        match sender.send(msg).await {
-            Ok(next_receiver) => receiver = next_receiver,
-            Err(_) => break,
+    while let Ok(message) = socket.recv().await {
+        if socket.send(message).await.is_err() {
+            break;
         }
     }
 }
 
 async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     let ctx = Context::new();
-    let mut sender = tmq::request(&ctx).connect(addr).expect("req connect");
+    let mut sender = r0z_async::request(&ctx).connect(addr).expect("req connect");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let payload = vec![b'x'; size];
 
+    sender
+        .send(payload_multipart(&payload))
+        .await
+        .expect("req validation send");
+    assert_eq!(
+        sender.recv().await.expect("req validation recv"),
+        payload_multipart(&payload),
+        "req reply payload"
+    );
+
     for _ in 0..warmup {
-        let receiver = sender.send(payload_multipart(&payload)).await.unwrap();
-        let (_, next_sender) = receiver.recv().await.unwrap();
-        sender = next_sender;
+        sender.send(payload_multipart(&payload)).await.unwrap();
+        sender.recv().await.unwrap();
     }
 
     let cpu_before = cpu_time_secs();
@@ -374,9 +382,8 @@ async fn run_req(addr: &str, size: usize, iterations: usize, warmup: usize) {
     let mut rtts: Vec<u64> = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let t = Instant::now();
-        let receiver = sender.send(payload_multipart(&payload)).await.unwrap();
-        let (_, next_sender) = receiver.recv().await.unwrap();
-        sender = next_sender;
+        sender.send(payload_multipart(&payload)).await.unwrap();
+        sender.recv().await.unwrap();
         rtts.push(t.elapsed().as_nanos() as u64);
     }
     let elapsed = t0.elapsed().as_secs_f64();
@@ -391,7 +398,7 @@ async fn run_multi_pull(addr: &str, size: usize, duration: Duration, socket_coun
     let ctx = Context::new();
     let mut sockets = Vec::with_capacity(socket_count);
     for _ in 0..socket_count {
-        let socket = tmq::pull(&ctx).connect(addr).expect("pull connect");
+        let socket = r0z_async::pull(&ctx).connect(addr).expect("pull connect");
         sockets.push(socket);
     }
     run_multi_recv(sockets, size, duration, socket_count).await;
@@ -401,7 +408,7 @@ async fn run_multi_sub(addr: &str, size: usize, duration: Duration, socket_count
     let ctx = Context::new();
     let mut sockets = Vec::with_capacity(socket_count);
     for _ in 0..socket_count {
-        let socket = tmq::subscribe(&ctx)
+        let socket = r0z_async::subscribe(&ctx)
             .connect(addr)
             .expect("sub connect")
             .subscribe(b"")
@@ -413,7 +420,7 @@ async fn run_multi_sub(addr: &str, size: usize, duration: Duration, socket_count
 
 async fn run_multi_recv<S>(sockets: Vec<S>, size: usize, duration: Duration, socket_count: usize)
 where
-    S: Stream<Item = tmq::Result<Multipart>> + Unpin + Send + 'static,
+    S: Stream<Item = r0z_async::Result<Multipart>> + Unpin + Send + 'static,
 {
     assert!((1..=256).contains(&socket_count));
     wait_for_start_barrier().await;
@@ -468,7 +475,7 @@ async fn run_multi_push(addr: &str, size: usize, socket_count: usize, duration: 
     let ctx = Context::new();
     let mut sockets = Vec::with_capacity(socket_count);
     for _ in 0..socket_count {
-        let socket = tmq::push(&ctx).connect(addr).expect("push connect");
+        let socket = r0z_async::push(&ctx).connect(addr).expect("push connect");
         sockets.push(socket);
     }
 

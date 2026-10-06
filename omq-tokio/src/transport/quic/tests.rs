@@ -485,6 +485,18 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
         let Endpoint::Quic { host, port } = listener.local_endpoint().clone() else {
             unreachable!()
         };
+        // Linux listeners reserve every data thread; other platforms reserve
+        // one. Compute the connector's expected placement from those leases.
+        let mut loads = vec![0; pool.thread_count()];
+        for endpoint in listener.endpoints.iter() {
+            loads[endpoint.lease.index()] += 1;
+        }
+        let client_thread = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, load)| load)
+            .unwrap()
+            .0;
         let accept = tokio::spawn(async move {
             let accepted = listener.accept().await.map(|(stream, _, _)| stream);
             (listener, accepted)
@@ -506,7 +518,11 @@ fn setup_runs_quinn_tasks_on_data_io_runtimes_only() {
             data_after >= data_before + 6,
             "QUIC tasks missing from data runtimes: {before:?} -> {after:?}"
         );
-        assert_eq!(client_lease.index(), 0, "least-loaded placement");
+        assert_eq!(
+            client_lease.index(),
+            client_thread,
+            "least-loaded placement"
+        );
         assert_on_endpoint_thread(&listener, &accepted, server_lease.index());
     });
 }

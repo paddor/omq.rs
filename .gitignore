@@ -12,6 +12,7 @@ Cargo.lock.bak
 !bindings/lua/native/Cargo.lock
 /bindings/pyomq/dist/*.whl
 !scripts/r0z_bench_peer/Cargo.lock
+!scripts/tmq_bench_peer/Cargo.lock
 uv.lock
 .DS_Store
 /tmp/

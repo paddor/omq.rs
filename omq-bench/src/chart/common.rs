@@ -74,6 +74,7 @@ pub(crate) const C_OMQ_4T: RGBColor = RGBColor(127, 29, 29);
 pub(crate) const C_ZMQRS: RGBColor = RGBColor(96, 165, 250);
 pub(crate) const C_MONOCOQUE: RGBColor = RGBColor(37, 99, 235);
 pub(crate) const C_R0Z: RGBColor = RGBColor(168, 85, 247);
+pub(crate) const C_TMQ: RGBColor = RGBColor(34, 211, 238);
 pub(crate) const C_RZMQ: RGBColor = RGBColor(74, 222, 128);
 pub(crate) const C_RZMQ_IOURING: RGBColor = RGBColor(16, 185, 129);
 
@@ -288,6 +289,9 @@ fn impl_versions() -> &'static BTreeMap<&'static str, String> {
         {
             versions.insert("r0z-async", version);
         }
+        if let Some(version) = cargo_lock_version("scripts/tmq_bench_peer/Cargo.lock", "tmq") {
+            versions.insert("tmq", version);
+        }
         if let Some(version) =
             cargo_lock_version("scripts/monocoque_bench_peer/Cargo.lock", "monocoque-rs")
         {
@@ -348,7 +352,7 @@ fn other_impl_version(key: &str) -> Option<&'static str> {
         "libzmq"
     } else if key == "zmq.rs" {
         "zmq.rs"
-    } else if matches!(key, "r0z-async" | "monocoque-tokio-ct") {
+    } else if matches!(key, "r0z-async" | "tmq" | "monocoque-tokio-ct") {
         key
     } else if matches!(key, "rzmq" | "rzmq-iouring") {
         "rzmq"

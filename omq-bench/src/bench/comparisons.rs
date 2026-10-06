@@ -271,9 +271,25 @@ static IMPLS: &[ImplDef] = &[
         env: &[("ZMQ_IO_THREADS", "2")],
     },
     ImplDef {
-        name: "r0z-async",
+        name: "tmq",
         binary_from: None,
         prefix: "m",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "push",
+        fanio_needs_peer_count: false,
+        supports_pubsub: true,
+        env: &[],
+    },
+    ImplDef {
+        name: "r0z-async",
+        binary_from: None,
+        prefix: "n",
         class: Some(ImplClass::Classic),
         main: true,
         transports: &[Tcp],
@@ -614,25 +630,8 @@ fn build_peers(
                     PathBuf::from("scripts/zmqrs_bench_peer/target/release/zmqrs_bench_peer"),
                 );
             }
-            "r0z-async" => {
-                binaries.insert(
-                    source.to_string(),
-                    process::build_external_peer(
-                        "scripts/r0z_bench_peer",
-                        "r0z_bench_peer",
-                        &[("CXXFLAGS", "-std=gnu++11")],
-                    ),
-                );
-            }
-            "monocoque-tokio-ct" => {
-                binaries.insert(
-                    source.to_string(),
-                    process::build_external_peer(
-                        "scripts/monocoque_bench_peer",
-                        "monocoque_bench_peer",
-                        &[],
-                    ),
-                );
+            "r0z-async" | "tmq" | "monocoque-tokio-ct" => {
+                binaries.insert(source.to_string(), build_external_comparison_peer(source));
             }
             "rzmq" => {
                 run_build_in_dir(
@@ -659,6 +658,27 @@ fn build_peers(
         result.insert("omq-tokio-1t".to_string(), binaries["omq-tokio-1t"].clone());
     }
     result
+}
+
+fn build_external_comparison_peer(source: &str) -> PathBuf {
+    match source {
+        "r0z-async" => process::build_external_peer(
+            "scripts/r0z_bench_peer",
+            "r0z_bench_peer",
+            &[("CXXFLAGS", "-std=gnu++11")],
+        ),
+        "tmq" => process::build_external_peer(
+            "scripts/tmq_bench_peer",
+            "tmq_bench_peer",
+            &[("CXXFLAGS", "-std=gnu++11")],
+        ),
+        "monocoque-tokio-ct" => process::build_external_peer(
+            "scripts/monocoque_bench_peer",
+            "monocoque_bench_peer",
+            &[],
+        ),
+        _ => unreachable!("not an external comparison peer: {source}"),
+    }
 }
 
 fn run_build(cmd: &[&str]) {

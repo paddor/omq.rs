@@ -39,14 +39,16 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 | `omq_bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio-ct |
 | `omq_bench_peer_blocking` | `omq-tokio/src/bin/bench_peer_blocking.rs` | omq-tokio-1t, omq-tokio-2t |
 | `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
+| `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
 | `r0z_bench_peer` | `scripts/r0z_bench_peer/` | r0z-async |
 | `monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 | `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
 
-The `r0z-async` baseline uses a current-thread Tokio runtime and one libzmq
-IO thread. It replaces the tmq baseline and uses r0z for native bindings.
+The `tmq` and `r0z-async` baselines use current-thread Tokio runtimes and one
+libzmq IO thread. `tmq` uses its own libzmq bindings; `r0z-async` uses r0z.
+Both remain available for direct comparison.
 
 The `monocoque-tokio-ct` baseline uses Monocoque's current-thread Tokio
 runtime. PUSH/PULL uses 64 KiB read buffers, write coalescing, and reusable

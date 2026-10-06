@@ -218,6 +218,7 @@ After Hex shows `omq` 0.2.0, dry-run/audit and publish the Gleam wrapper:
 (cd bindings/beam/gleam && ~/src/gleam/target/release/gleam publish)
 ```
 
-For token-based publishing, Mix reads `HEX_API_KEY`; Gleam reads
-`HEXPM_API_KEY`. Prefer the interactive commands above for the first publish
+For token-based publishing, Mix and Rebar3 read `HEX_API_KEY`; Gleam reads
+`HEXPM_API_KEY`. Pass `--repo hexpm` to `rebar3 hex publish` so Rebar3 loads
+the repository token from the environment. Prefer the interactive commands above for the first publish
 so package metadata and included files can be reviewed before confirming.

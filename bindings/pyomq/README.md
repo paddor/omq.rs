@@ -64,42 +64,6 @@ sock.close()
 
 Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
 
-### QUIC
-
-`quic://` carries reliable ZMTP messages over TLS 1.3. Check availability
-with `pyomq.has("quic")`. Set QUIC options before the socket's first
-bind/connect; later changes raise `ZMQError`. Sync and asyncio sockets use
-the same options.
-
-```python
-from pathlib import Path
-
-server = ctx.socket(pyomq.REP)
-server.quic_cert_pem = Path("server.pem").read_bytes()
-server.quic_key_pem = Path("server.key").read_bytes()
-server.bind("quic://127.0.0.1:5555")
-
-client = ctx.socket(pyomq.REQ)
-client.quic_trust_system = 0
-client.quic_trust_pem = Path("ca.pem").read_bytes()
-client.quic_server_name = b"localhost"
-client.connect("quic://127.0.0.1:5555")
-```
-
-System certificate roots are enabled by default. `quic_server_name`
-overrides the verified name; it does not disable verification. The optional
-`quic_stream_window` is a byte window (16 KiB to 256 MiB), not a message
-size limit. `quic_max_ready_peers` defaults to 1024. The corresponding
-`OMQ_QUIC_*` constants also work with `setsockopt()`/`getsockopt()`.
-
-Build the Rust test peer before running the cross-process tests:
-
-```sh
-cargo build -p omq-tokio --features quic --example quic_interop_peer
-cd bindings/pyomq
-OMQ_QUIC_INTEROP_REQUIRED=1 pytest tests/test_quic_interop.py
-```
-
 ### Buffers, tracking, and types
 
 `send()` accepts `pyomq.Sendable`: buffer-protocol objects and `Frame`.
@@ -204,6 +168,42 @@ push.compression_level = 1  # zstd+tcp only
 See [BENCHMARKS_COMPRESSION.md](https://github.com/paddor/omq.rs/blob/main/BENCHMARKS_COMPRESSION.md) for throughput charts and benchmark details.
 Wire formats: [LZ4](https://github.com/paddor/omq.rs/blob/main/doc/lz4-rfc.md),
 [Zstd](https://github.com/paddor/omq.rs/blob/main/doc/zstd-rfc.md).
+
+### QUIC
+
+`quic://` carries reliable ZMTP messages over TLS 1.3. Check availability
+with `pyomq.has("quic")`. Set QUIC options before the socket's first
+bind/connect; later changes raise `ZMQError`. Sync and asyncio sockets use
+the same options.
+
+```python
+from pathlib import Path
+
+server = ctx.socket(pyomq.REP)
+server.quic_cert_pem = Path("server.pem").read_bytes()
+server.quic_key_pem = Path("server.key").read_bytes()
+server.bind("quic://127.0.0.1:5555")
+
+client = ctx.socket(pyomq.REQ)
+client.quic_trust_system = 0
+client.quic_trust_pem = Path("ca.pem").read_bytes()
+client.quic_server_name = b"localhost"
+client.connect("quic://127.0.0.1:5555")
+```
+
+System certificate roots are enabled by default. `quic_server_name`
+overrides the verified name; it does not disable verification. The optional
+`quic_stream_window` is a byte window (16 KiB to 256 MiB), not a message
+size limit. `quic_max_ready_peers` defaults to 1024. The corresponding
+`OMQ_QUIC_*` constants also work with `setsockopt()`/`getsockopt()`.
+
+Build the Rust test peer before running the cross-process tests:
+
+```sh
+cargo build -p omq-tokio --features quic --example quic_interop_peer
+cd bindings/pyomq
+OMQ_QUIC_INTEROP_REQUIRED=1 pytest tests/test_quic_interop.py
+```
 
 ## CURVE authentication
 

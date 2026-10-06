@@ -1,7 +1,7 @@
 //! OMQ over QUIC for native `quic://` peers.
 //!
 //! One QUIC connection per OMQ peer. The connector opens two bidirectional
-//! streams and writes to both immediately: one carries unchanged ZMTP, the
+//! streams: one carries unchanged ZMTP, the
 //! other carries carrier liveness records. Stream ID 0 carries data; stream
 //! ID 4 carries liveness. TLS 1.3, verified certificates, no 0-RTT, no OMQ
 //! DATAGRAMs, no OMQ compression.
@@ -67,13 +67,11 @@ struct Roles {
 }
 
 impl Roles {
-    /// Start liveness and wrap the data stream. `preface_done` means setup
-    /// already consumed the peer's liveness preface.
+    /// Start liveness and wrap data after both prefaces have completed.
     fn establish(
         self,
         endpoint: Arc<UdpEndpoint>,
         group: Option<Arc<ListenerGroup>>,
-        preface_done: bool,
         config: LivenessConfig,
     ) -> QuicStream {
         let (liveness_send, liveness_recv) = self.liveness;
@@ -81,7 +79,6 @@ impl Roles {
             self.carrier.clone(),
             liveness_send,
             liveness_recv,
-            preface_done,
             config,
         ))
         .abort_handle();
@@ -197,8 +194,8 @@ async fn handshake(
         .map_err(|e| Error::HandshakeFailed(format!("QUIC handshake: {e}")))
 }
 
-/// Dial one peer. The caller bounds this with the setup deadline; the
-/// liveness task enforces the same deadline for the listener's preface.
+/// Dial one peer. The caller bounds the full attempt with the setup deadline;
+/// stream setup validates both prefaces under that same deadline.
 /// The connection lives on a reserved data IO runtime; the returned stream
 /// carries that reservation to the peer driver.
 pub(crate) async fn connect(
@@ -220,8 +217,7 @@ pub(crate) async fn connect(
         crate::transport::tls::server_name(host, options.quic.server_name.as_deref())?;
     let server_name = server_name.to_str().into_owned();
     let client = config::client(&options.quic)?;
-    let mut liveness = LivenessConfig::from_options(options);
-    liveness.preface_deadline = deadline.map(Into::into);
+    let liveness = LivenessConfig::from_options(options);
     let buffers = (options.recv_buffer_size, options.send_buffer_size);
     let lease = pool.reserve_thread();
     let mut last_err = None;
@@ -231,8 +227,8 @@ pub(crate) async fn connect(
         let attempt = on_io_thread(pool, &lease, async move {
             let endpoint = client_endpoint(addr, buffers)?;
             let connection = handshake(&endpoint, client, addr, &server_name).await?;
-            let roles = open_raw_roles(connection).await?;
-            Ok(roles.establish(endpoint, None, false, liveness))
+            let roles = open_raw_roles(connection, deadline).await?;
+            Ok(roles.establish(endpoint, None, liveness))
         });
         match attempt.await {
             Ok(stream) => return Ok(stream.with_io_lease(lease)),
@@ -242,21 +238,32 @@ pub(crate) async fn connect(
     Err(last_err.unwrap_or_else(|| Error::Io(std::io::Error::other("no addresses to connect"))))
 }
 
-async fn open_raw_roles(connection: quinn::Connection) -> Result<Roles> {
+async fn open_raw_roles(connection: quinn::Connection, deadline: Option<Instant>) -> Result<Roles> {
     let opened = async {
         config::check_alpn(&connection, ALPN)?;
         let open = |e: quinn::ConnectionError| Error::HandshakeFailed(format!("QUIC open: {e}"));
         let data = connection.open_bi().await.map_err(open)?;
         let control = connection.open_bi().await.map_err(open)?;
         check_raw_roles(&data.0, &control.0)?;
-        Ok((data, control))
-    }
-    .await;
+        let mut control_send = SendHalf::Raw(control.0);
+        let mut control_recv = RecvHalf::Raw(control.1);
+        liveness::write_preface(&mut control_send).await?;
+        liveness::read_preface(&mut control_recv).await?;
+        Ok((data, (control_send, control_recv)))
+    };
+    let opened = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline.into(), opened).await {
+            Ok(result) if Instant::now() < deadline => result,
+            _ => Err(Error::HandshakeFailed("transport setup timeout".into())),
+        }
+    } else {
+        opened.await
+    };
     match opened {
         Ok(((data_send, data_recv), (control_send, control_recv))) => Ok(Roles {
             carrier: Carrier::Raw(connection),
             data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-            liveness: (SendHalf::Raw(control_send), RecvHalf::Raw(control_recv)),
+            liveness: (control_send, control_recv),
         }),
         Err(e) => {
             connection.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
@@ -483,7 +490,7 @@ async fn accept_setup(
         Ok(Err(e)) => Err(e),
     };
     match roles {
-        Ok(roles) => Ok(roles.establish(endpoint, Some(group), true, liveness)),
+        Ok(roles) => Ok(roles.establish(endpoint, Some(group), liveness)),
         Err(e) => {
             closer.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
             Err(e)
@@ -498,12 +505,14 @@ async fn accept_roles(connection: quinn::Connection) -> Result<Roles> {
     let (data_send, data_recv) = connection.accept_bi().await.map_err(accept)?;
     let (control_send, control_recv) = connection.accept_bi().await.map_err(accept)?;
     check_raw_roles(&data_send, &control_send)?;
+    let mut control_send = SendHalf::Raw(control_send);
     let mut control_recv = RecvHalf::Raw(control_recv);
     liveness::read_preface(&mut control_recv).await?;
+    liveness::write_preface(&mut control_send).await?;
     Ok(Roles {
         carrier: Carrier::Raw(connection),
         data: (SendHalf::Raw(data_send), RecvHalf::Raw(data_recv)),
-        liveness: (SendHalf::Raw(control_send), control_recv),
+        liveness: (control_send, control_recv),
     })
 }
 

@@ -40,6 +40,10 @@ The listener opens no streams. Neither side opens unidirectional streams.
 Additional streams are a protocol violation. Roles follow stream IDs,
 regardless of which stream's bytes arrive first.
 
+The connector writes its liveness preface first. The listener validates it
+and writes its own preface. Both sides complete this exchange before
+starting ZMTP or admitting a READY peer.
+
 The data stream has no extra OMQ preface. Parsing a complete ZMTP message
 is the only way to deliver it to the application. FIN, RESET_STREAM, or
 connection loss MUST NOT cause a partial message to be delivered.

@@ -124,6 +124,132 @@ async fn alpn_mismatch_fails_the_tls_handshake() {
     assert!(accepted.is_ok(), "raw ALPN still completes TLS");
 }
 
+struct ConnectorFixture {
+    push: crate::Socket,
+    _endpoint: quinn::Endpoint,
+    _connection: quinn::Connection,
+    data_send: quinn::SendStream,
+    _data_recv: quinn::RecvStream,
+    control_send: quinn::SendStream,
+    _control_recv: quinn::RecvStream,
+}
+
+impl ConnectorFixture {
+    async fn new(timeout: Duration) -> Self {
+        let tls = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let mut options = Options {
+            handshake_timeout: Some(timeout),
+            ..Options::default()
+        };
+        options.quic.server_cert_pem = Some(tls.cert.pem().into_bytes());
+        options.quic.server_key_pem = Some(tls.signing_key.serialize_pem().into_bytes());
+        options.quic.trust_pem = options.quic.server_cert_pem.clone();
+        options.quic.trust_system = false;
+        let endpoint = quinn::Endpoint::server(
+            config::server(&options.quic, 4).unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let push = crate::Socket::new(omq_proto::SocketType::Push, options);
+        push.connect(
+            format!("quic://{}", endpoint.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        let (data_send, data_recv) = connection.accept_bi().await.unwrap();
+        let (control_send, mut control_recv) = connection.accept_bi().await.unwrap();
+        let mut preface = [0; 8];
+        control_recv.read_exact(&mut preface).await.unwrap();
+        assert_eq!(preface, liveness::PREFACE);
+
+        Self {
+            push,
+            _endpoint: endpoint,
+            _connection: connection,
+            data_send,
+            _data_recv: data_recv,
+            control_send,
+            _control_recv: control_recv,
+        }
+    }
+}
+
+#[tokio::test]
+async fn connector_cannot_reach_ready_before_the_liveness_preface() {
+    let mut fixture = ConnectorFixture::new(Duration::from_secs(5)).await;
+    // A TLS-authenticated server sends a valid NULL greeting and PULL READY,
+    // but deliberately withholds its liveness preface.
+    let mut greeting = vec![0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f, 3, 1];
+    greeting.extend_from_slice(b"NULL");
+    greeting.resize(64, 0);
+    let mut ready = vec![5];
+    ready.extend_from_slice(b"READY");
+    ready.push(11);
+    ready.extend_from_slice(b"Socket-Type");
+    ready.extend_from_slice(&4u32.to_be_bytes());
+    ready.extend_from_slice(b"PULL");
+    greeting.extend_from_slice(&[4, u8::try_from(ready.len()).unwrap()]);
+    greeting.extend_from_slice(&ready);
+    fixture.data_send.write_all(&greeting).await.unwrap();
+    assert!(
+        fixture
+            .push
+            .wait_connected(1, Duration::from_millis(150))
+            .await
+            .is_err(),
+        "ZMTP READY bypassed an unvalidated QUIC liveness preface"
+    );
+    fixture
+        .control_send
+        .write_all(&liveness::PREFACE)
+        .await
+        .unwrap();
+    fixture
+        .push
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .unwrap();
+    fixture.push.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn connector_rejects_invalid_missing_and_partial_prefaces_before_ready() {
+    for mode in ["invalid", "missing", "partial"] {
+        let mut fixture = ConnectorFixture::new(Duration::from_secs(1)).await;
+        let mut monitor = fixture.push.monitor();
+        match mode {
+            "invalid" => fixture
+                .control_send
+                .write_all(b"OMQL\x02\0\0\0")
+                .await
+                .unwrap(),
+            "partial" => fixture.control_send.write_all(b"OMQ").await.unwrap(),
+            _ => {}
+        }
+        let reason = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(omq_proto::MonitorEvent::HandshakeFailed { reason, .. }) =
+                    monitor.recv().await
+                {
+                    return reason;
+                }
+            }
+        })
+        .await
+        .expect("connector setup did not fail");
+        if mode == "invalid" {
+            assert!(reason.contains("invalid QUIC liveness preface"), "{reason}");
+        } else {
+            assert!(reason.contains("setup timeout"), "{reason}");
+        }
+        assert_eq!(fixture.push.ready_peer_count(), 0);
+        fixture.push.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn roles_follow_stream_ids_when_liveness_arrives_first() {
     let mut fixture = listener(Options::default(), Duration::from_secs(5)).await;

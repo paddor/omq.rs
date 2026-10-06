@@ -1,6 +1,7 @@
 """Native Rust / pyomq interoperability through verified QUIC connections."""
 
 import asyncio
+import errno
 import json
 import os
 import subprocess
@@ -256,6 +257,26 @@ def test_quic_options_are_fixed_after_bind(
     with factory() as context, context.socket(pyomq.REP) as socket:
         configure(socket, certificates, bind=True)
         socket.bind("quic://127.0.0.1:0")
-        with pytest.raises(pyomq.ZMQError):
+        with pytest.raises(pyomq.ZMQError) as error:
             socket.quic_stream_window = 32 * 1024
+        assert error.value.errno == errno.EBUSY
+        assert "fixed after bind/connect" in str(error.value)
         assert socket.quic_stream_window == 16 * 1024
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_quic_duplicate_bind_errno(
+    rust_peer: Path, certificates: Path, asynchronous: bool
+):
+    factory = pyomq.asyncio.Context if asynchronous else pyomq.Context
+    with (
+        factory() as context,
+        context.socket(pyomq.REP) as first,
+        context.socket(pyomq.REP) as second,
+    ):
+        configure(first, certificates, bind=True)
+        configure(second, certificates, bind=True)
+        first.bind("quic://127.0.0.1:0")
+        with pytest.raises(pyomq.ZMQError) as error:
+            second.bind(first.last_endpoint.decode())
+        assert error.value.errno == errno.EADDRINUSE

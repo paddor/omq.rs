@@ -32,7 +32,14 @@ pub fn map_err(e: Error) -> PyErr {
         ),
         Error::MessageTooLarge { size, max } => (libc::EMSGSIZE, format!("message {size} > {max}")),
         Error::InvalidEndpoint(m) => (libc::EINVAL, m),
-        Error::Io(io) => (io.raw_os_error().unwrap_or(libc::EIO), io.to_string()),
+        Error::Io(io) => (
+            io.raw_os_error().unwrap_or_else(|| match io.kind() {
+                std::io::ErrorKind::AddrInUse => libc::EADDRINUSE,
+                std::io::ErrorKind::ResourceBusy => libc::EBUSY,
+                _ => libc::EIO,
+            }),
+            io.to_string(),
+        ),
         _ => (libc::EIO, "internal error".into()),
     };
     let py_err = ZMQError::new_err(msg);

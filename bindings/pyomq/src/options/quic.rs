@@ -30,7 +30,10 @@ pub(super) fn set(
     let blocking = sock.blocking_materialized.read().unwrap();
     if asynchronous.is_some() || blocking.is_some() {
         return Err(crate::error::map_err(omq_proto::Error::Io(
-            std::io::Error::from_raw_os_error(libc::EBUSY),
+            std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                "QUIC options are fixed after bind/connect",
+            ),
         )));
     }
     let mut overlay = sock.overlay.lock().unwrap();

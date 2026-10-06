@@ -65,8 +65,6 @@ pub(crate) struct LivenessConfig {
     pub(crate) interval: Option<Duration>,
     /// Peer is dead when no record arrives for this long.
     pub(crate) timeout: Duration,
-    /// Deadline for the peer's preface when setup did not read it.
-    pub(crate) preface_deadline: Option<Instant>,
 }
 
 impl LivenessConfig {
@@ -78,7 +76,6 @@ impl LivenessConfig {
                 .heartbeat_timeout
                 .or(interval)
                 .unwrap_or(Duration::MAX),
-            preface_deadline: None,
         }
     }
 }
@@ -89,12 +86,10 @@ pub(super) struct RecordReader {
     stream: RecvHalf,
     buf: [u8; RECORD_LEN],
     filled: usize,
-    preface_done: bool,
 }
 
 pub(super) enum ReadOutcome {
     Record(Record),
-    Preface,
     /// Close with this application code.
     Violation(u32),
     /// The connection is already gone.
@@ -102,21 +97,16 @@ pub(super) enum ReadOutcome {
 }
 
 impl RecordReader {
-    pub(super) fn new(stream: RecvHalf, preface_done: bool) -> Self {
+    pub(super) fn new(stream: RecvHalf) -> Self {
         Self {
             stream,
             buf: [0; RECORD_LEN],
             filled: 0,
-            preface_done,
         }
     }
 
     pub(super) async fn next(&mut self) -> ReadOutcome {
-        let need = if self.preface_done {
-            RECORD_LEN
-        } else {
-            PREFACE.len()
-        };
+        let need = RECORD_LEN;
         while self.filled < need {
             match self.stream.read(&mut self.buf[self.filled..need]).await {
                 CtlRead::Data(n) => self.filled += n,
@@ -128,14 +118,6 @@ impl RecordReader {
             }
         }
         self.filled = 0;
-        if !self.preface_done {
-            self.preface_done = true;
-            return if self.buf[..PREFACE.len()] == PREFACE {
-                ReadOutcome::Preface
-            } else {
-                ReadOutcome::Violation(code::SETUP_ERROR)
-            };
-        }
         match Record::decode(&self.buf) {
             Some(record) => ReadOutcome::Record(record),
             None => ReadOutcome::Violation(code::CONTROL_ERROR),
@@ -143,7 +125,7 @@ impl RecordReader {
     }
 }
 
-/// Read and validate the peer preface during listener setup.
+/// Read and validate the peer preface during transport setup.
 pub(super) async fn read_preface(stream: &mut RecvHalf) -> omq_proto::Result<()> {
     let mut buf = [0; PREFACE.len()];
     stream.read_exact(&mut buf).await?;
@@ -154,6 +136,23 @@ pub(super) async fn read_preface(stream: &mut RecvHalf) -> omq_proto::Result<()>
             "invalid QUIC liveness preface".into(),
         ))
     }
+}
+
+/// Write the local preface before exposing the data stream to ZMTP.
+pub(super) async fn write_preface(stream: &mut SendHalf) -> omq_proto::Result<()> {
+    stream.raise_priority();
+    let mut written = 0;
+    while written < PREFACE.len() {
+        match stream.write(&PREFACE[written..]).await {
+            Some(n) if n > 0 => written += n,
+            _ => {
+                return Err(omq_proto::Error::HandshakeFailed(
+                    "QUIC liveness stream ended during preface".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One buffered output unit. A newer PONG replaces an unsent older one;
@@ -169,12 +168,10 @@ struct RecordWriter {
 
 impl RecordWriter {
     fn new(stream: SendHalf) -> Self {
-        let mut out = [0; RECORD_LEN];
-        out[..PREFACE.len()].copy_from_slice(&PREFACE);
         Self {
             stream,
-            out,
-            len: PREFACE.len(),
+            out: [0; RECORD_LEN],
+            len: 0,
             written: 0,
             pong: None,
             ping: None,
@@ -215,14 +212,8 @@ impl RecordWriter {
 
 /// Serve liveness until the connection ends. Closes the connection with a
 /// specific code on liveness or protocol failure.
-pub(super) async fn run(
-    carrier: Carrier,
-    send: SendHalf,
-    recv: RecvHalf,
-    preface_done: bool,
-    config: LivenessConfig,
-) {
-    if let Some(code) = serve(&carrier, send, recv, preface_done, config).await {
+pub(super) async fn run(carrier: Carrier, send: SendHalf, recv: RecvHalf, config: LivenessConfig) {
+    if let Some(code) = serve(&carrier, send, recv, config).await {
         carrier.close(code);
     }
 }
@@ -231,15 +222,13 @@ async fn serve(
     carrier: &Carrier,
     send: SendHalf,
     recv: RecvHalf,
-    preface_done: bool,
     config: LivenessConfig,
 ) -> Option<u32> {
-    let mut reader = RecordReader::new(recv, preface_done);
+    let mut reader = RecordReader::new(recv);
     let mut writer = RecordWriter::new(send);
     writer.stream.raise_priority();
     let start = Instant::now();
     let mut unanswered_since = None;
-    let mut preface_deadline = (!preface_done).then_some(config.preface_deadline).flatten();
     let mut next_ping = config.interval.and_then(|ivl| start.checked_add(ivl));
     let mut nonce = 0u64;
     let mut budget = RECORD_BUDGET;
@@ -252,7 +241,6 @@ async fn serve(
                 match outcome {
                     ReadOutcome::Record(Record::Ping(value)) => writer.pong = Some(value),
                     ReadOutcome::Record(Record::Pong(_)) => {}
-                    ReadOutcome::Preface => preface_deadline = None,
                     ReadOutcome::Violation(code) => return Some(code),
                     ReadOutcome::Lost => return None,
                 }
@@ -280,9 +268,6 @@ async fn serve(
             }
             () = sleep_until_opt(death), if death.is_some() => {
                 return Some(code::LIVENESS_TIMEOUT);
-            }
-            () = sleep_until_opt(preface_deadline), if preface_deadline.is_some() => {
-                return Some(code::SETUP_ERROR);
             }
             arrived = carrier.unexpected_stream() => {
                 return arrived.then_some(code::UNEXPECTED_STREAM);

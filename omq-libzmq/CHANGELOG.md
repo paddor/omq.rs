@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject identities beginning with NUL without changing the previous identity.
+  Wire receives inherit ZMTP bounds, version, subscription, multipart, and
+  heartbeat fixes.
+
 - Busy direct receive queues no longer starve queued fallback messages.
 - A fallback peer disconnect no longer replaces a live direct receive ring.
   Pending replacement rings survive churn, and polling/`ZMQ_EVENTS` adopt

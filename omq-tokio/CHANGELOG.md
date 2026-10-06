@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve duplicate subscriptions through cancellation and reconnect replay.
+- Honor received PING TTL without disconnecting locally backpressured
+  receivers; disable local PING traffic for ZMTP 3.0 peers.
+- Use mechanism security roles independently of bind/connect and discard
+  multipart wire input on CLIENT, SERVER, GATHER, and CHANNEL.
+
 - Stop automatic reconnect after a peer's fatal handshake ERROR. Temporary
   authentication failures and transport failures retain automatic retry.
 - Default ROUTER sends drop complete messages when the selected destination

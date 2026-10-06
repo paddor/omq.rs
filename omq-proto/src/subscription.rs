@@ -1,17 +1,17 @@
 //! Prefix-subscription matcher for PUB-side filtering.
 //!
-//! Backed by `patricia_tree::PatriciaSet` so the per-message match is
+//! Backed by `patricia_tree::PatriciaMap` so the per-message match is
 //! O(M) on the topic length, not O(N×M) on subscription count. The
 //! empty-prefix case ("subscribe to everything") sits beside the trie
-//! as an explicit flag - it would otherwise be an awkward special
+//! as an explicit count - it would otherwise be an awkward special
 //! case for `get_longest_common_prefix` against an empty stored key.
 
-use patricia_tree::PatriciaSet;
+use patricia_tree::PatriciaMap;
 
 #[derive(Debug, Default, Clone)]
 pub struct SubscriptionSet {
-    set: PatriciaSet,
-    subscribe_all: bool,
+    set: PatriciaMap<u64>,
+    subscribe_all: u64,
 }
 
 impl SubscriptionSet {
@@ -20,32 +20,37 @@ impl SubscriptionSet {
         Self::default()
     }
 
-    /// Add a subscription. Empty prefix is recorded as `subscribe_all`.
+    /// Add one subscription. Repeated prefixes require repeated removals.
     pub fn add(&mut self, prefix: &[u8]) {
         if prefix.is_empty() {
-            self.subscribe_all = true;
+            self.subscribe_all = self.subscribe_all.saturating_add(1);
+        } else if let Some(count) = self.set.get_mut(prefix) {
+            *count = count.saturating_add(1);
         } else {
-            self.set.insert(prefix);
+            self.set.insert(prefix, 1);
         }
     }
 
-    /// Remove a subscription. Empty prefix clears `subscribe_all`.
+    /// Remove one subscription. An unknown prefix is ignored.
     pub fn remove(&mut self, prefix: &[u8]) {
         if prefix.is_empty() {
-            self.subscribe_all = false;
-        } else {
-            self.set.remove(prefix);
+            self.subscribe_all = self.subscribe_all.saturating_sub(1);
+        } else if let Some(count) = self.set.get_mut(prefix) {
+            *count -= 1;
+            if *count == 0 {
+                self.set.remove(prefix);
+            }
         }
     }
 
     /// True if the empty prefix has been subscribed (match-all).
     pub fn is_subscribe_all(&self) -> bool {
-        self.subscribe_all
+        self.subscribe_all != 0
     }
 
     /// True if `topic` is matched by any subscription. O(M) walk.
     pub fn matches(&self, topic: &[u8]) -> bool {
-        if self.subscribe_all {
+        if self.subscribe_all != 0 {
             return true;
         }
         self.set.get_longest_common_prefix(topic).is_some()
@@ -142,5 +147,23 @@ mod tests {
         assert!(s.matches(b"topic-0999-x"));
         assert!(!s.matches(b"topic-1000-x"));
         assert!(!s.matches(b"unrelated"));
+    }
+
+    #[test]
+    fn duplicate_subscriptions_require_matching_cancels() {
+        for prefix in [b"topic".as_slice(), b""] {
+            let mut set = SubscriptionSet::new();
+            set.add(prefix);
+            set.add(prefix);
+            set.remove(prefix);
+            assert!(set.matches(b"topic/body"));
+            let mut cloned = set.clone();
+            set.remove(prefix);
+            assert!(!set.matches(b"topic/body"));
+            assert!(cloned.matches(b"topic/body"));
+            cloned.remove(prefix);
+            cloned.remove(prefix);
+            assert!(!cloned.matches(b"topic/body"));
+        }
     }
 }

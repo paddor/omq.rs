@@ -54,6 +54,7 @@ impl Connection {
         if src.is_empty() {
             return Ok(());
         }
+        self.peer_heartbeat_ttl = 0;
         self.in_buf.push(src);
         self.drive()
     }
@@ -112,7 +113,11 @@ impl Connection {
                 "peer sent as-server=1 with NULL mechanism".into(),
             ));
         }
-        self.peer_minor = effective_minor(g.minor);
+        self.peer_minor = if g.major > greeting::ZMTP_MAJOR {
+            greeting::ZMTP_MINOR
+        } else {
+            effective_minor(g.minor)
+        };
         self.peer_greeting = raw;
         self.state = State::MechanismHandshake;
 
@@ -175,6 +180,9 @@ impl Connection {
                 .socket_type
                 .ok_or_else(|| Error::HandshakeFailed("peer did not declare socket type".into()))?;
             if !is_compatible(self.config.socket_type, peer_type) {
+                self.write_outbound_commands(&[Command::Error {
+                    reason: "Incompatible socket types".into(),
+                }])?;
                 return Err(Error::HandshakeFailed(format!(
                     "incompatible socket types: ours={:?} peer={:?}",
                     self.config.socket_type, peer_type
@@ -195,12 +203,14 @@ impl Connection {
 
     #[inline]
     fn try_advance_ready(&mut self) -> Result<bool> {
+        self.clear_peer_ttl_if_input_buffered();
         // Fast path: single non-more, non-command data frame with
         // inline-sized payload, no crypto transform, no pending
         // multi-part accumulation. Reads frame bytes directly into
         // Message::Inline, skipping the Payload intermediary.
         if !self.has_frame_transform()
             && self.pending_parts.is_empty()
+            && !self.discarding_multipart
             && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
             && !hdr.flags.command
             && !hdr.flags.more
@@ -292,7 +302,22 @@ impl Connection {
     }
 
     #[inline]
+    fn clear_peer_ttl_if_input_buffered(&mut self) {
+        if !self.in_buf.is_empty() {
+            self.peer_heartbeat_ttl = 0;
+        }
+    }
+
+    #[inline]
     fn absorb_data_frame(&mut self, more: bool, payload: Payload) -> Result<bool> {
+        if self.discarding_multipart {
+            self.discarding_multipart = more;
+            return Ok(true);
+        }
+        if more && self.config.socket_type.requires_single_frame() {
+            self.discarding_multipart = true;
+            return Ok(true);
+        }
         #[cfg(feature = "ws")]
         if self.ws_role.is_some() && self.pending_parts.len() >= super::ws::MAX_PARTS {
             return Err(Error::Protocol("WS multipart part limit exceeded".into()));
@@ -335,9 +360,11 @@ impl Connection {
                     "READY/ERROR command received after handshake".into(),
                 ));
             }
-            Command::Ping { context, .. } => {
-                // Auto-answer with PONG. PING TTL is advisory; we ignore it here
-                // (engine layer enforces heartbeat_timeout).
+            Command::Ping {
+                context,
+                ttl_deciseconds,
+            } => {
+                self.peer_heartbeat_ttl = ttl_deciseconds;
                 let pong = Command::Pong { context };
                 self.write_outbound_commands(&[pong])?;
             }
@@ -582,6 +609,7 @@ impl Connection {
                 return Ok(());
             }
             let before = self.in_buf.len();
+            self.clear_peer_ttl_if_input_buffered();
 
             if self.ws_control.skip_payload > 0 {
                 let take = self
@@ -604,6 +632,7 @@ impl Connection {
                 && !self.ws_close_sent
                 && !self.has_frame_transform()
                 && self.pending_parts.is_empty()
+                && !self.discarding_multipart
                 && self.ws_fragment.is_none()
             {
                 match self.try_advance_ready_ws(peer_role)? {

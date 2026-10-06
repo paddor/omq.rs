@@ -619,6 +619,9 @@ pub extern "C" fn zmq_setsockopt(
             }
             // SAFETY: optval is non-null (checked above); optvallen bytes are readable.
             let bytes = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
+            if bytes.first() == Some(&0) {
+                return crate::error::fail(libc::EINVAL);
+            }
             lock_overlay!(sock_arc).identity = Bytes::copy_from_slice(bytes);
         }
         ZMQ_RECONNECT_IVL => {

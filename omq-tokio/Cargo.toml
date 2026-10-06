@@ -225,6 +225,10 @@ name = "omq_handshake_timeout"
 path = "tests/handshake_timeout.rs"
 
 [[test]]
+name = "omq_zmtp_compliance"
+path = "tests/zmtp_compliance.rs"
+
+[[test]]
 name = "omq_heartbeat"
 path = "tests/heartbeat.rs"
 

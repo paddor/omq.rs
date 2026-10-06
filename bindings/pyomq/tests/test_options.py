@@ -403,3 +403,18 @@ def test_compression_auto_train_round_trip():
     finally:
         s.close()
         ctx.term()
+
+
+@pytest.mark.parametrize("identity", [b"\x00reserved", b"x" * 256])
+def test_identity_rejects_invalid_value_without_overwriting(identity):
+    ctx, sock = _push()
+    try:
+        sock.identity = b"valid\x00suffix"
+        with pytest.raises(ValueError):
+            sock.identity = identity
+        assert sock.identity == b"valid\x00suffix"
+        sock.identity = b"x" * 255
+        assert sock.identity == b"x" * 255
+    finally:
+        sock.close(linger=0)
+        ctx.term()

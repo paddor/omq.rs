@@ -97,6 +97,8 @@ mod tests {
         assert!(!add_subscription(&mut subscriptions, b""));
         assert!(!remove_subscription(&mut subscriptions, b"abc"));
         assert!(subscriptions.is_subscribe_all());
+        assert!(!remove_subscription(&mut subscriptions, b""));
+        assert!(subscriptions.is_subscribe_all());
         assert!(remove_subscription(&mut subscriptions, b""));
         assert!(!subscriptions.is_subscribe_all());
         assert!(!remove_subscription(&mut subscriptions, b""));

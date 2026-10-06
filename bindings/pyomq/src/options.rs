@@ -321,6 +321,11 @@ pub fn setsockopt(
         }
         constants::IDENTITY => {
             let v: &[u8] = value.extract()?;
+            if v.len() > 255 || v.first() == Some(&0) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "IDENTITY must be at most 255 bytes and must not start with NUL",
+                ));
+            }
             ov.identity = Bytes::copy_from_slice(v);
         }
         constants::SUBSCRIBE => {
@@ -346,7 +351,12 @@ pub fn setsockopt(
         constants::UNSUBSCRIBE => {
             let v: &[u8] = value.extract()?;
             let bytes = Bytes::copy_from_slice(v);
-            sock.subscriptions.lock().unwrap().retain(|p| p != &bytes);
+            {
+                let mut subscriptions = sock.subscriptions.lock().unwrap();
+                if let Some(index) = subscriptions.iter().position(|p| p == &bytes) {
+                    subscriptions.remove(index);
+                }
+            }
             drop(ov);
             if let Some(s) = sock
                 .blocking_materialized

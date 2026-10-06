@@ -44,7 +44,7 @@ impl ChunkedInputBuf {
         self.total_len
     }
 
-    #[cfg(any(test, feature = "ws"))]
+    #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.total_len == 0
     }

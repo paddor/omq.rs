@@ -104,6 +104,21 @@ impl std::fmt::Debug for MechanismSetup {
 }
 
 impl MechanismSetup {
+    /// Greeting role of the security mechanism, independent of bind/connect.
+    pub(crate) fn as_server(&self) -> bool {
+        match self {
+            Self::Null | Self::NullServer { .. } => false,
+            #[cfg(feature = "curve")]
+            Self::CurveServer { .. } => true,
+            #[cfg(feature = "curve")]
+            Self::CurveClient { .. } => false,
+            #[cfg(feature = "plain")]
+            Self::PlainServer { .. } => true,
+            #[cfg(feature = "plain")]
+            Self::PlainClient { .. } => false,
+        }
+    }
+
     /// Wire-level mechanism name for the greeting.
     pub fn wire_name(&self) -> MechanismName {
         match self {

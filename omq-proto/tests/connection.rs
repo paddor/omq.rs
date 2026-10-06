@@ -857,3 +857,275 @@ fn null_rejects_peer_as_server() {
         "expected as-server rejection, got: {err:?}"
     );
 }
+
+fn raw_ready_connection(
+    socket_type: SocketType,
+    peer_type: SocketType,
+    version: (u8, u8),
+) -> Connection {
+    use bytes::BytesMut;
+    use omq_proto::proto::{command, frame, greeting};
+    let mut connection = Connection::new(ConnectionConfig::new(Role::Server, socket_type));
+    let mut wire = BytesMut::new();
+    greeting::Greeting {
+        major: version.0,
+        minor: version.1,
+        mechanism: greeting::MechanismName::NULL,
+        as_server: false,
+    }
+    .encode(&mut wire);
+    let mut body = BytesMut::new();
+    command::encode(
+        &Command::Ready(command::PeerProperties::default().with_socket_type(peer_type)),
+        &mut body,
+    );
+    frame::encode_frame(
+        &omq_proto::message::Frame {
+            flags: omq_proto::message::FrameFlags::COMMAND,
+            payload: Payload::from_bytes(body.freeze()),
+        },
+        &mut wire,
+    );
+    connection.handle_input(wire.freeze()).unwrap();
+    assert!(connection.is_ready());
+    let pending = connection.pending_transmit_size();
+    connection.advance_transmit(pending);
+    while connection.poll_event().is_some() {}
+    connection
+}
+
+#[test]
+fn version_negotiation_preserves_our_minor_for_newer_major() {
+    for (major, minor, expected) in [(3, 0, 0), (3, 1, 1), (3, 255, 1), (4, 0, 1), (255, 0, 1)] {
+        let connection = raw_ready_connection(SocketType::Sub, SocketType::Pub, (major, minor));
+        assert_eq!(connection.peer_minor(), expected, "version {major}.{minor}");
+    }
+}
+
+#[test]
+fn subscriptions_use_negotiated_wire_format() {
+    for version in [(3, 0), (3, 1), (4, 0)] {
+        let mut connection = raw_ready_connection(SocketType::Sub, SocketType::Pub, version);
+        for prefix in [
+            Bytes::new(),
+            Bytes::from_static(b"topic"),
+            Bytes::from(vec![b't'; 300]),
+        ] {
+            for (tag, cmd) in [
+                (1, Command::Subscribe(prefix.clone())),
+                (0, Command::Cancel(prefix.clone())),
+            ] {
+                connection.send_command(&cmd).unwrap();
+                let wire = connection.poll_transmit();
+                connection.advance_transmit(wire.len());
+                let long = wire[0] & 2 != 0;
+                let header_len = if long { 9 } else { 2 };
+                if version == (3, 0) {
+                    assert_eq!(wire[0] & 5, 0, "legacy subscriptions are final data frames");
+                    assert_eq!(wire[header_len], tag);
+                    assert_eq!(&wire[header_len + 1..], prefix.as_ref());
+                } else {
+                    assert_eq!(wire[0] & 5, 4);
+                    let decoded =
+                        omq_proto::proto::command::decode(wire.slice(header_len..)).unwrap();
+                    match (decoded, tag) {
+                        (Command::Subscribe(got), 1) | (Command::Cancel(got), 0) => {
+                            assert_eq!(got, prefix);
+                        }
+                        (got, _) => panic!("wrong subscription: {got:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_frame_sockets_discard_whole_multipart_and_accept_next_message() {
+    for (socket, peer) in [
+        (SocketType::Client, SocketType::Server),
+        (SocketType::Server, SocketType::Client),
+        (SocketType::Gather, SocketType::Scatter),
+        (SocketType::Channel, SocketType::Channel),
+    ] {
+        let mut receiver = raw_ready_connection(socket, peer, (3, 1));
+        // Inline final frames and split reads must both stay inside the discarded message.
+        for chunk_size in [1, 4096] {
+            let mut wire = vec![1, 1, b'a', 1, 1, b'b'];
+            wire.extend_from_slice(&[4, 8, 4, b'P', b'I', b'N', b'G', 0, 0, b'x']);
+            wire.extend_from_slice(&[0, 1, b'c', 0, 2, b'o', b'k']);
+            for chunk in wire.chunks(chunk_size) {
+                receiver
+                    .handle_input(Bytes::copy_from_slice(chunk))
+                    .unwrap();
+            }
+            let message = receiver.poll_message().unwrap();
+            assert_eq!(message.part_bytes(0).unwrap(), b"ok".as_slice());
+            assert!(
+                receiver.poll_message().is_none(),
+                "leaked multipart for {socket:?}"
+            );
+            let pong = receiver.poll_transmit();
+            assert_eq!(
+                &pong[2..],
+                b"\x04PONGx",
+                "control survives multipart discard"
+            );
+            receiver.advance_transmit(pong.len());
+        }
+    }
+}
+
+#[test]
+fn received_ping_ttl_is_cleared_by_subsequent_input() {
+    use std::time::Duration;
+    let mut receiver = raw_ready_connection(SocketType::Pair, SocketType::Pair, (3, 1));
+    let ping = Bytes::from_static(b"\x04\x07\x04PING\x00\x02");
+    receiver.handle_input(ping.clone()).unwrap();
+    assert_eq!(
+        receiver.peer_heartbeat_ttl(),
+        Some(Duration::from_millis(200))
+    );
+    receiver.resume_input().unwrap();
+    receiver.handle_input(Bytes::new()).unwrap();
+    assert!(
+        receiver.peer_heartbeat_ttl().is_some(),
+        "empty input is not peer activity"
+    );
+    receiver.handle_input(Bytes::from_static(b"\x00")).unwrap();
+    assert_eq!(
+        receiver.peer_heartbeat_ttl(),
+        None,
+        "even partial input shows life"
+    );
+    receiver.handle_input(Bytes::from_static(b"\x01x")).unwrap();
+    assert!(receiver.poll_message().is_some());
+    let mut combined = ping.to_vec();
+    combined.extend_from_slice(b"\x00\x01y");
+    receiver.handle_input(Bytes::from(combined)).unwrap();
+    assert_eq!(
+        receiver.peer_heartbeat_ttl(),
+        None,
+        "coalesced traffic clears TTL"
+    );
+    receiver.handle_input(ping).unwrap();
+    receiver
+        .handle_input(Bytes::from_static(b"\x04\x07\x04PING\x00\x00"))
+        .unwrap();
+    assert_eq!(
+        receiver.peer_heartbeat_ttl(),
+        None,
+        "zero TTL disables the peer timer"
+    );
+}
+
+#[test]
+fn invalid_greeting_roles_are_rejected() {
+    for flag in [2, 255] {
+        let mut receiver = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pair));
+        let peer = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pair));
+        let mut greeting = peer.poll_transmit().to_vec();
+        greeting[32] = flag;
+        assert!(matches!(
+            receiver.handle_input(Bytes::from(greeting)),
+            Err(Error::Protocol(_))
+        ));
+    }
+}
+
+#[test]
+fn incompatible_peer_gets_error_before_close() {
+    let mut receiver = Connection::new(ConnectionConfig::new(Role::Server, SocketType::Pull));
+    let mut peer = Connection::new(ConnectionConfig::new(Role::Client, SocketType::Pub));
+    let greeting = peer.poll_transmit();
+    peer.advance_transmit(greeting.len());
+    receiver.handle_input(greeting).unwrap();
+    let response = receiver.poll_transmit();
+    receiver.advance_transmit(response.len());
+    let _ = peer.handle_input(response);
+    let wire = peer.poll_transmit();
+    assert!(matches!(
+        receiver.handle_input(wire),
+        Err(Error::HandshakeFailed(_))
+    ));
+    let error = receiver.poll_transmit();
+    assert!(matches!(
+        omq_proto::proto::command::decode(error.slice(2..)).unwrap(),
+        Command::Error { .. }
+    ));
+}
+
+#[cfg(feature = "plain")]
+#[test]
+fn plain_security_roles_are_independent_of_transport_roles() {
+    use omq_proto::Options;
+    let mut server = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Pull).mechanism(
+            Options::default()
+                .plain_server(|peer| {
+                    peer.username.as_deref() == Some("alice")
+                        && peer.password.as_deref() == Some("secret")
+                })
+                .mechanism,
+        ),
+    );
+    let mut client = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Push)
+            .mechanism(Options::default().plain_client("alice", "secret").mechanism),
+    );
+    assert_eq!(server.poll_transmit()[32], 1);
+    assert_eq!(client.poll_transmit()[32], 0);
+    pump(&mut server, &mut client);
+    client
+        .send_message(&Message::single("authenticated"))
+        .unwrap();
+    pump(&mut server, &mut client);
+    assert_eq!(
+        server.poll_message().unwrap().part_bytes(0).unwrap(),
+        b"authenticated".as_slice()
+    );
+}
+
+#[cfg(feature = "curve")]
+#[test]
+fn curve_security_roles_and_discard_preserve_encrypted_stream() {
+    use omq_proto::{CurveKeypair, Options};
+    let keypair = CurveKeypair::generate();
+    let public = keypair.public;
+    let mut server = Connection::new(
+        ConnectionConfig::new(Role::Client, SocketType::Server)
+            .mechanism(Options::default().curve_server(keypair).mechanism),
+    );
+    let mut client = Connection::new(
+        ConnectionConfig::new(Role::Server, SocketType::Client).mechanism(
+            Options::default()
+                .curve_client(CurveKeypair::generate(), public)
+                .mechanism,
+        ),
+    );
+    assert_eq!(server.poll_transmit()[32], 1);
+    assert_eq!(client.poll_transmit()[32], 0);
+    pump(&mut server, &mut client);
+    client
+        .send_message(&Message::multipart(["discard", "both"]))
+        .unwrap();
+    client
+        .send_command(&Command::Ping {
+            ttl_deciseconds: 0,
+            context: Bytes::new(),
+        })
+        .unwrap();
+    client.send_message(&Message::single("encrypted")).unwrap();
+    pump(&mut server, &mut client);
+    assert_eq!(
+        server.poll_message().unwrap().part_bytes(0).unwrap(),
+        b"encrypted".as_slice()
+    );
+    assert!(server.poll_message().is_none());
+    client.send_message(&Message::single("next nonce")).unwrap();
+    pump(&mut server, &mut client);
+    assert_eq!(
+        server.poll_message().unwrap().part_bytes(0).unwrap(),
+        b"next nonce".as_slice()
+    );
+}

@@ -320,3 +320,65 @@ ctx.term()
 
     let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;
 }
+
+#[tokio::test]
+async fn plain_client_binds_and_pyzmq_security_server_connects() {
+    if skip_if_no_pyzmq() {
+        return;
+    }
+    let client = Socket::new(
+        SocketType::Pair,
+        Options::default()
+            .plain_client("alice", "s3cret")
+            .linger(Duration::ZERO),
+    );
+    let port = bind_loopback(&client).await;
+    let script = r#"
+import os, zmq, zmq.auth.thread
+ctx = zmq.Context()
+auth = zmq.auth.thread.ThreadAuthenticator(ctx)
+auth.start()
+auth.allow("127.0.0.1")
+auth.configure_plain(domain="global", passwords={"alice": "s3cret"})
+s = ctx.socket(zmq.PAIR)
+s.rcvtimeo = s.sndtimeo = 5000
+s.zap_domain = b"global"
+s.plain_server = True
+s.connect(f"tcp://127.0.0.1:{os.environ['PORT']}")
+assert s.recv() == b"reversed"
+s.send(b"authenticated")
+s.close(linger=1000)
+auth.stop()
+ctx.term()
+"#;
+    let child = python3_command()
+        .args(["-c", script])
+        .env("PORT", port.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    client
+        .wait_connected(1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    client.send(Message::single("reversed")).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .part_bytes(0)
+            .unwrap()
+            .as_ref(),
+        b"authenticated"
+    );
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -280,9 +280,7 @@ impl SocketDriver {
             ));
         }
         if subscribe {
-            if !self.subscriptions.iter().any(|p| p == &prefix) {
-                self.subscriptions.push(prefix.clone());
-            }
+            self.subscriptions.push(prefix.clone());
         } else if let Some(pos) = self.subscriptions.iter().position(|p| p == &prefix) {
             self.subscriptions.remove(pos);
         }

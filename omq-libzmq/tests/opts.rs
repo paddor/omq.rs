@@ -1292,3 +1292,20 @@ fn ws_ready_peer_limit_roundtrip_validation_and_materialization() {
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
+
+#[test]
+fn identity_rejects_reserved_prefix_and_preserves_previous_value() {
+    let ctx = zmq_ctx_new();
+    let socket = zmq_socket(ctx, ZMQ_DEALER);
+    assert_eq!(set_bytes(socket, ZMQ_IDENTITY, b"valid\x00suffix"), 0);
+    for identity in [b"\x00reserved".as_slice(), &[b'x'; 256]] {
+        assert_eq!(set_bytes(socket, ZMQ_IDENTITY, identity), -1);
+        assert_eq!(omq_zmq::zmq_errno(), libc::EINVAL);
+        let mut previous = [0; 255];
+        let len = get_bytes(socket, ZMQ_IDENTITY, &mut previous);
+        assert_eq!(&previous[..len], b"valid\x00suffix");
+    }
+    assert_eq!(set_bytes(socket, ZMQ_IDENTITY, &[b'x'; 255]), 0);
+    zmq_close(socket);
+    zmq_ctx_term(ctx);
+}

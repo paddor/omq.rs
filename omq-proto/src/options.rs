@@ -663,6 +663,11 @@ impl Options {
                 "identity length {id_len} exceeds ZMTP limit of 255 bytes"
             )));
         }
+        if self.identity.first() == Some(&0) {
+            return Err(crate::error::Error::Config(
+                "identity must not start with a zero byte".into(),
+            ));
+        }
         if let Some(ttl) = self.heartbeat_ttl
             && ttl.as_millis() > MAX_HEARTBEAT_TTL_MS
         {
@@ -1272,6 +1277,28 @@ impl KeepAlive {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identity_limits_and_reserved_prefix() {
+        use bytes::Bytes;
+        for valid in [
+            Bytes::new(),
+            Bytes::from_static(b"valid\x00suffix"),
+            Bytes::from(vec![b'x'; 255]),
+        ] {
+            assert!(super::Options::default().identity(valid).validate().is_ok());
+        }
+        for invalid in [
+            Bytes::from_static(b"\x00reserved"),
+            Bytes::from(vec![b'x'; 256]),
+        ] {
+            assert!(
+                super::Options::default()
+                    .identity(invalid)
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
     use super::*;
 
     #[cfg(feature = "quic")]

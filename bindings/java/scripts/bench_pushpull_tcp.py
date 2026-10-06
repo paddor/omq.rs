@@ -102,9 +102,14 @@ def build(args):
         ],
         cwd=REPO,
     )
+    maven_args = []
+    toolchains = ROOT / "toolchains.xml"
+    if toolchains.exists():
+        maven_args = ["-t", str(toolchains)]
     run(
         [
             "mvn",
+            *maven_args,
             "-q",
             "-f",
             str(ROOT / "pom.xml"),
@@ -120,7 +125,7 @@ def build(args):
 def classpath():
     deps_file = ROOT / "target" / "perf-classpath.txt"
     deps = deps_file.read_text().strip() if deps_file.exists() else ""
-    parts = [ROOT / "target" / "classes", ROOT / "target" / "test-classes"]
+    parts = [ROOT / "target" / "runtime-classes", ROOT / "target" / "test-classes"]
     if deps:
         parts.append(deps)
     return os.pathsep.join(str(part) for part in parts)
@@ -137,6 +142,8 @@ def free_endpoint():
 
 
 def java_cmd(class_name, cp, impl, role, endpoint, size, measure, warmup, batch=None):
+    jdk_home = os.environ.get("JAVA_HOME")
+    java = str(Path(jdk_home) / "bin" / "java") if jdk_home else "java"
     args = [
         str(size),
         str(measure),
@@ -145,7 +152,8 @@ def java_cmd(class_name, cp, impl, role, endpoint, size, measure, warmup, batch=
     if batch is not None:
         args.append(str(batch))
     return [
-        "java",
+        java,
+        "--enable-preview",
         "--enable-native-access=ALL-UNNAMED",
         "-Djava.library.path=" + str(ROOT / "native" / "target" / "release"),
         "-cp",

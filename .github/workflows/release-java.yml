@@ -52,7 +52,9 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: |
+            25
+            21
           cache: maven
           cache-dependency-path: bindings/java/pom.xml
       - uses: actions/setup-python@v6
@@ -112,7 +114,9 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: |
+            25
+            21
           cache: maven
           cache-dependency-path: bindings/java/pom.xml
       - name: Resolve version
@@ -145,13 +149,15 @@ jobs:
           retention-days: 7
 
   classifier-smoke:
-    name: Smoke packaged ${{ matrix.platform }} classifier
+    name: Smoke packaged ${{ matrix.platform }} classifier (Java ${{ matrix.java }})
     runs-on: ${{ matrix.runner }}
     needs: [package]
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        java: ["21", "25"]
+        platform: [linux-x86_64, macos-x86_64, macos-aarch64, windows-x86_64]
         include:
           - platform: linux-x86_64
             runner: ubuntu-latest
@@ -169,7 +175,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: ${{ matrix.java }}
       - name: Smoke classifier jar
         shell: bash
         run: |
@@ -186,10 +192,15 @@ jobs:
             cp_sep=";"
           fi
 
-          java --enable-native-access=ALL-UNNAMED \
+          java_args=(-Djdk.virtualThreadScheduler.parallelism=1 -Djdk.virtualThreadScheduler.maxPoolSize=1)
+          if [[ "${{ matrix.java }}" == "21" ]]; then
+            java_args+=(--enable-preview)
+          fi
+
+          java "${java_args[@]}" --enable-native-access=ALL-UNNAMED \
             -cp "${test_classes}${cp_sep}${jar}" \
             io.omq.smoke.PackagingSmoke
-          java --enable-native-access=io.omq \
+          java "${java_args[@]}" --enable-native-access=io.omq \
             --module-path "${jar}" --add-modules io.omq \
             -cp "${test_classes}" \
             io.omq.smoke.PackagingSmoke
@@ -212,7 +223,9 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: |
+            25
+            21
           cache: maven
           cache-dependency-path: bindings/java/pom.xml
           server-id: central

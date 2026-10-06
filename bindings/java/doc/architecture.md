@@ -2,14 +2,14 @@
 
 OMQ.java is a Java API over Rust `omq-tokio`.
 
-- Java owns API shape, lifetime wrappers, argument validation, Java exceptions, and Java 25 FFM views of native rings.
+- Java owns API shape, lifetime wrappers, argument validation, Java exceptions, and FFM views of native rings.
 - Rust owns contexts, sockets, routing, queues, transports, ZMTP, reconnect, auth, compression, peer metadata, and I/O threads.
 
 ## Runtime
 
 ```text
 Java caller thread
-  -> synchronized Socket method
+  -> serialized Socket method
   -> JNI control path or FFM data path
   -> omq_tokio::blocking::Socket
   -> OMQ context runtime thread(s)
@@ -17,7 +17,7 @@ Java caller thread
 ```
 
 - `Context` owns a native `omq_tokio::Context`; the native context owns runtime threads, endpoint state, inproc registry, and sockets.
-- `Socket` owns one native socket handle; Java methods are `synchronized`, but socket semantics live in Rust.
+- `Socket` owns one native socket handle; a reentrant lock serializes API calls, while socket semantics live in Rust.
 - Native handles are atomic; close is idempotent. `Cleaner` is only a leak fallback.
 - `Context.shareKey()` exposes a process-local opaque `UUID` for the native `u128` context key.
 - `Context.fromShareKey(UUID)` imports a non-owning Java handle to the same native context core.
@@ -82,6 +82,14 @@ ring path and use native owned storage or JNI fallback.
 - Completion attaches the runtime thread to the JVM as a daemon.
 - Canceling or externally completing the Java future drops a native abort token.
 - Async receive first drains any message already cached in the FFM receive ring.
+- Blocking virtual-thread receives wait for native futures while holding the API lock, without holding a Java monitor.
+
+## Java Runtime Compatibility
+
+The multi-release jar contains Java 21 preview FFM classes at its root and
+Java 22 final FFM classes under `META-INF/versions/22`. The versioned classes
+are generated from the same ring and downcall sources. The native ABI and
+public Java API are shared across both implementations.
 
 ## Inproc
 

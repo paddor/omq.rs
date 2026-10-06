@@ -14,7 +14,7 @@ small API built around `AutoCloseable`, `Duration`, `ByteBuffer`, and
 - Compression transports: `lz4+tcp://` and `zstd+tcp://`.
 - Static compression dictionaries and auto-trained dictionaries.
 - PLAIN and CURVE security with Java auth callbacks and peer metadata.
-- Java 25 FFM off-heap rings hide batching behind normal scalar send/receive
+- FFM off-heap rings hide batching behind normal scalar send/receive
   calls.
 - Explicit native context sharing for `inproc://` across Java handles.
 
@@ -31,7 +31,9 @@ has a 0.5 second warmup window.
 
 ## Build, install, test
 
-Requires Java 25 or newer. JPMS module name: `io.omq`.
+Requires Java 21 or newer. JPMS module name: `io.omq`.
+Java 21 uses preview FFM; Java 22 and newer use final FFM from the same
+multi-release jar.
 
 Maven Central coordinates. Use the latest version listed on Maven Central:
 
@@ -51,7 +53,7 @@ Use exactly one runtime classifier for your platform:
 - `macos-aarch64`
 - `windows-x86_64`
 
-OMQ.java loads native code and uses Java 25 FFM, so applications must enable
+OMQ.java loads native code and uses FFM, so applications must enable
 native access:
 
 ```sh
@@ -64,11 +66,25 @@ If the jar is used on the module path, enable only the named module:
 --enable-native-access=io.omq
 ```
 
+Java 21 also requires `--enable-preview` when running the application.
+Java 22 and newer do not require preview features. Public API consumers
+can compile without enabling preview features.
+
+Building requires JDK 21 and JDK 22 or newer configured as Maven toolchains.
+The base classes compile with JDK 21; final FFM overrides compile for Java 22.
+From `bindings/java`, generate a local toolchains file from installed JDKs:
+
 ```sh
-mvn package
-mvn install
-mvn test
+mvn org.apache.maven.plugins:maven-toolchains-plugin:3.2.0:generate-jdk-toolchains-xml -Dtoolchain.file=toolchains.xml
+mvn -t toolchains.xml package
+mvn -t toolchains.xml install
+mvn -t toolchains.xml test
 ```
+
+Alternatively, add both JDKs to `~/.m2/toolchains.xml` and omit `-t`.
+Tests select a Java 21 toolchain when Maven runs on Java 21 and a modern
+toolchain otherwise. Run Maven on both Java 21 and a newer JDK when changing
+FFM or packaging.
 
 Maven builds the Rust native library in `native/target/debug` and places the
 current-platform native library on the test runtime path. Release builds publish
@@ -85,7 +101,7 @@ under `io/omq/native/...`.
 - `Message` is immutable and supports single-part and multipart payloads.
 - `receiveBytes` is the direct single-part hot path; use `receive` when
   multipart metadata matters.
-- Sync receive methods transparently drain a Java 25 FFM off-heap ring filled
+- Sync receive methods transparently drain an FFM off-heap ring filled
   from native `recv_many_into()`, so scalar `receive*` calls amortize native
   transition cost without exposing batch APIs.
 - Blocking receives on virtual threads drain cached ring data first and then
@@ -93,7 +109,7 @@ under `io/omq/native/...`.
 - `sendAsync` and `receiveAsync` return `CompletableFuture` values backed by
   native OMQ runtime tasks, not Java worker threads. Cancel the returned
   future to abort the native task.
-- Sockets are synchronized on the Java side. Treat a socket as a single-thread
+- Socket calls are serialized with a reentrant lock. Treat a socket as a single-thread
   object; create more sockets for more concurrent flows.
 
 OMQ.java is not a JeroMQ compatibility layer. It follows ZMQ socket semantics,

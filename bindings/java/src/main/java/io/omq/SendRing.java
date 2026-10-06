@@ -22,7 +22,7 @@ final class SendRing implements AutoCloseable {
 
     private static final ValueLayout.OfLong LONG =
             ValueLayout.JAVA_LONG.withOrder(ByteOrder.nativeOrder());
-    private static final VarHandle ATOMIC_LONG = LONG.varHandle();
+    private static final VarHandle ATOMIC_LONG = LONG.arrayElementVarHandle();
 
     private volatile long handle;
     private volatile boolean shutdownRequested;
@@ -68,7 +68,7 @@ final class SendRing implements AutoCloseable {
         descriptors.set(LONG, descOffset + DESC_PAYLOAD_LEN, body.length);
         descriptors.set(LONG, descOffset + DESC_PAYLOAD_END, reservation.end());
         tail++;
-        ATOMIC_LONG.setRelease(control, CONTROL_TAIL, tail);
+        ATOMIC_LONG.setRelease(control, CONTROL_TAIL / Long.BYTES, tail);
         return true;
     }
 
@@ -151,15 +151,15 @@ final class SendRing implements AutoCloseable {
         if (current == 0) {
             return;
         }
-        ATOMIC_LONG.setRelease(control, CONTROL_CLOSED, 1L);
+        ATOMIC_LONG.setRelease(control, CONTROL_CLOSED / Long.BYTES, 1L);
     }
 
     private long headAcquire() {
-        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_HEAD);
+        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_HEAD / Long.BYTES);
     }
 
     private boolean closedAcquire() {
-        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_CLOSED) != 0;
+        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_CLOSED / Long.BYTES) != 0;
     }
 
     private void checkOpen() {
@@ -211,7 +211,7 @@ final class SendRing implements AutoCloseable {
         payloadHead = 0;
         handle = created;
         if (shutdownRequested) {
-            ATOMIC_LONG.setRelease(control, CONTROL_CLOSED, 1L);
+            ATOMIC_LONG.setRelease(control, CONTROL_CLOSED / Long.BYTES, 1L);
         }
     }
 

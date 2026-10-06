@@ -32,7 +32,7 @@ final class RecvRing implements AutoCloseable {
             ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
     private static final ValueLayout.OfLong LONG =
             ValueLayout.JAVA_LONG.withOrder(ByteOrder.nativeOrder());
-    private static final VarHandle ATOMIC_LONG = LONG.varHandle();
+    private static final VarHandle ATOMIC_LONG = LONG.arrayElementVarHandle();
 
     private long handle;
     private MemorySegment control;
@@ -207,12 +207,12 @@ final class RecvRing implements AutoCloseable {
     }
 
     private long tailAcquire() {
-        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_TAIL);
+        return (long) ATOMIC_LONG.getAcquire(control, CONTROL_TAIL / Long.BYTES);
     }
 
     private void releaseConsumed() {
         if (releasedHead != head) {
-            ATOMIC_LONG.setRelease(control, CONTROL_HEAD, head);
+            ATOMIC_LONG.setRelease(control, CONTROL_HEAD / Long.BYTES, head);
             releasedHead = head;
         }
     }

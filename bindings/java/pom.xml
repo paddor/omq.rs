@@ -42,7 +42,12 @@
 
   <properties>
     <revision>0.3.0-SNAPSHOT</revision>
-    <maven.compiler.release>25</maven.compiler.release>
+    <maven.compiler.release>21</maven.compiler.release>
+    <java.test.toolchain>[21,22)</java.test.toolchain>
+    <java.preview.args>--enable-preview</java.preview.args>
+    <ffm.runtime.classes>${project.build.outputDirectory}</ffm.runtime.classes>
+    <ffm.java22.sources>${project.build.directory}/generated-java22</ffm.java22.sources>
+    <java.runtime.classes>${project.build.directory}/runtime-classes</java.runtime.classes>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.14.1</junit.version>
     <jeromq.version>0.6.0</jeromq.version>
@@ -82,6 +87,75 @@
       </resource>
     </resources>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-toolchains-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>require-java22</id>
+            <goals><goal>toolchain</goal></goals>
+            <configuration>
+              <toolchains><jdk><version>[22,)</version></jdk></toolchains>
+            </configuration>
+          </execution>
+          <execution>
+            <id>select-java21</id>
+            <goals><goal>toolchain</goal></goals>
+            <configuration>
+              <toolchains><jdk><version>[21,22)</version></jdk></toolchains>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>${antrun.version}</version>
+        <executions>
+          <execution>
+            <id>generate-java22-ffm</id>
+            <phase>generate-sources</phase>
+            <goals><goal>run</goal></goals>
+            <configuration>
+              <target>
+                <copy todir="${ffm.java22.sources}" overwrite="true">
+                  <fileset dir="${project.basedir}/src/main/java">
+                    <include name="io/omq/NativeFfm.java"/>
+                    <include name="io/omq/RecvRing.java"/>
+                    <include name="io/omq/SendRing.java"/>
+                  </fileset>
+                </copy>
+                <!-- Keep the preview and final FFM implementations in one source set. -->
+                <replace dir="${ffm.java22.sources}" includes="**/*.java">
+                  <replacefilter token=".getUtf8String(0)" value=".getString(0)"/>
+                  <replacefilter token="LONG.arrayElementVarHandle()" value="LONG.varHandle()"/>
+                  <replacefilter token="control, CONTROL_HEAD / Long.BYTES" value="control, CONTROL_HEAD"/>
+                  <replacefilter token="control, CONTROL_TAIL / Long.BYTES" value="control, CONTROL_TAIL"/>
+                  <replacefilter token="control, CONTROL_CLOSED / Long.BYTES" value="control, CONTROL_CLOSED"/>
+                </replace>
+              </target>
+            </configuration>
+          </execution>
+          <execution>
+            <id>stage-test-runtime</id>
+            <phase>process-test-resources</phase>
+            <goals><goal>run</goal></goals>
+            <configuration>
+              <target>
+                <!-- Directory classpaths do not select multi-release jar entries. -->
+                <delete dir="${java.runtime.classes}"/>
+                <copy todir="${java.runtime.classes}">
+                  <fileset dir="${project.build.outputDirectory}" excludes="META-INF/**"/>
+                </copy>
+                <copy todir="${java.runtime.classes}" overwrite="true">
+                  <fileset dir="${ffm.runtime.classes}" includes="io/omq/*.class"/>
+                </copy>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
@@ -143,6 +217,7 @@
           <archive>
             <manifestEntries>
               <Automatic-Module-Name>io.omq</Automatic-Module-Name>
+              <Multi-Release>true</Multi-Release>
             </manifestEntries>
           </archive>
         </configuration>
@@ -152,12 +227,34 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.14.1</version>
         <configuration>
+          <fork>true</fork>
+          <enablePreview>true</enablePreview>
           <showWarnings>true</showWarnings>
           <compilerArgs>
-            <arg>-Xlint:all</arg>
+            <arg>-Xlint:all,-preview</arg>
             <arg>-Werror</arg>
           </compilerArgs>
         </configuration>
+        <executions>
+          <execution>
+            <id>compile-java22-ffm</id>
+            <phase>process-classes</phase>
+            <goals><goal>compile</goal></goals>
+            <configuration>
+              <jdkToolchain><version>[22,)</version></jdkToolchain>
+              <release>22</release>
+              <enablePreview>false</enablePreview>
+              <multiReleaseOutput>true</multiReleaseOutput>
+              <compileSourceRoots>
+                <compileSourceRoot>${ffm.java22.sources}</compileSourceRoot>
+              </compileSourceRoots>
+              <compilerArgs combine.self="override">
+                <arg>-Xlint:all</arg>
+                <arg>-Werror</arg>
+              </compilerArgs>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
@@ -198,6 +295,11 @@
         <version>3.12.0</version>
         <configuration>
           <doclint>all,-missing</doclint>
+          <jdkToolchain><version>[21,22)</version></jdkToolchain>
+          <source>21</source>
+          <additionalOptions>
+            <additionalOption>--enable-preview</additionalOption>
+          </additionalOptions>
         </configuration>
       </plugin>
       <plugin>
@@ -205,13 +307,24 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.4</version>
         <configuration>
-          <argLine>--enable-native-access=io.omq -Domq.java.peer=${omq.java.peer.path}</argLine>
+          <jdkToolchain><version>${java.test.toolchain}</version></jdkToolchain>
+          <classesDirectory>${java.runtime.classes}</classesDirectory>
+          <argLine>${java.preview.args} --enable-native-access=io.omq -Domq.java.peer=${omq.java.peer.path}</argLine>
         </configuration>
       </plugin>
     </plugins>
   </build>
 
   <profiles>
+    <profile>
+      <id>java22-runtime</id>
+      <activation><jdk>[22,)</jdk></activation>
+      <properties>
+        <java.test.toolchain>[22,)</java.test.toolchain>
+        <java.preview.args></java.preview.args>
+        <ffm.runtime.classes>${project.build.outputDirectory}/META-INF/versions/22</ffm.runtime.classes>
+      </properties>
+    </profile>
     <profile>
       <id>release</id>
       <build>
@@ -271,6 +384,7 @@
                              basedir="${native.classifier.classes}/@{classifier}">
                           <manifest>
                             <attribute name="Automatic-Module-Name" value="io.omq"/>
+                            <attribute name="Multi-Release" value="true"/>
                           </manifest>
                         </jar>
                       </sequential>

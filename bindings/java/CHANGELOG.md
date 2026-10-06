@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Support Java 21 preview FFM and Java 22 or newer final FFM in one multi-release jar.
+- Avoid monitor pinning during virtual-thread receives on Java 21.
+
 ## [0.3.5] - 2026-09-19
 
 ### Changed

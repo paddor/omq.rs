@@ -153,7 +153,7 @@ Four Cargo workspace crates plus language bindings.
 | [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
 | [`OMQ.Net`](bindings/dotnet/) | .NET binding (managed wrapper over omq-libzmq) | P/Invoke/native ABI boundary |
 | [`omq-rs`](bindings/ruby/) | Ruby binding (rb-sys over omq-tokio, scheduler-aware synchronous API) | Ruby C API/native extension boundary |
-| [`OMQ.java`](bindings/java/) | Java 25 binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
+| [`OMQ.java`](bindings/java/) | Java 21+ binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
 | [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
 | [`OMQ.node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
 | [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |

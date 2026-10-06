@@ -40,9 +40,23 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 | `omq_bench_peer_blocking` | `omq-tokio/src/bin/bench_peer_blocking.rs` | omq-tokio-1t, omq-tokio-2t |
 | `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
 | `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
+| `r0z_bench_peer` | `scripts/r0z_bench_peer/` | r0z-async |
+| `monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
 | `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
 | `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 | `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
+
+The `tmq` and `r0z-async` baselines use current-thread Tokio runtimes and one
+libzmq IO thread. `tmq` uses its own libzmq bindings; `r0z-async` uses r0z.
+Both remain available for direct comparison.
+
+The `monocoque-tokio-ct` baseline uses Monocoque's current-thread Tokio
+runtime. PUSH/PULL uses 64 KiB read buffers, write coalescing, and reusable
+receive vectors. REQ/REP disables write coalescing. PUB uses one worker;
+`MONOCOQUE_PUB_WORKERS` overrides the worker count for separate experiments.
+
+Both peers are standalone Cargo workspaces. Monocoque requires Rust 1.95;
+r0z-async supports Unix. Neither dependency enters the OMQ or pyomq builds.
 
 For direct blocking-peer experiments, `OMQ_BENCH_RECV_SPIN_US=50` sets
 `Options::recv_spin(Duration::from_micros(50))` on both endpoints. Unset or
@@ -122,7 +136,7 @@ postfix=6 cores, performance governor, turbo off
 automatically.
 
 Run throughput benchmarks with `OMQ_BENCH_TASKSET=1`. It pins the measured
-peer to CPUs 0-2 and the other peer to CPUs 3-5. Unpinned multi-peer runs are
+peer to CPUs 1-2 and the other peer to CPUs 3-4. Unpinned multi-peer runs are
 bimodal: the scheduler can stack several IO threads on one CPU. Run latency
 benchmarks unpinned: pinned REQ/REP runs show more p99 spikes.
 

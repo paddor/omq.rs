@@ -287,6 +287,38 @@ static IMPLS: &[ImplDef] = &[
         env: &[],
     },
     ImplDef {
+        name: "r0z-async",
+        binary_from: None,
+        prefix: "n",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: false,
+        fanout_subcmd: "push",
+        fanio_needs_peer_count: false,
+        supports_pubsub: true,
+        env: &[],
+    },
+    ImplDef {
+        name: "monocoque-tokio-ct",
+        binary_from: None,
+        prefix: "o",
+        class: Some(ImplClass::Classic),
+        main: true,
+        transports: &[Tcp],
+        inproc_tput_subcmd: "",
+        inproc_lat_subcmd: "",
+        inproc_pubsub_subcmd: "",
+        pub_needs_peer_count: true,
+        fanout_subcmd: "",
+        fanio_needs_peer_count: false,
+        supports_pubsub: true,
+        env: &[],
+    },
+    ImplDef {
         name: "zmq.rs",
         binary_from: None,
         prefix: "q",
@@ -598,16 +630,8 @@ fn build_peers(
                     PathBuf::from("scripts/zmqrs_bench_peer/target/release/zmqrs_bench_peer"),
                 );
             }
-            "tmq" => {
-                run_build_in_dir_with_env(
-                    &["cargo", "build", "--release", "-q"],
-                    "scripts/tmq_bench_peer",
-                    &[("CXXFLAGS", "-std=gnu++11")],
-                );
-                binaries.insert(
-                    source.to_string(),
-                    PathBuf::from("scripts/tmq_bench_peer/target/release/tmq_bench_peer"),
-                );
+            "r0z-async" | "tmq" | "monocoque-tokio-ct" => {
+                binaries.insert(source.to_string(), build_external_comparison_peer(source));
             }
             "rzmq" => {
                 run_build_in_dir(
@@ -636,6 +660,27 @@ fn build_peers(
     result
 }
 
+fn build_external_comparison_peer(source: &str) -> PathBuf {
+    match source {
+        "r0z-async" => process::build_external_peer(
+            "scripts/r0z_bench_peer",
+            "r0z_bench_peer",
+            &[("CXXFLAGS", "-std=gnu++11")],
+        ),
+        "tmq" => process::build_external_peer(
+            "scripts/tmq_bench_peer",
+            "tmq_bench_peer",
+            &[("CXXFLAGS", "-std=gnu++11")],
+        ),
+        "monocoque-tokio-ct" => process::build_external_peer(
+            "scripts/monocoque_bench_peer",
+            "monocoque_bench_peer",
+            &[],
+        ),
+        _ => unreachable!("not an external comparison peer: {source}"),
+    }
+}
+
 fn run_build(cmd: &[&str]) {
     eprintln!("  building: {}", cmd.join(" "));
     let status = std::process::Command::new(cmd[0])
@@ -650,17 +695,6 @@ fn run_build_in_dir(cmd: &[&str], dir: &str) {
     let status = std::process::Command::new(cmd[0])
         .args(&cmd[1..])
         .current_dir(dir)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run {cmd:?} in {dir}: {e}"));
-    assert!(status.success(), "build failed: {cmd:?} in {dir}");
-}
-
-fn run_build_in_dir_with_env(cmd: &[&str], dir: &str, env: &[(&str, &str)]) {
-    eprintln!("  building: {} (in {dir})", cmd.join(" "));
-    let status = std::process::Command::new(cmd[0])
-        .args(&cmd[1..])
-        .current_dir(dir)
-        .envs(env.iter().copied())
         .status()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?} in {dir}: {e}"));
     assert!(status.success(), "build failed: {cmd:?} in {dir}");

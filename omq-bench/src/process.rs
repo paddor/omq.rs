@@ -95,6 +95,34 @@ pub(crate) fn build_omq_peer(name: &str, features: &[&str]) -> PathBuf {
         .unwrap_or_else(|| panic!("Cargo did not report executable for {name}"))
 }
 
+/// Build a standalone peer and use Cargo's reported executable path.
+pub(crate) fn build_external_peer(dir: &str, name: &str, env: &[(&str, &str)]) -> PathBuf {
+    eprintln!("  building external peer {name} (in {dir})...");
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--bin",
+            name,
+            "--message-format=json-render-diagnostics",
+        ])
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("build external peer");
+    assert!(
+        output.status.success(),
+        "external peer build failed: {name}"
+    );
+    output
+        .stdout
+        .split(|&byte| byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .find_map(|message| executable_artifact(&message, name))
+        .unwrap_or_else(|| panic!("Cargo did not report executable for {name}"))
+}
+
 fn live_procs() -> &'static Mutex<HashMap<u32, Instant>> {
     LIVE_PROCS.get_or_init(|| Mutex::new(HashMap::new()))
 }

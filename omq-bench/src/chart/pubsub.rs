@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::common::{
-    C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl, ValMap,
-    draw_multirow_throughput, draw_throughput_dual_panel, load_tput, merge_cpu_data, out_dir,
+    C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl,
+    ValMap, draw_multirow_throughput, draw_throughput_dual_panel, load_tput, merge_cpu_data,
+    out_dir,
 };
 
 const PUBSUB_IMPLS: &[Impl] = &[
@@ -29,6 +30,12 @@ const PUBSUB_IMPLS: &[Impl] = &[
         label: "omq",
         threads: "2 IO",
         color: C_OMQ_2T,
+    },
+    Impl {
+        key: "monocoque-tokio-ct",
+        label: "monocoque",
+        threads: "CT + 1 worker",
+        color: C_MONOCOQUE,
     },
 ];
 

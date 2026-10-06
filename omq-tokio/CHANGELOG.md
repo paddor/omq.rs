@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-07
+
+### Breaking
+
+- Replace the public inproc transport queue types and engine receive item
+  with bounded per-source queues. Update users of these internal modules.
+- Extend peer driver commands and change driver auto-trait implementations.
+
 ### Added
+
+- Native `quic://` transport with TLS 1.3 and ALPN `omq-zmtp/1`, configurable
+  certificate verification, stream windows, and connection limits. Listener
+  replacement and peer liveness preserve automatic reconnection.
 
 - PEER, PULL, and GATHER support per-source backpressure through `recv_from`,
   `try_recv_from`, and `unshift`. Receives return a message and a receipt:
@@ -29,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopping transport reads and propagating backpressure without consuming
   other lanes' capacity or requiring application credits.
 
-- Require `fanring` 0.3.8 and `yring` 0.3.19 for batched release wake hints.
+- Require `fanring` 0.3.9 and `yring` 0.3.20 for batched release wake hints.
 - Native receive rings publish consumed slots at LWM and cached-window
   boundaries, waking full producers while the remaining window drains. Partial
   credits publish before receive parks or a bounded bulk drain returns.

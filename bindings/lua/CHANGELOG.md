@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-07
+
+### Changed
+
+- Bundle `omq-libzmq` 0.5.21 with receive fairness, request/reply routing,
+  and ZMTP compliance fixes.
+
 ## [0.2.3] - 2026-09-19
 
 ### Changed

@@ -2,11 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-07
+
+- Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive
+  queues, ZMTP compliance fixes, and reconnect improvements.
+
 ### Changed
 
 - Name authentication worker threads so lifecycle checks track owned workers.
-- Update native dependency bounds for `omq-proto` 0.28,
-  `omq-tokio` 0.23/0.24, and published `yring` 0.3.18.
+- Require `omq-proto` 0.29.0, `omq-tokio` 0.25.0, and published
+  `yring` 0.3.20.
   Workspace checks now exercise the current core through local patches.
 
 ### Fixed

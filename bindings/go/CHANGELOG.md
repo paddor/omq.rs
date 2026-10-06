@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-07
+
+### Changed
+
+- Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive
+  queues, ZMTP compliance fixes, and reconnect improvements.
+
 ## [0.1.3] - 2026-09-19
 
 ### Changed

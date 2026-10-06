@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-07
+
+- Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive
+  queues, ZMTP compliance fixes, and reconnect improvements.
+
 - Support Java 21 preview FFM and Java 22 or newer final FFM in one multi-release jar.
 - Avoid monitor pinning during virtual-thread receives on Java 21.
 

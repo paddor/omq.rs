@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-07
+
+- Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive
+  queues, ZMTP compliance fixes, and reconnect improvements.
+
 - Use the current backend's 10-second setup deadline and reconnect behavior.
 - Keep initial DNS errors visible; retry later resolution failures internally.
 

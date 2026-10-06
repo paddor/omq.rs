@@ -12,6 +12,7 @@ mod test_support;
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use omq_tokio::endpoint::Host;
@@ -374,13 +375,18 @@ async fn multi_io_rep_finishes_reply_while_client_closes() {
     let context = Context::with_config(ContextConfig { io_threads: 2 });
     let rep = context.socket(SocketType::Rep, Options::default().linger(Duration::ZERO));
     let endpoint = rep.bind(tcp_ep(0)).await.unwrap();
+    let reply_race = Arc::new(tokio::sync::Barrier::new(2));
+    let server_reply_race = Arc::clone(&reply_race);
 
     let server = tokio::spawn(async move {
-        for _ in 0..21 {
+        for sequence in 0..21 {
             let request = tokio::time::timeout(Duration::from_secs(1), rep.recv())
                 .await
                 .expect("REP recv timed out")
                 .unwrap();
+            if sequence == 20 {
+                server_reply_race.wait().await;
+            }
             tokio::time::timeout(Duration::from_secs(1), rep.send(request))
                 .await
                 .expect("REP send timed out")
@@ -397,6 +403,11 @@ async fn multi_io_rep_finishes_reply_while_client_closes() {
         assert_eq!(req.recv().await.unwrap(), request);
     }
     req.send(Message::single("last")).await.unwrap();
+    // Zero linger may discard the last send. Admit it before racing the
+    // client's close against the server's reply.
+    tokio::time::timeout(Duration::from_secs(1), reply_race.wait())
+        .await
+        .expect("REP did not receive final request");
     req.close_with_linger(Some(Duration::ZERO)).await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), server)

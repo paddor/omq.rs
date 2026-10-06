@@ -87,7 +87,9 @@ and PLAIN client password redacted.
 Each peer is its own QUIC connection placed on one OMQ IO thread; one
 connection's packet work does not spread across threads. Heartbeat options
 drive a separate liveness stream, so a slow local consumer is not mistaken
-for a dead peer. OMQ compression is never used on this transport.
+for a dead peer. OMQ compression is never used on this transport. All data
+messages share one ordered stream. The native protocol and endpoint lifetime
+rules are specified in [quic-rfc.md](../doc/quic-rfc.md).
 
 ## Internals
 

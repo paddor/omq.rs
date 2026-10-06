@@ -49,8 +49,8 @@ one outbound. Per-connection driver tasks bridge queues and wire.
 Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).
-Transport RFCs (wire format, dict shipping rules, security):
-[`lz4-rfc.md`](doc/lz4-rfc.md).
+Transport RFCs:
+[`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).

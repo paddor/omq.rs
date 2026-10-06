@@ -106,6 +106,12 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- QUIC unbind/rebind preserves accepted peers and the complete UDP endpoint
+  group. A replacement listener can rotate its certificate within the same
+  context without interrupting existing connections.
+- QUIC liveness services output and timeouts during receive floods. Delayed
+  heartbeat timers skip missed probes, and oversized durations do not panic.
+
 - Finite native linger includes actor command admission, so blocked
   subscription forwarding cannot prevent close from reaching its deadline.
 

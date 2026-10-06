@@ -285,8 +285,10 @@ STREAM uses raw TCP without a ZMTP handshake. Regular byte-stream sockets
 supervise reconnects. `Socket::monitor()` exposes lifecycle events and peer
 snapshots to applications.
 
-QUIC carriers retain their assigned data runtime. A separate liveness stream
-keeps heartbeat traffic independent of application receive backpressure.
+QUIC peers retain their UDP endpoint group and assigned data runtime. The
+listener controls new admission; established peers own their connections.
+A separate liveness stream keeps heartbeats independent of application
+receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
 
 ## Source map
 

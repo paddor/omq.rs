@@ -240,7 +240,7 @@ async fn serve(
     let start = Instant::now();
     let mut unanswered_since = None;
     let mut preface_deadline = (!preface_done).then_some(config.preface_deadline).flatten();
-    let mut next_ping = config.interval.map(|ivl| start + ivl);
+    let mut next_ping = config.interval.and_then(|ivl| start.checked_add(ivl));
     let mut nonce = 0u64;
     let mut budget = RECORD_BUDGET;
     loop {
@@ -248,7 +248,6 @@ async fn serve(
         let death =
             unanswered_since.and_then(|sent_at: Instant| sent_at.checked_add(config.timeout));
         tokio::select! {
-            biased;
             outcome = reader.next() => {
                 match outcome {
                     ReadOutcome::Record(Record::Ping(value)) => writer.pong = Some(value),
@@ -275,7 +274,9 @@ async fn serve(
             () = sleep_until_opt(next_ping), if next_ping.is_some() => {
                 nonce = nonce.wrapping_add(1);
                 writer.ping = Some(nonce);
-                next_ping = next_ping.zip(config.interval).map(|(at, ivl)| at + ivl);
+                // A delayed runtime sends one probe, not a backlog of missed
+                // ticks. Unrepresentable deadlines behave as infinite waits.
+                next_ping = config.interval.and_then(|ivl| Instant::now().checked_add(ivl));
             }
             () = sleep_until_opt(death), if death.is_some() => {
                 return Some(code::LIVENESS_TIMEOUT);

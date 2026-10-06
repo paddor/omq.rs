@@ -198,6 +198,73 @@ async fn silent_peer_hits_the_liveness_timeout() {
     assert_eq!(closed_code(&client).await, Some(code::LIVENESS_TIMEOUT));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn short_ping_interval_does_not_starve_the_timeout() {
+    let options = Options {
+        heartbeat_interval: Some(Duration::from_nanos(1)),
+        heartbeat_timeout: Some(Duration::from_millis(50)),
+        ..Options::default()
+    };
+    let (client, _send, _recv, _stream) = established(options).await;
+    assert_eq!(closed_code(&client).await, Some(code::LIVENESS_TIMEOUT));
+}
+
+#[tokio::test]
+async fn unrepresentable_ping_deadline_does_not_abort_liveness() {
+    let options = Options {
+        heartbeat_interval: Some(Duration::MAX),
+        ..Options::default()
+    };
+    let (_client, mut send, mut recv, _stream) = established(options).await;
+    send.write_all(&[1, 0, 0, 0, 0, 0, 0, 0, 42]).await.unwrap();
+    let mut reply = [0; 17];
+    tokio::time::timeout(Duration::from_secs(1), recv.read_exact(&mut reply))
+        .await
+        .expect("liveness did not answer a PING")
+        .unwrap();
+    assert_eq!(&reply[..8], &liveness::PREFACE);
+    assert_eq!(&reply[8..], &[2, 0, 0, 0, 0, 0, 0, 0, 42]);
+}
+
+#[tokio::test]
+async fn ping_flood_cannot_starve_replies() {
+    let (client, mut send, mut recv, _stream) = established(Options::default()).await;
+    let mut preface = [0; 8];
+    recv.read_exact(&mut preface).await.unwrap();
+    assert_eq!(preface, liveness::PREFACE);
+    let flood = tokio::spawn(async move {
+        let mut nonce = 0u64;
+        let mut records = Vec::with_capacity(256 * 9);
+        loop {
+            records.clear();
+            for _ in 0..256 {
+                nonce += 1;
+                records.push(1);
+                records.extend_from_slice(&nonce.to_be_bytes());
+            }
+            if send.write_all(&records).await.is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let mut last_nonce = 0;
+    for _ in 0..100 {
+        let mut record = [0; 9];
+        tokio::time::timeout(Duration::from_secs(2), recv.read_exact(&mut record))
+            .await
+            .expect("PING flood starved PONG output")
+            .unwrap();
+        assert_eq!(record[0], 2);
+        let nonce = u64::from_be_bytes(record[1..].try_into().unwrap());
+        assert!(nonce > last_nonce);
+        last_nonce = nonce;
+    }
+    assert!(client.close_reason().is_none());
+    flood.abort();
+    let _ = flood.await;
+}
+
 #[tokio::test]
 async fn equal_liveness_interval_and_timeout_allow_a_reply_window() {
     let options = Options {
@@ -406,6 +473,14 @@ fn listener_binds_one_endpoint_per_io_thread_on_linux() {
             client.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"pong");
         }
+        let group = Arc::downgrade(&listener.endpoints);
+        drop(listener);
+        assert!(group.upgrade().is_some(), "accepted peers lost UDP group");
+        drop(peers);
+        assert!(
+            group.upgrade().is_none(),
+            "idle listener group was retained"
+        );
     });
 }
 

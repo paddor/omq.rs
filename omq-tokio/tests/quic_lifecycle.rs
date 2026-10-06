@@ -546,3 +546,121 @@ async fn ready_peer_cap_limits_quic_without_limiting_tcp() {
         }
     }
 }
+
+#[tokio::test]
+async fn established_peers_survive_unbind_with_multiple_io_threads() {
+    let tls = tls();
+    for io_threads in [1, 3] {
+        // One live peer leaves unused reuseport members when unbinding.
+        for _ in 0..4 {
+            let context = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads });
+            let pull = context.socket(SocketType::Pull, server_options(&tls));
+            let bound = pull.bind(quic(0)).await.unwrap();
+            let push = Socket::new(SocketType::Push, client_options(&tls));
+            push.connect(bound.clone()).await.unwrap();
+            push.send(Message::single("before")).await.unwrap();
+            assert_eq!(recv(&pull).await, Message::single("before"));
+            pull.unbind(bound).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for seq in 0u32..10 {
+                let expected = Message::single(seq.to_be_bytes().to_vec());
+                push.send(expected.clone()).await.unwrap();
+                let actual = tokio::time::timeout(Duration::from_secs(2), pull.recv())
+                    .await
+                    .expect("unbinding disrupted an established QUIC peer")
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+            push.close().await.unwrap();
+            pull.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn unbind_rebind_keeps_old_peers_and_accepts_new_peers() {
+    let tls = tls();
+    let context = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: 3 });
+    let pull = context.socket(SocketType::Pull, server_options(&tls));
+    let bound = pull.bind(quic(0)).await.unwrap();
+    let first = Socket::new(SocketType::Push, client_options(&tls));
+    first.connect(bound.clone()).await.unwrap();
+    first.send(Message::single("before")).await.unwrap();
+    assert_eq!(recv(&pull).await, Message::single("before"));
+    pull.unbind(bound.clone()).await.unwrap();
+    assert_eq!(pull.bind(bound.clone()).await.unwrap(), bound);
+    let second = Socket::new(SocketType::Push, client_options(&tls));
+    second.connect(bound).await.unwrap();
+    for (sender, body) in [(&first, "old peer"), (&second, "new peer")] {
+        sender.send(Message::single(body)).await.unwrap();
+        assert_eq!(recv(&pull).await, Message::single(body));
+    }
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    pull.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rebind_on_another_socket_rotates_tls_without_disrupting_old_peers() {
+    let original = tls();
+    let replacement = tls();
+    let context = omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: 3 });
+    let old_pull = context.socket(SocketType::Pull, server_options(&original));
+    let bound = old_pull.bind(quic(0)).await.unwrap();
+    let old_push = Socket::new(SocketType::Push, client_options(&original));
+    old_push.connect(bound.clone()).await.unwrap();
+    old_push.send(Message::single("before")).await.unwrap();
+    assert_eq!(recv(&old_pull).await, Message::single("before"));
+    old_pull.unbind(bound.clone()).await.unwrap();
+
+    let new_pull = context.socket(SocketType::Pull, server_options(&replacement));
+    new_pull.bind(bound.clone()).await.unwrap();
+    let new_push = Socket::new(SocketType::Push, client_options(&replacement));
+    new_push.connect(bound).await.unwrap();
+    new_push
+        .send(Message::single("new listener"))
+        .await
+        .unwrap();
+    assert_eq!(recv(&new_pull).await, Message::single("new listener"));
+    old_push
+        .send(Message::single("old listener"))
+        .await
+        .unwrap();
+    assert_eq!(recv(&old_pull).await, Message::single("old listener"));
+
+    old_push.close().await.unwrap();
+    new_push.close().await.unwrap();
+    old_pull.close().await.unwrap();
+    new_pull.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_multi_io_binds_admit_only_one_listener() {
+    let tls = tls();
+    let contexts: Vec<_> = (0..2)
+        .map(|_| omq_tokio::Context::with_config(omq_tokio::ContextConfig { io_threads: 3 }))
+        .collect();
+    for _ in 0..8 {
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = quic(probe.local_addr().unwrap().port());
+        drop(probe);
+        let left = contexts[0].socket(SocketType::Pull, server_options(&tls));
+        let right = contexts[1].socket(SocketType::Pull, server_options(&tls));
+        let (a, b) = tokio::join!(left.bind(endpoint.clone()), right.bind(endpoint.clone()));
+        let (winner, error) = match (a, b) {
+            (Ok(_), Err(error)) => (&left, error),
+            (Err(error), Ok(_)) => (&right, error),
+            results => panic!("competing listeners: {results:?}"),
+        };
+        assert!(
+            matches!(error, omq_tokio::Error::Io(ref e) if e.kind() == std::io::ErrorKind::AddrInUse)
+        );
+        let push = Socket::new(SocketType::Push, client_options(&tls));
+        push.connect(endpoint).await.unwrap();
+        push.send(Message::single("winner")).await.unwrap();
+        assert_eq!(recv(winner).await, Message::single("winner"));
+        push.close().await.unwrap();
+        left.close().await.unwrap();
+        right.close().await.unwrap();
+    }
+}

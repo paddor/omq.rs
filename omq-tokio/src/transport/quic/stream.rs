@@ -28,6 +28,8 @@ struct Shared {
     /// Keeps the endpoint driver and UDP socket alive while this peer lives.
     #[cfg_attr(not(test), expect(dead_code))]
     endpoint: Arc<super::UdpEndpoint>,
+    /// Preserve reuseport membership while any accepted peer lives.
+    _listener_group: Option<Arc<super::ListenerGroup>>,
     liveness: tokio::task::AbortHandle,
     completed: AtomicBool,
 }
@@ -67,6 +69,7 @@ impl QuicStream {
     pub(super) fn new(
         carrier: Carrier,
         endpoint: Arc<super::UdpEndpoint>,
+        group: Option<Arc<super::ListenerGroup>>,
         send: SendHalf,
         recv: RecvHalf,
         liveness: tokio::task::AbortHandle,
@@ -74,6 +77,7 @@ impl QuicStream {
         let shared = Arc::new(Shared {
             carrier,
             endpoint,
+            _listener_group: group,
             liveness,
             completed: AtomicBool::new(false),
         });

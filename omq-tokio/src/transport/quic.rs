@@ -24,6 +24,7 @@ use crate::transport::setup::{Admission, PendingHandshake, SetupState};
 
 mod carrier;
 mod config;
+mod listener_group;
 mod liveness;
 #[cfg(target_os = "linux")]
 mod reuseport;
@@ -31,6 +32,7 @@ mod stream;
 mod udp;
 
 use carrier::{Carrier, RecvHalf, SendHalf};
+use listener_group::ListenerGroup;
 pub(crate) use liveness::LivenessConfig;
 pub(crate) use stream::{QuicRecvHalf, QuicSendHalf, QuicStream};
 use udp::UdpEndpoint;
@@ -70,6 +72,7 @@ impl Roles {
     fn establish(
         self,
         endpoint: Arc<UdpEndpoint>,
+        group: Option<Arc<ListenerGroup>>,
         preface_done: bool,
         config: LivenessConfig,
     ) -> QuicStream {
@@ -83,7 +86,14 @@ impl Roles {
         ))
         .abort_handle();
         let (data_send, data_recv) = self.data;
-        QuicStream::new(self.carrier, endpoint, data_send, data_recv, liveness)
+        QuicStream::new(
+            self.carrier,
+            endpoint,
+            group,
+            data_send,
+            data_recv,
+            liveness,
+        )
     }
 }
 
@@ -222,7 +232,7 @@ pub(crate) async fn connect(
             let endpoint = client_endpoint(addr, buffers)?;
             let connection = handshake(&endpoint, client, addr, &server_name).await?;
             let roles = open_raw_roles(connection).await?;
-            Ok(roles.establish(endpoint, false, liveness))
+            Ok(roles.establish(endpoint, None, false, liveness))
         });
         match attempt.await {
             Ok(stream) => return Ok(stream.with_io_lease(lease)),
@@ -263,7 +273,8 @@ type PendingSetup = BoxFuture<'static, (SocketAddr, Result<(QuicStream, SetupSta
 /// liveness preface, and continues through ZMTP authentication.
 pub(crate) struct QuicListener {
     /// One endpoint, or on Linux one per data IO thread in index order.
-    endpoints: Vec<ListenerEndpoint>,
+    endpoints: Arc<ListenerGroup>,
+    generation: u64,
     local: Endpoint,
     monitor_endpoint: Endpoint,
     setup: AcceptSetup,
@@ -284,14 +295,34 @@ impl std::fmt::Debug for QuicListener {
 
 impl Drop for QuicListener {
     fn drop(&mut self) {
-        // Refuse new Initials; established peers keep their own handles.
-        for endpoint in &self.endpoints {
-            endpoint.udp.set_server_config(None);
-        }
+        self.endpoints.release(self.generation);
     }
 }
 
 impl QuicListener {
+    fn new(
+        endpoints: Arc<ListenerGroup>,
+        generation: u64,
+        setup: AcceptSetup,
+        options: &Options,
+    ) -> Result<Self> {
+        let local = endpoints[0].udp.local_addr().map_err(Error::Io)?;
+        let local = Endpoint::Quic {
+            host: Host::Ip(local.ip()),
+            port: local.port(),
+        };
+        Ok(Self {
+            endpoints,
+            generation,
+            monitor_endpoint: local.clone(),
+            local,
+            setup,
+            liveness: LivenessConfig::from_options(options),
+            listener_admission: Admission::new(LISTENER_SETUPS as usize),
+            pending: FuturesUnordered::new(),
+        })
+    }
+
     pub(crate) fn local_endpoint(&self) -> &Endpoint {
         &self.local
     }
@@ -345,6 +376,7 @@ impl QuicListener {
             admission,
         };
         let endpoint = self.endpoints[index].udp.clone();
+        let group = self.endpoints.clone();
         let liveness = self.liveness;
         let pool = self.setup.io_pool.clone();
         // Accept on the peer's IO runtime so its connection driver, crypto,
@@ -359,7 +391,7 @@ impl QuicListener {
         };
         self.pending.push(Box::pin(async move {
             let accepted = on_io_thread(&pool, &lease, async move {
-                accept_setup(incoming, endpoint, liveness, deadline).await
+                accept_setup(incoming, endpoint, group, liveness, deadline).await
             });
             let result = accepted
                 .await
@@ -380,6 +412,7 @@ impl QuicListener {
 }
 
 /// A listener's UDP endpoint and the data IO runtime driving it.
+#[derive(Debug)]
 struct ListenerEndpoint {
     udp: Arc<UdpEndpoint>,
     /// The IO thread driving the endpoint, counted as loaded while the
@@ -425,6 +458,7 @@ fn listener_endpoint_config(index: usize, count: usize) -> quinn::EndpointConfig
 async fn accept_setup(
     incoming: quinn::Incoming,
     endpoint: Arc<UdpEndpoint>,
+    group: Arc<ListenerGroup>,
     liveness: LivenessConfig,
     deadline: Instant,
 ) -> Result<QuicStream> {
@@ -449,7 +483,7 @@ async fn accept_setup(
         Ok(Err(e)) => Err(e),
     };
     match roles {
-        Ok(roles) => Ok(roles.establish(endpoint, true, liveness)),
+        Ok(roles) => Ok(roles.establish(endpoint, Some(group), true, liveness)),
         Err(e) => {
             closer.close(quinn::VarInt::from_u32(code::SETUP_ERROR), b"");
             Err(e)
@@ -501,6 +535,11 @@ pub(crate) async fn bind(
             .ok_or_else(|| Error::InvalidEndpoint(format!("DNS lookup failed for {name}")))?,
         _ => unreachable!(),
     };
+    let _bind_guard = ListenerGroup::bind_guard().await;
+    if let Some(group) = ListenerGroup::cached(addr) {
+        let generation = group.claim(&server, setup.cancel.clone(), options)?;
+        return QuicListener::new(group, generation, setup, options);
+    }
     let sockets = listener_sockets(addr, setup.io_pool.thread_count())?;
     let count = sockets.len();
     let mut endpoints = Vec::with_capacity(count);
@@ -525,19 +564,8 @@ pub(crate) async fn bind(
         });
     }
     let local = endpoints[0].udp.local_addr().map_err(Error::Io)?;
-    let resolved = Endpoint::Quic {
-        host: Host::Ip(local.ip()),
-        port: local.port(),
-    };
-    Ok(QuicListener {
-        endpoints,
-        monitor_endpoint: resolved.clone(),
-        local: resolved,
-        setup,
-        liveness: LivenessConfig::from_options(options),
-        listener_admission: Admission::new(LISTENER_SETUPS as usize),
-        pending: FuturesUnordered::new(),
-    })
+    let group = ListenerGroup::new(local, endpoints, setup.cancel.clone());
+    QuicListener::new(group, 1, setup, options)
 }
 
 #[cfg(test)]

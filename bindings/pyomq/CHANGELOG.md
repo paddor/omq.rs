@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-07
+
+- Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive
+  queues, ZMTP compliance fixes, and reconnect improvements.
+
 ### Added
 
 - `connect_stopped` monitor events expose fatal handshake refusal mechanism,

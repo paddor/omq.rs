@@ -893,9 +893,17 @@ fn plain_server_without_zap_fails_closed() {
     let push = zmq_socket(ctx, ZMQ_PUSH);
     set_bytes(push, ZMQ_PLAIN_USERNAME, b"user");
     set_bytes(push, ZMQ_PLAIN_PASSWORD, b"pass");
+    set_i32(push, ZMQ_SNDTIMEO, 300);
     set_i32(push, ZMQ_LINGER, 0);
     assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
-    assert_eq!(zmq_send(push, b"denied".as_ptr().cast(), 6, 0), 6);
+    // Authentication can reject the peer before the message enters its pipe.
+    // A muted PUSH then waits for a usable peer until its send timeout.
+    let sent = zmq_send(push, b"denied".as_ptr().cast(), 6, 0);
+    if sent == -1 {
+        assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+    } else {
+        assert_eq!(sent, 6);
+    }
 
     let mut buf = [0u8; 16];
     assert_eq!(zmq_recv(pull, buf.as_mut_ptr().cast(), buf.len(), 0), -1);

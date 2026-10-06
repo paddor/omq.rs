@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-07
+
+### Breaking
+
+- Add receive-spin, WebSocket, and QUIC configuration fields to `Options`.
+  Construct options with `Default` or update exhaustive struct literals.
+- Extend connection and WebSocket upgrade configuration, and add the
+  `ConnectStopped` monitor event.
+
 ### Added
 
 - Structured fatal handshake refusals preserve the peer's security mechanism,

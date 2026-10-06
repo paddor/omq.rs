@@ -123,7 +123,8 @@ git -c push.followTags=false push origin pyomq-v0.21.0
 `omq-rs` publishes to RubyGems from
 `.github/workflows/release-rubygems.yml`. Prepare a release by bumping
 `bindings/ruby/lib/omq/rs/version.rb`, updating
-`bindings/ruby/CHANGELOG.md`, and running `cargo update -p omq_rs_native`
+`bindings/ruby/CHANGELOG.md`, running `bundle lock --local` to refresh the
+local gem version in `Gemfile.lock`, and running `cargo update -p omq_rs_native`
 inside `bindings/ruby`. Publish the required `omq-proto` and `omq-tokio`
 versions before pushing the Ruby tag. After the PR is merged, push a tag:
 

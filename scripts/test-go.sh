@@ -8,12 +8,19 @@ cargo_cmd="${CARGO:-cargo}"
 
 "$cargo_cmd" build --release --manifest-path bindings/go/native/Cargo.toml
 
+# Cargo config and CARGO_TARGET_DIR also apply to this separate workspace.
+target_dir="$("$cargo_cmd" metadata --format-version 1 --no-deps \
+    --manifest-path bindings/go/native/Cargo.toml \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+lib_dir="$target_dir/release"
+export CGO_LDFLAGS="\"-L$lib_dir\" ${CGO_LDFLAGS:-}"
+
 case "$(uname -s)" in
     Darwin)
-        export DYLD_LIBRARY_PATH="$repo_root/bindings/go/native/target/release:$repo_root/bindings/go/native/target/debug:${DYLD_LIBRARY_PATH:-}"
+        export DYLD_LIBRARY_PATH="$lib_dir:${DYLD_LIBRARY_PATH:-}"
         ;;
     *)
-        export LD_LIBRARY_PATH="$repo_root/bindings/go/native/target/release:$repo_root/bindings/go/native/target/debug:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="$lib_dir:${LD_LIBRARY_PATH:-}"
         ;;
 esac
 

@@ -13,6 +13,10 @@ cpu_count() {
 durations="${OMQ_JAVA_SOAK_DURATIONS:-300 600 1800 3600}"
 workers="${OMQ_JAVA_SOAK_WORKERS:-$(cpu_count)}"
 cargo_cmd="${CARGO:-cargo}"
+maven_args=()
+if [[ -f "${repo_root}/bindings/java/toolchains.xml" ]]; then
+  maven_args=(-t "${repo_root}/bindings/java/toolchains.xml")
+fi
 
 case "$(uname -s)" in
   Darwin)
@@ -48,7 +52,7 @@ resource_dir="${repo_root}/bindings/java/target/test-classes/io/omq/native/${pla
 if [[ "${SOAK_SKIP_BUILD:-0}" != "1" ]]; then
   "${cargo_cmd}" build --release --manifest-path "${repo_root}/bindings/java/native/Cargo.toml" \
     --features plain,curve,lz4,zstd
-  mvn -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -DskipTests test-compile
+  mvn "${maven_args[@]}" -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -DskipTests test-compile
 fi
 mkdir -p "${resource_dir}"
 cp "${native_dir}/${library}" "${resource_dir}/"
@@ -58,5 +62,5 @@ for duration in ${durations}; do
   OMQ_JAVA_SOAK=1 \
   OMQ_JAVA_SOAK_DURATION_SECS="${duration}" \
   OMQ_JAVA_SOAK_WORKERS="${workers}" \
-    mvn -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -Dtest=JavaSoakTest test
+    mvn "${maven_args[@]}" -f "${repo_root}/bindings/java/pom.xml" -DskipNative=true -Dtest=JavaSoakTest test
 done

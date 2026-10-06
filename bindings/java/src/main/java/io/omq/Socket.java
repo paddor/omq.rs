@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
 import java.util.function.Predicate;
@@ -30,6 +31,7 @@ public final class Socket implements AutoCloseable {
     private static final int ZSTD_LEVEL_MAX = 4;
     private static final long MAX_HEARTBEAT_TTL_MILLIS = 6_553_500;
 
+    private final ReentrantLock operationLock = new ReentrantLock();
     private final Context context;
     private final SocketType type;
     private final State state;
@@ -47,30 +49,50 @@ public final class Socket implements AutoCloseable {
     }
 
     /** Binds to an endpoint and returns the actual bound endpoint. */
-    public synchronized String bind(String endpoint) {
-        Objects.requireNonNull(endpoint, "endpoint");
-        return withHandle(handle -> Native.socketBind(handle, endpoint));
+    public String bind(String endpoint) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(endpoint, "endpoint");
+            return withHandle(handle -> Native.socketBind(handle, endpoint));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Connects to an endpoint. */
-    public synchronized Socket connect(String endpoint) {
-        Objects.requireNonNull(endpoint, "endpoint");
-        withHandleVoid(handle -> Native.socketConnect(handle, endpoint));
-        return this;
+    public Socket connect(String endpoint) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(endpoint, "endpoint");
+            withHandleVoid(handle -> Native.socketConnect(handle, endpoint));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Unbinds a previously bound endpoint. */
-    public synchronized Socket unbind(String endpoint) {
-        Objects.requireNonNull(endpoint, "endpoint");
-        withHandleVoid(handle -> Native.socketUnbind(handle, endpoint));
-        return this;
+    public Socket unbind(String endpoint) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(endpoint, "endpoint");
+            withHandleVoid(handle -> Native.socketUnbind(handle, endpoint));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disconnects a previously connected endpoint. */
-    public synchronized Socket disconnect(String endpoint) {
-        Objects.requireNonNull(endpoint, "endpoint");
-        withHandleVoid(handle -> Native.socketDisconnect(handle, endpoint));
-        return this;
+    public Socket disconnect(String endpoint) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(endpoint, "endpoint");
+            withHandleVoid(handle -> Native.socketDisconnect(handle, endpoint));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends a single-part binary message by copying {@code body}. */
@@ -87,491 +109,791 @@ public final class Socket implements AutoCloseable {
     }
 
     /** Sends the remaining bytes of {@code body} without changing its position. */
-    public synchronized Socket send(ByteBuffer body) {
-        return send(Message.of(body));
+    public Socket send(ByteBuffer body) {
+        operationLock.lock();
+        try {
+            return send(Message.of(body));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends UTF-8 text as a single-part message. */
-    public synchronized Socket send(String text) {
-        return send(text, StandardCharsets.UTF_8);
+    public Socket send(String text) {
+        operationLock.lock();
+        try {
+            return send(text, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends text encoded with the supplied charset as a single-part message. */
-    public synchronized Socket send(String text, Charset charset) {
-        Objects.requireNonNull(text, "text");
-        Objects.requireNonNull(charset, "charset");
-        return send(text.getBytes(charset));
+    public Socket send(String text, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(text, "text");
+            Objects.requireNonNull(charset, "charset");
+            return send(text.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends a single-part or multipart message. */
-    public synchronized Socket send(Message message) {
-        Objects.requireNonNull(message, "message");
-        byte[][] parts = message.toNative();
-        synchronized (state) {
-            long handle = state.handle();
-            drainSendRingOrThrow(FOREVER);
-            Native.socketSendMultipart(handle, parts, message.routingId().orElse(0));
+    public Socket send(Message message) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(message, "message");
+            byte[][] parts = message.toNative();
+            synchronized (state) {
+                long handle = state.handle();
+                drainSendRingOrThrow(FOREVER);
+                Native.socketSendMultipart(handle, parts, message.routingId().orElse(0));
+            }
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        return this;
     }
 
     /** Sends a single-part binary message before the timeout, or returns false. */
-    public synchronized boolean send(byte[] body, Duration timeout) {
-        Objects.requireNonNull(body, "body");
-        return send(Message.of(body), timeout);
+    public boolean send(byte[] body, Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(body, "body");
+            return send(Message.of(body), timeout);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends the remaining bytes of {@code body} before the timeout without changing its position. */
-    public synchronized boolean send(ByteBuffer body, Duration timeout) {
-        return send(Message.of(body), timeout);
+    public boolean send(ByteBuffer body, Duration timeout) {
+        operationLock.lock();
+        try {
+            return send(Message.of(body), timeout);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends UTF-8 text before the timeout, or returns false. */
-    public synchronized boolean send(String text, Duration timeout) {
-        return send(text, StandardCharsets.UTF_8, timeout);
+    public boolean send(String text, Duration timeout) {
+        operationLock.lock();
+        try {
+            return send(text, StandardCharsets.UTF_8, timeout);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends text encoded with the supplied charset before the timeout, or returns false. */
-    public synchronized boolean send(String text, Charset charset, Duration timeout) {
-        Objects.requireNonNull(text, "text");
-        Objects.requireNonNull(charset, "charset");
-        return send(text.getBytes(charset), timeout);
+    public boolean send(String text, Charset charset, Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(text, "text");
+            Objects.requireNonNull(charset, "charset");
+            return send(text.getBytes(charset), timeout);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends a message before the timeout, or returns false. */
-    public synchronized boolean send(Message message, Duration timeout) {
-        Objects.requireNonNull(message, "message");
-        Objects.requireNonNull(timeout, "timeout");
-        byte[][] parts = message.toNative();
-        long timeoutMillis = millis(timeout);
-        synchronized (state) {
-            long handle = state.handle();
-            if (!drainSendRing(timeoutMillis)) {
-                return false;
+    public boolean send(Message message, Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(message, "message");
+            Objects.requireNonNull(timeout, "timeout");
+            byte[][] parts = message.toNative();
+            long timeoutMillis = millis(timeout);
+            synchronized (state) {
+                long handle = state.handle();
+                if (!drainSendRing(timeoutMillis)) {
+                    return false;
+                }
+                return Native.socketSendMultipartTimeout(
+                        handle, parts, message.routingId().orElse(0), timeoutMillis) != 0;
             }
-            return Native.socketSendMultipartTimeout(
-                    handle, parts, message.routingId().orElse(0), timeoutMillis) != 0;
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Attempts to send a single-part binary message without blocking. */
-    public synchronized boolean trySend(byte[] body) {
-        Objects.requireNonNull(body, "body");
-        return trySend(Message.of(body));
+    public boolean trySend(byte[] body) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(body, "body");
+            return trySend(Message.of(body));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Attempts to send remaining buffer bytes without blocking or changing its position. */
-    public synchronized boolean trySend(ByteBuffer body) {
-        return trySend(Message.of(body));
+    public boolean trySend(ByteBuffer body) {
+        operationLock.lock();
+        try {
+            return trySend(Message.of(body));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Attempts to send UTF-8 text without blocking. */
-    public synchronized boolean trySend(String text) {
-        return trySend(text, StandardCharsets.UTF_8);
+    public boolean trySend(String text) {
+        operationLock.lock();
+        try {
+            return trySend(text, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Attempts to send text encoded with the supplied charset without blocking. */
-    public synchronized boolean trySend(String text, Charset charset) {
-        Objects.requireNonNull(text, "text");
-        Objects.requireNonNull(charset, "charset");
-        return trySend(text.getBytes(charset));
+    public boolean trySend(String text, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(text, "text");
+            Objects.requireNonNull(charset, "charset");
+            return trySend(text.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Attempts to send a message without blocking. */
-    public synchronized boolean trySend(Message message) {
-        Objects.requireNonNull(message, "message");
-        byte[][] parts = message.toNative();
-        synchronized (state) {
-            long handle = state.handle();
-            if (usesSendRing() && !state.sendRing.isDrained()) {
-                return false;
+    public boolean trySend(Message message) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(message, "message");
+            byte[][] parts = message.toNative();
+            synchronized (state) {
+                long handle = state.handle();
+                if (usesSendRing() && !state.sendRing.isDrained()) {
+                    return false;
+                }
+                return Native.socketTrySendMultipart(handle, parts, message.routingId().orElse(0)) != 0;
             }
-            return Native.socketTrySendMultipart(handle, parts, message.routingId().orElse(0)) != 0;
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Sends a single-part binary message asynchronously on the native runtime. */
-    public synchronized CompletableFuture<Void> sendAsync(byte[] body) {
-        Objects.requireNonNull(body, "body");
-        return sendAsync(Message.of(body));
+    public CompletableFuture<Void> sendAsync(byte[] body) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(body, "body");
+            return sendAsync(Message.of(body));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends the remaining buffer bytes asynchronously without changing its position. */
-    public synchronized CompletableFuture<Void> sendAsync(ByteBuffer body) {
-        return sendAsync(Message.of(body));
+    public CompletableFuture<Void> sendAsync(ByteBuffer body) {
+        operationLock.lock();
+        try {
+            return sendAsync(Message.of(body));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends UTF-8 text asynchronously on the native runtime. */
-    public synchronized CompletableFuture<Void> sendAsync(String text) {
-        return sendAsync(text, StandardCharsets.UTF_8);
+    public CompletableFuture<Void> sendAsync(String text) {
+        operationLock.lock();
+        try {
+            return sendAsync(text, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends text asynchronously on the native runtime with the supplied charset. */
-    public synchronized CompletableFuture<Void> sendAsync(String text, Charset charset) {
-        Objects.requireNonNull(text, "text");
-        Objects.requireNonNull(charset, "charset");
-        return sendAsync(text.getBytes(charset));
+    public CompletableFuture<Void> sendAsync(String text, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(text, "text");
+            Objects.requireNonNull(charset, "charset");
+            return sendAsync(text.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sends a message asynchronously on the native runtime; canceling aborts the native send. */
-    public synchronized CompletableFuture<Void> sendAsync(Message message) {
-        Objects.requireNonNull(message, "message");
-        NativeFuture<Void> future = new NativeFuture<>();
-        byte[][] parts = message.toNative();
+    public CompletableFuture<Void> sendAsync(Message message) {
+        operationLock.lock();
         try {
-            long task;
-            synchronized (state) {
-                long handle = state.handle();
-                drainSendRingOrThrow(FOREVER);
-                task = Native.socketSendAsync(handle, parts, message.routingId().orElse(0), future);
+            Objects.requireNonNull(message, "message");
+            NativeFuture<Void> future = new NativeFuture<>();
+            byte[][] parts = message.toNative();
+            try {
+                long task;
+                synchronized (state) {
+                    long handle = state.handle();
+                    drainSendRingOrThrow(FOREVER);
+                    task = Native.socketSendAsync(handle, parts, message.routingId().orElse(0), future);
+                }
+                future.setNativeTask(task);
+            } catch (OMQException error) {
+                future.completeExceptionally(error);
             }
-            future.setNativeTask(task);
-        } catch (OMQException error) {
-            future.completeExceptionally(error);
+            return future;
+        } finally {
+            operationLock.unlock();
         }
-        return future;
     }
 
     /** Receives one message, blocking forever. */
-    public synchronized Message receive() {
-        if (Thread.currentThread().isVirtual()) {
-            return receiveVirtual(FOREVER);
+    public Message receive() {
+        operationLock.lock();
+        try {
+            if (Thread.currentThread().isVirtual()) {
+                return receiveVirtual(FOREVER);
+            }
+            return withRecvRing((ring, handle) -> ring.receive(handle, FOREVER));
+        } finally {
+            operationLock.unlock();
         }
-        return withRecvRing((ring, handle) -> ring.receive(handle, FOREVER));
     }
 
     /** Receives one single-part message body, blocking forever. */
-    public synchronized byte[] receiveBytes() {
-        if (Thread.currentThread().isVirtual()) {
-            return receiveVirtual(FOREVER).bytes();
+    public byte[] receiveBytes() {
+        operationLock.lock();
+        try {
+            if (Thread.currentThread().isVirtual()) {
+                return receiveVirtual(FOREVER).bytes();
+            }
+            return withRecvRing((ring, handle) -> ring.receiveBytes(handle, FOREVER));
+        } finally {
+            operationLock.unlock();
         }
-        return withRecvRing((ring, handle) -> ring.receiveBytes(handle, FOREVER));
     }
 
     /** Receives one single-part message body into {@code destination}, blocking forever. */
-    public synchronized int receiveInto(ByteBuffer destination) {
-        Objects.requireNonNull(destination, "destination");
-        if (Thread.currentThread().isVirtual()) {
-            return writeInto(receiveVirtual(FOREVER), destination);
+    public int receiveInto(ByteBuffer destination) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(destination, "destination");
+            if (Thread.currentThread().isVirtual()) {
+                return writeInto(receiveVirtual(FOREVER), destination);
+            }
+            return withRecvRing((ring, handle) -> ring.receiveInto(handle, destination, FOREVER));
+        } finally {
+            operationLock.unlock();
         }
-        return withRecvRing((ring, handle) -> ring.receiveInto(handle, destination, FOREVER));
     }
 
     /** Receives one message before the timeout, or returns empty. */
-    public synchronized Optional<Message> receive(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
+    public Optional<Message> receive(Duration timeout) {
+        operationLock.lock();
         try {
-            if (Thread.currentThread().isVirtual()) {
-                return Optional.of(receiveVirtual(timeoutMillis));
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            try {
+                if (Thread.currentThread().isVirtual()) {
+                    return Optional.of(receiveVirtual(timeoutMillis));
+                }
+                return Optional.of(receiveTimedDirect(timeoutMillis));
+            } catch (TimeoutException timeoutError) {
+                return Optional.empty();
             }
-            return Optional.of(receiveTimedDirect(timeoutMillis));
-        } catch (TimeoutException timeoutError) {
-            return Optional.empty();
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one single-part message body before the timeout, or returns empty. */
-    public synchronized Optional<byte[]> receiveBytes(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
+    public Optional<byte[]> receiveBytes(Duration timeout) {
+        operationLock.lock();
         try {
-            if (Thread.currentThread().isVirtual()) {
-                return Optional.of(receiveVirtual(timeoutMillis).bytes());
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            try {
+                if (Thread.currentThread().isVirtual()) {
+                    return Optional.of(receiveVirtual(timeoutMillis).bytes());
+                }
+                return Optional.of(receiveTimedDirect(timeoutMillis).bytes());
+            } catch (TimeoutException timeoutError) {
+                return Optional.empty();
             }
-            return Optional.of(receiveTimedDirect(timeoutMillis).bytes());
-        } catch (TimeoutException timeoutError) {
-            return Optional.empty();
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one single-part body into {@code destination} before the timeout. */
-    public synchronized OptionalInt receiveInto(ByteBuffer destination, Duration timeout) {
-        Objects.requireNonNull(destination, "destination");
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
+    public OptionalInt receiveInto(ByteBuffer destination, Duration timeout) {
+        operationLock.lock();
         try {
-            if (Thread.currentThread().isVirtual()) {
-                return OptionalInt.of(writeInto(receiveVirtual(timeoutMillis), destination));
+            Objects.requireNonNull(destination, "destination");
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            try {
+                if (Thread.currentThread().isVirtual()) {
+                    return OptionalInt.of(writeInto(receiveVirtual(timeoutMillis), destination));
+                }
+                return OptionalInt.of(writeInto(receiveTimedDirect(timeoutMillis), destination));
+            } catch (TimeoutException timeoutError) {
+                return OptionalInt.empty();
             }
-            return OptionalInt.of(writeInto(receiveTimedDirect(timeoutMillis), destination));
-        } catch (TimeoutException timeoutError) {
-            return OptionalInt.empty();
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one message if already available, or returns empty. */
-    public synchronized Optional<Message> tryReceive() {
+    public Optional<Message> tryReceive() {
+        operationLock.lock();
         try {
-            return Optional.of(receiveTimedDirect(0));
-        } catch (TimeoutException timeoutError) {
-            return Optional.empty();
+            try {
+                return Optional.of(receiveTimedDirect(0));
+            } catch (TimeoutException timeoutError) {
+                return Optional.empty();
+            }
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one single-part message body if already available, or returns empty. */
-    public synchronized Optional<byte[]> tryReceiveBytes() {
+    public Optional<byte[]> tryReceiveBytes() {
+        operationLock.lock();
         try {
-            return Optional.of(receiveTimedDirect(0).bytes());
-        } catch (TimeoutException timeoutError) {
-            return Optional.empty();
+            try {
+                return Optional.of(receiveTimedDirect(0).bytes());
+            } catch (TimeoutException timeoutError) {
+                return Optional.empty();
+            }
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one available single-part body into {@code destination} without blocking. */
-    public synchronized OptionalInt tryReceiveInto(ByteBuffer destination) {
-        Objects.requireNonNull(destination, "destination");
+    public OptionalInt tryReceiveInto(ByteBuffer destination) {
+        operationLock.lock();
         try {
-            return OptionalInt.of(writeInto(receiveTimedDirect(0), destination));
-        } catch (TimeoutException timeoutError) {
-            return OptionalInt.empty();
+            Objects.requireNonNull(destination, "destination");
+            try {
+                return OptionalInt.of(writeInto(receiveTimedDirect(0), destination));
+            } catch (TimeoutException timeoutError) {
+                return OptionalInt.empty();
+            }
+        } finally {
+            operationLock.unlock();
         }
     }
 
     /** Receives one message if already available, or returns empty. */
-    public synchronized Optional<Message> tryRecv() {
-        return tryReceive();
+    public Optional<Message> tryRecv() {
+        operationLock.lock();
+        try {
+            return tryReceive();
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Receives one single-part message body if already available, or returns empty. */
-    public synchronized Optional<byte[]> tryRecvBytes() {
-        return tryReceiveBytes();
+    public Optional<byte[]> tryRecvBytes() {
+        operationLock.lock();
+        try {
+            return tryReceiveBytes();
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Receives one available single-part body into {@code destination} without blocking. */
-    public synchronized OptionalInt tryRecvInto(ByteBuffer destination) {
-        return tryReceiveInto(destination);
+    public OptionalInt tryRecvInto(ByteBuffer destination) {
+        operationLock.lock();
+        try {
+            return tryReceiveInto(destination);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Receives one message asynchronously on the native runtime; canceling aborts the native receive. */
-    public synchronized CompletableFuture<Message> receiveAsync() {
-        NativeFuture<Message> future = new NativeFuture<>();
+    public CompletableFuture<Message> receiveAsync() {
+        operationLock.lock();
         try {
-            Optional<Message> cached = tryReceiveCachedMessage();
-            if (cached.isPresent()) {
-                future.complete(cached.orElseThrow());
-                return future;
+            NativeFuture<Message> future = new NativeFuture<>();
+            try {
+                Optional<Message> cached = tryReceiveCachedMessage();
+                if (cached.isPresent()) {
+                    future.complete(cached.orElseThrow());
+                    return future;
+                }
+                long task = withHandle(handle -> Native.socketRecvAsync(handle, FOREVER, future));
+                future.setNativeTask(task);
+            } catch (OMQException error) {
+                future.completeExceptionally(error);
             }
-            long task = withHandle(handle -> Native.socketRecvAsync(handle, FOREVER, future));
-            future.setNativeTask(task);
-        } catch (OMQException error) {
-            future.completeExceptionally(error);
+            return future;
+        } finally {
+            operationLock.unlock();
         }
-        return future;
     }
 
     /** Receives one message asynchronously before the timeout; canceling aborts the native receive. */
-    public synchronized CompletableFuture<Message> receiveAsync(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        NativeFuture<Message> future = new NativeFuture<>();
-        long timeoutMillis = millis(timeout);
+    public CompletableFuture<Message> receiveAsync(Duration timeout) {
+        operationLock.lock();
         try {
-            Optional<Message> cached = tryReceiveCachedMessage();
-            if (cached.isPresent()) {
-                future.complete(cached.orElseThrow());
-                return future;
+            Objects.requireNonNull(timeout, "timeout");
+            NativeFuture<Message> future = new NativeFuture<>();
+            long timeoutMillis = millis(timeout);
+            try {
+                Optional<Message> cached = tryReceiveCachedMessage();
+                if (cached.isPresent()) {
+                    future.complete(cached.orElseThrow());
+                    return future;
+                }
+                long task = withHandle(handle -> Native.socketRecvAsync(handle, timeoutMillis, future));
+                future.setNativeTask(task);
+            } catch (OMQException error) {
+                future.completeExceptionally(error);
             }
-            long task = withHandle(handle -> Native.socketRecvAsync(handle, timeoutMillis, future));
-            future.setNativeTask(task);
-        } catch (OMQException error) {
-            future.completeExceptionally(error);
+            return future;
+        } finally {
+            operationLock.unlock();
         }
-        return future;
     }
 
     /** Subscribes this socket to a binary prefix. */
-    public synchronized Socket subscribe(byte[] prefix) {
-        Objects.requireNonNull(prefix, "prefix");
-        withHandleVoid(handle -> Native.socketSubscribe(handle, prefix));
-        return this;
+    public Socket subscribe(byte[] prefix) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(prefix, "prefix");
+            withHandleVoid(handle -> Native.socketSubscribe(handle, prefix));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Subscribes this socket to a UTF-8 prefix. */
-    public synchronized Socket subscribe(String prefix) {
-        return subscribe(prefix, StandardCharsets.UTF_8);
+    public Socket subscribe(String prefix) {
+        operationLock.lock();
+        try {
+            return subscribe(prefix, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Subscribes this socket to a text prefix encoded with the supplied charset. */
-    public synchronized Socket subscribe(String prefix, Charset charset) {
-        Objects.requireNonNull(prefix, "prefix");
-        Objects.requireNonNull(charset, "charset");
-        return subscribe(prefix.getBytes(charset));
+    public Socket subscribe(String prefix, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(prefix, "prefix");
+            Objects.requireNonNull(charset, "charset");
+            return subscribe(prefix.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Unsubscribes this socket from a binary prefix. */
-    public synchronized Socket unsubscribe(byte[] prefix) {
-        Objects.requireNonNull(prefix, "prefix");
-        withHandleVoid(handle -> Native.socketUnsubscribe(handle, prefix));
-        return this;
+    public Socket unsubscribe(byte[] prefix) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(prefix, "prefix");
+            withHandleVoid(handle -> Native.socketUnsubscribe(handle, prefix));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Joins a RADIO/DISH group. */
-    public synchronized Socket join(byte[] group) {
-        Objects.requireNonNull(group, "group");
-        withHandleVoid(handle -> Native.socketJoin(handle, group));
-        return this;
+    public Socket join(byte[] group) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(group, "group");
+            withHandleVoid(handle -> Native.socketJoin(handle, group));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Joins a RADIO/DISH group encoded as UTF-8. */
-    public synchronized Socket join(String group) {
-        return join(group, StandardCharsets.UTF_8);
+    public Socket join(String group) {
+        operationLock.lock();
+        try {
+            return join(group, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Joins a RADIO/DISH group encoded with the supplied charset. */
-    public synchronized Socket join(String group, Charset charset) {
-        Objects.requireNonNull(group, "group");
-        Objects.requireNonNull(charset, "charset");
-        return join(group.getBytes(charset));
+    public Socket join(String group, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(group, "group");
+            Objects.requireNonNull(charset, "charset");
+            return join(group.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Leaves a RADIO/DISH group. */
-    public synchronized Socket leave(byte[] group) {
-        Objects.requireNonNull(group, "group");
-        withHandleVoid(handle -> Native.socketLeave(handle, group));
-        return this;
+    public Socket leave(byte[] group) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(group, "group");
+            withHandleVoid(handle -> Native.socketLeave(handle, group));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Leaves a RADIO/DISH group encoded as UTF-8. */
-    public synchronized Socket leave(String group) {
-        return leave(group, StandardCharsets.UTF_8);
+    public Socket leave(String group) {
+        operationLock.lock();
+        try {
+            return leave(group, StandardCharsets.UTF_8);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Leaves a RADIO/DISH group encoded with the supplied charset. */
-    public synchronized Socket leave(String group, Charset charset) {
-        Objects.requireNonNull(group, "group");
-        Objects.requireNonNull(charset, "charset");
-        return leave(group.getBytes(charset));
+    public Socket leave(String group, Charset charset) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(group, "group");
+            Objects.requireNonNull(charset, "charset");
+            return leave(group.getBytes(charset));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Waits until at least {@code minPeers} peers are connected. */
-    public synchronized int waitConnected(int minPeers, Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        return withHandle(handle -> Native.socketWaitConnected(handle, minPeers, timeoutMillis));
+    public int waitConnected(int minPeers, Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            return withHandle(handle -> Native.socketWaitConnected(handle, minPeers, timeoutMillis));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Waits until at least {@code minSubscriptions} subscriptions are visible. */
-    public synchronized long waitSubscribed(long minSubscriptions, Duration timeout) {
-        if (minSubscriptions < 0) {
-            throw new IllegalArgumentException("minSubscriptions must be non-negative");
+    public long waitSubscribed(long minSubscriptions, Duration timeout) {
+        operationLock.lock();
+        try {
+            if (minSubscriptions < 0) {
+                throw new IllegalArgumentException("minSubscriptions must be non-negative");
+            }
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            return withHandle(handle -> Native.socketWaitSubscribed(handle, minSubscriptions, timeoutMillis));
+        } finally {
+            operationLock.unlock();
         }
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        return withHandle(handle -> Native.socketWaitSubscribed(handle, minSubscriptions, timeoutMillis));
     }
 
     /** Sets linger duration for close. Must be set before first I/O. */
-    public synchronized Socket linger(Duration linger) {
-        Objects.requireNonNull(linger, "linger");
-        long lingerMillis = millis(linger);
-        withHandleVoid(handle -> Native.socketSetLinger(handle, lingerMillis));
-        return this;
+    public Socket linger(Duration linger) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(linger, "linger");
+            long lingerMillis = millis(linger);
+            withHandleVoid(handle -> Native.socketSetLinger(handle, lingerMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets infinite linger. Must be set before first I/O. */
-    public synchronized Socket lingerForever() {
-        withHandleVoid(handle -> Native.socketSetLinger(handle, NONE));
-        return this;
+    public Socket lingerForever() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetLinger(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets this socket identity. Must be set before first I/O. */
-    public synchronized Socket identity(byte[] identity) {
-        Objects.requireNonNull(identity, "identity");
-        requireMaxLength("identity", identity.length, ZMTP_MAX_SHORT_STRING_BYTES);
-        withHandleVoid(handle -> Native.socketSetIdentity(handle, identity));
-        return this;
+    public Socket identity(byte[] identity) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(identity, "identity");
+            requireMaxLength("identity", identity.length, ZMTP_MAX_SHORT_STRING_BYTES);
+            withHandleVoid(handle -> Native.socketSetIdentity(handle, identity));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets send high-water mark in messages. Must be set before first I/O. */
-    public synchronized Socket sendHighWaterMark(int hwm) {
-        if (hwm < 0) {
-            throw new IllegalArgumentException("HWM must be non-negative");
+    public Socket sendHighWaterMark(int hwm) {
+        operationLock.lock();
+        try {
+            if (hwm < 0) {
+                throw new IllegalArgumentException("HWM must be non-negative");
+            }
+            withHandleVoid(handle -> Native.socketSetSendHighWaterMark(handle, hwm));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetSendHighWaterMark(handle, hwm));
-        return this;
     }
 
     /** Sets receive high-water mark in messages. Must be set before first I/O. */
-    public synchronized Socket receiveHighWaterMark(int hwm) {
-        if (hwm < 0) {
-            throw new IllegalArgumentException("HWM must be non-negative");
+    public Socket receiveHighWaterMark(int hwm) {
+        operationLock.lock();
+        try {
+            if (hwm < 0) {
+                throw new IllegalArgumentException("HWM must be non-negative");
+            }
+            withHandleVoid(handle -> Native.socketSetReceiveHighWaterMark(handle, hwm));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetReceiveHighWaterMark(handle, hwm));
-        return this;
     }
 
     /** Sets heartbeat interval. Must be set before first I/O. */
-    public synchronized Socket heartbeatInterval(Duration interval) {
-        Objects.requireNonNull(interval, "interval");
-        long intervalMillis = millis(interval);
-        withHandleVoid(handle -> Native.socketSetHeartbeatInterval(handle, intervalMillis));
-        return this;
+    public Socket heartbeatInterval(Duration interval) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(interval, "interval");
+            long intervalMillis = millis(interval);
+            withHandleVoid(handle -> Native.socketSetHeartbeatInterval(handle, intervalMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disables heartbeats. Must be set before first I/O. */
-    public synchronized Socket heartbeatOff() {
-        withHandleVoid(handle -> Native.socketSetHeartbeatInterval(handle, NONE));
-        return this;
+    public Socket heartbeatOff() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetHeartbeatInterval(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets connection setup timeout from DNS through READY (default 10s). Must be set before first I/O. */
-    public synchronized Socket handshakeTimeout(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        withHandleVoid(handle -> Native.socketSetHandshakeTimeout(handle, timeoutMillis));
-        return this;
+    public Socket handshakeTimeout(Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            withHandleVoid(handle -> Native.socketSetHandshakeTimeout(handle, timeoutMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets maximum message size in bytes. Must be set before first I/O. */
-    public synchronized Socket maxMessageSize(long size) {
-        if (size < 0) {
-            throw new IllegalArgumentException("size must be non-negative");
+    public Socket maxMessageSize(long size) {
+        operationLock.lock();
+        try {
+            if (size < 0) {
+                throw new IllegalArgumentException("size must be non-negative");
+            }
+            withHandleVoid(handle -> Native.socketSetMaxMessageSize(handle, size));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetMaxMessageSize(handle, size));
-        return this;
     }
 
     /** Removes the maximum message size limit. Must be set before first I/O. */
-    public synchronized Socket noMaxMessageSize() {
-        withHandleVoid(handle -> Native.socketSetMaxMessageSize(handle, NONE));
-        return this;
+    public Socket noMaxMessageSize() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetMaxMessageSize(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Enables or disables compression dictionary auto-training before first I/O. */
-    public synchronized Socket compressionAutoTrain(boolean enabled) {
-        withHandleVoid(handle -> Native.socketSetCompressionAutoTrain(handle, enabled ? 1 : 0));
-        return this;
+    public Socket compressionAutoTrain(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionAutoTrain(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets compression threshold in bytes before first I/O. */
-    public synchronized Socket compressionThreshold(long threshold) {
-        if (threshold < 0) {
-            throw new IllegalArgumentException("threshold must be non-negative");
+    public Socket compressionThreshold(long threshold) {
+        operationLock.lock();
+        try {
+            if (threshold < 0) {
+                throw new IllegalArgumentException("threshold must be non-negative");
+            }
+            withHandleVoid(handle -> Native.socketSetCompressionThreshold(handle, threshold));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetCompressionThreshold(handle, threshold));
-        return this;
     }
 
     /** Restores default compression threshold before first I/O. */
-    public synchronized Socket compressionDefaultThreshold() {
-        withHandleVoid(handle -> Native.socketSetCompressionThreshold(handle, NONE));
-        return this;
+    public Socket compressionDefaultThreshold() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionThreshold(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets compression level before first I/O. */
-    public synchronized Socket compressionLevel(int level) {
-        if (level < ZSTD_LEVEL_MIN || level > ZSTD_LEVEL_MAX) {
-            throw new IllegalArgumentException(
-                    "zstd compression level must be " + ZSTD_LEVEL_MIN + "..=" + ZSTD_LEVEL_MAX);
+    public Socket compressionLevel(int level) {
+        operationLock.lock();
+        try {
+            if (level < ZSTD_LEVEL_MIN || level > ZSTD_LEVEL_MAX) {
+                throw new IllegalArgumentException(
+                        "zstd compression level must be " + ZSTD_LEVEL_MIN + "..=" + ZSTD_LEVEL_MAX);
+            }
+            withHandleVoid(handle -> Native.socketSetCompressionLevel(handle, level));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetCompressionLevel(handle, level));
-        return this;
     }
 
     /** Restores default compression level before first I/O. */
-    public synchronized Socket compressionDefaultLevel() {
-        withHandleVoid(handle -> Native.socketSetCompressionLevel(handle, Integer.MIN_VALUE));
-        return this;
+    public Socket compressionDefaultLevel() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionLevel(handle, Integer.MIN_VALUE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /**
@@ -585,8 +907,13 @@ public final class Socket implements AutoCloseable {
      * @throws IllegalArgumentException if either value exceeds 255 bytes or contains
      *     bytes outside ASCII VCHAR
      */
-    public synchronized Socket plainServer(String username, String password) {
-        return plainServer(List.of(new PlainCredential(username, password)));
+    public Socket plainServer(String username, String password) {
+        operationLock.lock();
+        try {
+            return plainServer(List.of(new PlainCredential(username, password)));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /**
@@ -600,328 +927,543 @@ public final class Socket implements AutoCloseable {
      * @throws IllegalArgumentException if a field exceeds 255 bytes or contains
      *     bytes outside ASCII VCHAR
      */
-    public synchronized Socket plainServer(List<PlainCredential> credentials) {
-        credentials = List.copyOf(Objects.requireNonNull(credentials, "credentials"));
-        String[] usernames = new String[credentials.size()];
-        String[] passwords = new String[credentials.size()];
-        for (int i = 0; i < credentials.size(); i++) {
-            PlainCredential credential = credentials.get(i);
-            requireZmtpShortString("username", credential.username());
-            requireZmtpShortString("password", credential.password());
-            usernames[i] = credential.username();
-            passwords[i] = credential.password();
+    public Socket plainServer(List<PlainCredential> credentials) {
+        operationLock.lock();
+        try {
+            credentials = List.copyOf(Objects.requireNonNull(credentials, "credentials"));
+            String[] usernames = new String[credentials.size()];
+            String[] passwords = new String[credentials.size()];
+            for (int i = 0; i < credentials.size(); i++) {
+                PlainCredential credential = credentials.get(i);
+                requireZmtpShortString("username", credential.username());
+                requireZmtpShortString("password", credential.password());
+                usernames[i] = credential.username();
+                passwords[i] = credential.password();
+            }
+            withHandleVoid(handle -> Native.socketSetPlainServer(handle, usernames, passwords));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetPlainServer(handle, usernames, passwords));
-        return this;
     }
 
     /** Configures this socket as a PLAIN server with an authenticator before first I/O. */
-    public synchronized Socket plainServer(Predicate<PeerInfo> authenticator) {
-        Objects.requireNonNull(authenticator, "authenticator");
-        withHandleVoid(handle -> Native.socketSetPlainServerCallback(handle, authenticator));
-        return this;
+    public Socket plainServer(Predicate<PeerInfo> authenticator) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(authenticator, "authenticator");
+            withHandleVoid(handle -> Native.socketSetPlainServerCallback(handle, authenticator));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Configures this socket as a PLAIN client before first I/O. */
-    public synchronized Socket plainClient(String username, String password) {
-        Objects.requireNonNull(username, "username");
-        Objects.requireNonNull(password, "password");
-        requireZmtpShortString("username", username);
-        requireZmtpShortString("password", password);
-        withHandleVoid(handle -> Native.socketSetPlainClient(handle, username, password));
-        return this;
+    public Socket plainClient(String username, String password) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(username, "username");
+            Objects.requireNonNull(password, "password");
+            requireZmtpShortString("username", username);
+            requireZmtpShortString("password", password);
+            withHandleVoid(handle -> Native.socketSetPlainClient(handle, username, password));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Configures this socket as a CURVE server before first I/O. */
-    public synchronized Socket curveServer(CurveKeypair keypair) {
-        Objects.requireNonNull(keypair, "keypair");
-        requireMatchingCurveKeypair(keypair);
-        withHandleVoid(handle -> Native.socketSetCurveServer(
-                handle, keypair.publicKey(), keypair.secretKey()));
-        return this;
+    public Socket curveServer(CurveKeypair keypair) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(keypair, "keypair");
+            requireMatchingCurveKeypair(keypair);
+            withHandleVoid(handle -> Native.socketSetCurveServer(
+                    handle, keypair.publicKey(), keypair.secretKey()));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Configures this socket as a CURVE server with an authenticator before first I/O. */
-    public synchronized Socket curveServer(
+    public Socket curveServer(
             CurveKeypair keypair, Predicate<PeerInfo> authenticator) {
-        Objects.requireNonNull(keypair, "keypair");
-        Objects.requireNonNull(authenticator, "authenticator");
-        requireMatchingCurveKeypair(keypair);
-        withHandleVoid(handle -> Native.socketSetCurveServerCallback(
-                handle, keypair.publicKey(), keypair.secretKey(), authenticator));
-        return this;
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(keypair, "keypair");
+            Objects.requireNonNull(authenticator, "authenticator");
+            requireMatchingCurveKeypair(keypair);
+            withHandleVoid(handle -> Native.socketSetCurveServerCallback(
+                    handle, keypair.publicKey(), keypair.secretKey(), authenticator));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Configures this socket as a CURVE client before first I/O. */
-    public synchronized Socket curveClient(CurveKeypair keypair, String serverPublicKey) {
-        Objects.requireNonNull(keypair, "keypair");
-        Objects.requireNonNull(serverPublicKey, "serverPublicKey");
-        requireMatchingCurveKeypair(keypair);
-        requireCurvePublicKey(serverPublicKey);
-        withHandleVoid(handle -> Native.socketSetCurveClient(
-                handle, keypair.publicKey(), keypair.secretKey(), serverPublicKey));
-        return this;
+    public Socket curveClient(CurveKeypair keypair, String serverPublicKey) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(keypair, "keypair");
+            Objects.requireNonNull(serverPublicKey, "serverPublicKey");
+            requireMatchingCurveKeypair(keypair);
+            requireCurvePublicKey(serverPublicKey);
+            withHandleVoid(handle -> Native.socketSetCurveClient(
+                    handle, keypair.publicKey(), keypair.secretKey(), serverPublicKey));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Opens a diagnostic native monitor for this socket. */
-    public synchronized Monitor monitor() {
-        return new Monitor(withHandle(Native::socketMonitor));
+    public Monitor monitor() {
+        operationLock.lock();
+        try {
+            return new Monitor(withHandle(Native::socketMonitor));
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Selects native socket-driver scheduling before first I/O. */
-    public synchronized Socket workloadProfile(WorkloadProfile profile) {
-        Objects.requireNonNull(profile, "profile");
-        withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, profile.code()));
-        return this;
+    public Socket workloadProfile(WorkloadProfile profile) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(profile, "profile");
+            withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, profile.code()));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores native socket-type default scheduling before first I/O. */
-    public synchronized Socket defaultWorkloadProfile() {
-        withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, -1));
-        return this;
+    public Socket defaultWorkloadProfile() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetWorkloadProfile(handle, -1));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disables reconnect attempts before first I/O. */
-    public synchronized Socket reconnectDisabled() {
-        withHandleVoid(handle -> Native.socketSetReconnect(handle, 0, 0, 0));
-        return this;
+    public Socket reconnectDisabled() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetReconnect(handle, 0, 0, 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Uses a fixed reconnect interval before first I/O. */
-    public synchronized Socket reconnectInterval(Duration interval) {
-        Objects.requireNonNull(interval, "interval");
-        long intervalMillis = millis(interval);
-        withHandleVoid(handle -> Native.socketSetReconnect(handle, 1, intervalMillis, 0));
-        return this;
+    public Socket reconnectInterval(Duration interval) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(interval, "interval");
+            long intervalMillis = millis(interval);
+            withHandleVoid(handle -> Native.socketSetReconnect(handle, 1, intervalMillis, 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Uses exponential reconnect backoff before first I/O. */
-    public synchronized Socket reconnectExponential(Duration min, Duration max) {
-        Objects.requireNonNull(min, "min");
-        Objects.requireNonNull(max, "max");
-        long minMillis = millis(min);
-        long maxMillis = millis(max);
-        if (maxMillis < minMillis) {
-            throw new IllegalArgumentException("max must be greater than or equal to min");
+    public Socket reconnectExponential(Duration min, Duration max) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(min, "min");
+            Objects.requireNonNull(max, "max");
+            long minMillis = millis(min);
+            long maxMillis = millis(max);
+            if (maxMillis < minMillis) {
+                throw new IllegalArgumentException("max must be greater than or equal to min");
+            }
+            withHandleVoid(handle -> Native.socketSetReconnect(handle, 2, minMillis, maxMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetReconnect(handle, 2, minMillis, maxMillis));
-        return this;
     }
 
     /** Stops reconnecting after ECONNREFUSED before first I/O. */
-    public synchronized Socket reconnectStopConnRefused(boolean enabled) {
-        withHandleVoid(handle -> Native.socketSetReconnectStopConnRefused(handle, enabled ? 1 : 0));
-        return this;
+    public Socket reconnectStopConnRefused(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetReconnectStopConnRefused(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets heartbeat TTL advertised to peers before first I/O. */
-    public synchronized Socket heartbeatTtl(Duration ttl) {
-        Objects.requireNonNull(ttl, "ttl");
-        long ttlMillis = millis(ttl);
-        if (ttlMillis > MAX_HEARTBEAT_TTL_MILLIS) {
-            throw new IllegalArgumentException("heartbeat TTL exceeds ZMTP maximum of 6553.5s");
+    public Socket heartbeatTtl(Duration ttl) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(ttl, "ttl");
+            long ttlMillis = millis(ttl);
+            if (ttlMillis > MAX_HEARTBEAT_TTL_MILLIS) {
+                throw new IllegalArgumentException("heartbeat TTL exceeds ZMTP maximum of 6553.5s");
+            }
+            withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, ttlMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, ttlMillis));
-        return this;
     }
 
     /** Omits heartbeat TTL before first I/O. */
-    public synchronized Socket noHeartbeatTtl() {
-        withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, NONE));
-        return this;
+    public Socket noHeartbeatTtl() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetHeartbeatTtl(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets receive-idle heartbeat timeout before first I/O. */
-    public synchronized Socket heartbeatTimeout(Duration timeout) {
-        Objects.requireNonNull(timeout, "timeout");
-        long timeoutMillis = millis(timeout);
-        withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, timeoutMillis));
-        return this;
+    public Socket heartbeatTimeout(Duration timeout) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(timeout, "timeout");
+            long timeoutMillis = millis(timeout);
+            withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, timeoutMillis));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores default heartbeat timeout before first I/O. */
-    public synchronized Socket defaultHeartbeatTimeout() {
-        withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, NONE));
-        return this;
+    public Socket defaultHeartbeatTimeout() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetHeartbeatTimeout(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets maximum simultaneous pending handshakes before first I/O. */
-    public synchronized Socket maxPendingHandshakes(int max) {
-        if (max <= 0) {
-            throw new IllegalArgumentException("max must be greater than zero");
+    public Socket maxPendingHandshakes(int max) {
+        operationLock.lock();
+        try {
+            if (max <= 0) {
+                throw new IllegalArgumentException("max must be greater than zero");
+            }
+            withHandleVoid(handle -> Native.socketSetMaxPendingHandshakes(handle, max));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetMaxPendingHandshakes(handle, max));
-        return this;
     }
 
     /** Enables or disables receive-side conflation before first I/O. */
-    public synchronized Socket conflate(boolean enabled) {
-        withHandleVoid(handle -> Native.socketSetConflate(handle, enabled ? 1 : 0));
-        return this;
+    public Socket conflate(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetConflate(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Enables ROUTER mandatory routing errors before first I/O. */
-    public synchronized Socket routerMandatory(boolean enabled) {
-        withHandleVoid(handle -> Native.socketSetRouterMandatory(handle, enabled ? 1 : 0));
-        return this;
+    public Socket routerMandatory(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetRouterMandatory(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets outbound-full behavior before first I/O. */
-    public synchronized Socket onMute(OnMute mode) {
-        Objects.requireNonNull(mode, "mode");
-        withHandleVoid(handle -> Native.socketSetOnMute(handle, mode.code()));
-        return this;
+    public Socket onMute(OnMute mode) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(mode, "mode");
+            withHandleVoid(handle -> Native.socketSetOnMute(handle, mode.code()));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Leaves TCP keepalive policy at the operating-system default before first I/O. */
-    public synchronized Socket tcpKeepaliveDefault() {
-        withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 0, 0, 0, 0));
-        return this;
+    public Socket tcpKeepaliveDefault() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 0, 0, 0, 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disables TCP keepalive before first I/O. */
-    public synchronized Socket tcpKeepaliveOff() {
-        withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 1, 0, 0, 0));
-        return this;
+    public Socket tcpKeepaliveOff() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetTcpKeepalive(handle, 1, 0, 0, 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Enables TCP keepalive before first I/O. */
-    public synchronized Socket tcpKeepalive(Duration idle, Duration interval, int count) {
-        Objects.requireNonNull(idle, "idle");
-        Objects.requireNonNull(interval, "interval");
-        if (count <= 0) {
-            throw new IllegalArgumentException("count must be greater than zero");
+    public Socket tcpKeepalive(Duration idle, Duration interval, int count) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(idle, "idle");
+            Objects.requireNonNull(interval, "interval");
+            if (count <= 0) {
+                throw new IllegalArgumentException("count must be greater than zero");
+            }
+            withHandleVoid(handle -> Native.socketSetTcpKeepalive(
+                    handle, 2, millis(idle), millis(interval), count));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        withHandleVoid(handle -> Native.socketSetTcpKeepalive(
-                handle, 2, millis(idle), millis(interval), count));
-        return this;
     }
 
     /** Sets OS send buffer size before first I/O. */
-    public synchronized Socket sendBufferSize(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, bytes));
-        return this;
+    public Socket sendBufferSize(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores OS default send buffer size before first I/O. */
-    public synchronized Socket defaultSendBufferSize() {
-        withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, NONE));
-        return this;
+    public Socket defaultSendBufferSize() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetSendBufferSize(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets OS receive buffer size before first I/O. */
-    public synchronized Socket receiveBufferSize(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, bytes));
-        return this;
+    public Socket receiveBufferSize(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores OS default receive buffer size before first I/O. */
-    public synchronized Socket defaultReceiveBufferSize() {
-        withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, NONE));
-        return this;
+    public Socket defaultReceiveBufferSize() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetReceiveBufferSize(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets a compression dictionary before first I/O. */
-    public synchronized Socket compressionDict(byte[] dict) {
-        Objects.requireNonNull(dict, "dict");
-        if (dict.length == 0) {
-            throw new IllegalArgumentException("compression dict must not be empty");
+    public Socket compressionDict(byte[] dict) {
+        operationLock.lock();
+        try {
+            Objects.requireNonNull(dict, "dict");
+            if (dict.length == 0) {
+                throw new IllegalArgumentException("compression dict must not be empty");
+            }
+            requireMaxLength("compression dict", dict.length, COMPRESSION_DICT_MAX_BYTES);
+            withHandleVoid(handle -> Native.socketSetCompressionDict(handle, dict));
+            return this;
+        } finally {
+            operationLock.unlock();
         }
-        requireMaxLength("compression dict", dict.length, COMPRESSION_DICT_MAX_BYTES);
-        withHandleVoid(handle -> Native.socketSetCompressionDict(handle, dict));
-        return this;
     }
 
     /** Disables the static compression dictionary before first I/O. */
-    public synchronized Socket noCompressionDict() {
-        withHandleVoid(handle -> Native.socketSetCompressionDict(handle, new byte[0]));
-        return this;
+    public Socket noCompressionDict() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionDict(handle, new byte[0]));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets compression auto-trained dictionary capacity before first I/O. */
-    public synchronized Socket compressionDictCapacity(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, bytes));
-        return this;
+    public Socket compressionDictCapacity(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores default compression auto-trained dictionary capacity before first I/O. */
-    public synchronized Socket defaultCompressionDictCapacity() {
-        withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, NONE));
-        return this;
+    public Socket defaultCompressionDictCapacity() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionDictCapacity(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets maximum accepted peer compression dictionary size before first I/O. */
-    public synchronized Socket maxReceiveDictSize(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, bytes));
-        return this;
+    public Socket maxReceiveDictSize(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores default maximum accepted peer compression dictionary size before first I/O. */
-    public synchronized Socket defaultMaxReceiveDictSize() {
-        withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, NONE));
-        return this;
+    public Socket defaultMaxReceiveDictSize() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetMaxReceiveDictSize(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets minimum size for compression offload before first I/O. */
-    public synchronized Socket compressionOffloadThreshold(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, bytes));
-        return this;
+    public Socket compressionOffloadThreshold(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disables compression offload before first I/O. */
-    public synchronized Socket noCompressionOffload() {
-        withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, NONE));
-        return this;
+    public Socket noCompressionOffload() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetCompressionOffloadThreshold(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets large-message receive threshold before first I/O. */
-    public synchronized Socket largeMessageThreshold(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, bytes));
-        return this;
+    public Socket largeMessageThreshold(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Disables the large-message receive fast path before first I/O. */
-    public synchronized Socket disableLargeMessagePath() {
-        withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, NONE));
-        return this;
+    public Socket disableLargeMessagePath() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetLargeMessageThreshold(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets encoder arena threshold before first I/O. */
-    public synchronized Socket arenaThreshold(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, bytes));
-        return this;
+    public Socket arenaThreshold(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores default encoder arena threshold before first I/O. */
-    public synchronized Socket defaultArenaThreshold() {
-        withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, NONE));
-        return this;
+    public Socket defaultArenaThreshold() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetArenaThreshold(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Sets per-peer transmit slot capacity before first I/O. */
-    public synchronized Socket transmitSlotCapacity(long bytes) {
-        requireNonNegative("bytes", bytes);
-        withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, bytes));
-        return this;
+    public Socket transmitSlotCapacity(long bytes) {
+        operationLock.lock();
+        try {
+            requireNonNegative("bytes", bytes);
+            withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, bytes));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Restores default per-peer transmit slot capacity before first I/O. */
-    public synchronized Socket defaultTransmitSlotCapacity() {
-        withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, NONE));
-        return this;
+    public Socket defaultTransmitSlotCapacity() {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetTransmitSlotCap(handle, NONE));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     /** Enables or disables XPUB no-drop behavior before first I/O. */
-    public synchronized Socket xpubNoDrop(boolean enabled) {
-        withHandleVoid(handle -> Native.socketSetXpubNoDrop(handle, enabled ? 1 : 0));
-        return this;
+    public Socket xpubNoDrop(boolean enabled) {
+        operationLock.lock();
+        try {
+            withHandleVoid(handle -> Native.socketSetXpubNoDrop(handle, enabled ? 1 : 0));
+            return this;
+        } finally {
+            operationLock.unlock();
+        }
     }
 
     private <T> T withHandle(LongFunction<T> action) {

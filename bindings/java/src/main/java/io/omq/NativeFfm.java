@@ -257,7 +257,7 @@ final class NativeFfm {
 
     @SuppressWarnings("restricted")
     private static MethodHandle downcall(String name, FunctionDescriptor descriptor) {
-        MemorySegment symbol = LOOKUP.findOrThrow(name);
+        MemorySegment symbol = LOOKUP.find(name).orElseThrow(() -> new UnsatisfiedLinkError("native symbol not found: " + name));
         return LINKER.downcallHandle(symbol, descriptor);
     }
 
@@ -288,7 +288,7 @@ final class NativeFfm {
         }
         return MemorySegment.ofAddress(address)
                 .reinterpret(MAX_ERROR_STRING)
-                .getString(0);
+                .getUtf8String(0);
     }
 
     private static long callLong(MethodHandle handle, long argument) {

@@ -5,7 +5,7 @@ use omq_proto::endpoint::Endpoint;
 use omq_proto::message::Message;
 use omq_proto::options::Options;
 use omq_proto::proto::SocketType;
-use omq_tokio::{MechanismPeerInfo, Socket};
+use omq_tokio::{DisconnectReason, MechanismPeerInfo, MonitorEvent, Socket, TrySendError};
 use std::time::Duration;
 
 fn accept_alice(peer: &MechanismPeerInfo) -> bool {
@@ -64,17 +64,36 @@ async fn ws_plain_rejected() {
         SocketType::Push,
         Options::default().plain_client("alice", "wrong"),
     );
+    let mut monitor = client.monitor();
     client.connect(ws_endpoint(port)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    client
-        .send(Message::from(Bytes::from_static(b"should not arrive")))
-        .await
-        .unwrap();
+    assert!(matches!(
+        client.try_send(Message::single("should not arrive")),
+        Ok(()) | Err(TrySendError::Full(_))
+    ));
+    let refusal = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let MonitorEvent::ConnectStopped {
+                reason: DisconnectReason::HandshakeRefused(refusal),
+                ..
+            } = monitor.recv().await.unwrap()
+            {
+                break refusal;
+            }
+        }
+    })
+    .await
+    .expect("rejected credentials must stop WebSocket reconnect");
+    assert_eq!(
+        refusal.mechanism,
+        omq_proto::proto::greeting::MechanismName::PLAIN
+    );
+    assert_eq!(refusal.status_code(), Some(400));
 
     let result = tokio::time::timeout(Duration::from_millis(500), server.recv()).await;
     assert!(
         result.is_err(),
         "expected timeout, message should not arrive"
     );
+    client.close().await.unwrap();
+    server.close().await.unwrap();
 }

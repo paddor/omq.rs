@@ -281,14 +281,15 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "fanring"
-version = "0.3.8"
-source = "git+https://github.com/paddor/fanring.rs?rev=c1fd6be625778e9e3eb440f18ac6638d78dcd2ca#c1fd6be625778e9e3eb440f18ac6638d78dcd2ca"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a0a001924e64ade2c902a95dae33873344f5406798209408f19ae2504b6671a"
 dependencies = [
  "arc-swap",
  "atomic-waker",
  "concurrent-queue",
  "loom",
- "yring 0.3.19 (git+https://github.com/paddor/fanring.rs?rev=c1fd6be625778e9e3eb440f18ac6638d78dcd2ca)",
+ "yring",
 ]
 
 [[package]]
@@ -654,7 +655,7 @@ dependencies = [
  "rustc-hash",
  "tokio",
  "windows",
- "yring 0.3.19 (registry+https://github.com/rust-lang/crates.io-index)",
+ "yring",
 ]
 
 [[package]]
@@ -708,7 +709,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "yring 0.3.19 (registry+https://github.com/rust-lang/crates.io-index)",
+ "yring",
 ]
 
 [[package]]
@@ -1508,17 +1509,9 @@ dependencies = [
 
 [[package]]
 name = "yring"
-version = "0.3.19"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89585ecb2e317defa390e25588bdad7579a724101fd1e282202920f2675aff5c"
-dependencies = [
- "loom",
-]
-
-[[package]]
-name = "yring"
-version = "0.3.19"
-source = "git+https://github.com/paddor/fanring.rs?rev=c1fd6be625778e9e3eb440f18ac6638d78dcd2ca#c1fd6be625778e9e3eb440f18ac6638d78dcd2ca"
+checksum = "4591d9911df5ce299e6a33e65efe20d35d81c7c40f5be2d20092256187973763"
 dependencies = [
  "loom",
 ]

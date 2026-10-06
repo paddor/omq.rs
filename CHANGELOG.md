@@ -24,6 +24,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Use published `fanring` 0.3.9 and `yring` 0.3.20 across native and binding
+  builds, including receiver lane control without Git dependencies.
+
 - Socket-owned protocol inboxes and inproc relays use one Coordinated
   fanring producer per lane. Bounded lifecycle slots keep activation and
   shutdown reachable; inproc commands remain separate from relay messages.

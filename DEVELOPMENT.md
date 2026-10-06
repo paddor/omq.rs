@@ -53,7 +53,7 @@ cargo test --config 'patch.crates-io.yring.path="../fanring/yring"' \
   --config 'patch.crates-io.fanring.path="../fanring"' -p omq-tokio
 ```
 
-OMQ requires `fanring` 0.3.8 and `yring` 0.3.19 for
+OMQ requires `fanring` 0.3.9 and `yring` 0.3.20 for
 `Consumer::release_with_full()` and `AsyncProducer::poll_ready()`.
 Workspace and binding builds resolve these APIs from the registry. Put
 `--config` after the Cargo subcommand so clippy and nextest forward local

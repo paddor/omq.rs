@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Verified TLS QUIC transport in standard builds. Configure certificates,
+  trust anchors, server names, stream windows, and ready-peer limits before
+  bind/connect. Rust interoperability covers sync and asyncio sockets.
+
 ### Changed
 
 - Require published `yring` 0.3.20 and `fanring` 0.3.9 for batched release

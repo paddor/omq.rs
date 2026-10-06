@@ -24,6 +24,9 @@ use crate::constants;
 use crate::error::{map_err, not_implemented};
 use omq_tokio as backend;
 
+#[cfg(feature = "quic")]
+mod quic;
+
 const ZSTD_LEVEL_MIN: i32 = -8;
 const ZSTD_LEVEL_MAX: i32 = 4;
 
@@ -77,6 +80,8 @@ pub struct Overlay {
     pub compression_dict: Option<Bytes>,
     pub compression_auto_train: bool,
     pub reconnect_stop: i32,
+    #[cfg(feature = "quic")]
+    pub quic: omq_proto::options::QuicOptions,
 }
 
 impl Default for Overlay {
@@ -119,6 +124,8 @@ impl Default for Overlay {
             compression_dict: None,
             compression_auto_train: false,
             reconnect_stop: 0,
+            #[cfg(feature = "quic")]
+            quic: Default::default(),
         }
     }
 }
@@ -155,6 +162,8 @@ impl Overlay {
             arena_threshold: Some(64 * 1024),
             transmit_slot_cap: None,
             reconnect_stop_conn_refused: (self.reconnect_stop & 1) != 0,
+            #[cfg(feature = "quic")]
+            quic: self.quic.clone(),
             ..Default::default()
         };
         #[cfg(feature = "plain")]
@@ -256,6 +265,8 @@ impl Overlay {
             compression_dict: o.compression_dict.clone(),
             compression_auto_train: o.compression_auto_train,
             reconnect_stop: i32::from(o.reconnect_stop_conn_refused),
+            #[cfg(feature = "quic")]
+            quic: o.quic.clone(),
         }
     }
 }
@@ -293,6 +304,10 @@ pub fn setsockopt(
     option: i32,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
+    #[cfg(feature = "quic")]
+    if quic::is_option(option) {
+        return quic::set(sock, option, value);
+    }
     let mut ov = sock.overlay.lock().unwrap();
     match option {
         constants::LINGER => {
@@ -535,6 +550,10 @@ pub fn getsockopt<'py>(
     py: Python<'py>,
     option: i32,
 ) -> PyResult<Bound<'py, PyAny>> {
+    #[cfg(feature = "quic")]
+    if quic::is_option(option) {
+        return quic::get(sock, py, option);
+    }
     drop(sock.overlay.lock().unwrap()); // ensure poison-detection on every call path
     match option {
         constants::TYPE => {

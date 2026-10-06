@@ -64,7 +64,7 @@ exclude = ["tests/soak/**", "tests/typing/narrowing.py"]
 
 [tool.maturin]
 # Stable ABI - one wheel covers all supported Python versions.
-features = ["pyo3/abi3-py312", "plain", "curve", "lz4", "zstd"]
+features = ["pyo3/abi3-py312", "plain", "curve", "lz4", "zstd", "quic"]
 # The native module lives at pyomq._native; pyomq itself is a pure
 # Python package re-exporting from it.
 module-name = "pyomq._native"

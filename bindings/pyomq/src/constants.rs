@@ -67,6 +67,13 @@ pub const OMQ_ON_MUTE: i32 = 1004;
 pub const OMQ_COMPRESSION_LEVEL: i32 = 1005;
 pub const OMQ_COMPRESSION_DICT: i32 = 1006;
 pub const OMQ_COMPRESSION_AUTO_TRAIN: i32 = 1007;
+pub const OMQ_QUIC_CERT_PEM: i32 = 1011;
+pub const OMQ_QUIC_KEY_PEM: i32 = 1012;
+pub const OMQ_QUIC_TRUST_PEM: i32 = 1013;
+pub const OMQ_QUIC_SERVER_NAME: i32 = 1014;
+pub const OMQ_QUIC_TRUST_SYSTEM: i32 = 1015;
+pub const OMQ_QUIC_STREAM_WINDOW: i32 = 1016;
+pub const OMQ_QUIC_MAX_READY_PEERS: i32 = 1018;
 
 // OnMute enum values:
 pub const OMQ_ON_MUTE_BLOCK: i32 = 0;
@@ -165,6 +172,13 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         OMQ_COMPRESSION_LEVEL,
         OMQ_COMPRESSION_DICT,
         OMQ_COMPRESSION_AUTO_TRAIN,
+        OMQ_QUIC_CERT_PEM,
+        OMQ_QUIC_KEY_PEM,
+        OMQ_QUIC_TRUST_PEM,
+        OMQ_QUIC_SERVER_NAME,
+        OMQ_QUIC_TRUST_SYSTEM,
+        OMQ_QUIC_STREAM_WINDOW,
+        OMQ_QUIC_MAX_READY_PEERS,
         OMQ_ON_MUTE_BLOCK,
         OMQ_ON_MUTE_DROP_NEWEST,
         OMQ_ON_MUTE_DROP_OLDEST,

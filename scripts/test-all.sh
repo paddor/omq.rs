@@ -375,6 +375,8 @@ fi
 if [[ "${OMQ_SKIP_PYOMQ:-}" == "1" ]]; then
     echo "skip: OMQ_SKIP_PYOMQ=1"
 elif [[ -d bindings/pyomq/.venv ]]; then
+    run omq_cargo_with_rust_tools build -p omq-tokio --features quic --example quic_interop_peer
+    export OMQ_QUIC_INTEROP_REQUIRED=1
     pushd bindings/pyomq >/dev/null
     # shellcheck disable=SC1091
     source .venv/bin/activate

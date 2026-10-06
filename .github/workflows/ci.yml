@@ -763,11 +763,15 @@ jobs:
       - name: build pyomq
         working-directory: bindings/pyomq
         run: pip install .
+      - name: build Rust QUIC interop peer
+        run: cargo build -p omq-tokio --features quic --example quic_interop_peer
       - name: cargo nextest
         working-directory: bindings/pyomq
         run: cargo nextest run --profile ci --config-file .config/nextest.toml
       - name: pytest
         working-directory: bindings/pyomq
+        env:
+          OMQ_QUIC_INTEROP_REQUIRED: "1"
         run: pytest -v -k "not test_perf" -W error
 
   java-lint:

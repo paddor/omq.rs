@@ -10,8 +10,9 @@ port. Drop-in pyzmq replacement on the common path.
   XPUB, XSUB, and STREAM.
 - Draft sockets: SERVER, CLIENT, RADIO, DISH, GATHER, SCATTER, PEER, and
   CHANNEL.
-- `tcp://`, `ipc://`, `inproc://`, and `udp://` transports (RADIO/DISH only).
-- Optional `plain`, `curve`, `lz4`, and `zstd` features in the published
+- `tcp://`, `ipc://`, `inproc://`, verified TLS `quic://`, and `udp://`
+  transports (`udp://` is RADIO/DISH only).
+- Optional `plain`, `curve`, `lz4`, `zstd`, and `quic` features in the published
   wheel.
 - Built on [`omq-tokio`](https://github.com/paddor/omq.rs/tree/main/omq-tokio);
   runtime work runs on a dedicated background thread and Python calls release
@@ -28,7 +29,7 @@ uv pip install pyomq
 uv pip install 'pyomq[test]'   # adds pytest, pyzmq for the interop suite
 ```
 
-The published wheel includes optional features: plain, curve, lz4, zstd.
+The standard build includes optional features: plain, curve, lz4, zstd, quic.
 Use `pyomq.has("curve")` at runtime to check availability.
 
 Published wheels currently target Linux. Other platforms can build from
@@ -62,6 +63,42 @@ sock.close()
 ```
 
 Zguide-style runnable examples live in [examples/zguide/](examples/zguide/).
+
+### QUIC
+
+`quic://` carries reliable ZMTP messages over TLS 1.3. Check availability
+with `pyomq.has("quic")`. Set QUIC options before the socket's first
+bind/connect; later changes raise `ZMQError`. Sync and asyncio sockets use
+the same options.
+
+```python
+from pathlib import Path
+
+server = ctx.socket(pyomq.REP)
+server.quic_cert_pem = Path("server.pem").read_bytes()
+server.quic_key_pem = Path("server.key").read_bytes()
+server.bind("quic://127.0.0.1:5555")
+
+client = ctx.socket(pyomq.REQ)
+client.quic_trust_system = 0
+client.quic_trust_pem = Path("ca.pem").read_bytes()
+client.quic_server_name = b"localhost"
+client.connect("quic://127.0.0.1:5555")
+```
+
+System certificate roots are enabled by default. `quic_server_name`
+overrides the verified name; it does not disable verification. The optional
+`quic_stream_window` is a byte window (16 KiB to 256 MiB), not a message
+size limit. `quic_max_ready_peers` defaults to 1024. The corresponding
+`OMQ_QUIC_*` constants also work with `setsockopt()`/`getsockopt()`.
+
+Build the Rust test peer before running the cross-process tests:
+
+```sh
+cargo build -p omq-tokio --features quic --example quic_interop_peer
+cd bindings/pyomq
+OMQ_QUIC_INTEROP_REQUIRED=1 pytest tests/test_quic_interop.py
+```
 
 ### Buffers, tracking, and types
 

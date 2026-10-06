@@ -70,6 +70,13 @@ from ._native import (
     OMQ_ON_MUTE_BLOCK,
     OMQ_ON_MUTE_DROP_NEWEST,
     OMQ_ON_MUTE_DROP_OLDEST,
+    OMQ_QUIC_CERT_PEM,
+    OMQ_QUIC_KEY_PEM,
+    OMQ_QUIC_MAX_READY_PEERS,
+    OMQ_QUIC_SERVER_NAME,
+    OMQ_QUIC_STREAM_WINDOW,
+    OMQ_QUIC_TRUST_PEM,
+    OMQ_QUIC_TRUST_SYSTEM,
     PAIR,
     PEER,
     PUB,
@@ -451,6 +458,14 @@ class _SocketOptionsBase[
     compression_level = _SocketOptionDescriptor[int](OMQ_COMPRESSION_LEVEL)
     compression_dict = _SocketOptionDescriptor[bytes](OMQ_COMPRESSION_DICT)
     compression_auto_train = _SocketOptionDescriptor[int](OMQ_COMPRESSION_AUTO_TRAIN)
+    quic_cert_pem = _SocketOptionDescriptor[bytes](OMQ_QUIC_CERT_PEM)
+    quic_key_pem = _SocketOptionDescriptor[bytes](OMQ_QUIC_KEY_PEM)
+    quic_trust_pem = _SocketOptionDescriptor[bytes](OMQ_QUIC_TRUST_PEM)
+    quic_server_name = _SocketOptionDescriptor[bytes](OMQ_QUIC_SERVER_NAME)
+    quic_trust_system = _SocketOptionDescriptor[int](OMQ_QUIC_TRUST_SYSTEM)
+    quic_stream_window = _SocketOptionDescriptor[int](OMQ_QUIC_STREAM_WINDOW)
+    quic_max_ready_peers = _SocketOptionDescriptor[int](OMQ_QUIC_MAX_READY_PEERS)
+
     sndbuf = _SocketOptionDescriptor[int](SNDBUF)
     rcvbuf = _SocketOptionDescriptor[int](RCVBUF)
     mechanism = _SocketOptionDescriptor[int](MECHANISM)
@@ -1750,6 +1765,13 @@ __all__ = [  # noqa: RUF022
     "CURVE_PUBLICKEY",
     "CURVE_SECRETKEY",
     "CURVE_SERVERKEY",
+    "OMQ_QUIC_CERT_PEM",
+    "OMQ_QUIC_KEY_PEM",
+    "OMQ_QUIC_TRUST_PEM",
+    "OMQ_QUIC_SERVER_NAME",
+    "OMQ_QUIC_TRUST_SYSTEM",
+    "OMQ_QUIC_STREAM_WINDOW",
+    "OMQ_QUIC_MAX_READY_PEERS",
     "OMQ_ON_MUTE",
     "OMQ_COMPRESSION_LEVEL",
     "OMQ_COMPRESSION_DICT",

@@ -1,6 +1,7 @@
 """Send backpressure: async send waits (not spins) when HWM full."""
 
 import asyncio
+import time
 
 import pyomq
 import pyomq.asyncio as zmq_async
@@ -84,4 +85,67 @@ def test_sync_sndtimeo_raises_again(tcp_endpoint):
                 push.send(b"x")
     finally:
         push.close()
+        ctx.term()
+
+
+@pytest.mark.parametrize("mandatory", [False, True])
+def test_router_full_destination_policy(inproc_endpoint, mandatory):
+    ctx = pyomq.Context()
+    router = ctx.socket(pyomq.ROUTER)
+    slow = ctx.socket(pyomq.DEALER)
+    fast = ctx.socket(pyomq.DEALER)
+    try:
+        router.sndhwm = 1
+        router.sndtimeo = 2000
+        router.rcvtimeo = 2000
+        router.router_mandatory = int(mandatory)
+        slow.identity = b"slow"
+        slow.rcvhwm = 1
+        slow.rcvtimeo = 2000
+        fast.identity = b"fast"
+        fast.rcvtimeo = 2000
+        router.bind(inproc_endpoint)
+        for peer in (slow, fast):
+            peer.connect(inproc_endpoint)
+            peer.send(b"ready")
+            assert router.recv_multipart() == [peer.identity, b"ready"]
+
+        message = [b"slow", b"header", b"body"]
+        accepted = 0
+        started = time.monotonic()
+        for _ in range(64):
+            try:
+                router.send_multipart(message, pyomq.DONTWAIT)
+            except pyomq.Again:
+                assert mandatory
+                break
+            accepted += 1
+        assert time.monotonic() - started < 1, "DONTWAIT must ignore SNDTIMEO"
+        router.sndtimeo = 50
+        if mandatory:
+            assert 0 < accepted < 64
+            with pytest.raises(pyomq.Again):
+                router.send_multipart(message)
+        else:
+            assert accepted == 64
+            router.send_multipart(message)
+
+        router.send_multipart([b"fast", b"available"])
+        assert fast.recv() == b"available"
+        drained = 0
+        while True:
+            try:
+                assert slow.recv_multipart(pyomq.DONTWAIT) == [b"header", b"body"]
+                drained += 1
+            except pyomq.Again:
+                break
+        assert 0 < drained < 64
+        if mandatory:
+            assert drained == accepted
+        router.send_multipart([b"slow", b"after"])
+        assert slow.recv_multipart() == [b"after"]
+    finally:
+        router.close()
+        slow.close()
+        fast.close()
         ctx.term()

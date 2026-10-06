@@ -12,6 +12,76 @@ use omq_tokio::options::ReconnectPolicy;
 use omq_tokio::{Endpoint, Message, MonitorEvent, Options, Socket, SocketType};
 
 #[tokio::test]
+async fn null_refusal_stops_only_its_endpoint() {
+    use omq_tokio::proto::greeting::{Greeting, MechanismName};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let refused_endpoint: Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let healthy = Socket::new(SocketType::Pull, Options::default());
+    let healthy_endpoint = healthy
+        .bind("tcp://127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let push = Socket::new(
+        SocketType::Push,
+        Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(10))),
+    );
+    push.connect(healthy_endpoint).await.unwrap();
+    push.wait_connected(1, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let mut monitor = push.monitor();
+    push.connect(refused_endpoint.clone()).await.unwrap();
+    let (mut peer, _) = listener.accept().await.unwrap();
+    peer.read_exact(&mut [0; 64]).await.unwrap();
+    let mut greeting = bytes::BytesMut::new();
+    Greeting::current(MechanismName::NULL, false).encode(&mut greeting);
+    peer.write_all(&greeting).await.unwrap();
+    peer.write_all(b"\x04\x0b\x05ERROR\x04auth").await.unwrap();
+    peer.shutdown().await.unwrap();
+    drop(peer);
+
+    let (endpoint, refusal) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let MonitorEvent::ConnectStopped {
+                endpoint,
+                reason: omq_tokio::DisconnectReason::HandshakeRefused(refusal),
+            } = monitor.recv().await.unwrap()
+            {
+                break (endpoint, refusal);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(endpoint, refused_endpoint);
+    assert_eq!(refusal.mechanism, MechanismName::NULL);
+    assert_eq!(refusal.reason, "auth");
+    assert_eq!(refusal.status_code(), None);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "fatal ERROR must stop automatic retries"
+    );
+    push.send(Message::single("healthy route")).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), healthy.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Message::single("healthy route")
+    );
+    push.close().await.unwrap();
+    healthy.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn connect_to_silent_peer_queues_until_pre_ready_pipe_full() {
     let listener = StdTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = listener.local_addr().unwrap().port();

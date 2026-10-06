@@ -217,7 +217,9 @@ def test_python_quic_rejects_invalid_server(
                 except pyomq.Again:
                     continue
                 if event["event"] == "handshake_failed":
-                    assert "certificate" in event["reason"].lower()
+                    reason = event.get("reason")
+                    assert isinstance(reason, str)
+                    assert "certificate" in reason.lower()
                     break
             else:
                 pytest.fail("no certificate rejection reported")

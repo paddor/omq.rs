@@ -7,6 +7,7 @@
 //! drops, including unpolled disposal. Standalone public drivers still publish
 //! their final `PeerEvent::Closed` through the caller's mailbox.
 
+use omq_proto::DisconnectReason;
 use tokio::sync::oneshot;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +22,7 @@ pub(crate) enum StreamDisconnect {
 pub(crate) struct PeerCompletion {
     pub(crate) peer_id: u64,
     pub(crate) admitted_events: u64,
-    pub(crate) error: Option<String>,
+    pub(crate) reason: DisconnectReason,
     pub(crate) stream_disconnect: StreamDisconnect,
 }
 
@@ -58,15 +59,15 @@ impl CompletionProgress {
         self.admitted_events = self.admitted_events.wrapping_add(1);
     }
 
-    /// Return the error for standalone drivers using the legacy mailbox.
-    pub(crate) fn complete(&mut self, error: Option<String>) -> Result<(), Option<String>> {
+    /// Return the close reason for standalone drivers using the legacy mailbox.
+    pub(crate) fn complete(&mut self, reason: DisconnectReason) -> Result<(), DisconnectReason> {
         let Some(sender) = self.sender.take() else {
-            return Err(error);
+            return Err(reason);
         };
         let _ = sender.send(PeerCompletion {
             peer_id: self.peer_id,
             admitted_events: self.admitted_events,
-            error,
+            reason,
             stream_disconnect: self.stream_disconnect,
         });
         Ok(())
@@ -78,7 +79,9 @@ impl Drop for CompletionProgress {
         // Covers task abortion, panic unwinding, and failed reactor migration.
         // The reservation exists before any of those can happen.
         if self.sender.is_some() {
-            let _ = self.complete(Some("connection driver stopped before completion".into()));
+            let _ = self.complete(DisconnectReason::Error(
+                "connection driver stopped before completion".into(),
+            ));
         }
     }
 }
@@ -97,8 +100,8 @@ mod tests {
         assert_eq!(result.peer_id, 7);
         assert_eq!(result.admitted_events, 2);
         assert_eq!(
-            result.error.as_deref(),
-            Some("connection driver stopped before completion")
+            result.reason,
+            DisconnectReason::Error("connection driver stopped before completion".into())
         );
     }
 }

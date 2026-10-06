@@ -76,9 +76,10 @@ pub(crate) fn map_omq_err(e: &omq_tokio::error::Error) -> c_int {
         Error::WouldBlock | Error::Timeout => libc::EAGAIN,
         Error::Closed => ETERM,
         Error::InvalidEndpoint(_) | Error::Config(_) => libc::EINVAL,
-        Error::UnsupportedScheme(_) | Error::HandshakeFailed(_) | Error::Protocol(_) => {
-            EPROTONOSUPPORT
-        }
+        Error::UnsupportedScheme(_)
+        | Error::HandshakeFailed(_)
+        | Error::HandshakeRefused(_)
+        | Error::Protocol(_) => EPROTONOSUPPORT,
         Error::Unroutable => libc::EHOSTUNREACH,
         Error::MessageTooLarge { .. } => EMSGSIZE,
         Error::Io(io_e) => map_io_err(io_e),

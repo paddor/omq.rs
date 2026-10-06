@@ -86,6 +86,8 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Added
 
+- `HandshakeRefusal` preserves fatal ZMTP ERROR details. `ConnectStopped`
+  monitor events report when a refusal stops automatic connection attempts.
 - `quic://host:port` raw OMQ over QUIC behind the `quic` feature (Quinn,
   rustls/ring). One connection per
   peer: stream 0 carries unchanged ZMTP, stream 4 carries carrier liveness.
@@ -106,6 +108,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- Stop automatic retries after fatal handshake ERROR responses while preserving
+  retries after temporary authentication and transport failures.
+- Default ROUTER sends drop complete messages to full destination queues.
+  Mandatory ROUTER sends retain backpressure and nonblocking errors.
+- pyomq sync sends honor `DONTWAIT`; empty nonblocking receives return `Again`.
 - QUIC unbind/rebind preserves accepted peers and the complete UDP endpoint
   group. A replacement listener can rotate its certificate within the same
   context without interrupting existing connections.

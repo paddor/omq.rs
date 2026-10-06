@@ -45,6 +45,55 @@ fn auth_ep(_name: &str) -> Endpoint {
     "tcp://127.0.0.1:0".parse().unwrap()
 }
 
+#[tokio::test]
+async fn curve_refusal_stops_automatic_reconnect() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let server_kp = CurveKeypair::generate();
+    let server_pub = server_kp.public;
+    let server = Socket::new(
+        SocketType::Router,
+        Options::default().curve_server_with_options(
+            server_kp,
+            CurveServerOptions::default().authenticator(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+        ),
+    );
+    let endpoint = server.bind(auth_ep("refusal-reconnect")).await.unwrap();
+    let client = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .curve_client(CurveKeypair::generate(), server_pub)
+            .reconnect(omq_tokio::ReconnectPolicy::Fixed(Duration::from_millis(10))),
+    );
+    let mut monitor = client.monitor();
+    client.connect(endpoint).await.unwrap();
+    let refusal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let omq_tokio::MonitorEvent::ConnectStopped {
+                reason: omq_tokio::DisconnectReason::HandshakeRefused(refusal),
+                ..
+            } = monitor.recv().await.unwrap()
+            {
+                break refusal;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        refusal.mechanism,
+        omq_tokio::proto::greeting::MechanismName::CURVE
+    );
+    assert_eq!(refusal.status_code(), Some(400));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1, "refused key retried");
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
 fn handshake_prefix(stream: &[u8]) -> Option<Vec<u8>> {
     let mut off = 64usize;
     for _ in 0..2 {

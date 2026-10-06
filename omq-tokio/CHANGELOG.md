@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop automatic reconnect after a peer's fatal handshake ERROR. Temporary
+  authentication failures and transport failures retain automatic retry.
+- Default ROUTER sends drop complete messages when the selected destination
+  queue is full. Mandatory ROUTER sends retain backpressure and nonblocking
+  `Full` results.
 - Preserve decoded WebSocket messages preceding peer CLOSE while receive
   admission waits for space. Local close still bounds receive and wire drains.
 - Compatibility polls can stage raw transport receives without admitting

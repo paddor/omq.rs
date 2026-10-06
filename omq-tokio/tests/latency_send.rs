@@ -60,7 +60,10 @@ async fn full_identity_retry_allocates_nothing_and_preserves_original() {
         for profile in [WorkloadProfile::Throughput, WorkloadProfile::Latency] {
             let context = Context::current();
             let server = context.socket(kind, options(b"server", profile));
-            let client = context.socket(kind, options(b"client", profile));
+            let client = context.socket(
+                kind,
+                options(b"client", profile).router_mandatory(kind == SocketType::Router),
+            );
             let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
             client.connect(endpoint).await.unwrap();
             client.wait_connected(1, DEADLINE).await.unwrap();

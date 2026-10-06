@@ -97,6 +97,15 @@ class ConnectDelayedEvent(TypedDict):
     attempt: int
 
 
+class ConnectStoppedEvent(TypedDict):
+    event: Literal["connect_stopped"]
+    endpoint: str
+    reason: Literal["handshake_refused"]
+    mechanism: str
+    refusal_reason: str
+    status_code: int | None
+
+
 class LaggedEvent(TypedDict):
     event: Literal["lagged"]
     count: int
@@ -112,6 +121,7 @@ type MonitorEvent = (
     | HandshakeEvent
     | HandshakeFailedEvent
     | ConnectDelayedEvent
+    | ConnectStoppedEvent
     | LaggedEvent
     | TerminalEvent
 )

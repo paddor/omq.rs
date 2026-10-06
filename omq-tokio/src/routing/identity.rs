@@ -108,6 +108,7 @@ pub(crate) struct Submitter {
     data_lanes: crate::engine::data_inbox::SenderLanes,
     inner: Arc<Mutex<IdentityInner>>,
     router_mandatory: bool,
+    drop_on_full: bool,
     peer: Option<Arc<peer::PeerRoutes>>,
     lanes: peer::SenderLanes,
 }
@@ -118,6 +119,7 @@ impl Submitter {
             data_lanes: self.data_lanes.clone_shared(),
             inner: self.inner.clone(),
             router_mandatory: self.router_mandatory,
+            drop_on_full: self.drop_on_full,
             peer: self.peer.clone(),
             lanes: self.lanes.clone_shared(),
         }
@@ -165,6 +167,12 @@ impl Submitter {
             .try_send_prepared(msg, SendPreparation::StripIdentity, &self.data_lanes)
         {
             Ok(()) => Ok(()),
+            Err(SendPipeError::Full(returned)) if self.drop_on_full => {
+                // Payload owners may reenter routing when dropped.
+                drop(g);
+                drop(returned);
+                Ok(())
+            }
             Err(SendPipeError::Full(returned)) => Err(TrySendError::Full(returned)),
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
@@ -471,6 +479,11 @@ impl Submitter {
         };
         match peer.target.try_send(msg, &self.data_lanes) {
             Ok(()) => Ok(Ok(())),
+            Err(SendPipeError::Full(returned)) if self.drop_on_full => {
+                drop(g);
+                drop(returned);
+                Ok(Ok(()))
+            }
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
                 if self.router_mandatory {
@@ -525,6 +538,7 @@ fn take_server_routing_id(msg: &mut Message) -> Result<u32> {
 pub(crate) struct IdentitySend {
     inner: Arc<Mutex<IdentityInner>>,
     router_mandatory: bool,
+    socket_type: SocketType,
     latency_profile: bool,
     rep_latency: bool,
     peer: Option<Arc<peer::PeerRoutes>>,
@@ -573,6 +587,7 @@ impl IdentitySend {
                 closed: false,
             })),
             router_mandatory: options.router_mandatory,
+            socket_type,
             latency_profile,
             rep_latency: socket_type == SocketType::Rep && latency_profile,
             peer: (socket_type == SocketType::Peer).then(|| Arc::new(peer::PeerRoutes::new())),
@@ -584,6 +599,7 @@ impl IdentitySend {
             data_lanes: crate::engine::data_inbox::SenderLanes::default(),
             inner: self.inner.clone(),
             router_mandatory: self.router_mandatory,
+            drop_on_full: self.socket_type == SocketType::Router && !self.router_mandatory,
             peer: self.peer.clone(),
             lanes: peer::SenderLanes::default(),
         }

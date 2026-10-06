@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `connect_stopped` monitor events expose fatal handshake refusal mechanism,
+  reason, and optional status code.
 - Verified TLS QUIC transport in standard builds. Configure certificates,
   trust anchors, server names, stream windows, and ready-peer limits before
   bind/connect. Rust interoperability covers sync and asyncio sockets.
@@ -25,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop retries after fatal authentication refusals. Default ROUTER sends drop
+  full-destination messages; mandatory sends retain blocking and `Again` behavior.
+- Map empty nonblocking receives to `Again` instead of an internal error.
+- Honor `DONTWAIT` on sync sends without waiting for `SNDTIMEO`.
 - Preserve `EADDRINUSE` for duplicate QUIC binds and `EBUSY` when changing
   QUIC options after bind/connect, with consistent messages on Windows.
 - Preserve one native send scope across internal blocking and proxy handle

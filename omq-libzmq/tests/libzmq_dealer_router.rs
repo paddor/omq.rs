@@ -25,6 +25,10 @@ const ZMQ_RCVTIMEO: i32 = 27;
 const ZMQ_SNDTIMEO: i32 = 28;
 const ZMQ_RCVMORE: i32 = 13;
 const ZMQ_ROUTING_ID: i32 = 5;
+const ZMQ_LINGER: i32 = 17;
+const ZMQ_SNDHWM: i32 = 23;
+const ZMQ_RCVHWM: i32 = 24;
+const ZMQ_ROUTER_MANDATORY: i32 = 33;
 const TIMEOUT_MS: i32 = 2000;
 
 fn set_timeo(sock: *mut c_void, opt: i32, ms: i32) {
@@ -46,6 +50,83 @@ fn recv_frame(sock: *mut c_void, buf: &mut [u8]) -> &[u8] {
     let rc = zmq_recv(sock, buf.as_mut_ptr().cast(), buf.len(), 0);
     assert!(rc >= 0, "recv failed (errno {})", omq_zmq::zmq_errno());
     &buf[..rc as usize]
+}
+
+#[test]
+fn router_full_destination_drop_and_mandatory_backpressure() {
+    for mandatory in [0, 1] {
+        let ctx = zmq_ctx_new();
+        let router = zmq_socket(ctx, ZMQ_ROUTER);
+        let dealer = zmq_socket(ctx, ZMQ_DEALER);
+        let addr = CString::new(format!("inproc://router-full-{mandatory}")).unwrap();
+        set_timeo(router, ZMQ_LINGER, 0);
+        set_timeo(dealer, ZMQ_LINGER, 0);
+        set_timeo(router, ZMQ_SNDHWM, 1);
+        set_timeo(dealer, ZMQ_RCVHWM, 1);
+        set_timeo(router, ZMQ_ROUTER_MANDATORY, mandatory);
+        set_timeo(router, ZMQ_RCVTIMEO, TIMEOUT_MS);
+        set_timeo(router, ZMQ_SNDTIMEO, 50);
+        set_timeo(dealer, ZMQ_RCVTIMEO, TIMEOUT_MS);
+        set_identity(dealer, b"slow");
+        assert_eq!(zmq_bind(router, addr.as_ptr()), 0);
+        assert_eq!(zmq_connect(dealer, addr.as_ptr()), 0);
+        assert_eq!(zmq_send(dealer, b"ready".as_ptr().cast(), 5, 0), 5);
+        let mut buf = [0u8; 64];
+        assert_eq!(recv_frame(router, &mut buf), b"slow");
+        assert_eq!(recv_frame(router, &mut buf), b"ready");
+
+        let send = |flags| {
+            assert_eq!(
+                zmq_send(router, b"slow".as_ptr().cast(), 4, ZMQ_SNDMORE | flags),
+                4
+            );
+            assert_eq!(
+                zmq_send(router, b"header".as_ptr().cast(), 6, ZMQ_SNDMORE | flags),
+                6
+            );
+            zmq_send(router, b"body".as_ptr().cast(), 4, flags)
+        };
+        let mut accepted = 0;
+        for _ in 0..64 {
+            if send(ZMQ_DONTWAIT) == -1 {
+                assert_eq!(mandatory, 1, "default ROUTER must silently drop on full");
+                assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+                break;
+            }
+            accepted += 1;
+        }
+        if mandatory == 1 {
+            assert!(accepted > 0 && accepted < 64);
+            assert_eq!(send(0), -1, "SNDTIMEO must bound mandatory send waits");
+            assert_eq!(omq_zmq::zmq_errno(), libc::EAGAIN);
+        } else {
+            assert_eq!(accepted, 64);
+            assert_eq!(send(0), 4, "blocking default ROUTER must also drop on full");
+        }
+        let mut received = 0;
+        loop {
+            let rc = zmq_recv(dealer, buf.as_mut_ptr().cast(), buf.len(), ZMQ_DONTWAIT);
+            if rc < 0 {
+                break;
+            }
+            assert_eq!(rc, 6);
+            assert_eq!(&buf[..6], b"header");
+            assert!(rcvmore(dealer));
+            assert_eq!(recv_frame(dealer, &mut buf), b"body");
+            assert!(!rcvmore(dealer));
+            received += 1;
+        }
+        assert!(received > 0 && received < 64);
+        if mandatory == 1 {
+            assert_eq!(received, accepted);
+        }
+        assert_eq!(send(0), 4, "send must work again after drainage");
+        assert_eq!(recv_frame(dealer, &mut buf), b"header");
+        assert_eq!(recv_frame(dealer, &mut buf), b"body");
+        zmq_close(dealer);
+        zmq_close(router);
+        zmq_ctx_term(ctx);
+    }
 }
 
 /// DEALER connects to ROUTER; ROUTER sees identity frame + payload.

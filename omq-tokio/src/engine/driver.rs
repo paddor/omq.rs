@@ -30,7 +30,7 @@ use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
 use omq_proto::proto::{Command, Connection, Event};
-use omq_proto::{MessageRateLimit, WorkloadProfile};
+use omq_proto::{DisconnectReason, MessageRateLimit, WorkloadProfile};
 
 use super::actor_output::{DataSender, PeerOutput};
 use super::compression_pool::CompressionPool;
@@ -999,8 +999,18 @@ where
         let peer_id = self.peer_id;
         let mut completion = std::mem::take(&mut self.completion);
         let result = self.run_inner_body(&mut completion).await;
-        let error = result.as_ref().err().map(close_error_reason);
-        if let Err(error) = completion.complete(error) {
+        let reason = result
+            .as_ref()
+            .err()
+            .map_or(DisconnectReason::PeerClosed, |error| {
+                if let Error::HandshakeRefused(refusal) = error {
+                    DisconnectReason::HandshakeRefused(refusal.clone())
+                } else {
+                    DisconnectReason::Error(close_error_reason(error))
+                }
+            });
+        if completion.complete(reason).is_err() {
+            let error = result.as_ref().err().map(close_error_reason);
             let _ = peer_out
                 .expect("standalone event output")
                 .send((peer_id, PeerEvent::Closed { error }))
@@ -1782,6 +1792,7 @@ fn publish_direct_idle(
 fn close_error_reason(err: &Error) -> String {
     match err {
         Error::HandshakeFailed(reason) => reason.clone(),
+        Error::HandshakeRefused(refusal) => refusal.to_string(),
         other => other.to_string(),
     }
 }
@@ -4345,7 +4356,7 @@ mod tests {
             let finished = finished.await.unwrap();
             assert_eq!(finished.peer_id, 1);
             assert_eq!(finished.admitted_events, 0);
-            assert!(finished.error.is_none());
+            assert_eq!(finished.reason, omq_proto::DisconnectReason::PeerClosed);
             assert_eq!(event_inbox.len(), 1);
             assert_eq!(event_inbox.recv().await.unwrap().0, 99);
         }
@@ -4380,8 +4391,8 @@ mod tests {
         assert_eq!(finished.peer_id, 7);
         assert_eq!(finished.admitted_events, 1);
         assert_eq!(
-            finished.error.as_deref(),
-            Some("connection driver stopped before completion")
+            finished.reason,
+            DisconnectReason::Error("connection driver stopped before completion".into())
         );
         assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
         assert!(task.await.unwrap_err().is_cancelled());
@@ -4532,7 +4543,7 @@ mod tests {
         if let Some(finished) = finished.take() {
             let result = finished.await.unwrap();
             assert_eq!(result.admitted_events, admitted);
-            assert!(result.error.is_none());
+            assert_eq!(result.reason, omq_proto::DisconnectReason::PeerClosed);
         } else {
             tokio::time::timeout(Duration::from_millis(500), server_task)
                 .await

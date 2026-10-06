@@ -11,6 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::endpoint::Endpoint;
+use crate::error::HandshakeRefusal;
 use crate::proto::PeerProperties;
 
 /// Opaque peer identifier returned by transport accept paths. Used in
@@ -88,6 +89,14 @@ pub enum MonitorEvent {
         retry_in: Duration,
         /// One-based retry attempt count.
         attempt: u32,
+    },
+    /// Automatic connection attempts stopped after a fatal handshake refusal.
+    /// A preceding `HandshakeFailed` event retains the human-readable reason.
+    ConnectStopped {
+        /// Endpoint whose automatic connection attempts stopped.
+        endpoint: Endpoint,
+        /// Structured terminal connection failure.
+        reason: DisconnectReason,
     },
     /// A peer connection was torn down.
     Disconnected {
@@ -179,6 +188,8 @@ pub enum DisconnectReason {
     LocalClose,
     /// Timeout, protocol violation, or I/O error.
     Error(String),
+    /// The peer sent a fatal ERROR during the security handshake.
+    HandshakeRefused(Arc<HandshakeRefusal>),
     /// A new connection claimed the same routing identity.
     Handover,
 }

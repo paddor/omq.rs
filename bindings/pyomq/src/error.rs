@@ -27,8 +27,10 @@ const EADDRINUSE: i32 = libc::EADDRINUSE;
 pub fn map_err(e: Error) -> PyErr {
     let (errno, msg) = match e {
         Error::Closed => (ETERM, "context terminated".to_string()),
+        Error::WouldBlock => (libc::EAGAIN, "operation would block".into()),
         Error::Timeout => (libc::EAGAIN, "operation timed out".into()),
         Error::HandshakeFailed(m) => (libc::EPROTO, m),
+        Error::HandshakeRefused(refusal) => (libc::EPROTO, refusal.to_string()),
         Error::Unroutable => (libc::EHOSTUNREACH, "host unreachable".into()),
         Error::Protocol(m) => (libc::EPROTO, m),
         Error::UnsupportedScheme(m) => (libc::EINVAL, m),

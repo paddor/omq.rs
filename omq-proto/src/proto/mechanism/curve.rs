@@ -409,7 +409,7 @@ impl CurveClient {
     }
 
     fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
-        if let Some(err) = try_error_command(&cmd, "CURVE") {
+        if let Some(err) = try_error_command(&cmd, super::MechanismName::CURVE) {
             return Err(err);
         }
         let Command::Unknown { name, body } = cmd else {
@@ -695,7 +695,7 @@ impl CurveServer {
     }
 
     fn on_command(&mut self, cmd: Command, out: &mut Vec<Command>) -> Result<MechanismStep> {
-        if let Some(err) = try_error_command(&cmd, "CURVE") {
+        if let Some(err) = try_error_command(&cmd, super::MechanismName::CURVE) {
             return Err(err);
         }
         let Command::Unknown { name, body } = cmd else {

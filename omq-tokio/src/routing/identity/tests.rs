@@ -5,9 +5,114 @@ use std::time::Duration;
 use super::*;
 use crate::engine::send_pipe;
 
+#[test]
+fn default_router_releases_full_messages_outside_routing_lock() {
+    struct Export {
+        bytes: [u8; 128],
+        routes: Arc<Mutex<IdentityInner>>,
+    }
+    impl AsRef<[u8]> for Export {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for Export {
+        fn drop(&mut self) {
+            assert!(
+                self.routes.try_lock().is_ok(),
+                "payload drop must allow reentrant routing"
+            );
+        }
+    }
+    let mut send = IdentitySend::new(SocketType::Router, &Options::default());
+    let (producer, _consumer) = send_pipe(1);
+    send.connection_added(7, peer_handle(producer), Bytes::from_static(b"id"), false);
+    let submitter = send.submitter();
+    submitter
+        .try_send_to_message(b"id", Message::single("full"))
+        .unwrap();
+    for tagged in [true, false] {
+        let message = Message::single(Bytes::from_owner(Export {
+            bytes: [0; 128],
+            routes: send.inner.clone(),
+        }));
+        if tagged {
+            submitter
+                .try_send(Message::with_prefix(Bytes::from_static(b"id"), message))
+                .unwrap();
+        } else {
+            submitter.try_send_to_message(b"id", message).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn default_router_drops_full_lane_and_can_send_to_another_peer() {
+    let mut send = IdentitySend::new(SocketType::Router, &Options::default());
+    let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
+    let (fast_inbox, mut fast_receiver) = crate::engine::data_inbox::channel(1);
+    let make_handle = |data_inbox| ActorPeerDriverHandle {
+        inbox: tokio::sync::mpsc::channel(1).0.into(),
+        data_inbox,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        transmit_slot: None,
+        direct_tcp_writer: None,
+        send_pipe: None,
+        inproc: None,
+    };
+    send.connection_added(
+        7,
+        make_handle(data_inbox),
+        Bytes::from_static(b"slow"),
+        false,
+    );
+    send.connection_added(
+        8,
+        make_handle(fast_inbox),
+        Bytes::from_static(b"fast"),
+        false,
+    );
+    let submitter = send.submitter();
+    submitter
+        .try_send(Message::multipart(["slow", "first"]))
+        .unwrap();
+    submitter
+        .try_send(Message::multipart(["slow", "drop"]))
+        .unwrap();
+    submitter
+        .try_send_to_message(b"slow", Message::single("drop direct"))
+        .unwrap();
+    assert!(matches!(
+        submitter
+            .send(Message::multipart(["slow", "drop async"]))
+            .now_or_never(),
+        Some(Ok(()))
+    ));
+    assert!(matches!(
+        submitter
+            .send_to(b"slow", Message::single("drop async direct"))
+            .now_or_never(),
+        Some(Ok(()))
+    ));
+    submitter
+        .try_send(Message::multipart(["fast", "available"]))
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("first")
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        fast_receiver.recv().await.unwrap(),
+        PeerDriverData::SendMessage(message) if message == Message::single("available")
+    ));
+}
+
 #[tokio::test]
 async fn fallback_clones_have_separate_lanes_and_binding_copies_share_fifo() {
-    let options = Options::default().workload_profile(omq_proto::WorkloadProfile::Latency);
+    let options = Options::default()
+        .workload_profile(omq_proto::WorkloadProfile::Latency)
+        .router_mandatory(true);
     let mut send = IdentitySend::new(SocketType::Router, &options);
     let (data_inbox, mut receiver) = crate::engine::data_inbox::channel(1);
     let handle = ActorPeerDriverHandle {

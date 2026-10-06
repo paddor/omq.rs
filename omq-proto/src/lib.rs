@@ -26,7 +26,7 @@ pub mod type_state;
 
 pub use endpoint::IpcPath;
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
-pub use error::{Error, Result, TrySendError};
+pub use error::{Error, HandshakeRefusal, Result, TrySendError};
 pub use message::{
     Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, generated_identity,
 };

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Structured fatal handshake refusals preserve the peer's security mechanism,
+  ERROR reason, and optional status code. `ConnectStopped` monitor events report
+  when such a refusal stops automatic connection attempts.
 - Payload and message retained-storage accounting, including multipart table
   capacity, and bounded copies for payloads with opaque allocation backing.
 - Shared payload owners can report their allocation bound. Supplied codec

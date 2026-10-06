@@ -308,7 +308,8 @@ func DefaultHeartbeatTimeout() SocketOption {
 	})
 }
 
-// HandshakeTimeout sets ZMTP handshake timeout.
+// HandshakeTimeout bounds connection setup from DNS through ZMTP READY.
+// The native default is 10 seconds.
 func HandshakeTimeout(value time.Duration) SocketOption {
 	return trackedDurationOption(value, setHandshakeTimeoutNative, func(options *SocketOptions, value time.Duration) {
 		options.HandshakeTimeout = OptionValue[time.Duration]{Value: value, Set: true}

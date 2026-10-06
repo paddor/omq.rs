@@ -17,6 +17,8 @@ use std::net::Ipv4Addr;
 
 mod blocking_inproc;
 mod latency_common;
+#[cfg(any(feature = "ws", feature = "quic"))]
+mod ws_bench_config;
 
 fn multi_pull_drain_batch(size: usize) -> usize {
     if let Some(batch) = std::env::var("OMQ_BENCH_DRAIN_BATCH")
@@ -51,8 +53,11 @@ fn parse_ep(s: &str) -> Endpoint {
 static COORD_SOCK: std::sync::OnceLock<blocking::Socket> = std::sync::OnceLock::new();
 
 fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
-    let Endpoint::Tcp { port, .. } = ep else {
-        return;
+    let port = match ep {
+        Endpoint::Tcp { port, .. } => *port,
+        #[cfg(feature = "quic")]
+        Endpoint::Quic { port, .. } => *port,
+        _ => return,
     };
     let Ok(coord_ep) = std::env::var("OMQ_BENCH_COORD") else {
         return;
@@ -95,6 +100,8 @@ fn install_signals() {
 #[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(any(feature = "ws", feature = "quic"))]
+    ws_bench_config::set_endpoint(args.get(2).map(String::as_str));
     let ctx = omq_tokio::Context::with_config(omq_tokio::ContextConfig::from_env());
     let n = ctx.io_threads();
     eprintln!("runtime: blocking, {n} IO thread(s)");
@@ -217,6 +224,8 @@ fn main() {
 
 fn bench_options(msg_size: usize) -> Options {
     let mut o = Options::default().recv_spin(bench_recv_spin());
+    #[cfg(any(feature = "ws", feature = "quic"))]
+    ws_bench_config::configure(&mut o);
     if msg_size >= 2 * 1024 * 1024 {
         let buf = msg_size * 2;
         o = o.recv_buffer_size(buf).send_buffer_size(buf);

@@ -13,6 +13,14 @@ const MAX_PROC_LIFETIME: Duration = Duration::from_mins(1);
 
 static LIVE_PROCS: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
 static REAPER_INSTALLED: AtomicBool = AtomicBool::new(false);
+static PEER_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Sets environment variables passed to every spawned peer process.
+pub(crate) fn set_peer_env(env: Vec<(String, String)>) {
+    PEER_ENV
+        .set(env)
+        .expect("peer environment is set once per run");
+}
 
 /// Use Cargo's artifact paths, including configured target directories/triples.
 pub(crate) fn build_compression_peers(feature: &str) -> [PathBuf; 2] {
@@ -243,6 +251,9 @@ pub(crate) fn spawn(cmd: &[&str], env: &[(&str, &str)], cpu: Option<&str>) -> Pr
     command.args(&args[1..]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::inherit());
+    for (k, v) in PEER_ENV.get().into_iter().flatten() {
+        command.env(k, v);
+    }
     for &(k, v) in env {
         command.env(k, v);
     }

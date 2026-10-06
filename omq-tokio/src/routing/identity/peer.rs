@@ -487,6 +487,24 @@ mod tests {
     use super::*;
     use crate::engine::send_pipe;
 
+    #[test]
+    fn direct_identity_send_returns_body_unchanged_when_full() {
+        let routes = PeerRoutes::new();
+        let (producer, _receiver) = crate::engine::peer_send_pipe(1, None);
+        routes.insert(1, Bytes::from_static(b"id"), PeerTarget::Pipe(producer));
+        let lanes = SenderLanes::default();
+        let body = Message::single("body");
+        assert!(matches!(
+            routes.try_send_to(b"id", body.clone(), true, &lanes),
+            Ok(Ok(()))
+        ));
+        let result = routes.try_send_to(b"id", body.clone(), true, &lanes);
+        match result {
+            Ok(Err(SendRetry::Full(returned, _))) => assert_eq!(returned, body),
+            _ => panic!("expected full peer route"),
+        }
+    }
+
     #[tokio::test]
     async fn ring_progress_returns_when_another_sender_claims_shared_capacity() {
         use futures::FutureExt;

@@ -218,6 +218,7 @@ struct DialerEntry {
     cancel: CancellationToken,
     route_id: u64,
     send_pipe_rx: Option<crate::engine::SendPipeConsumer>,
+    failed_attempts: Arc<std::sync::atomic::AtomicU32>,
     _task: JoinHandle<()>,
 }
 

@@ -200,6 +200,8 @@ fn has_feature(name: &str) -> bool {
         "lz4" => true,
         #[cfg(feature = "zstd")]
         "zstd" => true,
+        #[cfg(feature = "quic")]
+        "quic" => true,
         _ => false,
     }
 }

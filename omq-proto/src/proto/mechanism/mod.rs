@@ -27,7 +27,7 @@ pub(crate) use plain::PlainMechanism;
 /// Security-mechanism configuration passed to [`crate::proto::Connection::new`] and
 /// stored in [`Options`](crate::options::Options). NULL is the default;
 /// CURVE is available behind the `curve` feature.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub enum MechanismSetup {
     /// NULL: no encryption, no peer authentication.
@@ -60,6 +60,47 @@ pub enum MechanismSetup {
     /// PLAIN client side: sends username + password to the server.
     #[cfg(feature = "plain")]
     PlainClient { username: String, password: String },
+}
+
+impl std::fmt::Debug for MechanismSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::NullServer { authenticator } => f
+                .debug_struct("NullServer")
+                .field("authenticator", authenticator)
+                .finish(),
+            #[cfg(feature = "curve")]
+            Self::CurveServer {
+                our_keypair,
+                options,
+            } => f
+                .debug_struct("CurveServer")
+                .field("our_keypair", our_keypair)
+                .field("options", options)
+                .finish(),
+            #[cfg(feature = "curve")]
+            Self::CurveClient {
+                our_keypair,
+                server_public,
+            } => f
+                .debug_struct("CurveClient")
+                .field("our_keypair", our_keypair)
+                .field("server_public", server_public)
+                .finish(),
+            #[cfg(feature = "plain")]
+            Self::PlainServer { authenticator } => f
+                .debug_struct("PlainServer")
+                .field("authenticator", authenticator)
+                .finish(),
+            #[cfg(feature = "plain")]
+            Self::PlainClient { username, .. } => f
+                .debug_struct("PlainClient")
+                .field("username", username)
+                .field("password", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl MechanismSetup {
@@ -216,7 +257,7 @@ fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
 
 /// Information passed to an [`Authenticator`] callback during a server-side
 /// security handshake.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MechanismPeerInfo {
     /// Which mechanism produced this peer info. Lets a single
     /// [`Authenticator`] decide based on the mechanism type if it
@@ -232,6 +273,19 @@ pub struct MechanismPeerInfo {
     pub username: Option<String>,
     /// PLAIN password. `None` for encrypting mechanisms.
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for MechanismPeerInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MechanismPeerInfo")
+            .field("mechanism", &self.mechanism)
+            .field("public_key", &self.public_key)
+            .field("identity", &self.identity)
+            .field("peer_address", &self.peer_address)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Result of a server-side authentication decision.
@@ -644,6 +698,22 @@ impl NullMechanism {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "plain")]
+    #[test]
+    fn peer_info_debug_redacts_plain_password() {
+        let info = super::MechanismPeerInfo {
+            mechanism: super::MechanismName::PLAIN,
+            public_key: [0; 32],
+            identity: None,
+            peer_address: Some("127.0.0.1".into()),
+            username: Some("alice".into()),
+            password: Some("password-sentinel".into()),
+        };
+        let debug = format!("{info:?}");
+        assert!(debug.contains("password: Some(\"<redacted>\")"));
+        assert!(!debug.contains("password-sentinel"));
+    }
+
     use super::*;
     use crate::proto::SocketType;
 

@@ -122,11 +122,17 @@ use crate::transport::{
     Transport as _, inproc as inproc_transport,
 };
 
-#[cfg(feature = "ws")]
+/// Per-attempt settings for carriers with TLS/HTTP setup.
+#[cfg(any(feature = "ws", feature = "quic"))]
 #[derive(Debug, Clone, Copy)]
-pub(super) struct WsConnectOptions<'a> {
-    pub(super) wss_tls: &'a omq_proto::options::WssTls,
-    pub(super) mechanism: &'a omq_proto::MechanismSetup,
+pub(super) struct CarrierConnect<'a> {
+    pub(super) options: &'a omq_proto::Options,
+    /// Absolute setup deadline of this attempt.
+    #[cfg_attr(not(feature = "quic"), expect(dead_code))]
+    pub(super) deadline: Option<std::time::Instant>,
+    /// Data IO runtimes; QUIC connects on the peer's assigned runtime.
+    #[cfg(feature = "quic")]
+    pub(super) io_pool: &'a crate::context::IoPoolHandle,
 }
 
 /// Re-register a stream with the current thread's I/O reactor. Each
@@ -148,6 +154,8 @@ pub(crate) enum AnyStream {
     Ipc(IpcStream),
     #[cfg(feature = "ws")]
     Ws(Box<crate::transport::ws::WsTransport>),
+    #[cfg(feature = "quic")]
+    Quic(Box<crate::transport::quic::QuicStream>),
 }
 
 impl Migratable for AnyStream {
@@ -168,6 +176,10 @@ impl Migratable for AnyStream {
             Self::Ipc(s) => Ok(Self::Ipc(s)),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Ok(Self::Ws(Box::new(s.migrate()?))),
+            // Quinn streams hold no reactor registration; the endpoint's
+            // UDP socket stays on the runtime that created it.
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Ok(Self::Quic(s)),
         }
     }
 }
@@ -197,6 +209,11 @@ impl AnyStream {
                 let (reader, writer) = tokio::io::split(Self::Ws(ws));
                 (AnyReadHalf::Other(reader), AnyWriteHalf::Other(writer))
             }
+            #[cfg(feature = "quic")]
+            Self::Quic(quic) => {
+                let (reader, writer) = quic.into_split();
+                (AnyReadHalf::Quic(reader), AnyWriteHalf::Quic(writer))
+            }
         }
     }
 
@@ -219,6 +236,8 @@ impl AnyStream {
             Self::Ipc(_) => Ok(()),
             #[cfg(feature = "ws")]
             Self::Ws(_) => Ok(()),
+            #[cfg(feature = "quic")]
+            Self::Quic(_) => Ok(()),
         }
     }
 }
@@ -226,6 +245,8 @@ impl AnyStream {
 pub(crate) enum AnyReadHalf {
     Tcp(OwnedReadHalf),
     Other(tokio::io::ReadHalf<AnyStream>),
+    #[cfg(feature = "quic")]
+    Quic(crate::transport::quic::QuicRecvHalf),
 }
 
 impl AsyncRead for AnyReadHalf {
@@ -237,6 +258,8 @@ impl AsyncRead for AnyReadHalf {
         match self.as_mut().get_mut() {
             Self::Tcp(reader) => Pin::new(reader).poll_read(cx, buf),
             Self::Other(reader) => Pin::new(reader).poll_read(cx, buf),
+            #[cfg(feature = "quic")]
+            Self::Quic(reader) => Pin::new(reader).poll_read(cx, buf),
         }
     }
 }
@@ -247,6 +270,8 @@ pub(crate) enum AnyWriteHalf {
         fast_write: bool,
     },
     Other(tokio::io::WriteHalf<AnyStream>),
+    #[cfg(feature = "quic")]
+    Quic(crate::transport::quic::QuicSendHalf),
 }
 
 impl AsyncWrite for AnyWriteHalf {
@@ -267,6 +292,8 @@ impl AsyncWrite for AnyWriteHalf {
                 Pin::new(writer).poll_write(cx, buf)
             }
             Self::Other(writer) => Pin::new(writer).poll_write(cx, buf),
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => Pin::new(writer).poll_write(cx, buf),
         }
     }
 
@@ -287,6 +314,8 @@ impl AsyncWrite for AnyWriteHalf {
                 Pin::new(writer).poll_write_vectored(cx, bufs)
             }
             Self::Other(writer) => Pin::new(writer).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => Pin::new(writer).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -294,6 +323,8 @@ impl AsyncWrite for AnyWriteHalf {
         match self {
             Self::Tcp { writer, .. } => writer.is_write_vectored(),
             Self::Other(writer) => writer.is_write_vectored(),
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => writer.is_write_vectored(),
         }
     }
 
@@ -301,6 +332,8 @@ impl AsyncWrite for AnyWriteHalf {
         match self.as_mut().get_mut() {
             Self::Tcp { writer, .. } => Pin::new(writer).poll_flush(cx),
             Self::Other(writer) => Pin::new(writer).poll_flush(cx),
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => Pin::new(writer).poll_flush(cx),
         }
     }
 
@@ -308,6 +341,8 @@ impl AsyncWrite for AnyWriteHalf {
         match self.as_mut().get_mut() {
             Self::Tcp { writer, .. } => Pin::new(writer).poll_shutdown(cx),
             Self::Other(writer) => Pin::new(writer).poll_shutdown(cx),
+            #[cfg(feature = "quic")]
+            Self::Quic(writer) => Pin::new(writer).poll_shutdown(cx),
         }
     }
 }
@@ -325,6 +360,8 @@ impl AsyncRead for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -342,6 +379,8 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -357,6 +396,8 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -368,6 +409,8 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => s.is_write_vectored(),
             #[cfg(feature = "ws")]
             Self::Ws(s) => s.is_write_vectored(),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => s.is_write_vectored(),
         }
     }
 
@@ -379,6 +422,8 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -390,6 +435,8 @@ impl AsyncWrite for AnyStream {
             Self::Ipc(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "ws")]
             Self::Ws(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "quic")]
+            Self::Quic(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -445,6 +492,8 @@ pub(super) enum AnyListener {
     Ipc(crate::transport::ipc::IpcListener),
     #[cfg(feature = "ws")]
     Ws(crate::transport::ws::WsListener),
+    #[cfg(feature = "quic")]
+    Quic(Box<crate::transport::quic::QuicListener>),
 }
 
 impl AnyListener {
@@ -455,6 +504,8 @@ impl AnyListener {
             Self::Ipc(l) => l.local_endpoint(),
             #[cfg(feature = "ws")]
             Self::Ws(l) => l.local_endpoint(),
+            #[cfg(feature = "quic")]
+            Self::Quic(l) => l.local_endpoint(),
         }
     }
 
@@ -487,6 +538,16 @@ impl AnyListener {
                     setup: Some(setup),
                 })
             }
+            #[cfg(feature = "quic")]
+            Self::Quic(l) => {
+                let (stream, addr, setup) = l.accept().await?;
+                Ok(AnyConn::ByteStream {
+                    stream: AnyStream::Quic(Box::new(stream)),
+                    peer_ident: PeerIdent::Socket(addr),
+                    leftover: bytes::Bytes::new(),
+                    setup: Some(setup),
+                })
+            }
         }
     }
 }
@@ -500,8 +561,9 @@ pub(super) async fn bind_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv: &inproc_transport::RecvConfig,
-    #[cfg(feature = "ws")] ws_options: &omq_proto::Options,
-    #[cfg(feature = "ws")] ws_setup: crate::transport::ws::AcceptSetup,
+    #[cfg(any(feature = "ws", feature = "quic"))] carrier_options: &omq_proto::Options,
+    #[cfg(any(feature = "ws", feature = "quic"))]
+    carrier_setup: crate::transport::setup::AcceptSetup,
 ) -> Result<BoundListener> {
     if endpoint.is_tcp_family() {
         let listener = AnyListener::Tcp(TcpTransport::bind(&endpoint.underlying_tcp()).await?);
@@ -514,7 +576,7 @@ pub(super) async fn bind_any(
     #[cfg(feature = "ws")]
     if endpoint.is_ws_family() {
         let plain = endpoint.underlying_ws();
-        let wss_tls = &ws_options.wss_tls;
+        let wss_tls = &carrier_options.wss_tls;
         let tls_acc = if matches!(plain, Endpoint::Wss { .. }) {
             let cert = wss_tls.server_cert_pem.as_deref().ok_or_else(|| {
                 Error::Protocol("wss:// bind requires server_cert_pem in WssTls options".into())
@@ -529,12 +591,23 @@ pub(super) async fn bind_any(
             None
         };
         let mut ws_listener =
-            crate::transport::ws::bind(&plain, tls_acc, ws_setup, ws_options).await?;
+            crate::transport::ws::bind(&plain, tls_acc, carrier_setup, carrier_options).await?;
         let resolved = endpoint.rewrap_ws(ws_listener.local_endpoint().clone());
         ws_listener.set_monitor_endpoint(resolved.clone());
         let listener = AnyListener::Ws(ws_listener);
         return Ok(BoundListener {
             listener,
+            endpoint: resolved,
+        });
+    }
+    #[cfg(feature = "quic")]
+    if endpoint.is_quic_family() {
+        let mut quic_listener =
+            crate::transport::quic::bind(endpoint, carrier_setup, carrier_options).await?;
+        let resolved = quic_listener.local_endpoint().clone();
+        quic_listener.set_monitor_endpoint(resolved.clone());
+        return Ok(BoundListener {
+            listener: AnyListener::Quic(Box::new(quic_listener)),
             endpoint: resolved,
         });
     }
@@ -583,6 +656,10 @@ pub(super) async fn preflight_connect_endpoint_resolution(endpoint: &Endpoint) -
         };
         return preflight_connect_host(host, port).await;
     }
+    #[cfg(feature = "quic")]
+    if let Endpoint::Quic { host, port } = endpoint {
+        return preflight_connect_host(host, *port).await;
+    }
     match endpoint {
         Endpoint::Inproc { .. } | Endpoint::Ipc(_) => Ok(()),
         other => Err(Error::UnsupportedScheme(other.scheme().to_string())),
@@ -606,7 +683,7 @@ pub(super) async fn connect_any(
     endpoint: &Endpoint,
     snapshot: &InprocPeerSnapshot,
     recv: &inproc_transport::RecvConfig,
-    #[cfg(feature = "ws")] ws_options: WsConnectOptions<'_>,
+    #[cfg(any(feature = "ws", feature = "quic"))] carrier: CarrierConnect<'_>,
 ) -> Result<AnyConn> {
     if endpoint.is_tcp_family() {
         let s = TcpTransport::connect(&endpoint.underlying_tcp()).await?;
@@ -635,8 +712,8 @@ pub(super) async fn connect_any(
             port,
             path,
             matches!(plain, Endpoint::Wss { .. }),
-            ws_options.wss_tls,
-            ws_options.mechanism,
+            &carrier.options.wss_tls,
+            &carrier.options.mechanism,
         )
         .await?;
         let peer_ident = peer_ident_for_endpoint(endpoint);
@@ -644,6 +721,23 @@ pub(super) async fn connect_any(
             stream: AnyStream::Ws(Box::new(connected.transport)),
             peer_ident,
             leftover: connected.leftover,
+            setup: None,
+        });
+    }
+    #[cfg(feature = "quic")]
+    if endpoint.is_quic_family() {
+        let stream = crate::transport::quic::connect(
+            endpoint,
+            carrier.options,
+            carrier.deadline,
+            carrier.io_pool,
+        )
+        .await?;
+        let peer_ident = PeerIdent::Socket(stream.remote_address());
+        return Ok(AnyConn::ByteStream {
+            stream: AnyStream::Quic(Box::new(stream)),
+            peer_ident,
+            leftover: bytes::Bytes::new(),
             setup: None,
         });
     }
@@ -704,8 +798,8 @@ mod tests {
     }
 
     async fn bind_result_for_test(endpoint: &Endpoint) -> Result<BoundListener> {
-        #[cfg(feature = "ws")]
-        let ws_options = omq_proto::Options::default();
+        #[cfg(any(feature = "ws", feature = "quic"))]
+        let carrier_options = omq_proto::Options::default();
         let inproc_registry = Arc::new(inproc_transport::InprocRegistry::new());
         bind_any(
             &inproc_registry,
@@ -715,14 +809,15 @@ mod tests {
                 direct: false,
                 send_hwm: 1000,
             },
-            #[cfg(feature = "ws")]
-            &ws_options,
-            #[cfg(feature = "ws")]
-            crate::transport::ws::AcceptSetup {
+            #[cfg(any(feature = "ws", feature = "quic"))]
+            &carrier_options,
+            #[cfg(any(feature = "ws", feature = "quic"))]
+            crate::transport::setup::AcceptSetup {
                 admission: crate::transport::setup::Admission::new(128),
                 timeout: std::time::Duration::from_secs(30),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 monitor: crate::socket::monitor::MonitorPublisher::new(),
+                io_pool: crate::context::IoPoolHandle::none(),
             },
         )
         .await

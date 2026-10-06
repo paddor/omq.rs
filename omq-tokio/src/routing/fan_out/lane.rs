@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -135,6 +136,75 @@ struct LaneDistributionTarget {
     data_space: Arc<StateSignal>,
 }
 
+struct LaneWorkerData {
+    rx: yring::Consumer<LaneData>,
+    signal: Arc<DataSignal>,
+    space: Arc<StateSignal>,
+    targets: Vec<LaneDistributionTarget>,
+    active_flags: Option<Arc<Vec<AtomicBool>>>,
+}
+
+struct LaneDataSetup {
+    distributor: LaneDistributor,
+    primary: Option<LaneWorkerData>,
+    secondary: VecDeque<LaneWorkerData>,
+}
+
+impl LaneDataSetup {
+    fn new(lane_count: usize, pipe_cap: usize, active_flags: Arc<Vec<AtomicBool>>) -> Self {
+        let mut data_channels: Vec<_> = (0..lane_count)
+            .map(|_| {
+                let (tx, rx) = yring::spsc(pipe_cap);
+                let signal = Arc::new(DataSignal::new());
+                let space = Arc::new(StateSignal::new());
+                (tx, rx, signal, space)
+            })
+            .collect();
+        let (dist_tx, dist_rx, dist_signal, dist_space) = data_channels.remove(0);
+        let distributor = LaneDistributor {
+            tx: dist_tx,
+            signal: Arc::clone(&dist_signal),
+            space: Arc::clone(&dist_space),
+        };
+        let mut targets = Vec::with_capacity(data_channels.len());
+        let mut secondary = VecDeque::with_capacity(data_channels.len());
+        for (index, (tx, rx, signal, space)) in data_channels.into_iter().enumerate() {
+            targets.push(LaneDistributionTarget {
+                lane: index + 1,
+                data_tx: tx,
+                data_signal: Arc::clone(&signal),
+                data_space: Arc::clone(&space),
+            });
+            secondary.push_back(LaneWorkerData {
+                rx,
+                signal,
+                space,
+                targets: Vec::new(),
+                active_flags: None,
+            });
+        }
+        Self {
+            distributor,
+            primary: Some(LaneWorkerData {
+                rx: dist_rx,
+                signal: dist_signal,
+                space: dist_space,
+                targets,
+                active_flags: Some(active_flags),
+            }),
+            secondary,
+        }
+    }
+
+    fn take(&mut self, index: usize) -> LaneWorkerData {
+        if index == 0 {
+            self.primary.take().expect("lane 0 data")
+        } else {
+            self.secondary.pop_front().expect("secondary lane data")
+        }
+    }
+}
+
 struct FanOutLaneState {
     endpoints: Vec<LaneEndpoint>,
 }
@@ -218,7 +288,6 @@ impl std::fmt::Debug for LaneWorker {
 }
 
 impl FanOutLanes {
-    #[expect(clippy::too_many_lines)]
     pub(super) fn spawn(
         options: &Options,
         mode: FanOutMode,
@@ -233,15 +302,7 @@ impl FanOutLanes {
                 .collect::<Vec<_>>(),
         );
 
-        // Create all channels up front.
-        let mut data_channels: Vec<_> = (0..lane_count)
-            .map(|_| {
-                let (tx, rx) = yring::spsc(pipe_cap);
-                let sig = Arc::new(DataSignal::new());
-                let space = Arc::new(StateSignal::new());
-                (tx, rx, sig, space)
-            })
-            .collect();
+        let mut data = LaneDataSetup::new(lane_count, pipe_cap, Arc::clone(&active_flags));
         let mut ctrl_channels: Vec<_> = (0..lane_count)
             .map(|_| {
                 let (tx, rx) = yring::spsc(LANE_CTRL_RING_CAP);
@@ -250,54 +311,13 @@ impl FanOutLanes {
             })
             .collect();
 
-        // Lane 0 receives user sends. It copies each batch to active
-        // secondary lanes first, then processes its own peers.
-        let (dist_tx, dist_rx, dist_signal, dist_space) = data_channels.remove(0);
-        let distributor = LaneDistributor {
-            tx: dist_tx,
-            signal: Arc::clone(&dist_signal),
-            space: Arc::clone(&dist_space),
-        };
-
-        let mut distribution_targets: Vec<LaneDistributionTarget> =
-            Vec::with_capacity(data_channels.len());
-        let mut secondary_data: Vec<(
-            yring::Consumer<LaneData>,
-            Arc<DataSignal>,
-            Arc<StateSignal>,
-        )> = Vec::with_capacity(data_channels.len());
-        for (i, (tx, rx, sig, space)) in data_channels.into_iter().enumerate() {
-            distribution_targets.push(LaneDistributionTarget {
-                lane: i + 1,
-                data_tx: tx,
-                data_signal: Arc::clone(&sig),
-                data_space: Arc::clone(&space),
-            });
-            secondary_data.push((rx, sig, space));
-        }
-
         // Build endpoints (ctrl only) and spawn workers.
         let distributor_exited = Arc::new(AtomicBool::new(false));
-        let mut dist_rx = Some(dist_rx);
-        let mut dist_signal = Some(dist_signal);
-        let mut dist_space = Some(dist_space);
         let mut endpoints = Vec::with_capacity(lane_count);
         for i in 0..lane_count {
             let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
-
-            let (data_rx, data_signal, data_space, dist_targets, flags) = if i == 0 {
-                (
-                    dist_rx.take().expect("lane 0 data_rx"),
-                    dist_signal.take().expect("lane 0 data_signal"),
-                    dist_space.take().expect("lane 0 data_space"),
-                    std::mem::take(&mut distribution_targets),
-                    Some(Arc::clone(&active_flags)),
-                )
-            } else {
-                let (rx, sig, space) = secondary_data.remove(0);
-                (rx, sig, space, Vec::new(), None)
-            };
-            let endpoint_data_signal = data_signal.clone();
+            let worker_data = data.take(i);
+            let endpoint_data_signal = worker_data.signal.clone();
             let exited = if i == 0 {
                 Arc::clone(&distributor_exited)
             } else {
@@ -306,10 +326,10 @@ impl FanOutLanes {
             io_pool.spawn_on(
                 i,
                 LaneWorker {
-                    data_rx,
+                    data_rx: worker_data.rx,
                     ctrl_rx,
-                    data_signal,
-                    data_space,
+                    data_signal: worker_data.signal,
+                    data_space: worker_data.space,
                     ctrl_notify: ctrl_notify.clone(),
                     mode,
                     mute_policy,
@@ -318,8 +338,8 @@ impl FanOutLanes {
                     eq: FrameBuffer::one_shot(),
                     chunks: Vec::new(),
                     codec_groups: std::array::from_fn(|_| None),
-                    distribution_targets: dist_targets,
-                    active_flags: flags,
+                    distribution_targets: worker_data.targets,
+                    active_flags: worker_data.active_flags,
                     exited: exited.clone(),
                 }
                 .run(),
@@ -337,7 +357,7 @@ impl FanOutLanes {
         Arc::new(Self {
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
-            distributor: Mutex::new(distributor),
+            distributor: Mutex::new(data.distributor),
             distributor_exited,
             admission_closed: AtomicBool::new(false),
             mute_policy,

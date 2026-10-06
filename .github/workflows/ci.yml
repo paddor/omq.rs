@@ -445,6 +445,41 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo nextest run --profile ci -p omq-tokio --features "lz4 ws" --test omq_lz4_ws --test-threads=1
 
+  quic:
+    name: QUIC (${{ matrix.toolchain }}, ${{ matrix.os }})
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: native QUIC
+        if: runner.os != 'macOS'
+        run: >-
+          cargo nextest run --profile ci -p omq-tokio --features "quic plain curve"
+          --lib --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network
+      - name: native QUIC (macOS)
+        if: runner.os == 'macOS'
+        run: >-
+          cargo nextest run --profile ci -p omq-tokio --features "quic plain curve"
+          --lib --test omq_quic_basic --test omq_quic_lifecycle --test omq_quic_network
+          --test-threads=1
+      - name: C API QUIC
+        run: >-
+          cargo nextest run --profile ci -p omq-libzmq --features quic
+          --test omq_libzmq_quic --test-threads=1
+
   interop:
     name: interop (pyzmq)
     needs: [changes, linux-gate]
@@ -763,11 +798,15 @@ jobs:
       - name: build pyomq
         working-directory: bindings/pyomq
         run: pip install .
+      - name: build Rust QUIC interop peer
+        run: cargo build -p omq-tokio --features quic --example quic_interop_peer
       - name: cargo nextest
         working-directory: bindings/pyomq
         run: cargo nextest run --profile ci --config-file .config/nextest.toml
       - name: pytest
         working-directory: bindings/pyomq
+        env:
+          OMQ_QUIC_INTEROP_REQUIRED: "1"
         run: pytest -v -k "not test_perf" -W error
 
   java-lint:
@@ -834,6 +873,7 @@ jobs:
         test,
         encryption,
         compression,
+        quic,
         interop,
         cppzmq,
         fuzz-smoke,

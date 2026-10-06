@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use omq_tokio::{Endpoint, Error, Message, Options, Socket, SocketType};
+use omq_tokio::{Endpoint, Error, IdentitySocket, Message, Options, Socket, SocketType};
 
 use bytes::Bytes;
 
@@ -173,6 +173,77 @@ async fn peer_bidirectional_identity_routing() {
         .unwrap()
         .unwrap();
     assert_eq!(got, Message::multipart(["peer-a", "hello b"]));
+}
+
+#[tokio::test]
+async fn peer_identity_api_keeps_routing_out_of_body() {
+    let endpoint = inproc_ep("peer-identity-api");
+    let a = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"peer-a")),
+    )
+    .identity_routing()
+    .unwrap();
+    a.bind(endpoint.clone()).await.unwrap();
+    let b = Socket::new(
+        SocketType::Peer,
+        Options::default().identity(Bytes::from_static(b"peer-b")),
+    );
+    b.connect(endpoint).await.unwrap();
+    let b = IdentitySocket::try_from(b).unwrap();
+
+    b.send_to(b"peer-a", Message::single("hello"))
+        .await
+        .unwrap();
+    let (sender, body) = tokio::time::timeout(Duration::from_secs(1), a.recv_from())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sender.as_ref(), b"peer-b");
+    assert_eq!(body, Message::single("hello"));
+
+    a.try_send_to(sender, Message::multipart(["part-1", "part-2"]))
+        .unwrap();
+    let (sender, body) = tokio::time::timeout(Duration::from_secs(1), b.recv_from())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sender.as_ref(), b"peer-a");
+    assert_eq!(body, Message::multipart(["part-1", "part-2"]));
+
+    b.send(Message::multipart(["peer-a", "legacy"]))
+        .await
+        .unwrap();
+    let (sender, body) = a.recv_from().await.unwrap();
+    assert_eq!(sender.as_ref(), b"peer-b");
+    assert_eq!(body, Message::single("legacy"));
+
+    b.send_to(b"peer-a", Message::single("direct"))
+        .await
+        .unwrap();
+    assert_eq!(
+        a.recv().await.unwrap(),
+        Message::multipart(["peer-b", "direct"])
+    );
+    assert!(matches!(b.try_recv_from(), Err(Error::WouldBlock)));
+}
+
+#[tokio::test]
+async fn identity_api_rejects_other_types_and_honors_mandatory_routes() {
+    let push = Socket::new(SocketType::Push, Options::default());
+    assert!(matches!(push.identity_routing(), Err(Error::Protocol(_))));
+    assert!(matches!(
+        push.send_to(b"any", Message::single("body")).await,
+        Err(Error::Protocol(_))
+    ));
+
+    let peer = Socket::new(SocketType::Peer, Options::default().router_mandatory(true))
+        .identity_routing()
+        .unwrap();
+    assert!(matches!(
+        peer.send_to(b"missing", Message::single("body")).await,
+        Err(Error::Unroutable)
+    ));
 }
 
 #[tokio::test]

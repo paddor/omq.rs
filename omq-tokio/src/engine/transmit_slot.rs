@@ -398,9 +398,23 @@ impl PeerTransmitSlot {
     }
 
     pub(crate) fn drain(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {
+        self.drain_with(buf, max_chunks, false)
+    }
+
+    /// Like [`Self::drain`], but moves arena bytes into `buf` without a
+    /// copy. See [`FrameBuffer::drain_owned`].
+    pub(crate) fn drain_owned(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {
+        self.drain_with(buf, max_chunks, true)
+    }
+
+    fn drain_with(&self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> DrainOutcome {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         let before_chunks = buf.len();
-        let protected_drained = eq.drain(buf, max_chunks);
+        let protected_drained = if owned {
+            eq.drain_owned(buf, max_chunks)
+        } else {
+            eq.drain(buf, max_chunks)
+        };
         let eq_drained_chunks = buf.len() - before_chunks;
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();

@@ -31,6 +31,8 @@ pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
     let cap = unsafe { CStr::from_ptr(capability) }.to_str().unwrap_or("");
     match cap {
         "ipc" | "inproc" | "tcp" | "udp" | "zmtp3" | "curve" | "plain" => 1,
+        #[cfg(feature = "quic")]
+        "quic" => 1,
         _ => 0,
     }
 }

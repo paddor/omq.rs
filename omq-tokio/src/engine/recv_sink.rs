@@ -1,4 +1,9 @@
 //! Receive queue admission and bounded pending delivery for connection drivers.
+//!
+//! A full queue retains one decoded delivery without repeating metadata/rate
+//! admission. MPSC reservations stay pinned across select turns and use their
+//! actual permit. REP admits body and saved envelope together. Raw yring
+//! consumers have a 10 ms fallback check for consumer drop without a space signal.
 
 use std::sync::Arc;
 use std::time::Duration;

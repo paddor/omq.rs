@@ -327,6 +327,32 @@ impl IoPoolHandle {
         }
     }
 
+    /// Reserve data IO thread `index` whatever its load, for work placed on
+    /// every IO thread.
+    #[cfg(feature = "quic")]
+    pub(crate) fn reserve_thread_at(&self, index: usize) -> IoThreadLease {
+        if let Some(pool) = &self.pool {
+            pool.threads[index + pool.data_thread_offset()]
+                .load
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        IoThreadLease {
+            pool: self.pool.clone(),
+            index,
+        }
+    }
+
+    /// Alive tasks per owned runtime, control runtime first when present.
+    #[cfg(all(test, feature = "quic"))]
+    pub(crate) fn alive_tasks(&self) -> Vec<usize> {
+        self.pool.as_ref().map_or_else(Vec::new, |pool| {
+            pool.threads
+                .iter()
+                .map(|thread| thread.handle.metrics().num_alive_tasks())
+                .collect()
+        })
+    }
+
     /// Number of IO threads.
     pub(crate) fn thread_count(&self) -> usize {
         match &self.pool {
@@ -483,6 +509,11 @@ impl ContextCore {
 }
 
 impl Context {
+    #[cfg(all(test, feature = "quic"))]
+    pub(crate) fn io_pool_handle_for_test(&self) -> IoPoolHandle {
+        self.inner.io_pool_handle()
+    }
+
     /// Create a context with 1 data-plane IO thread (`current_thread` runtime
     /// on a dedicated OS thread). This is the libzmq-like default. Multi-IO
     /// contexts use an additional internal control runtime.

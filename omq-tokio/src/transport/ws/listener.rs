@@ -1,16 +1,21 @@
 //! Raw accepts and bounded concurrent TLS/HTTP setup.
+//!
+//! Each listener admits at most 32 pending peers under socket admission.
+//! Reservations and the original accept deadline survive actor/driver handoff.
+//! Saturation closes excess connections without allocating another setup task;
+//! service yields after 32 operations or 128 KiB of logical work. Ready peers
+//! have a separate socket-wide `WsOptions::max_ready_peers` limit.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_util::sync::CancellationToken;
 
 use super::{WsAccepted, accept};
-use crate::socket::monitor::MonitorPublisher;
+use crate::transport::setup::AcceptSetup;
 use crate::transport::setup::{Admission, PendingHandshake, SetupState};
 use omq_proto::endpoint::{Endpoint, Host};
 use omq_proto::{Error, Result};
@@ -26,13 +31,6 @@ pub(crate) struct WsListener {
     policy: std::sync::Arc<super::upgrade::ServerPolicy>,
     listener_admission: Admission,
     pending: FuturesUnordered<PendingAccept>,
-}
-
-pub(crate) struct AcceptSetup {
-    pub(crate) admission: Admission,
-    pub(crate) timeout: Duration,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) monitor: MonitorPublisher,
 }
 
 impl WsListener {
@@ -171,6 +169,9 @@ pub(crate) async fn bind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::socket::monitor::MonitorPublisher;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn raw_accepts_respect_both_caps_and_release_every_reservation_on_drop() {
@@ -185,6 +186,7 @@ mod tests {
                     timeout: Duration::from_secs(30),
                     cancel: CancellationToken::new(),
                     monitor: MonitorPublisher::new(),
+                    io_pool: crate::context::IoPoolHandle::none(),
                 },
                 &omq_proto::Options::default(),
             )

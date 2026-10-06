@@ -514,7 +514,7 @@ public final class Socket implements AutoCloseable {
         return this;
     }
 
-    /** Sets ZMTP handshake timeout. Must be set before first I/O. */
+    /** Sets connection setup timeout from DNS through READY (default 10s). Must be set before first I/O. */
     public synchronized Socket handshakeTimeout(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout");
         long timeoutMillis = millis(timeout);

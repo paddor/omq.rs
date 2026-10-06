@@ -76,5 +76,5 @@ pub(crate) fn server_name(host: &Host, override_name: Option<&str>) -> Result<Se
     ServerName::try_from(name).map_err(|e| Error::Protocol(format!("invalid TLS server name: {e}")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ws"))]
 mod tests;

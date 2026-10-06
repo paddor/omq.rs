@@ -21,6 +21,9 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   `PeerRecvConfig`, and `PeerRecvLane`. Use ordinary socket receive methods;
   application code owns worker dispatch. Internal fanring fairness, bounded
   queues, and reconnect fencing remain unchanged.
+- `engine::driver::DriverStream::Writer` must implement the new
+  `DriverWrite` trait. `tokio::io::WriteHalf` and Tokio TCP write halves
+  implement it; other writers need an empty `impl DriverWrite`.
 
 ### Changed
 
@@ -61,9 +64,15 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   context; `zmq_bind` and `zmq_connect` no longer return `ENOTSUP` for it.
   Inproc PUSH/PULL now uses the shared inproc rings; the separate byte ring
   (`inproc_bypass`) is removed.
+
+- Default connection setup timeout to 10 seconds across Rust and all bindings,
+  covering DNS, dialing, carrier setup, and ZMTP READY under one deadline.
+  QUIC defaults to a 10-second transport idle timeout and 2-second keepalive.
 - Share verified TLS trust, identity, and server-name setup internally while
   isolating WSS's explicit insecure test override. Empty custom trust PEM now
   fails configuration validation.
+- Redact TLS private keys and PLAIN client passwords from socket-option
+  `Debug` output in the Rust and C compatibility layers.
 - WS/WSS requires a finite `handshake_timeout`, shared across transport setup
   and ZMTP. Pending-handshake admission includes outbound attempts and WS/WSS
   before HTTP/TLS; each WS/WSS listener admits at most 32 pending peers.
@@ -77,6 +86,18 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Added
 
+- `quic://host:port` raw OMQ over QUIC behind the `quic` feature (Quinn,
+  rustls/ring). One connection per
+  peer: stream 0 carries unchanged ZMTP, stream 4 carries carrier liveness.
+  ALPN `omq-zmtp/1`, verified server certificates, no 0-RTT, no DATAGRAM
+  frames, no OMQ compression. Configure through `Options::quic`
+  (`QuicOptions`). Heartbeat options drive the liveness stream, linger waits
+  for FIN acknowledgment and peer close, and `recv_buffer_size` /
+  `send_buffer_size` apply to the UDP sockets. Connectors share one UDP socket per IO
+  thread. On Linux, a listener binds one `SO_REUSEPORT` socket per IO thread
+  and steers datagrams by connection ID, so each connection stays on one IO
+  thread. `omq-libzmq` exposes it through the optional `quic` feature,
+  `OMQ_QUIC_*` socket options, and `zmq_has`.
 - Tokio byte-stream sockets can enforce hard per-connection and aggregate
   per-IP receive token buckets with `Options::recv_rate_limit()` and
   `Options::recv_ip_rate_limit()`. Offending connections are disconnected.
@@ -85,6 +106,14 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Fixed
 
+- QUIC unbind/rebind preserves accepted peers and the complete UDP endpoint
+  group. A replacement listener can rotate its certificate within the same
+  context without interrupting existing connections.
+- QUIC liveness services output and timeouts during receive floods. Delayed
+  heartbeat timers skip missed probes, and oversized durations do not panic.
+- QUIC connectors validate the server liveness preface before starting ZMTP
+  and reporting READY. Missing and partial prefaces obey the setup deadline.
+
 - Finite native linger includes actor command admission, so blocked
   subscription forwarding cannot prevent close from reaching its deadline.
 
@@ -92,6 +121,11 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   subscription state. XPUB notifications remain bounded and preserve each
   peer's FIFO through receive backpressure and driver completion.
 
+- Preserve REQ application frames returned by a muted `try_send`.
+- Keep Ruby monitor waits under their original timeout across stale wakeups.
+- Apply configured reconnect delays after driver handshake failure and peer
+  loss. Initial DNS errors still fail bind/connect; reconnect DNS failures
+  retry internally. Named QUIC DNS runs outside the socket actor.
 - REP splits the request envelope at the first empty frame, like libzmq.
   Requests whose body had an empty second part lost their leading parts.
 - REP with `WorkloadProfile::Throughput` or CURVE replies to the peer that

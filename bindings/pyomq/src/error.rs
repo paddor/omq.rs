@@ -17,6 +17,12 @@ create_exception!(_native, ZMQError, ZMQBaseError, "ZMQ error with errno.");
 // picks a value in the range that doesn't collide on supported OSes.
 pub const ETERM: i32 = 156;
 
+// Python's Windows socket errno constants use Winsock codes, not CRT codes.
+#[cfg(windows)]
+const EADDRINUSE: i32 = windows::Win32::Networking::WinSock::WSAEADDRINUSE.0;
+#[cfg(not(windows))]
+const EADDRINUSE: i32 = libc::EADDRINUSE;
+
 /// Map an `omq_proto::Error` to a `PyErr` carrying the right errno.
 pub fn map_err(e: Error) -> PyErr {
     let (errno, msg) = match e {
@@ -32,7 +38,14 @@ pub fn map_err(e: Error) -> PyErr {
         ),
         Error::MessageTooLarge { size, max } => (libc::EMSGSIZE, format!("message {size} > {max}")),
         Error::InvalidEndpoint(m) => (libc::EINVAL, m),
-        Error::Io(io) => (io.raw_os_error().unwrap_or(libc::EIO), io.to_string()),
+        Error::Io(io) => (
+            io.raw_os_error().unwrap_or_else(|| match io.kind() {
+                std::io::ErrorKind::AddrInUse => EADDRINUSE,
+                std::io::ErrorKind::ResourceBusy => libc::EBUSY,
+                _ => libc::EIO,
+            }),
+            io.to_string(),
+        ),
         _ => (libc::EIO, "internal error".into()),
     };
     let py_err = ZMQError::new_err(msg);

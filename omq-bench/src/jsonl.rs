@@ -60,7 +60,7 @@ pub(crate) fn append_jsonl<T: Serialize>(path: &Path, row: &T) {
 // Row types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct ComparisonRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocking_inproc: Option<crate::parse::BlockingInprocStats>,

@@ -43,9 +43,24 @@ rep.SendString("string");
 Check(req.ReceiveString() == "string", "string helper mismatch");
 
 using var options = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0, SendHwm = 64, ReceiveHwm = 32, HeartbeatInterval = 1000 });
+Check(options.GetInt32(SocketOption.HandshakeInterval) == 10_000, "default setup timeout mismatch");
+Check(options.GetInt32(SocketOption.ReconnectInterval) == 100, "default reconnect interval mismatch");
 Check(options.GetInt32(SocketOption.SendHwm) == 64, "SNDHWM option mismatch");
 Check(options.GetInt32(SocketOption.ReceiveHwm) == 32, "RCVHWM option mismatch");
 Check(options.GetInt32(SocketOption.HeartbeatInterval) == 1000, "heartbeat option mismatch");
+using (var dnsSocket = context.CreateSocket(SocketType.Push, new SocketOptions { Linger = 0 }))
+{
+    foreach (Action operation in new Action[] {
+        () => dnsSocket.Bind("tcp://omq-no-such-host.invalid:0"),
+        () => dnsSocket.Connect("tcp://omq-no-such-host.invalid:5555")
+    })
+    {
+        bool failed = false;
+        try { operation(); }
+        catch (OmqException) { failed = true; }
+        Check(failed, "initial DNS failure should raise");
+    }
+}
 options.SetOption(SocketOption.RoutingId, [1, 2, 3]);
 Check(options.GetBytes(SocketOption.RoutingId).SequenceEqual(new byte[] { 1, 2, 3 }), "routing id mismatch");
 Check(!pull.TryReceive(out _), "TryReceive should report empty socket");

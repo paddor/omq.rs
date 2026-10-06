@@ -207,7 +207,7 @@ down and reconnects.
 | heartbeat_ivl | Timer to send PING | heartbeat_interval | **=** |
 | heartbeat_ttl | Advertised to peer | heartbeat_ttl (advisory) | **=** |
 | heartbeat_timeout | No PONG -> timeout_error | No bytes received -> Timeout | **~** byte-level vs PONG |
-| Handshake timeout | Separate timer | handshake_timeout (30s default) | **=** |
+| Handshake timeout | Separate timer, 30s default | One setup deadline through DNS/transport/ZMTP, 10s default | **~** intentional default and scope difference |
 
 ---
 

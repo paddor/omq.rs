@@ -34,6 +34,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `curve` | CURVE handshake (RFC 26) | `crypto_box`, `crypto_secretbox` |
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
+| `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
 
@@ -48,8 +49,8 @@ one outbound. Per-connection driver tasks bridge queues and wire.
 Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).
-Transport RFCs (wire format, dict shipping rules, security):
-[`lz4-rfc.md`](doc/lz4-rfc.md).
+Transport RFCs:
+[`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).
@@ -100,9 +101,10 @@ libzmq.
 
 ## Build / test / bench / charts / releasing
 
-See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the full command reference
-(unit tests, feature-gated tests, fuzz, soak, stress tests, benchmarks,
-chart generation, release process).
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for build, test, stress test, and
+CI commands, [`RUNNING_BENCHMARKS.md`](RUNNING_BENCHMARKS.md) for benchmarks
+and chart generation, and [`RELEASING.md`](RELEASING.md) for fuzz, soak, and
+release steps.
 Benchmark results are collected append-only in `~/.cache/omq/*.jsonl`.
 
 Quick reference:

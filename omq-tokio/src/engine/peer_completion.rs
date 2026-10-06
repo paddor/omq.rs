@@ -3,6 +3,9 @@
 //! Publication cannot wait on the actor's data mailbox. The result carries
 //! the number of events actually admitted to the control and data queues, so
 //! the actor retains peer state until both admitted prefixes are handled.
+//! One slot covers normal return, abort, and panic unwinding after driver state
+//! drops, including unpolled disposal. Standalone public drivers still publish
+//! their final `PeerEvent::Closed` through the caller's mailbox.
 
 use tokio::sync::oneshot;
 

@@ -1,4 +1,14 @@
 //! WebSocket-specific bounded assembly state.
+//!
+//! Multipart parts and fragments each cap at 65,536, counting empty items.
+//! Interleaved control frames do not reset assembly counts. The tokio backend
+//! enables parser service budgets; standalone codecs opt in with
+//! `ConnectionConfig::ws_input_budget`. A turn stops between frames at 256
+//! frames or 256 KiB, checking its 1 ms target every 64 frames. One large frame
+//! operation can exceed that time target; these limits are not byte admission.
+//! Unmasked complete bodies may share input storage; masked/spanning bodies
+//! require assembly. CLOSE queues once and discards the unstarted pending PONG.
+//! PONG coalescing bounds backlog, but ordered data can still delay control.
 
 use bytes::BytesMut;
 use std::time::{Duration, Instant};

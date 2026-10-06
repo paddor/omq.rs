@@ -476,6 +476,11 @@ fn fuzz_endpoint_roundtrip() {
                 port,
                 path: path.clone(),
             },
+            #[cfg(feature = "quic")]
+            6 => Endpoint::Quic {
+                host: host.clone(),
+                port,
+            },
             _ => Endpoint::Tcp {
                 host: host.clone(),
                 port,

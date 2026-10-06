@@ -2,6 +2,10 @@
 //!
 //! Implements the minimal subset needed by ZWS/2.0: binary frames, close,
 //! ping/pong, and fragmented binary messages. No extensions or text frames.
+//! Clients generate cryptographic masks; receivers enforce mask direction,
+//! minimal lengths, the long-length high bit, RSV/opcodes, and control size/FIN.
+//! Mask offsets survive input chunk boundaries. CLOSE validates status and
+//! UTF-8 before echoing; fragment sequencing is owned by the connection codec.
 
 use bytes::{BufMut, BytesMut};
 

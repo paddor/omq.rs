@@ -42,20 +42,46 @@ pub enum Canceled {
 /// fresh future so no state leaks across retries. Cancellation drops a pending
 /// attempt; the future must release any partially established transport on drop.
 pub async fn dial_with_backoff<F, Fut, S>(
-    mut dial: F,
+    dial: F,
     policy: ReconnectPolicy,
     stop_conn_refused: bool,
     cancel: &CancellationToken,
-    mut on_delay: impl FnMut(Duration, u32),
+    on_delay: impl FnMut(Duration, u32),
 ) -> std::result::Result<S, Canceled>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<S>>,
 {
-    let mut attempt: u32 = 0;
+    dial_with_backoff_from(dial, policy, stop_conn_refused, cancel, on_delay, 0).await
+}
+
+/// Resume after a driver failure using the same delay policy as a failed dial.
+pub(crate) async fn dial_with_backoff_from<F, Fut, S>(
+    mut dial: F,
+    policy: ReconnectPolicy,
+    stop_conn_refused: bool,
+    cancel: &CancellationToken,
+    mut on_delay: impl FnMut(Duration, u32),
+    mut attempt: u32,
+) -> std::result::Result<S, Canceled>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<S>>,
+{
     loop {
         if cancel.is_cancelled() {
             return Err(Canceled::Token);
+        }
+        if attempt > 0 {
+            let Some(delay) = next_delay(&policy, attempt) else {
+                return Err(Canceled::PolicyDisabled);
+            };
+            on_delay(delay, attempt);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(Canceled::Token),
+                () = sleep(delay) => {}
+            }
         }
         let result = tokio::select! {
             biased;
@@ -69,14 +95,6 @@ where
                     return Err(Canceled::StoppedConnRefused);
                 }
                 attempt = attempt.saturating_add(1);
-                let Some(delay) = next_delay(&policy, attempt) else {
-                    return Err(Canceled::PolicyDisabled);
-                };
-                on_delay(delay, attempt);
-                tokio::select! {
-                    () = cancel.cancelled() => return Err(Canceled::Token),
-                    () = sleep(delay) => {}
-                }
             }
         }
     }

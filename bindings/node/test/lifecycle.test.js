@@ -7,6 +7,18 @@ const { promisify } = require("node:util");
 const { Context, Pull, Push } = require("../dist");
 const execFileAsync = promisify(execFile);
 
+test("initial DNS failures reject bind and connect", { timeout: 20000 }, async () => {
+  const pull = new Pull({ linger: 0 });
+  const push = new Push({ linger: 0 });
+  try {
+    await assert.rejects(pull.bind("tcp://omq-no-such-host.invalid:0"), /resolv|lookup/i);
+    await assert.rejects(push.connect("tcp://omq-no-such-host.invalid:5555"), /resolv|lookup/i);
+  } finally {
+    push.close();
+    pull.close();
+  }
+});
+
 test("close rejects pending recv", async () => {
   const pull = new Pull();
   const pending = pull.recv();

@@ -276,6 +276,7 @@ copy-free payload conversion.
 | --- | --- |
 | `tcp://`, `ipc://` | Byte streams with ZMTP framing |
 | `ws://`, `wss://` | ZWS over WebSocket, optionally TLS |
+| `quic://` | ZMTP byte stream over Quinn with TLS |
 | `inproc://` | Context-local message transfer without ZMTP |
 | `udp://` | RADIO/DISH datagrams |
 | `lz4+...`, `zstd+...` | Message transforms over supported carriers |
@@ -283,6 +284,11 @@ copy-free payload conversion.
 STREAM uses raw TCP without a ZMTP handshake. Regular byte-stream sockets
 supervise reconnects. `Socket::monitor()` exposes lifecycle events and peer
 snapshots to applications.
+
+QUIC peers retain their UDP endpoint group and assigned data runtime. The
+listener controls new admission; established peers own their connections.
+A separate liveness stream keeps heartbeats independent of application
+receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
 
 ## Source map
 
@@ -296,4 +302,4 @@ snapshots to applications.
 | How are receives managed? | [fanin.rs](../omq-tokio/src/socket/fanin.rs), [recv.rs](../omq-tokio/src/socket/recv.rs), [peer_recv.rs](../omq-tokio/src/socket/peer_recv.rs) |
 | How are payloads stored and framed? | [message.rs](../omq-proto/src/message.rs), [frame_buffer.rs](../omq-proto/src/frame_buffer.rs) |
 | Where are codec and transport rules? | [proto/connection/](../omq-proto/src/proto/connection/), [transport/](../omq-tokio/src/transport/) |
-| How do I test or measure a change? | [DEVELOPMENT.md](../DEVELOPMENT.md), [perf-verification.md](perf-verification.md) |
+| How do I test or measure a change? | [DEVELOPMENT.md](../DEVELOPMENT.md), [RUNNING_BENCHMARKS.md](../RUNNING_BENCHMARKS.md), [perf-verification.md](perf-verification.md) |

@@ -31,8 +31,6 @@ fn unsupported_disabled_and_nested_prefixes_never_fall_back() {
         "zstd+inproc",
         "lz4+udp",
         "lz4+quic",
-        "zstd+h3+quic",
-        "h3+quic",
         #[cfg(not(feature = "lz4"))]
         "lz4+tcp",
         #[cfg(not(feature = "zstd"))]

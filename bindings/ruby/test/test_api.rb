@@ -15,6 +15,17 @@ class ApiTest < Minitest::Test
     assert_match(/unknown socket type/, error.message)
   end
 
+  def test_initial_dns_failures_raise
+    pull = socket(:pull)
+    push = socket(:push)
+    Timeout.timeout(20) do
+      bind_error = assert_raises(RuntimeError) { pull.bind("tcp://omq-no-such-host.invalid:0") }
+      connect_error = assert_raises(RuntimeError) { push.connect("tcp://omq-no-such-host.invalid:5555") }
+      assert_match(/resolv|lookup/i, bind_error.message)
+      assert_match(/resolv|lookup/i, connect_error.message)
+    end
+  end
+
   def test_all_socket_classes_materialize
     OMQ::Rust::SOCKET_TYPES.each do |type|
       klass = OMQ::Rust.const_get(type.to_s.upcase)

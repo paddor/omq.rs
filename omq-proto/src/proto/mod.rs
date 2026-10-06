@@ -22,6 +22,8 @@ pub mod greeting;
 pub mod mechanism;
 pub mod transform;
 #[cfg(feature = "ws")]
+pub mod web_address;
+#[cfg(feature = "ws")]
 pub(crate) mod ws_codec;
 #[cfg(feature = "ws")]
 pub mod ws_handshake;

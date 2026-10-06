@@ -3,9 +3,8 @@
 //! Inline SHA-1 and base64 to avoid external deps. SHA-1 is used only for the
 //! `Sec-WebSocket-Accept` computation per RFC 6455; it is not used for security.
 
-mod address;
 mod http;
-pub use address::{normalize_ws_origin, validate_ws_address};
+pub use super::web_address::{normalize_ws_origin, validate_ws_address};
 pub use http::{
     MAX_HTTP_BYTES, MAX_HTTP_FIELDS, UpgradeRequest, parse_client_upgrade, parse_server_upgrade,
 };

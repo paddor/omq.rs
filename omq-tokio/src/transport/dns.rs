@@ -123,24 +123,86 @@ static GLOBAL: LazyLock<io::Result<Resolver>> = LazyLock::new(|| {
     Resolver::new(WORKERS, QUEUED, &lookup)
 });
 
-#[cfg(all(test, feature = "ws"))]
+#[cfg(test)]
 static STALLED_TEST_LOOKUPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(all(test, feature = "ws"))]
+#[cfg(all(test, any(feature = "ws", feature = "quic")))]
 pub(crate) fn stalled_test_lookups() -> usize {
     STALLED_TEST_LOOKUPS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 pub(crate) async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-    #[cfg(all(test, feature = "ws"))]
+    #[cfg(test)]
     if host == "omq-test-stall.invalid" {
         STALLED_TEST_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Release);
         return std::future::pending().await;
     }
+    #[cfg(test)]
+    if host == "omq-test-lookup.invalid" {
+        return test_lookup::resolve(port);
+    }
     match &*GLOBAL {
         Ok(resolver) => resolver.resolve(host, port).await,
         Err(error) => Err(Error::Io(io::Error::other(error.to_string()))),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_lookup {
+    use super::*;
+    use std::collections::HashMap;
+    use std::net::IpAddr;
+
+    struct Answer {
+        address: Option<IpAddr>,
+        calls: usize,
+    }
+
+    static ANSWERS: LazyLock<Mutex<HashMap<u16, Answer>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    #[derive(Debug)]
+    pub(crate) struct ScopedLookup {
+        port: u16,
+    }
+
+    impl ScopedLookup {
+        pub(crate) fn new(port: u16, address: Option<IpAddr>) -> Self {
+            let previous = ANSWERS
+                .lock()
+                .unwrap()
+                .insert(port, Answer { address, calls: 0 });
+            assert!(previous.is_none(), "test DNS port already in use");
+            Self { port }
+        }
+
+        pub(crate) fn set_address(&self, address: Option<IpAddr>) {
+            ANSWERS.lock().unwrap().get_mut(&self.port).unwrap().address = address;
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            ANSWERS.lock().unwrap().get(&self.port).unwrap().calls
+        }
+    }
+
+    impl Drop for ScopedLookup {
+        fn drop(&mut self) {
+            ANSWERS.lock().unwrap().remove(&self.port);
+        }
+    }
+
+    pub(super) fn resolve(port: u16) -> Result<Vec<SocketAddr>> {
+        let mut answers = ANSWERS.lock().unwrap();
+        let answer = answers.get_mut(&port).expect("test DNS answer missing");
+        answer.calls += 1;
+        match answer.address {
+            Some(address) => Ok(vec![SocketAddr::new(address, port)]),
+            None => Err(Error::Io(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "test DNS failure",
+            ))),
+        }
     }
 }
 

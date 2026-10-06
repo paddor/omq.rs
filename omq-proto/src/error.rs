@@ -1,10 +1,44 @@
 //! Error and Result types.
 
 use std::fmt;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::message::Message;
+use crate::proto::greeting::MechanismName;
+
+/// A peer's fatal ZMTP handshake ERROR response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandshakeRefusal {
+    /// Security mechanism used by the refused handshake.
+    pub mechanism: MechanismName,
+    /// Peer-provided ERROR reason, without a local error prefix.
+    pub reason: String,
+}
+
+impl HandshakeRefusal {
+    /// Return a three-digit status code when the peer supplies one.
+    #[must_use]
+    pub fn status_code(&self) -> Option<u16> {
+        if self.reason.len() == 3 && self.reason.bytes().all(|byte| byte.is_ascii_digit()) {
+            self.reason.parse().ok()
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for HandshakeRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} peer sent ERROR: {}",
+            self.mechanism.as_str().unwrap_or("<invalid>"),
+            self.reason
+        )
+    }
+}
 
 /// Convenience alias with `Error` as the default error type.
 pub type Result<T, E = Error> = core::result::Result<T, E>;
@@ -37,6 +71,10 @@ pub enum Error {
     /// The security handshake failed.
     #[error("handshake failed: {0}")]
     HandshakeFailed(String),
+
+    /// The peer refused the handshake. Automatic reconnect must stop.
+    #[error("handshake failed: {0}")]
+    HandshakeRefused(Arc<HandshakeRefusal>),
 
     /// The socket or connection is closed.
     #[error("socket closed")]

@@ -121,11 +121,8 @@ async fn receive_boundary(
     let completion = actor.peer_completions.next().await.unwrap().unwrap();
     assert_eq!(completion.peer_id, id);
     assert!(
-        completion
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("message too large"),
+        matches!(&completion.reason, omq_proto::DisconnectReason::Error(reason)
+            if reason.contains("message too large")),
         "{completion:?}"
     );
     assert!(matches!(

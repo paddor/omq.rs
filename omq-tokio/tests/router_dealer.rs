@@ -70,6 +70,119 @@ fn latency_dealer(identity: &'static [u8]) -> Socket {
 }
 
 #[tokio::test]
+async fn default_router_drops_full_inproc_messages_without_blocking_other_peers() {
+    let endpoint = inproc_ep("router-full-default");
+    let router = Socket::new(SocketType::Router, Options::default().send_hwm(1));
+    router.bind(endpoint.clone()).await.unwrap();
+    let slow = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"slow"))
+            .recv_hwm(1),
+    );
+    let fast = Socket::new(
+        SocketType::Dealer,
+        Options::default().identity(bytes::Bytes::from_static(b"fast")),
+    );
+    slow.connect(endpoint.clone()).await.unwrap();
+    fast.connect(endpoint).await.unwrap();
+    router
+        .wait_connected(2, Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    for _ in 0..64 {
+        router
+            .try_send(Message::multipart(["slow", "header", "body"]))
+            .expect("default ROUTER must drop messages when a destination is full");
+    }
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        router.send(Message::multipart(["slow", "drop"])),
+    )
+    .await
+    .expect("default ROUTER send must not wait for a full destination")
+    .unwrap();
+    router
+        .send(Message::multipart(["fast", "available"]))
+        .await
+        .unwrap();
+    assert_eq!(recv_dealer_body_string(&fast).await, "available");
+
+    let mut received = 0;
+    while let Ok(message) = slow.try_recv() {
+        assert_eq!(message, Message::multipart(["header", "body"]));
+        received += 1;
+    }
+    assert!(
+        received > 0 && received < 64,
+        "full queue must drop messages"
+    );
+    router.close().await.unwrap();
+    slow.close().await.unwrap();
+    fast.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn mandatory_router_preserves_full_message_and_resumes_after_drain() {
+    use futures::FutureExt;
+
+    let endpoint = inproc_ep("router-full-mandatory");
+    let router = Socket::new(
+        SocketType::Router,
+        Options::default().send_hwm(1).router_mandatory(true),
+    );
+    router.bind(endpoint.clone()).await.unwrap();
+    let dealer = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .identity(bytes::Bytes::from_static(b"slow"))
+            .recv_hwm(1),
+    );
+    dealer.connect(endpoint).await.unwrap();
+    router
+        .wait_connected(1, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let message = Message::multipart(["slow", "header", "body"]);
+    let mut accepted = 0;
+    loop {
+        match router.try_send(message.clone()) {
+            Ok(()) => {
+                accepted += 1;
+                assert!(accepted < 64, "bounded destination did not fill");
+            }
+            Err(omq_tokio::TrySendError::Full(returned)) => {
+                assert_eq!(returned, message, "Full must preserve the routing identity");
+                break;
+            }
+            other => panic!("unexpected send result: {other:?}"),
+        }
+    }
+    {
+        let waiting = router.send(message);
+        tokio::pin!(waiting);
+        assert!(waiting.as_mut().now_or_never().is_none());
+        for _ in 0..accepted {
+            assert_eq!(
+                dealer.recv().await.unwrap(),
+                Message::multipart(["header", "body"])
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("mandatory ROUTER must resume after its destination drains")
+            .unwrap();
+    }
+    assert_eq!(
+        dealer.recv().await.unwrap(),
+        Message::multipart(["header", "body"])
+    );
+    router.close().await.unwrap();
+    dealer.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn router_identity_api_keeps_dealer_body_intact() {
     let endpoint = inproc_ep("router-identity-api");
     let router = Socket::new(

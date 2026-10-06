@@ -234,9 +234,9 @@ impl Default for CurveServerOptions {
 }
 
 /// If `cmd` is an `ERROR` command, parse the length-prefixed reason
-/// string and return a `HandshakeFailed` error. Returns `None` for
+/// string and return a fatal `HandshakeRefused` error. Returns `None` for
 /// any other command.
-fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
+fn try_error_command(cmd: &Command, mechanism: MechanismName) -> Option<Error> {
     let Command::Unknown { ref name, ref body } = *cmd else {
         return None;
     };
@@ -250,8 +250,8 @@ fn try_error_command(cmd: &Command, mechanism: &str) -> Option<Error> {
         let end = (1 + reason_len).min(body.len());
         String::from_utf8_lossy(&body[1..end]).into_owned()
     };
-    Some(Error::HandshakeFailed(format!(
-        "{mechanism} peer sent ERROR: {reason}"
+    Some(Error::HandshakeRefused(std::sync::Arc::new(
+        crate::error::HandshakeRefusal { mechanism, reason },
     )))
 }
 
@@ -652,7 +652,7 @@ impl NullMechanism {
     }
 
     fn on_command(&mut self, cmd: Command, _out: &mut Vec<Command>) -> Result<MechanismStep> {
-        if let Some(err) = try_error_command(&cmd, "NULL") {
+        if let Some(err) = try_error_command(&cmd, MechanismName::NULL) {
             return Err(err);
         }
         match (self.state, cmd) {
@@ -780,8 +780,12 @@ mod tests {
             )
             .unwrap_err();
         match err {
-            Error::HandshakeFailed(msg) => assert!(msg.contains("auth"), "{msg}"),
-            other => panic!("expected HandshakeFailed, got {other:?}"),
+            Error::HandshakeRefused(refusal) => {
+                assert_eq!(refusal.mechanism, MechanismName::NULL);
+                assert_eq!(refusal.reason, "auth");
+                assert_eq!(refusal.status_code(), None);
+            }
+            other => panic!("expected HandshakeRefused, got {other:?}"),
         }
     }
 

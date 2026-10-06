@@ -28,6 +28,102 @@ fn accept_alice(peer: &omq_tokio::MechanismPeerInfo) -> bool {
 }
 
 #[tokio::test]
+async fn plain_refusal_stops_automatic_reconnect() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let server = Socket::new(
+        SocketType::Router,
+        Options::default().plain_server(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            false
+        }),
+    );
+    let endpoint = server.bind(auth_ep("refusal-reconnect")).await.unwrap();
+    let client = Socket::new(
+        SocketType::Dealer,
+        Options::default()
+            .plain_client("alice", "wrong")
+            .reconnect(omq_tokio::ReconnectPolicy::Fixed(Duration::from_millis(10))),
+    );
+    let mut monitor = client.monitor();
+    client.connect(endpoint).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(
+            monitor.recv().await.unwrap(),
+            omq_tokio::MonitorEvent::HandshakeFailed { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(1), monitor.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        stopped,
+        omq_tokio::MonitorEvent::ConnectStopped {
+            reason: omq_tokio::DisconnectReason::HandshakeRefused(refusal), ..
+        } if refusal.mechanism == omq_tokio::proto::greeting::MechanismName::PLAIN
+            && refusal.status_code() == Some(400)
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "refused credentials retried"
+    );
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn plain_temporary_auth_failure_reconnects_and_delivers() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let server = Socket::new(
+        SocketType::Pull,
+        Options {
+            mechanism: omq_tokio::MechanismSetup::PlainServer {
+                authenticator: omq_tokio::Authenticator::new_with_result(move |_| {
+                    if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                        omq_tokio::AuthenticationResult {
+                            status: omq_tokio::AuthenticationStatus::TemporaryFailure,
+                            ..omq_tokio::AuthenticationResult::allow()
+                        }
+                    } else {
+                        omq_tokio::AuthenticationResult::allow()
+                    }
+                }),
+            },
+            ..Options::default()
+        },
+    );
+    let endpoint = server.bind(auth_ep("temporary-reconnect")).await.unwrap();
+    let client = Socket::new(
+        SocketType::Push,
+        Options::default()
+            .plain_client("alice", "secret")
+            .reconnect(omq_tokio::ReconnectPolicy::Fixed(Duration::from_millis(10))),
+    );
+    client.connect(endpoint).await.unwrap();
+    client
+        .wait_connected(1, Duration::from_secs(2))
+        .await
+        .expect("temporary authentication failure must reconnect");
+    client.send(Message::single("recovered")).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), server.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Message::single("recovered")
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn plain_push_pull_roundtrip() {
     let server = Socket::new(
         SocketType::Pull,

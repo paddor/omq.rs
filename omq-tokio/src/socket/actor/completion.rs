@@ -145,8 +145,12 @@ impl SocketDriver {
         loop {
             let bytes = match result {
                 Ok(completion) => {
-                    let bytes = size_of::<PeerCompletion>()
-                        .saturating_add(completion.error.as_ref().map_or(0, String::len));
+                    let reason_bytes = match &completion.reason {
+                        DisconnectReason::Error(reason) => reason.len(),
+                        DisconnectReason::HandshakeRefused(refusal) => refusal.reason.len(),
+                        _ => 0,
+                    };
+                    let bytes = size_of::<PeerCompletion>().saturating_add(reason_bytes);
                     self.handle_peer_completion(completion).await;
                     bytes
                 }
@@ -221,9 +225,7 @@ impl SocketDriver {
         let completion = peer.completion.take().unwrap();
         self.handle_internal_event(InternalEvent::PeerClosed {
             peer_id,
-            reason: completion
-                .error
-                .map_or(DisconnectReason::PeerClosed, DisconnectReason::Error),
+            reason: completion.reason,
         })
         .await;
     }
@@ -394,7 +396,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 3,
-                error: None,
+                reason: DisconnectReason::PeerClosed,
                 stream_disconnect: StreamDisconnect::None,
             })
             .await;
@@ -481,7 +483,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 3,
-                error: Some("original wire failure".into()),
+                reason: DisconnectReason::Error("original wire failure".into()),
                 stream_disconnect: StreamDisconnect::None,
             })
             .await;
@@ -583,7 +585,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 1,
-                error: None,
+                reason: DisconnectReason::PeerClosed,
                 stream_disconnect: StreamDisconnect::Pending,
             })
             .await;
@@ -681,7 +683,7 @@ mod tests {
             assert!(drain.as_mut().poll(&mut context).is_ready());
         }
         counter.0.store(0, std::sync::atomic::Ordering::Relaxed);
-        publisher.complete(None).unwrap();
+        publisher.complete(DisconnectReason::PeerClosed).unwrap();
         assert!(
             counter.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
             "completion drain replaced the actual actor waker"
@@ -714,7 +716,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 0,
-                error: None,
+                reason: DisconnectReason::PeerClosed,
                 stream_disconnect: StreamDisconnect::Pending,
             })
             .await;
@@ -762,7 +764,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 0,
-                error: Some("setup failed".into()),
+                reason: DisconnectReason::Error("setup failed".into()),
                 stream_disconnect: StreamDisconnect::None,
             })
             .await;
@@ -787,7 +789,7 @@ mod tests {
             .handle_peer_completion(PeerCompletion {
                 peer_id: 7,
                 admitted_events: 0,
-                error: None,
+                reason: DisconnectReason::PeerClosed,
                 stream_disconnect: StreamDisconnect::None,
             })
             .await;

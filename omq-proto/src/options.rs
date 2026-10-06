@@ -193,7 +193,8 @@ pub struct Options {
     /// Identity used for ROUTER / DEALER / SERVER / PEER routing. Empty = auto.
     pub identity: Bytes,
 
-    /// Reconnection policy after a lost connection.
+    /// Reconnection policy after a lost connection. A peer's fatal handshake
+    /// ERROR stops automatic retries regardless of this policy.
     pub reconnect: ReconnectPolicy,
 
     /// ZMTP PING interval. `None` = heartbeats disabled.
@@ -244,6 +245,9 @@ pub struct Options {
     pub conflate: bool,
 
     /// ROUTER: fail `send` with `Error::Unroutable` for unknown identities.
+    /// Full destination queues apply send backpressure; `try_send` returns
+    /// `TrySendError::Full`. With this disabled, unknown destinations and
+    /// full destination queues silently drop complete messages.
     pub router_mandatory: bool,
 
     /// Behavior when the socket's send HWM is reached.
@@ -1159,6 +1163,7 @@ impl From<Bytes> for Options {
 }
 
 /// Reconnection policy applied after a lost connection on `connect()` sockets.
+/// Receiving a fatal handshake ERROR stops automatic retries under every policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReconnectPolicy {

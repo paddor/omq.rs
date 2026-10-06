@@ -67,39 +67,66 @@ impl SocketDriver {
                 self.handle_peer_event(peer_id, event).await;
             }
             InternalEvent::PeerClosed { peer_id, reason } => {
-                if let Some(peer) = self.peers.get(&peer_id)
-                    && peer.pending_handshake
-                    && let DisconnectReason::Error(reason_text) = &reason
-                {
-                    self.monitor.publish(MonitorEvent::HandshakeFailed {
-                        endpoint: peer.endpoint.clone(),
-                        peer_ident: peer.ident.clone(),
-                        reason: reason_text.clone(),
-                    });
+                self.handle_peer_closed(peer_id, reason).await;
+            }
+        }
+    }
+
+    async fn handle_peer_closed(&mut self, peer_id: u64, reason: DisconnectReason) {
+        let refused = matches!(reason, DisconnectReason::HandshakeRefused(_));
+        if let Some(peer) = self.peers.get(&peer_id)
+            && peer.pending_handshake
+        {
+            let reason_text = match &reason {
+                DisconnectReason::Error(text) => Some(text.clone()),
+                DisconnectReason::HandshakeRefused(refusal) => Some(refusal.to_string()),
+                _ => None,
+            };
+            if let Some(reason_text) = reason_text {
+                self.monitor.publish(MonitorEvent::HandshakeFailed {
+                    endpoint: peer.endpoint.clone(),
+                    peer_ident: peer.ident.clone(),
+                    reason: reason_text,
+                });
+            }
+        }
+        if refused
+            && let Some(peer) = self.peers.get(&peer_id)
+            && peer.is_client
+        {
+            self.monitor.publish(MonitorEvent::ConnectStopped {
+                endpoint: peer.endpoint.clone(),
+                reason: reason.clone(),
+            });
+        }
+        if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
+            if let Some(task) = peer.task.take() {
+                super::stop_peer_task(task).await;
+            }
+            if refused {
+                if peer.is_client {
+                    self.dialers
+                        .retain(|dialer| dialer.route_id != peer.route_id);
                 }
-                if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
-                    if let Some(task) = peer.task.take() {
-                        super::stop_peer_task(task).await;
-                    }
-                    if peer.is_client
-                        && !self.closing
-                        && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
-                    {
-                        let ep = peer.endpoint.clone();
-                        // Transport success does not reset backoff: READY does.
-                        let failed_attempts = if peer.ready {
-                            1
-                        } else {
-                            self.dialers
-                                .iter()
-                                .find(|dialer| dialer.route_id == peer.route_id)
-                                .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
-                                .saturating_add(1)
-                        };
-                        self.dialers.retain(|d| d.endpoint != ep);
-                        self.start_redial(ep, peer.options.clone(), failed_attempts);
-                    }
-                }
+                return;
+            }
+            if peer.is_client
+                && !self.closing
+                && !matches!(peer.options.reconnect, ReconnectPolicy::Disabled)
+            {
+                let ep = peer.endpoint.clone();
+                // Transport success does not reset backoff: READY does.
+                let failed_attempts = if peer.ready {
+                    1
+                } else {
+                    self.dialers
+                        .iter()
+                        .find(|dialer| dialer.route_id == peer.route_id)
+                        .map_or(0, |dialer| dialer.failed_attempts.load(Ordering::Relaxed))
+                        .saturating_add(1)
+                };
+                self.dialers.retain(|d| d.endpoint != ep);
+                self.start_redial(ep, peer.options.clone(), failed_attempts);
             }
         }
     }
@@ -786,7 +813,7 @@ pub(super) async fn inproc_peer_driver(
 ) {
     let mut completion = std::mem::take(&mut ctx.completion);
     inproc_peer_driver_body(inbox, data_inbox, in_rx, out, ctx, &mut completion).await;
-    let _ = completion.complete(None);
+    let _ = completion.complete(DisconnectReason::PeerClosed);
 }
 
 #[expect(clippy::too_many_lines)]
@@ -1087,7 +1114,7 @@ mod tests {
             .unwrap();
         let result = finished.await.unwrap();
         assert_eq!(result.admitted_events, 1);
-        assert!(result.error.is_none());
+        assert_eq!(result.reason, omq_proto::DisconnectReason::PeerClosed);
         assert!(outgoing.recv().await.is_none());
         assert!(matches!(
             events.recv().await.unwrap().1,
@@ -1173,7 +1200,10 @@ mod tests {
             }
             let completion = finished.await.unwrap();
             assert_eq!(completion.admitted_events, 3);
-            assert_eq!(completion.error.is_some(), mode == "abort");
+            assert_eq!(
+                matches!(completion.reason, omq_proto::DisconnectReason::Error(_)),
+                mode == "abort"
+            );
             assert!(matches!(events.recv().await.unwrap().1,
                 PeerEvent::Event(ZmtpEvent::Command(omq_proto::proto::Command::Unknown { name, .. }))
                     if name == "OLDER"));

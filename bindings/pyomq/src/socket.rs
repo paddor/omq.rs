@@ -652,6 +652,19 @@ fn monitor_event_to_dict<'py>(py: Python<'py>, ev: &MonitorEvent) -> PyResult<Bo
             d.set_item("endpoint", endpoint.to_string())?;
             d.set_item("attempt", attempt)?;
         }
+        MonitorEvent::ConnectStopped { endpoint, reason } => {
+            d.set_item("event", "connect_stopped")?;
+            d.set_item("endpoint", endpoint.to_string())?;
+            if let omq_tokio::DisconnectReason::HandshakeRefused(refusal) = reason {
+                d.set_item("reason", "handshake_refused")?;
+                d.set_item(
+                    "mechanism",
+                    refusal.mechanism.as_str().unwrap_or("<invalid>"),
+                )?;
+                d.set_item("refusal_reason", refusal.reason.as_str())?;
+                d.set_item("status_code", refusal.status_code())?;
+            }
+        }
         MonitorEvent::Disconnected { endpoint, peer, .. } => {
             d.set_item("event", "disconnected")?;
             d.set_item("endpoint", endpoint.to_string())?;
@@ -821,7 +834,7 @@ impl Socket {
                 return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
             }
             let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
-            self.send_message(py, omq_tokio::Message::with_group(group, bytes))?;
+            self.send_message(py, omq_tokio::Message::with_group(group, bytes), flags)?;
             return Ok(tracker);
         }
         let routing_id = conversions::routing_id_from_pyany(payload);
@@ -835,7 +848,7 @@ impl Socket {
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.send_message(py, msg)?;
+        self.send_message(py, msg, flags)?;
         Ok(tracker)
     }
 
@@ -858,7 +871,7 @@ impl Socket {
             return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
         }
         let (bytes, tracker) = conversions::payload_with_tracker(payload, copy, track)?;
-        self.send_message(py, omq_tokio::Message::with_group(group, bytes))?;
+        self.send_message(py, omq_tokio::Message::with_group(group, bytes), flags)?;
         Ok(tracker)
     }
 
@@ -882,7 +895,7 @@ impl Socket {
         if routing_id != 0 {
             msg = msg.with_routing_id(routing_id);
         }
-        self.send_message(py, msg)?;
+        self.send_message(py, msg, flags)?;
         Ok(tracker)
     }
 
@@ -900,12 +913,11 @@ impl Socket {
                 return Err(PyValueError::new_err("RADIO group send cannot use SNDMORE"));
             }
             let (msg, tracker) = conversions::radio_message_from_pyiterable(parts, copy, track)?;
-            self.send_message(py, msg)?;
+            self.send_message(py, msg, flags)?;
             return Ok(tracker);
         }
-        let _ = flags;
         let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
-        self.send_message(py, msg)?;
+        self.send_message(py, msg, flags)?;
         Ok(tracker)
     }
 
@@ -934,7 +946,7 @@ impl Socket {
             ));
         }
         let body = msg.part_bytes(0).expect("one-part message has a body");
-        self.send_message(py, omq_tokio::Message::with_group(group, body))?;
+        self.send_message(py, omq_tokio::Message::with_group(group, body), flags)?;
         Ok(tracker)
     }
 
@@ -948,9 +960,8 @@ impl Socket {
         copy: bool,
         track: bool,
     ) -> PyResult<Option<Py<PyAny>>> {
-        let _ = flags;
         let (msg, tracker) = conversions::message_from_pyiterable(parts, copy, track)?;
-        self.send_message(py, msg.with_routing_id(routing_id))?;
+        self.send_message(py, msg.with_routing_id(routing_id), flags)?;
         Ok(tracker)
     }
 
@@ -1229,7 +1240,7 @@ impl Socket {
 }
 
 impl Socket {
-    fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message) -> PyResult<()> {
+    fn send_message(&self, py: Python<'_>, msg: omq_tokio::Message, flags: i32) -> PyResult<()> {
         if matches!(
             self.inner.socket_type,
             omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
@@ -1239,6 +1250,7 @@ impl Socket {
                 "receive remaining multipart frames before sending".into(),
             )));
         }
+        let no_block = flags & crate::constants::NOBLOCK != 0;
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
         let fork_gen = FORK_GEN.load(Ordering::Acquire);
@@ -1256,7 +1268,7 @@ impl Socket {
         }
         let post_fork =
             self.inner.post_fork.swap(false, Ordering::AcqRel) || child_fork || parent_fork;
-        if post_fork {
+        if post_fork && !no_block {
             let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
             let wait = timeout.unwrap_or(Duration::from_secs(1));
             py.detach(|| {
@@ -1271,6 +1283,7 @@ impl Socket {
             Ok(()) => Ok(()),
             Err(TrySendError::Closed) => Err(map_err(PError::Closed)),
             Err(TrySendError::Error(e)) => Err(map_err(e)),
+            Err(TrySendError::Full(_)) if no_block => Err(timeout_err()),
             Err(TrySendError::Full(msg)) => py.detach(|| match timeout {
                 None => sock.send(msg).map_err(map_err),
                 Some(timeout) => {

@@ -1,5 +1,7 @@
 """CURVE client authentication tests."""
 
+import time
+
 import pyomq as zmq
 import pytest
 
@@ -100,6 +102,47 @@ def test_curve_auth_callback_reject(tcp_endpoint):
     finally:
         push.close()
         pull.close()
+        ctx.term()
+
+
+def test_curve_refusal_stops_retries_and_reports_status(tcp_endpoint):
+    attempts = []
+    ctx = zmq.Context()
+    server = ctx.socket(zmq.ROUTER)
+    client = ctx.socket(zmq.DEALER)
+    try:
+        _setup_curve(server, client)
+
+        def reject(peer):
+            attempts.append(peer.public_key)
+            return False
+
+        server.set_curve_auth(reject)
+        client.reconnect_ivl = 10
+        server.bind(tcp_endpoint)
+        endpoint = server.last_endpoint
+        monitor = client.monitor()
+        client.connect(endpoint)
+        events = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            event = dict(monitor.recv(timeout_ms=1000))
+            events.append(event["event"])
+            if event["event"] == "connect_stopped":
+                assert event["endpoint"] == endpoint.decode()
+                assert event["reason"] == "handshake_refused"
+                assert event["mechanism"] == "CURVE"
+                assert event["refusal_reason"] == "400"
+                assert event["status_code"] == 400
+                break
+        else:
+            pytest.fail("fatal refusal did not stop connection attempts")
+        assert "handshake_failed" in events
+        time.sleep(0.2)
+        assert len(attempts) == 1
+    finally:
+        client.close()
+        server.close()
         ctx.term()
 
 

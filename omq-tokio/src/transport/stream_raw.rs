@@ -43,7 +43,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
             &mut completion,
         )
         .await;
-        let _ = completion.complete(None);
+        let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
     });
     (
         ActorPeerDriverHandle {
@@ -187,7 +187,7 @@ mod tests {
             result.stream_disconnect,
             crate::engine::peer_completion::StreamDisconnect::Pending
         );
-        assert!(result.error.is_none());
+        assert_eq!(result.reason, omq_proto::DisconnectReason::PeerClosed);
         assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
         let PeerEvent::Event(ZmtpEvent::Message(message)) = event_inbox.recv().await.unwrap().1
         else {

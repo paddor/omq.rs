@@ -113,7 +113,7 @@ impl PlainMechanism {
         cmd: Command,
         out: &mut Vec<Command>,
     ) -> Result<MechanismStep> {
-        if let Some(err) = try_error_command(&cmd, "PLAIN") {
+        if let Some(err) = try_error_command(&cmd, super::MechanismName::PLAIN) {
             return Err(err);
         }
         match self {

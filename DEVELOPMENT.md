@@ -351,14 +351,15 @@ postfix=6 cores, performance governor, turbo off
 `omq-bench` and binding chart scripts read the repo-root `.chart_hw`
 automatically.
 
-### Main TCP Charts
+### Main Comparison Charts
 
 Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
 `doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
 `doc/charts/main_reqrep_tcp.svg` (REQ/REP latency). The MOM benchmark also
-feeds `doc/charts/main_mom_tcp.svg` (throughput) and
-`doc/charts/main_mom_latency_tcp.svg` (request/reply-like latency). The MOM
-charts also load Aeron UDP and iroh QUIC rows when present; zenoh uses TCP.
+feeds `doc/charts/main_mom_throughput.svg` and
+`doc/charts/main_mom_latency.svg`. Those charts include OMQ over TCP and native
+QUIC, plus Aeron over UDP and iroh over QUIC; zenoh uses TCP. The QUIC spin
+series appears only in latency.
 Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:
 
 ```sh

@@ -1,7 +1,7 @@
 use super::common::{
     self, C_AERON, C_GRPC, C_IROH, C_LIBZMQ, C_LIBZMQ_2T, C_NATS, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T,
-    C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_OMQ_SPIN, C_RABBITMQ, C_REDIS, C_RZMQ,
-    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyMap, ValMap,
+    C_OMQ_4T, C_OMQ_CT, C_OMQ_EXCLUSIVE, C_OMQ_MT, C_OMQ_QUIC, C_OMQ_SPIN, C_RABBITMQ, C_REDIS,
+    C_RZMQ, C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyMap, ValMap,
     draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
@@ -136,6 +136,18 @@ const MOM_IMPLS: &[Impl] = &[
         color: C_OMQ_SPIN,
     },
     Impl {
+        key: "omq-quic",
+        label: "OMQ / QUIC",
+        threads: "",
+        color: C_OMQ_QUIC,
+    },
+    Impl {
+        key: "omq-quic-spin50",
+        label: "OMQ / QUIC (50 μs spin)",
+        threads: "",
+        color: C_OMQ_SPIN,
+    },
+    Impl {
         key: "grpc-rust",
         label: "gRPC over HTTP/2",
         threads: "",
@@ -186,12 +198,41 @@ const MOM_UDP_IMPLS: &[Impl] = &[Impl {
     color: C_AERON,
 }];
 
-const MOM_QUIC_IMPLS: &[Impl] = &[Impl {
-    key: "iroh-quic-2proc",
-    label: "iroh / QUIC",
-    threads: "",
-    color: C_IROH,
-}];
+const MOM_QUIC_TPUT_IMPLS: &[Impl] = &[
+    Impl {
+        key: "omq-quic",
+        label: "OMQ / QUIC",
+        threads: "",
+        color: C_OMQ_QUIC,
+    },
+    Impl {
+        key: "iroh-quic-2proc",
+        label: "iroh / QUIC",
+        threads: "",
+        color: C_IROH,
+    },
+];
+
+const MOM_QUIC_LAT_IMPLS: &[Impl] = &[
+    Impl {
+        key: "omq-quic",
+        label: "OMQ / QUIC",
+        threads: "",
+        color: C_OMQ_QUIC,
+    },
+    Impl {
+        key: "omq-quic-spin50",
+        label: "OMQ / QUIC (50 μs spin)",
+        threads: "",
+        color: C_OMQ_SPIN,
+    },
+    Impl {
+        key: "iroh-quic-2proc",
+        label: "iroh / QUIC",
+        threads: "",
+        color: C_IROH,
+    },
+];
 
 fn merge_values(dst: &mut ValMap, src: ValMap) {
     for (size, values) in src {
@@ -203,13 +244,20 @@ fn mom_tcp_impls() -> Vec<Impl> {
     MOM_IMPLS
         .iter()
         .copied()
-        .filter(|imp| imp.key != "aeron-udp-2proc" && imp.key != "iroh-quic-2proc")
+        .filter(|imp| {
+            !matches!(
+                imp.key,
+                "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic" | "omq-quic-spin50"
+            )
+        })
         .collect()
 }
 
 fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuData>) {
-    let (mut tput, mut msgs, mut cpu) = load_tput("throughput", "tcp", None, &mom_tcp_impls());
-    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_IMPLS)] {
+    let mut tcp_impls = mom_tcp_impls();
+    tcp_impls.retain(|imp| imp.key != "omq-tokio-1t-spin50");
+    let (mut tput, mut msgs, mut cpu) = load_tput("throughput", "tcp", None, &tcp_impls);
+    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_TPUT_IMPLS)] {
         let (other_tput, other_msgs, other_cpu) = load_tput("throughput", transport, None, impls);
         merge_values(&mut tput, other_tput);
         merge_values(&mut msgs, other_msgs);
@@ -220,7 +268,7 @@ fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuDa
 
 fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
     let (mut lat, mut cpu) = load_latency("tcp", LAT_SIZES, &mom_tcp_impls());
-    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_IMPLS)] {
+    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_LAT_IMPLS)] {
         let (other_lat, other_cpu) = load_latency(transport, LAT_SIZES, impls);
         for (size, values) in other_lat {
             lat.entry(size).or_default().extend(values);
@@ -318,7 +366,7 @@ pub(crate) fn generate() {
     // Producer/consumer throughput across direct, RPC, and brokered transports.
     let (tput, msgs, cpu) = mom_throughput();
     if !tput.is_empty() {
-        let out = dir.join("main_mom_tcp.svg");
+        let out = dir.join("main_mom_throughput.svg");
         draw_throughput_dual_panel_brokered_with_versions(
             &out,
             "Producer/consumer throughput, loopback, one flow",
@@ -338,7 +386,7 @@ pub(crate) fn generate() {
     // Sequential request/reply-like latency across direct, RPC, and brokered transports.
     let (lat, cpu) = mom_latency();
     if !lat.is_empty() {
-        let out = dir.join("main_mom_latency_tcp.svg");
+        let out = dir.join("main_mom_latency.svg");
         draw_latency_brokered_with_versions(
             &out,
             "Sequential request/reply-like latency, loopback, one flow",

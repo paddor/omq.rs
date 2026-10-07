@@ -334,7 +334,7 @@ pub(crate) fn generate() {
     // Producer/consumer throughput across direct, RPC, and brokered transports.
     let (tput, msgs, cpu) = mom_throughput();
     if !tput.is_empty() {
-        let out = dir.join("main_mom_throughput.svg");
+        let out = dir.join("mom_throughput.svg");
         draw_throughput_dual_panel_brokered_with_versions(
             &out,
             "Producer/consumer throughput, loopback, one flow",
@@ -354,7 +354,7 @@ pub(crate) fn generate() {
     // Sequential request/reply-like latency across direct, RPC, and brokered transports.
     let (lat, cpu) = mom_latency();
     if !lat.is_empty() {
-        let out = dir.join("main_mom_latency.svg");
+        let out = dir.join("mom_latency.svg");
         draw_latency_brokered_with_versions(
             &out,
             "Sequential request/reply-like latency, loopback, one flow",

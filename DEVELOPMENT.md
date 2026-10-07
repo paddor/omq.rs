@@ -356,8 +356,8 @@ automatically.
 Refreshes `doc/charts/main_pushpull_tcp.svg` (PUSH/PULL throughput),
 `doc/charts/main_pubsub_tcp.svg` (PUB/SUB throughput), and
 `doc/charts/main_reqrep_tcp.svg` (REQ/REP latency). The MOM benchmark also
-feeds `doc/charts/main_mom_throughput.svg` and
-`doc/charts/main_mom_latency.svg`. Those charts include OMQ over TCP and native
+feeds `doc/charts/mom_throughput.svg` and
+`doc/charts/mom_latency.svg`. Those charts include OMQ over TCP and native
 QUIC, plus Aeron over UDP and iroh over QUIC; zenoh uses TCP. The QUIC spin
 series appears only in latency.
 Rebench omq impls only for PUSH/PULL and REQ/REP, then regenerate:

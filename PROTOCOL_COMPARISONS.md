@@ -45,13 +45,13 @@ every hop.
 ## Producer/Consumer Throughput
 
 <p align="center">
-  <img src="doc/charts/main_mom_throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+  <img src="doc/charts/mom_throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>
 
 ## Request/Reply-Like Latency
 
 <p align="center">
-  <img src="doc/charts/main_mom_latency.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
+  <img src="doc/charts/mom_latency.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
 </p>
 
 Lines show p99 round-trip latency. Whiskers span p50 to p99.9; values above

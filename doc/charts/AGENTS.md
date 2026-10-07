@@ -24,8 +24,8 @@ Data: `comparisons.jsonl`. External impls required.
 | file | impls |
 |------|-------|
 | `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
-| `main_mom_throughput.svg` | OMQ / TCP, OMQ / QUIC, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
-| `main_mom_latency.svg` | OMQ / TCP, OMQ / TCP (50 μs spin), OMQ / QUIC, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
+| `mom_throughput.svg` | OMQ / TCP, OMQ / QUIC, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
+| `mom_latency.svg` | OMQ / TCP, OMQ / TCP (50 μs spin), OMQ / QUIC, gRPC, RabbitMQ, NATS, Redis Streams, zenoh TCP, Aeron UDP, iroh QUIC |
 | `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, zmq.rs, rzmq, rzmq-iouring, gRPC Rust |
 | `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, zmq.rs, rzmq, rzmq-iouring |
 

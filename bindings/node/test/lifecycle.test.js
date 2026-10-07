@@ -11,8 +11,8 @@ test("initial DNS failures reject bind and connect", { timeout: 20000 }, async (
   const pull = new Pull({ linger: 0 });
   const push = new Push({ linger: 0 });
   try {
-    await assert.rejects(pull.bind("tcp://omq-no-such-host.invalid:0"), /resolv|lookup/i);
-    await assert.rejects(push.connect("tcp://omq-no-such-host.invalid:5555"), /resolv|lookup/i);
+    await assert.rejects(pull.bind("tcp://omq-no-such-host.invalid:0"), /resolv|lookup|no such host/i);
+    await assert.rejects(push.connect("tcp://omq-no-such-host.invalid:5555"), /resolv|lookup|no such host/i);
   } finally {
     push.close();
     pull.close();

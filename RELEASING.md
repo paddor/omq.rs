@@ -120,6 +120,11 @@ git tag -a pyomq-v0.21.0 -m "pyomq 0.21.0"
 git -c push.followTags=false push origin pyomq-v0.21.0
 ```
 
+If a wheel build fails before publication, fix the workflow on a PR, merge it,
+then dispatch `release-pyomq.yml` from `main` to retry the version in
+`pyproject.toml`. Keep the original release tag. Linux ARM wheels build on a
+native ARM runner with the official manylinux containers.
+
 `omq-rs` publishes to RubyGems from
 `.github/workflows/release-rubygems.yml`. Prepare a release by bumping
 `bindings/ruby/lib/omq/rs/version.rb`, updating

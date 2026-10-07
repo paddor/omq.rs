@@ -88,7 +88,7 @@ impl LegendTableLayout {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
-pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(56, 189, 248);
+pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(29, 78, 216);
 pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
@@ -517,7 +517,7 @@ fn draw_legend_table_with_versions(
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
         "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.24.0",
-        "omq-quic" | "omq-quic-spin50" => "omq-tokio v0.25.0",
+        "omq-quic" => "omq-tokio v0.25.0",
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
         "aeron-udp-2proc" => "Aeron v1.51.0",
@@ -692,7 +692,6 @@ fn comparison_impl_key<'a>(
     match (chart_key, transport) {
         ("omq-tokio-1t", "quic") | ("omq-tokio-1t-spin50", "quic") => None,
         ("omq-quic", "quic") => Some("omq-tokio-1t"),
-        ("omq-quic-spin50", "quic") => Some("omq-tokio-1t-spin50"),
         _ => Some(chart_key),
     }
 }

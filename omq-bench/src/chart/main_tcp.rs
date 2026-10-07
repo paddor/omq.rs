@@ -142,12 +142,6 @@ const MOM_IMPLS: &[Impl] = &[
         color: C_OMQ_QUIC,
     },
     Impl {
-        key: "omq-quic-spin50",
-        label: "OMQ / QUIC (50 μs spin)",
-        threads: "",
-        color: C_OMQ_SPIN,
-    },
-    Impl {
         key: "grpc-rust",
         label: "gRPC over HTTP/2",
         threads: "",
@@ -213,27 +207,6 @@ const MOM_QUIC_TPUT_IMPLS: &[Impl] = &[
     },
 ];
 
-const MOM_QUIC_LAT_IMPLS: &[Impl] = &[
-    Impl {
-        key: "omq-quic",
-        label: "OMQ / QUIC",
-        threads: "",
-        color: C_OMQ_QUIC,
-    },
-    Impl {
-        key: "omq-quic-spin50",
-        label: "OMQ / QUIC (50 μs spin)",
-        threads: "",
-        color: C_OMQ_SPIN,
-    },
-    Impl {
-        key: "iroh-quic-2proc",
-        label: "iroh / QUIC",
-        threads: "",
-        color: C_IROH,
-    },
-];
-
 fn merge_values(dst: &mut ValMap, src: ValMap) {
     for (size, values) in src {
         dst.entry(size).or_default().extend(values);
@@ -244,12 +217,7 @@ fn mom_tcp_impls() -> Vec<Impl> {
     MOM_IMPLS
         .iter()
         .copied()
-        .filter(|imp| {
-            !matches!(
-                imp.key,
-                "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic" | "omq-quic-spin50"
-            )
-        })
+        .filter(|imp| !matches!(imp.key, "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic"))
         .collect()
 }
 
@@ -268,7 +236,7 @@ fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuDa
 
 fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
     let (mut lat, mut cpu) = load_latency("tcp", LAT_SIZES, &mom_tcp_impls());
-    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_LAT_IMPLS)] {
+    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_TPUT_IMPLS)] {
         let (other_lat, other_cpu) = load_latency(transport, LAT_SIZES, impls);
         for (size, values) in other_lat {
             lat.entry(size).or_default().extend(values);

@@ -1,6 +1,6 @@
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_4T, C_OMQ_CT, C_OMQ_MT,
-    C_OMQ_SPIN, C_R0Z, C_RZMQ, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl,
+    C_OMQ_SPIN, C_R0Z, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl,
     draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
@@ -62,12 +62,6 @@ const PUSHPULL_IMPLS: &[Impl] = &[
         color: C_ZMQRS,
     },
     Impl {
-        key: "rzmq",
-        label: "rzmq",
-        threads: "",
-        color: C_RZMQ,
-    },
-    Impl {
         key: "rzmq-iouring",
         label: "rzmq-iouring",
         threads: "",
@@ -123,12 +117,6 @@ const REQREP_IMPLS: &[Impl] = &[
         label: "zmq.rs",
         threads: "",
         color: C_ZMQRS,
-    },
-    Impl {
-        key: "rzmq",
-        label: "rzmq",
-        threads: "",
-        color: C_RZMQ,
     },
     Impl {
         key: "rzmq-iouring",
@@ -198,12 +186,6 @@ const PUBSUB_IMPLS: &[Impl] = &[
         label: "zmq.rs",
         threads: "",
         color: C_ZMQRS,
-    },
-    Impl {
-        key: "rzmq",
-        label: "rzmq",
-        threads: "",
-        color: C_RZMQ,
     },
     Impl {
         key: "rzmq-iouring",

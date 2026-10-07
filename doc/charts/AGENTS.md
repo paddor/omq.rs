@@ -23,9 +23,9 @@ Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
-| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, omq MT, tmq, r0z-async, monocoque CT, zmq.rs, rzmq, rzmq-iouring |
-| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, tmq, r0z-async, monocoque CT, zmq.rs, rzmq, rzmq-iouring |
-| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO/2IO/3IO/4IO, tmq, r0z-async, monocoque CT + 1 worker, zmq.rs, rzmq, rzmq-iouring |
+| `main_pushpull_tcp.svg` | libzmq 1IO, omq 1IO, omq CT, omq MT, tmq, r0z-async, monocoque CT, zmq.rs, rzmq-iouring |
+| `main_reqrep_tcp.svg` | libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, tmq, r0z-async, monocoque CT, zmq.rs, rzmq-iouring |
+| `main_pubsub_tcp.svg` | libzmq 1IO, libzmq 2IO, omq 1IO/2IO/3IO/4IO, tmq, r0z-async, monocoque CT + 1 worker, zmq.rs, rzmq-iouring |
 
 PUSH/PULL sizes: 16B..8MiB (15 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 32 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.

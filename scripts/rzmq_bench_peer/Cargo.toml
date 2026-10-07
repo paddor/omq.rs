@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-rzmq = { version = "0.5.24", features = ["io-uring", "curve"] }
+rzmq = { version = "0.5.26", features = ["io-uring", "curve"] }
 tokio = { version = "1", features = ["full"] }

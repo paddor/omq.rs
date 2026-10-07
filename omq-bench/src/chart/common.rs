@@ -690,7 +690,7 @@ fn comparison_impl_key<'a>(
         return Some(chart_key);
     }
     match (chart_key, transport) {
-        ("omq-tokio-1t", "quic") | ("omq-tokio-1t-spin50", "quic") => None,
+        ("omq-tokio-1t" | "omq-tokio-1t-spin50", "quic") => None,
         ("omq-quic", "quic") => Some("omq-tokio-1t"),
         _ => Some(chart_key),
     }

@@ -1,8 +1,8 @@
 # Other Protocol Comparisons
 
 These charts compare OMQ/ZMTP with other messaging and RPC protocols over
-loopback. They measure one flow, not horizontal scaling. The chart filenames
-retain `tcp` for compatibility; Aeron uses UDP and iroh uses QUIC.
+loopback. They measure one flow, not horizontal scaling. Aeron uses UDP and
+iroh uses QUIC; OMQ's charts include TCP and QUIC.
 External benchmark adapters and run instructions remain on the `other-moms`
 branch.
 
@@ -47,13 +47,13 @@ every hop.
 ## Producer/Consumer Throughput
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/main_mom_tcp.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/mom_throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>
 
 ## Request/Reply-Like Latency
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/main_mom_latency_tcp.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/mom_latency.svg" alt="Sequential request/reply-like latency: direct, RPC, and brokered messaging" width="850">
 </p>
 
 Lines show p99 round-trip latency. Whiskers span p50 to p99.9; values above

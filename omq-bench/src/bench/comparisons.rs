@@ -116,7 +116,7 @@ static IMPLS: &[ImplDef] = &[
         prefix: "s",
         class: Some(ImplClass::Classic),
         main: false,
-        transports: &[Tcp, Ipc, Inproc],
+        transports: &[Tcp, Ipc, Inproc, Quic],
         inproc_tput_subcmd: "",
         inproc_lat_subcmd: "inproc-latency",
         inproc_pubsub_subcmd: "",

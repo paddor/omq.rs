@@ -122,3 +122,37 @@ N-to-1 PUSH/PULL over TCP.
 <p align="center">
   <img src="doc/charts/pubsub/curve_tcp.svg" alt="CURVE PUB/SUB throughput: TCP" width="850">
 </p>
+
+## QUIC vs CURVE/TCP
+
+These charts compare QUIC with CURVE over TCP on loopback.
+
+### PUSH/PULL Throughput
+
+<p align="center">
+  <img src="doc/charts/quic/pushpull.svg" alt="PUSH/PULL throughput: QUIC vs CURVE/TCP" width="850">
+</p>
+
+### PUSH Fan-Out
+
+<p align="center">
+  <img src="doc/charts/quic/fanout.svg" alt="PUSH fan-out: QUIC vs CURVE/TCP" width="850">
+</p>
+
+### PUSH Fan-In
+
+<p align="center">
+  <img src="doc/charts/quic/fanin.svg" alt="PUSH fan-in: QUIC vs CURVE/TCP" width="850">
+</p>
+
+### REQ/REP Latency
+
+<p align="center">
+  <img src="doc/charts/quic/reqrep.svg" alt="REQ/REP latency: QUIC vs CURVE/TCP" width="850">
+</p>
+
+### PUB/SUB Throughput
+
+<p align="center">
+  <img src="doc/charts/quic/pubsub.svg" alt="PUB/SUB throughput: QUIC vs CURVE/TCP" width="850">
+</p>

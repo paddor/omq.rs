@@ -91,6 +91,7 @@ impl LegendTableLayout {
 pub(crate) const C_LIBZMQ: RGBColor = RGBColor(250, 204, 21);
 pub(crate) const C_LIBZMQ_2T: RGBColor = RGBColor(245, 158, 11);
 pub(crate) const C_OMQ_1T: RGBColor = RGBColor(239, 68, 68);
+pub(crate) const C_OMQ_QUIC: RGBColor = RGBColor(29, 78, 216);
 pub(crate) const C_OMQ_SPIN: RGBColor = RGBColor(251, 146, 60);
 pub(crate) const C_OMQ_CT: RGBColor = RGBColor(251, 113, 133);
 pub(crate) const C_OMQ_MT: RGBColor = RGBColor(249, 115, 22);
@@ -531,6 +532,7 @@ fn draw_legend_table_with_versions(
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
         "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.24.0",
+        "omq-quic" => "omq-tokio v0.25.0",
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
         "aeron-udp-2proc" => "Aeron v1.51.0",
@@ -631,8 +633,7 @@ pub(crate) fn load_tput(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
-
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
     let mut tput: ValMap = BTreeMap::new();
     let mut msgs: ValMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -641,35 +642,39 @@ pub(crate) fn load_tput(
         if row.transport != transport || row.kind != kind {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let chart_key = impls.iter().find_map(|imp| {
+            (comparison_impl_key(imp.key, transport, map_omq_quic) == Some(row.impl_name.as_str()))
+                .then_some(imp.key)
+        });
+        let Some(chart_key) = chart_key else {
             continue;
-        }
+        };
         if let Some(p) = peers
             && row.peers != Some(p)
         {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let Some(v) = row.mbps {
             tput.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(v) = row.msgs_s {
             msgs.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), v);
+                .insert(chart_key.clone(), v);
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
@@ -693,6 +698,21 @@ pub(crate) fn load_tput(
         .collect();
 
     (tput, msgs, cpu)
+}
+
+fn comparison_impl_key<'a>(
+    chart_key: &'a str,
+    transport: &str,
+    map_omq_quic: bool,
+) -> Option<&'a str> {
+    if !map_omq_quic {
+        return Some(chart_key);
+    }
+    match (chart_key, transport) {
+        ("omq-tokio-1t" | "omq-tokio-1t-spin50", "quic") => None,
+        ("omq-quic", "quic") => Some("omq-tokio-1t"),
+        _ => Some(chart_key),
+    }
 }
 
 pub(crate) fn load_fairness(
@@ -760,7 +780,7 @@ pub(crate) fn load_latency(
 
     let path = jsonl::cache_dir().join("comparisons.jsonl");
     let rows: Vec<(usize, ComparisonRow)> = jsonl::load_jsonl(&path);
-    let keys: Vec<&str> = impls.iter().map(|i| i.key).collect();
+    let map_omq_quic = impls.iter().any(|imp| imp.key == "omq-quic");
 
     let mut lat: LatencyMap = BTreeMap::new();
     let mut latest: BTreeMap<(String, u64), ComparisonRow> = BTreeMap::new();
@@ -780,28 +800,32 @@ pub(crate) fn load_latency(
         {
             continue;
         }
-        if !keys.contains(&row.impl_name.as_str()) {
+        let chart_key = impls.iter().find_map(|imp| {
+            (comparison_impl_key(imp.key, transport, map_omq_quic) == Some(row.impl_name.as_str()))
+                .then_some(imp.key)
+        });
+        let Some(chart_key) = chart_key else {
             continue;
-        }
+        };
         if !sizes.contains(&row.msg_size) {
             continue;
         }
-        let key = (row.impl_name.clone(), row.msg_size);
+        let key = (chart_key.to_string(), row.msg_size);
         latest.insert(key, row);
     }
 
     let mut cpu_sums: BTreeMap<String, CpuAccum> = BTreeMap::new();
 
-    for row in latest.into_values() {
+    for ((chart_key, _), row) in latest {
         if let (Some(p50), Some(p99), Some(p999)) = (row.p50_us, row.p99_us, row.p999_us) {
             lat.entry(row.msg_size)
                 .or_default()
-                .insert(row.impl_name.clone(), LatencyEntry { p50, p99, p999 });
+                .insert(chart_key.clone(), LatencyEntry { p50, p99, p999 });
         }
         if let Some(elapsed) = row.elapsed
             && elapsed > 0.0
         {
-            let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            let e = cpu_sums.entry(chart_key).or_default();
             if let Some(req) = row.req_cpu_time {
                 e.add_sender(req, elapsed);
             }

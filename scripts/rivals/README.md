@@ -6,8 +6,8 @@ receiver-side timed windows. The server acknowledges each round after
 consuming all sent messages. Latency warms up for 2,000 exchanges (200,000
 for Aeron's JVM), then measures 10,000 client-observed round trips with one
 request outstanding.
-Throughput covers 16 B through 8 MiB at the 15 sizes in `main_mom_tcp.svg`;
-latency covers the six sizes in `main_mom_latency_tcp.svg`. The wrapper appends
+Throughput covers 16 B through 8 MiB at the 15 sizes in `mom_throughput.svg`;
+latency covers the six sizes in `mom_latency.svg`. The wrapper appends
 one row per requested size only after every case in that invocation passes.
 
 | implementation key | link | workload |

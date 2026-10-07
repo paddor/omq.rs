@@ -25,9 +25,9 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - name: Disable local CPU rustflags
+      - name: Disable local Cargo configuration
         shell: bash
-        run: rm -f .cargo/config.toml
+        run: rm -f .cargo/config.toml bindings/pyomq/.cargo/config.toml
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -54,9 +54,9 @@ jobs:
             python_arch: arm64
     steps:
       - uses: actions/checkout@v7
-      - name: Disable local CPU rustflags
+      - name: Disable local Cargo configuration
         shell: bash
-        run: rm -f .cargo/config.toml
+        run: rm -f .cargo/config.toml bindings/pyomq/.cargo/config.toml
       - uses: actions/setup-python@v6
         with:
           python-version: 3.14
@@ -85,8 +85,8 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@v7
-      - name: Disable local CPU rustflags
-        run: rm -f .cargo/config.toml
+      - name: Disable local Cargo configuration
+        run: rm -f .cargo/config.toml bindings/pyomq/.cargo/config.toml
       - uses: actions/setup-python@v6
         with:
           python-version: 3.x
@@ -107,8 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Disable local CPU rustflags
-        run: rm -f .cargo/config.toml
+      - name: Disable local Cargo configuration
+        run: rm -f .cargo/config.toml bindings/pyomq/.cargo/config.toml
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist

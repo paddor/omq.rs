@@ -18,6 +18,8 @@ pub(crate) struct Lifecycle {
     pending: Mutex<Pending>,
     changed: StateSignal,
     receive: futures::task::AtomicWaker,
+    #[cfg(feature = "dart")]
+    endpoint: std::sync::OnceLock<Arc<super::signal::DataSignal>>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,8 @@ pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
         pending: Mutex::new(Pending::default()),
         changed: StateSignal::new(),
         receive: futures::task::AtomicWaker::new(),
+        #[cfg(feature = "dart")]
+        endpoint: std::sync::OnceLock::new(),
     });
     (
         Sender::Owned {
@@ -100,6 +104,10 @@ impl Sender {
         drop(old);
         lifecycle.changed.notify_changed();
         lifecycle.receive.wake();
+        #[cfg(feature = "dart")]
+        if let Some(signal) = lifecycle.endpoint.get() {
+            signal.mark();
+        }
         Ok(())
     }
 
@@ -139,6 +147,13 @@ impl Sender {
 }
 
 impl Receiver {
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&self, signal: Arc<super::signal::DataSignal>) {
+        if let Self::Owned { lifecycle, .. } = self {
+            let _ = lifecycle.endpoint.set(signal);
+        }
+    }
+
     pub(crate) async fn recv_lifecycle(&mut self) -> Option<PeerDriverCommand> {
         let Self::Owned { lifecycle, .. } = self else {
             return futures::future::pending().await;

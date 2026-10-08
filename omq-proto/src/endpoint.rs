@@ -69,6 +69,9 @@ pub enum Endpoint {
     /// Uses ALPN `omq-zmtp/1`. Never compressed.
     #[cfg(feature = "quic")]
     Quic { host: Host, port: u16 },
+    /// `dart://host:port` reliable ordered OMQ messages over UDP.
+    #[cfg(feature = "dart")]
+    Dart { host: Host, port: u16 },
 }
 
 /// TCP / UDP host specification: either an IP address or a DNS name.
@@ -168,6 +171,8 @@ fn parse_carrier(scheme: &str, rest: &str, original: &str) -> Option<Result<Endp
         "wss" => parse_ws(rest, true),
         #[cfg(feature = "quic")]
         "quic" => parse_host_port(rest).map(|(host, port)| Endpoint::Quic { host, port }),
+        #[cfg(feature = "dart")]
+        "dart" => parse_host_port(rest).map(|(host, port)| Endpoint::Dart { host, port }),
         _ => return None,
     })
 }
@@ -194,6 +199,8 @@ impl fmt::Display for Endpoint {
             Self::Lz4Ws { host, port, path } => write!(f, "lz4+ws://{host}:{port}{path}"),
             #[cfg(feature = "quic")]
             Self::Quic { host, port } => write!(f, "quic://{host}:{port}"),
+            #[cfg(feature = "dart")]
+            Self::Dart { host, port } => write!(f, "dart://{host}:{port}"),
         }
     }
 }
@@ -365,6 +372,8 @@ impl Endpoint {
             Endpoint::Lz4Ws { .. } => "lz4+ws",
             #[cfg(feature = "quic")]
             Endpoint::Quic { .. } => "quic",
+            #[cfg(feature = "dart")]
+            Endpoint::Dart { .. } => "dart",
         }
     }
 }

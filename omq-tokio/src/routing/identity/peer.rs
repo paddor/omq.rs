@@ -383,6 +383,8 @@ impl PeerRoutes {
             };
             match result {
                 Ok(()) => return Ok(Ok(())),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(error)) => return Err(error),
                 Err(SendPipeError::Full(message)) => {
                     return Ok(Err(SendRetry::Full(message, space)));
                 }

@@ -1,10 +1,10 @@
 //! Two-process throughput peer for zeromq (zmq.rs).
 //!
 //! Usage:
-//!   zmqrs_bench_peer push <addr> <msg_size_bytes>
-//!   zmqrs_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
-//!   zmqrs_bench_peer rep  <addr> <msg_size_bytes>
-//!   zmqrs_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
+//!   omq_zmqrs_bench_peer push <addr> <msg_size_bytes>
+//!   omq_zmqrs_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+//!   omq_zmqrs_bench_peer rep  <addr> <msg_size_bytes>
+//!   omq_zmqrs_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
 //!
 //! <addr>: a port number (→ tcp://127.0.0.1:<port>) or a full ZMQ address
 //!         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15655).
@@ -145,12 +145,12 @@ async fn main() {
             run_multi_push(&addr, size, count).await;
         }
         _ => {
-            eprintln!("usage: zmqrs_bench_peer push <addr> <size>");
-            eprintln!("       zmqrs_bench_peer pull <addr> <size> <duration_secs>");
-            eprintln!("       zmqrs_bench_peer pub <addr> <size>");
-            eprintln!("       zmqrs_bench_peer sub <addr> <size> <duration_secs>");
-            eprintln!("       zmqrs_bench_peer rep <addr> <size>");
-            eprintln!("       zmqrs_bench_peer req <addr> <size> <iterations> <warmup>");
+            eprintln!("usage: omq_zmqrs_bench_peer push <addr> <size>");
+            eprintln!("       omq_zmqrs_bench_peer pull <addr> <size> <duration_secs>");
+            eprintln!("       omq_zmqrs_bench_peer pub <addr> <size>");
+            eprintln!("       omq_zmqrs_bench_peer sub <addr> <size> <duration_secs>");
+            eprintln!("       omq_zmqrs_bench_peer rep <addr> <size>");
+            eprintln!("       omq_zmqrs_bench_peer req <addr> <size> <iterations> <warmup>");
             eprintln!("<addr>: port number or full ZMQ address (tcp:// ipc://)");
             std::process::exit(1);
         }

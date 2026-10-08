@@ -497,7 +497,12 @@ fn inproc_port_sink(
             let recv_signal = socket.spsc.recv_signal.clone();
             let blocking_waker = socket.spsc.blocking_recv_waker.clone();
             let space = Arc::new(StateSignal::new());
-            PeerLifecycle::new(socket).register_tcp_consumer(consumer, space.clone(), peer_id);
+            PeerLifecycle::new(socket).register_tcp_consumer(
+                consumer,
+                space.clone(),
+                peer_id,
+                false,
+            );
             crate::engine::RecvSink::Yring(crate::engine::YringSink {
                 producer,
                 signal: Box::new(move || {
@@ -945,7 +950,7 @@ fn attach_yring_recv_bypass(
                 }),
                 space: space.clone(),
             });
-            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id);
+            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id, false);
             sink
         });
 

@@ -12,6 +12,7 @@ cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
 cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
 cargo run --release -p omq-bench -- chart zstd      # Zstd compression
+cargo run --release -p omq-bench -- chart quinn-datagram # raw Quinn DATAGRAM
 ```
 
 A chart refresh without new benchmarks just re-renders existing data.
@@ -118,6 +119,60 @@ Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
 `pushpull/zstd_tcp.svg` uses the same sizes, measured links, structural JSON,
 and 2 KiB dictionary setup as the LZ4 chart, at Zstd level 1.
 Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
+
+## Standalone Quinn DATAGRAM charts
+
+Data: `quinn-datagram.jsonl`. Outputs:
+`quinn-datagram/{throughput,latency}.svg`.
+These measure the raw Quinn API, without OMQ sockets. Both series use verified
+TLS 1.3/AES-128-GCM, default Cubic, and one current-thread runtime per process.
+The series compare the stock Tokio socket with a speculative UDP adapter using
+a 50 us IO spin budget. Select non-profiled inline runs with a spawned application
+task, zero application spin, reactor interval 61, a 256-message/64 KiB drain
+budget, and 3-second throughput windows. Latency requires 100,000 measured and
+20,000 warmup exchanges with zero timeouts. Plot the latest eligible row per
+size/series, with each latency point and its p50-to-p99.9 whiskers from the same
+row. Exploratory runtime, batching, and shorter runs are excluded.
+
+## Reliable Dart charts
+
+Data: `dart.jsonl`. Outputs: `dart/{scattergather,clientserver}.svg`.
+Select Dart protocol version 1, LAN/adaptive as separate series, with TCP from the
+matched runner. Exclude profiled rows, other spin budgets, verification
+failures, diagnostic sample captures, borrowed-runtime experiments, and
+mismatched workload profiles. Dart requires the default 256-message
+receive/retention window; other windows are recorded experiments.
+Throughput requires 3-second windows; RTT
+requires 100,000 measured and 200,000 warmup exchanges, with size order
+rotated between repeats so the first size does not always absorb startup.
+Use the median of the latest three eligible runs from the same binary SHA-256.
+Latency whiskers use p50/p99.9 from the selected median-p99 run. The runner
+prints all individual values and each range. Migrated rows retain the predecessor
+version in `experimental_wire_version`. Original versions 1-5 are incompatible
+experiments and have no Dart wire version. Versions 6-8 are mapped to Dart
+version 1 for chart selection; their original binaries and measurements remain
+unchanged. Original version 6 supports the current small-message format;
+large sizes require original version 7 or newer. Each size still requires
+its own complete three-run cohort.
+Use sizes 16 B, 64 B, 256 B, 512 B, 1 KiB, 4 KiB, and 16 KiB. The RTT Y axis is linear from
+1 to 100 us, with ticks at 1 us and multiples of 10 us. Whiskers above 100 us
+end at the axis limit and show a triangle and their measured p99.9 value.
+When p99 itself exceeds the limit, clip its plotted position and label all
+three measured percentiles. Boundary labels face inward so they stay visible.
+Labels are `OMQ / TCP` (red), `OMQ / Dart-LAN` and
+`OMQ / Dart-adaptive` (different orange shades), and `Aeron v1.53.3 / UDP`.
+Every series uses the thread label `1 IO`.
+Throughput uses one panel across all seven sizes, with two lines per
+implementation: dashed messages/s on the left axis and solid GB/s on the
+right axis.
+
+The Aeron series reads `dart-aeron.jsonl`: Aeron 1.53.3, shared driver,
+verified delivery, and explicitly pinned IO/app cores matching OMQ. Require
+three independent JVM pairs with the same class/JAR digest and placement.
+Throughput measures 3 seconds after 3 seconds of JVM warmup, with a 2-second
+verified drain. RTT measures 100,000 exchanges after 200,000 JVM warmup
+exchanges. Select the median throughput or median-p99 run; latency whiskers
+stay with that run. JVM warmup is excluded from the measurements.
 
 ## OMQ runtime modes
 

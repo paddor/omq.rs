@@ -28,6 +28,7 @@ lz4 = ["dep:lz4rip"]
 zstd = ["dep:zrip"]
 ws = []
 quic = []
+dart = []
 soak = []
 
 [dependencies]
@@ -79,3 +80,19 @@ path = "tests/codec_composition.rs"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[target.'cfg(target_pointer_width = "64")'.dev-dependencies]
+loom = "0.7"
+
+[target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
+loom = "0.7"
+
+[[test]]
+name = "omq_proto_dart"
+path = "tests/dart.rs"
+required-features = ["dart"]
+
+[[test]]
+name = "omq_proto_loom_dart"
+path = "tests/loom_dart.rs"
+required-features = ["dart"]

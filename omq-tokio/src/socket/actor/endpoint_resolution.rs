@@ -87,6 +87,10 @@ impl Drop for PendingEndpoint {
 }
 
 pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
+    #[cfg(feature = "dart")]
+    if let Endpoint::Dart { host, .. } = endpoint {
+        return matches!(host, Host::Name(_));
+    }
     if endpoint.is_tcp_family() {
         return matches!(
             endpoint.underlying_tcp(),
@@ -117,6 +121,18 @@ pub(super) fn needs_dns(endpoint: &Endpoint) -> bool {
 }
 
 async fn bind_address(endpoint: Endpoint) -> Result<Endpoint> {
+    #[cfg(feature = "dart")]
+    if let Endpoint::Dart {
+        host: Host::Name(host),
+        port,
+    } = &endpoint
+    {
+        let address = first(host, *port).await?;
+        return Ok(Endpoint::Dart {
+            host: Host::Ip(address.ip()),
+            port: *port,
+        });
+    }
     if endpoint.is_tcp_family() {
         let Endpoint::Tcp {
             host: Host::Name(host),
@@ -247,6 +263,10 @@ impl EndpointTask {
             let result = match self.kind {
                 Kind::Bind => bind_address(self.endpoint.clone()).await,
                 Kind::Connect => {
+                    #[cfg(feature = "dart")]
+                    if matches!(self.endpoint, Endpoint::Dart { .. }) {
+                        return bind_address(self.endpoint.clone()).await;
+                    }
                     super::super::dispatch::preflight_connect_endpoint_resolution(&self.endpoint)
                         .await
                         .map(|()| self.endpoint.clone())
@@ -324,9 +344,36 @@ impl SocketDriver {
         }
         match (ack, result) {
             (Ack::Bind(ack), Ok(resolved)) => {
+                #[cfg(feature = "dart")]
+                if matches!(resolved.endpoint, Endpoint::Dart { .. }) {
+                    let _ = ack.send(
+                        self.start_dart(
+                            resolved.endpoint,
+                            pending.original.clone(),
+                            pending.options.clone(),
+                            false,
+                        )
+                        .await,
+                    );
+                    return;
+                }
                 let _ = ack.send(self.bind(resolved.endpoint, pending.options.clone()).await);
             }
             (Ack::Connect(ack), Ok(resolved)) => {
+                #[cfg(feature = "dart")]
+                if matches!(resolved.endpoint, Endpoint::Dart { .. }) {
+                    let _ = ack.send(
+                        self.start_dart(
+                            resolved.endpoint,
+                            pending.original.clone(),
+                            pending.options.clone(),
+                            true,
+                        )
+                        .await
+                        .map(|_| ()),
+                    );
+                    return;
+                }
                 if !self.should_ignore_duplicate_connect(&resolved.endpoint) {
                     self.start_dial_with_deadline(
                         resolved.endpoint,

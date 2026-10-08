@@ -49,6 +49,8 @@ pub(crate) enum SendPipeMode {
 pub(crate) enum SendPipeError {
     Full(Message),
     Closed(Message),
+    #[cfg(feature = "dart")]
+    Invalid(omq_proto::Error),
 }
 
 #[derive(Debug)]
@@ -91,6 +93,8 @@ enum SendPipeConsumerInner {
 #[derive(Debug)]
 pub(crate) struct SendPipeProducer {
     inner: SendPipeProducerInner,
+    #[cfg(feature = "dart")]
+    dart: Option<omq_proto::SocketType>,
     direct_slot: Option<Arc<PeerTransmitSlot>>,
     data_signal: Arc<DataSignal>,
     space_available: Arc<StateSignal>,
@@ -134,6 +138,8 @@ pub(crate) fn send_pipe_with_mode(
     (
         SendPipeProducer {
             inner: producer,
+            #[cfg(feature = "dart")]
+            dart: None,
             direct_slot: None,
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
@@ -164,6 +170,8 @@ pub(crate) fn peer_send_pipe(
     (
         SendPipeProducer {
             inner: SendPipeProducerInner::Peer(producer),
+            #[cfg(feature = "dart")]
+            dart: None,
             direct_slot: None,
             data_signal: data_signal.clone(),
             space_available: space_available.clone(),
@@ -183,6 +191,8 @@ pub(crate) fn peer_send_pipe(
 pub(crate) fn inproc_send_pipe(sender: crate::transport::inproc::InprocSender) -> SendPipeProducer {
     SendPipeProducer {
         inner: SendPipeProducerInner::Inproc(sender),
+        #[cfg(feature = "dart")]
+        dart: None,
         direct_slot: None,
         data_signal: Arc::new(DataSignal::new()),
         space_available: Arc::new(StateSignal::new()),
@@ -191,6 +201,21 @@ pub(crate) fn inproc_send_pipe(sender: crate::transport::inproc::InprocSender) -
 }
 
 impl SendPipeProducer {
+    #[cfg(feature = "dart")]
+    pub(crate) fn set_dart(&mut self, socket_type: omq_proto::SocketType) {
+        self.dart = Some(socket_type);
+        let capacity = match &self.inner {
+            SendPipeProducerInner::Queue(queue) => Some(queue.capacity()),
+            SendPipeProducerInner::Peer(peer) => Some(peer.max_messages()),
+            _ => None,
+        };
+        if let Some(capacity) = capacity {
+            self.data_signal
+                .dart_admission
+                .get_or_init(|| omq_proto::dart::AdmissionCounter::new(capacity));
+        }
+    }
+
     pub(crate) fn set_direct_slot(&mut self, slot: Arc<PeerTransmitSlot>) {
         assert!(matches!(self.inner, SendPipeProducerInner::Peer(_)));
         self.direct_slot = Some(slot);
@@ -202,6 +227,8 @@ impl SendPipeProducer {
         };
         peer.register().map(|producer| Self {
             inner: SendPipeProducerInner::Peer(producer),
+            #[cfg(feature = "dart")]
+            dart: self.dart,
             direct_slot: self.direct_slot.clone(),
             data_signal: self.data_signal.clone(),
             space_available: self.space_available.clone(),
@@ -237,6 +264,45 @@ impl SendPipeProducer {
     }
 
     pub(crate) fn try_send_prepared(
+        &mut self,
+        msg: Message,
+        preparation: SendPreparation,
+    ) -> core::result::Result<(), SendPipeError> {
+        #[cfg(feature = "dart")]
+        if let Some(socket_type) = self.dart {
+            omq_proto::dart::validate_message(
+                socket_type,
+                &msg,
+                matches!(preparation, SendPreparation::StripIdentity),
+            )
+            .map_err(SendPipeError::Invalid)?;
+        }
+        #[cfg(feature = "dart")]
+        let admitted = if let Some(counter) = self.data_signal.dart_admission.get() {
+            if counter.acquire(1) == 0 {
+                return Err(if counter.is_closed() {
+                    SendPipeError::Closed(msg)
+                } else {
+                    SendPipeError::Full(msg)
+                });
+            }
+            true
+        } else {
+            false
+        };
+        let result = self.try_send_prepared_inner(msg, preparation);
+        #[cfg(feature = "dart")]
+        if admitted && result.is_err() {
+            self.data_signal
+                .dart_admission
+                .get()
+                .expect("DART admission")
+                .release(1);
+        }
+        result
+    }
+
+    fn try_send_prepared_inner(
         &mut self,
         msg: Message,
         preparation: SendPreparation,
@@ -296,6 +362,60 @@ impl SendPipeProducer {
         messages: &mut VecDeque<Message>,
         max: usize,
     ) -> core::result::Result<usize, SendPipeError> {
+        #[cfg(feature = "dart")]
+        if matches!(self.inner, SendPipeProducerInner::Queue(_))
+            && self.data_signal.dart_admission.get().is_some()
+        {
+            let requested = max.min(messages.len());
+            if requested == 0 {
+                return Ok(0);
+            }
+            if let Some(socket_type) = self.dart {
+                for message in messages.iter().take(requested) {
+                    omq_proto::dart::validate_message(socket_type, message, false)
+                        .map_err(SendPipeError::Invalid)?;
+                }
+            }
+            let counter = self
+                .data_signal
+                .dart_admission
+                .get()
+                .expect("DART admission");
+            let count = counter.acquire(requested);
+            if count == 0 {
+                let message = messages.pop_front().expect("requested message");
+                return Err(if counter.is_closed() {
+                    SendPipeError::Closed(message)
+                } else {
+                    SendPipeError::Full(message)
+                });
+            }
+            let result = self.try_send_many_inner(messages, count);
+            let unused = count - result.as_ref().copied().unwrap_or(0);
+            if unused != 0 {
+                self.data_signal
+                    .dart_admission
+                    .get()
+                    .expect("DART admission")
+                    .release(unused);
+            }
+            return result;
+        }
+        self.try_send_many_inner(messages, max)
+    }
+
+    fn try_send_many_inner(
+        &mut self,
+        messages: &mut VecDeque<Message>,
+        max: usize,
+    ) -> core::result::Result<usize, SendPipeError> {
+        #[cfg(feature = "dart")]
+        if let Some(socket_type) = self.dart {
+            for message in messages.iter().take(max) {
+                omq_proto::dart::validate_message(socket_type, message, false)
+                    .map_err(SendPipeError::Invalid)?;
+            }
+        }
         if matches!(self.inner, SendPipeProducerInner::Inproc(_)) {
             let mut count = 0usize;
             while count < max {
@@ -405,6 +525,15 @@ impl SendPipeProducer {
     }
 
     pub(crate) fn is_below_lwm(&self) -> bool {
+        #[cfg(feature = "dart")]
+        if self
+            .data_signal
+            .dart_admission
+            .get()
+            .is_some_and(|counter| counter.available() == 0)
+        {
+            return false;
+        }
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.ready(),
             SendPipeProducerInner::Queue(producer) => {
@@ -416,6 +545,10 @@ impl SendPipeProducer {
     }
 
     pub(crate) fn space_available(&self) -> Arc<StateSignal> {
+        #[cfg(feature = "dart")]
+        if self.dart.is_some() {
+            return self.space_available.clone();
+        }
         match &self.inner {
             SendPipeProducerInner::Peer(peer) => peer.space(),
             SendPipeProducerInner::Inproc(sender) => sender.space(),
@@ -439,6 +572,19 @@ impl Drop for SendPipeProducer {
 }
 
 impl SendPipeConsumer {
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&self, signal: Arc<DataSignal>) {
+        self.data_signal.forward_to(signal);
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_acknowledge(&self, count: usize) {
+        if let Some(counter) = self.data_signal.dart_admission.get() {
+            counter.release(count);
+            self.space_available.notify_changed();
+        }
+    }
+
     pub(crate) fn needs_drain(&self) -> bool {
         !self.is_empty() || self.is_disconnected() || !self.data_signal.is_idle()
     }
@@ -544,6 +690,10 @@ impl SendPipeConsumer {
 
 impl Drop for SendPipeConsumer {
     fn drop(&mut self) {
+        #[cfg(feature = "dart")]
+        if let Some(counter) = self.data_signal.dart_admission.get() {
+            counter.close();
+        }
         match &mut self.inner {
             SendPipeConsumerInner::Peer(peer) => peer.close(),
             SendPipeConsumerInner::Queue(consumer) => consumer.close(),
@@ -560,6 +710,65 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_drain_keeps_send_admission_until_ack() {
+        let (mut tx, mut rx) = send_pipe(2);
+        tx.set_dart(omq_proto::SocketType::Scatter);
+        tx.try_send(Message::single("first")).unwrap();
+        tx.try_send(Message::single("second")).unwrap();
+        let mut staged = Vec::with_capacity(2);
+        assert_eq!(rx.drain_into(&mut staged, 2, 2048), 2);
+        assert!(matches!(
+            tx.try_send(Message::single("third")),
+            Err(SendPipeError::Full(_))
+        ));
+        rx.dart_acknowledge(1);
+        tx.try_send(Message::single("third")).unwrap();
+        drop(rx);
+        assert!(matches!(
+            tx.try_send(Message::single("fourth")),
+            Err(SendPipeError::Closed(_))
+        ));
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_full_window_still_rejects_invalid_bodies_before_admission() {
+        let (mut tx, _rx) = send_pipe(1);
+        tx.set_dart(omq_proto::SocketType::Scatter);
+        tx.try_send(Message::single("first")).unwrap();
+        assert!(matches!(
+            tx.try_send(Message::from_slice(&[7; 1025])),
+            Err(SendPipeError::Invalid(_))
+        ));
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_bulk_admits_only_the_available_retention_prefix() {
+        let (mut tx, mut rx) = send_pipe(4);
+        tx.set_dart(omq_proto::SocketType::Scatter);
+        let mut messages = VecDeque::from([
+            Message::single("a"),
+            Message::single("b"),
+            Message::single("c"),
+        ]);
+        assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 3);
+        let mut staged = Vec::with_capacity(4);
+        assert_eq!(rx.drain_into(&mut staged, 4, 4096), 3);
+        messages.extend([
+            Message::single("d"),
+            Message::single("e"),
+            Message::single("f"),
+        ]);
+        assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 1);
+        assert_eq!(messages.len(), 2);
+        rx.dart_acknowledge(2);
+        assert_eq!(tx.try_send_many(&mut messages, 3).unwrap(), 2);
+        assert!(messages.is_empty());
+    }
 
     #[tokio::test]
     async fn data_ready_rearms_until_pipe_drains() {

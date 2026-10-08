@@ -1,6 +1,8 @@
 //! Socket actor: owns per-socket state, multiplexes commands + internal events.
 
 mod completion;
+#[cfg(feature = "dart")]
+mod dart;
 mod dialer;
 mod endpoint_resolution;
 mod endpoints;
@@ -124,6 +126,8 @@ pub(crate) enum CloseLinger {
 /// Events produced inside the driver (listeners accepting, connections
 /// emitting ZMTP events, etc.) and funnelled through one shared mpsc.
 enum InternalEvent {
+    #[cfg(feature = "dart")]
+    DartReady(crate::transport::dart::worker::ReadyPeer),
     Accepted {
         conn: AnyConn,
         endpoint: Endpoint,
@@ -231,6 +235,10 @@ struct PendingReceive {
 /// The socket actor.
 pub(crate) struct SocketDriver {
     socket_type: SocketType,
+    #[cfg(feature = "dart")]
+    pub(crate) dart: Arc<crate::transport::dart::SocketState>,
+    #[cfg(feature = "dart")]
+    dart_endpoints: Vec<dart::Entry>,
     options: Options,
     cmd_rx: mpsc::Receiver<SocketCommand>,
     recv_tx: Arc<super::recv::SharedRecvPipe>,
@@ -331,6 +339,13 @@ impl SocketDriver {
             .map(Arc::new);
         Self {
             socket_type,
+            #[cfg(feature = "dart")]
+            dart: Arc::new(crate::transport::dart::SocketState::new(
+                options.dart,
+                socket_type,
+            )),
+            #[cfg(feature = "dart")]
+            dart_endpoints: Vec::new(),
             setup_admission: crate::transport::setup::Admission::new(
                 options.max_pending_handshakes,
             ),
@@ -513,32 +528,8 @@ impl SocketDriver {
                 compression,
                 ack,
             } => {
-                let options = self.capture_endpoint_options(compression);
-                if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
-                    let _ = ack.send(Err(Error::Protocol(
-                        "STREAM sockets only support tcp:// endpoints".into(),
-                    )));
-                } else if matches!(endpoint, Endpoint::Udp { .. }) {
-                    let res = self.start_dial_udp(endpoint).await;
-                    let _ = ack.send(res);
-                } else if let Err(e) = reject_encrypted_inproc(&endpoint, &options.mechanism) {
-                    let _ = ack.send(Err(e));
-                } else if let Err(e) = self.validate_setup_options(&endpoint, &options) {
-                    let _ = ack.send(Err(e));
-                } else if endpoint_resolution::needs_dns(&endpoint) {
-                    self.start_endpoint_resolution(
-                        endpoint,
-                        options,
-                        endpoint_resolution::Ack::Connect(ack),
-                    );
-                } else if let Err(e) = preflight_connect_endpoint_resolution(&endpoint).await {
-                    let _ = ack.send(Err(e));
-                } else if self.should_ignore_duplicate_connect(&endpoint) {
-                    let _ = ack.send(Ok(()));
-                } else {
-                    self.start_dial(endpoint, options);
-                    let _ = ack.send(Ok(()));
-                }
+                self.handle_connect_command(endpoint, compression, ack)
+                    .await;
             }
             SocketCommand::Subscribe { prefix, ack } => {
                 let res = self.apply_subscription(prefix, true).await;
@@ -557,7 +548,7 @@ impl SocketDriver {
                 let _ = ack.send(res);
             }
             SocketCommand::Unbind { endpoint, ack } => {
-                let _ = ack.send(self.unbind(&endpoint));
+                let _ = ack.send(self.unbind(&endpoint).await);
             }
             SocketCommand::Disconnect { endpoint, ack } => {
                 let _ = ack.send(self.disconnect(&endpoint).await);
@@ -620,6 +611,10 @@ impl SocketDriver {
     }
 
     fn cancel_endpoints(&self) {
+        #[cfg(feature = "dart")]
+        for endpoint in &self.dart_endpoints {
+            endpoint.cancel.cancel();
+        }
         for l in &self.listeners {
             l.cancel.cancel();
         }
@@ -728,6 +723,8 @@ impl SocketDriver {
         for task in peer_tasks {
             stop_peer_task(task).await;
         }
+        #[cfg(feature = "dart")]
+        self.stop_dart_endpoints(None).await;
         self.monitor.publish(MonitorEvent::Closed);
         if let Some(ack) = self.close_ack.take() {
             let _ = ack.send(Ok(()));

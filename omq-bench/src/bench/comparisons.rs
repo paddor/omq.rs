@@ -616,7 +616,7 @@ fn build_peers(
             }
             "libzmq" => {
                 let src = "scripts/libzmq_bench_peer.c";
-                let out = "scripts/libzmq_bench_peer";
+                let out = "scripts/omq_libzmq_baseline_peer";
                 run_build(&["gcc", "-O2", "-o", out, src, "-lzmq", "-lpthread"]);
                 binaries.insert(source.to_string(), PathBuf::from(out));
             }
@@ -627,7 +627,7 @@ fn build_peers(
                 );
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("scripts/zmqrs_bench_peer/target/release/zmqrs_bench_peer"),
+                    PathBuf::from("scripts/zmqrs_bench_peer/target/release/omq_zmqrs_bench_peer"),
                 );
             }
             "r0z-async" | "tmq" | "monocoque-tokio-ct" => {
@@ -640,7 +640,7 @@ fn build_peers(
                 );
                 binaries.insert(
                     source.to_string(),
-                    PathBuf::from("scripts/rzmq_bench_peer/target/release/rzmq_bench_peer"),
+                    PathBuf::from("scripts/rzmq_bench_peer/target/release/omq_rzmq_bench_peer"),
                 );
             }
             _ => panic!("unknown impl source: {source}"),
@@ -664,17 +664,17 @@ fn build_external_comparison_peer(source: &str) -> PathBuf {
     match source {
         "r0z-async" => process::build_external_peer(
             "scripts/r0z_bench_peer",
-            "r0z_bench_peer",
+            "omq_r0z_bench_peer",
             &[("CXXFLAGS", "-std=gnu++11")],
         ),
         "tmq" => process::build_external_peer(
             "scripts/tmq_bench_peer",
-            "tmq_bench_peer",
+            "omq_tmq_bench_peer",
             &[("CXXFLAGS", "-std=gnu++11")],
         ),
         "monocoque-tokio-ct" => process::build_external_peer(
             "scripts/monocoque_bench_peer",
-            "monocoque_bench_peer",
+            "omq_monocoque_bench_peer",
             &[],
         ),
         _ => unreachable!("not an external comparison peer: {source}"),

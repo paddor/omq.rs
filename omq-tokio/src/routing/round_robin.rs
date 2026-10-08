@@ -296,6 +296,10 @@ impl Submitter {
             scanned += 1;
             match active.active[i].tx.try_send(msg) {
                 Ok(()) => return Ok(()),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(error)) => {
+                    return Err(omq_proto::TrySendError::Error(error));
+                }
                 Err(SendPipeError::Full(returned)) => {
                     msg = returned;
                     active.deactivate(i);
@@ -377,6 +381,8 @@ impl Submitter {
 
         match active.active[0].tx.try_send_many(messages, max) {
             Ok(count) => Ok(count),
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(error)) => Err(omq_proto::TrySendError::Error(error)),
             Err(SendPipeError::Full(returned)) => {
                 active.deactivate(0);
                 Err(omq_proto::error::TrySendError::Full(returned))
@@ -459,7 +465,36 @@ impl RoundRobinSend {
     }
 
     pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
+        self.make_connect_pipe_inner(
+            route_id,
+            #[cfg(feature = "dart")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn make_dart_connect_pipe(
+        &mut self,
+        route_id: u64,
+        socket_type: omq_proto::SocketType,
+    ) -> SendPipeConsumer {
+        self.make_connect_pipe_inner(route_id, Some(socket_type))
+    }
+
+    fn make_connect_pipe_inner(
+        &mut self,
+        route_id: u64,
+        #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
+    ) -> SendPipeConsumer {
         let (tx, rx) = crate::engine::send_pipe_with_mode(self.pipe_cap, self.pipe_mode);
+        #[cfg(feature = "dart")]
+        let tx = {
+            let mut tx = tx;
+            if let Some(kind) = dart {
+                tx.set_dart(kind);
+            }
+            tx
+        };
         let mut active = self.active.lock().expect("round_robin active");
         active.insert_pipe(route_id, tx);
         self.active_changed.notify_changed();

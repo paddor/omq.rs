@@ -217,6 +217,17 @@ impl ProcessGuard {
         self.child.as_mut().unwrap()
     }
 
+    pub(crate) fn wait_success(&mut self, timeout: Duration) {
+        let status = self
+            .child_mut()
+            .wait_timeout(timeout)
+            .expect("wait for peer");
+        let status = status.expect("benchmark process timeout");
+        self.child.take();
+        deregister_proc(self.pid);
+        assert!(status.success(), "benchmark process failed: {status}");
+    }
+
     /// Kill the process (SIGTERM, wait, SIGKILL).
     #[allow(clippy::cast_possible_wrap, clippy::similar_names)]
     pub(crate) fn kill(&mut self) {
@@ -257,6 +268,27 @@ impl ProcessGuard {
             None
         }
     }
+}
+
+pub(crate) fn spawn_interactive(command: &mut Command) -> ProcessGuard {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Each peer owns its process group, including profiler descendants.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    ProcessGuard::new(command.spawn().expect("spawn benchmark peer"))
 }
 
 impl Drop for ProcessGuard {

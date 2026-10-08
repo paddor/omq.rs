@@ -19,6 +19,20 @@ pub(crate) enum PeerOutbound {
 }
 
 impl PeerOutbound {
+    #[cfg(feature = "dart")]
+    pub(crate) fn validate_dart(
+        &self,
+        message: &Message,
+        identity_prefix: bool,
+    ) -> omq_proto::Result<()> {
+        match self {
+            Self::Wire { inbox, .. } | Self::Inbox(inbox) => {
+                inbox.validate_dart(message, identity_prefix)
+            }
+            Self::Inproc(_) => Ok(()),
+        }
+    }
+
     pub(crate) fn bind(&self, lanes: &crate::engine::data_inbox::SenderLanes) -> Self {
         match self {
             Self::Wire {
@@ -54,6 +68,8 @@ impl PeerOutbound {
             Ok(()) => TryFrameResult::Ok,
             Err(SendPipeError::Full(_)) => TryFrameResult::Full,
             Err(SendPipeError::Closed(_)) => TryFrameResult::Dead,
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(_)) => TryFrameResult::Dead,
         }
     }
 
@@ -66,6 +82,9 @@ impl PeerOutbound {
         msg: Message,
         preparation: SendPreparation,
     ) -> Result<(), SendPipeError> {
+        #[cfg(feature = "dart")]
+        self.validate_dart(&msg, matches!(preparation, SendPreparation::StripIdentity))
+            .map_err(SendPipeError::Invalid)?;
         let (inbox, direct) = match self {
             Self::Wire {
                 slot,

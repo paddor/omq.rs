@@ -157,6 +157,11 @@ has an independent bounded lane. Applications drain the lanes fairly, with
 FIFO order within each connection. Socket clones share the receive drain;
 application worker selection belongs to the application.
 
+Each receive call owns the mutable drain state until its synchronous drain
+ends. Atomic ownership transfer supports concurrent calls through one handle.
+Multiple application handles also serialize receives with a shared mutex;
+driver and endpoint references do not count as application handles.
+
 PEER, PULL, and GATHER let the application claim a receive source while deciding
 whether to admit its message. Receipt lifetime controls the claim; the receiving
 socket enforces the pause and owns any returned message. A claim pauses that
@@ -279,6 +284,7 @@ copy-free payload conversion.
 | `quic://` | ZMTP byte stream over Quinn with TLS |
 | `inproc://` | Context-local message transfer without ZMTP |
 | `udp://` | RADIO/DISH datagrams |
+| `dart://` | Reliable ordered messages over UDP |
 | `lz4+...`, `zstd+...` | Message transforms over supported carriers |
 
 STREAM uses raw TCP without a ZMTP handshake. Regular byte-stream sockets
@@ -289,6 +295,20 @@ QUIC peers retain their UDP endpoint group and assigned data runtime. The
 listener controls new admission; established peers own their connections.
 A separate liveness stream keeps heartbeats independent of application
 receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
+
+Each Dart endpoint has one task owning admission, liveness, and both IO
+directions for all its peers. Its sans-I/O sessions retain outbound messages
+until receipt acknowledgment and hold inbound messages in bounded ordered
+windows. Socket send queues retain admission while messages are unacknowledged.
+Each peer has a private preallocated receive pool; final body releases publish
+reusable storage before returning receive credit. The caller's send pool is
+separate. Lifecycle commands use a separate control channel, and data,
+application space, and returned-credit signals wake the endpoint task.
+Large Dart bodies share immutable send ownership across a bounded fragment
+window. The receiver reserves the full body after validating its advertised
+length, fills it from ordered fragments, and delivers one atomic message.
+Intermediate fragment credits return during assembly; the completed body
+retains the final credit until its last application owner releases it.
 
 ## Source map
 

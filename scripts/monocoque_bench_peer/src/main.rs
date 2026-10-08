@@ -280,7 +280,7 @@ fn main() {
                 )
                 .await
             }
-            _ => panic!("usage: monocoque_bench_peer push|pull|pub|multi-sub|rep|req ..."),
+            _ => panic!("usage: omq_monocoque_bench_peer push|pull|pub|multi-sub|rep|req ..."),
         }
     });
 }

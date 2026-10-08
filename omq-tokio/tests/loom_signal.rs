@@ -633,6 +633,67 @@ fn state_signal_catches_change_between_check_and_wait_registration() {
     });
 }
 
+fn fanout_scan_generation_model(refresh_between_targets: bool) {
+    let signal = Arc::new(ModelStateSignal::new());
+    let full = Arc::new(AtomicBool::new(true));
+    let writer = {
+        let signal = signal.clone();
+        let full = full.clone();
+        thread::spawn(move || {
+            full.store(false, Ordering::SeqCst);
+            signal.notify_changed();
+        })
+    };
+    let mut seen = signal.generation();
+    let pending = full.load(Ordering::SeqCst);
+    // Continue scanning other peers after yielding to their consumers.
+    thread::yield_now();
+    if refresh_between_targets {
+        seen = signal.generation();
+    }
+    let changed = signal.register_and_check(seen);
+    writer.join().unwrap();
+    assert!(
+        !pending || changed || signal.has_woken_waiter(),
+        "earlier full lane lost its capacity wake"
+    );
+}
+
+#[test]
+fn fanout_scan_keeps_capacity_generation_across_budget_yields() {
+    loom::model(|| fanout_scan_generation_model(false));
+}
+
+#[test]
+#[should_panic(expected = "earlier full lane lost its capacity wake")]
+fn fanout_refreshing_generation_between_targets_can_lose_capacity() {
+    loom::model(|| fanout_scan_generation_model(true));
+}
+
+#[test]
+fn native_slot_release_wakes_after_the_earlier_admission_capacity_edge() {
+    loom::model(|| {
+        let signal = Arc::new(ModelStateSignal::new());
+        // Admission may be decremented before fanring publishes its head.
+        signal.notify_changed();
+        let slot_full = Arc::new(AtomicBool::new(true));
+        let releaser = {
+            let signal = signal.clone();
+            let slot_full = slot_full.clone();
+            thread::spawn(move || {
+                slot_full.store(false, Ordering::SeqCst);
+                // Forward the ring's space wake as well as Admission::drop.
+                signal.notify_changed();
+            })
+        };
+        let seen = signal.generation();
+        let pending = slot_full.load(Ordering::SeqCst);
+        let changed = signal.register_and_check(seen);
+        releaser.join().unwrap();
+        assert!(!pending || changed || signal.has_woken_waiter());
+    });
+}
+
 /// Two send futures share one PEER producer. The first has already observed
 /// a full ring and registered the bridge waker. The second can observe the
 /// consumer's released slot before fanring delivers the capacity wake.

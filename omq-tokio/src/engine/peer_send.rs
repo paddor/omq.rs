@@ -138,6 +138,11 @@ impl Producer {
                 .is_some_and(|sender| sender.registered_lanes() < MAX_SENDERS + 1)
     }
 
+    #[cfg(feature = "dart")]
+    pub(crate) fn max_messages(&self) -> usize {
+        self.shared.max_messages
+    }
+
     pub(crate) fn max_bytes(&self) -> usize {
         self.shared.max_bytes
     }

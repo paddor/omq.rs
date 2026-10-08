@@ -17,3 +17,9 @@ slow-timeout = { period = "30m", terminate-after = 6, grace-period = "10s" }
 [[profile.ci.overrides]]
 filter = 'package(omq-tokio) and binary(omq_zstd_tcp) and test(/pub_sub_zstd_io_lane_(send|try_send)_auto_train_dict_for_late_subscriber/)'
 threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+# Reserve the runner for the saturated UDP test so concurrent tests do not turn
+# its bounded control-progress deadline into a scheduler or kernel-loss test.
+filter = 'package(omq-tokio) and binary(omq_dart_transport) and test(malformed_flood_and_closed_receive_window_preserve_handshake_and_teardown_progress)'
+threads-required = "num-test-threads"

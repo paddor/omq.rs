@@ -27,6 +27,10 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 ### Changed
 
+- Idle TCP receive spin probes skip mutable receive ownership. The matched
+  transport throughput runner reuses prepared large bodies and verifies
+  full payloads.
+
 - Use published `fanring` 0.3.9 and `yring` 0.3.20 across native and binding
   builds, including receiver lane control without Git dependencies.
 
@@ -88,6 +92,22 @@ All notable changes to omq.rs will be documented here. Format loosely follows
 
 - `HandshakeRefusal` preserves fatal ZMTP ERROR details. `ConnectStopped`
   monitor events report when a refusal stops automatic connection attempts.
+- Native Rust `dart://` reliable UDP transport behind the `dart` feature,
+  supporting CLIENT/SERVER, SCATTER/GATHER, PEER, RADIO/DISH, and CHANNEL.
+  Ordered delivery, duplicate suppression, loss recovery, receive-window
+  backpressure, adaptive congestion control with ECN, and explicit LAN mode.
+  Large atomic bodies use u64 length framing and enforce receiver
+  `max_message_size`; small messages pack up to 64 per datagram without a
+  fill delay. Includes reusable body pools, GSO/GRO fallback, diagnostics,
+  optional bounded or continuous polling, a [draft RFC](doc/dart-rfc.md),
+  and matched Dart/TCP/Aeron benchmark charts. No authentication or encryption.
+
+- Update the matched UDP benchmark baseline and chart series to Aeron 1.53.3.
+  The runner checks the supplied JAR's manifest version before measuring.
+
+- Prefix benchmark runner, native peer, and experiment executable names with
+  `omq_`. The Aeron runner uses an `omq_aeron_peer` Java executable symlink.
+
 - `quic://host:port` raw OMQ over QUIC behind the `quic` feature (Quinn,
   rustls/ring). One connection per
   peer: stream 0 carries unchanged ZMTP, stream 4 carries carrier liveness.

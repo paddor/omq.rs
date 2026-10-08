@@ -32,19 +32,23 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 
 ## Cross-implementation Comparison Benchmarks
 
-`omq_bench run comparisons` drives standalone `bench_peer` binaries:
+All benchmark executables, including the `omq_bench` runner and copied
+experiment binaries, MUST start with `omq_` so they are identifiable in `top`.
+The Cargo package remains `omq-bench`. The Aeron runner launches Java through
+an `omq_aeron_peer` executable symlink.
+
+`omq_bench run comparisons` drives standalone peer binaries:
 
 | binary | source | impls |
 |--------|--------|-------|
 | `omq_bench_peer_tokio` | `omq-tokio/src/bin/bench_peer_tokio.rs` | omq-tokio-ct |
 | `omq_bench_peer_blocking` | `omq-tokio/src/bin/bench_peer_blocking.rs` | omq-tokio-1t, omq-tokio-2t |
-| `libzmq_bench_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
-| `tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
-| `r0z_bench_peer` | `scripts/r0z_bench_peer/` | r0z-async |
-| `monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
-| `zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
-| `rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
-| `grpc_bench_peer` | `omq-bench/src/bin/grpc_bench_peer.rs` | grpc-rust |
+| `omq_libzmq_baseline_peer` | `scripts/libzmq_bench_peer.c` | libzmq, libzmq-2t |
+| `omq_tmq_bench_peer` | `scripts/tmq_bench_peer/` | tmq |
+| `omq_r0z_bench_peer` | `scripts/r0z_bench_peer/` | r0z-async |
+| `omq_monocoque_bench_peer` | `scripts/monocoque_bench_peer/` | monocoque-tokio-ct |
+| `omq_zmqrs_bench_peer` | `scripts/zmqrs_bench_peer/` | zmq.rs |
+| `omq_rzmq_bench_peer` | `scripts/rzmq_bench_peer/` | rzmq, rzmq-iouring |
 
 The `tmq` and `r0z-async` baselines use current-thread Tokio runtimes and one
 libzmq IO thread. `tmq` uses its own libzmq bindings; `r0z-async` uses r0z.
@@ -190,6 +194,198 @@ QUIC bench peers set 4 MiB UDP socket buffers through `recv_buffer_size` and
 `net.core.wmem_max`, so check both are at least 4 MiB. With smaller buffers,
 multi-peer QUIC runs drop packets on loopback (`RcvbufErrors` in
 `/proc/net/snmp`) and QUIC congestion control limits throughput.
+
+### Standalone Quinn DATAGRAM
+
+This measures Quinn's DATAGRAM API directly between two Linux processes,
+without OMQ sockets, framing, or queues. Verified TLS 1.3/AES-128-GCM,
+Quinn's default Cubic controller, pacing, and GSO/GRO remain enabled.
+The Rust runner is part of `omq-bench`.
+The pinned datagram runners require Linux and `sha256sum`; the Aeron runner
+also requires Java and `unzip` to verify the JAR version.
+
+```sh
+cargo build --release -p omq-tokio --features quic --example omq_quinn_datagram_peer
+cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer
+cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer --io-spin 50
+cargo run --release -p omq-bench -- chart quinn-datagram
+```
+
+The default is three serial runs at 16 B and 1 KiB: 3-second throughput
+windows after 200 ms warmup, and 100,000 echo RTT samples after 20,000 warmup
+exchanges. `inline` uses one current-thread runtime per process, with the
+application and Quinn's drivers on CPU slots 1 and 3. `--layout split` uses
+application/IO slots 0/1 and 5/3. `--layout multi` uses two Tokio workers per
+process on those same pairs of CPUs. Application spin is only available with
+the split layout; repeatedly polling Quinn's receive API contends for its
+connection lock. `--io-spin 50` selects a benchmark socket adapter that probes
+UDP for at most 50 us after activity, scheduling a fresh endpoint turn after
+each empty probe, then uses ordinary Tokio readiness waits when idle.
+Quinn's packet protection and congestion control are unchanged.
+
+Throughput counts application receives, including drops separately.
+`send_datagram_wait()` prevents eviction from the sender queue; the receiver
+can still discard DATAGRAMs when its own queue fills. Bodies are reusable
+immutable `Bytes`, deliberately excluding per-message sender allocation from
+this transport ceiling. Both byte queues are bounded at 8 MiB. Drain turns
+are limited to `--batch` messages (256 by default) and 64 KiB. The runner
+records actual kernel socket buffer sizes, which can be smaller than requested.
+RTT exchanges validate unique sequence tags and the full echoed body.
+
+Results append to `~/.cache/omq/quinn-datagram.jsonl`, including binary
+digests and protocol statistics. Charts use the latest eligible run with the
+default inline layout, batch size, and reactor interval. Latency points are
+p99 with p50-to-p99.9 whiskers from that same run, not medians across runs.
+Outputs: `doc/charts/quinn-datagram/{throughput,latency}.svg`.
+See [the measured results](doc/quinn-datagram-benchmark.md).
+
+Profile a single case serially; profiled rows are excluded from charts:
+
+```sh
+cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer \
+  --repeats 1 --kind throughput --sizes 1024 \
+  --profile /mnt/bench/tmp/quinn-datagram-profile --profile-side send
+perf report --stdio --no-inline --no-children -g none --percent-limit 1 \
+  -i /mnt/bench/tmp/quinn-datagram-profile/send-1024.data
+```
+
+### Dart Charts
+
+SCATTER/GATHER measures messages received by the application. CLIENT/SERVER
+measures RTT with the latency profile on both endpoints. Both transports use
+pooled bodies and the same body sizes, application spin, and CPU placement.
+Dart also has an independent IO spin budget. Bounded spins are at most 50 us.
+Use `--continuous-spin` and `--continuous-io-spin` to compare continuous
+application and Dart IO polling independently. These select `Duration::MAX`
+instead of the corresponding bounded budget and are excluded from charts.
+Continuous IO polling requires `--transport dart`. Save experiments with
+`--output` to keep the normal benchmark cohorts separate.
+Throughput enables `recv_batching` for both transports. Latency uses ordinary
+single-message receives. Sender batch preparation reuses the bounded pool
+handle rather than checking socket lifecycle for every buffer. Preparation
+and recycling use bounded pool batches. Sender capacity retries also use the
+application spin limit, then yield; successful sends reset that wait window.
+Successful throughput batches check their phase and deadline once. Empty
+pool/capacity probes share a timestamp for up to eight attempts; capacity
+waits compare an absolute deadline. Latency still timestamps each measured
+round trip before send and after receive to retain individual percentiles.
+`--window-messages` varies Dart's receive/retention slots per peer (default
+256). Both peers report the actual window, and the runner checks it. Save
+window experiments with `--output`; standard charts require 256 slots.
+
+Build the peer, then pass its executable path to the Linux runner:
+
+```sh
+cargo build --release -p omq-tokio --features dart --bin omq_dart_bench_peer
+cargo run --release -p omq-bench -- run dart --binary path/to/omq_dart_bench_peer \
+  --cpus 0,1,2,3,4,5 --spin 50 --io-spin 50 --congestion lan --repeats 3
+cargo run --release -p omq-bench -- chart dart
+```
+
+The runner verifies six distinct cores. Send application/IO use CPU slots
+0/1; receive IO/application use slots 3/5. Each side runs in its own process
+with one owned IO thread. Throughput excludes a 200 ms warmup and batches
+completed after the measurement deadline. A bounded 2-second drain records delivery
+after the window separately and requires acknowledgment of native sends. RTT excludes the configured warmup iterations.
+Warnings, IO failures, and timeouts stop the run.
+
+Results append to `~/.cache/omq/dart.jsonl`. Rows include offered and received
+counts, missing/excess counts, local overflow, pool exhaustion, RTT tails,
+revision, binary SHA-256, Dart wire version, congestion mode, RTT iteration
+counts, spin budgets, receive batching, receive/retention windows, and CPU IDs.
+Monotonic sequence tags and their complements verify ordered, unique,
+uncorrupted delivery. Missing
+messages or acknowledgments after the drain stop the run.
+Dart packs up to 64 already queued messages per datagram without waiting,
+using a count byte, byte-length table, session header, and concatenated
+payloads. Payloads over 255 bytes use individual DATA datagrams with no
+length escapes. GSO/GRO additionally batch complete datagrams.
+Report RTT p50, p99, and p99.9 separately.
+For tail investigations, `--kind latency --latency-samples path/to/samples`
+saves every RTT in chronological order as CSV after timing completes. The
+result also records Dart retransmission and stall counters. These diagnostic
+runs are excluded from charts; keep them separate from ordinary cohorts.
+The runner defaults to three independent runs, 3-second throughput windows,
+and 200,000 warmup plus 100,000 measured RTT exchanges. It rotates the size
+order between repeats to distribute startup effects; `--order fixed` supports
+order investigations and is excluded from RTT charts. It prints each result
+and the median/minimum/maximum for each size. `--check-gates` requires LAN
+medians of at least 5 million 16-byte messages/s, 1 GB/s of 1024-byte payloads,
+and RTT p99 at most 25 us. These experiment gates are separate from the RFC.
+Run `--congestion adaptive` separately; it is excluded from LAN gate checks.
+
+Charts require three eligible runs from the same binary, matching workload
+profiles, batched throughput receives, and Dart protocol version 1. Migrated
+experimental versions 6 through 8 retain their original version in
+`experimental_wire_version`; large bodies require original version 7 or newer.
+They plot LAN and
+adaptive separately; historical unreliable rows are excluded.
+Outputs: `doc/charts/dart/{scattergather,clientserver}.svg`.
+Chart sizes are 16 B, 64 B, 256 B, 512 B, 1 KiB, 4 KiB, and 16 KiB. The RTT chart uses a
+linear Y axis from 1 to 100 us with 10 us ticks. A triangle and measured value
+identify p99.9 whiskers that extend above the axis limit.
+Throughput uses one panel over the same sizes: dashed message rates on the
+left axis, solid GB/s on the right, and two lines per implementation.
+Large OMQ throughput bodies reuse a bounded cache of prepared `Bytes` on both
+transports. TCP also uses it at 1 KiB; smaller TCP bodies and Dart bodies up
+to 1 KiB use the fixed pool. Retag only unique bodies, preserving every
+in-flight reference. The cache holds about 1 MiB of prepared bodies. RTT
+prepares each outgoing body before the timestamp. Dart's IO task fragments
+larger bodies and the receiver validates the assembled message.
+Throughput verifies every payload byte using a vectorizable word reduction,
+plus per-message sequence and complement checks.
+
+The runner also supports latency comparisons with no owned IO thread:
+
+```sh
+cargo run --release -p omq-bench -- run dart --binary path/to/omq_dart_bench_peer \
+  --transport dart --kind latency --runtime current-poll --spin 0 --io-spin 0
+```
+
+`current` uses the ordinary current-thread Tokio runtime and may sleep in the
+reactor. `current-poll` keeps a cooperative task ready throughout measurement
+and polls the reactor after every scheduled task. Both use the async Socket
+API and `Context::current()`, with application and transport sharing CPU slot
+0 or 5 in each process. They retain socket queues and driver tasks; they are
+not Exclusive mode, which currently supports TCP only. These modes require
+zero application/transport spin budgets. Their explicit runtime and polling
+metadata keep them separate from the charts' owned-IO series.
+
+The Aeron baseline uses 1.53.3, an exclusive publication, 64 MiB terms,
+and one embedded shared Media Driver per process. Each JVM starts on its
+application core; the runner pins the shared driver to its separate IO core
+before releasing the start barrier. CPU slots match the OMQ runner.
+The JVM uses 3-second throughput warmup and 200,000 RTT warmup exchanges;
+each independent run measures 3 seconds or 100,000 RTT samples. Bodies carry
+sequence tags and complements, and the receiver validates their contents.
+Clock reads bound throughput batches rather than timing every message.
+Delivery after throughput ends must drain within 2 seconds. Other Aeron
+settings, including its default congestion control and idle strategy, remain
+at their defaults.
+
+```sh
+curl -fLsS https://repo.maven.apache.org/maven2/io/aeron/aeron-all/1.53.3/aeron-all-1.53.3.jar \
+  -o /tmp/aeron-all-1.53.3.jar
+javac -cp /tmp/aeron-all-1.53.3.jar -d /tmp/aeron-dart-classes \
+  scripts/aeron_dart_peer/AeronUdpPeer.java
+TMPDIR=/tmp cargo run --release -p omq-bench -- run aeron-dart \
+  --jar /tmp/aeron-all-1.53.3.jar --classes /tmp/aeron-dart-classes
+```
+
+Aeron rows append to `~/.cache/omq/dart-aeron.jsonl`. Its chart points use
+three independent JVM pairs with the same class/JAR digest and CPU placement.
+Latency whiskers come from the median-p99 run, as for OMQ. Warmup is recorded
+separately and does not count toward the measured samples.
+
+Profile one side at a time. Profiled rows are excluded from charts:
+
+```sh
+cargo run --release -p omq-bench -- run dart --binary path/to/omq_dart_bench_peer \
+  --transport dart --kind throughput --sizes 16 \
+  --profile /mnt/bench/tmp/dart-profile --profile-side receive
+perf report --stdio --no-inline -g none \
+  -i /mnt/bench/tmp/dart-profile/gather-16.data
+```
 
 ### Cross-library Comparison Charts
 

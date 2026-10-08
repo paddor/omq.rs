@@ -85,6 +85,10 @@ impl PeerEventDispatch {
                 unreachable!("single producer retained notification capacity")
             }
             Err(super::SendPipeError::Closed(_)) => false,
+            #[cfg(feature = "dart")]
+            Err(super::SendPipeError::Invalid(_)) => {
+                unreachable!("receive output has no transport send validator")
+            }
         }
     }
 

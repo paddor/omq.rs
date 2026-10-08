@@ -35,6 +35,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |
+| `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
 
@@ -50,7 +51,8 @@ Full detail in `doc/`:
 [`architecture.md`](doc/architecture.md),
 [`libzmq/`](doc/libzmq/).
 Transport RFCs:
-[`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md).
+[`lz4-rfc.md`](doc/lz4-rfc.md), [`quic-rfc.md`](doc/quic-rfc.md),
+[`dart-rfc.md`](doc/dart-rfc.md).
 
 **omq-proto key types.** `Connection`: ZMTP codec state machine
 (`handle_input`/`poll_event`/`send_message`/`poll_transmit`).

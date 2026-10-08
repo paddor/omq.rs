@@ -402,6 +402,19 @@ impl SendStrategy {
         }
     }
 
+    #[cfg(feature = "dart")]
+    pub(crate) fn make_dart_connect_pipe(
+        &mut self,
+        route_id: u64,
+        socket_type: SocketType,
+    ) -> Option<SendPipeConsumer> {
+        match self {
+            Self::RoundRobin(s) => Some(s.make_dart_connect_pipe(route_id, socket_type)),
+            Self::Latency(s) => Some(s.make_dart_connect_pipe(route_id, socket_type)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn needs_peer_send_pipe(&self) -> bool {
         match self {
             Self::RoundRobin(_) | Self::Exclusive(_) => true,

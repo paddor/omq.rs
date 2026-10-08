@@ -34,6 +34,10 @@ pub(crate) enum ChartSub {
     Fanio,
     /// OMQ over QUIC against OMQ over TCP.
     Quic,
+    /// DART against TCP, SCATTER/GATHER and CLIENT/SERVER.
+    Dart,
+    /// Standalone Quinn DATAGRAM API, with stock and polling socket adapters.
+    QuinnDatagram,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
     /// PUSH/PULL Zstd compression chart.
@@ -50,6 +54,12 @@ pub(crate) enum RunSub {
     PushpullZstd(PushpullZstdArgs),
     /// Push/pull compression benchmarks.
     Compression(CompressionArgs),
+    /// Pinned, two-process DART/TCP benchmarks.
+    Dart(crate::bench::datagram::args::DartArgs),
+    /// Aeron 1.53.3 UDP baseline with pinned shared drivers.
+    AeronDart(crate::bench::datagram::args::AeronArgs),
+    /// Standalone Quinn DATAGRAM API with real TLS.
+    QuinnDatagram(crate::bench::datagram::args::QuinnArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]

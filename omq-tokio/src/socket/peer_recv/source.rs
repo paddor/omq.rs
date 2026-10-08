@@ -2,8 +2,8 @@
 
 use super::budget::{Permit, QueuedMessage};
 use super::{
-    Arc, Bytes, DrainBudget, Error, Message, Mutex, Ordering, PausedSource, PeerReceiver,
-    QueueState, RecvItem, RecvShared, Result, Weak, mpsc,
+    Arc, Bytes, DrainBudget, Error, Message, Ordering, PausedSource, PeerReceiver, QueueState,
+    ReceiveCell, RecvItem, RecvShared, Result, Weak, mpsc,
 };
 
 /// One physical receive connection and generation. A replacement connection
@@ -330,19 +330,15 @@ impl PeerReceiver {
     }
 
     pub(crate) async fn recv_from(
-        receiver: &Mutex<Self>,
+        receiver: &ReceiveCell<Self>,
         source: Option<&ReceiveSource>,
     ) -> Result<(ReceiveReceipt, Message)> {
         let peer_source = source.map(ReceiveSource::peer).transpose()?;
-        let shared = receiver
-            .lock()
-            .expect("PEER receive poisoned")
-            .shared
-            .clone();
+        let shared = receiver.lock().shared.clone();
         loop {
             let seen = peer_source.map(|source| source.state.data.generation());
             let (result, yielded) = {
-                let mut receiver = receiver.lock().expect("PEER receive poisoned");
+                let mut receiver = receiver.lock();
                 let result = receiver.try_recv_from(source);
                 (result, receiver.take_yield_pending())
             };

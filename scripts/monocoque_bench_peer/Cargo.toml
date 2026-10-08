@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.95"
 
 [[bin]]
-name = "monocoque_bench_peer"
+name = "omq_monocoque_bench_peer"
 path = "src/main.rs"
 
 [workspace]

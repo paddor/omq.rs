@@ -1,6 +1,6 @@
 //! C API round-trip latency and single-thread PUSH/PULL cost over inproc.
 //!
-//! Run: `cargo run --release --example bench_latency -p omq-libzmq`
+//! Run: `cargo run --release --example omq_libzmq_bench_latency -p omq-libzmq`
 
 use std::ffi::CString;
 use std::time::Instant;

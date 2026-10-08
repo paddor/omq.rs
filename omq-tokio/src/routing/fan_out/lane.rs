@@ -67,7 +67,6 @@ pub(super) struct LanePeerAdd {
 pub(super) struct LaneDispatch {
     pub(super) msg: Message,
     pub(super) topic: Bytes,
-    pub(super) group: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +84,7 @@ impl LaneData {
 #[derive(Debug)]
 struct LanePeer {
     subscriptions: SubscriptionSet,
-    groups: FxHashSet<String>,
+    groups: FxHashSet<Bytes>,
     any_groups: bool,
     slot: Arc<PeerTransmitSlot>,
     dict_shipped: bool,
@@ -886,17 +885,13 @@ impl LaneWorker {
                 }
             }
             LaneControl::Join { peer_id, group } => {
-                if let Some(peer) = self.peers.get_mut(&peer_id)
-                    && let Ok(s) = std::str::from_utf8(&group)
-                {
-                    peer.groups.insert(s.to_string());
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.groups.insert(group);
                 }
             }
             LaneControl::Leave { peer_id, group } => {
-                if let Some(peer) = self.peers.get_mut(&peer_id)
-                    && let Ok(s) = std::str::from_utf8(&group)
-                {
-                    peer.groups.remove(s);
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.groups.remove(group.as_ref());
                 }
             }
             LaneControl::Shutdown => return true,
@@ -1098,7 +1093,7 @@ impl LaneWorker {
                         &peer.groups,
                         peer.any_groups,
                         &dispatch.topic,
-                        dispatch.group.as_deref(),
+                        matches!(self.mode, FanOutMode::Group).then_some(dispatch.topic.as_ref()),
                     ))
             {
                 groups[peer.codec_group].push(peer_id);
@@ -1809,7 +1804,6 @@ mod tests {
         LaneDispatch {
             topic: msg.part_bytes(0).unwrap(),
             msg,
-            group: None,
         }
     }
 

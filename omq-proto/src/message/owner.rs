@@ -19,27 +19,37 @@ pub trait PayloadOwner: AsRef<[u8]> + Send + Sync + 'static {
     ///
     /// Called once for each owned payload view, including empty payloads. Cloning
     /// a payload clones its `Arc`; reference releases can occur on any thread.
-    /// Implementations must drop this reference before publishing storage as
-    /// reusable. Any additional pool references and their synchronization belong
-    /// to the implementation. The default simply releases the reference.
+    /// A pool must prevent reuse while shared views remain. Non-final releases
+    /// must drop their reference before another owner publishes reusable storage;
+    /// final ownership may transfer directly into the pool. Synchronization
+    /// belongs to the implementation. The default drops this reference.
     fn release(self: Arc<Self>) {
         drop(self);
     }
 }
 
 #[derive(Clone)]
-pub(super) struct SharedOwner {
+pub(crate) struct SharedOwner {
     owner: Option<Arc<dyn PayloadOwner>>,
     len: usize,
 }
 
 impl SharedOwner {
+    #[inline]
     pub(super) fn new(owner: Arc<dyn PayloadOwner>) -> Self {
         let len = owner.as_ref().as_ref().len();
         Self {
             owner: Some(owner),
             len,
         }
+    }
+
+    #[inline]
+    pub(super) fn prefix(owner: Arc<dyn PayloadOwner>, len: usize) -> Self {
+        let mut view = Self::new(owner);
+        assert!(len <= view.len, "shared payload prefix exceeds owner");
+        view.len = len;
+        view
     }
 
     #[inline]
@@ -58,7 +68,7 @@ impl SharedOwner {
 
 impl AsRef<[u8]> for SharedOwner {
     fn as_ref(&self) -> &[u8] {
-        self.owner.as_deref().expect("live payload owner").as_ref()
+        &self.owner.as_deref().expect("live payload owner").as_ref()[..self.len]
     }
 }
 
@@ -88,6 +98,45 @@ mod tests {
         fn release(self: Arc<Self>) {
             self.releases.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn shared_prefixes_keep_declared_length_and_retain_the_entire_owner() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        for length in [0, 1, 31, 32] {
+            let owner = Arc::new(Owner {
+                bytes: (0..32).collect(),
+                releases: releases.clone(),
+            });
+            let weak = Arc::downgrade(&owner);
+            let payload = Payload::from_shared_owner_prefix(owner, length);
+            assert_eq!(payload.len(), length);
+            assert_eq!(payload.as_slice(), &(0..32).collect::<Vec<u8>>()[..length]);
+            let clone = payload.clone();
+            let bytes = payload.as_bytes();
+            drop(payload);
+            drop(clone);
+            assert!(weak.upgrade().is_some());
+            assert_eq!(bytes.len(), length);
+            assert_eq!(bytes.as_ref(), &(0..32).collect::<Vec<u8>>()[..length]);
+            drop(bytes);
+            assert!(weak.upgrade().is_none());
+        }
+        assert_eq!(releases.load(Ordering::Relaxed), 12);
+    }
+
+    #[test]
+    fn oversized_shared_prefix_is_rejected_before_any_view_escapes() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(Owner {
+            bytes: vec![7; 3],
+            releases: releases.clone(),
+        });
+        let weak = Arc::downgrade(&owner);
+        let result = std::panic::catch_unwind(|| Payload::from_shared_owner_prefix(owner, 4));
+        assert!(result.is_err());
+        assert_eq!(releases.load(Ordering::Relaxed), 1);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

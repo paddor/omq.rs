@@ -68,6 +68,12 @@ impl PeerTarget {
         preparation: SendPreparation,
         lanes: &crate::engine::data_inbox::SenderLanes,
     ) -> core::result::Result<(), SendPipeError> {
+        #[cfg(feature = "dart")]
+        if let Self::Inbox(sender) = self {
+            sender
+                .validate_dart(&msg, matches!(preparation, SendPreparation::StripIdentity))
+                .map_err(SendPipeError::Invalid)?;
+        }
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => p.try_send_prepared(msg, preparation),
             Self::Direct(target) => target.bind(lanes).try_send_prepared(msg, preparation),
@@ -173,6 +179,8 @@ impl Submitter {
                 drop(returned);
                 Ok(())
             }
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(error)) => Err(TrySendError::Error(error)),
             Err(SendPipeError::Full(returned)) => Err(TrySendError::Full(returned)),
             Err(SendPipeError::Closed(_)) => {
                 g.remove_peer(id);
@@ -447,6 +455,8 @@ impl Submitter {
             return Ok(());
         };
         match peer.target.try_send(msg, &self.data_lanes) {
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(error)) => Err(TrySendError::Error(error)),
             Err(SendPipeError::Full(m)) => Err(TrySendError::Full(m)),
             Err(SendPipeError::Closed(_)) if closed => Err(TrySendError::Closed),
             Ok(()) | Err(SendPipeError::Closed(_)) => Ok(()),
@@ -492,6 +502,8 @@ impl Submitter {
                     Ok(Ok(()))
                 }
             }
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(error)) => Err(error),
             Err(SendPipeError::Full(returned)) => {
                 let space = peer.target.space_available();
                 Ok(Err(SendRetry::Full(returned, space)))
@@ -514,6 +526,8 @@ impl Submitter {
         match peer.target.try_send(msg, &self.data_lanes) {
             Ok(()) => Ok(Ok(())),
             Err(SendPipeError::Closed(_)) => Err(Error::Unroutable),
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(error)) => Err(error),
             Err(SendPipeError::Full(returned)) => {
                 let space = peer.target.space_available();
                 Ok(Err(SendRetry::Full(returned, space)))

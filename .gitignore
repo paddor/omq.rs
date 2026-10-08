@@ -34,6 +34,7 @@ __pycache__/
 omq-tokio/tests/helpers/zmq_ws_peer
 omq-tokio/tests/helpers/zmq_draft_peer
 scripts/omq_libzmq_bench_peer
+scripts/omq_libzmq_baseline_peer
 perf.data*
 /TODO
 .chart_hw

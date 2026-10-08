@@ -1,12 +1,12 @@
 //! Two-process throughput peer for rzmq.
 //!
 //! Usage:
-//!   rzmq_bench_peer push <addr> <msg_size_bytes>
-//!   rzmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
-//!   rzmq_bench_peer rep  <addr> <msg_size_bytes>
-//!   rzmq_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
-//!   rzmq_bench_peer inproc <addr> <msg_size_bytes> <duration_secs>
-//!   rzmq_bench_peer inproc-latency <addr> <msg_size_bytes> <iterations> <warmup>
+//!   omq_rzmq_bench_peer push <addr> <msg_size_bytes>
+//!   omq_rzmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
+//!   omq_rzmq_bench_peer rep  <addr> <msg_size_bytes>
+//!   omq_rzmq_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
+//!   omq_rzmq_bench_peer inproc <addr> <msg_size_bytes> <duration_secs>
+//!   omq_rzmq_bench_peer inproc-latency <addr> <msg_size_bytes> <iterations> <warmup>
 //!
 //! <addr>: a port number (-> tcp://127.0.0.1:<port>) or a full ZMQ address
 //!         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15655).
@@ -225,12 +225,12 @@ async fn main() {
             run_multi_push(&addr, size, count).await;
         }
         _ => {
-            eprintln!("usage: rzmq_bench_peer push <addr> <size>");
-            eprintln!("       rzmq_bench_peer pull <addr> <size> <duration_secs>");
-            eprintln!("       rzmq_bench_peer rep <addr> <size>");
-            eprintln!("       rzmq_bench_peer req <addr> <size> <iterations> <warmup>");
-            eprintln!("       rzmq_bench_peer inproc <addr> <size> <duration_secs>");
-            eprintln!("       rzmq_bench_peer inproc-latency <addr> <size> <iters> <warmup>");
+            eprintln!("usage: omq_rzmq_bench_peer push <addr> <size>");
+            eprintln!("       omq_rzmq_bench_peer pull <addr> <size> <duration_secs>");
+            eprintln!("       omq_rzmq_bench_peer rep <addr> <size>");
+            eprintln!("       omq_rzmq_bench_peer req <addr> <size> <iterations> <warmup>");
+            eprintln!("       omq_rzmq_bench_peer inproc <addr> <size> <duration_secs>");
+            eprintln!("       omq_rzmq_bench_peer inproc-latency <addr> <size> <iters> <warmup>");
             std::process::exit(1);
         }
     }

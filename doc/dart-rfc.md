@@ -215,6 +215,8 @@ repeat needed receipt, credit, and gap feedback. Duplicate sequenced data
 MUST solicit current STATUS without redelivery or additional credit.
 Senders MUST provide timer recovery when data or control traffic is lost,
 using RTT estimates and bounded retransmission backoff.
+Advancing cumulative receipt SHOULD restart the retransmission timer.
+Unchanged receipt or credit-only feedback MUST NOT restart it.
 
 ### 3.9 Congestion Control
 

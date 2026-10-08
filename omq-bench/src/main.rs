@@ -31,6 +31,7 @@ fn main() {
             Some(ChartSub::Fanio) => chart::fanio::generate(),
             Some(ChartSub::Quic) => chart::quic::generate(),
             Some(ChartSub::Dart) => chart::dart::generate(),
+            Some(ChartSub::Lossy) => chart::lossy::generate(),
             Some(ChartSub::Lz4) => chart::lz4::generate(),
             Some(ChartSub::Zstd) => chart::zstd::generate(),
             None => {
@@ -40,6 +41,7 @@ fn main() {
                 chart::fanio::generate();
                 chart::quic::generate();
                 chart::dart::generate();
+                chart::lossy::generate();
                 chart::lz4::generate();
                 chart::zstd::generate();
             }

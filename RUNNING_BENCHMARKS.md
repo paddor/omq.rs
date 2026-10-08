@@ -189,6 +189,9 @@ cargo run --release -p omq-bench -- chart quic
 
 CURVE impls run the multi-peer benches only when named with `--impl`.
 
+The [lossy-link chart](doc/charts/dart/lossy.svg) compares QUIC streams with
+Dart LAN/adaptive using matched socket pairs and simulated link conditions.
+
 QUIC bench peers set 4 MiB UDP socket buffers through `recv_buffer_size` and
 `send_buffer_size`. Linux caps them at `net.core.rmem_max` and
 `net.core.wmem_max`, so check both are at least 4 MiB. With smaller buffers,
@@ -332,6 +335,15 @@ With the peer built using `--features 'dart quic'`, `--transport quic` runs
 the same socket pairs and verification over TLS-authenticated QUIC streams.
 The runner generates trusted benchmark credentials. Use `--output` for
 simulated-link measurements; they do not belong in loopback chart cohorts.
+`cargo run --release -p omq-bench -- chart lossy` generates
+[`doc/charts/dart/lossy.svg`](doc/charts/dart/lossy.svg) from `lossy.jsonl`.
+It shows received Mbps at 1 KiB/16 KiB and p99 RTT at 1 KiB across random
+loss rates 0%, 0.1%, 1%, and 5%. The link shares 100 Mbps between directions
+with 1 ms delay each way and MTU 1500; UDP ingress netem runs on IFB with
+segmentation offloads disabled. Rows add `socket_pair` (`scatter-gather` or
+`client-server`) and a `netem` object with `loss_ppm`, `loss_model: "random"`,
+`rate_mbps: 100`, `shared_rate: true`, `delay_us: 1000`, `mtu: 1500`,
+`ecn: false`, `segmentation_offloads: false`, and `placement: "udp-ingress-ifb"`.
 Large OMQ throughput bodies reuse a bounded cache of prepared `Bytes` on both
 transports. TCP also uses it at 1 KiB; smaller TCP bodies and Dart bodies up
 to 1 KiB use the fixed pool. Retag only unique bodies, preserving every

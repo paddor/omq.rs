@@ -2,6 +2,7 @@ mod common;
 pub(crate) mod comparison;
 pub(crate) mod dart;
 pub(crate) mod fanio;
+pub(crate) mod lossy;
 pub(crate) mod lz4;
 pub(crate) mod main_tcp;
 pub(crate) mod pubsub;

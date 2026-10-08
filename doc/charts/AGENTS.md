@@ -162,6 +162,20 @@ verified drain. RTT measures 100,000 exchanges after 200,000 JVM warmup
 exchanges. Select the median throughput or median-p99 run; latency whiskers
 stay with that run. JVM warmup is excluded from the measurements.
 
+## Lossy-link chart
+
+`cargo run --release -p omq-bench -- chart lossy` reads `lossy.jsonl` and
+generates `dart/lossy.svg`: Dart LAN/adaptive and QUIC streams, 1 IO,
+SCATTER/GATHER throughput at 1 KiB and 16 KiB, CLIENT/SERVER p99 RTT at 1 KiB.
+Use 0%, 0.1%, 1%, and 5% independent random loss, 100 Mbps shared between
+directions, 1 ms delay each way, MTU 1500, UDP ingress netem on IFB, and
+segmentation offloads disabled. ECN marking runs are separate conditions.
+Cache rows retain raw runner fields plus `socket_pair` and `netem` settings.
+Require three verified runs with matching binary digest and CPU placement.
+Dots show medians; whiskers show min-max across repeats. Throughput measures
+3 seconds after 200 ms warmup; delivery/ACK drains are 2 seconds, or 10 seconds
+at 5% loss, excluded from rates. RTT uses 100 warmup and 1000 measured exchanges.
+
 ## OMQ runtime modes
 
 - `omq-tokio-1t`: blocking API, 1 dedicated background IO thread.

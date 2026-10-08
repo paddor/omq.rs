@@ -240,11 +240,11 @@ public final class AeronUdpPeer {
         if (!mode.equals("throughput") && !mode.equals("latency")) {
             throw new IllegalArgumentException("unknown mode " + mode);
         }
-        if (mode.equals("latency") && !Arrays.asList(16, 32, 64, 256, 512, 1024, 4096, 16384).contains(size)) {
+        if (mode.equals("latency") && !Arrays.asList(16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384).contains(size)) {
             throw new IllegalArgumentException("unsupported latency size");
         }
         if (mode.equals("throughput") && !Arrays.asList(16, 32, 64, 128, 256, 512,
-                1024, 2048, 4096, 8192, 16384, 32768, 262144, 4194304, 8388608).contains(size)) {
+                1024, 2048, 4096, 8192, 16384, 32768, 65536, 262144, 1048576, 4194304, 8388608).contains(size)) {
             throw new IllegalArgumentException("unsupported throughput size");
         }
         MediaDriver.Context context = new MediaDriver.Context()

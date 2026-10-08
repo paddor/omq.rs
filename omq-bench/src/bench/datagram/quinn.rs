@@ -21,19 +21,24 @@ pub(crate) fn run(mut args: QuinnArgs) {
     let mut certificates = Command::new(&args.binary);
     certificates.arg("certs").arg(&directory.0);
     print!("{}", capture(&mut certificates));
-    rounds(&args.common, &[16, 1024], |kind, size, repeat, position| {
-        let mut row = measure(&args, &directory.0, kind, size);
-        row.as_object_mut()
-            .unwrap()
-            .extend(provenance.as_object().unwrap().clone());
-        row["quinn_version"] = versions["quinn"].clone();
-        row["dependency_versions"] = versions.clone();
-        row["dependency_versions_source"] = json!("workspace Cargo.lock at measurement time");
-        row["run"] = json!(repeat);
-        row["size_position"] = json!(position);
-        record(&args.common, "quinn-datagram.jsonl", &row);
-        row
-    });
+    rounds(
+        &args.common,
+        &[16, 1024],
+        &[16, 1024],
+        |kind, size, repeat, position| {
+            let mut row = measure(&args, &directory.0, kind, size);
+            row.as_object_mut()
+                .unwrap()
+                .extend(provenance.as_object().unwrap().clone());
+            row["quinn_version"] = versions["quinn"].clone();
+            row["dependency_versions"] = versions.clone();
+            row["dependency_versions_source"] = json!("workspace Cargo.lock at measurement time");
+            row["run"] = json!(repeat);
+            row["size_position"] = json!(position);
+            record(&args.common, "quinn-datagram.jsonl", &row);
+            row
+        },
+    );
 }
 
 fn command(

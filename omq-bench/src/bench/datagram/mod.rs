@@ -14,7 +14,12 @@ use serde_json::{Value, json};
 
 use args::CommonArgs;
 
-const SIZES: &[u64] = &[16, 64, 256, 512, 1024, 4096, 16384];
+pub(crate) const THROUGHPUT_SIZES: &[u64] = &[
+    16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 262_144, 1_048_576,
+    4_194_304, 8_388_608,
+];
+pub(crate) const LATENCY_SIZES: &[u64] =
+    &[16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 
 fn timestamp() -> u64 {
     SystemTime::now()
@@ -33,11 +38,16 @@ fn record(args: &CommonArgs, name: &str, row: &Value) {
 
 fn rounds(
     args: &CommonArgs,
-    defaults: &[u64],
+    throughput_defaults: &[u64],
+    latency_defaults: &[u64],
     mut measure: impl FnMut(&str, u64, usize, usize) -> Value,
 ) {
-    let sizes = args.sizes(defaults);
     for kind in args.kinds() {
+        let sizes = args.sizes(if kind == "throughput" {
+            throughput_defaults
+        } else {
+            latency_defaults
+        });
         let mut groups: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
         for repeat in 0..args.repeats {
             let offset = if args.order == "rotate" {

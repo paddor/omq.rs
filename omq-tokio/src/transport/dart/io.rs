@@ -1,5 +1,6 @@
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
 
 use omq_proto::dart::MAX_DATAGRAM;
 use quinn_udp::{BATCH_SIZE, EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
@@ -8,6 +9,94 @@ use tokio::net::UdpSocket;
 
 const MAX_SEGMENTS: usize = 64;
 const MAX_BATCH_BYTES: usize = 64_000;
+
+/// Endpoint-owned timer for submillisecond pacing and feedback deadlines.
+#[derive(Debug)]
+pub(super) struct Deadline {
+    #[cfg(target_os = "linux")]
+    timer: Option<tokio::io::unix::AsyncFd<NativeTimer>>,
+}
+
+impl Deadline {
+    pub(super) fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            timer: new_timer().ok(),
+        }
+    }
+
+    pub(super) async fn wait(&mut self, deadline: Instant) {
+        #[cfg(target_os = "linux")]
+        if let Some(timer) = &self.timer {
+            if wait_timer(timer, deadline).await.is_ok() {
+                return;
+            }
+            // Keep driving the session if native timer setup or polling fails.
+            self.timer = None;
+        }
+        tokio::time::sleep_until(deadline.into()).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct NativeTimer(nix::sys::timerfd::TimerFd);
+
+#[cfg(target_os = "linux")]
+impl std::os::fd::AsRawFd for NativeTimer {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsFd;
+        self.0.as_fd().as_raw_fd()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn new_timer() -> io::Result<tokio::io::unix::AsyncFd<NativeTimer>> {
+    use nix::sys::timerfd::{ClockId, TimerFd, TimerFlags};
+
+    let timer = TimerFd::new(
+        ClockId::CLOCK_MONOTONIC,
+        TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+    )?;
+    tokio::io::unix::AsyncFd::new(NativeTimer(timer))
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_timer(
+    timer: &tokio::io::unix::AsyncFd<NativeTimer>,
+    deadline: Instant,
+) -> io::Result<()> {
+    use nix::sys::time::TimeSpec;
+    use nix::sys::timerfd::{Expiration, TimerSetTimeFlags};
+
+    let delay = deadline.saturating_duration_since(Instant::now());
+    if delay.is_zero() {
+        return Ok(());
+    }
+    timer.get_ref().0.set(
+        Expiration::OneShot(TimeSpec::from_duration(delay)),
+        TimerSetTimeFlags::empty(),
+    )?;
+    loop {
+        let mut ready = timer.readable().await?;
+        let result = ready.try_io(|timer| {
+            let count = nix::unistd::read(&timer.get_ref().0, &mut [0; 8])?;
+            if count == 8 {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "short DART timer read",
+                ))
+            }
+        });
+        match result {
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+            Ok(result) => return result,
+            Err(_) => {}
+        }
+    }
+}
 
 /// A nonblocking UDP carrier with Quinn's offloads and packet metadata.
 ///

@@ -36,7 +36,7 @@ impl CommonArgs {
         let sizes = self.sizes.clone().unwrap_or_else(|| defaults.to_vec());
         assert!(self.repeats > 0 && !sizes.is_empty());
         for (i, size) in sizes.iter().enumerate() {
-            assert!((16..=16_384).contains(size) && !sizes[..i].contains(size));
+            assert!((16..=8_388_608).contains(size) && !sizes[..i].contains(size));
         }
         sizes
     }
@@ -62,10 +62,16 @@ pub(crate) struct DartArgs {
     pub common: CommonArgs,
     #[arg(long)]
     pub binary: PathBuf,
-    #[arg(long, default_value = "dart,tcp", value_delimiter = ',', value_parser = ["dart", "tcp"])]
+    #[arg(long, default_value = "dart,tcp", value_delimiter = ',', value_parser = ["dart", "tcp", "quic"])]
     pub transport: Vec<String>,
     #[arg(long, default_value_t = 3.0)]
     pub duration: f64,
+    /// Unmeasured throughput warmup in seconds.
+    #[arg(long, default_value_t = 0.2)]
+    pub warmup_seconds: f64,
+    /// Maximum postmeasurement delivery and acknowledgment drain in seconds.
+    #[arg(long, default_value_t = 2.0)]
+    pub drain_seconds: f64,
     #[arg(long, default_value_t = 100_000)]
     pub iterations: u64,
     #[arg(long, default_value_t = 200_000)]

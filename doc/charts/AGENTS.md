@@ -92,15 +92,18 @@ data in the JSONL get whiskers (currently omq impls only). Data fields:
 Data: `results_pushpull_lz4.jsonl`, patterns `pushpull_lz4` and
 `pushpull_lz4_dict`.
 
-`pushpull/lz4_tcp.svg`: PUSH/PULL single-peer, 3-row link-speed
-projection (1 Gbps, 100 Mbps, 10 Mbps). Each row: single panel with
+`pushpull/lz4_tcp.svg`: measured PUSH/PULL over private Linux netem links
+(1 Gbps, 100 Mbps, 10 Mbps shared between directions). Each row: single panel with
 dual Y-axes (dashed msg/s left, solid GB/s right) across all sizes.
 Series: tcp, lz4+tcp, lz4+tcp+dict. Sizes: 16B..256KiB (8 points).
-Thin dotted lines show compression CPU% at each datapoint, on a fixed 0–200%
+Thin dotted lines show measured sender CPU% at each datapoint, on a fixed 0–200%
 panel scale.
-Payload: structural JSON (`OMQ_BENCH_PAYLOAD=json`). Dict: 2 KiB,
+Payload: structural JSON (`OMQ_BENCH_PAYLOAD=json`, seed 4242). Dict: 2 KiB,
 trained on diverse seeded samples (`json_payload_seeded`, seeds 1..N).
-Bench: `omq-bench run pushpull-lz4` (uses `bench_peer_blocking`, 1IO).
+Bench: `omq_bench run pushpull-lz4 --link-mbps RATE` (1IO). MTU 1500,
+1 ms/direction, offloads off; 0.5 s active warmup, at least 2 s receive interval,
+three retained repeats. Charts require complete measured cohorts and exclude
+old projections. Use `OMQ_BENCH_TASKSET=1` for sender CPUs 1-2, receiver 3-4.
 
 Historical caveat: before `d6f07c40a` (2026-07-31), the blocking sender ignored
 the JSON and dictionary settings. Its throughput used repeated `x` bytes,
@@ -112,9 +115,9 @@ with current JSON/dictionary runs.
 Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
 `pushpull_zstd_dict`.
 
-`pushpull/zstd_tcp.svg` uses the same sizes, link projections, structural JSON,
+`pushpull/zstd_tcp.svg` uses the same sizes, measured links, structural JSON,
 and 2 KiB dictionary setup as the LZ4 chart, at Zstd level 1.
-Bench: `omq-bench run pushpull-zstd --level 1`.
+Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
 
 ## OMQ runtime modes
 

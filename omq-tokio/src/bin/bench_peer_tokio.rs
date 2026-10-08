@@ -1260,6 +1260,11 @@ fn json_payload_random(target_bytes: usize) -> Bytes {
 }
 
 fn rand_seed() -> u32 {
+    if let Ok(seed) = std::env::var("OMQ_BENCH_JSON_SEED") {
+        let seed = seed.parse().expect("OMQ_BENCH_JSON_SEED");
+        assert!(seed != 0, "JSON seed must be nonzero");
+        return seed;
+    }
     let mut buf = [0u8; 4];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| {

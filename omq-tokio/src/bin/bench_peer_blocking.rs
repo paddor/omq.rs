@@ -344,6 +344,11 @@ fn json_payload_random(target_bytes: usize) -> Bytes {
 }
 
 fn rand_seed() -> u32 {
+    if let Ok(seed) = std::env::var("OMQ_BENCH_JSON_SEED") {
+        let seed = seed.parse().expect("OMQ_BENCH_JSON_SEED");
+        assert!(seed != 0, "JSON seed must be nonzero");
+        return seed;
+    }
     let mut buf = [0u8; 4];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| {
@@ -576,10 +581,74 @@ fn run_pull(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Durat
     let pull = ctx.blocking_socket(SocketType::Pull, bench_options_client(size));
     pull.connect(ep).expect("pull connect");
 
+    if std::env::var_os("OMQ_BENCH_COMPRESSION").is_some() {
+        run_compression_pull(&pull, size, duration);
+        return;
+    }
+
     let cpu_before = cpu_time_secs();
     let (count, elapsed) = recv_loop(&pull, duration, size);
     let cpu = cpu_time_secs() - cpu_before;
     println!("{count} {elapsed:.6} {size} {cpu:.6}");
+}
+
+fn run_compression_pull(pull: &blocking::Socket, size: usize, duration: Duration) {
+    pull.wait_connected(1, Duration::from_secs(10))
+        .expect("compression sender connected");
+    let payload = bench_payload(size);
+    let batch = (64 * 1024 / size).clamp(1, 64);
+    let receive_until = |deadline: Instant| {
+        let mut count = 0u64;
+        loop {
+            let mut received = 0u64;
+            for _ in 0..batch {
+                let Ok(message) = pull.try_recv() else {
+                    break;
+                };
+                assert!(
+                    message.len() == 1 && message.part_slice(0) == Some(payload.as_ref()),
+                    "corrupt compression payload"
+                );
+                received += 1;
+            }
+            // Exclude the entire batch that crosses the measurement boundary.
+            if Instant::now() >= deadline {
+                return count;
+            }
+            count += received;
+            if received == 0 {
+                std::thread::yield_now();
+            }
+        }
+    };
+    let _ = receive_until(Instant::now() + warmup_duration());
+    let sender_pid = std::env::var("OMQ_BENCH_SENDER_PID").expect("compression sender PID");
+    let sender_before = process_cpu_time(&sender_pid);
+    let receiver_before = cpu_time_secs();
+    let start = Instant::now();
+    let count = receive_until(start + duration);
+    let elapsed = start.elapsed().as_secs_f64();
+    let receiver_cpu = cpu_time_secs() - receiver_before;
+    let sender_cpu = process_cpu_time(&sender_pid) - sender_before;
+    println!("{count} {elapsed:.9} {size} {receiver_cpu:.9} {sender_cpu:.9}");
+}
+
+#[cfg(target_os = "linux")]
+fn process_cpu_time(pid: &str) -> f64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .expect("compression sender CPU accounting");
+    let (_, counters) = stat.rsplit_once(')').expect("process stat command");
+    let fields: Vec<_> = counters.split_whitespace().collect();
+    let user: f64 = fields[11].parse().expect("sender user CPU ticks");
+    let system: f64 = fields[12].parse().expect("sender system CPU ticks");
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    assert!(ticks > 0, "process CPU clock resolution");
+    (user + system) / ticks as f64
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cpu_time(_pid: &str) -> f64 {
+    0.0
 }
 
 fn run_pull_bind(ctx: &omq_tokio::Context, ep: Endpoint, size: usize, duration: Duration) {

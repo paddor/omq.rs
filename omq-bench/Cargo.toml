@@ -8,7 +8,7 @@ authors.workspace = true
 publish = false
 
 [[bin]]
-name = "omq-bench"
+name = "omq_bench"
 path = "src/main.rs"
 
 [dependencies]

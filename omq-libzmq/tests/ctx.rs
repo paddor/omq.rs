@@ -220,7 +220,7 @@ fn ctx_thread_name_prefix_names_background_threads() {
         .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
         .map(|name| name.trim().to_owned())
         .collect::<Vec<_>>();
-    assert!(names.iter().any(|name| name == "threads/Control"));
+    assert!(names.iter().any(|name| name == "threads/Ctrl"));
     assert!(names.iter().any(|name| name == "threads/IO/0"));
     assert!(names.iter().any(|name| name == "threads/IO/1"));
 

@@ -26,7 +26,7 @@ const CHART: CompressionChart = CompressionChart {
     dict_pattern: "pushpull_zstd_dict",
     dict_series_key: "zstd+tcp+dict",
     output_file: "zstd_tcp.svg",
-    title: "PUSH/PULL Zstd L1 compression, structural JSON payload, 2 KiB dict, TCP loopback, 2-process",
+    title: "PUSH/PULL Zstd L1, JSON payloads, 2 KiB dict, netem, 1 IO",
     series: SERIES,
     compression_level: Some(1),
 };

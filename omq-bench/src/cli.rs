@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "omq-bench", about = "OMQ benchmark runner")]
+#[command(name = "omq_bench", about = "OMQ benchmark runner")]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -185,6 +185,9 @@ pub(crate) struct ComparisonsArgs {
 
 #[derive(Parser)]
 pub(crate) struct PushpullLz4Args {
+    #[command(flatten)]
+    pub link: CompressionLinkArgs,
+
     /// Transports (comma-separated).
     #[arg(long, default_value = "tcp,lz4+tcp")]
     pub transports: String,
@@ -197,7 +200,7 @@ pub(crate) struct PushpullLz4Args {
     #[arg(long, default_value_t = 2.0)]
     pub duration: f64,
 
-    /// Best-of-N rounds.
+    /// Measurements per cell (all rounds are retained).
     #[arg(long, default_value_t = 3)]
     pub rounds: u32,
 
@@ -212,6 +215,9 @@ pub(crate) struct PushpullLz4Args {
 
 #[derive(Parser)]
 pub(crate) struct PushpullZstdArgs {
+    #[command(flatten)]
+    pub link: CompressionLinkArgs,
+
     /// Transports (comma-separated).
     #[arg(long, default_value = "tcp,zstd+tcp")]
     pub transports: String,
@@ -224,7 +230,7 @@ pub(crate) struct PushpullZstdArgs {
     #[arg(long, default_value_t = 2.0)]
     pub duration: f64,
 
-    /// Best-of-N rounds.
+    /// Measurements per cell (all rounds are retained).
     #[arg(long, default_value_t = 3)]
     pub rounds: u32,
 
@@ -239,6 +245,21 @@ pub(crate) struct PushpullZstdArgs {
     /// Zstd compression level (-8..=4). Omitted uses transport default.
     #[arg(long)]
     pub level: Option<i32>,
+}
+
+#[derive(Parser)]
+pub(crate) struct CompressionLinkArgs {
+    /// Emulate a shared TCP link in a private Linux network namespace.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub link_mbps: Option<u32>,
+
+    /// Netem delay in each direction, in microseconds.
+    #[arg(long, default_value_t = 1000)]
+    pub link_delay_us: u32,
+
+    /// Active receiver warmup, in seconds.
+    #[arg(long, default_value_t = 0.5)]
+    pub warmup_seconds: f64,
 }
 
 #[derive(Parser)]

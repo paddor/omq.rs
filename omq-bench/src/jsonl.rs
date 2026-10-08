@@ -144,6 +144,34 @@ pub(crate) struct PushpullLz4Row {
     pub dict_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub netem: Option<CompressionLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_affinity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_seed: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompressionLink {
+    pub rate_mbps: u32,
+    pub delay_us: u32,
+    pub mtu: u32,
+    pub shared_rate: bool,
+    pub segmentation_offloads: bool,
+    pub placement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

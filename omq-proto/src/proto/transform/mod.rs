@@ -78,10 +78,10 @@ impl CompressionKind {
     /// not enable a new codec wire format on an otherwise unsupported carrier.
     #[cfg(any(feature = "lz4", feature = "zstd"))]
     pub(crate) fn supports_carrier(self, scheme: &str) -> bool {
-        match scheme {
-            "tcp" => true,
+        match (self, scheme) {
+            (_, "tcp") => true,
             #[cfg(all(feature = "ws", feature = "lz4"))]
-            "ws" => self == Self::Lz4,
+            (Self::Lz4, "ws") => true,
             _ => false,
         }
     }

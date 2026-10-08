@@ -32,7 +32,7 @@ unless `OMQ_BENCH_NO_WRITE=1`.
 
 ## Cross-implementation Comparison Benchmarks
 
-`omq-bench run comparisons` drives standalone `bench_peer` binaries:
+`omq_bench run comparisons` drives standalone `bench_peer` binaries:
 
 | binary | source | impls |
 |--------|--------|-------|
@@ -132,7 +132,7 @@ prefix=Linux VM on a 2018 Mac Mini
 postfix=6 cores, performance governor, turbo off
 ```
 
-`omq-bench` and binding chart scripts read the repo-root `.chart_hw`
+`omq_bench` and binding chart scripts read the repo-root `.chart_hw`
 automatically.
 
 Run throughput benchmarks with `OMQ_BENCH_TASKSET=1`. It pins the measured
@@ -268,16 +268,24 @@ cargo run --release -p omq-bench -- chart pubsub-lz4
 
 ### Compression Chart
 
-```sh
-cargo run --release -p omq-bench -- run compression --chart
-```
-
-Or bench and chart separately:
+The LZ4 and Zstd charts use measured Linux netem links. Each invocation
+creates a private user/network namespace; it needs `unshare`, `ip`, `tc`,
+and `ethtool`, with unprivileged user namespaces enabled.
 
 ```sh
-cargo run --release -p omq-bench -- run compression
-cargo run --release -p omq-bench -- chart compression
+for rate in 1000 100 10; do
+  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-lz4 --link-mbps "$rate"
+  OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run pushpull-zstd --level 1 --link-mbps "$rate"
+done
+cargo run --release -p omq-bench -- chart lz4
+cargo run --release -p omq-bench -- chart zstd
 ```
+
+Rates include both directions' IP traffic; delay is 1 ms each way and MTU
+is 1500. Segmentation offloads are disabled. Three repeats use 0.5 s active
+warmup and at least a 2 s receive interval, extended for large messages on
+slow links. Payloads are checked; boundary-crossing
+batches are excluded. Sender CPU covers the measured interval only.
 
 ### pyomq Bindings Charts
 

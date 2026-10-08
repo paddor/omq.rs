@@ -61,7 +61,7 @@ currently wired into backend behavior.
 socket.
 
 Unnamed contexts use background thread names such as `OMQ0/IO/0`. Contexts
-configured with more than one IO thread also have an `OMQ0/Control` thread.
+configured with more than one IO thread also have an `OMQ0/Ctrl` thread.
 `ZMQ_THREAD_NAME_PREFIX` replaces the generated `OMQ0` context name and must be
 set before creating a socket.
 

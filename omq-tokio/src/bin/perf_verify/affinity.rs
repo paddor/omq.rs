@@ -58,7 +58,7 @@ impl Affinity {
         let mut names = Vec::new();
         if io_threads > 1 {
             names.push((
-                format!("{prefix}/Control"),
+                format!("{prefix}/Ctrl"),
                 self.cpus[control % self.cpus.len()],
             ));
         }

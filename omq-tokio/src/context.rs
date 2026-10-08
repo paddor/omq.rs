@@ -208,7 +208,7 @@ impl IoThreadPool {
 
 fn background_thread_name(prefix: &str, runtime_count: usize, index: usize) -> String {
     if runtime_count > 1 && index == 0 {
-        format!("{prefix}/Control")
+        format!("{prefix}/Ctrl")
     } else {
         let io_index = index.saturating_sub(usize::from(runtime_count > 1));
         format!("{prefix}/IO/{io_index}")
@@ -218,7 +218,7 @@ fn background_thread_name(prefix: &str, runtime_count: usize, index: usize) -> S
 fn fit_context_name(name: &str, io_threads: usize) -> &str {
     let max_io_suffix = format!("/IO/{}", io_threads - 1).len();
     let max_suffix = if io_threads > 1 {
-        max_io_suffix.max("/Control".len())
+        max_io_suffix.max("/Ctrl".len())
     } else {
         max_io_suffix
     };
@@ -548,7 +548,7 @@ impl Context {
     /// Create a context with custom configuration and a custom context name.
     ///
     /// Data thread names use `<name>/IO/<index>`. Multi-IO contexts also use
-    /// `<name>/Control` for the internal control runtime. Without an explicit
+    /// `<name>/Ctrl` for the internal control runtime. Without an explicit
     /// name, contexts receive process-local names such as `OMQ0` and `OMQ1`.
     /// Names are shortened at UTF-8 boundaries to fit Linux's 15-byte thread
     /// name limit while retaining the role and IO index.
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(pool.assign_thread(), 0);
         assert_eq!(pool.assign_thread(), 1);
         assert_eq!(pool.assign_thread(), 2);
-        assert_eq!(thread_name(&pool, 0), "multi/Control");
+        assert_eq!(thread_name(&pool, 0), "multi/Ctrl");
         assert_eq!(thread_name(&pool, 1), "multi/IO/0");
         assert_eq!(thread_name(&pool, 2), "multi/IO/1");
         assert_eq!(thread_name(&pool, 3), "multi/IO/2");
@@ -914,10 +914,19 @@ mod tests {
     #[test]
     fn long_context_names_preserve_thread_role() {
         let pool = IoThreadPool::new_with_context_name(3, Some("orders-service".to_owned()));
-        assert_eq!(fit_context_name("orders-service", 3), "orders-");
-        assert_eq!(thread_name(&pool, 0), "orders-/Control");
-        assert_eq!(thread_name(&pool, 1), "orders-/IO/0");
-        assert_eq!(thread_name(&pool, 3), "orders-/IO/2");
+        assert_eq!(fit_context_name("orders-service", 3), "orders-ser");
+        assert_eq!(thread_name(&pool, 0), "orders-ser/Ctrl");
+        assert_eq!(thread_name(&pool, 1), "orders-ser/IO/0");
+        assert_eq!(thread_name(&pool, 3), "orders-ser/IO/2");
+        pool.shutdown();
+    }
+
+    #[test]
+    fn eight_byte_context_name_keeps_its_full_prefix() {
+        let pool = IoThreadPool::new_with_context_name(2, Some("test/omq".to_owned()));
+        assert_eq!(thread_name(&pool, 0), "test/omq/Ctrl");
+        assert_eq!(thread_name(&pool, 1), "test/omq/IO/0");
+        assert_eq!(thread_name(&pool, 2), "test/omq/IO/1");
         pool.shutdown();
     }
 

@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use plotters::style::RGBColor;
 
 use super::common::{self, Impl, LatencyEntry, LatencyMap, ValMap};
 use crate::jsonl;
 
-const SIZES: &[u64] = &[16, 64, 256, 512, 1024, 4096, 16384];
+use crate::bench::datagram::{LATENCY_SIZES, THROUGHPUT_SIZES};
 // The chart binary builds without the transport feature. Match the codec version.
 const DART_WIRE_VERSION: u64 = 1;
 const IMPLS: &[Impl] = &[
@@ -30,7 +31,7 @@ const IMPLS: &[Impl] = &[
     Impl {
         key: "aeron",
         label: "Aeron v1.53.3 / UDP",
-        threads: "1 IO",
+        threads: "1 IO (SHARED)",
         color: common::C_MONOCOQUE,
     },
 ];
@@ -63,7 +64,10 @@ fn eligible_runs() -> Runs {
         {
             continue;
         }
-        let Some(size) = row["msg_size"].as_u64().filter(|size| SIZES.contains(size)) else {
+        let Some(size) = row["msg_size"]
+            .as_u64()
+            .filter(|size| THROUGHPUT_SIZES.contains(size))
+        else {
             continue;
         };
         if transport == "dart"
@@ -91,6 +95,10 @@ fn eligible_runs() -> Runs {
         if kind == "throughput" {
             if row["recv_batching"] != true
                 || row["sender"]["seconds"] != 3
+                || row["warmup_seconds"] != 0.2
+                || row["drain_seconds"].as_f64().is_some_and(|seconds| {
+                    Duration::try_from_secs_f64(seconds) != Ok(Duration::from_secs(2))
+                })
                 || row["missing_count"] != 0
                 || row["excess_count"] != 0
                 || row["sender"]["unacknowledged"] != 0
@@ -138,7 +146,10 @@ fn aeron_runs(groups: &mut Runs) {
         {
             continue;
         }
-        let Some(size) = row["msg_size"].as_u64().filter(|size| SIZES.contains(size)) else {
+        let Some(size) = row["msg_size"]
+            .as_u64()
+            .filter(|size| THROUGHPUT_SIZES.contains(size))
+        else {
             continue;
         };
         let Some(kind @ ("throughput" | "latency")) = row["kind"].as_str() else {
@@ -206,13 +217,16 @@ pub(crate) fn generate() {
     std::fs::create_dir_all(&directory).expect("create DART chart directory");
     if !messages.is_empty() {
         let path = directory.join("scattergather.svg");
-        common::draw_throughput_single_panel(
+        common::draw_throughput_dual_panel(
             &path,
             "Received throughput, Dart / TCP / Aeron UDP loopback, 2-process, median of 3",
-            SIZES,
+            THROUGHPUT_SIZES,
             IMPLS,
             &bandwidth,
             &messages,
+            &BTreeMap::new(),
+            "",
+            "",
         )
         .expect("draw DART throughput chart");
         eprintln!("Written: {}", path.display());
@@ -222,7 +236,7 @@ pub(crate) fn generate() {
         common::draw_latency_single_panel_100us(
             &path,
             "Echo RTT, Dart / TCP / Aeron UDP loopback, 2-process, median-p99 run of 3",
-            SIZES,
+            LATENCY_SIZES,
             IMPLS,
             &latency,
             &BTreeMap::new(),

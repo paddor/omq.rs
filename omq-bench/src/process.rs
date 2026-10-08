@@ -271,6 +271,9 @@ impl ProcessGuard {
 }
 
 pub(crate) fn spawn_interactive(command: &mut Command) -> ProcessGuard {
+    for (key, value) in PEER_ENV.get().into_iter().flatten() {
+        command.env(key, value);
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

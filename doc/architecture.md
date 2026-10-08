@@ -296,7 +296,8 @@ listener controls new admission; established peers own their connections.
 A separate liveness stream keeps heartbeats independent of application
 receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
 
-Each Dart endpoint task drives all peers' sans-I/O sessions. Sessions retain
+Each Dart endpoint task drives all peers' sans-I/O sessions and owns its
+deadline timer (monotonic timerfd on Linux). Sessions retain
 outbound bodies until receipt acknowledgment and enforce bounded receive
 credit. Per-peer receive pools return credit only when storage is reusable.
 Fragmented bodies reserve their full allocation after length validation;

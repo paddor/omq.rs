@@ -283,6 +283,10 @@ The runner verifies six distinct cores. Send application/IO use CPU slots
 with one owned IO thread. Throughput excludes a 200 ms warmup and batches
 completed after the measurement deadline. A bounded 2-second drain records delivery
 after the window separately and requires acknowledgment of native sends. RTT excludes the configured warmup iterations.
+`--warmup-seconds` changes throughput warmup; `--duration` changes its
+measurement window; `--drain-seconds` changes the bounded delivery/ACK drain
+(default 2 seconds). Save nonstandard runs with `--output`; loopback charts
+require 200 ms warmup, 3-second measurements, and the default drain.
 Warnings, IO failures, and timeouts stop the run.
 
 Results append to `~/.cache/omq/dart.jsonl`. Rows include offered and received
@@ -317,15 +321,21 @@ experimental versions 6 through 8 retain their original version in
 They plot LAN and
 adaptive separately; historical unreliable rows are excluded.
 Outputs: `doc/charts/dart/{scattergather,clientserver}.svg`.
-Chart sizes are 16 B, 64 B, 256 B, 512 B, 1 KiB, 4 KiB, and 16 KiB. The RTT chart uses a
-linear Y axis from 1 to 100 us with 10 us ticks. A triangle and measured value
+RTT sizes are 16 B, 32 B, 64 B, 128 B, 256 B, 512 B, 1 KiB, 2 KiB, 4 KiB,
+8 KiB, and 16 KiB. The RTT chart uses a linear Y axis from 1 to 100 us with
+10 us ticks. A triangle and measured value
 identify p99.9 whiskers that extend above the axis limit.
-Throughput uses one panel over the same sizes: dashed message rates on the
-left axis, solid GB/s on the right, and two lines per implementation.
+Throughput adds 32 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, and 8 MiB. Its two
+panels show messages/s through 1 KiB on the left and GB/s from 256 B on the
+right, matching the main TCP chart's overlap.
+With the peer built using `--features 'dart quic'`, `--transport quic` runs
+the same socket pairs and verification over TLS-authenticated QUIC streams.
+The runner generates trusted benchmark credentials. Use `--output` for
+simulated-link measurements; they do not belong in loopback chart cohorts.
 Large OMQ throughput bodies reuse a bounded cache of prepared `Bytes` on both
 transports. TCP also uses it at 1 KiB; smaller TCP bodies and Dart bodies up
 to 1 KiB use the fixed pool. Retag only unique bodies, preserving every
-in-flight reference. The cache holds about 1 MiB of prepared bodies. RTT
+in-flight reference. The cache holds at least 64 bodies, targeting 1 MiB. RTT
 prepares each outgoing body before the timestamp. Dart's IO task fragments
 larger bodies and the receiver validates the assembled message.
 Throughput verifies every payload byte using a vectorizable word reduction,
@@ -348,7 +358,8 @@ zero application/transport spin budgets. Their explicit runtime and polling
 metadata keep them separate from the charts' owned-IO series.
 
 The Aeron baseline uses 1.53.3, an exclusive publication, 64 MiB terms,
-and one embedded shared Media Driver per process. Each JVM starts on its
+and one embedded SHARED Media Driver per process, labeled `1 IO (SHARED)`.
+Congestion control uses Aeron's default static receive window. Each JVM starts on its
 application core; the runner pins the shared driver to its separate IO core
 before releasing the start barrier. CPU slots match the OMQ runner.
 The JVM uses 3-second throughput warmup and 200,000 RTT warmup exchanges;

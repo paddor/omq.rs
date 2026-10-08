@@ -1,4 +1,4 @@
-//! Two-process DART/TCP peers. Only socket APIs carry measured messages.
+//! Two-process Dart/TCP/QUIC peers. Only socket APIs carry measured messages.
 //! Stdin coordinates the measurement window; stdout contains JSON events.
 
 use std::collections::VecDeque;
@@ -18,10 +18,11 @@ mod affinity;
 #[path = "dart_bench/current.rs"]
 mod current;
 
+#[cfg(feature = "quic")]
+mod ws_bench_config;
+
 const BATCH: usize = 64;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const TAIL: Duration = Duration::from_secs(2);
-const THROUGHPUT_WARMUP: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeMode {
@@ -37,6 +38,8 @@ struct Config {
     duration: Duration,
     iterations: usize,
     warmup: usize,
+    throughput_warmup: Duration,
+    drain: Duration,
     spin: Duration,
     io_spin: Duration,
     window_messages: usize,
@@ -60,7 +63,9 @@ impl Config {
         let size = args[3].parse().expect("body size");
         let spin = spin_budget(&args[7]);
         let io_spin = spin_budget(&args[8]);
-        assert!((16..=16_384).contains(&size));
+        assert!((16..=8_388_608).contains(&size));
+        #[cfg(feature = "quic")]
+        ws_bench_config::set_endpoint(Some(&args[2]));
         assert!(spin <= Duration::from_micros(50) || spin == Duration::MAX);
         assert!(io_spin <= Duration::from_micros(50) || io_spin == Duration::MAX);
         assert!(runtime == RuntimeMode::Owned || (spin.is_zero() && io_spin.is_zero()));
@@ -71,6 +76,14 @@ impl Config {
             duration: Duration::from_secs_f64(args[4].parse().expect("seconds")),
             iterations: args[5].parse().expect("iterations"),
             warmup: args[6].parse().expect("warmup"),
+            throughput_warmup: Duration::from_secs_f64(
+                std::env::var("OMQ_DART_WARMUP_SECS")
+                    .map_or(0.2, |value| value.parse().expect("warmup seconds")),
+            ),
+            drain: Duration::from_secs_f64(
+                std::env::var("OMQ_DART_DRAIN_SECS")
+                    .map_or(2.0, |value| value.parse().expect("drain seconds")),
+            ),
             spin,
             io_spin,
             window_messages: std::env::var("OMQ_DART_WINDOW_MESSAGES")
@@ -109,6 +122,8 @@ impl Config {
         options.dart.io_spin = self.io_spin;
         options.dart.window_messages = self.window_messages;
         options.dart.congestion = self.congestion;
+        #[cfg(feature = "quic")]
+        ws_bench_config::configure(&mut options);
         options
     }
 }
@@ -220,7 +235,7 @@ fn scatter(socket: &Socket, config: &Config, native: bool, at: Instant) {
     let pooled = config.size < omq_proto::dart::MAX_BODY
         || (native && config.size == omq_proto::dart::MAX_BODY);
     let mut cache = (!pooled).then(|| BodyCache::new(config.size));
-    let measure_at = at + THROUGHPUT_WARMUP;
+    let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
     let mut queued = VecDeque::with_capacity(BATCH);
     let mut buffers = Vec::with_capacity(BATCH);
@@ -288,10 +303,26 @@ fn scatter(socket: &Socket, config: &Config, native: bool, at: Instant) {
         }
     }
     drop(queued);
-    std::thread::sleep(TAIL / 2);
+    std::thread::sleep((config.drain / 2).min(Duration::from_secs(1)));
     if native {
-        wait_acknowledged(socket, offered + warmup_offered, until + TAIL, &mut wait);
+        wait_acknowledged(
+            socket,
+            offered + warmup_offered,
+            until + config.drain,
+            &mut wait,
+        );
     }
+    scatter_result(socket, config, native, offered, warmup_offered, pool_empty);
+}
+
+fn scatter_result(
+    socket: &Socket,
+    config: &Config,
+    native: bool,
+    offered: u64,
+    warmup_offered: u64,
+    pool_empty: u64,
+) {
     let stats = socket.dart_stats();
     let unacknowledged = if native {
         (offered + warmup_offered).saturating_sub(stats.acknowledged)
@@ -380,8 +411,8 @@ fn wait_acknowledged(socket: &Socket, count: u64, deadline: Instant, wait: &mut 
 }
 
 fn gather(socket: &Socket, config: &Config, at: Instant) {
-    let until = at + THROUGHPUT_WARMUP + config.duration;
-    let cancel = timed_cancel(until + TAIL);
+    let until = at + config.throughput_warmup + config.duration;
+    let cancel = timed_cancel(until + config.drain);
     let mut batch = Vec::with_capacity(256);
     let pool = socket.dart_pool().ok().cloned();
     let mut received = 0u64;

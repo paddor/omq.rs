@@ -35,7 +35,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `lz4` | `lz4+tcp://` transform | `lz4rip` |
 | `ws` | `ws://` / `wss://` WebSocket transport | `rustls`, `rustls-native-certs` (backend-level) |
 | `quic` | `quic://` raw OMQ over QUIC (TLS 1.3, ALPN `omq-zmtp/1`) | `quinn` (backend-level) |
-| `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp` (backend-level) |
+| `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp`, Linux `nix` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
 

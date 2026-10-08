@@ -1078,130 +1078,6 @@ pub(crate) fn draw_gbs_panel(
     Ok(())
 }
 
-pub(crate) fn draw_throughput_single_panel(
-    out_path: &Path,
-    title: &str,
-    sizes: &[u64],
-    impls: &[Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let present: Vec<&Impl> = impls
-        .iter()
-        .filter(|imp| {
-            sizes
-                .iter()
-                .any(|s| msgs.get(s).is_some_and(|m| m.contains_key(imp.key)))
-        })
-        .collect();
-    let chart_h = 340u32;
-    let total_h = chart_h + 30 + present.len() as u32 * 16;
-    let width = 850u32;
-    let hw_label = detect_hardware();
-    let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
-    root.fill(&BACKGROUND_COLOR)?;
-    let (chart_area, table_area) = root.split_vertically(chart_h);
-    let msgs_raw = msgs
-        .values()
-        .flat_map(|m| m.values())
-        .copied()
-        .fold(0.0_f64, f64::max);
-    let gbs_raw = tput
-        .values()
-        .flat_map(|m| m.values())
-        .map(|v| v / 1000.0)
-        .fold(0.0_f64, f64::max);
-    let (msgs_max, msgs_ticks) = nice_axis(msgs_raw, 6);
-    let (gbs_max, gbs_ticks) = nice_axis(gbs_raw, 6);
-    let x_range = -0.15..(sizes.len() - 1) as f64 + 0.15;
-    let mut chart = ChartBuilder::on(&chart_area)
-        .caption(
-            "Dashed: messages/s (left); solid: GB/s (right); higher is better",
-            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
-        )
-        .set_label_area_size(LabelAreaPosition::Bottom, 28)
-        .set_label_area_size(LabelAreaPosition::Left, 70)
-        .set_label_area_size(LabelAreaPosition::Right, 70)
-        .margin_top(36)
-        .margin_left(10)
-        .margin_right(10)
-        .build_cartesian_2d(x_range.clone(), 0.0..msgs_max)?
-        .set_secondary_coord(x_range, 0.0..gbs_max);
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(msgs_ticks + 1)
-        .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
-    chart
-        .configure_secondary_axes()
-        .x_labels(0)
-        .y_labels(gbs_ticks + 1)
-        .y_label_formatter(&|v| fmt_gbps(*v))
-        .label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .axis_style(AXIS_COLOR)
-        .draw()?;
-    draw_dual_axis_throughput_series(&mut chart, sizes, &present, tput, msgs)?;
-    draw_legend_table(&table_area, &present, &BTreeMap::new(), "", "")?;
-    root.present()?;
-    drop(root);
-    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
-}
-
-fn draw_dual_axis_throughput_series<DB: DrawingBackend>(
-    chart: &mut plotters::chart::DualCoordChartContext<
-        '_,
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordf64>,
-        Cartesian2d<RangedCoordf64, RangedCoordf64>,
-    >,
-    sizes: &[u64],
-    present: &[&Impl],
-    tput: &ValMap,
-    msgs: &ValMap,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    for imp in present.iter().rev() {
-        let points: Vec<_> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
-            .collect();
-        chart.draw_series(DashedLineSeries::new(
-            points.clone(),
-            5,
-            4,
-            imp.color.stroke_width(2),
-        ))?;
-        chart.draw_series(
-            points
-                .iter()
-                .map(|&point| Circle::new(point, 2, imp.color.filled())),
-        )?;
-        let points: Vec<_> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| tput.get(&s)?.get(imp.key).map(|&v| (i as f64, v / 1000.0)))
-            .collect();
-        chart.draw_secondary_series(LineSeries::new(points.clone(), imp.color.stroke_width(2)))?;
-        chart.draw_secondary_series(
-            points
-                .iter()
-                .map(|&point| Circle::new(point, 2, imp.color.filled())),
-        )?;
-    }
-    Ok(())
-}
-
 struct LatencyAxis(RangedCoordf64, Vec<f64>);
 
 impl Ranged for LatencyAxis {
@@ -1418,6 +1294,7 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     // Draw ranges behind the p99 lines and dots. All three values come from
     // the same measured run, not from variation between runs.
+    let mut label_rows: Vec<Vec<std::ops::Range<i32>>> = Vec::new();
     for imp in present.iter().rev() {
         let stroke = imp.color.mix(0.65).stroke_width(1);
         for (index, size) in sizes.iter().enumerate() {
@@ -1454,7 +1331,27 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
                 } else {
                     format!("p99.9: {}", fmt_us(entry.p999))
                 };
-                let boundary = index + 1 == sizes.len();
+                let pixel_x = chart.plotting_area().map_coordinate(&(x, bounds.end)).0;
+                let label_width = i32::try_from(label.len()).unwrap() * 6;
+                let boundary =
+                    pixel_x + label_width + 8 > chart.plotting_area().get_pixel_range().0.end;
+                let span = if boundary {
+                    pixel_x - label_width - 8..pixel_x
+                } else {
+                    pixel_x..pixel_x + label_width + 8
+                };
+                let row = label_rows
+                    .iter()
+                    .position(|placed| {
+                        placed
+                            .iter()
+                            .all(|old| old.end <= span.start || span.end <= old.start)
+                    })
+                    .unwrap_or(label_rows.len());
+                if row == label_rows.len() {
+                    label_rows.push(Vec::new());
+                }
+                label_rows[row].push(span);
                 let style = ("sans-serif", 10)
                     .into_font()
                     .color(&imp.color)
@@ -1464,7 +1361,10 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
                     ));
                 chart.draw_series(std::iter::once(Text::new(
                     label,
-                    (x + if boundary { -0.05 } else { 0.05 }, bounds.end - 4.0),
+                    (
+                        x + if boundary { -0.05 } else { 0.05 },
+                        bounds.end - 4.0 - row as f64 * 3.0,
+                    ),
                     style,
                 )))?;
             }

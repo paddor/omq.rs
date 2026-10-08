@@ -27,7 +27,7 @@ zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Raw OMQ over QUIC (`quic://`). Quinn with rustls/ring; no OMQ compression.
 quic = ["omq-proto/quic", "dep:quinn", "dep:nix", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
-dart = ["omq-proto/dart", "dep:quinn-udp"]
+dart = ["omq-proto/dart", "dep:quinn-udp", "dep:nix", "nix/time"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.

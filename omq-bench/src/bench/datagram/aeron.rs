@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use super::args::AeronArgs;
 use super::peers::{Peers, Side};
-use super::{SIZES, TempDir, capture, digest, record, rounds, timestamp, validate_cpus};
+use super::{
+    LATENCY_SIZES, THROUGHPUT_SIZES, TempDir, capture, digest, record, rounds, timestamp,
+    validate_cpus,
+};
 
 pub(crate) fn run(mut args: AeronArgs) {
     validate_cpus(&args.common.cpus);
@@ -43,27 +46,33 @@ pub(crate) fn run(mut args: AeronArgs) {
     classes.sort();
     classes.insert(0, args.jar.clone());
     let binary_sha = digest(&classes);
-    rounds(&args.common, SIZES, |kind, size, repeat, position| {
-        assert!(SIZES.contains(&size));
-        let directory = TempDir::new("dart-aeron");
-        let mut row = measure(&args, &directory.0, kind, size);
-        row.as_object_mut().unwrap().extend(
-            json!({"timestamp_ns":timestamp(),
+    rounds(
+        &args.common,
+        THROUGHPUT_SIZES,
+        LATENCY_SIZES,
+        |kind, size, repeat, position| {
+            assert!(THROUGHPUT_SIZES.contains(&size));
+            let directory = TempDir::new("dart-aeron");
+            let mut row = measure(&args, &directory.0, kind, size);
+            row.as_object_mut().unwrap().extend(
+                json!({"timestamp_ns":timestamp(),
             "kind":kind, "transport":"aeron", "msg_size":size, "cpus":args.common.cpu_csv(),
             "binary_sha256":binary_sha, "aeron_version":"1.53.3", "threading":"shared",
+            "publication":"exclusive", "congestion":"static-window",
             "pinned_driver":true, "profiled":args.common.profile.is_some(), "verified":true,
             "repeat":repeat, "size_position":position, "measurement_order":args.common.order,
             "warmup_seconds":if kind == "throughput" { Some(3) } else { None },
             "drain_seconds":if kind == "throughput" { Some(2) } else { None },
             "iterations":if kind == "latency" { Some(100_000) } else { None },
             "warmup_iterations":if kind == "latency" { Some(200_000) } else { None }})
-            .as_object()
-            .unwrap()
-            .clone(),
-        );
-        record(&args.common, "dart-aeron.jsonl", &row);
-        row
-    });
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            record(&args.common, "dart-aeron.jsonl", &row);
+            row
+        },
+    );
 }
 
 fn command(args: &AeronArgs, directory: &Path, kind: &str, peer_side: Side, size: u64) -> Command {

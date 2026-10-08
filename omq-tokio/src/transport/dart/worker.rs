@@ -447,6 +447,7 @@ fn fresh_session() -> u64 {
 impl EndpointWorker {
     pub(crate) async fn run(mut self) {
         let epoch = Instant::now();
+        let mut timer = super::io::Deadline::new();
         let signal = Arc::new(DataSignal::new());
         let mut routes = Routes::default();
         let mut generation = 0;
@@ -539,7 +540,7 @@ impl EndpointWorker {
                     None => break,
                 },
                 () = signal.ready() => {},
-                () = tokio::time::sleep_until(deadline.into()) => {},
+                () = timer.wait(deadline) => {},
                 result = self.io.writable(), if blocked => { if result.is_err() { break; } },
                 result = self.io.readable(), if Instant::now() >= receive_retry => { if result.is_err() { break; } },
             }

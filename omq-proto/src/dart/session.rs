@@ -538,8 +538,10 @@ impl Session {
         self.peer_status_serial = status.serial;
         self.peer_ecn = status.counts;
         self.peer_credit = status.credit;
+        if status.ack > self.peer_ack {
+            self.peer_ack_at = now;
+        }
         self.peer_ack = status.ack;
-        self.peer_ack_at = now;
         self.retire_acknowledged();
         true
     }
@@ -616,7 +618,7 @@ impl Session {
             let index = self.index(self.peer_ack);
             let rto = self.rto();
             if let Some(sent) = &mut self.tx[index]
-                && now.saturating_sub(sent.last) >= rto
+                && now.saturating_sub(sent.last.max(self.peer_ack_at)) >= rto
             {
                 if !sent.repair {
                     self.repairs += 1;
@@ -942,7 +944,9 @@ impl Session {
             let sent = self.tx[self.index(self.peer_ack)]
                 .as_ref()
                 .expect("retained flight");
-            deadline = deadline.min(sent.last + self.rto());
+            // Advancing cumulative receipt restarts the retransmission timer.
+            // Unchanged ACKs and credit-only feedback cannot postpone repair.
+            deadline = deadline.min(sent.last.max(self.peer_ack_at) + self.rto());
         }
         if self.pace_at > now && (self.send_cursor < self.send_next || self.next_repair().is_some())
         {

@@ -36,6 +36,8 @@ pub(crate) enum ChartSub {
     Quic,
     /// DART against TCP, SCATTER/GATHER and CLIENT/SERVER.
     Dart,
+    /// Dart and QUIC throughput and RTT over simulated lossy links.
+    Lossy,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
     /// PUSH/PULL Zstd compression chart.

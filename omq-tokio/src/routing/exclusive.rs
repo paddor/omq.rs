@@ -87,6 +87,8 @@ impl Submitter {
         match guard.as_mut() {
             Some(producer) => match producer.try_send(msg) {
                 Ok(()) => Ok(()),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(error)) => Err(omq_proto::TrySendError::Error(error)),
                 Err(SendPipeError::Full(m)) => Err(omq_proto::error::TrySendError::Full(m)),
                 Err(SendPipeError::Closed(m)) => {
                     *guard = None;

@@ -1586,6 +1586,8 @@ where
                             Ok(()) => completion.note_event(),
                             Err(super::SendPipeError::Full(message)) => pending_receive = Some(message),
                             Err(super::SendPipeError::Closed(_)) => return Ok(()),
+                            #[cfg(feature = "dart")]
+                            Err(crate::engine::SendPipeError::Invalid(_)) => unreachable!("receive output has no transport send validator"),
                         }
                     }
                 }
@@ -1863,6 +1865,10 @@ impl MessageDelivery<'_> {
                 }
                 Err(super::SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
                 Err(super::SendPipeError::Closed(_)) => Err(TrySendError::Closed),
+                #[cfg(feature = "dart")]
+                Err(crate::engine::SendPipeError::Invalid(_)) => {
+                    unreachable!("receive output has no transport send validator")
+                }
             }
         };
         match result {
@@ -5116,6 +5122,10 @@ mod tests {
                         tokio::task::yield_now().await;
                     }
                     Err(crate::engine::SendPipeError::Closed(_)) => panic!("send pipe closed"),
+                    #[cfg(feature = "dart")]
+                    Err(crate::engine::SendPipeError::Invalid(_)) => {
+                        unreachable!("receive output has no transport send validator")
+                    }
                 }
             }
         }

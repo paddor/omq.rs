@@ -84,7 +84,6 @@ fn dispatch(body: &[u8]) -> LaneDispatch {
     LaneDispatch {
         msg: Message::multipart([Bytes::from_static(b"topic"), Bytes::copy_from_slice(body)]),
         topic: Bytes::from_static(b"topic"),
-        group: Some("topic".into()),
     }
 }
 
@@ -175,7 +174,6 @@ async fn encodes_once_per_matched_group_per_lane_in_both_registration_orders() {
                         }
                         let unmatched = LaneDispatch {
                             topic: Bytes::from_static(b"other"),
-                            group: Some("other".into()),
                             ..publication
                         };
                         assert!(!worker.dispatch(&unmatched, &mut SmallVec::new()).await);
@@ -358,7 +356,6 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
                         .chain((0..parts).map(|_| Bytes::from_static(&[0x5a; 1024]))),
                 ),
                 topic: Bytes::from_static(b"topic"),
-                group: None,
             };
             assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
             for (slot, decoder) in &mut peers {

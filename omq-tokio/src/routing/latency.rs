@@ -69,7 +69,36 @@ impl LatencySend {
     }
 
     pub(crate) fn make_connect_pipe(&mut self, route_id: u64) -> SendPipeConsumer {
+        self.make_connect_pipe_inner(
+            route_id,
+            #[cfg(feature = "dart")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn make_dart_connect_pipe(
+        &mut self,
+        route_id: u64,
+        socket_type: omq_proto::SocketType,
+    ) -> SendPipeConsumer {
+        self.make_connect_pipe_inner(route_id, Some(socket_type))
+    }
+
+    fn make_connect_pipe_inner(
+        &mut self,
+        route_id: u64,
+        #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
+    ) -> SendPipeConsumer {
         let (tx, rx) = crate::engine::send_pipe(self.pipe_cap);
+        #[cfg(feature = "dart")]
+        let tx = {
+            let mut tx = tx;
+            if let Some(kind) = dart {
+                tx.set_dart(kind);
+            }
+            tx
+        };
         let mut state = self.state.lock().expect("latency send state");
         state.remove_route(route_id);
         state.pending.push(PendingPipe { route_id, tx });
@@ -238,6 +267,10 @@ impl Submitter {
                 .try_send(msg)
             {
                 Ok(()) => return Ok(()),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(error)) => {
+                    return Err(omq_proto::TrySendError::Error(error));
+                }
                 Err(SendPipeError::Full(returned) | SendPipeError::Closed(returned)) => {
                     msg = returned;
                 }
@@ -290,6 +323,10 @@ impl State {
             scanned += 1;
             match self.pending[index].tx.try_send(msg) {
                 Ok(()) => return Ok(()),
+                #[cfg(feature = "dart")]
+                Err(SendPipeError::Invalid(error)) => {
+                    return Err(omq_proto::TrySendError::Error(error));
+                }
                 Err(SendPipeError::Full(returned)) => msg = returned,
                 Err(SendPipeError::Closed(returned)) => {
                     self.pending.remove(index);

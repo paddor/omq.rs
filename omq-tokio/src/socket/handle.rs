@@ -59,11 +59,15 @@ pub use omq_proto::error::TrySendError;
 pub struct Socket {
     inner: Arc<Inner>,
     send_submitter: SendSubmitter,
+    /// Only application handles count toward shared receive serialization.
+    receive_handle: Arc<()>,
 }
 
 #[derive(Debug)]
 struct Inner {
     socket_type: SocketType,
+    #[cfg(feature = "dart")]
+    dart: Arc<crate::transport::dart::SocketState>,
     cmd_tx: mpsc::Sender<SocketCommand>,
     cancel: CancellationToken,
     linger: Option<std::time::Duration>,
@@ -93,6 +97,55 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Current DART counters across this socket's endpoints. Unknown ECN
+    /// metadata is recorded as unavailable, not as a measured zero CE rate.
+    #[cfg(feature = "dart")]
+    pub fn dart_stats(&self) -> crate::DartStats {
+        self.inner.dart.counters.snapshot()
+    }
+
+    /// Current conservative capabilities across live DART endpoints. Returns
+    /// `None` when none are live. This diagnostic does not initialize the pool.
+    #[cfg(feature = "dart")]
+    pub fn dart_capabilities(&self) -> Option<crate::DartCapabilities> {
+        self.inner.dart.capabilities()
+    }
+
+    /// Acquire one writable 1024-byte body buffer from this socket's bounded
+    /// pool. The first call initializes the pool; later calls never allocate.
+    /// `Ok(None)` means every buffer is held by a buffer, message, or byte view.
+    ///
+    /// Write through [`DartBuffer::writable`](crate::DartBuffer::writable),
+    /// set its length, then send its `into_message()` through the usual API.
+    /// Clones share the pool. Held buffers may outlive the socket.
+    ///
+    /// # Errors
+    /// Returns `Closed` after close or a protocol error for unsupported types.
+    #[cfg(feature = "dart")]
+    pub fn try_dart_buffer(&self) -> Result<Option<crate::DartBuffer>> {
+        Ok(self.dart_pool()?.try_take())
+    }
+
+    /// Borrow this socket's bounded DART body pool. Cache this reference or
+    /// clone the handle when preparing batches, avoiding socket lifecycle
+    /// checks for each buffer. The pool and its buffers may outlive the socket;
+    /// retaining a cloned pool handle retains its entire fixed capacity.
+    ///
+    /// # Errors
+    /// Returns `Closed` after close or a protocol error for unsupported types.
+    #[cfg(feature = "dart")]
+    pub fn dart_pool(&self) -> Result<&crate::DartPool> {
+        if self.inner.cancel.is_cancelled() || self.inner.cmd_tx.is_closed() {
+            return Err(Error::Closed);
+        }
+        if !omq_proto::dart::supports(self.inner.socket_type) {
+            return Err(Error::Protocol(
+                "DART buffers require a supported single-body socket type".into(),
+            ));
+        }
+        Ok(self.inner.dart.pool())
+    }
+
     /// View a ROUTER or PEER socket through its identity-routing API.
     pub fn identity_routing(&self) -> Result<super::identity::IdentitySocket> {
         super::identity::IdentitySocket::try_from(self)
@@ -203,6 +256,7 @@ impl Socket {
         Self {
             inner: self.inner.clone(),
             send_submitter: self.send_submitter.clone_shared(),
+            receive_handle: self.receive_handle.clone(),
         }
     }
 
@@ -315,6 +369,8 @@ impl Socket {
             recv_sink_config.is_none(),
             blocking_recv_waker,
         );
+        let receive_handle = Arc::new(());
+        spsc.set_receive_handles(&receive_handle);
         let peer_recv_routes = (socket_type == SocketType::Peer && recv_sink_config.is_none())
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
@@ -340,11 +396,16 @@ impl Socket {
             inproc_registry,
         );
         driver.peer_recv_routes = peer_recv_routes;
+        #[cfg(feature = "dart")]
+        let dart = driver.dart.clone();
         let actor_task = spawn_driver(driver, io_pool);
         Self {
             send_submitter: send_submitter.clone(),
+            receive_handle,
             inner: Arc::new(Inner {
                 socket_type,
+                #[cfg(feature = "dart")]
+                dart,
                 cmd_tx,
                 cancel,
                 linger: driver_linger,

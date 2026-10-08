@@ -1,15 +1,16 @@
-//! Socket recv mux: shared recv pipe (yring + Mutex) plus per-peer
+//! Socket recv mux: shared recv pipe (yring + receive ownership) plus per-peer
 //! yring fast paths. Zero heap allocations per message.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::flow::DrainBudget;
 use omq_proto::message::Message;
 
+use crate::engine::receive_cell::ReceiveCell;
 use crate::engine::signal::{DataSignal, StateSignal};
 
 /// Shared recv data signal. All inproc producers mark this.
@@ -43,10 +44,12 @@ pub(crate) type SpscConsumerGeneration = Arc<AtomicU64>;
 /// Per-TCP-peer yring consumer entry. The driver pushes decoded messages
 /// into its yring producer; the recv side drains the consumer here.
 pub(crate) struct TcpYringConsumer {
-    pub consumer: Mutex<yring::Consumer<Message>>,
+    pub consumer: ReceiveCell<yring::Consumer<Message>>,
     pub batch_remaining: AtomicUsize,
     pub batch_popped: AtomicUsize,
     pub capacity: usize,
+    /// DART rings allow empty spin probes without resetting data signals.
+    pub spin_probe: bool,
     pub space: Arc<StateSignal>,
     pub peer_id: u64,
 }
@@ -273,8 +276,9 @@ pub(crate) fn recv_pipe(
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpscHandles {
+    pub receive_handles: Weak<()>,
     pub fanin: Option<Arc<super::fanin::Fanin>>,
-    pub peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
+    pub peer_recv: Option<Arc<ReceiveCell<super::peer_recv::PeerReceiver>>>,
     pub consumer_generation: SpscConsumerGeneration,
     pub recv_signal: SpscRecvSignal,
     pub activated: SpscActivated,
@@ -284,13 +288,25 @@ pub(crate) struct SpscHandles {
 }
 
 impl SpscHandles {
+    pub(crate) fn set_receive_handles(&mut self, handle: &Arc<()>) {
+        self.receive_handles = Arc::downgrade(handle);
+        if let Some(fanin) = self.fanin.as_mut() {
+            Arc::get_mut(fanin)
+                .expect("new fan-in is not shared")
+                .set_receive_handles(self.receive_handles.clone());
+        }
+    }
+
     pub(crate) fn init_peer_recv(
         &mut self,
         hwm: usize,
         max_message_size: Option<usize>,
     ) -> super::peer_recv::PeerRecvRoutes {
         let (routes, receive) = super::peer_recv::PeerRecvRoutes::new(hwm, self, max_message_size);
-        self.peer_recv = Some(Arc::new(Mutex::new(receive)));
+        self.peer_recv = Some(Arc::new(ReceiveCell::new(
+            receive,
+            self.receive_handles.clone(),
+        )));
         routes
     }
 
@@ -299,6 +315,7 @@ impl SpscHandles {
         let conflate_slot = conflate_recv
             .then(|| ConflateRecvSlot::new(recv_signal.clone(), blocking_recv_waker.clone()));
         Self {
+            receive_handles: Weak::new(),
             fanin: None,
             peer_recv: None,
             consumer_generation: Arc::new(AtomicU64::new(0)),
@@ -319,7 +336,7 @@ impl SpscHandles {
             let keep = tc
                 .consumer
                 .try_lock()
-                .map_or(true, |consumer| !consumer.is_empty());
+                .is_none_or(|consumer| !consumer.is_empty());
             removed |= !keep;
             keep
         });
@@ -337,7 +354,7 @@ impl SpscHandles {
 #[derive(Debug)]
 pub(crate) struct SpscAwareRecv {
     fanin: Option<Arc<super::fanin::Fanin>>,
-    peer_recv: Option<Arc<Mutex<super::peer_recv::PeerReceiver>>>,
+    peer_recv: Option<Arc<ReceiveCell<super::peer_recv::PeerReceiver>>>,
     /// Per-peer yring consumers: byte-stream peers and inproc
     /// connections. Actor appends.
     tcp_consumers: TcpConsumers,
@@ -356,11 +373,13 @@ pub(crate) struct SpscAwareRecv {
     conflate_slot: Option<Arc<ConflateRecvSlot>>,
     /// Drain state: cached consumer snapshots, message batch buffer,
     /// and the shared recv pipe consumer.
-    drain_state: Mutex<DrainState>,
+    drain_state: ReceiveCell<DrainState>,
     /// Opt-in receive scheduling for bulk calls only.
     recv_batching: bool,
     /// Opt-in busy-wait budget before each blocking receive park.
     recv_spin: Duration,
+    /// Latency receives can probe one ring without preparing a signal drain.
+    spin_single: bool,
     /// Waker for blocking `recv()` callers.
     blocking_recv_waker: Arc<BlockingRecvWaker>,
     /// Fan-in sockets with per-peer rings alternate which source a
@@ -445,7 +464,7 @@ fn drain_peer_source(
     budget: &mut DrainBudget,
     limit: DrainLimit,
 ) -> SourceDrain {
-    let Ok(mut consumer) = peer.consumer.try_lock() else {
+    let Some(mut consumer) = peer.consumer.try_lock() else {
         return SourceDrain::default();
     };
     let mut progress = RingDrain {
@@ -607,9 +626,7 @@ impl SpscAwareRecv {
                     .into(),
             )
         })?;
-        peer.lock()
-            .expect("PEER receive poisoned")
-            .try_recv_from(source)
+        peer.lock().try_recv_from(source)
     }
 
     pub(crate) fn unshift(
@@ -628,9 +645,7 @@ impl SpscAwareRecv {
                 message,
             });
         };
-        peer.lock()
-            .expect("PEER receive poisoned")
-            .unshift(receipt, message)
+        peer.lock().unshift(receipt, message)
     }
 
     pub(crate) fn new(
@@ -645,6 +660,10 @@ impl SpscAwareRecv {
         Self {
             recv_batching,
             recv_spin,
+            spin_single: latency
+                && handles.fanin.is_none()
+                && handles.peer_recv.is_none()
+                && handles.conflate_slot.is_none(),
             fanin: handles.fanin,
             peer_recv: handles.peer_recv,
             tcp_consumers: handles.tcp_consumers,
@@ -656,22 +675,25 @@ impl SpscAwareRecv {
             recv_pipe_space,
             blocking_recv_waker: handles.blocking_recv_waker,
             rings_first: AtomicBool::new(false),
-            drain_state: Mutex::new(DrainState {
-                generation: u64::MAX,
-                recv_cursor: 0,
-                tcp: Vec::new(),
-                batch: VecDeque::new(),
-                recv_consumer,
-                recv_batch: RingDrain::default(),
-                latency,
-            }),
+            drain_state: ReceiveCell::new(
+                DrainState {
+                    generation: u64::MAX,
+                    recv_cursor: 0,
+                    tcp: Vec::new(),
+                    batch: VecDeque::new(),
+                    recv_consumer,
+                    recv_batch: RingDrain::default(),
+                    latency,
+                },
+                handles.receive_handles,
+            ),
         }
     }
 
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
         let mut waiter = None;
         loop {
-            match self.try_drain_with_spin(|| false) {
+            match self.try_drain_with_spin(None, || false) {
                 DrainResult::Message(msg) => return Ok(msg),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
@@ -716,7 +738,7 @@ impl SpscAwareRecv {
         let mut waiter = None;
         let mut woke_without_message = false;
         loop {
-            match self.try_drain_with_spin(|| cancel.is_canceled()) {
+            match self.try_drain_with_spin(None, || cancel.is_canceled()) {
                 DrainResult::Message(msg) => return Ok(Some(msg)),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {
@@ -763,7 +785,7 @@ impl SpscAwareRecv {
     pub(crate) fn blocking_recv_until(&self, deadline: Instant) -> Result<Message> {
         let mut waiter = None;
         loop {
-            match self.try_drain_with_spin(|| Instant::now() >= deadline) {
+            match self.try_drain_with_spin(Some(deadline), || false) {
                 DrainResult::Message(msg) => return Ok(msg),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {}
@@ -798,20 +820,105 @@ impl SpscAwareRecv {
     /// protocol. No drain lock is held between attempts, so producers and
     /// socket close can still make progress. The default path reads no clock.
     #[inline]
-    fn try_drain_with_spin(&self, interrupted: impl Fn() -> bool) -> DrainResult {
+    fn try_drain_with_spin(
+        &self,
+        deadline: Option<Instant>,
+        interrupted: impl Fn() -> bool,
+    ) -> DrainResult {
         let result = self.try_drain();
         if !matches!(result, DrainResult::Empty) || self.recv_spin.is_zero() {
             return result;
         }
-        let started = Instant::now();
-        while started.elapsed() < self.recv_spin && !interrupted() {
-            std::hint::spin_loop();
-            match self.try_drain() {
-                DrainResult::Empty => {}
-                result => return result,
+        let spin_deadline =
+            (self.recv_spin != Duration::MAX).then(|| Instant::now() + self.recv_spin);
+        let deadline = match (deadline, spin_deadline) {
+            (Some(timeout), Some(spin)) => Some(timeout.min(spin)),
+            (timeout, spin) => timeout.or(spin),
+        };
+        let single = if self.spin_single {
+            let state = self.drain_state.lock();
+            (state.tcp.len() == 1 && state.tcp[0].spin_probe).then_some(state.generation)
+        } else {
+            None
+        };
+        let fanin_probe = self.active_fanin().filter(|_| !self.has_ring_sources());
+        // Cheap idle probes check time once per eight attempts. Other
+        // receive sources keep their per-attempt budget check. Cancellation
+        // and queue closure remain observable on every attempt.
+        let clock_stride = if single.is_some() || fanin_probe.is_some() {
+            8
+        } else {
+            1
+        };
+        while deadline.is_none_or(|deadline| Instant::now() < deadline) {
+            if fanin_probe.is_some() && self.has_ring_sources() {
+                // A peer added during continuous spinning must join the
+                // full fair drain; the initial source snapshot is stale.
+                return self.try_drain();
+            }
+            for _ in 0..clock_stride {
+                if interrupted() {
+                    return DrainResult::Empty;
+                }
+                std::hint::spin_loop();
+                let result = if let Some(fanin) = fanin_probe {
+                    match fanin.try_recv_spinning() {
+                        Ok(message) => DrainResult::Message(message),
+                        Err(Error::Closed) => DrainResult::Closed,
+                        Err(_) => DrainResult::Empty,
+                    }
+                } else if let Some(generation) = single {
+                    self.try_drain_spinning(generation)
+                } else {
+                    self.try_drain()
+                };
+                match result {
+                    DrainResult::Empty => {}
+                    result => return result,
+                }
             }
         }
         DrainResult::Empty
+    }
+
+    /// A spinning caller will poll again or perform the full sleep/recheck
+    /// protocol. Empty probes need no signal fences or staging vector.
+    fn try_drain_spinning(&self, generation: u64) -> DrainResult {
+        // The full empty drain established these signals before spinning.
+        // Deliveries and pipe closure mark them; source changes bump the
+        // generation. An idle probe needs no mutable consumer access.
+        if self.recv_signal.is_idle()
+            && self.recv_pipe_notify.is_idle()
+            && self.consumer_generation.load(Ordering::Acquire) == generation
+        {
+            return DrainResult::Empty;
+        }
+        {
+            let mut state = self.drain_state.lock();
+            self.refresh_snapshot(&mut state);
+            if state.batch.is_empty()
+                && state.tcp.len() == 1
+                && state.tcp[0].spin_probe
+                && state.recv_consumer.is_empty()
+                && !state.recv_consumer.is_disconnected()
+            {
+                let mut budget = DrainBudget::new(1, RECV_BATCH_BYTES);
+                let outcome = drain_peer_source(
+                    &state.tcp[0],
+                    true,
+                    &mut Vec::new(),
+                    &mut budget,
+                    DrainLimit::One,
+                );
+                if let Some(message) = outcome.message {
+                    return DrainResult::Message(message);
+                }
+                if !outcome.disconnected {
+                    return DrainResult::Empty;
+                }
+            }
+        }
+        self.try_drain()
     }
 
     fn buffered_sources_empty(&self) -> bool {
@@ -820,9 +927,9 @@ impl SpscAwareRecv {
             return true;
         }
         if let Some(peer) = &self.peer_recv {
-            return peer.lock().expect("PEER receive poisoned").is_empty();
+            return peer.lock().is_empty();
         }
-        let guard = self.drain_state.lock().unwrap();
+        let guard = self.drain_state.lock();
         Self::state_is_empty(&guard) && self.conflate_slot_empty()
     }
 
@@ -868,7 +975,7 @@ impl SpscAwareRecv {
 
     fn try_drain_queues(&self) -> DrainResult {
         if let Some(peer) = &self.peer_recv {
-            return match peer.lock().expect("PEER receive poisoned").try_recv() {
+            return match peer.lock().try_recv() {
                 Ok(message) => DrainResult::Message(message),
                 Err(Error::Closed) => DrainResult::Closed,
                 Err(_) => DrainResult::Empty,
@@ -878,7 +985,7 @@ impl SpscAwareRecv {
             return DrainResult::Message(msg);
         }
 
-        let mut guard = self.drain_state.lock().unwrap();
+        let mut guard = self.drain_state.lock();
 
         if let Some(msg) = guard.batch.pop_front() {
             return DrainResult::Message(msg);
@@ -1074,7 +1181,7 @@ impl SpscAwareRecv {
             && state.tcp.iter().all(|tc| {
                 tc.consumer
                     .try_lock()
-                    .is_ok_and(|consumer| consumer.is_empty())
+                    .is_some_and(|consumer| consumer.is_empty())
             })
     }
 
@@ -1083,7 +1190,7 @@ impl SpscAwareRecv {
     fn release_partial_batches(&self, state: &mut DrainState) {
         for peer in &state.tcp {
             if peer.batch_popped.load(Ordering::Relaxed) > 0 {
-                let mut consumer = peer.consumer.lock().unwrap();
+                let mut consumer = peer.consumer.lock();
                 if peer.batch_popped.swap(0, Ordering::Relaxed) > 0 && consumer.release_with_full()
                 {
                     peer.space.notify_changed();
@@ -1096,13 +1203,12 @@ impl SpscAwareRecv {
     }
 
     fn cleanup_disconnected(&self) {
-        self.tcp_consumers.write().unwrap().retain(|tc| {
-            tc.consumer
-                .try_lock()
-                .map_or(true, |c| !c.is_disconnected())
-        });
+        self.tcp_consumers
+            .write()
+            .unwrap()
+            .retain(|tc| tc.consumer.try_lock().is_none_or(|c| !c.is_disconnected()));
         self.consumer_generation.fetch_add(1, Ordering::Release);
-        self.drain_state.lock().unwrap().generation = u64::MAX;
+        self.drain_state.lock().generation = u64::MAX;
     }
 
     #[expect(clippy::needless_continue)]
@@ -1174,11 +1280,9 @@ impl SpscAwareRecv {
     }
 
     fn take_peer_yield_pending(&self) -> bool {
-        self.peer_recv.as_ref().is_some_and(|peer| {
-            peer.lock()
-                .expect("PEER receive poisoned")
-                .take_yield_pending()
-        })
+        self.peer_recv
+            .as_ref()
+            .is_some_and(|peer| peer.lock().take_yield_pending())
     }
 
     pub(crate) fn try_recv(&self) -> Result<Message> {
@@ -1200,15 +1304,12 @@ impl SpscAwareRecv {
         out: &mut Vec<Message>,
     ) -> Result<usize> {
         if let Some(peer) = &self.peer_recv {
-            return peer
-                .lock()
-                .expect("PEER receive poisoned")
-                .try_recv_many_after_first(max, out);
+            return peer.lock().try_recv_many_after_first(max, out);
         }
         let mut budget = DrainBudget::new(max.min(RECV_BATCH_MESSAGES), RECV_BATCH_BYTES);
         let first = out.last().expect("first message already received");
         if !budget.account(recv_budget_bytes(first)) {
-            self.release_partial_batches(&mut self.drain_state.lock().unwrap());
+            self.release_partial_batches(&mut self.drain_state.lock());
             return Ok(0);
         }
         self.try_recv_many_into_budget(max - 1, out, budget)
@@ -1269,10 +1370,7 @@ impl SpscAwareRecv {
         mut budget: DrainBudget,
     ) -> Result<usize> {
         if let Some(peer) = &self.peer_recv {
-            return peer
-                .lock()
-                .expect("PEER receive poisoned")
-                .try_recv_many_into(max, out);
+            return peer.lock().try_recv_many_into(max, out);
         }
         let start_len = out.len();
         if max == 0 {
@@ -1286,7 +1384,7 @@ impl SpscAwareRecv {
             }
         }
 
-        let mut guard = self.drain_state.lock().unwrap();
+        let mut guard = self.drain_state.lock();
         while !budget.exhausted() {
             let Some(msg) = guard.batch.pop_front() else {
                 break;
@@ -1345,10 +1443,10 @@ impl SpscAwareRecv {
             fanin.close();
         }
         if let Some(peer) = &self.peer_recv {
-            peer.lock().expect("PEER receive poisoned").shutdown();
+            peer.lock().shutdown();
         }
         {
-            let mut state = self.drain_state.lock().unwrap();
+            let mut state = self.drain_state.lock();
             while state.recv_consumer.prefetch() > 0 {
                 while state.recv_consumer.pop().is_some() {}
                 state.recv_consumer.release();
@@ -1383,10 +1481,14 @@ mod tests {
         (
             producer,
             Arc::new(TcpYringConsumer {
-                consumer: std::sync::Mutex::new(consumer),
+                consumer: crate::engine::receive_cell::ReceiveCell::new(
+                    consumer,
+                    std::sync::Weak::new(),
+                ),
                 batch_remaining: AtomicUsize::new(0),
                 batch_popped: AtomicUsize::new(0),
                 capacity: 4,
+                spin_probe: false,
                 space: Arc::new(crate::engine::signal::StateSignal::new()),
                 peer_id,
             }),
@@ -1413,10 +1515,14 @@ mod tests {
                 .write()
                 .unwrap()
                 .push(Arc::new(TcpYringConsumer {
-                    consumer: std::sync::Mutex::new(consumer),
+                    consumer: crate::engine::receive_cell::ReceiveCell::new(
+                        consumer,
+                        std::sync::Weak::new(),
+                    ),
                     batch_remaining: AtomicUsize::new(0),
                     batch_popped: AtomicUsize::new(0),
                     capacity,
+                    spin_probe: false,
                     space: Arc::new(crate::engine::signal::StateSignal::new()),
                     peer_id: id as u64,
                 }));

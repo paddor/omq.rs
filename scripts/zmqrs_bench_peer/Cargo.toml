@@ -6,7 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "zmqrs_bench_peer"
+name = "omq_zmqrs_bench_peer"
 path = "src/main.rs"
 
 [dependencies]

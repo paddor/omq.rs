@@ -282,11 +282,11 @@ fn targeted_wait_ignores_other_sources_and_wakes_on_its_source() {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
     let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
-    let receiver = Mutex::new(receiver);
+    let receiver = ReceiveCell::new(receiver, Weak::new());
     let mut a = register(&mut routes, "a");
     let mut b = register(&mut routes, "b");
     put(&mut a, "first");
-    let (receipt, _) = receiver.lock().unwrap().try_recv_from(None).unwrap();
+    let (receipt, _) = receiver.lock().try_recv_from(None).unwrap();
     let source = receipt.source().unwrap().clone();
     drop(receipt);
     let count = Arc::new(WakeCount(0.into()));
@@ -318,10 +318,10 @@ fn targeted_wait_ends_on_disconnect_or_socket_close() {
     use std::task::{Context, Poll, Waker};
     for close_socket in [false, true] {
         let (mut routes, receiver) = receive_pair(RecvLimits::default(), 16);
-        let receiver = Mutex::new(receiver);
+        let receiver = ReceiveCell::new(receiver, Weak::new());
         let mut a = register(&mut routes, "a");
         put(&mut a, "first");
-        let (receipt, _) = receiver.lock().unwrap().try_recv_from(None).unwrap();
+        let (receipt, _) = receiver.lock().try_recv_from(None).unwrap();
         let source = receipt.source().unwrap().clone();
         drop(receipt);
         let count = Arc::new(WakeCount(0.into()));
@@ -804,13 +804,13 @@ fn ordinary_async_receive_yields_during_stale_generation_cleanup() {
     }
     let mut next = register(&mut routes, "a");
     assert!(poll_once(receiver.recv()).is_pending());
-    assert!(!lane.lock().unwrap().is_empty());
+    assert!(!lane.lock().is_empty());
     put(&mut next, "current");
     let std::task::Poll::Ready(Ok(message)) = poll_once(receiver.recv()) else {
         panic!("current peer must not wait for the stale backlog");
     };
     assert_eq!(message.part_slice(1), Some(b"current".as_slice()));
-    assert!(!lane.lock().unwrap().is_empty());
+    assert!(!lane.lock().is_empty());
 }
 
 #[test]

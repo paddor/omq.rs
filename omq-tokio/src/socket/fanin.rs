@@ -1,6 +1,6 @@
 //! Socket-owned fan-in. Drivers own producers; only the application drains.
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Wake, Waker};
 
 use fanring::mpsc;
@@ -11,21 +11,26 @@ use omq_proto::{
 };
 
 use super::recv::{BlockingRecvWaker, recv_budget_bytes};
+use crate::engine::receive_cell::ReceiveCell;
 use crate::engine::signal::{DataSignal, StateSignal};
 
 mod source;
 pub(crate) use source::Source;
 use source::{ReceiveState, SourceRegistration};
 
+const STANDARD_PRODUCER: u8 = 1;
+#[cfg(feature = "dart")]
+const DART_PRODUCER: u8 = 2;
+
 #[derive(Debug)]
 pub(crate) struct Fanin {
     registrar: Mutex<mpsc::Sender<Message>>,
-    receiver: Mutex<Option<ReceiveState>>,
+    receiver: ReceiveCell<Option<ReceiveState>>,
     signal: Arc<DataSignal>,
     blocking: Arc<BlockingRecvWaker>,
     /// Set once any producer registered. Stays set: a dropped producer's
     /// lane may still hold messages.
-    registered: AtomicBool,
+    registered: AtomicU8,
     source_aware: bool,
     source_pending: AtomicBool,
     closed: AtomicBool,
@@ -57,20 +62,24 @@ impl Fanin {
         let (sender, rx) = mpsc::channel(capacity);
         Arc::new(Self {
             registrar: Mutex::new(sender),
-            receiver: Mutex::new(Some(ReceiveState::new(rx))),
+            receiver: ReceiveCell::new(Some(ReceiveState::new(rx)), Weak::new()),
             signal,
             blocking,
-            registered: AtomicBool::new(false),
+            registered: AtomicU8::new(0),
             source_aware,
             source_pending: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         })
     }
 
+    pub(crate) fn set_receive_handles(&mut self, handles: Weak<()>) {
+        self.receiver.set_handles(handles);
+    }
+
     /// Whether a producer ever registered. Until then the queue is empty
     /// and the receive path can skip it.
     pub(crate) fn has_registered(&self) -> bool {
-        self.registered.load(Ordering::Acquire)
+        self.registered.load(Ordering::Acquire) != 0
     }
 
     pub(crate) fn source_aware(&self) -> bool {
@@ -78,30 +87,42 @@ impl Fanin {
     }
 
     pub(crate) fn register(self: &Arc<Self>) -> Option<Producer> {
-        self.register_capacity(None)
+        self.register_capacity(None, false, STANDARD_PRODUCER)
     }
 
     pub(crate) fn register_with_capacity(self: &Arc<Self>, capacity: usize) -> Option<Producer> {
-        self.register_capacity(Some(capacity))
+        self.register_capacity(Some(capacity), true, STANDARD_PRODUCER)
     }
 
-    fn register_capacity(self: &Arc<Self>, capacity: Option<usize>) -> Option<Producer> {
+    #[cfg(feature = "dart")]
+    pub(crate) fn register_dart(self: &Arc<Self>, capacity: usize) -> Option<Producer> {
+        // DART flushes fanring's deferred publications. Custom capacity does
+        // not imply the unsignaled publication used by inproc producers.
+        self.register_capacity(Some(capacity), false, DART_PRODUCER)
+    }
+
+    fn register_capacity(
+        self: &Arc<Self>,
+        capacity: Option<usize>,
+        external_ready: bool,
+        kind: u8,
+    ) -> Option<Producer> {
         let registrar = self.registrar.lock().unwrap();
         let sender = match capacity {
             Some(capacity) => registrar.try_register_with_capacity(capacity).ok()?,
             None => registrar.try_clone()?,
         };
         let source = if self.source_aware {
-            let mut guard = self.receiver.lock().unwrap();
+            let mut guard = self.receiver.lock();
             let state = guard.as_mut()?;
             state.process_changes(self);
             state.reclaim_sources();
-            state.scan_lanes |= capacity.is_some();
+            state.scan_lanes |= external_ready;
             Some(state.register(self, sender.lane()))
         } else {
             None
         };
-        self.registered.store(true, Ordering::Release);
+        self.registered.fetch_or(kind, Ordering::Release);
         let space = Arc::new(SpaceWake {
             signal: Arc::new(StateSignal::new()),
         });
@@ -111,7 +132,7 @@ impl Fanin {
             blocking: self.blocking.clone(),
             waker: Waker::from(space.clone()),
             space,
-            external_ready: self.source_aware && capacity.is_some(),
+            external_ready: self.source_aware && external_ready,
             source,
         })
     }
@@ -122,7 +143,7 @@ impl Fanin {
         mut budget: DrainBudget,
         batching: bool,
     ) -> Result<usize> {
-        let mut guard = self.receiver.lock().unwrap();
+        let mut guard = self.receiver.lock();
         let state = guard.as_mut().ok_or(Error::Closed)?;
         state.process_changes(self);
         let start = out.len();
@@ -194,10 +215,32 @@ impl Fanin {
     }
 
     pub(crate) fn try_recv(&self) -> Result<Message> {
-        let mut guard = self.receiver.lock().unwrap();
+        self.try_recv_inner(false)
+    }
+
+    /// An active spinner rechecks signals before parking. Empty probes need
+    /// only fanring readiness; they need no socket signal fences or wakeups.
+    pub(crate) fn try_recv_spinning(&self) -> Result<Message> {
+        // The full empty drain established the signal before spinning.
+        // Publication and source changes mark it. A speculative idle probe
+        // needs no mutable receive ownership; parking still performs a full
+        // fenced drain and readiness recheck.
+        if self.signal.is_idle() {
+            return Err(if self.closed.load(Ordering::Acquire) {
+                Error::Closed
+            } else {
+                Error::WouldBlock
+            });
+        }
+        self.try_recv_inner(true)
+    }
+
+    fn try_recv_inner(&self, spinning: bool) -> Result<Message> {
+        let mut guard = self.receiver.lock();
         let state = guard.as_mut().ok_or(Error::Closed)?;
         state.process_changes(self);
-        if !state.scan_lanes {
+        let spinning = spinning && !state.scan_lanes;
+        if !spinning && !state.scan_lanes {
             self.signal.begin_drain();
         }
         state.poll_sources(false);
@@ -221,7 +264,7 @@ impl Fanin {
             // Publish partial credits before the caller can park. Bulk calls
             // still release all consumed slots before returning to the caller.
             state.receiver.release_consumed();
-            if self.signal.clear_after(true) {
+            if !spinning && self.signal.clear_after(true) {
                 self.blocking.wake();
             }
             state.observed_empty = true;
@@ -231,7 +274,7 @@ impl Fanin {
 
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
-        let state = self.receiver.lock().unwrap().take();
+        let state = self.receiver.lock().take();
         if let Some(state) = &state {
             state.close_sources();
         }

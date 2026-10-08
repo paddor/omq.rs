@@ -445,6 +445,39 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo nextest run --profile ci -p omq-tokio --features "lz4 ws" --test omq_lz4_ws --test-threads=1
 
+  dart:
+    name: Dart (${{ matrix.toolchain }}, ${{ matrix.os }})
+    needs: [changes, linux-gate]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      OMQ_ALLOC_TRACE: "1"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: protocol tests
+        run: cargo nextest run --profile ci -p omq-proto --features dart
+      - name: transport and pool tests
+        run: >-
+          cargo nextest run --profile ci -p omq-tokio --features dart
+          --test omq_dart_transport --test omq_dart_pool --test omq_loom_dart_pool
+      - name: protocol Loom models
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: --cfg loom -D warnings
+        run: cargo test -p omq-proto --features dart --test omq_proto_loom_dart
+
   quic:
     name: QUIC (${{ matrix.toolchain }}, ${{ matrix.os }})
     needs: [changes, linux-gate]
@@ -878,6 +911,7 @@ jobs:
         test,
         encryption,
         compression,
+        dart,
         quic,
         interop,
         cppzmq,

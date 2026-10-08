@@ -551,6 +551,12 @@ unsafe fn parse_endpoint_args<'a>(
     };
     let addr_str = addr_str.to_owned();
 
+    // DART's buffer ownership API is currently native Rust only. Cargo
+    // feature unification must not silently expose it through the C facade.
+    if addr_str.starts_with("dart://") {
+        return Err(libc::EINVAL);
+    }
+
     let Ok(endpoint) = omq_tokio::Endpoint::from_str(&addr_str) else {
         return Err(libc::EINVAL);
     };

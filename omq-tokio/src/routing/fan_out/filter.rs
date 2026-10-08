@@ -18,14 +18,14 @@ pub(crate) enum FanOutMode {
 pub(super) fn prepare(
     mode: FanOutMode,
     msg: Message,
-) -> core::result::Result<(Message, Option<String>), Error> {
+) -> core::result::Result<(Message, Option<Bytes>), Error> {
     match mode {
         FanOutMode::SubscriptionPrefix => Ok((msg, None)),
         FanOutMode::Group => validate_group(msg),
     }
 }
 
-fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>), Error> {
+fn validate_group(msg: Message) -> core::result::Result<(Message, Option<Bytes>), Error> {
     if msg.len() != 2 {
         return Err(Error::Protocol(
             "RADIO send requires [group, body] (2 parts)".into(),
@@ -37,8 +37,7 @@ fn validate_group(msg: Message) -> core::result::Result<(Message, Option<String>
             "RADIO group name too long (max 255 bytes)".into(),
         ));
     }
-    let group = String::from_utf8_lossy(&group_bytes).into_owned();
-    Ok((msg, Some(group)))
+    Ok((msg, Some(group_bytes)))
 }
 
 pub(super) fn first_frame_bytes(msg: &Message) -> Bytes {
@@ -48,10 +47,10 @@ pub(super) fn first_frame_bytes(msg: &Message) -> Bytes {
 pub(super) fn peer_matches(
     mode: FanOutMode,
     subscriptions: &SubscriptionSet,
-    groups: &FxHashSet<String>,
+    groups: &FxHashSet<Bytes>,
     any_groups: bool,
     topic: &Bytes,
-    group: Option<&str>,
+    group: Option<&[u8]>,
 ) -> bool {
     match (mode, group) {
         (FanOutMode::Group, Some(grp)) => any_groups || groups.contains(grp),

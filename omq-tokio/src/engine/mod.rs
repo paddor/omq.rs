@@ -19,6 +19,7 @@ pub(crate) mod framing;
 pub(crate) mod peer_completion;
 pub(crate) mod peer_events;
 pub(crate) mod rate_limit;
+pub(crate) mod receive_cell;
 mod recv_sink;
 pub(crate) use recv_sink::reserve_authenticated;
 pub(crate) mod send_pipe;

@@ -43,6 +43,10 @@ pub use omq_proto::{
 };
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
+#[cfg(feature = "dart")]
+pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
+#[cfg(feature = "dart")]
+pub use transport::dart::{BufferLengthError, DartBuffer, DartCapabilities, DartPool, DartStats};
 
 // Sub-modules of omq_proto are re-exported under their original
 // paths so downstream `use omq_tokio::endpoint::Host` style imports keep

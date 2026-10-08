@@ -25,6 +25,19 @@ struct Shared {
     drained: futures::task::AtomicWaker,
     registration: Arc<StateSignal>,
     registration_hints: AtomicBool,
+    #[cfg(feature = "dart")]
+    native_progress: std::sync::OnceLock<Arc<StateSignal>>,
+    #[cfg(feature = "dart")]
+    endpoint: std::sync::OnceLock<Arc<super::signal::DataSignal>>,
+}
+
+impl Shared {
+    #[cfg(feature = "dart")]
+    fn notify_native_progress(&self) {
+        if let Some(signal) = self.native_progress.get() {
+            signal.notify_changed();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +46,8 @@ pub(crate) struct Template {
     registrar: Mutex<mpsc::Sender<Queued, Coordinated>>,
     shared: Arc<Shared>,
     capacity: usize,
+    #[cfg(feature = "dart")]
+    dart: Option<omq_proto::SocketType>,
 }
 
 #[derive(Debug)]
@@ -54,12 +69,18 @@ pub(crate) struct Producer {
 struct SpaceWake {
     signal: Arc<StateSignal>,
     waiting: AtomicBool,
+    #[cfg(feature = "dart")]
+    shared: std::sync::Weak<Shared>,
 }
 
 impl Wake for SpaceWake {
     fn wake(self: Arc<Self>) {
         self.waiting.store(false, Ordering::Release);
         self.signal.notify_changed();
+        #[cfg(feature = "dart")]
+        if let Some(shared) = self.shared.upgrade() {
+            shared.notify_native_progress();
+        }
     }
 }
 
@@ -103,6 +124,8 @@ impl SenderLanes {
             wake: Arc::new(SpaceWake {
                 signal: space.clone(),
                 waiting: AtomicBool::new(false),
+                #[cfg(feature = "dart")]
+                shared: Arc::downgrade(&template.shared),
             }),
             space,
         });
@@ -140,6 +163,8 @@ impl Drop for Admission {
     fn drop(&mut self) {
         if self.lane.queued.fetch_sub(1, Ordering::AcqRel) == self.lane.template.capacity {
             self.lane.space.notify_changed();
+            #[cfg(feature = "dart")]
+            self.lane.template.shared.notify_native_progress();
         }
         if self
             .lane
@@ -168,6 +193,37 @@ pub(crate) enum Permit<'a> {
     Legacy(legacy::Permit<'a, PeerDriverData>),
 }
 
+/// Owned capacity for a native publication. Queue admission remains counted
+/// while the producer mutex is released, including across graceful close.
+#[cfg(feature = "dart")]
+#[derive(Debug)]
+pub(crate) struct OwnedPermit(Admission);
+
+#[cfg(feature = "dart")]
+impl OwnedPermit {
+    pub(crate) fn send(self, data: PeerDriverData) {
+        let lane = self.0.lane.clone();
+        let mut producer = lane.producer.lock().expect("data producer poisoned");
+        let result = producer
+            .as_mut()
+            .expect("reserved producer")
+            .sender
+            .try_send(Queued {
+                data,
+                _admission: self.0,
+            });
+        if let Some(signal) = lane.template.shared.endpoint.get() {
+            signal.mark();
+        }
+        // A payload destructor may reenter its owner. Unlock first.
+        drop(producer);
+        match result {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+            Err(mpsc::TrySendError::Full(_)) => unreachable!("reserved native data lane"),
+        }
+    }
+}
+
 impl Permit<'_> {
     pub(crate) fn send(self, data: PeerDriverData) {
         match self {
@@ -176,6 +232,8 @@ impl Permit<'_> {
                 mut producer,
                 admission,
             } => {
+                #[cfg(feature = "dart")]
+                let endpoint = admission.lane.template.shared.endpoint.get().cloned();
                 let result = producer
                     .as_mut()
                     .expect("reserved producer")
@@ -184,6 +242,10 @@ impl Permit<'_> {
                         data,
                         _admission: admission,
                     });
+                #[cfg(feature = "dart")]
+                if let Some(signal) = endpoint {
+                    signal.mark();
+                }
                 // Payload destruction can enter a binding's buffer owner.
                 // Release the producer lock before dropping a disconnected send.
                 drop(producer);
@@ -197,6 +259,25 @@ impl Permit<'_> {
 }
 
 pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
+    channel_inner(
+        capacity,
+        #[cfg(feature = "dart")]
+        None,
+    )
+}
+
+#[cfg(feature = "dart")]
+pub(crate) fn dart_channel(
+    capacity: usize,
+    socket_type: omq_proto::SocketType,
+) -> (Sender, Receiver) {
+    channel_inner(capacity, Some(socket_type))
+}
+
+fn channel_inner(
+    capacity: usize,
+    #[cfg(feature = "dart")] dart: Option<omq_proto::SocketType>,
+) -> (Sender, Receiver) {
     let capacity = capacity.clamp(1, 64);
     let (registrar, receiver) = mpsc::channel_with_policy(capacity);
     let template = Arc::new(Template {
@@ -207,13 +288,38 @@ pub(crate) fn channel(capacity: usize) -> (Sender, Receiver) {
             drained: futures::task::AtomicWaker::new(),
             registration: Arc::new(StateSignal::new()),
             registration_hints: AtomicBool::new(false),
+            #[cfg(feature = "dart")]
+            native_progress: std::sync::OnceLock::new(),
+            #[cfg(feature = "dart")]
+            endpoint: std::sync::OnceLock::new(),
         }),
         capacity,
+        #[cfg(feature = "dart")]
+        dart,
     });
     (
         Sender::Template(template.clone()),
         Receiver::Owned { receiver, template },
     )
+}
+
+#[cfg(feature = "dart")]
+impl Sender {
+    pub(crate) fn validate_dart(
+        &self,
+        message: &omq_proto::Message,
+        identity_prefix: bool,
+    ) -> omq_proto::Result<()> {
+        let kind = match self {
+            Self::Template(template) => template.dart,
+            Self::Lane(lane) => lane.template.dart,
+            Self::Legacy(_) => None,
+        };
+        if let Some(kind) = kind {
+            omq_proto::dart::validate_message(kind, message, identity_prefix)?;
+        }
+        Ok(())
+    }
 }
 
 impl Template {
@@ -227,6 +333,8 @@ impl Template {
                 < MAX_LANES + 1
         {
             self.shared.registration.notify_changed();
+            #[cfg(feature = "dart")]
+            self.shared.notify_native_progress();
         }
     }
 }
@@ -278,12 +386,48 @@ impl Lane {
             // A ready probe cancels fanring's sole waker. Existing callers
             // waiting on this lane still need the observed readiness edge.
             self.space.notify_changed();
+            #[cfg(feature = "dart")]
+            self.template.shared.notify_native_progress();
         }
         Ok(self.queued.load(Ordering::Acquire) < self.template.capacity)
     }
 }
 
 impl Sender {
+    #[cfg(feature = "dart")]
+    pub(crate) fn observe_native_progress(&self, signal: &Arc<StateSignal>) {
+        let shared = match self {
+            Self::Template(template) => &template.shared,
+            Self::Lane(lane) => &lane.template.shared,
+            Self::Legacy(_) => unreachable!("native fanout uses owned data lanes"),
+        };
+        let existing = shared.native_progress.get_or_init(|| signal.clone());
+        debug_assert!(Arc::ptr_eq(existing, signal));
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn is_native_dart(&self) -> bool {
+        match self {
+            Self::Template(template) => template.dart.is_some(),
+            Self::Lane(lane) => lane.template.dart.is_some(),
+            Self::Legacy(_) => false,
+        }
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn try_reserve_owned(&self) -> Result<OwnedPermit, ReserveError> {
+        match self.try_reserve()? {
+            Permit::Owned {
+                producer,
+                admission,
+            } => {
+                drop(producer);
+                Ok(OwnedPermit(admission))
+            }
+            Permit::Legacy(_) => unreachable!("native DART uses owned data lanes"),
+        }
+    }
+
     pub(crate) fn try_reserve(&self) -> Result<Permit<'_>, ReserveError> {
         match self {
             Self::Legacy(sender) => sender.try_reserve().map(Permit::Legacy),
@@ -390,12 +534,38 @@ impl Sender {
 }
 
 impl Receiver {
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&self, signal: Arc<super::signal::DataSignal>) {
+        if let Self::Owned { template, .. } = self {
+            let _ = template.shared.endpoint.set(signal);
+        }
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_try_recv(&mut self) -> Option<(PeerDriverData, Option<Admission>)> {
+        match self {
+            Self::Legacy(receiver) => receiver.try_recv().ok().map(|data| (data, None)),
+            Self::Owned { receiver, template } => {
+                let result = receiver.try_recv().ok().map(
+                    |Queued {
+                         data,
+                         _admission: admission,
+                     }| (data, Some(admission)),
+                );
+                template.notify_registration();
+                result
+            }
+        }
+    }
+
     pub(crate) fn close(&mut self) {
         match self {
             Self::Legacy(receiver) => receiver.close(),
             Self::Owned { template, .. } => {
                 template.shared.admitted.fetch_or(CLOSED, Ordering::AcqRel);
                 template.shared.registration.notify_changed();
+                #[cfg(feature = "dart")]
+                template.shared.notify_native_progress();
                 template.shared.drained.wake();
             }
         }
@@ -645,6 +815,106 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "dart")]
+    #[tokio::test]
+    async fn native_progress_observes_ring_release_after_admission_release() {
+        let (root, mut receiver) = dart_channel(16, omq_proto::SocketType::Radio);
+        let sender = SenderLanes::default().bind(&root);
+        let progress = Arc::new(StateSignal::new());
+        sender.observe_native_progress(&progress);
+        for n in 0..16 {
+            sender.try_send(message(n)).unwrap();
+        }
+        assert!(matches!(
+            sender.try_reserve_owned(),
+            Err(ReserveError::Full(()))
+        ));
+        let before_pop = progress.generation();
+        assert_eq!(value(receiver.try_recv().unwrap()), 0);
+        assert_ne!(progress.generation(), before_pop, "admission capacity edge");
+        let before_release = progress.generation();
+        assert!(
+            matches!(sender.try_reserve_owned(), Err(ReserveError::Full(()))),
+            "slot release is batched"
+        );
+        let wait = progress.changed_after(before_release);
+        tokio::pin!(wait);
+        assert!(poll_once(wait.as_mut()).is_pending());
+        receiver.release_consumed();
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap();
+        drop(sender.try_reserve_owned().unwrap());
+    }
+
+    #[cfg(feature = "dart")]
+    #[tokio::test]
+    async fn native_progress_observes_registration_reclamation() {
+        let (root, mut receiver) = dart_channel(1, omq_proto::SocketType::Radio);
+        let progress = Arc::new(StateSignal::new());
+        root.observe_native_progress(&progress);
+        let mut scopes = Vec::new();
+        for _ in 0..MAX_LANES {
+            let scope = SenderLanes::default();
+            assert!(scope.bind(&root).send_ready());
+            scopes.push(scope);
+        }
+        let waiting = SenderLanes::default().bind(&root);
+        let seen = progress.generation();
+        assert!(matches!(
+            waiting.try_reserve_owned(),
+            Err(ReserveError::Full(()))
+        ));
+        drop(scopes.pop());
+        assert!(poll_once(std::pin::pin!(receiver.recv())).is_pending());
+        tokio::time::timeout(Duration::from_secs(1), progress.changed_after(seen))
+            .await
+            .unwrap();
+        drop(waiting.try_reserve_owned().unwrap());
+    }
+
+    #[cfg(feature = "dart")]
+    #[tokio::test]
+    async fn owned_reservation_keeps_capacity_and_survives_graceful_close() {
+        let (root, mut receiver) = dart_channel(1, omq_proto::SocketType::Radio);
+        let sender = SenderLanes::default().bind(&root);
+        let reserved = sender.try_reserve_owned().unwrap();
+        assert!(matches!(
+            sender.try_send(message(9)),
+            Err(legacy::error::TrySendError::Full(_))
+        ));
+        receiver.close();
+        assert!(poll_once(std::pin::pin!(receiver.recv())).is_pending());
+        reserved.send(message(7));
+        assert_eq!(value(receiver.recv().await.unwrap()), 7);
+        assert!(receiver.recv().await.is_none());
+
+        let (root, mut receiver) = dart_channel(1, omq_proto::SocketType::Radio);
+        let sender = SenderLanes::default().bind(&root);
+        let reserved = sender.try_reserve_owned().unwrap();
+        receiver.close();
+        assert!(!receiver.is_empty());
+        drop(reserved);
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn owned_reservation_is_not_stolen_by_another_publication() {
+        let (root, mut receiver) = dart_channel(2, omq_proto::SocketType::Radio);
+        let sender = SenderLanes::default().bind(&root);
+        let reserved = sender.try_reserve_owned().unwrap();
+        sender.try_send(message(9)).unwrap();
+        assert!(matches!(
+            sender.try_reserve_owned(),
+            Err(ReserveError::Full(()))
+        ));
+        assert_eq!(value(receiver.try_recv().unwrap()), 9);
+        receiver.release_consumed();
+        reserved.send(message(7));
+        assert_eq!(value(receiver.try_recv().unwrap()), 7);
     }
 
     #[test]

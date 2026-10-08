@@ -89,6 +89,10 @@ async fn run_body<T: DriverStream>(
                 Ok(()) => completion.note_event(),
                 Err(crate::engine::SendPipeError::Full(message)) => pending_event = Some(message),
                 Err(crate::engine::SendPipeError::Closed(_)) => return,
+                #[cfg(feature = "dart")]
+                Err(crate::engine::SendPipeError::Invalid(_)) => {
+                    unreachable!("receive output has no transport send validator")
+                }
             }
         }
         if closing && pending.is_none() && inbox.is_empty() && data_inbox.is_empty() {

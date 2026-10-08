@@ -14,6 +14,8 @@ use std::sync::atomic::Ordering;
 impl SocketDriver {
     pub(super) async fn handle_internal_event(&mut self, evt: InternalEvent) {
         match evt {
+            #[cfg(feature = "dart")]
+            InternalEvent::DartReady(peer) => self.dart_peer_ready(peer).await,
             InternalEvent::EndpointResolved { id, ack, result } => {
                 self.finish_endpoint_resolution(id, ack, result).await;
             }
@@ -102,6 +104,11 @@ impl SocketDriver {
         if let Some(mut peer) = PeerLifecycle::new(self).remove_peer(peer_id, reason) {
             if let Some(task) = peer.task.take() {
                 super::stop_peer_task(task).await;
+            }
+            #[cfg(feature = "dart")]
+            if matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }) {
+                self.dart_peer_closed(peer_id);
+                return;
             }
             if refused {
                 if peer.is_client {
@@ -448,7 +455,7 @@ impl SocketDriver {
         }
     }
 
-    async fn handle_handshake_succeeded(
+    pub(super) async fn handle_handshake_succeeded(
         &mut self,
         peer_id: u64,
         peer_minor: u8,
@@ -502,7 +509,7 @@ impl SocketDriver {
                 peer_address: peer_ident_socket_addr(&p.ident),
                 peer_identity: peer_properties.identity.clone(),
                 peer_properties: peer_properties.clone(),
-                zmtp_version: (3, peer_minor),
+                zmtp_version: Self::peer_protocol_version(&p.endpoint, peer_minor),
             };
             p.info = Some(info.clone());
             let ready_event = MonitorEvent::HandshakeSucceeded {
@@ -519,14 +526,27 @@ impl SocketDriver {
                 ready_event,
             )
         };
-        self.send_strategy.connection_added(
-            peer_id,
-            route_id,
-            handle.clone(),
-            identity.clone(),
-            matches!(peer_ident, PeerIdent::Inproc(_)),
-            io_thread,
-        );
+        #[cfg(feature = "dart")]
+        let any_groups = self.socket_type == SocketType::Radio
+            && self
+                .peers
+                .get(&peer_id)
+                .is_some_and(|peer| matches!(peer.endpoint, omq_proto::Endpoint::Dart { .. }));
+        #[cfg(not(feature = "dart"))]
+        let any_groups = false;
+        if any_groups {
+            self.send_strategy
+                .connection_added_any_groups(peer_id, handle.clone(), io_thread);
+        } else {
+            self.send_strategy.connection_added(
+                peer_id,
+                route_id,
+                handle.clone(),
+                identity.clone(),
+                matches!(peer_ident, PeerIdent::Inproc(_)),
+                io_thread,
+            );
+        }
         self.recv_strategy.connection_added(peer_id, identity);
         // Replies are routable now, so the peer may deliver into this
         // socket's receive queue.
@@ -577,6 +597,14 @@ impl SocketDriver {
                 }
                 None
             }
+        }
+    }
+
+    fn peer_protocol_version(endpoint: &omq_proto::Endpoint, minor: u8) -> (u8, u8) {
+        if Self::is_dart_endpoint(endpoint) {
+            (0, 0)
+        } else {
+            (3, minor)
         }
     }
 
@@ -897,6 +925,8 @@ async fn inproc_peer_driver_body(
                     port.try_send(message).map_err(|error| match error {
                         crate::engine::SendPipeError::Full(message) => TrySendError::Full(message),
                         crate::engine::SendPipeError::Closed(_) => TrySendError::Closed,
+                        #[cfg(feature = "dart")]
+                        crate::engine::SendPipeError::Invalid(_) => unreachable!("receive output has no transport send validator"),
                     })
                 } else if let Some(sink) = &mut recv_sink {
                     sink.try_deliver(message)
@@ -907,6 +937,8 @@ async fn inproc_peer_driver_body(
                         Ok(()) => { completion.note_event(); Ok(()) }
                         Err(crate::engine::SendPipeError::Full(message)) => Err(TrySendError::Full(message)),
                         Err(crate::engine::SendPipeError::Closed(_)) => Err(TrySendError::Closed),
+                        #[cfg(feature = "dart")]
+                        Err(crate::engine::SendPipeError::Invalid(_)) => unreachable!("receive output has no transport send validator"),
                     }
                 };
                 match result {
@@ -981,6 +1013,8 @@ async fn inproc_peer_driver_body(
                             Ok(()) => completion.note_event(),
                             Err(crate::engine::SendPipeError::Full(_)) => unreachable!("single producer retained notification capacity"),
                             Err(crate::engine::SendPipeError::Closed(_)) => return,
+                            #[cfg(feature = "dart")]
+                            Err(crate::engine::SendPipeError::Invalid(_)) => unreachable!("receive output has no transport send validator"),
                         }
                     }
                     control_credit.set(peer_control.reserve());

@@ -36,12 +36,15 @@ Feature-gated tests:
 cargo test -p omq-tokio --features plain     --test omq_plain
 cargo test -p omq-tokio --features curve     --test omq_curve
 cargo test -p omq-tokio --features lz4       --test omq_lz4_tcp --test omq_lz4_pub_sub
+cargo test -p omq-tokio --features dart     --test omq_dart_transport --test omq_dart_pool
 ```
 
 Loom checks:
 
 ```sh
 cargo test -p omq-tokio --test omq_loom_signal
+cargo test -p omq-tokio --features dart --test omq_loom_dart_pool
+RUSTFLAGS="--cfg loom" cargo test -p omq-proto --features dart --test omq_proto_loom_dart
 ```
 
 The `omq-tokio` Loom test models `StateSignal` and `DataSignal` lost-wake

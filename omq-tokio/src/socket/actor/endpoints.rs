@@ -10,6 +10,59 @@ use super::{
 use crate::socket::actor::lifecycle::PeerLifecycle;
 
 impl SocketDriver {
+    pub(super) async fn handle_connect_command(
+        &mut self,
+        endpoint: Endpoint,
+        compression: Option<omq_proto::CompressionOptions>,
+        ack: super::oneshot::Sender<Result<()>>,
+    ) {
+        let options = self.capture_endpoint_options(compression);
+        if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
+            let _ = ack.send(Err(Error::Protocol(
+                "STREAM sockets only support tcp:// endpoints".into(),
+            )));
+        } else if matches!(endpoint, Endpoint::Udp { .. }) {
+            let res = self.start_dial_udp(endpoint).await;
+            let _ = ack.send(res);
+        } else if let Err(e) = reject_encrypted_inproc(&endpoint, &options.mechanism) {
+            let _ = ack.send(Err(e));
+        } else if let Err(e) = self.validate_setup_options(&endpoint, &options) {
+            let _ = ack.send(Err(e));
+        } else if super::endpoint_resolution::needs_dns(&endpoint) {
+            self.start_endpoint_resolution(
+                endpoint,
+                options,
+                super::endpoint_resolution::Ack::Connect(ack),
+            );
+        } else if Self::is_dart_endpoint(&endpoint) {
+            #[cfg(feature = "dart")]
+            let _ = ack.send(
+                self.start_dart(endpoint.clone(), endpoint, options, true)
+                    .await
+                    .map(|_| ()),
+            );
+        } else if let Err(e) = super::preflight_connect_endpoint_resolution(&endpoint).await {
+            let _ = ack.send(Err(e));
+        } else if self.should_ignore_duplicate_connect(&endpoint) {
+            let _ = ack.send(Ok(()));
+        } else {
+            self.start_dial(endpoint, options);
+            let _ = ack.send(Ok(()));
+        }
+    }
+
+    pub(super) fn is_dart_endpoint(endpoint: &Endpoint) -> bool {
+        #[cfg(feature = "dart")]
+        {
+            matches!(endpoint, Endpoint::Dart { .. })
+        }
+        #[cfg(not(feature = "dart"))]
+        {
+            let _ = endpoint;
+            false
+        }
+    }
+
     pub(super) fn socket_type_ignores_duplicate_connect(&self) -> bool {
         matches!(
             self.socket_type,
@@ -28,7 +81,15 @@ impl SocketDriver {
                 .any(|peer| peer.is_client && &peer.endpoint == endpoint)
     }
 
-    pub(super) fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
+    #[cfg_attr(
+        not(feature = "dart"),
+        allow(clippy::unused_async, clippy::unused_async_trait_impl)
+    )]
+    pub(super) async fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
+        #[cfg(feature = "dart")]
+        if self.stop_dart_endpoints(Some((endpoint, false))).await {
+            return Ok(());
+        }
         let pending =
             self.cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Bind)));
         let before = self.listeners.len() + self.udp_listeners.len();
@@ -61,6 +122,10 @@ impl SocketDriver {
     /// handshaked client-side peer tasks are stopped. Returns
     /// `Error::Unroutable` if no dialer or live client peer matches.
     pub(super) async fn disconnect(&mut self, endpoint: &Endpoint) -> Result<()> {
+        #[cfg(feature = "dart")]
+        if self.stop_dart_endpoints(Some((endpoint, true))).await {
+            return Ok(());
+        }
         let pending = self
             .cancel_pending_endpoints(Some((endpoint, super::endpoint_resolution::Kind::Connect)));
         let before = self.dialers.len() + self.udp_dialers.len();
@@ -331,6 +396,12 @@ impl SocketDriver {
         options: Arc<Options>,
     ) -> Result<Endpoint> {
         self.validate_setup_options(&endpoint, &options)?;
+        #[cfg(feature = "dart")]
+        if matches!(endpoint, Endpoint::Dart { .. }) {
+            return self
+                .start_dart(endpoint.clone(), endpoint, options, false)
+                .await;
+        }
         if self.socket_type == SocketType::Stream && !endpoint.is_tcp_family() {
             return Err(Error::Protocol(
                 "STREAM sockets only support tcp:// endpoints".into(),
@@ -463,6 +534,10 @@ impl SocketDriver {
         options: &Options,
     ) -> Result<()> {
         options.validate()?;
+        #[cfg(feature = "dart")]
+        if matches!(endpoint, Endpoint::Dart { .. }) {
+            return self.validate_dart_options(options);
+        }
         // Validate the effective mechanism before DNS or carrier setup. The
         // codec factory repeats this check for standalone sans-I/O callers.
         let compression =

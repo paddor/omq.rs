@@ -369,6 +369,8 @@ impl InprocSender {
         self.inner.port.try_send(msg).map_err(|error| match error {
             SendPipeError::Full(msg) => SendPipeError::Full(restore(msg)),
             SendPipeError::Closed(msg) => SendPipeError::Closed(restore(msg)),
+            #[cfg(feature = "dart")]
+            SendPipeError::Invalid(error) => SendPipeError::Invalid(error),
         })
     }
 
@@ -384,6 +386,8 @@ impl InprocSender {
         loop {
             if let Some(msg) = backlog.stalled.take() {
                 match self.inner.port.try_send(msg) {
+                    #[cfg(feature = "dart")]
+                    Err(SendPipeError::Invalid(_)) => unreachable!("inproc has no DART validator"),
                     Ok(()) => {}
                     Err(SendPipeError::Full(msg)) => {
                         backlog.stalled = Some(msg);

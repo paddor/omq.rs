@@ -152,9 +152,22 @@ impl Payload {
     /// Use an existing shared owner without allocating a new owner block.
     /// Empty owners remain retained. Converting this payload to `Bytes` allocates
     /// an adapter; borrowing or cloning the payload does not.
+    #[inline]
     pub fn from_shared_owner(owner: std::sync::Arc<impl PayloadOwner>) -> Self {
         Self {
             inner: PayloadInner::Shared(SharedOwner::new(owner)),
+        }
+    }
+
+    /// Borrow the first `len` bytes of a shared owner without allocating.
+    /// The entire owner remains retained, including for an empty prefix.
+    ///
+    /// # Panics
+    /// Panics when `len` exceeds the owner's byte length.
+    #[inline]
+    pub fn from_shared_owner_prefix(owner: std::sync::Arc<impl PayloadOwner>, len: usize) -> Self {
+        Self {
+            inner: PayloadInner::Shared(SharedOwner::prefix(owner, len)),
         }
     }
 
@@ -374,6 +387,11 @@ pub(crate) enum MessageInner {
         data: [u8; MAX_INLINE_MESSAGE],
     },
     Single(Payload),
+    /// Existing shared body with one local identity or group prefix.
+    PrefixedShared {
+        prefix: Bytes,
+        body: SharedOwner,
+    },
     /// Empty delimiter followed by one heap-backed body frame.
     EmptyDelimitedBytes(Bytes),
     Multi(Parts),
@@ -387,6 +405,10 @@ pub(crate) enum MessageInner {
     RoutedBytes {
         routing_id: u32,
         data: Bytes,
+    },
+    RoutedShared {
+        routing_id: u32,
+        body: SharedOwner,
     },
     RoutedMulti {
         routing_id: u32,
@@ -411,7 +433,10 @@ impl Message {
             | MessageInner::RoutedEmpty { .. }
             | MessageInner::RoutedInline { .. } => 0,
             MessageInner::Single(payload) => payload.retained_size()?,
-            MessageInner::EmptyDelimitedBytes(_) | MessageInner::RoutedBytes { .. } => return None,
+            MessageInner::RoutedShared { body, .. } => body.retained_size()?,
+            MessageInner::PrefixedShared { .. }
+            | MessageInner::EmptyDelimitedBytes(_)
+            | MessageInner::RoutedBytes { .. } => return None,
             MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
                 parts.iter().try_fold(
                     parts
@@ -429,6 +454,27 @@ impl Message {
     pub fn bound_storage(&mut self) {
         match &mut self.inner {
             MessageInner::Single(payload) => payload.bound_storage(),
+            MessageInner::PrefixedShared { prefix, body } => {
+                let mut prefix = Payload::from_bytes(prefix.clone());
+                let mut body = Payload {
+                    inner: PayloadInner::Shared(body.clone()),
+                };
+                prefix.bound_storage();
+                body.bound_storage();
+                self.inner = MessageInner::Multi(vec![prefix, body].into());
+            }
+            MessageInner::RoutedShared { body, routing_id } => {
+                if body.retained_size().is_none() {
+                    let mut payload = Payload {
+                        inner: PayloadInner::Shared(body.clone()),
+                    };
+                    payload.bound_storage();
+                    self.inner = MessageInner::RoutedMulti {
+                        routing_id: *routing_id,
+                        parts: vec![payload].into(),
+                    };
+                }
+            }
             MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
                 for payload in parts.iter_mut() {
                     payload.bound_storage();
@@ -548,6 +594,9 @@ impl Message {
                     data: Bytes::copy_from_slice(&data[..usize::from(len)]),
                 }
             }
+            MessageInner::Single(Payload {
+                inner: PayloadInner::Shared(body),
+            }) => MessageInner::RoutedShared { routing_id, body },
             MessageInner::Single(payload) => MessageInner::RoutedBytes {
                 routing_id,
                 data: payload.as_bytes(),
@@ -566,6 +615,7 @@ impl Message {
         match &self.inner {
             MessageInner::RoutedEmpty { routing_id }
             | MessageInner::RoutedBytes { routing_id, .. }
+            | MessageInner::RoutedShared { routing_id, .. }
             | MessageInner::RoutedMulti { routing_id, .. } => Some(*routing_id),
             MessageInner::RoutedInline { data, .. } => Some(routed_inline_id(data)),
             _ => None,
@@ -582,6 +632,12 @@ impl Message {
             MessageInner::RoutedBytes { routing_id, data } => {
                 (routing_id, MessageInner::Single(Payload::from_bytes(data)))
             }
+            MessageInner::RoutedShared { routing_id, body } => (
+                routing_id,
+                MessageInner::Single(Payload {
+                    inner: PayloadInner::Shared(body),
+                }),
+            ),
             MessageInner::RoutedMulti { routing_id, parts } => {
                 (routing_id, Self::from_parts(parts).inner)
             }
@@ -608,8 +664,9 @@ impl Message {
             }
             MessageInner::Single(_)
             | MessageInner::RoutedInline { .. }
-            | MessageInner::RoutedBytes { .. } => 1,
-            MessageInner::EmptyDelimitedBytes(_) => 2,
+            | MessageInner::RoutedBytes { .. }
+            | MessageInner::RoutedShared { .. } => 1,
+            MessageInner::PrefixedShared { .. } | MessageInner::EmptyDelimitedBytes(_) => 2,
             MessageInner::Multi(v) => v.len(),
             MessageInner::RoutedMulti { parts, .. } => parts.len(),
         }
@@ -629,6 +686,8 @@ impl Message {
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => 0,
             MessageInner::Inline { len, .. } => (len & !INLINE_DELIMITED_FLAG) as usize,
             MessageInner::Single(p) => p.len(),
+            MessageInner::RoutedShared { body, .. } => body.len(),
+            MessageInner::PrefixedShared { prefix, body } => prefix.len() + body.len(),
             MessageInner::EmptyDelimitedBytes(p) => p.len(),
             MessageInner::Multi(v) => v.byte_len(),
             MessageInner::RoutedInline { len, .. } => usize::from(*len),
@@ -655,6 +714,7 @@ impl Message {
         ) || matches!(
             self.inner,
             MessageInner::EmptyDelimitedBytes(_)
+                | MessageInner::PrefixedShared { .. }
                 | MessageInner::Multi(_)
                 | MessageInner::RoutedMulti { .. }
         )
@@ -697,6 +757,14 @@ impl Message {
                 (index == 0).then(|| Bytes::copy_from_slice(&data[..usize::from(*len)]))
             }
             MessageInner::RoutedBytes { data, .. } => (index == 0).then(|| data.clone()),
+            MessageInner::RoutedShared { body, .. } => {
+                (index == 0).then(|| Bytes::from_owner(body.clone()))
+            }
+            MessageInner::PrefixedShared { prefix, body } => match index {
+                0 => Some(prefix.clone()),
+                1 => Some(Bytes::from_owner(body.clone())),
+                _ => None,
+            },
             MessageInner::RoutedMulti { parts, .. } => parts.get(index).map(Payload::as_bytes),
         }
     }
@@ -740,6 +808,12 @@ impl Message {
                 (index == 0).then(|| &data[..usize::from(*len)])
             }
             MessageInner::RoutedBytes { data, .. } => (index == 0).then_some(data.as_ref()),
+            MessageInner::RoutedShared { body, .. } => (index == 0).then(|| body.as_ref()),
+            MessageInner::PrefixedShared { prefix, body } => match index {
+                0 => Some(prefix.as_ref()),
+                1 => Some(body.as_ref()),
+                _ => None,
+            },
             MessageInner::RoutedMulti { parts, .. } => parts.get(index).map(Payload::as_slice),
         }
     }
@@ -796,6 +870,15 @@ impl Message {
                 }
             }
             MessageInner::Single(p) => Some(p),
+            MessageInner::RoutedShared { body, .. } => Some(Payload {
+                inner: PayloadInner::Shared(body),
+            }),
+            MessageInner::PrefixedShared { prefix, body } => {
+                self.inner = MessageInner::Single(Payload {
+                    inner: PayloadInner::Shared(body),
+                });
+                Some(Payload::from_bytes(prefix))
+            }
             MessageInner::EmptyDelimitedBytes(p) => {
                 self.inner = MessageInner::Single(Payload::from_bytes(p));
                 Some(Payload::new())
@@ -834,6 +917,20 @@ impl Message {
         if prefix.is_empty() {
             return body.prepend_empty_delimiter();
         }
+        body.inner = match body.inner {
+            MessageInner::Single(Payload {
+                inner: PayloadInner::Shared(shared),
+            })
+            | MessageInner::RoutedShared { body: shared, .. } => {
+                return Self {
+                    inner: MessageInner::PrefixedShared {
+                        prefix,
+                        body: shared,
+                    },
+                };
+            }
+            other => other,
+        };
         if let MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } =
             &mut body.inner
         {
@@ -854,6 +951,15 @@ impl Message {
                 ));
             }
             MessageInner::Single(p) => parts.push(p),
+            MessageInner::RoutedShared { body, .. } => parts.push(Payload {
+                inner: PayloadInner::Shared(body),
+            }),
+            MessageInner::PrefixedShared { prefix, body } => {
+                parts.push(Payload::from_bytes(prefix));
+                parts.push(Payload {
+                    inner: PayloadInner::Shared(body),
+                });
+            }
             MessageInner::EmptyDelimitedBytes(p) => {
                 parts.push(Payload::from_bytes(Bytes::new()));
                 parts.push(Payload::from_bytes(p));
@@ -891,6 +997,15 @@ impl Message {
                 ));
             }
             MessageInner::Single(p) => parts.push(p),
+            MessageInner::RoutedShared { body, .. } => parts.push(Payload {
+                inner: PayloadInner::Shared(body),
+            }),
+            MessageInner::PrefixedShared { prefix, body } => {
+                parts.push(Payload::from_bytes(prefix));
+                parts.push(Payload {
+                    inner: PayloadInner::Shared(body),
+                });
+            }
             MessageInner::EmptyDelimitedBytes(p) => {
                 parts.push(Payload::from_bytes(Bytes::new()));
                 parts.push(Payload::from_bytes(p));
@@ -927,6 +1042,26 @@ impl Message {
                 }
             }
             MessageInner::Single(existing) => MessageInner::Multi(vec![existing, part].into()),
+            MessageInner::PrefixedShared { prefix, body } => MessageInner::Multi(
+                vec![
+                    Payload::from_bytes(prefix),
+                    Payload {
+                        inner: PayloadInner::Shared(body),
+                    },
+                    part,
+                ]
+                .into(),
+            ),
+            MessageInner::RoutedShared { routing_id, body } => MessageInner::RoutedMulti {
+                routing_id,
+                parts: vec![
+                    Payload {
+                        inner: PayloadInner::Shared(body),
+                    },
+                    part,
+                ]
+                .into(),
+            },
             MessageInner::EmptyDelimitedBytes(existing) => MessageInner::Multi(
                 vec![
                     Payload::from_bytes(Bytes::new()),
@@ -973,6 +1108,15 @@ impl Message {
                 }
             }
             MessageInner::Single(p) => smallvec::smallvec![p.clone()],
+            MessageInner::RoutedShared { body, .. } => smallvec::smallvec![Payload {
+                inner: PayloadInner::Shared(body.clone())
+            }],
+            MessageInner::PrefixedShared { prefix, body } => smallvec::smallvec![
+                Payload::from_bytes(prefix.clone()),
+                Payload {
+                    inner: PayloadInner::Shared(body.clone())
+                }
+            ],
             MessageInner::EmptyDelimitedBytes(p) => {
                 smallvec::smallvec![
                     Payload::from_bytes(Bytes::new()),
@@ -1001,6 +1145,11 @@ impl Message {
                 f(&data[..(*len & !INLINE_DELIMITED_FLAG) as usize]);
             }
             MessageInner::Single(p) => f(p.as_slice()),
+            MessageInner::RoutedShared { body, .. } => f(body.as_ref()),
+            MessageInner::PrefixedShared { prefix, body } => {
+                f(prefix.as_ref());
+                f(body.as_ref());
+            }
             MessageInner::EmptyDelimitedBytes(p) => {
                 f(&[]);
                 f(p.as_ref());
@@ -1034,6 +1183,17 @@ impl Message {
                 }
             }
             MessageInner::Single(p) => vec![p].into(),
+            MessageInner::RoutedShared { body, .. } => vec![Payload {
+                inner: PayloadInner::Shared(body),
+            }]
+            .into(),
+            MessageInner::PrefixedShared { prefix, body } => vec![
+                Payload::from_bytes(prefix),
+                Payload {
+                    inner: PayloadInner::Shared(body),
+                },
+            ]
+            .into(),
             MessageInner::EmptyDelimitedBytes(p) => {
                 vec![Payload::from_bytes(Bytes::new()), Payload::from_bytes(p)].into()
             }
@@ -1089,8 +1249,40 @@ impl Message {
                     data,
                 },
             },
+            MessageInner::Single(Payload {
+                inner: PayloadInner::Shared(body),
+            }) => Self {
+                inner: MessageInner::PrefixedShared {
+                    prefix: Bytes::new(),
+                    body,
+                },
+            },
             MessageInner::Single(p) => Self {
                 inner: MessageInner::EmptyDelimitedBytes(p.as_bytes()),
+            },
+            MessageInner::PrefixedShared { prefix, body } => Self {
+                inner: MessageInner::Multi(
+                    vec![
+                        empty,
+                        Payload::from_bytes(prefix),
+                        Payload {
+                            inner: PayloadInner::Shared(body),
+                        },
+                    ]
+                    .into(),
+                ),
+            },
+            MessageInner::RoutedShared { routing_id, body } => Self {
+                inner: MessageInner::RoutedMulti {
+                    routing_id,
+                    parts: vec![
+                        empty,
+                        Payload {
+                            inner: PayloadInner::Shared(body),
+                        },
+                    ]
+                    .into(),
+                },
             },
             MessageInner::EmptyDelimitedBytes(p) => Self {
                 inner: MessageInner::Multi(
@@ -1209,6 +1401,14 @@ impl Clone for Message {
                     data: *data,
                 },
                 MessageInner::Single(p) => MessageInner::Single(p.clone()),
+                MessageInner::RoutedShared { routing_id, body } => MessageInner::RoutedShared {
+                    routing_id: *routing_id,
+                    body: body.clone(),
+                },
+                MessageInner::PrefixedShared { prefix, body } => MessageInner::PrefixedShared {
+                    prefix: prefix.clone(),
+                    body: body.clone(),
+                },
                 MessageInner::EmptyDelimitedBytes(p) => {
                     MessageInner::EmptyDelimitedBytes(p.clone())
                 }
@@ -1296,6 +1496,12 @@ impl Message {
                 (index == 0).then(|| &data[..usize::from(*len)])
             }
             MessageInner::RoutedBytes { data, .. } => (index == 0).then_some(data.as_ref()),
+            MessageInner::RoutedShared { body, .. } => (index == 0).then(|| body.as_ref()),
+            MessageInner::PrefixedShared { prefix, body } => match index {
+                0 => Some(prefix.as_ref()),
+                1 => Some(body.as_ref()),
+                _ => None,
+            },
             MessageInner::RoutedMulti { parts, .. } => parts.get(index).map(Payload::as_slice),
         }
     }
@@ -1356,6 +1562,146 @@ pub fn generated_identity(id: u64) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SharedFrame(Vec<u8>);
+
+    impl AsRef<[u8]> for SharedFrame {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    impl PayloadOwner for SharedFrame {
+        fn retained_size(&self) -> Option<usize> {
+            Some(self.0.capacity())
+        }
+    }
+
+    fn shared_frame(length: usize) -> (Message, std::sync::Weak<SharedFrame>) {
+        let owner = std::sync::Arc::new(SharedFrame(vec![7; length]));
+        let weak = std::sync::Arc::downgrade(&owner);
+        (Message::from(Payload::from_shared_owner(owner)), weak)
+    }
+
+    #[test]
+    fn compact_shared_routing_preserves_ownership_and_frame_operations() {
+        assert_eq!(std::mem::size_of::<Message>(), 64);
+        for length in [0, 16, 63, 1024] {
+            let (body, owner) = shared_frame(length);
+            let mut routed = body.with_routing_id(7);
+            assert!(matches!(routed.inner, MessageInner::RoutedShared { .. }));
+            assert_eq!(routed.len(), 1);
+            assert!(!routed.is_multipart());
+            assert_eq!(routed.byte_len(), length);
+            assert_eq!(routed.get(0), Some(vec![7; length].as_slice()));
+            assert!(routed.part_slice(1).is_none());
+            assert!(routed.part_bytes(1).is_none());
+            assert!(routed.retained_size().is_some());
+            routed.bound_storage();
+            assert!(matches!(routed.inner, MessageInner::RoutedShared { .. }));
+
+            let byte_view = routed.part_bytes(0).unwrap();
+            let mut clone = routed.clone();
+            assert_eq!(clone.take_routing_id(), Some(7));
+            assert_eq!(clone, routed);
+            assert_eq!(routed.parts_payload()[0].as_slice(), byte_view.as_ref());
+            let mut slices = Vec::new();
+            routed.iter_slices(|part| slices.push(part.to_vec()));
+            assert_eq!(slices, [vec![7; length]]);
+
+            let parts = routed.clone().into_parts_payload();
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0].as_slice(), byte_view.as_ref());
+            drop(parts);
+            routed.push_part_payload(Payload::from_slice(b"tail"));
+            assert_eq!(routed.routing_id(), Some(7));
+            assert_eq!(routed.len(), 2);
+            assert_eq!(routed.part_slice(1), Some(b"tail".as_slice()));
+            drop(routed);
+            drop(clone);
+            assert!(owner.upgrade().is_some());
+            drop(byte_view);
+            assert!(owner.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn compact_shared_prefix_preserves_ownership_and_frame_operations() {
+        for length in [0, 16, 63, 1024] {
+            let (body, owner) = shared_frame(length);
+            let mut message = Message::with_prefix(Bytes::from_static(b"prefix"), body);
+            assert!(matches!(message.inner, MessageInner::PrefixedShared { .. }));
+            assert_eq!(message.len(), 2);
+            assert!(message.is_multipart());
+            assert_eq!(message.byte_len(), length + 6);
+            assert_eq!(message.get(0), Some(b"prefix".as_slice()));
+            assert_eq!(message.get(1), Some(vec![7; length].as_slice()));
+            assert!(message.part_slice(2).is_none());
+            assert!(message.part_bytes(2).is_none());
+            let clone = message.clone();
+            let parts = message.parts_payload();
+            assert_eq!(parts.len(), 2);
+            drop(parts);
+            let parts = message.clone().into_parts_payload();
+            assert_eq!(parts.len(), 2);
+            drop(parts);
+            let mut slices = Vec::new();
+            message.iter_slices(|part| slices.push(part.to_vec()));
+            assert_eq!(slices, [b"prefix".to_vec(), vec![7; length]]);
+            message.bound_storage();
+            assert!(message.retained_size().is_some());
+            assert_eq!(message, clone);
+            drop(message);
+
+            let byte_view = clone.part_bytes(1).unwrap();
+            let mut expanded = clone.clone();
+            expanded.push_part_payload(Payload::from_slice(b"tail"));
+            assert_eq!(expanded.len(), 3);
+            assert_eq!(expanded.part_slice(2), Some(b"tail".as_slice()));
+            drop(expanded);
+            let mut popped = clone.clone();
+            assert_eq!(popped.pop_front_payload().unwrap().as_slice(), b"prefix");
+            assert_eq!(popped.part_slice(0), Some(byte_view.as_ref()));
+            drop(popped);
+            drop(clone);
+            assert!(owner.upgrade().is_some());
+            drop(byte_view);
+            assert!(owner.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn compact_shared_envelopes_preserve_parts_and_routing_rules() {
+        let (body, _) = shared_frame(128);
+        let routed = body.with_routing_id(7);
+        let message = Message::with_prefix(Bytes::from_static(b"peer"), routed.clone());
+        assert_eq!(message.routing_id(), None);
+        assert_eq!(message.part_slice(0), Some(b"peer".as_slice()));
+        assert_eq!(message.part_slice(1), Some([7; 128].as_slice()));
+        let nested = Message::with_prefix(Bytes::from_static(b"outer"), message.clone());
+        assert_eq!(nested.len(), 3);
+        assert_eq!(nested.part_slice(1), Some(b"peer".as_slice()));
+        let envelope = smallvec::smallvec![Bytes::from_static(b"route")];
+        let reply = Message::with_rep_envelope(envelope, message.clone());
+        assert_eq!(reply.len(), 4);
+        assert_eq!(reply.part_slice(0), Some(b"route".as_slice()));
+        assert_eq!(reply.part_slice(1), Some([].as_slice()));
+        assert_eq!(reply.part_slice(2), Some(b"peer".as_slice()));
+        assert_eq!(reply.part_slice(3), Some([7; 128].as_slice()));
+        let mut delimited = message.prepend_empty_delimiter();
+        assert_eq!(delimited.len(), 3);
+        assert!(delimited.pop_front_payload().unwrap().is_empty());
+        assert_eq!(delimited.part_slice(0), Some(b"peer".as_slice()));
+        let mut routed_delimited = routed.prepend_empty_delimiter();
+        assert_eq!(routed_delimited.routing_id(), Some(7));
+        assert_eq!(routed_delimited.take_routing_id(), Some(7));
+        assert_eq!(routed_delimited.len(), 2);
+        assert!(routed_delimited.pop_front_payload().unwrap().is_empty());
+        assert_eq!(
+            routed_delimited.pop_front_payload().unwrap().as_slice(),
+            &[7; 128]
+        );
+    }
 
     #[test]
     fn opaque_storage_is_bounded_without_losing_frames_or_routing() {

@@ -27,6 +27,7 @@ zstd = ["omq-proto/zstd"]
 ws = ["omq-proto/ws", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:tokio-rustls"]
 # Raw OMQ over QUIC (`quic://`). Quinn with rustls/ring; no OMQ compression.
 quic = ["omq-proto/quic", "dep:quinn", "dep:nix", "dep:rustls", "dep:rustls-native-certs", "dep:rustls-pki-types"]
+dart = ["omq-proto/dart", "dep:quinn-udp"]
 # Enables the fuzz test suites (`tests/fuzz_*.rs`). Off by default -
 # those targets do ~1 M iterations each and dominate runtime of
 # `cargo test`. Run with `cargo test --features fuzz`.
@@ -57,6 +58,7 @@ rustls-native-certs = { version = "0.8", optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 quinn = { version = "0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn-udp = { version = "0.5.16", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", optional = true, default-features = false, features = ["socket"] }
@@ -85,6 +87,11 @@ path = "src/bin/bench_proxy_client.rs"
 name = "omq_perf_verify"
 path = "src/bin/perf_verify.rs"
 
+[[bin]]
+name = "omq_dart_bench_peer"
+path = "src/bin/dart_bench_peer.rs"
+required-features = ["dart"]
+
 [[example]]
 name = "pub_sub_lz4"
 required-features = ["lz4"]
@@ -96,6 +103,11 @@ required-features = ["quic"]
 
 [[example]]
 name = "quic_interop_peer"
+required-features = ["quic"]
+
+[[example]]
+name = "omq_quinn_datagram_peer"
+path = "examples/quinn_datagram_peer.rs"
 required-features = ["quic"]
 
 [[test]]
@@ -256,6 +268,21 @@ path = "tests/inproc_recv_race.rs"
 [[test]]
 name = "omq_loom_signal"
 path = "tests/loom_signal.rs"
+
+[[test]]
+name = "omq_dart_pool"
+path = "tests/dart_pool.rs"
+required-features = ["dart"]
+
+[[test]]
+name = "omq_dart_transport"
+path = "tests/dart_transport.rs"
+required-features = ["dart"]
+
+[[test]]
+name = "omq_loom_dart_pool"
+path = "tests/loom_dart_pool.rs"
+required-features = ["dart"]
 
 [[test]]
 name = "omq_inproc_subside"

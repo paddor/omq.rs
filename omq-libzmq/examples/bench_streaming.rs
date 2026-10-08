@@ -1,6 +1,6 @@
 //! Blocking C API PUSH/PULL on two application threads.
 //!
-//! Run: `cargo run --release -p omq-libzmq --example bench_streaming -- 64 1000000 1000`
+//! Run: `cargo run --release -p omq-libzmq --example omq_libzmq_bench_streaming -- 64 1000000 1000`
 //! Use a separate perf/strace run to measure wake syscalls per message.
 
 use std::ffi::{CString, c_void};

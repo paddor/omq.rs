@@ -2,10 +2,10 @@
  * Two-process throughput peer for libzmq 4.x.
  *
  * Usage:
- *   libzmq_bench_peer push <addr> <msg_size_bytes>
- *   libzmq_bench_peer pull <addr> <msg_size_bytes> <duration_secs>
- *   libzmq_bench_peer rep  <addr> <msg_size_bytes>
- *   libzmq_bench_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
+ *   omq_libzmq_baseline_peer push <addr> <msg_size_bytes>
+ *   omq_libzmq_baseline_peer pull <addr> <msg_size_bytes> <duration_secs>
+ *   omq_libzmq_baseline_peer rep  <addr> <msg_size_bytes>
+ *   omq_libzmq_baseline_peer req  <addr> <msg_size_bytes> <iterations> <warmup>
  *
  * <addr>: a port number (→ tcp://127.0.0.1:<port>) or a full ZMQ address
  *         (e.g. ipc:///tmp/bench.sock or tcp://127.0.0.1:15555).
@@ -16,7 +16,7 @@
  * Req:  connects, runs warmup + measured round-trips, prints latency
  *       percentiles (p50 p99 p999 max iterations) in microseconds.
  *
- * Compile: gcc -O2 -o libzmq_bench_peer libzmq_bench_peer.c -lzmq
+ * Compile: gcc -O2 -o omq_libzmq_baseline_peer libzmq_bench_peer.c -lzmq
  *
  * Output (pull only, one line to stdout):
  *   <count> <elapsed_secs> <msg_size> <cpu_secs>

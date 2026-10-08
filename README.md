@@ -128,6 +128,7 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `zstd`            | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
 | `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
 | `quic`            | QUIC (`quic://`) transport ([example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
+| `dart`            | Reliable ordered UDP messages (`dart://`), [RFC](doc/dart-rfc.md), [native Rust API](doc/dart.md) | `quinn-udp` |
 
 ## Design highlights
 
@@ -212,6 +213,8 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
   format and dictionary shipping rules.
 - [doc/quic-rfc.md](doc/quic-rfc.md): native QUIC transport, TLS verification,
   liveness, and reconnect rules.
+- [doc/dart.md](doc/dart.md): reliable UDP messages, buffer ownership,
+  capacity, and diagnostics.
 
 ## Platform and requirements
 

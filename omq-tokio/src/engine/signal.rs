@@ -20,26 +20,48 @@
 //!   let both loads read stale values, and the consumer parks with the item
 //!   queued (`tests/loom_signal.rs`).
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::Notify;
 
-/// Poll `future` on the calling thread and park it between wakeups.
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
-    struct Unpark(std::thread::Thread);
+fn new_notify() -> Notify {
+    let notify = Notify::new();
+    // Tokio's waiter mutex allocates on first use on some platforms.
+    // Register and remove an empty waiter while the signal is private.
+    {
+        let mut waiter = std::pin::pin!(notify.notified());
+        waiter.as_mut().enable();
+    }
+    notify
+}
 
-    impl std::task::Wake for Unpark {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
+#[derive(Debug)]
+struct Unpark(std::thread::Thread);
 
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.unpark();
-        }
+impl std::task::Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
     }
 
-    let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+thread_local! {
+    // Every call wakes this same OS thread. Retain no future or socket state.
+    static BLOCKING_UNPARK: Arc<Unpark> = Arc::new(Unpark(std::thread::current()));
+}
+
+/// Poll `future` on the calling thread and park it between wakeups.
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    let unpark = BLOCKING_UNPARK
+        .try_with(Arc::clone)
+        // A later TLS destructor may still need to perform a blocking call.
+        .unwrap_or_else(|_| Arc::new(Unpark(std::thread::current())));
+    let waker = std::task::Waker::from(unpark);
     let mut cx = std::task::Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     loop {
@@ -66,6 +88,46 @@ struct BlockingThread {
     armed: AtomicBool,
 }
 
+struct CachedBlockingThread {
+    signal: Weak<BlockingSignal>,
+    state: Arc<BlockingThread>,
+}
+
+thread_local! {
+    // Weak signals retain no socket resources. Thread exit releases cached
+    // waiters; new registrations prune sockets that have already closed.
+    static BLOCKING_THREADS: RefCell<Vec<CachedBlockingThread>> = const { RefCell::new(Vec::new()) };
+}
+
+fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
+    let new = || {
+        Arc::new(BlockingThread {
+            thread: std::thread::current(),
+            armed: AtomicBool::new(true),
+        })
+    };
+    BLOCKING_THREADS
+        .try_with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(cached) = cache.iter().find(|cached| {
+                cached.signal.as_ptr() == Arc::as_ptr(signal)
+                // Active guards and the signal's list own other references.
+                // A nested call must get a separate waiter.
+                && Arc::strong_count(&cached.state) == 1
+            }) {
+                return cached.state.clone();
+            }
+            cache.retain(|cached| cached.signal.strong_count() != 0);
+            let state = new();
+            cache.push(CachedBlockingThread {
+                signal: Arc::downgrade(signal),
+                state: state.clone(),
+            });
+            state
+        })
+        .unwrap_or_else(|_| new()) // Thread-local teardown is outside steady state.
+}
+
 pub(crate) struct BlockingWaiter<'a> {
     signal: &'a BlockingSignal,
     state: Arc<BlockingThread>,
@@ -79,11 +141,9 @@ impl BlockingSignal {
         })
     }
 
-    pub(crate) fn register(&self) -> BlockingWaiter<'_> {
-        let state = Arc::new(BlockingThread {
-            thread: std::thread::current(),
-            armed: AtomicBool::new(true),
-        });
+    pub(crate) fn register(self: &Arc<Self>) -> BlockingWaiter<'_> {
+        let state = blocking_thread(self);
+        state.armed.store(true, Ordering::SeqCst);
         let mut waiters = self.waiters.lock().unwrap();
         waiters.push(state.clone());
         self.active.fetch_add(1, Ordering::SeqCst);
@@ -250,15 +310,32 @@ const DIRTY: u8 = 3;
 /// Coalesced data-available notification.
 #[derive(Debug)]
 pub(crate) struct DataSignal {
+    #[cfg(feature = "dart")]
+    pub(crate) dart_admission: std::sync::OnceLock<omq_proto::dart::AdmissionCounter>,
+    #[cfg(feature = "dart")]
+    endpoint: std::sync::OnceLock<Arc<DataSignal>>,
     state: AtomicU8,
     notify: Notify,
 }
 
 impl DataSignal {
+    #[cfg(feature = "dart")]
+    pub(crate) fn forward_to(&self, endpoint: Arc<Self>) {
+        assert!(
+            endpoint.endpoint.get().is_none(),
+            "DART wake forwarding has one level"
+        );
+        let _ = self.endpoint.set(endpoint);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
+            #[cfg(feature = "dart")]
+            dart_admission: std::sync::OnceLock::new(),
+            #[cfg(feature = "dart")]
+            endpoint: std::sync::OnceLock::new(),
             state: AtomicU8::new(IDLE),
-            notify: Notify::new(),
+            notify: new_notify(),
         }
     }
 
@@ -266,6 +343,10 @@ impl DataSignal {
     /// Wakes one waiter only on the idle-to-pending transition.
     #[inline]
     pub(crate) fn mark(&self) {
+        #[cfg(feature = "dart")]
+        if let Some(endpoint) = self.endpoint.get() {
+            endpoint.mark();
+        }
         // Order the caller's publication before the state read. See the
         // module docs.
         fence(Ordering::SeqCst);
@@ -414,15 +495,36 @@ impl DataSignal {
 /// state, then await only if nothing changed meanwhile.
 #[derive(Debug)]
 pub struct StateSignal {
+    #[cfg(feature = "dart")]
+    endpoints: std::sync::OnceLock<Mutex<Vec<Weak<DataSignal>>>>,
     generation: AtomicU64,
     notify: Notify,
 }
 
 impl StateSignal {
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&self, signal: &Arc<DataSignal>) {
+        let mut endpoints = self
+            .endpoints
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("DART space subscribers");
+        endpoints.retain(|endpoint| endpoint.strong_count() != 0);
+        if !endpoints
+            .iter()
+            .any(|endpoint| endpoint.as_ptr() == Arc::as_ptr(signal))
+        {
+            assert!(endpoints.len() < 128, "bounded DART endpoint subscriptions");
+            endpoints.push(Arc::downgrade(signal));
+        }
+    }
+
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "dart")]
+            endpoints: std::sync::OnceLock::new(),
             generation: AtomicU64::new(0),
-            notify: Notify::new(),
+            notify: new_notify(),
         }
     }
 
@@ -435,6 +537,14 @@ impl StateSignal {
     pub fn notify_changed(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_waiters();
+        #[cfg(feature = "dart")]
+        if let Some(endpoints) = self.endpoints.get() {
+            for endpoint in endpoints.lock().expect("DART space subscribers").iter() {
+                if let Some(signal) = endpoint.upgrade() {
+                    signal.mark();
+                }
+            }
+        }
     }
 
     pub async fn changed_after(&self, seen: u64) {
@@ -485,6 +595,68 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+
+    #[test]
+    fn blocking_task_waker_releases_at_thread_exit_and_allows_late_tls_calls() {
+        struct LateCall(std::sync::mpsc::Sender<()>);
+        impl Drop for LateCall {
+            fn drop(&mut self) {
+                block_on(std::future::ready(()));
+                self.0.send(()).unwrap();
+            }
+        }
+        thread_local! {
+            static LATE: RefCell<Option<LateCall>> = const { RefCell::new(None) };
+        }
+        let (completed, completion) = std::sync::mpsc::channel();
+        let cached = std::thread::spawn(move || {
+            // TLS drops in reverse order. This destructor runs after the
+            // cached wake handle has been destroyed.
+            LATE.with(|late| *late.borrow_mut() = Some(LateCall(completed)));
+            block_on(std::future::ready(()));
+            BLOCKING_UNPARK.with(Arc::downgrade)
+        })
+        .join()
+        .unwrap();
+        completion.recv().unwrap();
+        assert!(cached.upgrade().is_none());
+    }
+
+    #[test]
+    fn cached_blocking_waiters_keep_nested_registrations_independent() {
+        let signal = BlockingSignal::new();
+        let first = signal.register();
+        let pointer = Arc::as_ptr(&first.state);
+        let second = signal.register();
+        assert!(!Arc::ptr_eq(&first.state, &second.state));
+        drop(first);
+        let reused = signal.register();
+        assert_eq!(Arc::as_ptr(&reused.state), pointer);
+        assert_eq!(signal.active.load(Ordering::Acquire), 2);
+        signal.wake();
+        assert!(!second.state.armed.load(Ordering::Acquire));
+        assert!(!reused.state.armed.load(Ordering::Acquire));
+        drop(second);
+        drop(reused);
+        assert_eq!(signal.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn blocking_waiter_cache_retains_no_socket_or_exited_thread() {
+        let signal = BlockingSignal::new();
+        let background = signal.clone();
+        let state = std::thread::spawn(move || {
+            let waiter = background.register();
+            Arc::downgrade(&waiter.state)
+        })
+        .join()
+        .unwrap();
+        assert!(state.upgrade().is_none());
+        let weak = Arc::downgrade(&signal);
+        drop(signal.register());
+        drop(signal);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[tokio::test]
     async fn first_mark_wakes() {

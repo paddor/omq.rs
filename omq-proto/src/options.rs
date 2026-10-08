@@ -143,6 +143,8 @@ pub struct Options {
     /// first message of a bulk receive, including timeout and cancelable calls.
     /// Timeouts and cancellation stop the spin early. Async and nonblocking
     /// receives do not spin.
+    /// [`Duration::MAX`] polls continuously until delivery, close, cancellation,
+    /// or timeout. This consumes an application CPU even while idle.
     ///
     /// Spinning can reduce wakeup latency when application and IO threads have
     /// separate CPU resources, but consumes CPU and can worsen latency when
@@ -386,6 +388,93 @@ pub struct Options {
     /// `quic` feature.
     #[cfg(feature = "quic")]
     pub quic: QuicOptions,
+
+    /// Bounded datagram transport settings. Requires the `dart` feature.
+    #[cfg(feature = "dart")]
+    pub dart: DartOptions,
+}
+
+/// Network congestion policy for reliable DART.
+#[cfg(feature = "dart")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DartCongestion {
+    /// Loss-based congestion control, validated ECN feedback, and pacing.
+    #[default]
+    Adaptive,
+    /// Fixed receiver window for provisioned networks. Repairs remain reliable.
+    Lan,
+}
+
+/// ECN is enabled only with a validated adaptive feedback path.
+#[cfg(feature = "dart")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DartEcn {
+    #[default]
+    Auto,
+    Disabled,
+}
+
+/// Settings for reliable, ordered, bounded `dart://` messages.
+#[cfg(feature = "dart")]
+#[derive(Clone, Copy, Debug)]
+pub struct DartOptions {
+    /// Caller-acquired send buffers per socket. Default 1024.
+    pub pool_buffers: usize,
+    /// Maximum admitted peers across the socket. Default 1024.
+    pub max_ready_peers: usize,
+    /// Busy wait before readiness waiting. Default zero, maximum 50 us.
+    /// [`Duration::MAX`] polls continuously, including while idle. Endpoint
+    /// turns remain bounded so other runtime tasks and controls make progress.
+    pub io_spin: Duration,
+    /// Automatic or disabled ECN. LAN mode never marks outgoing traffic.
+    pub ecn: DartEcn,
+    /// Network congestion policy. Default adaptive.
+    pub congestion: DartCongestion,
+    /// Preallocated receive and retention slots per peer. Default 256;
+    /// a power of two between 1 and 65536. Receive storage is private to peers.
+    pub window_messages: usize,
+    /// Optional wire-byte rate cap per peer. Zero is invalid.
+    pub max_send_rate: Option<u64>,
+}
+
+#[cfg(feature = "dart")]
+impl Default for DartOptions {
+    fn default() -> Self {
+        Self {
+            pool_buffers: 1024,
+            max_ready_peers: 1024,
+            io_spin: Duration::ZERO,
+            ecn: DartEcn::Auto,
+            congestion: DartCongestion::Adaptive,
+            window_messages: 256,
+            max_send_rate: None,
+        }
+    }
+}
+
+#[cfg(feature = "dart")]
+impl DartOptions {
+    fn validate(self) -> crate::error::Result<()> {
+        if self.pool_buffers == 0 || self.max_ready_peers == 0 {
+            return Err(crate::error::Error::Config(
+                "dart.pool_buffers and dart.max_ready_peers must be nonzero".into(),
+            ));
+        }
+        if !self.window_messages.is_power_of_two()
+            || self.window_messages > 65536
+            || self.max_send_rate == Some(0)
+        {
+            return Err(crate::error::Error::Config(
+                "DART needs a power-of-two window <=65536 and a nonzero rate cap".into(),
+            ));
+        }
+        if self.io_spin > Duration::from_micros(50) && self.io_spin != Duration::MAX {
+            return Err(crate::error::Error::Config(
+                "dart.io_spin must be at most 50 microseconds or Duration::MAX".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Settings for OMQ over QUIC (`quic://`).
@@ -630,6 +719,8 @@ impl Default for Options {
             reconnect_stop_conn_refused: false,
             #[cfg(feature = "quic")]
             quic: QuicOptions::default(),
+            #[cfg(feature = "dart")]
+            dart: DartOptions::default(),
             #[cfg(feature = "ws")]
             wss_tls: WssTls::default(),
             #[cfg(feature = "ws")]
@@ -682,24 +773,15 @@ impl Options {
         }
         #[cfg(feature = "quic")]
         self.quic.validate()?;
+        #[cfg(feature = "dart")]
+        self.dart.validate()?;
         #[cfg(feature = "ws")]
         if self.ws.max_ready_peers == 0 {
             return Err(crate::error::Error::Config(
                 "ws.max_ready_peers must be greater than zero".into(),
             ));
         }
-        for (name, limit) in [
-            ("recv_rate_limit", self.recv_rate_limit),
-            ("recv_ip_rate_limit", self.recv_ip_rate_limit),
-        ] {
-            if let Some(limit) = limit
-                && (limit.messages_per_second == 0 || limit.burst == 0)
-            {
-                return Err(crate::error::Error::Config(format!(
-                    "{name} rate and burst must be greater than zero"
-                )));
-            }
-        }
+        self.validate_recv_rate_limits()?;
         if self.handshake_timeout.is_none() && self.mechanism.has_frame_transform() {
             return Err(crate::error::Error::Config(
                 "encrypted mechanisms require handshake_timeout".into(),
@@ -755,6 +837,22 @@ impl Options {
             return Err(crate::error::Error::Config(
                 "CURVE cookie lifetime must be greater than zero".into(),
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_recv_rate_limits(&self) -> crate::error::Result<()> {
+        for (name, limit) in [
+            ("recv_rate_limit", self.recv_rate_limit),
+            ("recv_ip_rate_limit", self.recv_ip_rate_limit),
+        ] {
+            if let Some(limit) = limit
+                && (limit.messages_per_second == 0 || limit.burst == 0)
+            {
+                return Err(crate::error::Error::Config(format!(
+                    "{name} rate and burst must be greater than zero"
+                )));
+            }
         }
         Ok(())
     }
@@ -1300,6 +1398,38 @@ mod tests {
         }
     }
     use super::*;
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_defaults_are_bounded_and_spinning_is_explicit() {
+        let mut options = Options::default();
+        assert_eq!(options.dart.pool_buffers, 1024);
+        assert_eq!(options.dart.max_ready_peers, 1024);
+        assert_eq!(options.dart.io_spin, Duration::ZERO);
+        assert_eq!(options.dart.ecn, DartEcn::Auto);
+        assert_eq!(options.dart.congestion, DartCongestion::Adaptive);
+        assert_eq!(options.dart.window_messages, 256);
+        assert_eq!(options.dart.max_send_rate, None);
+        options.dart.io_spin = Duration::from_micros(50);
+        assert!(options.validate().is_ok());
+        options.dart.io_spin += Duration::from_nanos(1);
+        assert!(options.validate().is_err());
+        options.dart.io_spin = Duration::ZERO;
+        options.dart.pool_buffers = 0;
+        assert!(options.validate().is_err());
+        options.dart.pool_buffers = 1;
+        options.dart.max_ready_peers = 0;
+        assert!(options.validate().is_err());
+        options.dart.max_ready_peers = 1;
+        for window in [0, 3, 65_537] {
+            options.dart.window_messages = window;
+            assert!(options.validate().is_err());
+        }
+        options.dart.window_messages = 65_536;
+        assert!(options.validate().is_ok());
+        options.dart.max_send_rate = Some(0);
+        assert!(options.validate().is_err());
+    }
 
     #[cfg(feature = "quic")]
     #[test]

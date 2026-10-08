@@ -83,6 +83,8 @@ async fn deliver_blocking(target: &PeerOutbound, mut msg: Message, publish: &Mut
             sender.try_send_prepared(msg, SendPreparation::Plain)
         };
         match sent {
+            #[cfg(feature = "dart")]
+            Err(SendPipeError::Invalid(_)) => unreachable!("inproc has no DART validator"),
             Ok(()) | Err(SendPipeError::Closed(_)) => return,
             Err(SendPipeError::Full(returned)) => msg = returned,
         }

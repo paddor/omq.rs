@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
+#[cfg(feature = "dart")]
+pub mod dart;
 pub mod endpoint;
 pub mod error;
 pub mod fan_out_frame;
@@ -40,6 +42,8 @@ pub use options::{
     CompressionOptions, KeepAlive, MechanismConfig, MessageRateLimit, OnMute, Options,
     ReconnectPolicy, WorkloadProfile,
 };
+#[cfg(feature = "dart")]
+pub use options::{DartCongestion, DartEcn, DartOptions};
 pub use proto::mechanism::MechanismSetup;
 pub use proto::mechanism::{
     AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo,

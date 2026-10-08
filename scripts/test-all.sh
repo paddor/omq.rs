@@ -335,7 +335,7 @@ par_wait
 #    cross-feature interactions and internal #[cfg(feature)] items
 #    inside otherwise-ungated test files (connect_before_bind lz4).
 # ---------------------------------------------------------------- #
-all_features='plain curve lz4 zstd ws quic'
+all_features='plain curve lz4 zstd ws quic dart'
 par run omq_cargo_with_rust_tools test -p omq-proto  --features "$all_features"
 par run omq_cargo_with_rust_tools test -p omq-tokio  --features "$all_features"
 par_wait
@@ -363,6 +363,8 @@ fi
 
 if [[ "${OMQ_LOOM:-}" == "1" ]]; then
     run omq_cargo_with_rust_tools test -p omq-tokio --test omq_loom_signal
+    run omq_cargo_with_rust_tools test -p omq-tokio --features dart --test omq_loom_dart_pool
+    RUSTFLAGS="${RUSTFLAGS:-} --cfg loom" run omq_cargo_with_rust_tools test -p omq-proto --features dart --test omq_proto_loom_dart
 else
     echo "skip: OMQ_LOOM=1"
 fi

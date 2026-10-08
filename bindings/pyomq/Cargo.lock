@@ -577,6 +577,7 @@ dependencies = [
  "bytes",
  "crypto_box",
  "crypto_secretbox",
+ "loom",
  "lz4rip",
  "patricia_tree",
  "rand",

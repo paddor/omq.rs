@@ -243,7 +243,7 @@ pub(crate) struct ReceiveWaiter<'a>(&'a Fanin);
 
 impl Drop for ReceiveWaiter<'_> {
     fn drop(&mut self) {
-        if let Some(state) = self.0.receiver.lock().unwrap().as_mut() {
+        if let Some(state) = self.0.receiver.lock().as_mut() {
             state.waiters -= 1;
             state.handoff = false;
             if !state.observed_empty {
@@ -261,7 +261,7 @@ impl Fanin {
     }
 
     pub(crate) fn wait(&self) -> ReceiveWaiter<'_> {
-        if let Some(state) = self.receiver.lock().unwrap().as_mut() {
+        if let Some(state) = self.receiver.lock().as_mut() {
             state.waiters += 1;
         }
         ReceiveWaiter(self)
@@ -277,7 +277,7 @@ impl Fanin {
                 "receive source belongs to another socket".into(),
             ));
         }
-        let mut guard = self.receiver.lock().unwrap();
+        let mut guard = self.receiver.lock();
         let state = guard.as_mut().ok_or(Error::Closed)?;
         state.process_changes(self);
         if let Some(source) = source {
@@ -378,7 +378,7 @@ impl Fanin {
             Ok(claim) => claim,
             Err(error) => return Err(UnshiftError { error, message }),
         };
-        let mut guard = self.receiver.lock().unwrap();
+        let mut guard = self.receiver.lock();
         let Some(state) = guard.as_mut() else {
             return Err(UnshiftError {
                 error: Error::Closed,
@@ -614,17 +614,7 @@ mod tests {
             drop(producer);
             assert_eq!(queue.try_recv().unwrap(), Message::single("churn"));
             assert!(matches!(queue.try_recv(), Err(Error::WouldBlock)));
-            assert!(
-                queue
-                    .receiver
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .sources
-                    .len()
-                    <= 1
-            );
+            assert!(queue.receiver.lock().as_ref().unwrap().sources.len() <= 1);
         }
     }
 

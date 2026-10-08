@@ -1,6 +1,7 @@
 //! Socket-owned PEER fan-in. Each connection owns a bounded producer;
 //! ordinary receives share one fair receiver with reconnect fencing.
 
+use crate::engine::receive_cell::ReceiveCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Wake;
@@ -59,11 +60,11 @@ pub(crate) struct PeerReceiver {
 /// Registration spans only the async wait, never a drain. Cancellation must
 /// pass a pending wake to another receiver if messages remain buffered.
 #[derive(Debug)]
-pub(super) struct ReceiveWaiter<'a>(&'a Mutex<PeerReceiver>);
+pub(super) struct ReceiveWaiter<'a>(&'a ReceiveCell<PeerReceiver>);
 
 impl Drop for ReceiveWaiter<'_> {
     fn drop(&mut self) {
-        let mut receiver = self.0.lock().expect("PEER receive poisoned");
+        let mut receiver = self.0.lock();
         receiver.async_waiters -= 1;
         receiver.handoff_pending = false;
         if !receiver.is_empty() && (!receiver.observed_empty || !receiver.shared.data.is_idle()) {
@@ -322,11 +323,8 @@ impl Drop for PeerRecvRoutes {
 }
 
 impl PeerReceiver {
-    pub(super) fn wait(receiver: &Mutex<Self>) -> ReceiveWaiter<'_> {
-        receiver
-            .lock()
-            .expect("PEER receive poisoned")
-            .async_waiters += 1;
+    pub(super) fn wait(receiver: &ReceiveCell<Self>) -> ReceiveWaiter<'_> {
+        receiver.lock().async_waiters += 1;
         ReceiveWaiter(receiver)
     }
 

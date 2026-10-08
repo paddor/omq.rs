@@ -540,30 +540,94 @@ impl RecvSink {
         }
     }
 
-    /// Deliver one message without waiting. A full queue returns the
-    /// message unchanged; the sink never retains it.
+    /// Deliver without waiting. PEER retains one blocked delivery for its
+    /// budget-aware waiter; other full queues return the original message.
     pub(crate) fn try_deliver(
         &mut self,
         message: Message,
     ) -> core::result::Result<(), TrySendError> {
-        match self.try_send_with_flush_mode(message, false, &mut false) {
+        self.try_deliver_inner(message, false, &mut false)
+    }
+
+    #[cfg(feature = "dart")]
+    /// Defer notification and return rejected ownership to the reliable
+    /// datagram session, which retains it until application space returns.
+    pub(crate) fn try_deliver_datagram(
+        &mut self,
+        message: Message,
+        pending: &mut bool,
+    ) -> core::result::Result<(), TrySendError> {
+        self.try_deliver_inner(message, true, pending)
+    }
+
+    fn try_deliver_inner(
+        &mut self,
+        message: Message,
+        defer: bool,
+        pending: &mut bool,
+    ) -> core::result::Result<(), TrySendError> {
+        let routing_id = message.routing_id();
+        let wrapped = matches!(self, Self::Server(_));
+        match self.try_send_with_flush_mode(message, defer, pending) {
             Ok(()) => {}
             Err(TrySendError::Full(mut message)) => {
-                if matches!(self, Self::Server(_)) {
+                if wrapped {
                     let _ = message.take_routing_id();
+                    if let Some(id) = routing_id {
+                        message = message.with_routing_id(id);
+                    }
                 }
                 return Err(TrySendError::Full(message));
             }
             Err(error) => return Err(error),
         }
-        if let Self::Fanin(sink) = self
-            && let Some(message) = sink.take_pending()
-        {
-            // Register the space waker before reporting the full queue.
-            let _ = sink.is_full();
+        let unwrapped = self.direct_inner();
+        let returned = if let Self::Fanin(sink) = unwrapped {
+            let message = sink.take_pending();
+            // Register the producer's space wake before the endpoint parks.
+            let full = if message.is_some() || !defer {
+                sink.is_full()
+            } else {
+                false
+            };
+            if message.is_some() && !full {
+                sink.space().notify_changed();
+            }
+            message
+        } else {
+            #[cfg(feature = "dart")]
+            if defer && let Self::Peer(sink) = unwrapped {
+                sink.take_pending()
+            } else {
+                None
+            }
+            #[cfg(not(feature = "dart"))]
+            None
+        };
+        if let Some(mut message) = returned {
+            if wrapped {
+                let _ = message.take_routing_id();
+                if let Some(id) = routing_id {
+                    message = message.with_routing_id(id);
+                }
+            }
             return Err(TrySendError::Full(message));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn flush_delivery(&mut self, pending: &mut bool) {
+        self.flush_deferred(pending);
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&mut self, signal: &Arc<super::signal::DataSignal>) {
+        if let Self::Peer(sink) = self.direct_inner() {
+            sink.dart_forward_to(signal);
+        } else if let Some(space) = self.direct_space() {
+            space.dart_forward_to(signal);
+        }
     }
 
     fn direct_inner(&mut self) -> &mut Self {
@@ -639,10 +703,8 @@ impl RecvSink {
             sink.flush();
         } else if let Self::Yring(sink) = self {
             sink.flush_pending(pending_yring_flush);
-        } else if let Self::Server(server) = self
-            && let Self::Yring(sink) = server.sink.as_mut()
-        {
-            sink.flush_pending(pending_yring_flush);
+        } else if let Self::Server(server) = self {
+            server.sink.flush_deferred(pending_yring_flush);
         }
     }
 

@@ -18,6 +18,8 @@ use omq_proto::error::Result;
 pub use omq_proto::monitor::PeerIdent;
 
 pub mod backoff;
+#[cfg(feature = "dart")]
+pub mod dart;
 pub(crate) mod dns;
 pub mod inproc;
 pub mod ipc;

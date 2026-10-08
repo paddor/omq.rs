@@ -16,11 +16,11 @@ use crate::proto::PeerProperties;
 
 /// Opaque peer identifier returned by transport accept paths. Used in
 /// monitor events and by identity-routed strategies that want to
-/// distinguish peers before the ZMTP handshake completes.
+/// distinguish peers before protocol admission completes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerIdent {
-    /// TCP peer socket address.
+    /// IP peer socket address, including TCP, QUIC, and DART.
     Socket(SocketAddr),
     /// IPC peer path.
     Path(String),
@@ -47,7 +47,8 @@ pub enum MonitorEvent {
         /// Bound endpoint.
         endpoint: Endpoint,
     },
-    /// An incoming peer was accepted; handshake is starting.
+    /// An incoming transport peer was accepted. For DART, compatible READY
+    /// metadata has already been admitted; this does not authenticate the peer.
     Accepted {
         /// Bound endpoint that accepted this peer.
         endpoint: Endpoint,
@@ -56,7 +57,8 @@ pub enum MonitorEvent {
         /// Stable per-socket connection id.
         connection_id: u64,
     },
-    /// An outbound dial succeeded; handshake is starting.
+    /// An outbound transport peer was reached. DART emits this after local
+    /// READY admission; it does not confirm remote data delivery.
     Connected {
         /// Connected endpoint.
         endpoint: Endpoint,
@@ -65,7 +67,8 @@ pub enum MonitorEvent {
         /// Stable per-socket connection id.
         connection_id: u64,
     },
-    /// The ZMTP handshake completed; the peer is ready for data.
+    /// Protocol admission completed; the peer is locally ready for data.
+    /// DART uses READY admission rather than a ZMTP handshake.
     HandshakeSucceeded {
         /// Endpoint for this peer.
         endpoint: Endpoint,
@@ -173,8 +176,7 @@ pub struct ConnectionStatus {
     /// Identity assigned to this peer (peer-supplied via the READY
     /// `Identity` property, or auto-generated when absent).
     pub identity: Bytes,
-    /// `Some` once the ZMTP handshake completes; `None` while still
-    /// shaking hands.
+    /// `Some` once protocol admission completes; `None` during setup.
     pub peer_info: Option<PeerInfo>,
 }
 
@@ -200,14 +202,15 @@ pub enum DisconnectReason {
 pub struct PeerInfo {
     /// Stable per-socket id for this connection.
     pub connection_id: u64,
-    /// `SocketAddr` for TCP peers; `None` for IPC / inproc.
+    /// `SocketAddr` for IP peers; `None` for IPC / inproc.
     pub peer_address: Option<SocketAddr>,
     /// Peer identity declared via the READY `Identity` property; empty
     /// bytes if the peer didn't declare one (we auto-generate internally).
     pub peer_identity: Option<Bytes>,
     /// Full READY property bag. `Arc` because several subscribers share it.
     pub peer_properties: Arc<PeerProperties>,
-    /// Negotiated ZMTP minor version (`(3, 0)` or `(3, 1)`).
+    /// Negotiated ZMTP version (`(3, 0)` or `(3, 1)`). `(0, 0)` for DART,
+    /// whose version is the `DART-Version` READY property.
     pub zmtp_version: (u8, u8),
 }
 

@@ -47,6 +47,14 @@ libc = "0.2"
 rcgen = "0.14"
 serial_test = "4"
 
+[[example]]
+name = "omq_libzmq_bench_latency"
+path = "examples/bench_latency.rs"
+
+[[example]]
+name = "omq_libzmq_bench_streaming"
+path = "examples/bench_streaming.rs"
+
 [[test]]
 name = "omq_libzmq_abi_matrix"
 path = "tests/abi_matrix.rs"

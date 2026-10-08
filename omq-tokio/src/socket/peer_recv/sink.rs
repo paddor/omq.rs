@@ -43,6 +43,28 @@ impl PeerRecvSink {
         self.pending.is_some()
     }
 
+    #[cfg(feature = "dart")]
+    pub(crate) fn take_pending(&mut self) -> Option<Message> {
+        let message = self.pending.take();
+        if let Some(message) = &message
+            && self.producer.as_mut().is_some_and(|producer| {
+                producer
+                    .poll_ready(&mut Context::from_waker(&self.waker))
+                    .is_ready()
+            })
+            && self.state.budget.room(super::Budget::charge(message))
+        {
+            self.state.space.notify_changed();
+        }
+        message
+    }
+
+    #[cfg(feature = "dart")]
+    pub(crate) fn dart_forward_to(&self, signal: &Arc<crate::engine::signal::DataSignal>) {
+        self.state.space.dart_forward_to(signal);
+        self.state.budget.space.dart_forward_to(signal);
+    }
+
     pub(crate) fn push(&mut self, mut message: Message) -> bool {
         assert!(
             self.pending.is_none(),

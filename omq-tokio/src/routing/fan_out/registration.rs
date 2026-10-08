@@ -93,7 +93,6 @@ impl FanOutSend {
             };
             let mut inner = inner.lock().expect("fanout inner poisoned");
             if inner.reactivate_fanout_peer(peer_id) {
-                drop(inner);
                 generation.fetch_add(1, Ordering::Release);
             }
         }));

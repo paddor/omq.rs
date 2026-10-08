@@ -42,11 +42,16 @@ impl<'a> PeerLifecycle<'a> {
         consumer: yring::Consumer<crate::Message>,
         space: Arc<StateSignal>,
         peer_id: u64,
+        spin_probe: bool,
     ) {
         let capacity = consumer.capacity();
         let entry = Arc::new(crate::socket::recv::TcpYringConsumer {
             capacity,
-            consumer: std::sync::Mutex::new(consumer),
+            spin_probe,
+            consumer: crate::engine::receive_cell::ReceiveCell::new(
+                consumer,
+                self.driver.spsc.receive_handles.clone(),
+            ),
             batch_remaining: std::sync::atomic::AtomicUsize::new(0),
             batch_popped: std::sync::atomic::AtomicUsize::new(0),
             space,

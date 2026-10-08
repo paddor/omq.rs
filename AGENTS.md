@@ -138,6 +138,12 @@ Lints: `missing_debug_implementations` = **deny**,
 
 ## Conventions
 
+- Add new charts or documentation files only when explicitly requested.
+- Keep documentation brief and technical, readable when browsing on GitHub.
+  Update existing sections; describe only relevant design and behavior.
+  Do not add a narrative or a wall of text for each change or feature.
+- Never auto-add one-off feasibility or theoretical-ceiling benchmarks to Git
+  history. Keep them local unless the user explicitly requests versioning.
 - `doc/architecture.md` describes current components, ownership, and data flow.
   Rewrite existing explanations when architecture changes. No change history,
   benchmark results, verification notes, tuning constants, or implementation

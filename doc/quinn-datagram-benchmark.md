@@ -94,11 +94,7 @@ plane.
 
 Commands and runner options are in
 [RUNNING_BENCHMARKS.md](../RUNNING_BENCHMARKS.md#standalone-quinn-datagram).
-Full rows append to `~/.cache/omq/quinn-datagram.jsonl`. Charts show the latest
-eligible run, not the three-run medians in this note:
-
-- [Received throughput](charts/quinn-datagram/throughput.svg)
-- [Echo RTT p99, with p50-to-p99.9 whiskers](charts/quinn-datagram/latency.svg)
+Full rows append to `~/.cache/omq/quinn-datagram.jsonl`.
 
 The final benchmark binary is preserved at
 `/mnt/bench/tmp/quinn-datagram-final-20261007`, SHA256
@@ -120,4 +116,4 @@ The first receiver profile exposed per-message deadline timer overhead in
 the initial harness; the measured harness uses one throughput deadline timer
 for the entire receive loop. Earlier exploratory rows also include a reactor
 keep-awake experiment and a root-future application layout. They are excluded
-from the final charts and reported three-run results.
+from the reported three-run results.

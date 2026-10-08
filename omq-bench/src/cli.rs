@@ -36,8 +36,6 @@ pub(crate) enum ChartSub {
     Quic,
     /// DART against TCP, SCATTER/GATHER and CLIENT/SERVER.
     Dart,
-    /// Standalone Quinn DATAGRAM API, with stock and polling socket adapters.
-    QuinnDatagram,
     /// PUB/SUB LZ4 compression chart.
     Lz4,
     /// PUSH/PULL Zstd compression chart.

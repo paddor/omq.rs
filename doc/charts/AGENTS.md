@@ -12,7 +12,6 @@ cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
 cargo run --release -p omq-bench -- chart lz4       # LZ4 compression
 cargo run --release -p omq-bench -- chart zstd      # Zstd compression
-cargo run --release -p omq-bench -- chart quinn-datagram # raw Quinn DATAGRAM
 ```
 
 A chart refresh without new benchmarks just re-renders existing data.
@@ -119,20 +118,6 @@ Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
 `pushpull/zstd_tcp.svg` uses the same sizes, measured links, structural JSON,
 and 2 KiB dictionary setup as the LZ4 chart, at Zstd level 1.
 Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
-
-## Standalone Quinn DATAGRAM charts
-
-Data: `quinn-datagram.jsonl`. Outputs:
-`quinn-datagram/{throughput,latency}.svg`.
-These measure the raw Quinn API, without OMQ sockets. Both series use verified
-TLS 1.3/AES-128-GCM, default Cubic, and one current-thread runtime per process.
-The series compare the stock Tokio socket with a speculative UDP adapter using
-a 50 us IO spin budget. Select non-profiled inline runs with a spawned application
-task, zero application spin, reactor interval 61, a 256-message/64 KiB drain
-budget, and 3-second throughput windows. Latency requires 100,000 measured and
-20,000 warmup exchanges with zero timeouts. Plot the latest eligible row per
-size/series, with each latency point and its p50-to-p99.9 whiskers from the same
-row. Exploratory runtime, batching, and shorter runs are excluded.
 
 ## Reliable Dart charts
 

@@ -208,7 +208,6 @@ also requires Java and `unzip` to verify the JAR version.
 cargo build --release -p omq-tokio --features quic --example omq_quinn_datagram_peer
 cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer
 cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer --io-spin 50
-cargo run --release -p omq-bench -- chart quinn-datagram
 ```
 
 The default is three serial runs at 16 B and 1 KiB: 3-second throughput
@@ -233,13 +232,10 @@ records actual kernel socket buffer sizes, which can be smaller than requested.
 RTT exchanges validate unique sequence tags and the full echoed body.
 
 Results append to `~/.cache/omq/quinn-datagram.jsonl`, including binary
-digests and protocol statistics. Charts use the latest eligible run with the
-default inline layout, batch size, and reactor interval. Latency points are
-p99 with p50-to-p99.9 whiskers from that same run, not medians across runs.
-Outputs: `doc/charts/quinn-datagram/{throughput,latency}.svg`.
+digests and protocol statistics.
 See [the measured results](doc/quinn-datagram-benchmark.md).
 
-Profile a single case serially; profiled rows are excluded from charts:
+Profile a single case serially:
 
 ```sh
 cargo run --release -p omq-bench -- run quinn-datagram --binary path/to/omq_quinn_datagram_peer \

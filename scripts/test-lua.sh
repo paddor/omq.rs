@@ -9,6 +9,10 @@ lua_bin="${OMQ_LUA:-/usr/bin/lua}"
 
 "$cargo_cmd" build --manifest-path bindings/lua/native/Cargo.toml
 
+target_dir="$("$cargo_cmd" metadata --format-version 1 --no-deps \
+    --manifest-path bindings/lua/native/Cargo.toml \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+
 case "$(uname -s)" in
     Darwin)
         lib_pattern="?.dylib"
@@ -19,7 +23,7 @@ case "$(uname -s)" in
 esac
 
 export LUA_PATH="$repo_root/bindings/lua/lua/?.lua;;"
-export LUA_CPATH="$repo_root/bindings/lua/native/target/debug/$lib_pattern;;"
+export LUA_CPATH="$target_dir/debug/$lib_pattern;;"
 
 for test_file in bindings/lua/tests/test_*.lua; do
     echo "::: $test_file"

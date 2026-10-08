@@ -71,9 +71,9 @@ func TestChannelsCloseClosesErrors(t *testing.T) {
 	channels.Close()
 
 	select {
-	case _, ok := <-channels.Errors:
+	case err, ok := <-channels.Errors:
 		if ok {
-			t.Fatal("Errors still open")
+			t.Fatalf("Errors retained an unexpected worker error: %v", err)
 		}
 	default:
 		t.Fatal("Errors not closed")

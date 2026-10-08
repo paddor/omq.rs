@@ -51,6 +51,9 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 	var rx chan Message
 	var tx chan Message
 
+	// Complete setup before a receive can block the socket owner goroutine.
+	monitor, monitorErr := s.Monitor()
+
 	if s.socketType.canRecv() {
 		rx = make(chan Message, capacity)
 		wg.Go(func() {
@@ -93,8 +96,7 @@ func (s *Socket) Channels(ctx context.Context, opts ChannelOptions) (*SocketChan
 		})
 	}
 
-	monitor, err := s.Monitor()
-	if err == nil {
+	if monitorErr == nil {
 		wg.Go(func() {
 			defer monitor.Close()
 			defer close(eventsCh)

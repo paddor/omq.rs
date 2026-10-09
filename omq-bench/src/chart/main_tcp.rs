@@ -149,7 +149,7 @@ const MOM_IMPLS: &[Impl] = &[
     },
     Impl {
         key: "omq-dart",
-        label: "OMQ / Dart",
+        label: "OMQ / DART",
         threads: "",
         color: plotters::style::RGBColor(255, 183, 77),
     },

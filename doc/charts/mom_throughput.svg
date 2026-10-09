@@ -872,7 +872,7 @@ omq-tokio v0.25.0
 </text>
 <polyline fill="none" opacity="1" stroke="#FFB74D" stroke-width="2" points="78,578 92,578 "/>
 <text x="98" y="572" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#E5E7EB">
-OMQ / Dart
+OMQ / DART
 </text>
 <text x="290" y="572" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="8.870967741935484" opacity="1" fill="#9CA3AF">
 omq-tokio v0.25.0

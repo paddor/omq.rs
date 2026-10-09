@@ -364,6 +364,7 @@ impl SocketDriver {
             &self.cancel,
             completion,
             self.options.send_hwm.max(1) as usize,
+            options.recv_payload_pool.clone(),
         );
 
         self.peers.insert(

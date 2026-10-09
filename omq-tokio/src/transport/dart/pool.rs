@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use crate::buffer_pool::BufferReturn;
-use crate::{BufferPool, MessageBuffer};
+use crate::{PayloadBuffer, PayloadPool};
 use omq_proto::message::{Payload, PayloadOwner};
-
-/// Writable body capacity, independent of the protocol's datagram limit.
-pub const BUFFER_CAPACITY: usize = 2048;
+use omq_proto::payload_pool::PayloadRelease;
 
 #[derive(Debug)]
 struct ReceiveCredits {
@@ -13,7 +10,7 @@ struct ReceiveCredits {
     signal: Arc<crate::engine::signal::DataSignal>,
 }
 
-impl BufferReturn for ReceiveCredits {
+impl PayloadRelease for ReceiveCredits {
     fn publish(&self, count: usize) {
         self.credits.publish(count);
         self.signal.mark();
@@ -22,18 +19,75 @@ impl BufferReturn for ReceiveCredits {
     fn wake(&self) {
         self.signal.mark();
     }
+}
 
-    fn own(&self, bytes: Vec<u8>) -> Payload {
-        large_payload(bytes, self.credits.clone(), self.signal.clone())
-    }
+#[derive(Debug)]
+pub(super) struct ReceivePool {
+    storage: Option<PayloadPool>,
+    received: Option<PayloadPool>,
+    returns: Arc<ReceiveCredits>,
 }
 
 pub(super) fn receiver(
-    pool: &BufferPool,
+    pool: Option<&PayloadPool>,
     credits: Arc<omq_proto::dart::CreditCounter>,
     signal: Arc<crate::engine::signal::DataSignal>,
-) -> BufferPool {
-    pool.with_returns(Arc::new(ReceiveCredits { credits, signal }))
+) -> ReceivePool {
+    let returns = Arc::new(ReceiveCredits { credits, signal });
+    ReceivePool {
+        storage: pool.cloned(),
+        received: pool.map(|pool| pool.with_release(returns.clone())),
+        returns,
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ReceiveBuffers {
+    class: Option<usize>,
+    buffers: Vec<PayloadBuffer>,
+}
+
+impl ReceiveBuffers {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            class: None,
+            buffers: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+impl ReceivePool {
+    pub(super) fn storage(&self) -> Option<&PayloadPool> {
+        self.received.as_ref()
+    }
+
+    pub(super) fn owned_payload(&self, bytes: Vec<u8>) -> Payload {
+        large_payload(
+            bytes,
+            self.returns.credits.clone(),
+            self.returns.signal.clone(),
+        )
+    }
+
+    pub(super) fn copy_received(&self, bytes: &[u8]) -> Option<Payload> {
+        let mut body = Vec::new();
+        body.try_reserve_exact(bytes.len()).ok()?;
+        body.extend_from_slice(bytes);
+        Some(self.owned_payload(body))
+    }
+
+    pub(super) fn take(&self, size: usize, cache: &mut ReceiveBuffers) -> Option<PayloadBuffer> {
+        let pool = self.storage.as_ref()?;
+        let target = pool.class_size(size)?;
+        if cache.class != Some(target) {
+            pool.with_recycling_batch(|| cache.buffers.clear());
+            cache.class = Some(target);
+        }
+        if cache.buffers.is_empty() {
+            pool.try_buffers_into(size, 64, &mut cache.buffers);
+        }
+        cache.buffers.pop()
+    }
 }
 
 #[derive(Debug)]
@@ -78,14 +132,14 @@ pub(super) fn large_payload(
 
 #[derive(Debug)]
 pub(super) enum ReceiveBody {
-    Pooled(MessageBuffer),
+    Pooled(PayloadBuffer),
     Owned(Vec<u8>),
 }
 
 impl ReceiveBody {
-    pub(super) fn reserve(pool: &BufferPool, length: usize) -> Option<Self> {
-        if length <= BUFFER_CAPACITY
-            && let Some(buffer) = pool.try_take()
+    pub(super) fn reserve(pool: &ReceivePool, length: usize) -> Option<Self> {
+        if let Some(storage) = pool.storage()
+            && let Some(buffer) = storage.try_buffer(length)
         {
             return Some(Self::Pooled(buffer));
         }
@@ -94,7 +148,7 @@ impl ReceiveBody {
         Some(Self::Owned(body))
     }
 
-    pub(super) fn finish(self, pool: &BufferPool) -> Payload {
+    pub(super) fn finish(self, pool: &ReceivePool) -> Payload {
         match self {
             Self::Pooled(buffer) => buffer.into_payload(),
             Self::Owned(body) => pool.owned_payload(body),

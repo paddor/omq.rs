@@ -239,6 +239,7 @@ pub(crate) struct SocketDriver {
     pub(crate) dart: Arc<crate::transport::dart::SocketState>,
     #[cfg(feature = "dart")]
     dart_endpoints: Vec<dart::Entry>,
+    pub(crate) payload_pools: Arc<super::pools::Configuration>,
     options: Options,
     cmd_rx: mpsc::Receiver<SocketCommand>,
     recv_tx: Arc<super::recv::SharedRecvPipe>,
@@ -339,6 +340,7 @@ impl SocketDriver {
             .map(Arc::new);
         Self {
             socket_type,
+            payload_pools: Arc::new(super::pools::Configuration::new(socket_type, &options)),
             #[cfg(feature = "dart")]
             dart: Arc::new(crate::transport::dart::SocketState::new(
                 options.dart,

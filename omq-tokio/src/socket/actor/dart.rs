@@ -113,7 +113,8 @@ impl SocketDriver {
         let (commands, commands_rx) = mpsc::channel(128);
         let ready_tx = self.internal_tx.clone();
         self.dart.register_carrier(&io);
-        self.dart.receive_pool();
+        self.dart
+            .configure_receive_pool(options.recv_payload_pool.clone());
         let worker = EndpointWorker {
             max_message_size: options.max_message_size,
             id,

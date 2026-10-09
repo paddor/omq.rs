@@ -226,6 +226,7 @@ impl SocketDriver {
             self.recv_tx.clone(),
             self.joined_groups.clone(),
             cancel.clone(),
+            self.payload_pools.receive(),
         );
         let ret = resolved.clone();
         self.udp_listeners.push(UdpListenerEntry {
@@ -375,6 +376,7 @@ impl SocketDriver {
         compression: Option<omq_proto::CompressionOptions>,
     ) -> Arc<Options> {
         let mut options = self.options.clone();
+        options.recv_payload_pool = self.payload_pools.receive();
         if let Some(compression) = compression {
             options.compression_dict = compression.dict;
             options.compression_auto_train = compression.auto_train;

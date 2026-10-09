@@ -282,6 +282,7 @@ pub struct Connection {
     events: VecDeque<Event>,
     messages: VecDeque<Message>,
     pending_parts: Parts,
+    recv_payload_pool: Option<crate::PayloadPool>,
     pending_size: usize,
     discarding_multipart: bool,
     peer_heartbeat_ttl: u16,
@@ -326,6 +327,7 @@ impl Connection {
             events: VecDeque::new(),
             messages: VecDeque::new(),
             pending_parts: Vec::new().into(),
+            recv_payload_pool: None,
             pending_size: 0,
             discarding_multipart: false,
             peer_heartbeat_ttl: 0,
@@ -356,6 +358,14 @@ impl Connection {
         let mut parts = pool.take();
         parts.extend(self.pending_parts.drain(..));
         self.pending_parts = parts;
+        self
+    }
+
+    /// Select explicit receive payload size classes. Exhaustion and oversized
+    /// bodies retain ordinary owned storage. Inline payloads skip checkout.
+    #[must_use]
+    pub fn recv_payload_pool(mut self, pool: &crate::PayloadPool) -> Self {
+        self.recv_payload_pool = Some(pool.clone());
         self
     }
 

@@ -19,6 +19,7 @@ pub mod inproc;
 pub mod message;
 pub mod monitor;
 pub mod options;
+pub mod payload_pool;
 pub mod proto;
 pub mod routing;
 pub mod socket_api;
@@ -30,7 +31,8 @@ pub use endpoint::IpcPath;
 pub use endpoint::{Endpoint, EndpointRole, EndpointSpec};
 pub use error::{Error, HandshakeRefusal, Result, TrySendError};
 pub use message::{
-    Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, generated_identity,
+    Frame, FrameFlags, Message, MessageIter, MessagePool, PartCountError, Payload,
+    generated_identity,
 };
 pub use monitor::{
     ConnectionStatus, DisconnectReason, MonitorEvent, MonitorRecvError, MonitorTryRecvError,
@@ -44,6 +46,7 @@ pub use options::{
 };
 #[cfg(feature = "dart")]
 pub use options::{DartCongestion, DartEcn, DartOptions};
+pub use payload_pool::{PayloadBuffer, PayloadLengthError, PayloadPool};
 pub use proto::mechanism::MechanismSetup;
 pub use proto::mechanism::{
     AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo,

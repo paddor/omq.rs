@@ -3,7 +3,7 @@
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
-use omq_tokio::{BufferPool, Context, Socket};
+use omq_tokio::{Context, PayloadPool, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::{Config, RuntimeMode, SETUP_TIMEOUT, affinity, emit, format_offloads, make_body};
@@ -14,9 +14,9 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
     let pool = (!config.receiving()).then(|| {
         if native {
-            BufferPool::new(2048, 8192)
+            PayloadPool::new([(2048, 8192)]).unwrap()
         } else {
-            BufferPool::new(1024, 1024)
+            PayloadPool::new([(1024, 1024)]).unwrap()
         }
     });
     if config.receiving() {
@@ -34,12 +34,12 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
         "null".into()
     };
     emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{},\"dart_pool_buffers\":{},\"dart_buffer_capacity\":{}}}",
+        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
         affinity.description(),
         format_offloads(socket.dart_capabilities()),
         config.window_messages,
-        config.options().dart.pool_buffers,
-        omq_tokio::transport::dart::BUFFER_CAPACITY,
+        if native { super::POOL_SLOTS } else { 0 },
+        if native { super::POOL_SLOT_BYTES } else { 0 },
     ));
     // Keep driving connection setup and maintenance while awaiting the
     // runner's barrier. Stdin never blocks the current-thread runtime.
@@ -90,7 +90,7 @@ async fn server(socket: &Socket) {
     ));
 }
 
-async fn client(socket: &Socket, config: &Config, pool: &BufferPool) {
+async fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
     let mut samples = Vec::with_capacity(config.iterations);
     for index in 0..config.warmup + config.iterations {
         let tag = u64::try_from(index).unwrap();

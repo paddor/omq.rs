@@ -66,6 +66,7 @@ pub struct Socket {
 #[derive(Debug)]
 struct Inner {
     socket_type: SocketType,
+    payload_pools: Arc<super::pools::Configuration>,
     #[cfg(feature = "dart")]
     dart: Arc<crate::transport::dart::SocketState>,
     cmd_tx: mpsc::Sender<SocketCommand>,
@@ -97,6 +98,33 @@ struct Inner {
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
+    /// Set shared receive payload storage before the first bind/connect.
+    ///
+    /// # Errors
+    /// Returns a configuration error after endpoint setup has started, or
+    /// `Closed` after the socket closes.
+    pub fn set_recv_payload_pool(&self, pool: crate::PayloadPool) -> Result<()> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(Error::Closed);
+        }
+        self.inner.payload_pools.set_receive(pool)
+    }
+
+    /// Explicitly initialize payload pools for supported send/receive directions.
+    /// Uses one slot per configured HWM message, with 4 KiB slots below HWM
+    /// 8192 and 2 KiB slots at or above it. Explicit receive storage wins.
+    /// Repeated calls before endpoint setup return the same shared pools.
+    ///
+    /// # Errors
+    /// Returns a configuration error after the first bind/connect or if
+    /// payload storage cannot be allocated. Returns `Closed` after close.
+    pub fn init_payload_pools(&self) -> Result<super::SocketPools> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(Error::Closed);
+        }
+        self.inner.payload_pools.initialize()
+    }
+
     /// Current DART counters across this socket's endpoints. Unknown ECN
     /// metadata is recorded as unavailable, not as a measured zero CE rate.
     #[cfg(feature = "dart")]
@@ -105,7 +133,7 @@ impl Socket {
     }
 
     /// Current conservative capabilities across live DART endpoints. Returns
-    /// `None` when none are live. This diagnostic does not initialize the pool.
+    /// `None` when none are live.
     #[cfg(feature = "dart")]
     pub fn dart_capabilities(&self) -> Option<crate::DartCapabilities> {
         self.inner.dart.capabilities()
@@ -363,12 +391,14 @@ impl Socket {
         driver.peer_recv_routes = peer_recv_routes;
         #[cfg(feature = "dart")]
         let dart = driver.dart.clone();
+        let payload_pools = driver.payload_pools.clone();
         let actor_task = spawn_driver(driver, io_pool);
         Self {
             send_submitter: send_submitter.clone(),
             receive_handle,
             inner: Arc::new(Inner {
                 socket_type,
+                payload_pools,
                 #[cfg(feature = "dart")]
                 dart,
                 cmd_tx,
@@ -482,6 +512,7 @@ impl Socket {
         endpoint: Endpoint,
         compression: Option<omq_proto::CompressionOptions>,
     ) -> Result<Endpoint> {
+        self.inner.payload_pools.freeze();
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
@@ -528,6 +559,7 @@ impl Socket {
         endpoint: Endpoint,
         compression: Option<omq_proto::CompressionOptions>,
     ) -> Result<()> {
+        self.inner.payload_pools.freeze();
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx

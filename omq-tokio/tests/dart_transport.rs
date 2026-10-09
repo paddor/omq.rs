@@ -136,8 +136,8 @@ async fn receive(socket: &Socket) -> Message {
         .unwrap()
 }
 
-fn pooled(pool: &omq_tokio::BufferPool, size: usize, byte: u8) -> Message {
-    let mut buffer = pool.try_take().unwrap();
+fn pooled(pool: &omq_tokio::PayloadPool, size: usize, byte: u8) -> Message {
+    let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..size].fill(byte);
     buffer.set_len(size).unwrap();
     buffer.into_message()
@@ -145,7 +145,7 @@ fn pooled(pool: &omq_tokio::BufferPool, size: usize, byte: u8) -> Message {
 
 #[tokio::test]
 async fn scatter_gather_preserves_exact_body_lengths_including_empty() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let gather = Socket::new(SocketType::Gather, Options::default());
     let scatter = Socket::new(SocketType::Scatter, Options::default());
     let endpoint = gather.bind(endpoint(0)).await.unwrap();
@@ -190,7 +190,7 @@ async fn malformed_packed_body_cannot_partially_advance_receipt() {
 
 #[tokio::test]
 async fn client_server_roundtrip_uses_local_routing_id() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let server = Socket::new(SocketType::Server, Options::default());
     let client = Socket::new(SocketType::Client, Options::default());
     client
@@ -215,7 +215,7 @@ async fn client_server_roundtrip_uses_local_routing_id() {
 
 #[tokio::test]
 async fn channel_roundtrip_and_unbind_release_port_before_ack() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let server = Socket::new(SocketType::Channel, Options::default());
     let client = Socket::new(SocketType::Channel, Options::default());
     let address = server.bind(endpoint(0)).await.unwrap();
@@ -233,7 +233,7 @@ async fn channel_roundtrip_and_unbind_release_port_before_ack() {
 
 #[tokio::test]
 async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let server = Socket::new(
         SocketType::Peer,
         Options::default().identity(Bytes::from_static(b"server")),
@@ -268,7 +268,7 @@ async fn peer_roundtrip_keeps_identity_outside_datagram_body() {
 
 #[tokio::test]
 async fn radio_dish_filters_locally_and_preserves_group() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let radio = Socket::new(SocketType::Radio, Options::default());
     let dish = Socket::new(SocketType::Dish, Options::default());
     dish.join(Bytes::from_static(b"quotes")).await.unwrap();
@@ -301,13 +301,13 @@ async fn radio_dish_filters_locally_and_preserves_group() {
 
 #[tokio::test]
 async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let gather = Socket::new(
         SocketType::Gather,
         Options {
+            recv_payload_pool: Some(omq_tokio::PayloadPool::new([(2048, 1)]).unwrap()),
             dart: DartOptions {
                 window_messages: 1,
-                pool_buffers: 1,
                 ..DartOptions::default()
             },
             ..Options::default()
@@ -333,7 +333,7 @@ async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit(
     assert_eq!(gather.connections().await.unwrap().len(), 1);
     assert_eq!(gather.dart_stats().pool_exhausted, 0);
     // Receive storage is independent of application-created send buffers.
-    assert!(pool.try_take().is_some());
+    assert!(pool.try_buffer(1).is_some());
     drop(clone);
     assert_eq!(receive(&gather).await.part_slice(0).unwrap(), &[2; 256]);
     scatter.close().await.unwrap();
@@ -421,9 +421,9 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
         SocketType::Gather,
         Options {
             recv_hwm: 1,
+            recv_payload_pool: Some(omq_tokio::PayloadPool::new([(2048, 1)]).unwrap()),
             workload_profile: Some(WorkloadProfile::Latency),
             dart: DartOptions {
-                pool_buffers: 1,
                 window_messages: 1,
                 io_spin: Duration::from_micros(50),
                 ..DartOptions::default()
@@ -437,8 +437,8 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let session = response(&raw).await;
     ready(&gather, 1).await;
-    let pool = omq_tokio::BufferPool::new(2048, 1);
-    let caller_held = pool.try_take().unwrap();
+    let pool = omq_tokio::PayloadPool::new([(2048, 1)]).unwrap();
+    let caller_held = pool.try_buffer(1).unwrap();
     send_data(&raw, target, session, 0, &[7; 256], None).await;
     let held = receive(&gather).await;
     let stop = tokio_util::sync::CancellationToken::new();
@@ -481,7 +481,7 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     .await
     .unwrap();
     assert!(
-        pool.try_take().is_none(),
+        pool.try_buffer(1).is_none(),
         "control cannot consume another body slot"
     );
     tokio::time::timeout(Duration::from_secs(1), gather.unbind(bound))
@@ -752,7 +752,7 @@ async fn invalid_traffic_cannot_renew_a_lease_and_reconnection_reassigns_routing
 
 #[tokio::test]
 async fn full_receive_lane_retains_messages_and_other_sources_progress() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let gather = Socket::new(SocketType::Gather, Options::default().recv_hwm(1));
     let slow = Socket::new(SocketType::Scatter, Options::default());
     let fast = Socket::new(SocketType::Scatter, Options::default());
@@ -790,7 +790,7 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
 
 #[tokio::test]
 async fn connect_before_bind_queues_locally_and_reconnects_after_rebind() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let target = endpoint(reservation.local_addr().unwrap().port());
     drop(reservation);
@@ -979,7 +979,7 @@ async fn fragmented_radio_groups_preserve_metadata_and_filter_atomic_bodies() {
 
 #[tokio::test]
 async fn ipv6_and_hostname_endpoints_use_native_datagrams() {
-    let pool = omq_tokio::BufferPool::new(2048, 64);
+    let pool = omq_tokio::PayloadPool::new([(2048, 64)]).unwrap();
     for bind in ["dart://[::1]:0", "dart://localhost:0"] {
         let gather = Socket::new(SocketType::Gather, Options::default());
         let scatter = Socket::new(SocketType::Scatter, Options::default());

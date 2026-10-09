@@ -260,7 +260,7 @@ mod tests {
             xpub_nodrop: true,
             ..Options::default()
         };
-        options.dart.pool_buffers = pending_limit;
+        options.send_hwm = u32::try_from(pending_limit).unwrap();
         super::super::FanOutSend::new(
             SocketType::Radio,
             &options,

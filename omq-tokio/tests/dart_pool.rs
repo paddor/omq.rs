@@ -6,7 +6,7 @@ use std::cell::Cell;
 use omq_proto::dart;
 use omq_tokio::message::Message;
 use omq_tokio::transport::dart::{DartIo, ReceiveBatch};
-use omq_tokio::{BufferPool, Error, Options, Socket, SocketType};
+use omq_tokio::{Error, Options, PayloadPool, Socket, SocketType};
 
 struct CountingAllocator;
 
@@ -42,8 +42,8 @@ async fn warm_runtime(task_count: usize) {
     }
 }
 
-async fn radio_delivery(pool: &BufferPool, radio: &Socket, dishes: &[Socket], size: usize) {
-    let mut buffer = pool.try_take().unwrap();
+async fn radio_delivery(pool: &PayloadPool, radio: &Socket, dishes: &[Socket], size: usize) {
+    let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..size].fill(7);
     buffer.set_len(size).unwrap();
     radio
@@ -71,7 +71,7 @@ async fn radio_delivery(pool: &BufferPool, radio: &Socket, dishes: &[Socket], si
 async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
     let mut counts = [[0; 2]; 2];
     for (policy, nodrop) in [false, true].into_iter().enumerate() {
-        let pool = BufferPool::new(2048, 8192);
+        let pool = PayloadPool::new([(2048, 8192)]).unwrap();
         let radio = Socket::new(
             SocketType::Radio,
             Options {
@@ -81,7 +81,10 @@ async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
         );
         let mut dishes = Vec::with_capacity(12);
         for _ in 0..12 {
-            let dish = Socket::new(SocketType::Dish, Options::default());
+            let dish = Socket::new(
+                SocketType::Dish,
+                Options::default().recv_payload_pool(PayloadPool::new([(2048, 8192)]).unwrap()),
+            );
             dish.join(bytes::Bytes::from_static(b"group"))
                 .await
                 .unwrap();
@@ -125,7 +128,7 @@ async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
 fn native_blocking_send_and_parked_receive_do_not_allocate() {
     let context = omq_tokio::Context::with_name("hf-alloc");
     let sender = context.blocking_socket(SocketType::Channel, Options::default());
-    let pool = BufferPool::new(2048, 8192);
+    let pool = PayloadPool::new([(2048, 8192)]).unwrap();
     let receiver = context.blocking_socket(SocketType::Channel, Options::default());
     sender
         .connect(
@@ -151,7 +154,7 @@ fn native_blocking_send_and_parked_receive_do_not_allocate() {
             TRACE_FIRST.with(|trace| trace.set(std::env::var_os("OMQ_ALLOC_TRACE").is_some()));
             ALLOCATIONS.with(|count| count.set(Some(0)));
         }
-        let mut buffer = pool.try_take().unwrap();
+        let mut buffer = pool.try_buffer(1).unwrap();
         buffer.writable()[..16].fill(7);
         buffer.set_len(16).unwrap();
         sender.send(buffer.into_message()).unwrap();
@@ -184,7 +187,7 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
 
     let context = omq_tokio::Context::with_name("hf-full-alloc");
     let sender = context.blocking_socket(SocketType::Scatter, Options::default().send_hwm(1));
-    let pool = BufferPool::new(2048, 8192);
+    let pool = PayloadPool::new([(2048, 8192)]).unwrap();
     let receiver = context.blocking_socket(SocketType::Gather, Options::default());
     sender
         .connect(
@@ -264,9 +267,9 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
     );
 }
 
-async fn radio_burst(pool: &BufferPool, radio: &Socket, dishes: &[Socket]) {
+async fn radio_burst(pool: &PayloadPool, radio: &Socket, dishes: &[Socket]) {
     for value in 0..32u8 {
-        let mut buffer = pool.try_take().unwrap();
+        let mut buffer = pool.try_buffer(1).unwrap();
         buffer.writable()[..16].fill(value);
         buffer.set_len(16).unwrap();
         radio
@@ -296,7 +299,7 @@ async fn radio_burst(pool: &BufferPool, radio: &Socket, dishes: &[Socket]) {
 
 #[tokio::test]
 async fn native_radio_nodrop_bursts_do_not_allocate() {
-    let pool = BufferPool::new(2048, 8192);
+    let pool = PayloadPool::new([(2048, 8192)]).unwrap();
     let radio = Socket::new(
         SocketType::Radio,
         Options {
@@ -307,7 +310,10 @@ async fn native_radio_nodrop_bursts_do_not_allocate() {
     );
     let mut dishes = Vec::with_capacity(12);
     for _ in 0..12 {
-        let dish = Socket::new(SocketType::Dish, Options::default());
+        let dish = Socket::new(
+            SocketType::Dish,
+            Options::default().recv_payload_pool(PayloadPool::new([(2048, 8192)]).unwrap()),
+        );
         dish.join(bytes::Bytes::from_static(b"group"))
             .await
             .unwrap();
@@ -371,15 +377,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-fn message(pool: &BufferPool, length: usize) -> Message {
-    let mut buffer = pool.try_take().unwrap();
+fn message(pool: &PayloadPool, length: usize) -> Message {
+    let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..length].fill(7);
     buffer.set_len(length).unwrap();
     buffer.into_message()
 }
 
-async fn native_delivery(pool: &BufferPool, sender: &Socket, receiver: &Socket, size: usize) {
-    let mut buffer = pool.try_take().unwrap();
+async fn native_delivery(pool: &PayloadPool, sender: &Socket, receiver: &Socket, size: usize) {
+    let mut buffer = pool.try_buffer(1).unwrap();
     buffer.writable()[..size].fill(7);
     buffer.set_len(size).unwrap();
     let body = buffer.into_message();
@@ -418,14 +424,16 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
         (SocketType::Peer, SocketType::Peer),
         (SocketType::Radio, SocketType::Dish),
     ] {
-        let pool = BufferPool::new(2048, 8192);
+        let pool = PayloadPool::new([(2048, 8192)]).unwrap();
         let sender = Socket::new(
             send,
             Options::default().identity(bytes::Bytes::from_static(b"sender")),
         );
         let receiver = Socket::new(
             recv,
-            Options::default().identity(bytes::Bytes::from_static(b"receiver")),
+            Options::default()
+                .identity(bytes::Bytes::from_static(b"receiver"))
+                .recv_payload_pool(PayloadPool::new([(2048, 8192)]).unwrap()),
         );
         if recv == SocketType::Dish {
             receiver
@@ -466,7 +474,7 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
 
 #[test]
 fn pooled_server_routing_and_cloning_do_not_allocate() {
-    let pool = BufferPool::new(2048, 1);
+    let pool = PayloadPool::new([(2048, 1)]).unwrap();
     for size in [0, 16, 64, 256, 1024] {
         let body = message(&pool, size);
         let pointer = body.part_slice(0).unwrap().as_ptr();
@@ -486,7 +494,7 @@ fn pooled_server_routing_and_cloning_do_not_allocate() {
 
 #[test]
 fn pooled_peer_and_radio_prefixes_and_cloning_do_not_allocate() {
-    let pool = BufferPool::new(2048, 1);
+    let pool = PayloadPool::new([(2048, 1)]).unwrap();
     for size in [0, 16, 64, 256, 1024] {
         let body = message(&pool, size);
         let pointer = body.part_slice(0).unwrap().as_ptr();
@@ -511,13 +519,13 @@ fn pooled_peer_and_radio_prefixes_and_cloning_do_not_allocate() {
 
 #[test]
 fn buffer_acquisition_clone_freeze_drop_and_exhaustion_do_not_allocate() {
-    let pool = BufferPool::new(2048, 4);
+    let pool = PayloadPool::new([(2048, 4)]).unwrap();
     let mut messages: [Option<Message>; 4] = std::array::from_fn(|_| None);
     ALLOCATIONS.with(|count| count.set(Some(0)));
     for size in [0, 16, 64, 256, 1024] {
         for _ in 0..128 {
             for message in &mut messages {
-                let mut buffer = pool.try_take().unwrap();
+                let mut buffer = pool.try_buffer(1).unwrap();
                 buffer.writable()[..size].fill(7);
                 buffer.set_len(size).unwrap();
                 assert!(buffer.set_len(buffer.capacity() + 1).is_err());
@@ -527,7 +535,7 @@ fn buffer_acquisition_clone_freeze_drop_and_exhaustion_do_not_allocate() {
                 drop(clone);
                 *message = Some(owned);
             }
-            assert!(pool.try_take().is_none());
+            assert!(pool.try_buffer(1).is_none());
             for message in &mut messages {
                 drop(message.take());
             }
@@ -627,18 +635,18 @@ async fn reusable_udp_io_and_segmentation_do_not_allocate() {
 
 #[test]
 fn bulk_pool_transfers_do_not_allocate() {
-    let pool = BufferPool::new(1024, 64);
+    let pool = PayloadPool::new([(1024, 64)]).unwrap();
     let mut buffers = Vec::with_capacity(64);
     let mut messages = Vec::with_capacity(64);
     ALLOCATIONS.with(|count| count.set(Some(0)));
     for _ in 0..128 {
-        assert_eq!(pool.try_take_many_into(64, &mut buffers), 64);
+        assert_eq!(pool.try_buffers_into(1, 64, &mut buffers), 64);
         for mut buffer in buffers.drain(..) {
             buffer.writable()[..16].fill(7);
             buffer.set_len(16).unwrap();
             messages.push(buffer.into_message());
         }
-        assert_eq!(BufferPool::recycle_many(&mut messages, 64), 64);
+        assert_eq!(PayloadPool::recycle_many(&mut messages, 64), 64);
         assert_eq!(pool.available(), 64);
     }
     assert_eq!(ALLOCATIONS.with(|count| count.replace(None).unwrap()), 0);

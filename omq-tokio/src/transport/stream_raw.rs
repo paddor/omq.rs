@@ -26,6 +26,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     cancel: &CancellationToken,
     completion: CompletionProgress,
     capacity: usize,
+    pool: Option<crate::PayloadPool>,
 ) -> (ActorPeerDriverHandle, tokio::task::JoinHandle<()>) {
     let (inbox_tx, inbox_rx) = crate::engine::control_inbox::channel(64);
     let (data_inbox_tx, data_inbox_rx) = crate::engine::data_inbox::channel(capacity);
@@ -41,6 +42,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
             inbox_rx,
             data_inbox_rx,
             &mut completion,
+            pool,
         )
         .await;
         let _ = completion.complete(omq_proto::DisconnectReason::PeerClosed);
@@ -59,6 +61,7 @@ pub(crate) fn spawn<T: DriverStream + Send + 'static>(
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn run_body<T: DriverStream>(
     stream: T,
     peer_id: u64,
@@ -67,6 +70,7 @@ async fn run_body<T: DriverStream>(
     mut inbox: crate::engine::control_inbox::Receiver,
     mut data_inbox: crate::engine::data_inbox::Receiver,
     completion: &mut CompletionProgress,
+    pool: Option<crate::PayloadPool>,
 ) {
     let (mut reader, mut writer) = stream.split(false);
     let mut buf = vec![0u8; 64 * 1024];
@@ -141,7 +145,12 @@ async fn run_body<T: DriverStream>(
                     Ok(0) | Err(_) => return,
                     Ok(n) => {
                         let _ = budget.account(n);
-                        pending_event = Some(Message::single(Bytes::copy_from_slice(&buf[..n])));
+                        pending_event = Some(if let Some(pool) = &pool {
+                            let Ok(message) = pool.message(n, |bytes| bytes.copy_from_slice(&buf[..n])) else { return; };
+                            message
+                        } else {
+                            Message::single(Bytes::copy_from_slice(&buf[..n]))
+                        });
                     }
                 }
             },
@@ -179,6 +188,7 @@ mod tests {
             &CancellationToken::new(),
             completion,
             64,
+            None,
         );
         handle.inbox.try_send(PeerDriverCommand::Close).unwrap();
         tokio::time::timeout(Duration::from_millis(500), &mut task)
@@ -215,6 +225,7 @@ mod tests {
                 &CancellationToken::new(),
                 completion,
                 64,
+                None,
             );
             handle.data_inbox =
                 crate::engine::data_inbox::SenderLanes::default().bind(&handle.data_inbox);

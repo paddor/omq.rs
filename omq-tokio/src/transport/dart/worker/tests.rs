@@ -1,5 +1,5 @@
 use super::*;
-use omq_proto::DartCongestion;
+use omq_proto::{DartCongestion, PayloadPool};
 
 fn peer() -> Peer {
     Peer {
@@ -12,7 +12,7 @@ fn peer() -> Peer {
         reported: false,
         session: None,
         pool: None,
-        receive_buffers: Vec::new(),
+        receive_buffers: super::super::pool::ReceiveBuffers::default(),
         returns: Arc::new(CreditCounter::default()),
         io: None,
         sampled: dart::SessionStats::default(),
@@ -34,9 +34,14 @@ fn queues() -> Box<PeerIo> {
     ))
 }
 
+fn state() -> SocketState {
+    let state = SocketState::new(options(), SocketType::Gather);
+    state.configure_receive_pool(Some(PayloadPool::new([(2048, 2)]).unwrap()));
+    state
+}
+
 fn options() -> omq_proto::DartOptions {
     omq_proto::DartOptions {
-        pool_buffers: 2,
         window_messages: 2,
         congestion: DartCongestion::Lan,
         ..omq_proto::DartOptions::default()
@@ -48,13 +53,7 @@ fn late_activation_cannot_replace_a_new_generation() {
     let mut peer = peer();
     let old = queues();
     let cancel = old.cancel.clone();
-    peer.install_io(
-        1,
-        old,
-        &SocketState::new(options(), SocketType::Gather),
-        false,
-        &Arc::new(DataSignal::new()),
-    );
+    peer.install_io(1, old, &state(), false, &Arc::new(DataSignal::new()));
     assert!(cancel.is_cancelled());
     assert!(peer.io.is_none());
     assert!(peer.session.is_none());
@@ -71,13 +70,7 @@ fn expired_or_cancelled_activation_never_installs_storage() {
             io.cancel.cancel();
         }
         let cancel = io.cancel.clone();
-        peer.install_io(
-            2,
-            io,
-            &SocketState::new(options(), SocketType::Gather),
-            false,
-            &Arc::new(DataSignal::new()),
-        );
+        peer.install_io(2, io, &state(), false, &Arc::new(DataSignal::new()));
         assert!(cancel.is_cancelled());
         assert!(peer.pool.is_none());
     }
@@ -87,26 +80,17 @@ fn expired_or_cancelled_activation_never_installs_storage() {
 fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();
-    peer.install_io(
-        2,
-        queues(),
-        &SocketState::new(options(), SocketType::Gather),
-        false,
-        &signal,
-    );
+    peer.install_io(2, queues(), &state(), false, &signal);
     let live = peer.io.as_ref().unwrap().cancel.clone();
     let repeated = queues();
     let rejected = repeated.cancel.clone();
-    peer.install_io(
-        2,
-        repeated,
-        &SocketState::new(options(), SocketType::Gather),
-        false,
-        &signal,
-    );
+    peer.install_io(2, repeated, &state(), false, &signal);
     assert!(rejected.is_cancelled());
     assert!(!live.is_cancelled());
-    assert_eq!(peer.pool.as_ref().unwrap().available(), 2);
+    assert_eq!(
+        peer.pool.as_ref().unwrap().storage().unwrap().available(),
+        2
+    );
 }
 
 #[test]
@@ -138,15 +122,9 @@ fn a_closed_delivery_window_does_not_block_lifecycle_control() {
 fn final_receive_owner_returns_physical_storage_and_credit_once() {
     let mut peer = peer();
     let signal = Arc::new(DataSignal::new());
-    peer.install_io(
-        2,
-        queues(),
-        &SocketState::new(options(), SocketType::Gather),
-        false,
-        &signal,
-    );
-    let pool = peer.pool.as_ref().unwrap();
-    let message = pool.try_take().unwrap().into_message();
+    peer.install_io(2, queues(), &state(), false, &signal);
+    let pool = peer.pool.as_ref().unwrap().storage().unwrap();
+    let message = pool.try_buffer(1).unwrap().into_message();
     let view = message.clone();
     assert_eq!(peer.returns.take(), 0);
     drop(message);
@@ -161,17 +139,31 @@ fn final_receive_owner_returns_physical_storage_and_credit_once() {
 fn foreign_pool_batch_publishes_credit_only_after_free_list_return() {
     let credit = Arc::new(CreditCounter::default());
     let signal = Arc::new(DataSignal::new());
-    let receive = super::super::pool::receiver(&BufferPool::new(2048, 2), credit.clone(), signal);
-    let caller = BufferPool::new(2048, 2);
-    let first = receive.try_take().unwrap().into_message();
-    let second = receive.try_take().unwrap().into_message();
+    let receive = super::super::pool::receiver(
+        Some(&PayloadPool::new([(2048, 2)]).unwrap()),
+        credit.clone(),
+        signal,
+    );
+    let caller = PayloadPool::new([(2048, 2)]).unwrap();
+    let first = receive
+        .storage()
+        .unwrap()
+        .try_buffer(1)
+        .unwrap()
+        .into_message();
+    let second = receive
+        .storage()
+        .unwrap()
+        .try_buffer(1)
+        .unwrap()
+        .into_message();
     caller.with_recycling_batch(|| {
         drop(first);
         drop(second);
         assert_eq!(credit.take(), 0);
-        assert_eq!(receive.available(), 0);
+        assert_eq!(receive.storage().unwrap().available(), 0);
     });
-    assert_eq!(receive.available(), 2);
+    assert_eq!(receive.storage().unwrap().available(), 2);
     assert_eq!(credit.take(), 2);
 }
 

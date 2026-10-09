@@ -9,16 +9,15 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use omq_proto::DartOptions;
 
-use crate::BufferPool;
+use crate::PayloadPool;
 pub use io::{DartIo, ReceiveBatch, ReceivedDatagram};
-pub use pool::BUFFER_CAPACITY;
 
 /// Shared by the socket handle and its endpoint workers. TCP-only sockets
-/// keep the body pool uninitialized even when DART is compiled in.
+/// receive storage is configured explicitly before endpoint setup.
 #[derive(Debug)]
 pub(crate) struct SocketState {
     options: DartOptions,
-    receive_pool: OnceLock<BufferPool>,
+    receive_pool: OnceLock<Option<PayloadPool>>,
     pub(crate) counters: Counters,
     pub(crate) peers: std::sync::Arc<tokio::sync::Semaphore>,
     identity: OnceLock<bytes::Bytes>,
@@ -43,9 +42,12 @@ impl SocketState {
         }
     }
 
-    pub(crate) fn receive_pool(&self) -> &BufferPool {
-        self.receive_pool
-            .get_or_init(|| BufferPool::new(BUFFER_CAPACITY, self.options.pool_buffers))
+    pub(crate) fn configure_receive_pool(&self, pool: Option<PayloadPool>) {
+        self.receive_pool.get_or_init(|| pool);
+    }
+
+    pub(crate) fn receive_pool(&self) -> Option<&PayloadPool> {
+        self.receive_pool.get().and_then(Option::as_ref)
     }
 
     pub(crate) fn register_carrier(&self, carrier: &Arc<DartIo>) {

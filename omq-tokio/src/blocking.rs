@@ -108,10 +108,23 @@ impl Socket {
         self.inner.last_bound_endpoint()
     }
 
-    /// Bind this socket to an endpoint.
+    /// Install explicit receive storage before the first bind/connect.
     ///
-    /// Returns the concrete endpoint. Wildcards such as `tcp://*:0` are
-    /// expanded to the address selected by the OS.
+    /// # Errors
+    /// Returns a configuration error once setup starts, or `Closed` after close.
+    pub fn set_recv_payload_pool(&self, pool: crate::PayloadPool) -> Result<()> {
+        self.inner.set_recv_payload_pool(pool)
+    }
+
+    /// Initialize HWM-sized payload storage for supported directions.
+    ///
+    /// # Errors
+    /// Returns a configuration or allocation error, or `Closed` after close.
+    pub fn init_payload_pools(&self) -> Result<crate::SocketPools> {
+        self.inner.init_payload_pools()
+    }
+
+    /// Bind this socket, returning its concrete endpoint.
     pub fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.bind(endpoint).await })

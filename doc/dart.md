@@ -55,46 +55,46 @@ peers can return automatically.
 
 ## Preparing messages
 
-Use ordinary `Socket` construction, bind/connect, and send/receive methods.
-Buffer preparation is transport-independent. Create an optional standalone
-pool with `BufferPool::new(bytes_per_buffer, count)` and reuse its handle:
+Use ordinary socket construction and send/receive methods. Payload pools
+are optional and transport-independent:
 
 ```rust
-use omq_tokio::{BufferPool, Socket};
+use omq_tokio::{Options, PayloadPool, Socket, SocketType};
 
-async fn publish(scatter: &Socket, pool: &BufferPool, data: &[u8]) -> omq_tokio::Result<bool> {
-    let Some(message) = pool.try_message(data.len(), |body| {
-        body.copy_from_slice(data);
-    })? else {
-        return Ok(false); // Existing owners hold every buffer. Retry later.
-    };
-    scatter.send(message).await?;
-    Ok(true)
-}
+let send = PayloadPool::new([(1024, 8192), (4096, 1024)])?;
+let recv = PayloadPool::new([(1024, 8192), (4096, 1024)])?;
+let sender = Socket::new(SocketType::Scatter, Options::default());
+let receiver = Socket::new(SocketType::Gather, Options::default().recv_payload_pool(recv));
+receiver.bind("dart://127.0.0.1:5555".parse()?).await?;
+sender.connect("dart://127.0.0.1:5555".parse()?).await?;
+let message = send.message(128, |body| body.fill(7))?;
+sender.send(message).await?;
+let received = receiver.recv().await?;
+assert_eq!(received.part_slice(0), Some([7; 128].as_slice()));
+# Ok::<(), omq_tokio::Error>(())
 ```
 
-`try_message` stores bodies up to 55 bytes inline without a pool checkout or
-allocation. Larger bodies use pooled storage when they fit; `Ok(None)` means
-the pool is exhausted. Bodies exceeding its buffer size own a heap allocation.
-Pool buffers never grow. Dart fragmentation happens on the IO task above the
-1 KiB wire body limit.
+`message` keeps bodies up to 55 bytes inline, then selects the smallest
+fitting available class, with an owned allocation fallback. `try_message`
+omits that fallback and returns `Ok(None)` without calling the fill closure.
+`payload` and `try_payload` select storage per multipart part; payloads up
+to 62 bytes stay inline. DART accepts single-part application bodies.
 
-`pool.try_take()` exposes fixed writable storage for manual filling; set its
-length before `into_message`. This consumes writable access and transfers the
-body into an immutable message without copying. Pool clones share storage;
-they have no socket lifecycle dependency. Batch checkout and
-`BufferPool::recycle_many` are bounded by count and bytes. Concurrent clone
-releases use bounded deferred reclamation without per-slot locks.
+`try_buffer(size)` returns fixed writable storage. Set its length before
+`into_message` or `into_payload`; freezing transfers ownership without
+copying. Clones and byte views retain storage until the final owner drops.
+Bulk checkout and `PayloadPool::recycle_many` are bounded by count and bytes.
 
-`try_send` returns the original message on `Full`. Retain and retry it.
-`recv` returns an immutable `Message`; ungrouped bodies up to 55 bytes are
-inline, except PEER bodies, which use pooled storage for their identity prefix.
-Bodies up to 2 KiB normally use the receive pool, including fragment
-assembly. Larger bodies own their allocation.
-Borrow with `part_slice`.
-Message clones and byte views retain their storage until the last owner
-is dropped. Buffers and messages may outlive a closed socket. Creating an
-independently owned `Bytes` adapter can allocate; borrowing does not.
+DART creates no receive pool automatically. Configure `recv_payload_pool`,
+call `set_recv_payload_pool`, or explicitly call `init_payload_pools` before
+the first bind/connect. The helper creates separate pools for supported
+directions, using one slot per HWM message: 4 KiB slots below HWM 8192,
+otherwise 2 KiB. Explicit receive storage takes precedence. Configuration
+then remains fixed across endpoints and reconnects. Fragment assembly selects
+storage from the advertised full body length after checking `max_message_size`.
+Oversized bodies and exhausted or absent receive pools use owned storage.
+Borrow received bodies with `part_slice`. Final ownership release returns
+receive credit independently of allocation choice.
 
 For SERVER, pass the received message back to `send` to keep its routing ID,
 or attach that ID to a new body with `with_routing_id`. For PEER, use
@@ -107,7 +107,6 @@ Configure `Options::dart` before constructing the socket:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `pool_buffers` | 8192 | Internal receive buffers per socket; 2 KiB each, must be nonzero |
 | `window_messages` | 256 | Receive and retention positions per peer; power of two, at most 65536 |
 | `max_ready_peers` | 1024 | Ready peer cap across all Dart endpoints |
 | `io_spin` | Zero | At most 50 microseconds; `Duration::MAX` polls continuously |
@@ -115,12 +114,11 @@ Configure `Options::dart` before constructing the socket:
 | `ecn` | Auto | Enable adaptive ECT(0) when the carrier supports feedback; Disabled opts out |
 | `max_send_rate` | None | Optional bytes per second cap, including repairs |
 
-`pool_buffers` also bounds simultaneous blocked native RADIO publications
+`send_hwm` bounds simultaneous blocked native RADIO publications
 per sender scope. Queued and unacknowledged messages retain send admission.
 Full receive windows stop new transmissions until storage is reusable.
-All peers share the socket's internal receive pool, separate from application
-send pools. The default receive pool reserves 16 MiB of body storage plus
-metadata. Pooled credit returns with the last owner; inline credit returns
+All peers share any explicitly configured receive pool. Credit for owned or
+pooled bodies returns with the last owner; inline credit returns
 when the bounded application queue accepts its independent message value.
 Control traffic continues while receive credit is closed.
 Receive ownership remains bounded by peer windows and socket HWM. If the

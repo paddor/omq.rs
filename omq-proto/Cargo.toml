@@ -32,6 +32,7 @@ dart = []
 soak = []
 
 [dependencies]
+concurrent-queue = "2.5.0"
 bytes = "1.12.0"
 crypto_box = { version = "0.9", optional = true }
 crypto_secretbox = { version = "0.1", optional = true }

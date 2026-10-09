@@ -575,6 +575,7 @@ name = "omq-proto"
 version = "0.29.0"
 dependencies = [
  "bytes",
+ "concurrent-queue",
  "crypto_box",
  "crypto_secretbox",
  "loom",

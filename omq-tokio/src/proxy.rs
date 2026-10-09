@@ -5,7 +5,8 @@
 //! force.
 //!
 //! The loop keeps at most one unsent message per direction when a target
-//! reports HWM backpressure. It retries that pending message before taking
+//! reports HWM backpressure. A pending message waits in that target's own
+//! send, which completes once the message is accepted, before the loop takes
 //! more input from the same side. The configured burst size bounds how many
 //! complete messages one hot side may forward before the other side and the
 //! control socket get another chance to run.
@@ -64,9 +65,19 @@ impl Direction {
     }
 }
 
-#[derive(Debug)]
+type PendingSend = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+/// A forwarded message waiting for target space. The send future owns the
+/// message and survives loop iterations; `copy` feeds the capture socket.
 struct Pending {
-    msg: Message,
+    copy: Message,
+    send: PendingSend,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,16 +165,6 @@ impl Proxy {
 
             if state == ProxyState::Active {
                 for direction in [preferred, preferred.opposite()] {
-                    if self.flush_pending_direction(
-                        direction,
-                        &mut fe_pending,
-                        &mut be_pending,
-                        fe_to_be_enabled,
-                        be_to_fe_enabled,
-                    )? {
-                        preferred = direction.opposite();
-                        continue 'main;
-                    }
                     if self.try_forward_available(
                         direction,
                         &mut fe_pending,
@@ -177,8 +178,6 @@ impl Proxy {
                 }
             }
 
-            let fe_wait_msg = fe_pending.as_ref().map(|pending| pending.msg.clone());
-            let be_wait_msg = be_pending.as_ref().map(|pending| pending.msg.clone());
             let frontend = self.frontend.clone_shared();
             let backend = self.backend.clone_shared();
             let control = self.control.as_ref().map(Socket::clone_shared);
@@ -197,10 +196,16 @@ impl Proxy {
                         None => return Ok(ProxyExit::Closed),
                     }
                 }
-                () = wait_for_send_progress(backend.clone_shared(), fe_wait_msg),
-                    if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_some() => {}
-                () = wait_for_send_progress(frontend.clone_shared(), be_wait_msg),
-                    if state == ProxyState::Active && be_to_fe_enabled && be_pending.is_some() => {}
+                sent = pending_send(&mut fe_pending),
+                    if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_some() => {
+                    self.finish_pending(sent, &mut fe_pending)?;
+                    preferred = Direction::BackendToFrontend;
+                }
+                sent = pending_send(&mut be_pending),
+                    if state == ProxyState::Active && be_to_fe_enabled && be_pending.is_some() => {
+                    self.finish_pending(sent, &mut be_pending)?;
+                    preferred = Direction::FrontendToBackend;
+                }
                 msg = frontend.recv(),
                     if state == ProxyState::Active && fe_to_be_enabled && fe_pending.is_none() => {
                     let msg = msg?;
@@ -214,23 +219,6 @@ impl Proxy {
                     preferred = Direction::FrontendToBackend;
                 }
             }
-        }
-    }
-
-    fn flush_pending_direction(
-        &self,
-        direction: Direction,
-        fe_pending: &mut Option<Pending>,
-        be_pending: &mut Option<Pending>,
-        fe_to_be_enabled: bool,
-        be_to_fe_enabled: bool,
-    ) -> Result<bool> {
-        if !direction_enabled(direction, fe_to_be_enabled, be_to_fe_enabled) {
-            return Ok(false);
-        }
-        match direction {
-            Direction::FrontendToBackend => self.flush_pending(direction, fe_pending),
-            Direction::BackendToFrontend => self.flush_pending(direction, be_pending),
         }
     }
 
@@ -274,17 +262,20 @@ impl Proxy {
             && socket_can_send(self.target(direction).socket_type())
     }
 
-    fn flush_pending(&self, direction: Direction, pending: &mut Option<Pending>) -> Result<bool> {
-        let Some(p) = pending.take() else {
-            return Ok(false);
-        };
-        match self.try_forward(direction, p.msg)? {
-            ForwardAttempt::Sent => Ok(true),
-            ForwardAttempt::Full(msg) => {
-                *pending = Some(Pending { msg });
-                Ok(false)
-            }
-            ForwardAttempt::Closed => Err(Error::Closed),
+    fn finish_pending(&self, sent: Result<()>, pending: &mut Option<Pending>) -> Result<()> {
+        let copy = pending.take().expect("completed pending send").copy;
+        sent?;
+        if let Some(capture) = &self.capture {
+            let _ = capture.try_send(copy);
+        }
+        Ok(())
+    }
+
+    fn pend(&self, direction: Direction, msg: Message) -> Pending {
+        let target = self.target(direction).clone_shared();
+        Pending {
+            copy: msg.clone(),
+            send: Box::pin(async move { target.send(msg).await }),
         }
     }
 
@@ -299,7 +290,7 @@ impl Proxy {
             match self.try_forward(direction, msg)? {
                 ForwardAttempt::Sent => {}
                 ForwardAttempt::Full(returned) => {
-                    *pending = Some(Pending { msg: returned });
+                    *pending = Some(self.pend(direction, returned));
                     return Ok(());
                 }
                 ForwardAttempt::Closed => return Err(Error::Closed),
@@ -434,17 +425,14 @@ async fn recv_optional(socket: Option<Socket>) -> Result<Option<Message>> {
     socket.recv().await.map(Some)
 }
 
-async fn wait_for_send_progress(socket: Socket, msg: Option<Message>) {
-    let Some(msg) = msg else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    // Space notifications are best-effort across multiple send strategies.
-    // The short timer prevents a lost notify from pinning a pending message.
-    tokio::select! {
-        () = socket.wait_send_progress_for(&msg) => {}
-        () = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
-    }
+/// Drive a pending send. Only polled while one exists.
+fn pending_send(
+    pending: &mut Option<Pending>,
+) -> impl std::future::Future<Output = Result<()>> + '_ {
+    std::future::poll_fn(move |cx| match pending {
+        Some(pending) => pending.send.as_mut().poll(cx),
+        None => std::task::Poll::Pending,
+    })
 }
 
 fn direction_enabled(direction: Direction, fe_to_be_enabled: bool, be_to_fe_enabled: bool) -> bool {

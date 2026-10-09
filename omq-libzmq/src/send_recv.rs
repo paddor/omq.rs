@@ -107,6 +107,112 @@ pub(crate) fn try_send_message(
     }
 }
 
+/// libzmq `ZMQ_POLLOUT`: whether a `ZMQ_DONTWAIT` send would be accepted.
+pub(crate) fn send_ready(sock: &OmqSocket) -> bool {
+    if sock.zap_handler.load(std::sync::atomic::Ordering::Acquire) {
+        return sock.ctx.zap.can_send(sock.id);
+    }
+    let Some(inner) = sock.inner.get() else {
+        return false;
+    };
+    if waits_for_ready_peer(sock) && inner.ready_peer_count() == 0 {
+        return false;
+    }
+    inner.send_ready()
+}
+
+/// A one-shot wait that signals `sock`'s send eventfd once [`send_ready`]
+/// may have turned true. Dropping it cancels the wait.
+#[derive(Debug)]
+pub(crate) struct SendWake(tokio::task::AbortHandle);
+
+impl Drop for SendWake {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Arm a [`SendWake`]. `None` when nothing could make `sock` writable.
+pub(crate) fn arm_send_wake(sock: &OmqSocket) -> Option<SendWake> {
+    let inner = sock.inner.get()?.clone();
+    let gated = waits_for_ready_peer(sock);
+    let notify = sock.notify.clone();
+    let task = sock.ctx.handle()?.spawn(async move {
+        loop {
+            if gated && inner.wait_connected(1, Duration::MAX).await.is_err() {
+                break;
+            }
+            inner.wait_send_ready().await;
+            if !gated || inner.ready_peer_count() > 0 {
+                break;
+            }
+        }
+        notify.signal_send();
+    });
+    Some(SendWake(task.abort_handle()))
+}
+
+/// A send of one message running on its socket's runtime. Dropping it
+/// abandons the send.
+#[derive(Debug)]
+pub(crate) struct SpawnedSend {
+    result: Arc<std::sync::Mutex<Option<omq_tokio::Result<()>>>>,
+    task: tokio::task::AbortHandle,
+}
+
+impl SpawnedSend {
+    /// The send's result once accepted or failed. Stored before the
+    /// socket's send eventfd is signaled.
+    pub(crate) fn take_result(&self) -> Option<omq_tokio::Result<()>> {
+        self.result.lock().expect("spawned send result").take()
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.result.lock().expect("spawned send result").is_some()
+    }
+}
+
+impl Drop for SpawnedSend {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Send `msg` once accepted, on the socket's runtime. Mirrors the libzmq
+/// gating of [`try_send_message`], then signals `sock`'s send eventfd.
+pub(crate) fn spawn_send_message(
+    sock: &OmqSocket,
+    msg: omq_tokio::Message,
+) -> Result<SpawnedSend, c_int> {
+    let inner = sock.inner.get().ok_or(ETERM)?.clone();
+    let handle = sock.ctx.handle().ok_or(ETERM)?;
+    let gated = waits_for_ready_peer(sock);
+    let notify = sock.notify.clone();
+    let result = Arc::new(std::sync::Mutex::new(None));
+    let stored = result.clone();
+    let task = handle.spawn(async move {
+        let sent = if gated {
+            match inner.wait_connected(1, Duration::MAX).await {
+                Ok(_) => inner.send(msg).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            inner.send(msg).await
+        };
+        *stored.lock().expect("spawned send result") = Some(sent);
+        notify.signal_send();
+    });
+    Ok(SpawnedSend {
+        result,
+        task: task.abort_handle(),
+    })
+}
+
+/// libzmq types that mute without a ready peer unless they may queue.
+fn waits_for_ready_peer(sock: &OmqSocket) -> bool {
+    round_robin_send_mutes_without_ready_peer(sock) && !can_queue_without_ready_peer(sock)
+}
+
 fn send_zap_bytes(sock: &OmqSocket, data: &[u8], flags: c_int, ret_len: c_int) -> c_int {
     if !sock.ctx.zap.can_send(sock.id) {
         return fail(crate::error::EFSM);
@@ -368,7 +474,7 @@ pub(crate) fn send_message(
     submit_message(sock, msg, ret_len, flags, sndtimeo)
 }
 
-fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int {
+pub(crate) fn map_send_err(sock: &OmqSocket, error: &omq_tokio::Error) -> c_int {
     if matches!(
         sock.socket_type,
         omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep

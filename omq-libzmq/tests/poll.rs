@@ -616,3 +616,153 @@ fn poll_both_events_counts_as_one_item() {
     zmq_close(b);
     zmq_ctx_term(ctx);
 }
+
+const ZMQ_REQ: i32 = 3;
+const ZMQ_REP: i32 = 4;
+const ZMQ_SNDHWM: i32 = 23;
+const ZMQ_RCVHWM: i32 = 24;
+const ZMQ_DONTWAIT: i32 = 1;
+
+/// A socket handed to exactly one helper thread.
+struct ThreadSocket(*mut c_void);
+// SAFETY: each socket is used by one thread at a time.
+unsafe impl Send for ThreadSocket {}
+
+impl ThreadSocket {
+    fn get(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+fn poll_out(sock: *mut c_void, timeout_ms: i64) -> (i32, Duration) {
+    let mut items = [PollItem {
+        socket: sock,
+        fd: invalid_fd(),
+        events: ZMQ_POLLOUT,
+        revents: 0,
+    }];
+    let started = std::time::Instant::now();
+    let rc = zmq_poll(items.as_mut_ptr().cast(), 1, timeout_ms as libc::c_long);
+    if rc > 0 {
+        assert_ne!(items[0].revents & ZMQ_POLLOUT, 0);
+    }
+    (rc, started.elapsed())
+}
+
+fn set_i32(sock: *mut c_void, option: i32, value: i32) {
+    assert_eq!(
+        zmq_setsockopt(
+            sock,
+            option,
+            (&value as *const i32).cast(),
+            size_of::<i32>()
+        ),
+        0
+    );
+}
+
+#[test]
+fn pollout_waits_for_a_bound_peer() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let addr = CString::new("inproc://pollout-bound-peer").unwrap();
+    assert_eq!(zmq_bind(push, addr.as_ptr()), 0);
+    assert_eq!(poll_out(push, 50).0, 0, "bound PUSH without peers is mute");
+
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let connector = {
+        let pull = ThreadSocket(pull);
+        let addr = addr.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(zmq_connect(pull.get(), addr.as_ptr()), 0);
+        })
+    };
+    let (rc, elapsed) = poll_out(push, 5_000);
+    connector.join().unwrap();
+    assert_eq!(rc, 1);
+    assert!(elapsed < Duration::from_secs(2), "woke after {elapsed:?}");
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn pollout_waits_for_queue_space() {
+    let ctx = zmq_ctx_new();
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    set_i32(push, ZMQ_SNDHWM, 4);
+    set_i32(pull, ZMQ_RCVHWM, 4);
+    let addr = CString::new("inproc://pollout-queue-space").unwrap();
+    assert_eq!(zmq_bind(pull, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, addr.as_ptr()), 0);
+    // Internal queues drain asynchronously; refill until the PUSH stays full.
+    // Every POLLOUT report must be backed by an accepted send.
+    let mut queued = 0;
+    loop {
+        while zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT) == 1 {
+            queued += 1;
+            assert!(queued < 100_000, "queue never filled");
+        }
+        if poll_out(push, 50).0 == 0 {
+            break;
+        }
+        assert_eq!(
+            zmq_send(push, b"x".as_ptr().cast(), 1, ZMQ_DONTWAIT),
+            1,
+            "POLLOUT without an accepted send"
+        );
+        queued += 1;
+    }
+
+    let drainer = {
+        let pull = ThreadSocket(pull);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let mut buf = [0u8; 8];
+            for _ in 0..queued {
+                assert_eq!(
+                    zmq_recv(pull.get(), buf.as_mut_ptr().cast(), buf.len(), 0),
+                    1
+                );
+            }
+        })
+    };
+    let (rc, elapsed) = poll_out(push, 5_000);
+    drainer.join().unwrap();
+    assert_eq!(rc, 1);
+    assert!(elapsed < Duration::from_secs(2), "woke after {elapsed:?}");
+    assert_eq!(zmq_send(push, b"y".as_ptr().cast(), 1, ZMQ_DONTWAIT), 1);
+
+    zmq_close(push);
+    zmq_close(pull);
+    zmq_ctx_term(ctx);
+}
+
+#[test]
+fn pollout_follows_req_rep_alternation() {
+    let ctx = zmq_ctx_new();
+    let rep = zmq_socket(ctx, ZMQ_REP);
+    let req = zmq_socket(ctx, ZMQ_REQ);
+    let addr = CString::new("inproc://pollout-req-rep").unwrap();
+    assert_eq!(zmq_bind(rep, addr.as_ptr()), 0);
+    assert_eq!(zmq_connect(req, addr.as_ptr()), 0);
+    assert_eq!(poll_out(req, 1_000).0, 1, "REQ before request");
+    assert_eq!(poll_out(rep, 0).0, 0, "REP before request");
+
+    assert_eq!(zmq_send(req, b"q".as_ptr().cast(), 1, 0), 1);
+    assert_eq!(poll_out(req, 0).0, 0, "REQ awaiting reply");
+    let mut buf = [0u8; 8];
+    assert_eq!(zmq_recv(rep, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+    assert_eq!(poll_out(rep, 1_000).0, 1, "REP with request");
+    assert_eq!(zmq_send(rep, b"a".as_ptr().cast(), 1, 0), 1);
+    assert_eq!(poll_out(rep, 0).0, 0, "REP after reply");
+    assert_eq!(zmq_recv(req, buf.as_mut_ptr().cast(), buf.len(), 0), 1);
+    assert_eq!(poll_out(req, 1_000).0, 1, "REQ after reply");
+
+    zmq_close(req);
+    zmq_close(rep);
+    zmq_ctx_term(ctx);
+}

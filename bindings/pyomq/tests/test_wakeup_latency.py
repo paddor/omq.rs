@@ -132,7 +132,7 @@ def test_muted_send_with_timeout_wakes_promptly():
 
 def _forked_rep_round_trips():
     port_r, port_w = os.pipe()
-    pid = os.fork()  # ty: ignore[unresolved-attribute, unused-ignore-comment]
+    pid = os.fork()  # ty: ignore[unresolved-attribute, unused-ignore-comment, unused-ignore-comment]
     if pid == 0:
         os.close(port_r)
         code = 1

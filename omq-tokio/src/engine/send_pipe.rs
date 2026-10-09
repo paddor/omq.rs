@@ -540,6 +540,60 @@ impl SendPipeProducer {
         }
     }
 
+    /// Whether `try_send` would admit an ordinary message now. A full
+    /// queue arms its space wake exactly like a failed `try_send`, so a
+    /// readiness wait on [`Self::readiness_signals`] cannot be stranded.
+    pub(crate) fn can_accept(&mut self) -> bool {
+        #[cfg(feature = "dart")]
+        if self
+            .data_signal
+            .dart_admission
+            .get()
+            .is_some_and(|counter| counter.available() == 0)
+        {
+            return false;
+        }
+        match &mut self.inner {
+            SendPipeProducerInner::Peer(peer) => peer.alive() && peer.has_space(),
+            SendPipeProducerInner::Queue(producer) => {
+                if producer.is_consumer_dropped() {
+                    return false;
+                }
+                if producer.is_full() {
+                    self.above_lwm.store(true, Ordering::Release);
+                    return false;
+                }
+                true
+            }
+            SendPipeProducerInner::Conflate(state) => {
+                !state.consumer_dropped.load(Ordering::Acquire)
+            }
+            SendPipeProducerInner::Inproc(sender) => match sender.admission() {
+                crate::transport::inproc::Admission::Ready => true,
+                crate::transport::inproc::Admission::Full => {
+                    self.above_lwm.store(true, Ordering::Release);
+                    false
+                }
+                crate::transport::inproc::Admission::Closed => false,
+            },
+        }
+    }
+
+    /// Signals that fire when [`Self::can_accept`] may have turned true.
+    pub(crate) fn readiness_signals(&self) -> smallvec::SmallVec<[Arc<StateSignal>; 2]> {
+        if let SendPipeProducerInner::Peer(peer) = &self.inner {
+            peer.space_signals().into_iter().collect()
+        } else {
+            smallvec::smallvec![self.space_available()]
+        }
+    }
+
+    /// Whether a round-robin router may move this full pipe back into
+    /// rotation: it has drained below its low-water mark since it filled.
+    pub(crate) fn can_reactivate(&self) -> bool {
+        !self.above_lwm.load(Ordering::Acquire) || self.is_below_lwm()
+    }
+
     pub(crate) fn space_available(&self) -> Arc<StateSignal> {
         #[cfg(feature = "dart")]
         if self.dart.is_some() {

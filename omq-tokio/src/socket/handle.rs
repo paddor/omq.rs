@@ -1,7 +1,7 @@
 //! Public `Socket` handle.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
@@ -81,7 +81,7 @@ struct Inner {
     rep_current: Arc<Mutex<Option<(u64, RepEnvelope)>>>,
     /// REQ alternation flag. Avoids Mutex on the REQ hot path.
     /// Shared with the actor for `on_peer_disconnected` reset.
-    req_awaiting_reply: Arc<AtomicBool>,
+    req_awaiting_reply: Arc<ReqAwaitingReply>,
     /// Cooperative yield counter. Every `SEND_YIELD_INTERVAL` successful
     /// synchronous sends, `send()` yields to the runtime so driver tasks
     /// on the same worker thread can drain and flush.
@@ -90,7 +90,7 @@ struct Inner {
     /// actor on each `Command::Subscribe`; read by `wait_subscribed`.
     subscribe_count: Arc<AtomicU64>,
     /// Peers that have completed handshaking and can accept data-plane sends.
-    ready_peer_count: Arc<std::sync::atomic::AtomicUsize>,
+    ready_peer_count: Arc<ReadyPeers>,
     last_bound_endpoint: RwLock<Option<Endpoint>>,
     actor_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -368,9 +368,9 @@ impl Socket {
             .then(|| spsc.init_peer_recv(recv_hwm, options.max_message_size));
         let type_state = Arc::new(Mutex::new(TypeState::new()));
         let rep_current = Arc::new(Mutex::new(None));
-        let req_awaiting_reply = Arc::new(AtomicBool::new(false));
+        let req_awaiting_reply = Arc::new(ReqAwaitingReply::default());
         let subscribe_count = Arc::new(AtomicU64::new(0));
-        let ready_peer_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ready_peer_count = Arc::new(ReadyPeers::default());
         let mut driver = SocketDriver::new(
             socket_type,
             options,
@@ -441,9 +441,7 @@ impl Socket {
 
     #[doc(hidden)]
     pub fn ready_peer_count(&self) -> usize {
-        self.inner
-            .ready_peer_count
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.inner.ready_peer_count.get()
     }
 
     /// Read a complete transport item without advancing request/reply state.
@@ -469,9 +467,7 @@ impl Socket {
                 if message.len() < 2 || !message.pop_front()?.is_empty() {
                     return None;
                 }
-                self.inner
-                    .req_awaiting_reply
-                    .store(false, Ordering::Release);
+                self.inner.req_awaiting_reply.clear();
                 Some(message)
             }
             SocketType::Rep => {
@@ -593,21 +589,11 @@ impl Socket {
         }
         match self.inner.socket_type {
             SocketType::Req => {
-                if self
-                    .inner
-                    .req_awaiting_reply
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
+                if !self.inner.req_awaiting_reply.claim() {
                     // Yield so the actor can process a potential peer
                     // disconnect that resets the flag, then retry once.
                     tokio::task::yield_now().await;
-                    if self
-                        .inner
-                        .req_awaiting_reply
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
+                    if !self.inner.req_awaiting_reply.claim() {
                         return Err(Error::Protocol(
                             "REQ socket must receive a reply before sending again".into(),
                         ));
@@ -665,12 +651,7 @@ impl Socket {
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {
-                if self
-                    .inner
-                    .req_awaiting_reply
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
+                if !self.inner.req_awaiting_reply.claim() {
                     return Err(TrySendError::Error(Error::Protocol(
                         "REQ socket must receive a reply before sending again".into(),
                     )));
@@ -678,9 +659,7 @@ impl Socket {
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self.send_submitter.try_send(msg);
                 if result.is_err() {
-                    self.inner
-                        .req_awaiting_reply
-                        .store(false, Ordering::Release);
+                    self.inner.req_awaiting_reply.clear();
                 }
                 match result {
                     Err(TrySendError::Full(mut returned)) => {
@@ -752,6 +731,71 @@ impl Socket {
                 }
                 Ok(sent)
             }
+        }
+    }
+
+    /// Whether [`Self::try_send`] would accept a message now.
+    ///
+    /// Matches libzmq `ZMQ_POLLOUT`. `REQ` is writable once it has received
+    /// its reply, `REP` while a request awaits its reply. Round-robin and
+    /// exclusive types are writable while a peer queue has space. `ROUTER`
+    /// is writable unless `router_mandatory` is set and every peer is full.
+    /// `SERVER`, `PEER`, `STREAM`, and lossy fan-out never block. With
+    /// `xpub_nodrop`, fan-out is writable while its distribution ring has
+    /// space. Receive-only types are never writable. After close, sockets
+    /// report writable so the next send reports the error.
+    ///
+    /// Another handle can take the space before this handle sends.
+    pub fn send_ready(&self) -> bool {
+        match self.inner.socket_type {
+            SocketType::Req => {
+                !self.inner.req_awaiting_reply.is_set() && self.send_submitter.send_ready()
+            }
+            SocketType::Rep => {
+                let peer = self
+                    .inner
+                    .rep_current
+                    .lock()
+                    .expect("rep identity")
+                    .as_ref()
+                    .map(|(peer_id, _)| *peer_id);
+                peer.is_some_and(|peer_id| self.send_submitter.rep_send_ready(peer_id))
+            }
+            SocketType::XSub => self.inner.cmd_tx.capacity() > 0 || self.inner.cmd_tx.is_closed(),
+            _ => self.send_submitter.send_ready(),
+        }
+    }
+
+    /// Wait until [`Self::send_ready`] is true.
+    ///
+    /// Completes when readiness was observed; another handle can take the
+    /// space before this one sends. Never completes for receive-only types,
+    /// or for a `REP` socket that had no request to answer when called.
+    pub async fn wait_send_ready(&self) {
+        match self.inner.socket_type {
+            SocketType::Req => loop {
+                self.inner.req_awaiting_reply.wait_cleared().await;
+                self.send_submitter.wait_send_ready().await;
+                // A send from another handle may have claimed the reply.
+                if self.send_ready() {
+                    return;
+                }
+            },
+            SocketType::Rep => {
+                let peer = self
+                    .inner
+                    .rep_current
+                    .lock()
+                    .expect("rep identity")
+                    .as_ref()
+                    .map(|(peer_id, _)| *peer_id);
+                match peer {
+                    Some(peer_id) => self.send_submitter.wait_rep_send_ready(peer_id).await,
+                    None => std::future::pending().await,
+                }
+            }
+            SocketType::XSub => drop(self.inner.cmd_tx.reserve().await),
+            _ => self.send_submitter.wait_send_ready().await,
         }
     }
 
@@ -1210,7 +1254,11 @@ impl Socket {
         timeout: std::time::Duration,
     ) -> Result<usize> {
         let deadline = super::deadline_after(timeout).map(tokio::time::Instant::from_std);
+        let changed = &self.inner.ready_peer_count.changed;
         loop {
+            // Snapshot first: the actor answers after any readiness change
+            // it already published, and notifies for later ones.
+            let seen = changed.generation();
             let conns = self.connections().await?;
             let ready = if self.inner.socket_type == SocketType::Stream {
                 conns.len()
@@ -1220,13 +1268,17 @@ impl Socket {
             if ready >= min_peers {
                 return Ok(ready);
             }
-            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
-                return Err(Error::Timeout);
+            match deadline {
+                Some(deadline) => {
+                    if tokio::time::timeout_at(deadline, changed.changed_after(seen))
+                        .await
+                        .is_err()
+                    {
+                        return Err(Error::Timeout);
+                    }
+                }
+                None => changed.changed_after(seen).await,
             }
-            let now = tokio::time::Instant::now();
-            let poll_deadline = now + std::time::Duration::from_millis(5);
-            tokio::time::sleep_until(deadline.map_or(poll_deadline, |d| d.min(poll_deadline)))
-                .await;
         }
     }
 
@@ -1471,20 +1523,94 @@ fn supports_recv_batching(t: SocketType) -> bool {
     )
 }
 
-/// Validate frame count for socket types that enforce a fixed count but whose
-/// `TypeState::pre_send` has no mutable side effects. This mirrors the check
-/// inside `TypeState::pre_send` for the relevant types so the actor-bypass
-/// send path still surfaces the same protocol errors.
+/// Ready peer count, shared by a socket's handles and its actor. Every
+/// change wakes `wait_connected` and send-readiness waits.
+#[derive(Debug, Default)]
+pub(crate) struct ReadyPeers {
+    count: AtomicUsize,
+    changed: crate::engine::signal::StateSignal,
+}
+
+impl ReadyPeers {
+    pub(crate) fn get(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn add(&self) {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_changed();
+    }
+
+    pub(crate) fn remove(&self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.changed.notify_changed();
+    }
+
+    pub(crate) fn set(&self, count: usize) {
+        self.count.store(count, Ordering::Release);
+        self.changed.notify_changed();
+    }
+}
+
+/// REQ alternation: set while a reply is outstanding. Shared with the actor,
+/// which clears it when the last peer leaves. Clearing wakes send-readiness
+/// waiters; without waiters it costs one fenced store.
+#[derive(Debug, Default)]
+pub(crate) struct ReqAwaitingReply {
+    awaiting: AtomicBool,
+    waiters: AtomicUsize,
+    cleared: crate::engine::signal::StateSignal,
+}
+
+impl ReqAwaitingReply {
+    fn is_set(&self) -> bool {
+        self.awaiting.load(Ordering::Acquire)
+    }
+
+    fn claim(&self) -> bool {
+        self.awaiting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn clear(&self) {
+        // Pairs with `wait_cleared`: either it sees the flag clear or this
+        // sees its waiter count.
+        self.awaiting.store(false, Ordering::SeqCst);
+        if self.waiters.load(Ordering::SeqCst) > 0 {
+            self.cleared.notify_changed();
+        }
+    }
+
+    async fn wait_cleared(&self) {
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.waiters.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(&self.waiters);
+        loop {
+            let seen = self.cleared.generation();
+            if !self.awaiting.load(Ordering::SeqCst) {
+                return;
+            }
+            self.cleared.changed_after(seen).await;
+        }
+    }
+}
+
 /// Clears the REQ alternation claim unless the request was sent.
 struct ReqSendClaim<'a> {
-    awaiting_reply: &'a AtomicBool,
+    awaiting_reply: &'a ReqAwaitingReply,
     sent: bool,
 }
 
 impl Drop for ReqSendClaim<'_> {
     fn drop(&mut self) {
         if !self.sent {
-            self.awaiting_reply.store(false, Ordering::Release);
+            self.awaiting_reply.clear();
         }
     }
 }
@@ -1510,6 +1636,10 @@ fn rep_send_without_request() -> Error {
     Error::Protocol("REP socket must receive a request before replying".into())
 }
 
+/// Validate frame count for socket types that enforce a fixed count but whose
+/// `TypeState::pre_send` has no mutable side effects. This mirrors the check
+/// inside `TypeState::pre_send` for the relevant types so the actor-bypass
+/// send path still surfaces the same protocol errors.
 #[inline]
 fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
     match t {

@@ -135,6 +135,16 @@ impl PeerOutbound {
         }
     }
 
+    /// Whether `try_send` would admit a message now.
+    pub(crate) fn can_accept(&self) -> bool {
+        match self {
+            Self::Wire { inbox, .. } | Self::Inbox(inbox) => self.is_alive() && inbox.send_ready(),
+            Self::Inproc(sender) => {
+                sender.admission() == crate::transport::inproc::Admission::Ready
+            }
+        }
+    }
+
     pub(crate) fn send_ready(&self) -> bool {
         let inbox = match self {
             Self::Wire { inbox, .. } | Self::Inbox(inbox) => inbox,

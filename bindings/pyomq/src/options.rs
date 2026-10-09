@@ -812,18 +812,14 @@ pub fn getsockopt<'py>(
             Ok(int_to_bound(py, materialized.recv_ready.fd() as i64))
         }
         constants::EVENTS => {
-            let has_data = if !sock.rxbuf.lock().unwrap().is_empty() {
-                true
-            } else {
-                let materialized_guard = sock.materialized.read().unwrap();
-                materialized_guard.as_ref().is_some_and(|materialized| {
-                    let mut consumers = materialized.recv_cons.lock().unwrap();
-                    consumers.refresh(materialized.recv_config.as_ref());
-                    consumers.has_data()
-                })
-            };
-            let flags: i64 = if has_data { 1 } else { 0 };
-            Ok(int_to_bound(py, flags))
+            let mut flags = 0;
+            if crate::runtime::recv_ready(sock) {
+                flags |= crate::runtime::POLLIN;
+            }
+            if crate::runtime::send_ready(sock) {
+                flags |= crate::runtime::POLLOUT;
+            }
+            Ok(int_to_bound(py, i64::from(flags)))
         }
         constants::ZAP_DOMAIN | constants::TCP_ACCEPT_FILTER | constants::LAST_ENDPOINT => {
             Ok(PyBytes::new(py, b"").into_any())

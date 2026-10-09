@@ -547,6 +547,48 @@ pub struct StateSignal {
     notify: Notify,
 }
 
+/// Completes once any of `signals` changes after this call returns.
+/// Generations are read before returning, so a probe made after this call
+/// cannot miss a change. Never completes for an empty set.
+pub(crate) fn any_changed(signals: impl IntoIterator<Item = Arc<StateSignal>>) -> AnyChanged {
+    AnyChanged {
+        waits: signals
+            .into_iter()
+            .map(|signal| {
+                let seen = signal.generation();
+                let wait: ChangeWait = Box::pin(async move { signal.changed_after(seen).await });
+                wait
+            })
+            .collect(),
+    }
+}
+
+type ChangeWait = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Future returned by [`any_changed`].
+pub(crate) struct AnyChanged {
+    waits: Vec<ChangeWait>,
+}
+
+impl std::future::Future for AnyChanged {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self
+            .waits
+            .iter_mut()
+            .any(|wait| wait.as_mut().poll(cx).is_ready())
+        {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
 impl StateSignal {
     #[cfg(feature = "dart")]
     pub(crate) fn dart_forward_to(&self, signal: &Arc<DataSignal>) {

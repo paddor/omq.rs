@@ -27,6 +27,26 @@ use crate::socket::handle::Socket as AsyncSocket;
 use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
 pub use crate::socket::recv::BlockingRecvCancel;
 
+/// Receive waker registered by [`Socket::register_recv_waker`].
+/// Dropping it unregisters the waker.
+#[derive(Debug)]
+pub struct RecvWakerRegistration {
+    _registration: crate::engine::signal::WakerRegistration,
+}
+
+/// Send waker registered by [`Socket::register_send_waker`].
+/// Dropping it cancels the wait.
+#[derive(Debug)]
+pub struct SendWakerRegistration {
+    task: tokio::task::AbortHandle,
+}
+
+impl Drop for SendWakerRegistration {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Blocking socket handle.
 ///
 /// Created by [`Context::blocking_socket()`]. All async operations
@@ -40,13 +60,6 @@ pub use crate::socket::recv::BlockingRecvCancel;
 /// Methods panic if the context was created with
 /// [`Context::current()`] (use the async [`Socket`](crate::Socket)
 /// instead).
-/// Receive waker registered by [`Socket::register_recv_waker`].
-/// Dropping it unregisters the waker.
-#[derive(Debug)]
-pub struct RecvWakerRegistration {
-    _registration: crate::engine::signal::WakerRegistration,
-}
-
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: AsyncSocket,
@@ -231,6 +244,26 @@ impl Socket {
                 () = canceled => Ok(false),
             }
         })
+    }
+
+    /// Whether [`Self::try_send`] would accept a message now. See
+    /// [`crate::Socket::send_ready`] for each socket type.
+    pub fn send_ready(&self) -> bool {
+        self.inner.send_ready()
+    }
+
+    /// Wake `waker` once [`Self::send_ready`] turns true, unless the returned
+    /// registration drops first. Wakes at most once. Register before the
+    /// final [`Self::send_ready`] check to avoid missing the change.
+    pub fn register_send_waker(&self, waker: std::task::Waker) -> SendWakerRegistration {
+        let socket = self.inner.clone_shared();
+        let task = self.ctx.handle().spawn(async move {
+            socket.wait_send_ready().await;
+            waker.wake();
+        });
+        SendWakerRegistration {
+            task: task.abort_handle(),
+        }
     }
 
     /// Try to send one complete message without blocking.

@@ -245,6 +245,38 @@ impl Submitter {
         }
     }
 
+    /// Whether `try_send` would find a pipe with space. A closed socket is
+    /// ready: sending reports the error.
+    pub(crate) fn send_ready(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut guard = self.active.lock().expect("round_robin active");
+        let pipes = &mut *guard;
+        pipes.active.iter_mut().any(|pipe| pipe.tx.can_accept())
+            || pipes
+                .inactive
+                .iter_mut()
+                .any(|pipe| pipe.tx.can_reactivate() && pipe.tx.can_accept())
+    }
+
+    pub(crate) async fn wait_send_ready(&self) {
+        loop {
+            let changed = {
+                let active = self.active.lock().expect("round_robin active");
+                let pipes = active.active.iter().chain(&active.inactive);
+                crate::engine::signal::any_changed(
+                    std::iter::once(self.active_changed.clone())
+                        .chain(pipes.flat_map(|pipe| pipe.tx.readiness_signals())),
+                )
+            };
+            if self.send_ready() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     pub(crate) async fn wait_send_progress(&self) {
         let space_available = {
             let mut active = self.active.lock().expect("round_robin active");

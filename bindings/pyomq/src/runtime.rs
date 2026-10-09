@@ -569,55 +569,192 @@ pub fn wait_any(
     sockets: Vec<(u64, Arc<crate::socket::SocketInner>)>,
     timeout_ms: Option<u64>,
 ) -> Vec<u64> {
-    if sockets.is_empty() {
+    wait_ready(sockets, Vec::new(), timeout_ms)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+pub(crate) const POLLIN: i32 = 1;
+pub(crate) const POLLOUT: i32 = 2;
+
+/// Whether a receive would find a message now. Probing a blocking socket
+/// moves one message into `rxmsgs`, where the next receive takes it.
+pub(crate) fn recv_ready(inner: &crate::socket::SocketInner) -> bool {
+    if !inner.rxbuf.lock().unwrap().is_empty() || !inner.rxmsgs.lock().unwrap().is_empty() {
+        return true;
+    }
+    let materialized_guard = inner.materialized.read().unwrap();
+    if let Some(materialized) = materialized_guard.as_ref() {
+        let mut consumers = materialized.recv_cons.lock().unwrap();
+        consumers.refresh(materialized.recv_config.as_ref());
+        return consumers.has_data();
+    }
+    drop(materialized_guard);
+    let Ok(sock) = inner.ensure_blocking_socket() else {
+        return false;
+    };
+    match sock.into_async().try_recv_for_external_recv() {
+        Ok(msg) => {
+            inner.rxmsgs.lock().unwrap().push(msg);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// libzmq `POLLOUT`: whether a nonblocking send of a complete message
+/// would be accepted now. REQ/REP cannot send with frames left to read.
+pub(crate) fn send_ready(inner: &crate::socket::SocketInner) -> bool {
+    if matches!(
+        inner.socket_type,
+        omq_tokio::SocketType::Req | omq_tokio::SocketType::Rep
+    ) && !inner.rxbuf.lock().unwrap().is_empty()
+    {
+        return false;
+    }
+    if let Some(materialized) = inner.materialized.read().unwrap().as_ref() {
+        return materialized.socket.send_ready();
+    }
+    inner
+        .ensure_blocking_socket()
+        .is_ok_and(|sock| sock.send_ready())
+}
+
+/// One-shot wake for when a socket may have become writable.
+enum SendWait {
+    Blocking(#[allow(dead_code)] omq_tokio::blocking::SendWakerRegistration),
+    Async(tokio::task::AbortHandle),
+}
+
+impl Drop for SendWait {
+    fn drop(&mut self) {
+        if let Self::Async(task) = self {
+            task.abort();
+        }
+    }
+}
+
+fn arm_send_wait(inner: &crate::socket::SocketInner, waker: &std::task::Waker) -> Option<SendWait> {
+    if let Some(materialized) = inner.materialized.read().unwrap().as_ref() {
+        let socket = materialized.socket.clone();
+        let waker = waker.clone();
+        let task = inner.ctx.runtime_handle().ok()?.spawn(async move {
+            socket.wait_send_ready().await;
+            waker.wake();
+        });
+        return Some(SendWait::Async(task.abort_handle()));
+    }
+    let sock = inner.ensure_blocking_socket().ok()?;
+    Some(SendWait::Blocking(sock.register_send_waker(waker.clone())))
+}
+
+/// Unparks one polling thread.
+struct ThreadWake {
+    thread: std::thread::Thread,
+    woken: AtomicBool,
+}
+
+impl std::task::Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        self.thread.unpark();
+    }
+}
+
+type PollSet = Vec<(u64, Arc<crate::socket::SocketInner>)>;
+
+/// Block until a socket in `pollin` can receive or one in `pollout` can
+/// send, or until `timeout_ms` elapses. Returns `(socket id, events)`.
+pub fn wait_ready(pollin: PollSet, pollout: PollSet, timeout_ms: Option<u64>) -> Vec<(u64, i32)> {
+    if pollin.is_empty() && pollout.is_empty() {
         return vec![];
     }
-
-    let poll_ready = |sockets: &[(u64, Arc<crate::socket::SocketInner>)]| -> Vec<u64> {
-        sockets
-            .iter()
-            .filter(|(_, inner)| {
-                if !inner.rxbuf.lock().unwrap().is_empty() {
-                    return true;
-                }
-                if !inner.rxmsgs.lock().unwrap().is_empty() {
-                    return true;
-                }
-                let materialized_guard = inner.materialized.read().unwrap();
-                if let Some(materialized) = materialized_guard.as_ref() {
-                    let mut consumers = materialized.recv_cons.lock().unwrap();
-                    consumers.refresh(materialized.recv_config.as_ref());
-                    consumers.has_data()
-                } else {
-                    drop(materialized_guard);
-                    let Ok(sock) = inner.ensure_blocking_socket() else {
-                        return false;
-                    };
-                    match sock.into_async().try_recv_for_external_recv() {
-                        Ok(msg) => {
-                            inner.rxmsgs.lock().unwrap().push(msg);
-                            true
-                        }
-                        Err(_) => false,
-                    }
-                }
-            })
-            .map(|(id, _)| *id)
-            .collect()
+    let poll_ready = || -> Vec<(u64, i32)> {
+        let mut ready: Vec<(u64, i32)> = Vec::new();
+        let mut add = |id: u64, event: i32| match ready.iter_mut().find(|(seen, _)| *seen == id) {
+            Some((_, events)) => *events |= event,
+            None => ready.push((id, event)),
+        };
+        for (id, inner) in &pollin {
+            if recv_ready(inner) {
+                add(*id, POLLIN);
+            }
+        }
+        for (id, inner) in &pollout {
+            if send_ready(inner) {
+                add(*id, POLLOUT);
+            }
+        }
+        ready
     };
 
-    let ready = poll_ready(&sockets);
-    if !ready.is_empty() {
+    let ready = poll_ready();
+    if !ready.is_empty() || timeout_ms == Some(0) {
         return ready;
     }
-
-    let recv_signal = global_recv_signal();
     let deadline = timeout_ms.and_then(|ms| Instant::now().checked_add(Duration::from_millis(ms)));
+    let async_input = pollin
+        .iter()
+        .any(|(_, inner)| inner.materialized.read().unwrap().is_some());
+    if async_input {
+        return wait_ready_shared(&poll_ready, &pollin, &pollout, deadline);
+    }
 
+    // Blocking sockets and send waits wake this thread directly.
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        woken: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake.clone());
+    let _recv_registrations: Vec<_> = pollin
+        .iter()
+        .filter_map(|(_, inner)| inner.ensure_blocking_socket().ok())
+        .map(|sock| sock.register_recv_waker(waker.clone()))
+        .collect();
+    loop {
+        // Send waits fire once: re-arm them before each check.
+        let _send_waits: Vec<_> = pollout
+            .iter()
+            .filter_map(|(_, inner)| arm_send_wait(inner, &waker))
+            .collect();
+        let ready = poll_ready();
+        if !ready.is_empty() {
+            return ready;
+        }
+        while !wake.woken.swap(false, Ordering::AcqRel) {
+            match deadline {
+                None => std::thread::park(),
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return vec![];
+                    }
+                    std::thread::park_timeout(deadline - now);
+                }
+            }
+        }
+    }
+}
+
+/// Wait on the process-global receive signal, which async-materialized
+/// sockets signal. Concurrent waiters share and drain that one signal, so
+/// waits are sliced to recover a wakeup another waiter consumed.
+fn wait_ready_shared(
+    poll_ready: &dyn Fn() -> Vec<(u64, i32)>,
+    pollin: &PollSet,
+    pollout: &PollSet,
+    deadline: Option<Instant>,
+) -> Vec<(u64, i32)> {
+    let recv_signal = global_recv_signal();
     // Native blocking sockets wake threads, not the readiness fd. Forward
     // their wakeups into the fd for the duration of this wait.
     let waker = std::task::Waker::from(Arc::new(ForwardRecvWake(recv_signal.clone())));
-    let _registrations: Vec<_> = sockets
+    let _registrations: Vec<_> = pollin
         .iter()
         .filter(|(_, inner)| inner.materialized.read().unwrap().is_none())
         .filter_map(|(_, inner)| inner.ensure_blocking_socket().ok())
@@ -625,35 +762,27 @@ pub fn wait_any(
         .collect();
 
     recv_signal.park_begin();
-    let ready = poll_ready(&sockets);
-    if !ready.is_empty() {
-        recv_signal.park_end();
-        return ready;
-    }
-
-    loop {
+    let result = loop {
+        let _send_waits: Vec<_> = pollout
+            .iter()
+            .filter_map(|(_, inner)| arm_send_wait(inner, &waker))
+            .collect();
+        let ready = poll_ready();
+        if !ready.is_empty() {
+            break ready;
+        }
         let wait_dur = match deadline {
             Some(d) => {
                 let now = Instant::now();
                 if now >= d {
-                    recv_signal.park_end();
-                    return vec![];
+                    break vec![];
                 }
-                d - now
+                (d - now).min(Duration::from_millis(100))
             }
             None => Duration::from_millis(100),
         };
-
         recv_signal.wait_timeout(wait_dur);
-
-        let ready = poll_ready(&sockets);
-        if !ready.is_empty() {
-            recv_signal.park_end();
-            return ready;
-        }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            recv_signal.park_end();
-            return vec![];
-        }
-    }
+    };
+    recv_signal.park_end();
+    result
 }

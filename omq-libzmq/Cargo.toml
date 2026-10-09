@@ -136,6 +136,10 @@ name = "omq_libzmq_poller"
 path = "tests/poller.rs"
 
 [[test]]
+name = "omq_libzmq_proxy_idle"
+path = "tests/proxy_idle.rs"
+
+[[test]]
 name = "omq_libzmq_proxy"
 path = "tests/proxy.rs"
 

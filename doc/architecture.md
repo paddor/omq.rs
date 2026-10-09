@@ -273,9 +273,18 @@ and heartbeat work. Its send and replay contract differs from regular sockets.
 ### Proxy
 
 `Proxy` composes two sockets without another socket type or unbounded
-forwarding queue. It retains a pending message in each direction when the
-target is full and retries it before reading more from that source. Socket
-HWM and routing policy govern forwarding.
+forwarding queue. When the target is full, a direction keeps one pending
+message in the target's own send, which completes once that message is
+accepted, before reading more from that source. The other direction and the
+control socket keep running. Socket HWM and routing policy govern forwarding.
+
+### Send readiness
+
+`Socket::send_ready` and `wait_send_ready` follow libzmq `ZMQ_POLLOUT`. Each
+send strategy probes the queues its `try_send` would use, and a full queue
+arms its space wake as a failed send does. The wait snapshots the space and
+topology signals before probing, so no change is lost. `zmq_poll`,
+`ZMQ_EVENTS`, and the Python `Poller` use it.
 
 ### C and language bindings
 

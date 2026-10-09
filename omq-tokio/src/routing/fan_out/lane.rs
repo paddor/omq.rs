@@ -556,6 +556,16 @@ impl FanOutLanes {
         }
     }
 
+    /// Whether lane 0 would admit a dispatch now, and the signal its space
+    /// changes on. Closed or exited lanes admit: sending reports or drops.
+    pub(super) fn dispatch_space(&self) -> (bool, Arc<StateSignal>) {
+        let mut dist = self.distributor.lock().expect("distributor poisoned");
+        let ready = self.admission_closed.load(Ordering::Acquire)
+            || self.distributor_exited.load(Ordering::Acquire)
+            || !dist.tx.is_full();
+        (ready, dist.space.clone())
+    }
+
     pub(super) fn stop_admission(&self) {
         let distributor = self.distributor.lock().expect("distributor poisoned");
         self.admission_closed.store(true, Ordering::Release);

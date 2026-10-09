@@ -81,16 +81,87 @@ def test_poll_huge_timeout_receives_late_message():
         ctx.term()
 
 
-def test_pollout_ready_immediately():
+def test_pollout_ready_once_connected():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     try:
         poller = zmq.Poller()
         poller.register(push, zmq.POLLOUT)
-        events = poller.poll(timeout=1000)
-        assert events == [(push, zmq.POLLOUT)]
+        # Like libzmq: no pipe, not writable.
+        assert poller.poll(timeout=0) == []
+        push.connect("inproc://pollout-ready")
+        assert poller.poll(timeout=1000) == [(push, zmq.POLLOUT)]
+        assert push.getsockopt(zmq.EVENTS) & zmq.POLLOUT
     finally:
         push.close()
+        ctx.term()
+
+
+def test_pollout_waits_for_bound_peer_and_queue_space():
+    ctx = zmq.Context()
+    push = ctx.socket(zmq.PUSH)
+    pull = ctx.socket(zmq.PULL)
+    try:
+        push.setsockopt(zmq.SNDHWM, 4)
+        pull.setsockopt(zmq.RCVHWM, 4)
+        push.bind("inproc://pollout-space")
+        poller = zmq.Poller()
+        poller.register(push, zmq.POLLOUT)
+        assert poller.poll(timeout=50) == [], "bound PUSH without peers is mute"
+        assert not push.getsockopt(zmq.EVENTS) & zmq.POLLOUT
+
+        threading.Timer(0.05, pull.connect, ("inproc://pollout-space",)).start()
+        started = time.perf_counter()
+        assert poller.poll(timeout=5000) == [(push, zmq.POLLOUT)]
+        assert time.perf_counter() - started < 2
+
+        # Internal queues drain asynchronously; refill until it stays full.
+        queued = 0
+        while True:
+            try:
+                while True:
+                    push.send(b"x", zmq.NOBLOCK)
+                    queued += 1
+            except zmq.Again:
+                pass
+            if not poller.poll(timeout=50):
+                break
+
+        def drain():
+            for _ in range(queued):
+                pull.recv()
+
+        threading.Timer(0.05, drain).start()
+        started = time.perf_counter()
+        assert poller.poll(timeout=5000) == [(push, zmq.POLLOUT)]
+        assert time.perf_counter() - started < 2
+        push.send(b"y", zmq.NOBLOCK)
+    finally:
+        push.close(linger=0)
+        pull.close(linger=0)
+        ctx.term()
+
+
+def test_pollout_follows_req_rep_alternation():
+    ctx = zmq.Context()
+    rep = ctx.socket(zmq.REP)
+    req = ctx.socket(zmq.REQ)
+    try:
+        rep.bind("inproc://pollout-req-rep")
+        req.connect("inproc://pollout-req-rep")
+        assert req.poll(1000, zmq.POLLOUT) == zmq.POLLOUT
+        assert rep.poll(0, zmq.POLLOUT) == 0
+        req.send(b"q")
+        assert req.poll(0, zmq.POLLOUT) == 0
+        assert rep.recv() == b"q"
+        assert rep.poll(1000, zmq.POLLOUT) == zmq.POLLOUT
+        rep.send(b"a")
+        assert rep.poll(0, zmq.POLLOUT) == 0
+        assert req.recv() == b"a"
+        assert req.poll(1000, zmq.POLLOUT) == zmq.POLLOUT
+    finally:
+        req.close(linger=0)
+        rep.close(linger=0)
         ctx.term()
 
 

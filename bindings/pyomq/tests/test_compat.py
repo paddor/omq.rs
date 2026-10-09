@@ -683,6 +683,7 @@ def test_select_wlist_reports_pollout():
     ctx = zmq.Context()
     push = ctx.socket(zmq.PUSH)
     try:
+        push.connect("inproc://select-wlist")
         rready, wready, xready = zmq.select([], [push], [], timeout=1.0)
         assert rready == []
         assert wready == [push]

@@ -1600,22 +1600,21 @@ class Poller:
     def sockets(self) -> list[tuple[Socket, int]]:
         return [(s, f) for s, f in self._sockets.values()]
 
+    def _results(self, ready: list[tuple[int, int]]) -> list[tuple[Socket, int]]:
+        events = dict(ready)
+        return [
+            (s, events[k] & f)
+            for k, (s, f) in self._sockets.items()
+            if events.get(k, 0) & f
+        ]
+
     def poll(self, timeout: int | None = None) -> list[tuple[Socket, int]]:
         if not self._sockets:
             return []
-        ready: dict[int, int] = {
-            k: POLLOUT for k, (_, f) in self._sockets.items() if f & POLLOUT
-        }
-        pollin_socks = [s._sock for k, (s, f) in self._sockets.items() if f & POLLIN]
-        if not pollin_socks:
-            return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
+        pollin = [s._sock for s, f in self._sockets.values() if f & POLLIN]
+        pollout = [s._sock for s, f in self._sockets.values() if f & POLLOUT]
         t = None if (timeout is None or timeout < 0) else int(timeout)
-        if ready:
-            t = 0
-        ready_ids = _native.wait_any(pollin_socks, t)
-        for rid in ready_ids:
-            ready[rid] = ready.get(rid, 0) | POLLIN
-        return [(s, ready[k]) for k, (s, _) in self._sockets.items() if k in ready]
+        return self._results(_native.wait_ready(pollin, pollout, t))
 
 
 # ── select ──────────────────────────────────────────────────────────

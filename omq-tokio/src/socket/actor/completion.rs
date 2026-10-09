@@ -313,10 +313,10 @@ mod tests {
             crate::routing::SendStrategy::for_socket_type(socket_type, &options, &pool),
             crate::socket::recv::SpscHandles::new(blocking, false),
             Arc::new(std::sync::Mutex::new(super::super::TypeState::new())),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(crate::socket::handle::ReqAwaitingReply::default()),
             None,
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            Arc::new(crate::socket::handle::ReadyPeers::default()),
             pool,
             Arc::new(crate::transport::inproc::InprocRegistry::new()),
         );
@@ -568,9 +568,7 @@ mod tests {
         peer.pending_handshake = false;
         peer.handshake_admission = None;
         peer.identity = identity.clone();
-        driver
-            .ready_peer_count_shared
-            .store(1, std::sync::atomic::Ordering::Release);
+        driver.ready_peer_count_shared.set(1);
         driver.recv_strategy.connection_added(7, identity.clone());
         for _ in 0..16 {
             driver.recv_tx.try_send(Message::single("filler")).unwrap();
@@ -617,12 +615,7 @@ mod tests {
         driver.retry_pending_receive();
         driver.retire_completed_peer(7).await;
         assert!(!driver.peers.contains_key(&7));
-        assert_eq!(
-            driver
-                .ready_peer_count_shared
-                .load(std::sync::atomic::Ordering::Acquire),
-            0
-        );
+        assert_eq!(driver.ready_peer_count_shared.get(), 0);
         for _ in 0..14 {
             assert_eq!(
                 receive.pop().unwrap().part_slice(0),
@@ -704,9 +697,7 @@ mod tests {
         driver
             .recv_strategy
             .connection_added(7, peer.identity.clone());
-        driver
-            .ready_peer_count_shared
-            .store(1, std::sync::atomic::Ordering::Release);
+        driver.ready_peer_count_shared.set(1);
         driver.pending_receive = Some(super::super::PendingReceive {
             peer_id: 8,
             message: Message::single("other peer"),

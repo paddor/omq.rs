@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
+pub mod copy_stats;
 #[cfg(feature = "dart")]
 pub mod dart;
 pub mod endpoint;

@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `FrameBuffer::drain` and `FrameBuffer::drain_owned` return `Drained`, the
+  protected and drained entry counts, instead of the protected count.
+
 ### Added
 
 - `FrameBuffer::io_slices` and `FrameBuffer::advance` write queued frames
   without draining them, large payloads from their own buffers.
+- `FrameBuffer::push_raw_message` queues one message's chunks as a group that
+  eviction removes whole.
+- `copy_stats` and the `copy-stats` feature count copied message bytes per
+  data-path site.
 
 ## [0.29.0] - 2026-10-07
 

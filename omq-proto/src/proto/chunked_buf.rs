@@ -192,6 +192,7 @@ impl ChunkedInputBuf {
     #[cfg(feature = "ws")]
     pub(crate) fn copy_into(&mut self, mut n: usize, dest: &mut BytesMut) {
         debug_assert!(n <= self.total_len);
+        crate::copy_stats::record(crate::copy_stats::Site::WebSocket, n);
         self.total_len -= n;
         while n > 0 {
             let start = self.front_offset;
@@ -236,6 +237,7 @@ impl ChunkedInputBuf {
         }
 
         // Slow path: spans front + rest chunks. Coalesce into one contiguous buffer.
+        crate::copy_stats::record(crate::copy_stats::Site::RecvAssemble, n);
         let mut remaining = n;
         let mut buf = BytesMut::with_capacity(n);
 

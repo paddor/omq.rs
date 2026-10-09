@@ -87,7 +87,8 @@ Use `--list`, `--case NAME`, `--repeat N`, or `--measure-only` for focused check
 `OMQ_PERF_WARMUP_MS` and `OMQ_PERF_MEASURE_MS` set durations;
 `OMQ_PERF_CPUS` sets an ordered Linux CPU list. The verifier excludes warmup,
 times bounded batches, and reports rates using actual elapsed time.
-See [performance verification](doc/perf-verification.md) for threshold settings.
+See [performance verification](doc/perf-verification.md) for threshold settings
+and the copy budget.
 
 ### Ruby Binding Tests
 

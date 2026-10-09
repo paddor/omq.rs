@@ -30,6 +30,8 @@ ws = []
 quic = []
 dart = []
 soak = []
+# Counts data-path copies of message bytes (`copy_stats`). Test-only.
+copy-stats = []
 
 [dependencies]
 concurrent-queue = "2.5.0"

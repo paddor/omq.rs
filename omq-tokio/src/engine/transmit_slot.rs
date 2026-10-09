@@ -6,11 +6,13 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+use smallvec::SmallVec;
 
 use super::codec::CodecProfile;
 use super::framing::WireFraming;
 use super::signal::{DataSignal, StateSignal};
+use omq_proto::copy_stats::{self, Site};
 use omq_proto::fan_out_frame::FanOutFrame;
 use omq_proto::frame_buffer::FrameBuffer;
 use omq_proto::handle_frame::{
@@ -244,17 +246,17 @@ impl PeerTransmitSlot {
         if self.dead.load(Ordering::Acquire) {
             return TryFrameResult::Dead;
         }
-        // Store one encoded fan-out message per entry so full-slot eviction
-        // can remove the oldest whole message instead of an arbitrary chunk.
-        let chunk = fanout_frame_chunk(frame);
+        // Queue each encoded fan-out message as one entry or chunk group so
+        // full-slot eviction removes the oldest whole message.
+        let chunks = fanout_frame_chunks(frame);
+        let len = chunks.iter().map(Bytes::len).sum::<usize>();
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
         if self.dead.load(Ordering::Acquire) {
             return TryFrameResult::Dead;
         }
         let mut queued_msgs = self.queued_msgs.load(Ordering::Relaxed);
         while queued_msgs > 0
-            && (eq.total_bytes().saturating_add(chunk.len()) >= self.cap
-                || queued_msgs >= self.msg_cap)
+            && (eq.total_bytes().saturating_add(len) >= self.cap || queued_msgs >= self.msg_cap)
         {
             if !eq.pop_oldest_unprotected_entry() {
                 self.above_lwm.store(true, Ordering::Relaxed);
@@ -262,11 +264,9 @@ impl PeerTransmitSlot {
             }
             queued_msgs = queued_msgs.saturating_sub(1);
         }
+        eq.push_raw_message(&chunks, protected);
         if protected {
-            eq.push_raw_protected(vec![chunk]);
             self.fanout_dict_queued.store(true, Ordering::Release);
-        } else {
-            eq.push_raw(vec![chunk]);
         }
         queued_msgs += 1;
         self.queued_msgs.store(queued_msgs, Ordering::Relaxed);
@@ -329,6 +329,7 @@ impl PeerTransmitSlot {
         if !eq.has_arena_only() {
             return None;
         }
+        copy_stats::record(Site::ArenaDrain, eq.arena_bytes().len());
         out.extend_from_slice(eq.arena_bytes());
         eq.clear_arena();
         self.data_signal.begin_drain();
@@ -416,26 +417,24 @@ impl PeerTransmitSlot {
 
     fn drain_with(&self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> DrainOutcome {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        let before_chunks = buf.len();
-        let protected_drained = if owned {
+        let drained = if owned {
             eq.drain_owned(buf, max_chunks)
         } else {
             eq.drain(buf, max_chunks)
         };
-        let eq_drained_chunks = buf.len() - before_chunks;
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
         self.data_signal.begin_drain();
 
-        if protected_drained > 0 {
+        if drained.protected > 0 {
             self.mark_fanout_dict_shipped();
         }
 
-        if eq_drained_chunks > 0 {
+        if drained.entries > 0 {
             #[allow(deprecated)]
             self.queued_msgs
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    Some(n.saturating_sub(eq_drained_chunks))
+                    Some(n.saturating_sub(drained.entries))
                 })
                 .ok();
         }
@@ -513,18 +512,13 @@ impl PeerTransmitSlot {
     }
 }
 
-fn fanout_frame_chunk(frame: &FanOutFrame<'_>) -> Bytes {
+fn fanout_frame_chunks(frame: &FanOutFrame<'_>) -> SmallVec<[Bytes; 2]> {
     match frame {
-        FanOutFrame::Arena(raw) => Bytes::copy_from_slice(raw),
-        FanOutFrame::Chunks(chunks) if chunks.len() == 1 => chunks[0].clone(),
-        FanOutFrame::Chunks(chunks) => {
-            let len = chunks.iter().map(Bytes::len).sum();
-            let mut buf = BytesMut::with_capacity(len);
-            for chunk in *chunks {
-                buf.extend_from_slice(chunk);
-            }
-            buf.freeze()
+        FanOutFrame::Arena(raw) => {
+            copy_stats::record(Site::FanOutChunk, raw.len());
+            smallvec::smallvec![Bytes::copy_from_slice(raw)]
         }
+        FanOutFrame::Chunks(chunks) => chunks.iter().cloned().collect(),
     }
 }
 
@@ -554,9 +548,9 @@ mod tests {
         let mut eq = FrameBuffer::one_shot();
         let mut chunks = Vec::new();
         let frame = build_fan_out_frame(&mut eq, msg, &mut chunks, 1, 8 * 1024);
-        let bytes = fanout_frame_chunk(&frame);
+        let wire: Vec<u8> = fanout_frame_chunks(&frame).concat();
         clear_fan_out_frame(&mut eq, &mut chunks);
-        bytes
+        Bytes::from(wire)
     }
 
     #[test]
@@ -643,6 +637,46 @@ mod tests {
         slot.drain(&mut actual, 1024);
         assert_eq!(actual, vec![fanout_bytes(&dict)]);
         assert!(slot.fanout_dict_shipped());
+    }
+
+    #[test]
+    fn fanout_drop_oldest_shares_large_bodies_and_evicts_whole_messages() {
+        let slot = PeerTransmitSlot::new(
+            1,
+            false,
+            None,
+            None,
+            omq_proto::frame_buffer::ARENA_THRESHOLD,
+            omq_proto::frame_buffer::ARENA_INITIAL_CAP,
+            TRANSMIT_SLOT_CAP_DEFAULT,
+            2,
+            crate::engine::framing::WireFraming::Zmtp,
+        );
+        slot.handshake_done.store(true, Ordering::Release);
+        let bodies: Vec<Bytes> = (0..3u8)
+            .map(|tag| Bytes::from(vec![tag; 64 * 1024]))
+            .collect();
+
+        let mut eq = FrameBuffer::one_shot();
+        let mut chunks = Vec::new();
+        for body in &bodies {
+            let msg = Message::single(body.clone());
+            let frame = build_fan_out_frame(&mut eq, &msg, &mut chunks, 1, 8 * 1024);
+            assert_eq!(slot.try_push_fanout_drop_oldest(&frame), TryFrameResult::Ok);
+            clear_fan_out_frame(&mut eq, &mut chunks);
+        }
+        let mut actual = Vec::new();
+        slot.drain(&mut actual, 1024);
+        // The first message was evicted whole: header and body.
+        let shared: Vec<_> = actual.iter().filter(|chunk| chunk.len() > 1024).collect();
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared[0].as_ptr(), bodies[1].as_ptr());
+        assert_eq!(shared[1].as_ptr(), bodies[2].as_ptr());
+        assert_eq!(actual.len(), 4, "one header chunk per remaining message");
+        assert_eq!(
+            slot.try_push_fanout_drop_oldest(&FanOutFrame::Arena(b"\x00\x01x")),
+            TryFrameResult::Ok
+        );
     }
 
     #[tokio::test]

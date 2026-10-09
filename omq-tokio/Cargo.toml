@@ -33,6 +33,8 @@ dart = ["omq-proto/dart", "dep:quinn-udp", "dep:nix", "nix/time"]
 # `cargo test`. Run with `cargo test --features fuzz`.
 fuzz = []
 soak = []
+# Counts data-path copies of message bytes for the copy-budget tests.
+copy-stats = ["omq-proto/copy-stats"]
 # Enables the comparison peer's Tokio multi-thread runtime variant.
 bench-mt-runtime = ["tokio/rt-multi-thread"]
 
@@ -109,6 +111,11 @@ required-features = ["quic"]
 name = "omq_quinn_datagram_peer"
 path = "examples/quinn_datagram_peer.rs"
 required-features = ["quic"]
+
+[[test]]
+name = "omq_copy_budget"
+path = "tests/copy_budget.rs"
+required-features = ["copy-stats"]
 
 [[test]]
 name = "omq_latency_send"

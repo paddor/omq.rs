@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BlockingRecvCancel` fires.
 - `blocking::Socket::register_recv_waker` forwards receive readiness to a
   `Waker` for external pollers.
+- The `copy-stats` feature and the `omq_copy_budget` test check copied bytes
+  per message across socket types, peer counts, transports, and profiles.
 
 ### Changed
 
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Canceling a REQ or REP `send` no longer leaves the socket unable to send.
+- PUB, XPUB, and RADIO with `OnMute::DropOldest` no longer copy each
+  message of 4 KiB or more once per peer.
 
 ## [0.25.0] - 2026-10-07
 

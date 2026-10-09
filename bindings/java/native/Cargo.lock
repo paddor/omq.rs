@@ -541,6 +541,7 @@ name = "omq-java-native"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "jni",
  "omq-proto",
  "omq-tokio",
@@ -554,6 +555,7 @@ dependencies = [
  "bytes",
  "crypto_box",
  "crypto_secretbox",
+ "loom",
  "lz4rip",
  "patricia_tree",
  "rand",

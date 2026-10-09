@@ -41,6 +41,8 @@ final class NativeFfm {
     private static final MethodHandle SEND_RING_PAYLOAD_CAPACITY;
     private static final MethodHandle SEND_RING_ERROR_CODE;
     private static final MethodHandle SEND_RING_ERROR_MESSAGE;
+    private static final MethodHandle SEND_RING_WAKE;
+    private static final MethodHandle SEND_RING_WAIT;
 
     static {
         Native.ensureLoaded();
@@ -78,6 +80,12 @@ final class NativeFfm {
         SEND_RING_CREATE = downcall(
                 "omq_java_send_ring_create",
                 FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_LONG));
+        SEND_RING_WAKE = downcall(
+                "omq_java_send_ring_wake",
+                FunctionDescriptor.ofVoid(JAVA_LONG));
+        SEND_RING_WAIT = downcall(
+                "omq_java_send_ring_wait",
+                FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
         SEND_RING_CLOSE = downcall(
                 "omq_java_send_ring_close",
                 FunctionDescriptor.ofVoid(JAVA_LONG));
@@ -188,6 +196,27 @@ final class NativeFfm {
         }
         try {
             SEND_RING_CLOSE.invokeExact(handle);
+        } catch (RuntimeException error) {
+            throw error;
+        } catch (Throwable error) {
+            throw new OMQException("native FFM call failed", error);
+        }
+    }
+
+    static void sendRingWake(long handle) {
+        try {
+            SEND_RING_WAKE.invokeExact(handle);
+        } catch (RuntimeException error) {
+            throw error;
+        } catch (Throwable error) {
+            throw new OMQException("native FFM call failed", error);
+        }
+    }
+
+    /** Parks until the ring head moves past {@code seenHead}; returns false on timeout. */
+    static boolean sendRingWait(long handle, long seenHead, long timeoutMillis) {
+        try {
+            return (int) SEND_RING_WAIT.invokeExact(handle, seenHead, timeoutMillis) == 0;
         } catch (RuntimeException error) {
             throw error;
         } catch (Throwable error) {

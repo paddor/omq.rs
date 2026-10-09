@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Blocking and timed sends on a full queue, `receiveAny`, and the PUSH and
+  SCATTER send ring park until woken instead of polling every 50 us to 1 ms.
+  An idle send ring no longer wakes its worker thread 20,000 times per second.
+
 ## [0.3.6] - 2026-10-07
 
 - Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive

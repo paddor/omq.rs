@@ -4,16 +4,17 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
-import java.util.concurrent.locks.LockSupport;
 
 final class SendRing implements AutoCloseable {
     private static final int DEFAULT_DESC_CAPACITY = 4096;
     private static final long DEFAULT_PAYLOAD_CAPACITY = 16L * 1024L * 1024L;
 
-    private static final long CONTROL_BYTES = 384;
+    private static final long CONTROL_BYTES = 640;
     private static final long CONTROL_HEAD = 0;
     private static final long CONTROL_TAIL = 128;
     private static final long CONTROL_CLOSED = 256;
+    private static final long CONTROL_WORKER_PARKED = 384;
+    private static final int SPIN_LIMIT = 512;
 
     private static final long DESC_BYTES = 64;
     private static final long DESC_PAYLOAD = 0;
@@ -49,15 +50,18 @@ final class SendRing implements AutoCloseable {
         int spins = 0;
         while (descIsFull()) {
             checkOpen();
-            spins = backoff(spins);
+            spins = waitForSpace(spins, cachedHead, -1);
         }
 
         Reservation reservation;
         spins = 0;
         while ((reservation = reservePayload(body.length)) == null) {
             checkOpen();
+            long seen = cachedHead;
             reclaimConsumed();
-            spins = backoff(spins);
+            if (cachedHead == seen) {
+                spins = waitForSpace(spins, seen, -1);
+            }
         }
 
         if (body.length > 0) {
@@ -69,6 +73,12 @@ final class SendRing implements AutoCloseable {
         descriptors.set(LONG, descOffset + DESC_PAYLOAD_END, reservation.end());
         tail++;
         ATOMIC_LONG.setRelease(control, CONTROL_TAIL / Long.BYTES, tail);
+        // Pairs with the worker's parked-flag store and tail recheck.
+        VarHandle.fullFence();
+        if ((long) ATOMIC_LONG.getVolatile(control, CONTROL_WORKER_PARKED / Long.BYTES) != 0
+                && ATOMIC_LONG.compareAndSet(control, CONTROL_WORKER_PARKED / Long.BYTES, 1L, 0L)) {
+            NativeFfm.sendRingWake(handle);
+        }
         return true;
     }
 
@@ -120,15 +130,21 @@ final class SendRing implements AutoCloseable {
         long start = System.nanoTime();
         long timeoutNanos = saturatedNanos(timeoutMillis);
         int spins = 0;
-        while (tail != headAcquire()) {
+        long head;
+        while (tail != (head = headAcquire())) {
             checkOpen();
             if (timeoutMillis == 0) {
                 return false;
             }
-            if (timeoutMillis > 0 && System.nanoTime() - start >= timeoutNanos) {
-                return false;
+            long remainingMillis = -1;
+            if (timeoutMillis > 0) {
+                long elapsed = System.nanoTime() - start;
+                if (elapsed >= timeoutNanos) {
+                    return false;
+                }
+                remainingMillis = Math.max(1, (timeoutNanos - elapsed) / 1_000_000L);
             }
-            spins = backoff(spins);
+            spins = waitForSpace(spins, head, remainingMillis);
         }
         reclaimConsumed();
         return true;
@@ -152,6 +168,7 @@ final class SendRing implements AutoCloseable {
             return;
         }
         ATOMIC_LONG.setRelease(control, CONTROL_CLOSED / Long.BYTES, 1L);
+        NativeFfm.sendRingWake(current);
     }
 
     private long headAcquire() {
@@ -230,16 +247,17 @@ final class SendRing implements AutoCloseable {
         NativeFfm.sendRingClose(current);
     }
 
-    private static int backoff(int spins) {
+    /** Spins briefly, then parks natively until the head moves past {@code seenHead}. */
+    private int waitForSpace(int spins, long seenHead, long timeoutMillis) {
         if (spins < 256) {
             Thread.onSpinWait();
             return spins + 1;
         }
-        if (spins < 512) {
+        if (spins < SPIN_LIMIT) {
             Thread.yield();
             return spins + 1;
         }
-        LockSupport.parkNanos(50_000L);
+        NativeFfm.sendRingWait(handle, seenHead, timeoutMillis);
         return spins;
     }
 

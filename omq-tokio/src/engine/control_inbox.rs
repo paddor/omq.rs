@@ -111,10 +111,6 @@ impl Sender {
         Ok(())
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "return original command without an error allocation"
-    )]
     pub(crate) async fn send(
         &self,
         mut command: PeerDriverCommand,

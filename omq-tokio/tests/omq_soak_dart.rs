@@ -206,7 +206,7 @@ async fn relay_packets(
     let mut turn_bytes = 0;
     loop {
         let deadline = pending.as_ref().map_or_else(
-            || Instant::now() + Duration::from_secs(60),
+            || Instant::now() + Duration::from_mins(1),
             |(_, _, deadline)| *deadline,
         );
         tokio::select! {

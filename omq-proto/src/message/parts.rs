@@ -1,10 +1,11 @@
 //! Bounded owning multipart tables. Payload storage is independent of recycling.
 
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use concurrent_queue::ConcurrentQueue;
 
 use super::{MAX_INLINE_PAYLOAD, Message, Payload};
 
@@ -14,13 +15,13 @@ use super::{MAX_INLINE_PAYLOAD, Message, Payload};
 /// bytes. Exhaustion uses an ordinary allocation; sending never waits for a
 /// table. Oversized tables are discarded on return. Messages can outlive the
 /// pool handle and may be cloned or dropped on other threads.
+/// Cached table checkout and return use a bounded atomic MPMC queue.
 #[derive(Debug, Clone)]
 pub struct MessagePool(Arc<Pool>);
 
 #[derive(Debug)]
 struct Pool {
-    free: Mutex<Vec<Vec<Payload>>>,
-    tables: usize,
+    free: Option<ConcurrentQueue<Vec<Payload>>>,
     parts: usize,
 }
 
@@ -29,11 +30,15 @@ impl MessagePool {
     /// Zero tables disables caching; zero parts only caches empty tables.
     #[must_use]
     pub fn new(tables: usize, parts: usize) -> Self {
-        Self(Arc::new(Pool {
-            free: Mutex::new((0..tables).map(|_| Vec::with_capacity(parts)).collect()),
-            tables,
-            parts,
-        }))
+        let free = (tables != 0).then(|| {
+            let free = ConcurrentQueue::bounded(tables);
+            for _ in 0..tables {
+                free.push(Vec::with_capacity(parts))
+                    .expect("preallocated table cache capacity");
+            }
+            free
+        });
+        Self(Arc::new(Pool { free, parts }))
     }
 
     /// Construct a message with the same frame and ownership rules as
@@ -61,8 +66,7 @@ impl MessagePool {
     }
 
     pub(crate) fn take(&self) -> Parts {
-        // The guard must be released before allocation or payload destruction.
-        let free = self.0.free.lock().expect("message pool poisoned").pop();
+        let free = self.0.free.as_ref().and_then(|free| free.pop().ok());
         Parts {
             values: free.unwrap_or_else(|| Vec::with_capacity(self.0.parts)),
             pool: Some(self.clone()),
@@ -182,16 +186,17 @@ impl Drop for Parts {
         let Some(pool) = &self.pool else {
             return;
         };
+        let Some(free) = &pool.0.free else {
+            return;
+        };
         if self.values.capacity() > pool.0.parts {
             return;
         }
         // A payload owner may run arbitrary drop logic, including constructing
-        // another message. Never hold the cache lock while releasing payloads.
+        // another message. Publish only after releasing all payload owners.
         self.values.clear();
-        let mut free = pool.0.free.lock().expect("message pool poisoned");
-        if free.len() < pool.0.tables {
-            free.push(std::mem::take(&mut self.values));
-        }
+        // Concurrent fallback returns can fill the cache; discard excess tables.
+        let _ = free.push(std::mem::take(&mut self.values));
     }
 }
 
@@ -315,14 +320,14 @@ mod tests {
         let clone = first.clone();
         assert_ne!(pointer(&first), pointer(&clone));
         drop((first, clone));
-        assert_eq!(pool.0.free.lock().unwrap().len(), 1);
+        assert_eq!(pool.0.free.as_ref().unwrap().len(), 1);
         let large = pool.multipart(["a", "b", "c"]);
         drop(large);
-        assert!(pool.0.free.lock().unwrap().is_empty());
+        assert!(pool.0.free.as_ref().unwrap().is_empty());
         drop(pool.multipart(["a", "b"]));
-        let free = pool.0.free.lock().unwrap();
+        let free = pool.0.free.as_ref().unwrap();
         assert_eq!(free.len(), 1);
-        assert!(free[0].capacity() <= 2);
+        assert!(free.pop().unwrap().capacity() <= 2);
     }
 
     #[test]
@@ -349,6 +354,6 @@ mod tests {
         assert!(pool.multipart::<_, Bytes>([]).is_empty());
         let message = pool.multipart([Bytes::from(vec![3; 128])]);
         assert_eq!(message.len(), 1);
-        assert_eq!(pool.0.free.lock().unwrap().len(), 1);
+        assert_eq!(pool.0.free.as_ref().unwrap().len(), 1);
     }
 }

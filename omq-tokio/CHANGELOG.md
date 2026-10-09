@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `blocking::Socket::send_timeout` waits for queue space up to a deadline.
+- `blocking::Socket::register_recv_waker` forwards receive readiness to a
+  `Waker` for external pollers.
+
+### Fixed
+
+- Canceling a REQ or REP `send` no longer leaves the socket unable to send.
+
 ## [0.25.0] - 2026-10-07
 
 ### Breaking

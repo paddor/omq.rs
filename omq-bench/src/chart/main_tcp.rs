@@ -1,7 +1,7 @@
 use super::common::{
-    self, C_AERON, C_GRPC, C_IGGY, C_IROH, C_KAFKA, C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_NATS,
-    C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_CT, C_OMQ_MT, C_OMQ_QUIC, C_OMQ_SPIN, C_R0Z, C_RABBITMQ,
-    C_REDIS, C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyMap, ValMap,
+    C_AERON, C_GRPC, C_IROH, C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_NATS, C_OMQ_1T, C_OMQ_2T,
+    C_OMQ_3T, C_OMQ_CT, C_OMQ_MT, C_OMQ_QUIC, C_OMQ_SPIN, C_R0Z, C_RABBITMQ, C_REDIS,
+    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyEntry, LatencyMap, ValMap,
     draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_brokered_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
@@ -148,6 +148,12 @@ const MOM_IMPLS: &[Impl] = &[
         color: C_OMQ_QUIC,
     },
     Impl {
+        key: "omq-dart",
+        label: "OMQ / Dart",
+        threads: "",
+        color: plotters::style::RGBColor(255, 183, 77),
+    },
+    Impl {
         key: "grpc-rust",
         label: "gRPC over HTTP/2",
         threads: "",
@@ -161,7 +167,7 @@ const MOM_IMPLS: &[Impl] = &[
     },
     Impl {
         key: "aeron-udp-2proc",
-        label: "Aeron / UDP",
+        label: "Aeron / UDP (SHARED)",
         threads: "",
         color: C_AERON,
     },
@@ -223,7 +229,12 @@ fn mom_tcp_impls() -> Vec<Impl> {
     MOM_IMPLS
         .iter()
         .copied()
-        .filter(|imp| !matches!(imp.key, "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic"))
+        .filter(|imp| {
+            !matches!(
+                imp.key,
+                "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic" | "omq-dart"
+            )
+        })
         .collect()
 }
 
@@ -237,6 +248,15 @@ fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuDa
         merge_values(&mut msgs, other_msgs);
         cpu.extend(other_cpu);
     }
+    for (size, row) in super::dart::mom_rows("throughput", TPUT_SIZES) {
+        let rate = row["msgs_s"].as_f64().unwrap();
+        msgs.entry(size)
+            .or_default()
+            .insert("omq-dart".into(), rate);
+        tput.entry(size)
+            .or_default()
+            .insert("omq-dart".into(), rate * size as f64 / 1e6);
+    }
     (tput, msgs, cpu)
 }
 
@@ -248,6 +268,16 @@ fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
             lat.entry(size).or_default().extend(values);
         }
         cpu.extend(other_cpu);
+    }
+    for (size, row) in super::dart::mom_rows("latency", MOM_LAT_SIZES) {
+        lat.entry(size).or_default().insert(
+            "omq-dart".into(),
+            LatencyEntry {
+                p50: row["p50_us"].as_f64().unwrap(),
+                p99: row["p99_us"].as_f64().unwrap(),
+                p999: row["p999_us"].as_f64().unwrap(),
+            },
+        );
     }
     (lat, cpu)
 }
@@ -337,42 +367,6 @@ pub(crate) fn generate() {
         eprintln!("Written: {}", out.display());
     }
 
-    // Producer/consumer throughput across direct, RPC, and brokered transports.
-    let (tput, msgs, cpu) = mom_throughput();
-    if !tput.is_empty() {
-        let out = dir.join("mom_throughput.svg");
-        draw_throughput_dual_panel_brokered_with_versions(
-            &out,
-            "Producer/consumer throughput, loopback, one flow",
-            TPUT_SIZES,
-            MOM_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "broker CPU%",
-            "rcv CPU%",
-        )
-        .expect("draw RPC/MOM chart");
-        eprintln!("Written: {}", out.display());
-    }
-
-    // Sequential request/reply-like latency across direct, RPC, and brokered transports.
-    let (lat, cpu) = mom_latency();
-    if !lat.is_empty() {
-        let out = dir.join("mom_latency.svg");
-        draw_latency_brokered_with_versions(
-            &out,
-            "Sequential request/reply-like latency, loopback, one flow",
-            LAT_SIZES,
-            MOM_IMPLS,
-            &lat,
-            &cpu,
-        )
-        .expect("draw RPC/MOM latency chart");
-        eprintln!("Written: {}", out.display());
-    }
-
     // PUB/SUB (32 peers)
     let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(32), PUBSUB_IMPLS);
     if !tput.is_empty() {
@@ -405,6 +399,43 @@ pub(crate) fn generate() {
             &cpu,
         )
         .expect("draw reqrep chart");
+        eprintln!("Written: {}", out.display());
+    }
+}
+
+pub(crate) fn generate_mom() {
+    let dir = out_dir();
+    let (tput, msgs, cpu) = mom_throughput();
+    if !tput.is_empty() {
+        let out = dir.join("mom_throughput.svg");
+        draw_throughput_dual_panel_brokered_with_versions(
+            &out,
+            "Producer/consumer throughput, loopback, one flow",
+            TPUT_SIZES,
+            MOM_IMPLS,
+            &tput,
+            &msgs,
+            &cpu,
+            "snd CPU%",
+            "broker CPU%",
+            "rcv CPU%",
+        )
+        .expect("draw MOM throughput chart");
+        eprintln!("Written: {}", out.display());
+    }
+
+    let (lat, cpu) = mom_latency();
+    if !lat.is_empty() {
+        let out = dir.join("mom_latency.svg");
+        draw_latency_brokered_with_versions(
+            &out,
+            "Sequential request/reply-like latency, loopback, one flow",
+            MOM_LAT_SIZES,
+            MOM_IMPLS,
+            &lat,
+            &cpu,
+        )
+        .expect("draw MOM latency chart");
         eprintln!("Written: {}", out.display());
     }
 }

@@ -7,6 +7,7 @@ Generated SVGs. Do not hand-edit. Data source: `~/.cache/omq/*.jsonl`.
 ```sh
 cargo run --release -p omq-bench -- chart          # all charts
 cargo run --release -p omq-bench -- chart main      # main overview only
+cargo run --release -p omq-bench -- chart mom       # other protocol comparisons
 cargo run --release -p omq-bench -- chart comparison # per-transport
 cargo run --release -p omq-bench -- chart pubsub    # PUB/SUB + CURVE
 cargo run --release -p omq-bench -- chart fanio     # fan-out/fan-in
@@ -17,9 +18,10 @@ cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Main charts (5 files)
+## Overview charts (5 files)
 
-Data: `comparisons.jsonl`. External impls required.
+Data: `comparisons.jsonl`; MOM Dart rows: `mom-dart.jsonl`.
+External impls required.
 
 | file | impls |
 |------|-------|

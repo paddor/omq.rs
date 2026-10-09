@@ -891,6 +891,40 @@ fn blocking_send_timeout_waits_for_peer() {
 }
 
 #[test]
+fn blocking_send_cancelable_parks_until_canceled() {
+    let ctx = Context::new();
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+    let ep = inproc_ep("blocking-send-cancelable");
+    push.bind(ep.clone()).unwrap();
+
+    // Bind-side PUSH without a peer mutes until canceled.
+    let cancel = Arc::new(omq_tokio::blocking::BlockingRecvCancel::new());
+    let canceler = {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.cancel();
+        })
+    };
+    assert!(
+        !push
+            .send_cancelable(Message::single("lost"), &cancel)
+            .unwrap()
+    );
+    canceler.join().unwrap();
+
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    pull.connect(ep).unwrap();
+    let fresh = omq_tokio::blocking::BlockingRecvCancel::new();
+    assert!(
+        push.send_cancelable(Message::single("sent"), &fresh)
+            .unwrap()
+    );
+    let m = pull.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(m, Message::single("sent"));
+}
+
+#[test]
 fn blocking_recv_waker_wakes_on_message() {
     struct Flag(std::sync::atomic::AtomicBool, std::thread::Thread);
     impl std::task::Wake for Flag {

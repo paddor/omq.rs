@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use omq_tokio::blocking::{BlockingRecvCancel, Socket};
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
-    Context, DartCongestion, DartPool, DartStats, Message, Options, SocketType, TrySendError,
+    BufferPool, Context, DartCongestion, DartStats, Message, Options, SocketType, TrySendError,
 };
 
 #[path = "perf_verify/affinity.rs"]
@@ -21,7 +21,7 @@ mod current;
 #[cfg(feature = "quic")]
 mod ws_bench_config;
 
-const BATCH: usize = 64;
+const CLOCK_MESSAGES: usize = 64;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl Config {
         let size = args[3].parse().expect("body size");
         let spin = spin_budget(&args[7]);
         let io_spin = spin_budget(&args[8]);
-        assert!((16..=8_388_608).contains(&size));
+        assert!((8..=8_388_608).contains(&size));
         #[cfg(feature = "quic")]
         ws_bench_config::set_endpoint(Some(&args[2]));
         assert!(spin <= Duration::from_micros(50) || spin == Duration::MAX);
@@ -185,18 +185,17 @@ fn timed_cancel(at: Instant) -> Arc<BlockingRecvCancel> {
     cancel
 }
 
-fn make_body(pool: &DartPool, size: usize, tag: u64) -> Option<Message> {
-    if size > omq_proto::dart::MAX_BODY {
+fn make_body(pool: &BufferPool, size: usize, tag: u64) -> Option<Message> {
+    if size > pool.buffer_size() {
         let mut body = vec![7; size];
         body[..8].copy_from_slice(&tag.to_le_bytes());
         return Some(Message::single(body));
     }
-    let mut body = pool.try_take()?;
-    let writable = body.writable();
-    writable[..size].fill(7);
-    writable[..8].copy_from_slice(&tag.to_le_bytes());
-    body.set_len(size).unwrap();
-    Some(body.into_message())
+    pool.try_message(size, |body| {
+        body.fill(7);
+        body[..8].copy_from_slice(&tag.to_le_bytes());
+    })
+    .unwrap()
 }
 
 // A failed attempt keeps polling for one bounded window before yielding.
@@ -226,83 +225,74 @@ impl CapacityWait {
     }
 }
 
-fn scatter(socket: &Socket, config: &Config, native: bool, at: Instant) {
-    let pool = if native {
-        socket.dart_pool().unwrap().clone()
-    } else {
-        DartPool::new(1024)
-    };
-    let pooled = config.size < omq_proto::dart::MAX_BODY
-        || (native && config.size == omq_proto::dart::MAX_BODY);
-    let mut cache = (!pooled).then(|| BodyCache::new(config.size));
+fn scatter(socket: &Socket, config: &Config, native: bool, pool: &BufferPool, at: Instant) {
+    let mut cache = (config.size > pool.buffer_size()).then(|| BodyCache::new(config.size));
     let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
-    let mut queued = VecDeque::with_capacity(BATCH);
-    let mut buffers = Vec::with_capacity(BATCH);
+    let mut pending = None;
     let mut offered = 0u64;
     let mut warmup_offered = 0u64;
     let mut pool_empty = 0u64;
-    let mut measured = false;
     let mut sequence = 0u64;
     let mut wait = CapacityWait {
         spin: config.spin,
         deadline: None,
     };
     let mut now = at;
-    let mut clock_stride = 0;
+    let mut until_clock = 0;
     loop {
-        // Successful batches keep an exact phase/deadline check. Empty pool
-        // and capacity probes share one timestamp for up to eight attempts.
-        if clock_stride == 0 {
+        // Submit messages individually. Read time every 64 successful sends,
+        // or at most eight capacity probes while making no progress.
+        if until_clock == 0 {
             now = Instant::now();
+            until_clock = CLOCK_MESSAGES;
         }
-        clock_stride = (clock_stride + 1) % 8;
         if now >= until {
             break;
         }
-        if queued.is_empty() {
-            measured = now >= measure_at;
-            // Each batch has one phase, including retries across the boundary.
-            // Warmup bodies stay distinguishable after reordering or delays.
-            if pooled {
-                pool.try_take_many_into(BATCH, &mut buffers);
-                pool_empty += u64::from(buffers.is_empty());
-            }
-            for mut body in buffers.drain(..) {
-                let tag = sequence | (u64::from(measured) << 63);
-                prepare_pooled_body(&mut body, config.size, tag);
+        if pending.is_none() {
+            let measured = now >= measure_at;
+            let tag = sequence | (u64::from(measured) << 63);
+            let body = if let Some(cache) = &mut cache {
+                cache.message(tag)
+            } else {
+                pool.try_message(config.size, |body| {
+                    body.fill(7);
+                    write_tag(body, tag);
+                })
+                .unwrap()
+            };
+            if let Some(body) = body {
                 sequence += 1;
-                queued.push_back(body.into_message());
-            }
-            if let Some(cache) = &mut cache {
-                prepare_cached_batch(cache, &mut queued, &mut sequence, measured);
+                pending = Some((body, measured));
+            } else {
+                pool_empty += 1;
             }
         }
-        if queued.is_empty() {
+        let Some((body, measured)) = pending.take() else {
             wait.stalled(now);
+            until_clock = until_clock.min(8) - 1;
             continue;
-        }
-        let count = match socket.try_send_many(&mut queued, BATCH) {
-            Ok(count) => count,
+        };
+        match socket.try_send(body) {
+            Ok(()) => {
+                if measured {
+                    offered += 1;
+                } else {
+                    warmup_offered += 1;
+                }
+                wait.progressed();
+                until_clock -= 1;
+            }
             Err(TrySendError::Full(body)) => {
-                queued.push_front(body);
-                0
+                pending = Some((body, measured));
+                wait.stalled(now);
+                until_clock = until_clock.min(8) - 1;
             }
             Err(error) => panic!("send failed: {error}"),
-        };
-        if measured {
-            offered += count as u64;
-        } else {
-            warmup_offered += count as u64;
-        }
-        if count == 0 {
-            wait.stalled(now);
-        } else {
-            wait.progressed();
-            clock_stride = 0;
         }
     }
-    drop(queued);
+    drop(pending);
     std::thread::sleep((config.drain / 2).min(Duration::from_secs(1)));
     if native {
         wait_acknowledged(
@@ -349,39 +339,11 @@ fn scatter_result(
     ));
 }
 
-fn prepare_pooled_body(body: &mut omq_tokio::DartBuffer, size: usize, tag: u64) {
-    let writable = body.writable();
-    writable[..size].fill(7);
-    writable[..8].copy_from_slice(&tag.to_le_bytes());
-    writable[8..16].copy_from_slice(&(!tag).to_le_bytes());
-    body.set_len(size).unwrap();
-}
-
-fn prepare_cached_batch(
-    cache: &mut BodyCache,
-    queued: &mut VecDeque<Message>,
-    sequence: &mut u64,
-    measured: bool,
-) {
-    let size = cache.bodies.front().expect("bounded body cache").len();
-    for _ in 0..BATCH.min((64_000 / size).max(1)) {
-        let bytes = cache.bodies.pop_front().expect("bounded body cache");
-        // The cache keeps one immutable view. Reuse is allowed only after
-        // every transport/repair reference has gone; no bytes change in flight.
-        let mut body = match bytes.try_into_mut() {
-            Ok(body) => body,
-            Err(bytes) => {
-                cache.bodies.push_front(bytes);
-                break;
-            }
-        };
-        let tag = *sequence | (u64::from(measured) << 63);
-        body[..8].copy_from_slice(&tag.to_le_bytes());
+#[inline]
+fn write_tag(body: &mut [u8], tag: u64) {
+    body[..8].copy_from_slice(&tag.to_le_bytes());
+    if body.len() >= 16 {
         body[8..16].copy_from_slice(&(!tag).to_le_bytes());
-        let body = body.freeze();
-        *sequence += 1;
-        queued.push_back(Message::single(body.clone()));
-        cache.bodies.push_back(body);
     }
 }
 
@@ -391,12 +353,29 @@ struct BodyCache {
 
 impl BodyCache {
     fn new(size: usize) -> Self {
-        let count = (1024 * 1024 / size).clamp(BATCH, 1024);
+        let count = (1024 * 1024 / size).clamp(64, 1024);
         Self {
             bodies: (0..count)
                 .map(|_| bytes::Bytes::from(vec![7; size]))
                 .collect(),
         }
+    }
+
+    fn message(&mut self, tag: u64) -> Option<Message> {
+        let bytes = self.bodies.pop_front().expect("bounded body cache");
+        // Retained transport or repair views prevent mutation in flight.
+        let mut body = match bytes.try_into_mut() {
+            Ok(body) => body,
+            Err(bytes) => {
+                self.bodies.push_front(bytes);
+                return None;
+            }
+        };
+        write_tag(&mut body, tag);
+        let body = body.freeze();
+        let message = Message::single(body.clone());
+        self.bodies.push_back(body);
+        Some(message)
     }
 }
 
@@ -411,10 +390,11 @@ fn wait_acknowledged(socket: &Socket, count: u64, deadline: Instant, wait: &mut 
 }
 
 fn gather(socket: &Socket, config: &Config, at: Instant) {
+    let recycle_pooled = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. })
+        && config.size > omq_tokio::message::MAX_INLINE_MESSAGE;
     let until = at + config.throughput_warmup + config.duration;
     let cancel = timed_cancel(until + config.drain);
     let mut batch = Vec::with_capacity(256);
-    let pool = socket.dart_pool().ok().cloned();
     let mut received = 0u64;
     let mut total = 0u64;
     let mut expected = 0u64;
@@ -434,8 +414,13 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
                 continue;
             }
             let tag = u64::from_le_bytes(body[..8].try_into().unwrap());
-            let check = u64::from_le_bytes(body[8..16].try_into().unwrap());
-            if check != !tag || !valid_padding(&body[16..]) {
+            let valid = if body.len() >= 16 {
+                let check = u64::from_le_bytes(body[8..16].try_into().unwrap());
+                check == !tag && valid_padding(&body[16..])
+            } else {
+                valid_padding(&body[8..])
+            };
+            if !valid {
                 corrupt += 1;
             }
             let sequence = tag & !(1 << 63);
@@ -451,9 +436,9 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
         if Instant::now() <= until {
             received += measured;
         }
-        if let Some(pool) = &pool {
+        if recycle_pooled {
             while !batch.is_empty() {
-                pool.recycle_many(&mut batch, BATCH);
+                BufferPool::recycle_many(&mut batch, 64);
             }
         } else {
             batch.clear();
@@ -495,9 +480,9 @@ fn server(socket: &Socket) {
         std::io::stdin().lock().read_line(&mut line).unwrap();
         stop.cancel();
     });
-    let mut replies = Vec::with_capacity(BATCH);
+    let mut replies = Vec::with_capacity(1);
     while socket
-        .recv_many_registered_cancelable_into(BATCH, &cancel, &mut replies)
+        .recv_many_registered_cancelable_into(1, &cancel, &mut replies)
         .unwrap()
         .is_some()
     {
@@ -512,16 +497,11 @@ fn server(socket: &Socket) {
     ));
 }
 
-fn client(socket: &Socket, config: &Config, native: bool) {
-    let pool = if native {
-        socket.dart_pool().unwrap().clone()
-    } else {
-        DartPool::new(1024)
-    };
+fn client(socket: &Socket, config: &Config, pool: &BufferPool) {
     let mut samples = Vec::with_capacity(config.iterations);
     for index in 0..config.warmup + config.iterations {
         let tag = u64::try_from(index).unwrap();
-        let body = make_body(&pool, config.size, tag).expect("send pool exhausted");
+        let body = make_body(pool, config.size, tag).expect("send pool exhausted");
         let at = Instant::now();
         socket.send(body).unwrap();
         let reply = socket
@@ -618,6 +598,13 @@ fn main() {
     affinity.pin(if config.receiving() { 5 } else { 0 });
     let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
     let socket = context.blocking_socket(config.socket_type(), config.options());
+    let pool = (!config.receiving()).then(|| {
+        if native {
+            BufferPool::new(2048, 8192)
+        } else {
+            BufferPool::new(1024, 1024)
+        }
+    });
     if config.receiving() {
         let endpoint = socket.bind(config.endpoint.clone()).unwrap();
         emit(&format!(
@@ -633,16 +620,18 @@ fn main() {
         "null".into()
     };
     emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{}}}",
+        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"dart_pool_buffers\":{},\"dart_buffer_capacity\":{}}}",
         affinity.description(),
         offloads(&socket),
         config.window_messages,
+        config.options().dart.pool_buffers,
+        omq_tokio::transport::dart::BUFFER_CAPACITY,
     ));
     let at = start();
     match config.role.as_str() {
-        "scatter" => scatter(&socket, &config, native, at),
+        "scatter" => scatter(&socket, &config, native, pool.as_ref().unwrap(), at),
         "gather" => gather(&socket, &config, at),
-        "client" => client(&socket, &config, native),
+        "client" => client(&socket, &config, pool.as_ref().unwrap()),
         "server" => server(&socket),
         _ => unreachable!(),
     }

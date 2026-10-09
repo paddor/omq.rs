@@ -119,13 +119,13 @@ Data: `results_pushpull_zstd.jsonl`, patterns `pushpull_zstd` and
 and 2 KiB dictionary setup as the LZ4 chart, at Zstd level 1.
 Bench: `omq_bench run pushpull-zstd --level 1 --link-mbps RATE`.
 
-## Reliable Dart charts
+## Reliable DART charts
 
 Data: `dart.jsonl`. Outputs: `dart/{scattergather,clientserver}.svg`.
-Select Dart protocol version 1, LAN/adaptive as separate series, with TCP from the
+Select DART protocol version 1, LAN/adaptive as separate series, with TCP from the
 matched runner. Exclude profiled rows, other spin budgets, verification
 failures, diagnostic sample captures, borrowed-runtime experiments, and
-mismatched workload profiles. Dart requires the default 256-message
+mismatched workload profiles. DART requires the default 256-message
 receive/retention window; other windows are recorded experiments.
 Throughput requires 3-second windows and a 2-second delivery/ACK drain; RTT
 requires 100,000 measured and 200,000 warmup exchanges, with size order
@@ -134,7 +134,7 @@ Use the median of the latest three eligible runs from the same binary SHA-256.
 Latency whiskers use p50/p99.9 from the selected median-p99 run. The runner
 prints all individual values and each range. Migrated rows retain the predecessor
 version in `experimental_wire_version`. Original versions 1-5 are incompatible
-experiments and have no Dart wire version. Versions 6-8 are mapped to Dart
+experiments and have no DART wire version. Versions 6-8 are mapped to DART
 version 1 for chart selection; their original binaries and measurements remain
 unchanged. Original version 6 supports the current small-message format;
 large sizes require original version 7 or newer. Each size still requires
@@ -146,9 +146,10 @@ end at the axis limit and show a triangle and their measured p99.9 value.
 When p99 itself exceeds the limit, clip its plotted position and label all
 three measured percentiles. Labels face inward near the boundary and use
 separate rows when they overlap.
-Labels are `OMQ / TCP` (red), `OMQ / Dart-LAN` and
-`OMQ / Dart-adaptive` (different orange shades), and `Aeron v1.53.3 / UDP`.
+Labels are `OMQ / TCP` (red), `OMQ / DART-LAN` and
+`OMQ / DART-adaptive` (different orange shades), and `Aeron v1.53.3 / UDP`.
 Thread labels are `1 IO`, with `1 IO (SHARED)` for Aeron's Media Driver.
+The RTT legend also shows the 50 us application/IO spin budgets for OMQ.
 Throughput adds 32 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, and 8 MiB. Use the
 main TCP chart layout: messages/s on the left through 1 KiB, GB/s on the
 right from 256 B. The panels overlap at 256 B, 512 B, and 1 KiB.
@@ -165,7 +166,7 @@ stay with that run. JVM warmup is excluded from the measurements.
 ## Lossy-link chart
 
 `cargo run --release -p omq-bench -- chart lossy` reads `lossy.jsonl` and
-generates `dart/lossy.svg`: Dart LAN/adaptive and QUIC streams, 1 IO,
+generates `dart/lossy.svg`: DART LAN/adaptive and QUIC streams, 1 IO,
 SCATTER/GATHER throughput at 1 KiB and 16 KiB, CLIENT/SERVER p99 RTT at 1 KiB.
 Use 0%, 0.1%, 1%, and 5% independent random loss, 100 Mbps shared between
 directions, 1 ms delay each way, MTU 1500, UDP ingress netem on IFB, and

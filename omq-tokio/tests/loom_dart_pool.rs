@@ -1,21 +1,51 @@
 #![cfg(target_pointer_width = "64")]
 
+use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::sync::{Arc, Mutex};
 use loom::thread;
 
 // Model ownership separately from the bounded queue's publication. Queue
-// internals belong to concurrent-queue; this checks our per-slot release lock.
+// internals belong to concurrent-queue; mutexes below model queue publication,
+// while per-slot release uses the same deferred-owner flag as BufferPool.
 struct Model {
-    releases: [Mutex<()>; 2],
+    queued: [AtomicBool; 2],
+    pending: Mutex<Vec<(usize, Arc<usize>)>>,
     free: Mutex<Vec<Arc<usize>>>,
 }
 
 impl Model {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            releases: [Mutex::new(()), Mutex::new(())],
+            queued: [AtomicBool::new(false), AtomicBool::new(false)],
+            pending: Mutex::new(Vec::new()),
             free: Mutex::new(Vec::new()),
         })
+    }
+
+    fn defer(&self, owner: Arc<usize>, slot: usize) {
+        if self.queued[slot]
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.pending.lock().unwrap().push((slot, owner));
+        } else {
+            drop(owner);
+        }
+    }
+
+    fn reclaim(&self) {
+        let count = self.pending.lock().unwrap().len();
+        for _ in 0..count {
+            let Some((slot, owner)) = self.pending.lock().unwrap().pop() else {
+                break;
+            };
+            if Arc::strong_count(&owner) == 1 {
+                self.queued[slot].store(false, Ordering::Relaxed);
+                self.free.lock().unwrap().push(owner);
+            } else {
+                self.pending.lock().unwrap().push((slot, owner));
+            }
+        }
     }
 }
 
@@ -24,12 +54,7 @@ fn release(owner: Arc<usize>, model: &Model, slot: usize) {
         model.free.lock().unwrap().push(owner);
         return;
     }
-    let _release = model.releases[slot].lock().unwrap();
-    if Arc::strong_count(&owner) == 1 {
-        model.free.lock().unwrap().push(owner);
-    } else {
-        drop(owner);
-    }
+    model.defer(owner, slot);
 }
 
 #[test]
@@ -49,6 +74,7 @@ fn cloning_a_live_reader_cannot_race_unique_return() {
         });
         release(first, &model, 0);
         other.join().unwrap();
+        model.reclaim();
         let mut returned = model.free.lock().unwrap().pop().unwrap();
         assert!(model.free.lock().unwrap().is_empty());
         *Arc::get_mut(&mut returned).unwrap() = 9;
@@ -67,6 +93,7 @@ fn simultaneous_final_releases_cannot_lose_or_duplicate_storage() {
         let other = thread::spawn(move || release(second, &other_free, 0));
         release(first, &free, 0);
         other.join().unwrap();
+        free.reclaim();
         let mut free = free.free.lock().unwrap();
         assert_eq!(free.len(), 1);
         assert_eq!(Arc::get_mut(&mut free[0]), Some(&mut 7));
@@ -83,10 +110,12 @@ fn a_live_reader_prevents_reuse_during_other_releases() {
         let other_free = free.clone();
         let other = thread::spawn(move || release(second, &other_free, 0));
         release(first, &free, 0);
+        free.reclaim();
         assert_eq!(*reader, 7);
         assert!(free.free.lock().unwrap().is_empty());
         other.join().unwrap();
         release(reader, &free, 0);
+        free.reclaim();
         assert_eq!(free.free.lock().unwrap().len(), 1);
     });
 }
@@ -98,12 +127,14 @@ fn acquisition_racing_final_release_sees_exhaustion_or_unique_storage() {
         let owner = Arc::new(7);
         let other_free = free.clone();
         let releaser = thread::spawn(move || release(owner, &other_free, 0));
+        free.reclaim();
         let acquired = free.free.lock().unwrap().pop();
         if let Some(mut acquired) = acquired {
             *Arc::get_mut(&mut acquired).expect("exclusive writable storage") = 9;
             release(acquired, &free, 0);
         }
         releaser.join().unwrap();
+        free.reclaim();
         assert_eq!(free.free.lock().unwrap().len(), 1);
     });
 }
@@ -117,6 +148,7 @@ fn independent_slots_return_once_with_concurrent_acquisition() {
         let other_model = model.clone();
         let other = thread::spawn(move || release(first, &other_model, 0));
         release(second, &model, 1);
+        model.reclaim();
         let acquired = model.free.lock().unwrap().pop();
         if let Some(mut acquired) = acquired {
             let slot = usize::from(*acquired == 9);
@@ -124,6 +156,7 @@ fn independent_slots_return_once_with_concurrent_acquisition() {
             release(acquired, &model, slot);
         }
         other.join().unwrap();
+        model.reclaim();
         let mut free = model.free.lock().unwrap();
         free.sort_unstable_by_key(|owner| **owner);
         assert_eq!(free.len(), 2);
@@ -134,7 +167,7 @@ fn independent_slots_return_once_with_concurrent_acquisition() {
 
 #[test]
 #[should_panic(expected = "lost final storage")]
-fn dropping_nonfinal_refs_outside_the_lock_can_lose_storage() {
+fn dropping_nonfinal_refs_without_a_queued_owner_can_lose_storage() {
     fn broken_release(mut owner: Arc<usize>, free: &Mutex<Vec<Arc<usize>>>) {
         {
             let mut free = free.lock().unwrap();
@@ -291,12 +324,7 @@ fn stage_release(owner: Arc<usize>, model: &Model, slot: usize, pending: &mut Ve
         pending.push(owner);
         return;
     }
-    let _release = model.releases[slot].lock().unwrap();
-    if Arc::strong_count(&owner) == 1 {
-        pending.push(owner);
-    } else {
-        drop(owner);
-    }
+    model.defer(owner, slot);
 }
 
 #[test]
@@ -311,6 +339,7 @@ fn batched_and_scalar_final_drops_publish_one_unique_owner() {
         stage_release(first, &model, 0, &mut pending);
         model.free.lock().unwrap().extend(pending);
         other.join().unwrap();
+        model.reclaim();
         let mut free = model.free.lock().unwrap();
         assert_eq!(free.len(), 1);
         assert!(Arc::get_mut(&mut free[0]).is_some());
@@ -360,6 +389,38 @@ fn immediate_group_acquisition_cannot_underflow_the_available_count() {
             assert_eq!(queue.lock().unwrap().pop(), Some([0, 1]));
             assert_eq!(available.fetch_sub(2, Ordering::Relaxed), 2);
         }
+        assert_eq!(available.load(Ordering::Relaxed), 0);
+    });
+}
+
+#[test]
+fn scalar_expansion_of_a_returned_group_preserves_count_and_unique_slots() {
+    use loom::sync::atomic::AtomicUsize;
+
+    loom::model(|| {
+        let singles = Arc::new(Mutex::new(Vec::new()));
+        let available = Arc::new(AtomicUsize::new(2));
+        let expanded = singles.clone();
+        let count = available.clone();
+        let consumer = thread::spawn(move || {
+            // Taking the group's first slot does not reacquire or recount
+            // its remainder when publishing that remainder as single slots.
+            assert_eq!(count.fetch_sub(1, Ordering::Relaxed), 2);
+            expanded.lock().unwrap().push(1);
+            0
+        });
+        let mut acquired = Vec::new();
+        if let Some(slot) = singles.lock().unwrap().pop() {
+            assert_eq!(available.fetch_sub(1, Ordering::Relaxed), 1);
+            acquired.push(slot);
+        }
+        acquired.push(consumer.join().unwrap());
+        for slot in singles.lock().unwrap().drain(..) {
+            assert_eq!(available.fetch_sub(1, Ordering::Relaxed), 1);
+            acquired.push(slot);
+        }
+        acquired.sort_unstable();
+        assert_eq!(acquired, [0, 1]);
         assert_eq!(available.load(Ordering::Relaxed), 0);
     });
 }

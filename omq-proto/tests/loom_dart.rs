@@ -163,6 +163,85 @@ fn concurrent_duplicate_arrivals_ack_once() {
     );
 }
 
+fn receive_direct(core: &mut Session, sequence: u64) {
+    if core.classify(2, sequence) == Admission::Accept {
+        core.commit_receive_with_delivery(
+            sequence,
+            Message::from_slice(&sequence.to_le_bytes()),
+            Ecn::NotEct,
+            Duration::ZERO,
+            |message| {
+                assert_eq!(message.part_slice(0).unwrap(), sequence.to_le_bytes());
+                Ok(())
+            },
+        );
+    }
+}
+
+#[test]
+fn direct_duplicate_arrivals_return_credit_once() {
+    interleave(
+        session(2, 1),
+        |s| receive_direct(s, 0),
+        |s| receive_direct(s, 0),
+        |s| {
+            assert_eq!(s.next_receive(), 1);
+            assert_eq!(s.receive_right_edge(), 3);
+            assert_eq!(s.stats().duplicates, 1);
+            assert!(s.take_received().is_none());
+        },
+    );
+}
+
+#[test]
+fn direct_reordered_arrivals_retain_only_the_undelivered_suffix() {
+    interleave(
+        session(2, 1),
+        |s| receive_direct(s, 0),
+        |s| receive_direct(s, 1),
+        |s| {
+            assert_eq!(s.next_receive(), 2);
+            if let Some(message) = s.take_received() {
+                assert_eq!(message.part_slice(0).unwrap(), 1u64.to_le_bytes());
+                s.release_receive(1);
+            }
+            assert!(s.take_received().is_none());
+            assert_eq!(s.receive_right_edge(), 4);
+        },
+    );
+}
+
+#[test]
+fn rejected_direct_delivery_prevents_successor_bypass() {
+    interleave(
+        session(2, 1),
+        |s| {
+            assert!(!s.commit_receive_with_delivery(
+                0,
+                Message::from_slice(&0u64.to_le_bytes()),
+                Ecn::NotEct,
+                Duration::ZERO,
+                Err,
+            ));
+        },
+        |s| {
+            assert!(!s.commit_receive_with_delivery(
+                1,
+                Message::from_slice(&1u64.to_le_bytes()),
+                Ecn::NotEct,
+                Duration::ZERO,
+                |_| panic!("predecessor is not delivered"),
+            ));
+        },
+        |s| {
+            assert_eq!(s.receive_right_edge(), 2);
+            ordered(s);
+            s.release_receive(2);
+            assert_eq!(s.receive_right_edge(), 4);
+        },
+    );
+}
+
 fn receive_packed(core: &mut Session) {
     let mut sender = session(1, 2);
     sender.handle_control(status(1, 0, 2), Duration::ZERO);

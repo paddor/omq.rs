@@ -61,15 +61,15 @@ except property value lengths (`u32be`).
 
 ```abnf
 datagram = ready / data / packed / first / cont / status / nak / probe
-ready    = %x80 %x05 %x52.45.41.44.59 *property
+ready    = %xC0 %x05 %x52.45.41.44.59 *property
 property = OCTET 1*255ASCII u32be *OCTET
 data     = %x01 session sequence *OCTET
-packed   = %x02-40 2*64OCTET session sequence *OCTET
-first    = %x41 session sequence u64 1*OCTET
-cont     = %x42 session sequence 1*OCTET
-status   = %x81 session 8u64
-nak      = %x82 session sequence u32
-probe    = %x83 session sequence
+packed   = %x02-80 2*128OCTET session sequence *OCTET
+first    = %x81 session sequence u64 1*OCTET
+cont     = %x82 session sequence 1*OCTET
+status   = %xC1 session 8u64
+nak      = %xC2 session sequence u32
+probe    = %xC3 session sequence
 session  = u64
 sequence = u64
 u64      = 8OCTET
@@ -78,12 +78,16 @@ u32be    = 4OCTET
 ASCII    = %x00-7F
 ```
 
-Every datagram MUST fit within 1,200 bytes, including all headers and
-metadata. Oversized or truncated datagrams MUST be discarded. This limit
-applies to each individual segment when UDP offloads are used. Implementations
-MUST preserve complete datagram boundaries through GSO/GRO, including a shorter
-final segment. Implementations SHOULD disable IP fragmentation where
-available. Dart does not perform path MTU discovery.
+PACKED MUST fit within 1,452 bytes; other datagrams MUST fit within 1,200
+bytes, including all headers and metadata. Oversized or truncated datagrams
+MUST be discarded. The larger bound requires a path MTU of at least 1,500
+bytes for IPv6. Each limit applies to individual UDP offload segments.
+
+On a local MTU error, senders SHOULD reduce PACKED to 1,200 bytes and retry
+the retained messages. Implementations MUST preserve complete datagram
+boundaries through GSO/GRO, including a shorter final segment.
+Implementations SHOULD disable IP fragmentation where available.
+Dart does not perform path MTU discovery.
 
 ### 3.3 Topology
 
@@ -109,7 +113,7 @@ identifiers MUST NOT change session state.
 
 ### 3.5 Connection Metadata
 
-READY starts with `0x80, 0x05, "READY"`, followed by properties. Each property
+READY starts with `0xC0, 0x05, "READY"`, followed by properties. Each property
 contains a one-byte name length, that many ASCII name bytes, a four-byte
 big-endian value length, and that many value bytes. Names contain 1 to 255
 bytes and are case-sensitive. Duplicate names, malformed lengths, missing
@@ -139,13 +143,13 @@ whether group metadata is present.
 Receivers MUST enforce configured message size limits on DATA and each
 packed payload.
 
-PACKED's first byte is the message count, 2 through 64. Exactly that many
+PACKED's first byte is the message count, 2 through 128. Exactly that many
 one-byte payload lengths follow, then the destination session, first
 sequence, and concatenated payloads. Each payload uses DATA's body and group
 encoding and occupies 0 to 255 bytes including metadata. The lengths MUST
 consume the complete datagram; the implied sequence range MUST NOT wrap.
-All lengths and payloads MUST be validated before admitting any unit.
-Larger payloads MUST use separate datagrams. There are no length escapes.
+All lengths and group metadata MUST be validated before admitting any unit.
+Larger payloads MUST use DATA or fragmentation. There are no length escapes.
 A sender MAY pack already queued messages for one peer but MUST NOT wait
 for further messages to fill a datagram. An isolated message uses DATA.
 
@@ -186,10 +190,12 @@ credit. Each peer has a bounded window of at most 65,536 sequence units.
 Gaps reserve capacity even when later units arrive. Duplicates MUST NOT
 consume extra capacity or return additional credit.
 
-Credit MUST return only when the associated storage is reusable, including
-the release of application-held clones and views. Intermediate fragment
-credit returns after copying into the reserved body. The final fragment's
-credit remains charged until the assembled body's last owner releases it.
+Credit MUST return only when the associated receive storage is reusable,
+including the release of shared application-held clones and views. An
+independent inline copy MAY release receive storage upon bounded queue delivery.
+Intermediate fragment credit returns after copying into the reserved body.
+The final fragment's credit remains charged until the assembled body's last
+owner releases it.
 This permits a body to span multiple receive windows. Sender admission
 counts queued and unacknowledged logical messages against the outbound HWM.
 Admission returns only after acknowledgment of a message's final unit.

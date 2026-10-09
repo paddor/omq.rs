@@ -195,6 +195,12 @@ Small message bodies can live inline in `Message` or `Payload`. Larger bodies
 use shared storage; cloning a message need not copy its payload. Multipart
 messages retain part descriptors and shared body owners.
 
+Applications can explicitly create transport-independent `BufferPool` handles.
+Their message builder keeps tiny bodies inline, uses pooled storage when it
+fits, or allocates owned storage for larger bodies. Fixed buffers return to
+their shared pool after the final owner releases them; overlapping clone
+releases are reclaimed through a bounded queue.
+
 `FrameBuffer` owns encoded headers and small bodies. Large bodies use shared
 chunks for gather writes. Drivers retain unfinished output until its wire
 write completes. Received storage passes from the transport through the codec
@@ -299,7 +305,10 @@ receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
 Each Dart endpoint task drives all peers' sans-I/O sessions and owns its
 deadline timer (monotonic timerfd on Linux). Sessions retain
 outbound bodies until receipt acknowledgment and enforce bounded receive
-credit. Per-peer receive pools return credit only when storage is reusable.
+credit. Peers share the socket's internal receive body pool, separate from
+application send storage. Final pooled owners return credit to their original
+session when storage is reusable; inline values return credit after bounded
+queue delivery. Fragment chunks also use the receive pool.
 Fragmented bodies reserve their full allocation after length validation;
 intermediate credits return during assembly, and the final credit follows
 the complete body's last owner. See [dart-rfc.md](dart-rfc.md).

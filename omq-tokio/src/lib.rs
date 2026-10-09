@@ -22,6 +22,7 @@
 compile_error!("omq-tokio requires target_has_atomic = \"64\"");
 
 pub mod blocking;
+mod buffer_pool;
 pub mod context;
 pub mod engine;
 pub mod exclusive;
@@ -33,6 +34,7 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
+pub use buffer_pool::{BufferLengthError, BufferPool, MessageBuffer};
 pub use omq_proto::IpcPath;
 pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
 pub use omq_proto::{
@@ -46,7 +48,7 @@ pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOpt
 #[cfg(feature = "dart")]
 pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
 #[cfg(feature = "dart")]
-pub use transport::dart::{BufferLengthError, DartBuffer, DartCapabilities, DartPool, DartStats};
+pub use transport::dart::{DartCapabilities, DartStats};
 
 // Sub-modules of omq_proto are re-exported under their original
 // paths so downstream `use omq_tokio::endpoint::Host` style imports keep

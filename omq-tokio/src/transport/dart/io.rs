@@ -2,7 +2,7 @@ use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
-use omq_proto::dart::MAX_DATAGRAM;
+use omq_proto::dart::MAX_PACKED_DATAGRAM;
 use quinn_udp::{BATCH_SIZE, EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
@@ -182,7 +182,7 @@ impl DartIo {
     ) -> io::Result<usize> {
         if contents.is_empty()
             || contents.len() > MAX_BATCH_BYTES
-            || !(1..=MAX_DATAGRAM).contains(&segment_size)
+            || !(1..=MAX_PACKED_DATAGRAM).contains(&segment_size)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -291,7 +291,7 @@ impl ReceiveBatch {
         // Linux's batched Quinn receive does not expose MSG_TRUNC. Keep one
         // guard byte beyond every admissible aggregate and drop full arenas.
         // Also fit a whole ordinary UDP packet on platforms without GRO.
-        let slot_size = (MAX_DATAGRAM * gro_segments.clamp(1, MAX_SEGMENTS)).max(65_536) + 1;
+        let slot_size = (MAX_PACKED_DATAGRAM * gro_segments.clamp(1, MAX_SEGMENTS)).max(65_536) + 1;
         Self {
             storage: vec![0; slot_size * BATCH_SIZE].into_boxed_slice(),
             slot_size,
@@ -418,7 +418,9 @@ impl ReceiveBatch {
     }
 
     fn accepts(&self, meta: &RecvMeta) -> bool {
-        meta.len > 0 && meta.len < self.slot_size && (1..=MAX_DATAGRAM).contains(&meta.stride)
+        meta.len > 0
+            && meta.len < self.slot_size
+            && (1..=MAX_PACKED_DATAGRAM).contains(&meta.stride)
     }
 
     /// Split GRO at its exact stride. A shorter final segment is preserved.
@@ -512,7 +514,7 @@ mod tests {
         for (length, stride) in [
             (0, 0),
             (1, 0),
-            (1201, 1201),
+            (MAX_PACKED_DATAGRAM + 1, MAX_PACKED_DATAGRAM + 1),
             (batch.slot_size, 1),
             (batch.slot_size + 1, 17),
         ] {
@@ -521,8 +523,8 @@ mod tests {
             assert_eq!(batch.datagrams().count(), 0);
             assert_eq!(batch.rejected_buffers(), 1);
         }
-        batch.metadata[0].len = MAX_DATAGRAM * 64;
-        batch.metadata[0].stride = MAX_DATAGRAM;
+        batch.metadata[0].len = MAX_PACKED_DATAGRAM * 64;
+        batch.metadata[0].stride = MAX_PACKED_DATAGRAM;
         assert_eq!(batch.datagrams().count(), 64);
         assert_eq!(batch.rejected_buffers(), 0);
     }

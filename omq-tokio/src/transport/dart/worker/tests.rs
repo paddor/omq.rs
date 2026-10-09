@@ -36,6 +36,7 @@ fn queues() -> Box<PeerIo> {
 
 fn options() -> omq_proto::DartOptions {
     omq_proto::DartOptions {
+        pool_buffers: 2,
         window_messages: 2,
         congestion: DartCongestion::Lan,
         ..omq_proto::DartOptions::default()
@@ -47,7 +48,13 @@ fn late_activation_cannot_replace_a_new_generation() {
     let mut peer = peer();
     let old = queues();
     let cancel = old.cancel.clone();
-    peer.install_io(1, old, options(), false, &Arc::new(DataSignal::new()));
+    peer.install_io(
+        1,
+        old,
+        &SocketState::new(options(), SocketType::Gather),
+        false,
+        &Arc::new(DataSignal::new()),
+    );
     assert!(cancel.is_cancelled());
     assert!(peer.io.is_none());
     assert!(peer.session.is_none());
@@ -64,7 +71,13 @@ fn expired_or_cancelled_activation_never_installs_storage() {
             io.cancel.cancel();
         }
         let cancel = io.cancel.clone();
-        peer.install_io(2, io, options(), false, &Arc::new(DataSignal::new()));
+        peer.install_io(
+            2,
+            io,
+            &SocketState::new(options(), SocketType::Gather),
+            false,
+            &Arc::new(DataSignal::new()),
+        );
         assert!(cancel.is_cancelled());
         assert!(peer.pool.is_none());
     }
@@ -74,11 +87,23 @@ fn expired_or_cancelled_activation_never_installs_storage() {
 fn repeated_activation_preserves_the_original_queues() {
     let signal = Arc::new(DataSignal::new());
     let mut peer = peer();
-    peer.install_io(2, queues(), options(), false, &signal);
+    peer.install_io(
+        2,
+        queues(),
+        &SocketState::new(options(), SocketType::Gather),
+        false,
+        &signal,
+    );
     let live = peer.io.as_ref().unwrap().cancel.clone();
     let repeated = queues();
     let rejected = repeated.cancel.clone();
-    peer.install_io(2, repeated, options(), false, &signal);
+    peer.install_io(
+        2,
+        repeated,
+        &SocketState::new(options(), SocketType::Gather),
+        false,
+        &signal,
+    );
     assert!(rejected.is_cancelled());
     assert!(!live.is_cancelled());
     assert_eq!(peer.pool.as_ref().unwrap().available(), 2);
@@ -113,7 +138,13 @@ fn a_closed_delivery_window_does_not_block_lifecycle_control() {
 fn final_receive_owner_returns_physical_storage_and_credit_once() {
     let mut peer = peer();
     let signal = Arc::new(DataSignal::new());
-    peer.install_io(2, queues(), options(), false, &signal);
+    peer.install_io(
+        2,
+        queues(),
+        &SocketState::new(options(), SocketType::Gather),
+        false,
+        &signal,
+    );
     let pool = peer.pool.as_ref().unwrap();
     let message = pool.try_take().unwrap().into_message();
     let view = message.clone();
@@ -130,8 +161,8 @@ fn final_receive_owner_returns_physical_storage_and_credit_once() {
 fn foreign_pool_batch_publishes_credit_only_after_free_list_return() {
     let credit = Arc::new(CreditCounter::default());
     let signal = Arc::new(DataSignal::new());
-    let receive = DartPool::receiver(2, credit.clone(), signal);
-    let caller = DartPool::new(2);
+    let receive = super::super::pool::receiver(&BufferPool::new(2048, 2), credit.clone(), signal);
+    let caller = BufferPool::new(2048, 2);
     let first = receive.try_take().unwrap().into_message();
     let second = receive.try_take().unwrap().into_message();
     caller.with_recycling_batch(|| {
@@ -142,6 +173,28 @@ fn foreign_pool_batch_publishes_credit_only_after_free_list_return() {
     });
     assert_eq!(receive.available(), 2);
     assert_eq!(credit.take(), 2);
+}
+
+#[test]
+fn teardown_publishes_pending_inline_delivery() {
+    let queue = crate::socket::fanin::Fanin::new(
+        1,
+        Arc::new(DataSignal::new()),
+        crate::socket::recv::BlockingRecvWaker::new(),
+    );
+    let mut io = queues();
+    io.sink = Some(RecvSink::Fanin(crate::socket::fanin::Sink::owned(
+        queue.register().unwrap(),
+    )));
+    io.sink
+        .as_mut()
+        .unwrap()
+        .try_deliver_datagram(Message::from_slice(b"last"), &mut io.pending_flush)
+        .unwrap();
+    assert!(io.pending_flush);
+    drop(io);
+    assert_eq!(queue.try_recv().unwrap().part_slice(0).unwrap(), b"last");
+    assert!(queue.try_recv().is_err());
 }
 
 #[test]

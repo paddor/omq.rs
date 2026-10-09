@@ -18,20 +18,41 @@ pub(super) struct FragmentPiece {
     pub(super) last: bool,
 }
 
+/// Exclusive, fully reserved storage for incremental fragment assembly.
+/// Appending must not allocate or exceed the reserved capacity.
+pub trait FragmentBuffer: std::fmt::Debug + AsRef<[u8]> {
+    /// Reserved byte capacity, including the already appended prefix.
+    fn capacity(&self) -> usize;
+    /// Append every byte and extend the prefix exposed by `AsRef<[u8]>`.
+    /// The caller supplies no more than the remaining reserved capacity.
+    fn append(&mut self, bytes: &[u8]);
+}
+
+impl FragmentBuffer for Vec<u8> {
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        assert!(bytes.len() <= self.capacity() - self.len());
+        self.extend_from_slice(bytes);
+    }
+}
+
 #[derive(Debug)]
-pub(super) enum FragmentReceive {
-    First(Assembly),
+pub(super) enum FragmentReceive<B> {
+    First(Assembly<B>),
     Continuation,
 }
 
 #[derive(Debug)]
-pub(super) struct Assembly {
-    body: Vec<u8>,
+pub(super) struct Assembly<B> {
+    body: B,
     length: usize,
     group: Option<bytes::Bytes>,
 }
 
-impl Session {
+impl<B: FragmentBuffer> Session<B> {
     pub(super) fn submit_fragmented(&mut self, message: Message) -> Result<u64, Message> {
         let grouped = message.len() == 2;
         let length = message
@@ -43,11 +64,19 @@ impl Session {
         } else {
             0
         };
-        // FIRST's length and group consume payload space. Balance that space
-        // across the message so every nonfinal datagram has the same wire size,
-        // allowing GSO/GRO to span fragment and message boundaries.
+        // Include FIRST's metadata when balancing wire lengths. Prefer an
+        // exact split when other messages are queued, so the final fragment
+        // does not end each GSO/GRO batch. Isolated messages minimize packets.
+        // Permit at most one extra datagram to bound per-fragment overhead.
         let payload = length + 8 + metadata;
-        let count = payload.div_ceil(MAX_FRAGMENT_BODY).max(2);
+        let minimum = payload.div_ceil(MAX_FRAGMENT_BODY).max(2);
+        let count = if self.send_cursor < self.send_next {
+            (minimum..=minimum + 1)
+                .find(|count| payload.is_multiple_of(*count))
+                .unwrap_or(minimum)
+        } else {
+            minimum
+        };
         let chunk = payload.div_ceil(count);
         let Some(end) = self
             .send_next
@@ -116,13 +145,17 @@ impl Session {
 
     /// Reserve the entire advertised body before committing FIRST. No partial
     /// message is visible to the application, even across multiple windows.
-    pub fn commit_fragment(
+    /// `reserve` runs only for FIRST and must return empty storage with at
+    /// least the advertised byte capacity. `false` leaves receipt uncommitted.
+    /// The sequence must have been accepted by [`Self::classify`].
+    pub fn commit_fragment_with(
         &mut self,
         sequence: u64,
         length: Option<u64>,
         message: Message,
         ecn: Ecn,
         now: Duration,
+        reserve: impl FnOnce(usize) -> Option<B>,
     ) -> bool {
         let fragment = if let Some(length) = length {
             let Ok(length) = usize::try_from(length) else {
@@ -135,8 +168,10 @@ impl Session {
             if length <= chunk.len() || chunk.is_empty() {
                 return false;
             }
-            let mut body = Vec::new();
-            if body.try_reserve_exact(length).is_err() {
+            let Some(body) = reserve(length) else {
+                return false;
+            };
+            if !body.as_ref().is_empty() || body.capacity() < length {
                 return false;
             }
             FragmentReceive::First(Assembly {
@@ -156,14 +191,12 @@ impl Session {
         true
     }
 
+    /// Whether fragment assembly encountered an invalid sequence or body length.
     pub const fn receive_failed(&self) -> bool {
         self.receive_failed
     }
 
-    pub(super) fn take_fragmented(
-        &mut self,
-        finish: impl FnOnce(Vec<u8>) -> Payload,
-    ) -> Option<Message> {
+    pub(super) fn take_fragmented(&mut self, finish: impl FnOnce(B) -> Payload) -> Option<Message> {
         let mut budget = crate::flow::DrainBudget::new(64, 64_000);
         while self.deliver_next < self.receive_next && !budget.exhausted() {
             let index = self.index(self.deliver_next);
@@ -183,14 +216,14 @@ impl Session {
                 .part_slice(usize::from(message.len() == 2))
                 .expect("chunk");
             let assembly = self.assembly.as_mut().expect("FIRST assembly");
-            if chunk.len() > assembly.length - assembly.body.len() {
+            if chunk.len() > assembly.length - assembly.body.as_ref().len() {
                 self.receive_failed = true;
                 return None;
             }
-            assembly.body.extend_from_slice(chunk);
+            assembly.body.append(chunk);
             let _ = budget.account(chunk.len());
             self.deliver_next += 1;
-            if assembly.body.len() == assembly.length {
+            if assembly.body.as_ref().len() == assembly.length {
                 let assembly = self.assembly.take().expect("complete body");
                 let mut message = Message::from(finish(assembly.body));
                 if let Some(group) = assembly.group {

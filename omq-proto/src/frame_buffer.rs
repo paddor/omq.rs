@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
+use std::io::IoSlice;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::message::Message;
 use crate::proto::frame;
@@ -137,10 +138,46 @@ impl FrameBuffer {
         self.entries.is_empty() && !self.arena.is_empty()
     }
 
+    /// Queued wire bytes in order, one slice per entry, without consuming
+    /// them. Fills at most `out.len()` slices and returns the count.
+    pub fn io_slices<'a>(&'a self, out: &mut [IoSlice<'a>]) -> usize {
+        let mut count = 0;
+        let pending = self.uncommitted_arena();
+        let tail = (!pending.is_empty()).then_some(pending);
+        let chunks = self.entries.iter().map(|entry| entry.as_slice(&self.arena));
+        for (slot, chunk) in out.iter_mut().zip(chunks.chain(tail)) {
+            *slot = IoSlice::new(chunk);
+            count += 1;
+        }
+        count
+    }
+
+    /// Consume `n` written bytes from the front of the queue.
+    pub fn advance(&mut self, mut n: usize) {
+        debug_assert!(n <= self.total_bytes);
+        self.total_bytes -= n;
+        while let Some(front) = self.entries.front_mut() {
+            let len = front.len();
+            if n < len {
+                front.advance(n);
+                return;
+            }
+            n -= len;
+            self.entries.pop_front();
+        }
+        // No entry references the arena any more: drop its written prefix.
+        let written = self.arena_mark as usize + n;
+        self.arena_mark = 0;
+        if written >= self.arena.len() {
+            self.arena.clear();
+        } else {
+            self.arena.advance(written);
+        }
+    }
+
     /// Advance past `n` bytes of arena content that have been written
     /// to the wire. Only valid when `has_arena_only()`.
     pub fn advance_arena(&mut self, n: usize) {
-        use bytes::Buf;
         debug_assert!(self.entries.is_empty());
         debug_assert!(n <= self.arena.len());
         if n >= self.arena.len() {
@@ -526,6 +563,24 @@ impl Entry {
         }
     }
 
+    fn as_slice<'a>(&'a self, arena: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::Arena { offset, len, .. } => &arena[*offset as usize..(*offset + *len) as usize],
+            Self::External { bytes, .. } => bytes,
+        }
+    }
+
+    fn advance(&mut self, n: usize) {
+        match self {
+            Self::Arena { offset, len, .. } => {
+                let n = u32::try_from(n).expect("arena entry advance");
+                *offset += n;
+                *len -= n;
+            }
+            Self::External { bytes, .. } => bytes.advance(n),
+        }
+    }
+
     fn is_protected(&self) -> bool {
         match self {
             Self::Arena { protected, .. } | Self::External { protected, .. } => *protected,
@@ -644,6 +699,76 @@ mod tests {
 
         assert!(eq.arena.capacity() >= ARENA_INITIAL_CAP);
         assert_ne!(eq.arena_bytes(), []);
+    }
+
+    fn wire_bytes(eq: &FrameBuffer) -> Vec<u8> {
+        let mut slices = [IoSlice::new(&[]); 64];
+        let count = eq.io_slices(&mut slices);
+        slices[..count]
+            .iter()
+            .flat_map(|slice| slice.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn io_slices_borrow_large_payloads_in_wire_order() {
+        let mut eq = FrameBuffer::new();
+        let large = Bytes::from(vec![2; 128 * 1024]);
+        eq.frame(&Message::single("a"));
+        eq.frame(&Message::single(large.clone()));
+        eq.frame(&Message::single("b"));
+
+        let mut slices = [IoSlice::new(&[]); 8];
+        let count = eq.io_slices(&mut slices);
+        // [a + large header], large body, [b]
+        assert_eq!(count, 3);
+        assert_eq!(slices[1].as_ptr(), large.as_ptr(), "payload was copied");
+
+        let mut expected = FrameBuffer::new();
+        expected.frame(&Message::single("a"));
+        expected.frame(&Message::single(large));
+        expected.frame(&Message::single("b"));
+        let mut chunks = Vec::new();
+        expected.drain(&mut chunks, 1024);
+        let drained: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(wire_bytes(&eq), drained);
+    }
+
+    #[test]
+    fn advance_consumes_partial_writes_across_entries() {
+        let mut eq = FrameBuffer::new();
+        eq.frame(&Message::single("head"));
+        eq.frame(&Message::single(Bytes::from(vec![9; 8 * 1024])));
+        eq.frame(&Message::single("tail"));
+        let full = wire_bytes(&eq);
+
+        let mut written = 0;
+        for step in [1, 7, 4000, 4100, 1] {
+            eq.advance(step);
+            written += step;
+            assert_eq!(wire_bytes(&eq), full[written..]);
+            assert_eq!(eq.total_bytes(), full.len() - written);
+        }
+        eq.advance(full.len() - written);
+        assert!(eq.is_empty());
+        assert_eq!(eq.total_bytes(), 0);
+
+        // The arena is reusable after a full write.
+        eq.frame(&Message::single("next"));
+        assert!(eq.has_arena_only());
+        assert_eq!(eq.arena_bytes(), b"\x00\x04next");
+    }
+
+    #[test]
+    fn advance_through_arena_only_queue() {
+        let mut eq = FrameBuffer::new();
+        eq.frame(&Message::single("abcdef"));
+        eq.advance(3);
+        assert_eq!(wire_bytes(&eq), b"bcdef");
+        assert!(eq.has_arena_only());
+        assert_eq!(eq.arena_bytes(), b"bcdef");
+        eq.advance(5);
+        assert!(eq.is_empty());
     }
 
     #[test]

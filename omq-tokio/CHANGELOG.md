@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `blocking::Socket::register_recv_waker` forwards receive readiness to a
   `Waker` for external pollers.
 
+### Changed
+
+- Latency-profile peers frame messages of 4 KiB and more from their own
+  buffers instead of copying them into the send arena. The caller-thread TCP
+  write is vectored. 1 MiB REQ/REP round trips take ~22% less time, and RR
+  throughput at 1 MiB and above rises 20-45%.
+
 ### Fixed
 
 - Canceling a REQ or REP `send` no longer leaves the socket unable to send.

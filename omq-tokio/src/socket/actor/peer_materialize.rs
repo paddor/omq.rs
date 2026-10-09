@@ -788,11 +788,7 @@ fn arena_config(endpoint: &Endpoint, latency_profile: bool, socket: &SocketDrive
     let threshold = socket
         .options
         .arena_threshold
-        .unwrap_or(if latency_profile {
-            usize::MAX
-        } else {
-            omq_proto::frame_buffer::ARENA_THRESHOLD
-        });
+        .unwrap_or(omq_proto::frame_buffer::ARENA_THRESHOLD);
     let cap = if matches!(endpoint, Endpoint::Ipc(_)) {
         omq_proto::frame_buffer::ARENA_INITIAL_CAP_IPC
     } else if latency_profile {

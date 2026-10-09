@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   park until woken instead of polling every 1-10 ms. This capped such
   sockets at ~100-900 messages per second.
 - Forking no longer delays the first send of each socket by 100 ms.
+- `Poller`, `select`, and `Socket.poll` report `POLLOUT` only when a send
+  would be accepted, as libzmq does, and wake when a socket becomes
+  writable. They reported every socket writable.
+- `EVENTS` reports `POLLOUT`, and `POLLIN` for messages queued on sync
+  sockets.
+- Sync `Poller` waits no longer wake every 100 ms.
 
 ## [0.23.0] - 2026-10-07
 

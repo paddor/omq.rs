@@ -458,8 +458,10 @@ that drains the tokio broadcast channel into a `flume::Receiver`. A
 
 ## Known limitations
 
-- `Poller` registers POLLIN only; POLLOUT is ignored.
-- `wait_any` returns socket IDs, not file descriptors.
+- `wait_ready` and `wait_any` return socket IDs, not file descriptors.
+- `Poller` reports POLLOUT like libzmq: when a nonblocking send would be
+  accepted. Polls that include an async socket wait in 100 ms slices on the
+  shared receive signal; other polls park until a socket wakes them.
 
 ## Direct-path measurements
 

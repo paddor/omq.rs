@@ -1392,7 +1392,11 @@ pub extern "C" fn zmq_getsockopt(
             }
         }
         ZMQ_EVENTS => {
-            let mut events = ZMQ_POLLOUT; // optimistic: always writable
+            let mut events = if crate::send_recv::send_ready(sock_arc) {
+                ZMQ_POLLOUT
+            } else {
+                0
+            };
             let drain_nonempty = if sock_arc
                 .zap_handler
                 .load(std::sync::atomic::Ordering::Acquire)

@@ -61,6 +61,34 @@ impl Submitter {
         }
     }
 
+    /// Whether `try_send` would find the peer pipe with space. A closed
+    /// socket is ready.
+    pub(crate) fn send_ready(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+            || self
+                .pipe
+                .lock()
+                .expect("exclusive pipe")
+                .as_mut()
+                .is_some_and(SendPipeProducer::can_accept)
+    }
+
+    pub(crate) async fn wait_send_ready(&self) {
+        loop {
+            let changed = {
+                let guard = self.pipe.lock().expect("exclusive pipe");
+                crate::engine::signal::any_changed(
+                    std::iter::once(self.peer_ready.clone())
+                        .chain(guard.iter().flat_map(SendPipeProducer::readiness_signals)),
+                )
+            };
+            if self.send_ready() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     pub(crate) async fn wait_send_progress(&self) {
         let space = {
             let guard = self.pipe.lock().expect("exclusive pipe");

@@ -181,6 +181,7 @@ async def test_async_poller_reports_pollout():
     try:
         poller = zmq_async.Poller()
         poller.register(push, zmq.POLLOUT)
+        push.connect("inproc://async-pollout")
         assert await poller.poll(timeout=1000) == [(push, zmq.POLLOUT)]
     finally:
         push.close()

@@ -131,6 +131,11 @@ def has_feature(name: str) -> bool: ...
 def wait_any(
     sockets: Sequence[Socket | AsyncSocket], timeout_ms: int | None = ...
 ) -> list[int]: ...
+def wait_ready(
+    pollin: Sequence[Socket | AsyncSocket],
+    pollout: Sequence[Socket | AsyncSocket],
+    timeout_ms: int | None = ...,
+) -> list[tuple[int, int]]: ...
 def rust_thread_send_via_share_key(
     share_key: int, endpoint: str, payload: bytes
 ) -> None: ...
@@ -518,4 +523,5 @@ __all__ = [
     "rust_thread_send_via_share_key",
     "version",
     "wait_any",
+    "wait_ready",
 ]

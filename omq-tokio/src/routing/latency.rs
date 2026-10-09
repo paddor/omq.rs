@@ -183,6 +183,59 @@ impl Submitter {
         }
     }
 
+    /// Whether `try_send` would find a live peer, or with no live peer a
+    /// pending connect pipe, with space. A closed socket is ready.
+    pub(crate) fn send_ready(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut state = self.state.lock().expect("latency send state");
+        if state.peers.iter().any(|peer| peer.target.is_alive()) {
+            return state
+                .peers
+                .iter()
+                .any(|peer| peer.target.bind(&self.data_lanes).can_accept());
+        }
+        state.pending.iter_mut().any(|pipe| pipe.tx.can_accept())
+    }
+
+    pub(crate) async fn wait_send_ready(&self) {
+        use futures::StreamExt;
+        loop {
+            let (peers, pending) = {
+                let state = self.state.lock().expect("latency send state");
+                // Dead peers leave through `changed`; their capacity waits
+                // would complete at once.
+                let peers: futures::stream::FuturesUnordered<_> = state
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.target.is_alive())
+                    .map(|peer| {
+                        let target = peer.target.bind(&self.data_lanes);
+                        async move { target.wait_capacity().await }
+                    })
+                    .collect();
+                let pending = crate::engine::signal::any_changed(
+                    std::iter::once(self.changed.clone()).chain(
+                        state
+                            .pending
+                            .iter()
+                            .flat_map(|pipe| pipe.tx.readiness_signals()),
+                    ),
+                );
+                (peers, pending)
+            };
+            if self.send_ready() {
+                return;
+            }
+            let mut peers = peers;
+            tokio::select! {
+                Some(()) = peers.next() => {},
+                () = pending => {},
+            }
+        }
+    }
+
     pub(crate) async fn wait_send_progress(&self) {
         let seen = self.changed.generation();
         let (mut peers, notified) = {

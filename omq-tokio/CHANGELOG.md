@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BlockingRecvCancel` fires.
 - `blocking::Socket::register_recv_waker` forwards receive readiness to a
   `Waker` for external pollers.
+- `Socket::send_ready` and `Socket::wait_send_ready` report libzmq
+  `ZMQ_POLLOUT` readiness per socket type. `blocking::Socket::send_ready` and
+  `blocking::Socket::register_send_waker` serve external pollers.
 - The `copy-stats` feature and the `omq_copy_budget` test check copied bytes
   per message across socket types, peer counts, transports, and profiles.
 
@@ -27,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Canceling a REQ or REP `send` no longer leaves the socket unable to send.
+- `Proxy` waits in the target's send instead of retrying on a 1 ms timer. A
+  muted `xpub_nodrop` target no longer spins the proxy.
+- `wait_connected` waits for peer changes instead of polling every 5 ms.
 - PUB, XPUB, and RADIO with `OnMute::DropOldest` no longer copy each
   message of 4 KiB or more once per peer.
 

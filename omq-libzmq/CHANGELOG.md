@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `zmq_poll` and `ZMQ_EVENTS` report `ZMQ_POLLOUT` only when a nonblocking
+  send would be accepted, as libzmq does, and `zmq_poll` wakes when a socket
+  becomes writable. It reported every socket writable, so poll-then-send
+  loops spun on muted sockets.
+- `zmq_proxy` waits for a muted target without polling on a 1 ms timer, and
+  keeps serving the other direction and the control socket meanwhile.
+- Blocking sends with `ZMQ_IMMEDIATE` and no ready peer wait for one instead of
+  polling every 5 ms.
+
 ## [0.5.21] - 2026-10-07
 
 ### Fixed

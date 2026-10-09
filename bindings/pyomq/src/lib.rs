@@ -65,6 +65,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(backend_name, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(wait_any, m)?)?;
+    m.add_function(wrap_pyfunction!(wait_ready, m)?)?;
     m.add_function(wrap_pyfunction!(native_proxy, m)?)?;
     m.add_function(wrap_pyfunction!(has_feature, m)?)?;
     m.add_function(wrap_pyfunction!(rust_thread_send_via_share_key, m)?)?;
@@ -117,6 +118,29 @@ fn wait_any(
         entries.push((id, s.0.clone()));
     }
     Ok(py.detach(|| runtime::wait_any(entries, timeout_ms)))
+}
+
+/// Wait until a socket in `pollin` can receive or one in `pollout` can send.
+/// Returns `(socket id, events)` pairs with `POLLIN`/`POLLOUT` bits.
+#[pyfunction]
+#[pyo3(signature = (pollin, pollout, timeout_ms=None))]
+fn wait_ready(
+    py: Python<'_>,
+    pollin: &Bound<'_, pyo3::types::PySequence>,
+    pollout: &Bound<'_, pyo3::types::PySequence>,
+    timeout_ms: Option<u64>,
+) -> PyResult<Vec<(u64, i32)>> {
+    let entries = |sockets: &Bound<'_, pyo3::types::PySequence>| -> PyResult<Vec<_>> {
+        let mut entries = Vec::with_capacity(sockets.len()?);
+        for item in sockets.try_iter()? {
+            let s = item?.extract::<AnySocket>()?;
+            let id = s.0.ensure_id()?;
+            entries.push((id, s.0.clone()));
+        }
+        Ok(entries)
+    };
+    let (pollin, pollout) = (entries(pollin)?, entries(pollout)?);
+    Ok(py.detach(|| runtime::wait_ready(pollin, pollout, timeout_ms)))
 }
 
 #[pyfunction]

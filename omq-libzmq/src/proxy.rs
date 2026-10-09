@@ -5,17 +5,25 @@
 //! authoritative inbound queue. This
 //! proxy uses the same message-level policy as the tokio proxy, but its I/O
 //! adapters read and write through libzmq's queues.
-
-use std::ffi::c_void;
-use std::sync::Arc;
-use std::time::Duration;
+//!
+//! A message the target cannot take yet is sent by a task on the target's
+//! runtime, which completes once that exact message is accepted and then
+//! signals the target's send eventfd. The proxy thread waits on that
+//! eventfd and its input eventfds together, so no direction or control
+//! waits behind another and nothing polls on a timer.
 
 use crate::consts;
-use crate::poll::{ZmqFd, ZmqPollItem, zmq_poll};
-use crate::send_recv::{SendMessageAttempt, try_recv_message, try_send_message, zmq_recv};
+use crate::poll::{ZmqFd, ZmqPollItem, recv_ready};
+use crate::send_recv::{
+    SendMessageAttempt, SpawnedSend, map_send_err, spawn_send_message, try_recv_message,
+    try_send_message, zmq_recv,
+};
 use crate::socket::{OmqSocket, ensure_materialized};
+use std::ffi::c_void;
+use std::sync::Arc;
 
 const ZMQ_POLLIN: libc::c_short = consts::ZMQ_POLLIN as libc::c_short;
+const ZMQ_POLLOUT: libc::c_short = consts::ZMQ_POLLOUT as libc::c_short;
 const ZMQ_DONTWAIT: i32 = consts::ZMQ_DONTWAIT;
 const DEFAULT_PROXY_BURST_SIZE: usize = omq_tokio::proxy::DEFAULT_PROXY_BURST_SIZE;
 
@@ -57,9 +65,18 @@ enum ControlAction {
     Terminate,
 }
 
+/// A forwarded message the target could not take yet, owned by its send
+/// task. Dropping it abandons the send.
 #[derive(Debug)]
 struct Pending {
-    msg: omq_tokio::Message,
+    copy: omq_tokio::Message,
+    send: SpawnedSend,
+}
+
+impl Pending {
+    fn is_finished(&self) -> bool {
+        self.send.is_finished()
+    }
 }
 
 struct ProxyCtx {
@@ -137,8 +154,7 @@ impl ProxyCtx {
 
             if state == ProxyState::Active {
                 for direction in [preferred, preferred.opposite()] {
-                    match self.flush_pending_direction(direction, &mut fe_pending, &mut be_pending)
-                    {
+                    match self.finish_pending(direction, &mut fe_pending, &mut be_pending) {
                         Ok(true) => {
                             preferred = direction.opposite();
                             continue 'main;
@@ -160,31 +176,13 @@ impl ProxyCtx {
             if self.frontend.ctx.is_effectively_terminated() {
                 return crate::error::fail(crate::error::ETERM);
             }
-
-            if let Some(pending) = fe_pending.as_ref() {
-                Self::wait_send_progress(&self.backend, &pending.msg);
-            } else if let Some(pending) = be_pending.as_ref() {
-                Self::wait_send_progress(&self.frontend, &pending.msg);
-            }
-
-            let timeout_ms = if fe_pending.is_some() || be_pending.is_some() {
-                1
-            } else {
-                100
-            };
-            if self.poll_for_input(
-                state,
-                fe_pending.is_none(),
-                be_pending.is_none(),
-                timeout_ms,
-            ) < 0
-            {
+            if self.wait_for_events(state, fe_pending.as_ref(), be_pending.as_ref()) < 0 {
                 return -1;
             }
         }
     }
 
-    fn flush_pending_direction(
+    fn finish_pending(
         &self,
         direction: Direction,
         fe_pending: &mut Option<Pending>,
@@ -197,15 +195,18 @@ impl ProxyCtx {
             Direction::FrontendToBackend => fe_pending,
             Direction::BackendToFrontend => be_pending,
         };
-        let Some(pending_msg) = pending.take() else {
+        if !pending.as_ref().is_some_and(Pending::is_finished) {
             return Ok(false);
-        };
-        match self.try_forward(direction, pending_msg.msg)? {
-            SendMessageAttempt::Sent => Ok(true),
-            SendMessageAttempt::Full(msg) => {
-                *pending = Some(Pending { msg });
-                Ok(false)
+        }
+        let finished = pending.take().expect("finished pending send");
+        match finished.send.take_result().expect("finished send result") {
+            Ok(()) => {
+                if let Some(capture) = &self.capture {
+                    let _ = try_send_message(capture, finished.copy);
+                }
+                Ok(true)
             }
+            Err(error) => Err(map_send_err(self.target(direction), &error)),
         }
     }
 
@@ -246,7 +247,10 @@ impl ProxyCtx {
             match self.try_forward(direction, msg)? {
                 SendMessageAttempt::Sent => {}
                 SendMessageAttempt::Full(returned) => {
-                    *pending = Some(Pending { msg: returned });
+                    *pending = Some(Pending {
+                        copy: returned.clone(),
+                        send: spawn_send_message(self.target(direction), returned)?,
+                    });
                     return Ok(());
                 }
             }
@@ -331,66 +335,58 @@ impl ProxyCtx {
         }
     }
 
-    fn wait_send_progress(target: &OmqSocket, msg: &omq_tokio::Message) {
-        let wait_on = target.inner.get().map(|socket| socket.as_ref().clone());
-        let Some(socket) = wait_on else {
-            std::thread::sleep(Duration::from_millis(1));
-            return;
-        };
-        if target.ctx.is_effectively_terminated() {
-            return;
-        }
-        let Some(handle) = target.ctx.handle() else {
-            std::thread::sleep(Duration::from_millis(1));
-            return;
-        };
-        let msg = msg.clone();
-        handle.block_on(async move {
-            tokio::select! {
-                () = socket.wait_send_progress_for(&msg) => {}
-                () = tokio::time::sleep(Duration::from_millis(1)) => {}
-            }
-        });
-    }
-
-    fn poll_for_input(
+    /// Block until input arrives, a pending send finishes, or the context
+    /// terminates. Sources with a pending message are not read; their
+    /// target's send eventfd reports the pending send instead.
+    fn wait_for_events(
         &self,
         state: ProxyState,
-        fe_can_read: bool,
-        be_can_read: bool,
-        timeout_ms: libc::c_long,
+        fe_pending: Option<&Pending>,
+        be_pending: Option<&Pending>,
     ) -> libc::c_int {
+        let active = state == ProxyState::Active;
         let mut items = Vec::with_capacity(3);
-        if state == ProxyState::Active && self.fe_to_be_enabled && fe_can_read {
-            items.push(ZmqPollItem {
-                socket: self.frontend_ptr,
-                fd: invalid_fd(),
-                events: ZMQ_POLLIN,
-                revents: 0,
+        let item = |socket, events| ZmqPollItem {
+            socket,
+            fd: invalid_fd(),
+            events,
+            revents: 0,
+        };
+        if active && self.fe_to_be_enabled {
+            items.push(match fe_pending {
+                None => item(self.frontend_ptr, ZMQ_POLLIN),
+                Some(_) => item(self.backend_ptr, ZMQ_POLLOUT),
             });
         }
-        if state == ProxyState::Active && self.be_to_fe_enabled && be_can_read {
-            items.push(ZmqPollItem {
-                socket: self.backend_ptr,
-                fd: invalid_fd(),
-                events: ZMQ_POLLIN,
-                revents: 0,
+        if active && self.be_to_fe_enabled {
+            items.push(match be_pending {
+                None => item(self.backend_ptr, ZMQ_POLLIN),
+                Some(_) => item(self.frontend_ptr, ZMQ_POLLOUT),
             });
         }
         if self.control.is_some() {
-            items.push(ZmqPollItem {
-                socket: self.control_ptr,
-                fd: invalid_fd(),
-                events: ZMQ_POLLIN,
-                revents: 0,
-            });
+            items.push(item(self.control_ptr, ZMQ_POLLIN));
         }
-        if items.is_empty() {
-            std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+        let mut waiter = crate::notify::PollWaiter::new(&items);
+        if waiter.has_no_handles() {
             return 0;
         }
-        let nitems = libc::c_int::try_from(items.len()).expect("proxy poll item count fits c_int");
-        zmq_poll(items.as_mut_ptr(), nitems, timeout_ms)
+        waiter.prepare_for_wait();
+        // Recheck after draining: a later signal stays visible to the wait.
+        let input = items.iter().any(|item| {
+            // SAFETY: proxy sockets stay valid for the whole `zmq_proxy` call.
+            item.events == ZMQ_POLLIN
+                && recv_ready(unsafe { &*(item.socket.cast::<Arc<OmqSocket>>()) })
+        });
+        let sent = [fe_pending, be_pending]
+            .into_iter()
+            .flatten()
+            .any(Pending::is_finished);
+        if input || sent || self.frontend.ctx.is_effectively_terminated() {
+            return 0;
+        }
+        let rc = waiter.wait(-1, &mut items);
+        if rc < 0 { rc } else { 0 }
     }
 
     fn direction_enabled(&self, direction: Direction) -> bool {

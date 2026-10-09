@@ -239,6 +239,44 @@ impl SendSubmitter {
         }
     }
 
+    /// Whether `try_send` of an ordinary message would be admitted now.
+    pub(crate) fn send_ready(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::RoundRobin(s) => s.send_ready(),
+            Self::Latency(s) => s.send_ready(),
+            Self::Exclusive(s) => s.send_ready(),
+            Self::FanOut(s) => s.send_ready(),
+            Self::Identity(s) => s.send_ready(),
+        }
+    }
+
+    /// Completes once [`Self::send_ready`] is true. Never completes for
+    /// socket types that cannot send.
+    pub(crate) async fn wait_send_ready(&self) {
+        match self {
+            Self::None => std::future::pending().await,
+            Self::RoundRobin(s) => s.wait_send_ready().await,
+            Self::Latency(s) => s.wait_send_ready().await,
+            Self::Exclusive(s) => s.wait_send_ready().await,
+            Self::FanOut(s) => s.wait_send_ready().await,
+            Self::Identity(s) => s.wait_send_ready().await,
+        }
+    }
+
+    pub(crate) fn rep_send_ready(&self, peer_id: u64) -> bool {
+        match self {
+            Self::Identity(s) => s.rep_send_ready(peer_id),
+            _ => true,
+        }
+    }
+
+    pub(crate) async fn wait_rep_send_ready(&self, peer_id: u64) {
+        if let Self::Identity(s) = self {
+            s.wait_rep_send_ready(peer_id).await;
+        }
+    }
+
     pub(crate) async fn wait_send_progress(&self, msg: &Message) {
         match self {
             Self::None | Self::FanOut(_) => tokio::task::yield_now().await,

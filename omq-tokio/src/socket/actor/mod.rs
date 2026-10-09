@@ -13,7 +13,7 @@ mod peer_materialize;
 
 pub(crate) use peer::spawn_driver;
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
@@ -277,7 +277,7 @@ pub(crate) struct SocketDriver {
     /// REP latency route: envelopes for requests waiting in the receive pipe.
     /// REQ alternation flag. Shared with the socket handle for lock-free
     /// send/recv on REQ. Actor resets on peer disconnect.
-    req_awaiting_reply: Arc<AtomicBool>,
+    req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
     monitor: MonitorPublisher,
     /// Active subscription prefixes for SUB / XSUB. Replayed to new peers
     /// on `HandshakeSucceeded` so late-connecting publishers get our state.
@@ -301,7 +301,7 @@ pub(crate) struct SocketDriver {
     authenticated_recv_sink: Option<crate::engine::RecvSink>,
     pending_receive: Option<PendingReceive>,
     subscribe_count: Arc<AtomicU64>,
-    ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
+    ready_peer_count_shared: Arc<crate::socket::handle::ReadyPeers>,
     io_pool: crate::context::IoPoolHandle,
     inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     recv_ip_rate_limiter: Option<Arc<SharedIpRateLimiter>>,
@@ -320,10 +320,10 @@ impl SocketDriver {
         send_strategy: SendStrategy,
         spsc: super::recv::SpscHandles,
         type_state: Arc<Mutex<TypeState>>,
-        req_awaiting_reply: Arc<AtomicBool>,
+        req_awaiting_reply: Arc<crate::socket::handle::ReqAwaitingReply>,
         recv_sink_config: Option<Arc<crate::engine::RecvSinkConfig>>,
         subscribe_count: Arc<AtomicU64>,
-        ready_peer_count_shared: Arc<std::sync::atomic::AtomicUsize>,
+        ready_peer_count_shared: Arc<crate::socket::handle::ReadyPeers>,
         io_pool: crate::context::IoPoolHandle,
         inproc_registry: Arc<crate::transport::inproc::InprocRegistry>,
     ) -> Self {
@@ -694,8 +694,7 @@ impl SocketDriver {
         self.peer_control_rx.close();
         self.pending_endpoints.clear();
         self.send_strategy.shutdown();
-        self.ready_peer_count_shared
-            .store(0, std::sync::atomic::Ordering::Release);
+        self.ready_peer_count_shared.set(0);
         let mut peer_tasks = Vec::new();
         for p in self.peers.values() {
             if let Some(ref slot) = p.handle.transmit_slot {

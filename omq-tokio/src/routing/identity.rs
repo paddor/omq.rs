@@ -92,6 +92,17 @@ impl PeerTarget {
         }
     }
 
+    fn can_accept(&mut self, lanes: &crate::engine::data_inbox::SenderLanes) -> bool {
+        match self {
+            Self::Pipe(p) | Self::RepInproc(p) => p.can_accept(),
+            Self::Direct(target) => target.bind(lanes).can_accept(),
+            Self::Inbox(tx) => {
+                let tx = lanes.bind(tx);
+                !tx.is_closed() && tx.send_ready()
+            }
+        }
+    }
+
     fn space_available(&self) -> Option<Arc<StateSignal>> {
         match self {
             Self::Pipe(p) | Self::RepInproc(p) => Some(p.space_available()),
@@ -113,6 +124,7 @@ impl PeerTarget {
 pub(crate) struct Submitter {
     data_lanes: crate::engine::data_inbox::SenderLanes,
     inner: Arc<Mutex<IdentityInner>>,
+    changed: Arc<StateSignal>,
     router_mandatory: bool,
     drop_on_full: bool,
     peer: Option<Arc<peer::PeerRoutes>>,
@@ -124,6 +136,7 @@ impl Submitter {
         Self {
             data_lanes: self.data_lanes.clone_shared(),
             inner: self.inner.clone(),
+            changed: self.changed.clone(),
             router_mandatory: self.router_mandatory,
             drop_on_full: self.drop_on_full,
             peer: self.peer.clone(),
@@ -294,6 +307,97 @@ impl Submitter {
         {
             Ok(()) => Ok(()),
             Err(SendRetry::Full(_, _)) => Err(TrySendError::Full(retry)),
+        }
+    }
+
+    /// libzmq readiness: ROUTER with `router_mandatory` is writable while any
+    /// peer has space. Other identity-routed types never block on a peer
+    /// they do not know, so they are always writable.
+    pub(crate) fn send_ready(&self) -> bool {
+        if self.drop_on_full || self.peer.is_some() || !self.router_mandatory {
+            return true;
+        }
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.closed
+            || g.peers
+                .values_mut()
+                .any(|peer| peer.target.can_accept(&self.data_lanes))
+    }
+
+    pub(crate) async fn wait_send_ready(&self) {
+        use futures::StreamExt;
+        loop {
+            let (mut peers, changed) = {
+                let g = self.inner.lock().expect("identity inner poisoned");
+                let peers: futures::stream::FuturesUnordered<_> = g
+                    .peers
+                    .values()
+                    .map(|peer| self.space_changed(&peer.target))
+                    .collect();
+                (
+                    peers,
+                    crate::engine::signal::any_changed([self.changed.clone()]),
+                )
+            };
+            if self.send_ready() {
+                return;
+            }
+            tokio::select! {
+                Some(()) = peers.next() => {},
+                () = changed => {},
+            }
+        }
+    }
+
+    /// Completes once `target`'s admission may have changed. A departed
+    /// target waits for the peer table change instead.
+    fn space_changed(
+        &self,
+        target: &PeerTarget,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        if let Some(outbound) = target.outbound(&self.data_lanes) {
+            if !outbound.is_alive() {
+                return Box::pin(std::future::pending());
+            }
+            return Box::pin(async move { outbound.wait_capacity().await });
+        }
+        match target {
+            PeerTarget::Pipe(pipe) | PeerTarget::RepInproc(pipe) => {
+                Box::pin(crate::engine::signal::any_changed(pipe.readiness_signals()))
+            }
+            PeerTarget::Direct(_) | PeerTarget::Inbox(_) => Box::pin(std::future::pending()),
+        }
+    }
+
+    /// Whether a REP reply to `peer_id` would be admitted now. A reply to a
+    /// departed peer is dropped, so it never waits.
+    pub(crate) fn rep_send_ready(&self, peer_id: u64) -> bool {
+        let mut g = self.inner.lock().expect("identity inner poisoned");
+        g.closed
+            || g.peers
+                .get_mut(&peer_id)
+                .is_none_or(|peer| peer.target.can_accept(&self.data_lanes))
+    }
+
+    pub(crate) async fn wait_rep_send_ready(&self, peer_id: u64) {
+        loop {
+            let (peer, changed) = {
+                let g = self.inner.lock().expect("identity inner poisoned");
+                (
+                    g.peers
+                        .get(&peer_id)
+                        .map(|peer| self.space_changed(&peer.target)),
+                    crate::engine::signal::any_changed([self.changed.clone()]),
+                )
+            };
+            if self.rep_send_ready(peer_id) {
+                return;
+            }
+            let Some(peer) = peer else { return };
+            tokio::select! {
+                () = peer => {},
+                () = changed => {},
+            }
         }
     }
 
@@ -551,6 +655,8 @@ fn take_server_routing_id(msg: &mut Message) -> Result<u32> {
 #[derive(Debug)]
 pub(crate) struct IdentitySend {
     inner: Arc<Mutex<IdentityInner>>,
+    /// Peer table changes, for send readiness waits.
+    changed: Arc<StateSignal>,
     router_mandatory: bool,
     socket_type: SocketType,
     latency_profile: bool,
@@ -600,6 +706,7 @@ impl IdentitySend {
                 identity_to_peer: FxHashMap::default(),
                 closed: false,
             })),
+            changed: Arc::new(StateSignal::new()),
             router_mandatory: options.router_mandatory,
             socket_type,
             latency_profile,
@@ -612,6 +719,7 @@ impl IdentitySend {
         Submitter {
             data_lanes: crate::engine::data_inbox::SenderLanes::default(),
             inner: self.inner.clone(),
+            changed: self.changed.clone(),
             router_mandatory: self.router_mandatory,
             drop_on_full: self.socket_type == SocketType::Router && !self.router_mandatory,
             peer: self.peer.clone(),
@@ -676,6 +784,8 @@ impl IdentitySend {
         {
             signal.notify_changed();
         }
+        drop(g);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn connection_removed(&mut self, peer_id: u64) {
@@ -685,6 +795,8 @@ impl IdentitySend {
         }
         let mut g = self.inner.lock().expect("identity inner poisoned");
         g.remove_peer(peer_id);
+        drop(g);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn peer_for_identity(&self, identity: &Bytes) -> Option<u64> {
@@ -704,6 +816,8 @@ impl IdentitySend {
         g.closed = true;
         g.peers.clear();
         g.identity_to_peer.clear();
+        drop(g);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn stop_admission(&self) {
@@ -718,6 +832,8 @@ impl IdentitySend {
                 space.notify_changed();
             }
         }
+        drop(state);
+        self.changed.notify_changed();
     }
 
     pub(crate) fn is_drained(&self) -> bool {

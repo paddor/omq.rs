@@ -423,6 +423,25 @@ impl Submitter {
         }
     }
 
+    /// Lossy fan-out never blocks. With `xpub_nodrop`, sends wait for lane
+    /// 0's ring; fallback peers (inproc, WebSocket) are not probed.
+    pub(crate) fn send_ready(&self) -> bool {
+        self.mute_policy.is_lossy()
+            || self.lane_peer_count.load(Ordering::Acquire) == 0
+            || self.lanes.dispatch_space().0
+    }
+
+    pub(crate) async fn wait_send_ready(&self) {
+        loop {
+            let (_, space) = self.lanes.dispatch_space();
+            let changed = crate::engine::signal::any_changed([space]);
+            if self.send_ready() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     pub(crate) fn try_send(
         &self,
         msg: Message,

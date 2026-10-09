@@ -1,4 +1,5 @@
-//! Rejects timer polling in the libzmq API and binding native code.
+//! Rejects timer polling in the backend, the libzmq API, and binding native
+//! code.
 //!
 //! A wait must park on a wakeup (socket signal, cancel handle, condvar) and
 //! use a deadline only to bound it. Sleeping a fixed interval between
@@ -23,19 +24,29 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "zmq_poll with no pollable items has nothing to wake it",
     ),
     (
-        "omq-libzmq/src/proxy.rs",
-        "from_millis(timeout_ms as u64)",
-        "proxy poll with no enabled items has nothing to wake it",
+        "omq-tokio/src/transport/ipc.rs",
+        "sleep(std::time::Duration::from_millis(5))",
+        "Windows ERROR_PIPE_BUSY has no wakeup; connect setup only",
     ),
     (
-        "omq-libzmq/src/proxy.rs",
-        "std::thread::sleep(Duration::from_millis(1));",
-        "lost-notify fallback while a proxy target is muted",
+        "omq-tokio/src/socket/actor/endpoint_resolution.rs",
+        "sleep(Duration::from_millis(10))",
+        "setup retry while bind or connect preflight would block",
     ),
     (
-        "omq-libzmq/src/proxy.rs",
-        "tokio::time::sleep(Duration::from_millis(1))",
-        "lost-notify fallback while a proxy target is muted",
+        "omq-tokio/src/socket/actor/listener.rs",
+        "sleep(Duration::from_millis(50))",
+        "accept error backoff, not a readiness poll",
+    ),
+    (
+        "omq-tokio/src/engine/recv_sink.rs",
+        "sleep(Duration::from_millis(10))",
+        "receiver drop fallback: a raw yring consumer drop has no signal",
+    ),
+    (
+        "omq-tokio/src/socket/actor/mod.rs",
+        "sleep(Duration::from_millis(1))",
+        "close drain: send queues have no became-empty signal",
     ),
 ];
 
@@ -44,7 +55,7 @@ fn binding_and_libzmq_waits_do_not_sleep_poll() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo = manifest.parent().expect("omq-tokio lives under repo root");
     let mut violations = Vec::new();
-    for root in ["omq-libzmq/src", "bindings"] {
+    for root in ["omq-tokio/src", "omq-libzmq/src", "bindings"] {
         collect(repo, &repo.join(root), &mut violations);
     }
     assert!(

@@ -10,8 +10,8 @@ public static class SocketAsyncExtensions
     public static Task SendAsync(this Socket socket, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        // Poll reports POLLOUT unconditionally, so a muted socket must park in
-        // the native async send rather than retry on writability.
+        // A muted socket parks in the native async send, which completes once
+        // this message is accepted.
         return socket.TrySend(data.Span) ? Task.CompletedTask : socket.SendAsync(new Message([data]), cancellationToken);
     }
 

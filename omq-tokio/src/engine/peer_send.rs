@@ -167,8 +167,21 @@ impl Producer {
         }
     }
 
+    /// Ring space and shared budget signals: either can admit a send.
+    pub(crate) fn space_signals(&self) -> [Arc<StateSignal>; 2] {
+        [self.space.clone(), self.shared.space.clone()]
+    }
+
     pub(crate) fn registration_space(&self) -> Arc<StateSignal> {
         self.shared.space.clone()
+    }
+
+    /// Whether a send may be admitted now, judged without polling the ring:
+    /// the last ring poll found space and the shared budget has room.
+    pub(crate) fn has_space(&self) -> bool {
+        !self.ring_space.waiting.load(Ordering::Acquire)
+            && self.shared.messages.load(Ordering::Acquire) < self.shared.max_messages
+            && self.shared.bytes.load(Ordering::Acquire) < self.shared.max_bytes
     }
 
     pub(crate) fn ready(&self) -> bool {

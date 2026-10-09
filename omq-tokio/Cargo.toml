@@ -118,6 +118,10 @@ path = "tests/copy_budget.rs"
 required-features = ["copy-stats"]
 
 [[test]]
+name = "omq_send_ready"
+path = "tests/send_ready.rs"
+
+[[test]]
 name = "omq_latency_send"
 path = "tests/latency_send.rs"
 
@@ -493,6 +497,10 @@ path = "tests/peer_churn.rs"
 [[test]]
 name = "omq_plain"
 path = "tests/plain.rs"
+
+[[test]]
+name = "omq_proxy_idle"
+path = "tests/proxy_idle.rs"
 
 [[test]]
 name = "omq_proxy"

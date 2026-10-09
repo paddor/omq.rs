@@ -389,8 +389,7 @@ impl SocketDriver {
                 io_thread: 0,
             },
         );
-        self.ready_peer_count_shared
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.ready_peer_count_shared.add();
 
         self.send_strategy
             .connection_added(peer_id, route_id, handle, identity.clone(), false, 0);
@@ -559,8 +558,7 @@ impl SocketDriver {
             port.open(open);
         }
         if became_ready {
-            self.ready_peer_count_shared
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.ready_peer_count_shared.add();
         }
         self.monitor.publish(ready_event);
         // Replies must be routable before a different I/O/application thread

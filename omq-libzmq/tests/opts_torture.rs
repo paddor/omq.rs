@@ -226,8 +226,9 @@ fn read_only_options_accept_set_without_corrupting_state() {
     assert_eq!(set_i32(sock, ZMQ_TYPE, ZMQ_PULL), 0);
     assert_eq!(get_i32(sock, ZMQ_TYPE), ZMQ_PUSH);
 
+    // Like libzmq, a PUSH without a pipe is not writable.
     let events = get_i32(sock, ZMQ_EVENTS);
-    assert_ne!(events & ZMQ_POLLOUT, 0);
+    assert_eq!(events & ZMQ_POLLOUT, 0);
     assert_eq!(set_i32(sock, ZMQ_EVENTS, 0), 0);
     assert_eq!(get_i32(sock, ZMQ_EVENTS), events);
 

@@ -166,6 +166,11 @@ pub struct Options {
     /// bounded by this cache. Exhaustion allocates normally. Default: disabled.
     pub recv_message_pool: Option<crate::message::MessagePool>,
 
+    /// Optional application-selected receive payload storage. Shared across
+    /// connections; inline parts skip checkout and exhaustion uses owned
+    /// storage. Default: disabled. Frozen before the first bind/connect.
+    pub recv_payload_pool: Option<crate::PayloadPool>,
+
     /// Per-connection receive token bucket. `None` disables it.
     ///
     /// The tokio byte-stream backend counts complete application messages
@@ -418,9 +423,6 @@ pub enum DartEcn {
 #[cfg(feature = "dart")]
 #[derive(Clone, Copy, Debug)]
 pub struct DartOptions {
-    /// Internal receive buffers per socket. Default 8192, each holding 2 KiB.
-    /// Shared across peers; also bounds retained native RADIO publications.
-    pub pool_buffers: usize,
     /// Maximum admitted peers across the socket. Default 1024.
     pub max_ready_peers: usize,
     /// Busy wait before readiness waiting. Default zero, maximum 50 us.
@@ -442,7 +444,6 @@ pub struct DartOptions {
 impl Default for DartOptions {
     fn default() -> Self {
         Self {
-            pool_buffers: 8192,
             max_ready_peers: 1024,
             io_spin: Duration::ZERO,
             ecn: DartEcn::Auto,
@@ -456,9 +457,9 @@ impl Default for DartOptions {
 #[cfg(feature = "dart")]
 impl DartOptions {
     fn validate(self) -> crate::error::Result<()> {
-        if self.pool_buffers == 0 || self.max_ready_peers == 0 {
+        if self.max_ready_peers == 0 {
             return Err(crate::error::Error::Config(
-                "dart.pool_buffers and dart.max_ready_peers must be nonzero".into(),
+                "dart.max_ready_peers must be nonzero".into(),
             ));
         }
         if !self.window_messages.is_power_of_two()
@@ -688,6 +689,7 @@ impl Default for Options {
             recv_spin: Duration::ZERO,
             recv_batching: false,
             recv_message_pool: None,
+            recv_payload_pool: None,
             recv_rate_limit: None,
             recv_ip_rate_limit: None,
             linger: Some(Duration::ZERO),
@@ -900,6 +902,15 @@ impl Options {
     #[must_use]
     pub fn recv_message_pool(mut self, pool: crate::message::MessagePool) -> Self {
         self.recv_message_pool = Some(pool);
+        self
+    }
+
+    /// Set explicit receive payload size classes, shared across connections.
+    /// Inline bodies skip checkout; exhaustion and oversized bodies use owned
+    /// allocations. Inproc transfers existing payload owners unchanged.
+    #[must_use]
+    pub fn recv_payload_pool(mut self, pool: crate::PayloadPool) -> Self {
+        self.recv_payload_pool = Some(pool);
         self
     }
 
@@ -1404,7 +1415,6 @@ mod tests {
     #[test]
     fn dart_defaults_are_bounded_and_spinning_is_explicit() {
         let mut options = Options::default();
-        assert_eq!(options.dart.pool_buffers, 8192);
         assert_eq!(options.dart.max_ready_peers, 1024);
         assert_eq!(options.dart.io_spin, Duration::ZERO);
         assert_eq!(options.dart.ecn, DartEcn::Auto);
@@ -1416,9 +1426,6 @@ mod tests {
         options.dart.io_spin += Duration::from_nanos(1);
         assert!(options.validate().is_err());
         options.dart.io_spin = Duration::ZERO;
-        options.dart.pool_buffers = 0;
-        assert!(options.validate().is_err());
-        options.dart.pool_buffers = 1;
         options.dart.max_ready_peers = 0;
         assert!(options.validate().is_err());
         options.dart.max_ready_peers = 1;

@@ -22,7 +22,6 @@
 compile_error!("omq-tokio requires target_has_atomic = \"64\"");
 
 pub mod blocking;
-mod buffer_pool;
 pub mod context;
 pub mod engine;
 pub mod exclusive;
@@ -34,19 +33,19 @@ pub mod transport;
 // Re-export the sans-I/O surface so downstream callers don't have
 // to depend on omq-proto explicitly. Identical surface to the
 // pre-split crate.
-pub use buffer_pool::{BufferLengthError, BufferPool, MessageBuffer};
 pub use omq_proto::IpcPath;
 pub use omq_proto::{AuthenticationResult, AuthenticationStatus, Authenticator, MechanismPeerInfo};
 pub use omq_proto::{
     CompressionKind, CompressionOptions, Endpoint, EndpointRole, EndpointSpec, Error, Frame,
     FrameFlags, HandshakeRefusal, KeepAlive, MechanismConfig, MechanismSetup, Message, MessageIter,
-    MessagePool, OnMute, Options, PartCountError, ReconnectPolicy, Result, SocketType,
+    MessagePool, OnMute, Options, PartCountError, Payload, ReconnectPolicy, Result, SocketType,
     TrySendError, is_compatible,
 };
 #[cfg(feature = "curve")]
 pub use omq_proto::{CurveKeypair, CurvePublicKey, CurveSecretKey, CurveServerOptions};
 #[cfg(feature = "dart")]
 pub use omq_proto::{DartCongestion, DartEcn, DartOptions};
+pub use omq_proto::{PayloadBuffer, PayloadLengthError, PayloadPool};
 #[cfg(feature = "dart")]
 pub use transport::dart::{DartCapabilities, DartStats};
 
@@ -65,5 +64,5 @@ pub use proxy::{Proxy, ProxyExit};
 pub use socket::{
     ConnectionStatus, DisconnectReason, IdentitySocket, MonitorEvent, MonitorRecvError,
     MonitorStream, MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo, ReceiveReceipt,
-    ReceiveSource, Socket, UnshiftError,
+    ReceiveSource, Socket, SocketPools, UnshiftError,
 };

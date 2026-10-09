@@ -195,11 +195,13 @@ Small message bodies can live inline in `Message` or `Payload`. Larger bodies
 use shared storage; cloning a message need not copy its payload. Multipart
 messages retain part descriptors and shared body owners.
 
-Applications can explicitly create transport-independent `BufferPool` handles.
-Their message builder keeps tiny bodies inline, uses pooled storage when it
-fits, or allocates owned storage for larger bodies. Fixed buffers return to
-their shared pool after the final owner releases them; overlapping clone
-releases are reclaimed through a bounded queue.
+Applications explicitly create transport-independent `PayloadPool` handles
+with fixed storage classes. Message construction selects inline storage or
+the smallest fitting available class, with an owned allocation fallback.
+Multipart parts select independently; `MessagePool` caches frame tables.
+`Options::recv_payload_pool` supplies socket-wide receive storage. Configuration
+freezes before the first bind/connect; inproc transfers existing owners.
+Final owners return slots; overlapping releases use bounded reclamation.
 
 `FrameBuffer` owns encoded headers and small bodies. Large bodies use shared
 chunks for gather writes. Drivers retain unfinished output until its wire
@@ -305,10 +307,10 @@ receive backpressure. See [quic-rfc.md](quic-rfc.md) for the native protocol.
 Each Dart endpoint task drives all peers' sans-I/O sessions and owns its
 deadline timer (monotonic timerfd on Linux). Sessions retain
 outbound bodies until receipt acknowledgment and enforce bounded receive
-credit. Peers share the socket's internal receive body pool, separate from
-application send storage. Final pooled owners return credit to their original
+credit. Peers share explicit receive payload storage when configured.
+Final owned and pooled bodies return credit to their original
 session when storage is reusable; inline values return credit after bounded
-queue delivery. Fragment chunks also use the receive pool.
+queue delivery. Fragment chunks can use the configured payload classes.
 Fragmented bodies reserve their full allocation after length validation;
 intermediate credits return during assembly, and the final credit follows
 the complete body's last owner. See [dart-rfc.md](dart-rfc.md).

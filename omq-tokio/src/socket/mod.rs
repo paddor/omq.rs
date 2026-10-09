@@ -13,6 +13,7 @@ pub mod handle;
 pub mod identity;
 pub mod monitor;
 pub(crate) mod peer_recv;
+pub(crate) mod pools;
 pub(crate) mod recv;
 pub(crate) mod type_state;
 pub(crate) mod udp;
@@ -24,6 +25,7 @@ pub use monitor::{
     MonitorTryRecvError, PeerCommandKind, PeerIdent, PeerInfo,
 };
 pub use peer_recv::{ReceiveReceipt, ReceiveSource, UnshiftError};
+pub use pools::SocketPools;
 
 pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<std::time::Instant> {
     std::time::Instant::now().checked_add(timeout)

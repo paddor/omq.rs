@@ -22,7 +22,6 @@ use super::pool::ReceiveBody;
 use super::{DartIo, DartStats, ReceiveBatch, ReceivedDatagram, SocketState};
 use crate::engine::signal::DataSignal;
 use crate::engine::{PeerDriverCommand, PeerDriverData, RecvSink, SendPipeConsumer};
-use crate::{BufferPool, MessageBuffer};
 
 const RETRY: Duration = Duration::from_millis(100);
 const LEASE: Duration = Duration::from_secs(3);
@@ -263,7 +262,7 @@ impl PeerIo {
         &mut self,
         session: &mut Session,
         groups: Option<&crate::socket::udp::JoinedGroups>,
-        pool: &BufferPool,
+        pool: &super::pool::ReceivePool,
         stats: &mut DartStats,
     ) -> usize {
         if !self.active {
@@ -359,8 +358,8 @@ struct Peer {
     retry: Instant,
     reported: bool,
     session: Option<Session>,
-    pool: Option<BufferPool>,
-    receive_buffers: Vec<MessageBuffer>,
+    pool: Option<super::pool::ReceivePool>,
+    receive_buffers: super::pool::ReceiveBuffers,
     returns: Arc<CreditCounter>,
     io: Option<Box<PeerIo>>,
     sampled: dart::SessionStats,
@@ -391,7 +390,11 @@ impl Peer {
             self.returns.clone(),
             signal.clone(),
         ));
-        self.receive_buffers = Vec::with_capacity(MESSAGES.min(options.window_messages));
+        self.receive_buffers = super::pool::ReceiveBuffers::new(
+            shared
+                .receive_pool()
+                .map_or(0, |_| MESSAGES.min(options.window_messages)),
+        );
         self.session = Some(Session::with_receive_buffers(
             self.handshake.local(),
             self.handshake.remote(),
@@ -503,7 +506,7 @@ impl EndpointWorker {
                 }
             }
             signal.begin_drain();
-            if let Some(pool) = self.shared.receive_pool.get() {
+            if let Some(pool) = self.shared.receive_pool() {
                 pool.reclaim();
             }
             if !self.drain_commands(&mut routes, &signal) {
@@ -745,7 +748,7 @@ impl EndpointWorker {
                     reported: false,
                     session: None,
                     pool: None,
-                    receive_buffers: Vec::new(),
+                    receive_buffers: super::pool::ReceiveBuffers::default(),
                     returns: Arc::new(CreditCounter::default()),
                     io: None,
                     sampled: dart::SessionStats::default(),
@@ -944,7 +947,7 @@ impl EndpointWorker {
                 }
             }
             _ => {
-                let valid = crate::buffer_pool::with_recycling_batch(|| {
+                let valid = omq_proto::payload_pool::with_recycling_batch(|| {
                     session.handle_control(decoded, elapsed)
                 });
                 if valid {
@@ -1053,19 +1056,18 @@ impl EndpointWorker {
                 Ecn::Unavailable
             }
         };
-        if peer.receive_buffers.is_empty() {
-            self.shared
-                .receive_pool()
-                .try_take_many_into(MESSAGES, &mut peer.receive_buffers);
-        }
-        let mut message = if let Some(mut buffer) = peer.receive_buffers.pop() {
+        let pool = peer.pool.as_ref().expect("receive allocator");
+        let mut message = if let Some(mut buffer) = pool.take(body.len(), &mut peer.receive_buffers)
+        {
             buffer.writable()[..body.len()].copy_from_slice(body);
             buffer.set_len(body.len()).expect("validated fragment body");
             buffer.into_message()
         } else {
             // A missing fragment must remain recoverable even if other peers
             // retain every pooled slot. Session windows still bound ownership.
-            stats.pool_exhausted += 1;
+            if pool.storage().is_some() {
+                stats.pool_exhausted += 1;
+            }
             Message::from_slice(body)
         };
         if let Some(group) = group {
@@ -1178,19 +1180,18 @@ impl EndpointWorker {
             }
             return true;
         }
-        if peer.receive_buffers.is_empty() {
-            self.shared
-                .receive_pool()
-                .try_take_many_into(MESSAGES, &mut peer.receive_buffers);
-        }
-        let mut message = if let Some(mut buffer) = peer.receive_buffers.pop() {
-            buffer.writable_received(peer.pool.as_ref().expect("receiver pool"))[..body.len()]
+        let pool = peer.pool.as_ref().expect("receive allocator");
+        let mut message = if let Some(mut buffer) = pool.take(body.len(), &mut peer.receive_buffers)
+        {
+            buffer.writable_received(pool.storage().expect("explicit receive pool"))[..body.len()]
                 .copy_from_slice(body);
             buffer.set_len(body.len()).expect("validated body");
             buffer.into_message()
         } else {
             // Shared pool exhaustion must not block another peer's gap repair.
-            stats.pool_exhausted += 1;
+            if pool.storage().is_some() {
+                stats.pool_exhausted += 1;
+            }
             let Some(payload) = peer
                 .pool
                 .as_ref()
@@ -1369,11 +1370,12 @@ impl EndpointWorker {
             session.release_receive(returned);
         }
         if session.has_progress() {
-            turn.worked |= crate::buffer_pool::with_recycling_batch(|| session.poll_progress());
+            turn.worked |=
+                omq_proto::payload_pool::with_recycling_batch(|| session.poll_progress());
             io.acknowledge(session.acknowledged_position());
         }
         session.handle_timeout(now);
-        turn.worked |= self.shared.receive_pool().with_recycling_batch(|| {
+        turn.worked |= omq_proto::payload_pool::with_recycling_batch(|| {
             io.deliver(
                 session,
                 (self.socket_type == SocketType::Dish).then_some(&self.joined),

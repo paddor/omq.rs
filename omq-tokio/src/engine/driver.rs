@@ -730,6 +730,7 @@ where
     arena_threshold: usize,
     arena_cap: usize,
     receive_profile: ReceiveProfile,
+    decoded_payload_pool: Option<omq_proto::PayloadPool>,
     recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
     socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
 }
@@ -830,6 +831,7 @@ where
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             receive_profile: ReceiveProfile::Throughput,
+            decoded_payload_pool: None,
             recv_ip_rate_limiter: None,
             socket_close_state: None,
         }
@@ -873,6 +875,16 @@ where
     #[must_use]
     pub fn with_decoder(mut self, decoder: MessageDecoder) -> Self {
         self.decoder = Some(decoder);
+        self
+    }
+
+    /// Select receive payload storage after decoding a message transform.
+    #[must_use]
+    pub(crate) fn with_decoded_payload_pool(
+        mut self,
+        pool: Option<omq_proto::PayloadPool>,
+    ) -> Self {
+        self.decoded_payload_pool = pool;
         self
     }
 
@@ -1042,6 +1054,7 @@ where
             arena_threshold,
             arena_cap,
             receive_profile,
+            decoded_payload_pool,
             recv_ip_rate_limiter,
             setup_deadline,
             setup_cancel,
@@ -1385,6 +1398,7 @@ where
                         connection: &mut recv_rate_limiter,
                         ip: recv_ip_rate_limiter.as_ref(),
                     },
+                    decoded_payload_pool.as_ref(),
                 )? {
                     DriverStep::Continue => {}
                     DriverStep::Yield => {
@@ -1894,6 +1908,7 @@ fn drain_decoded_messages(
     receive_profile: ReceiveProfile,
     mut delivery: MessageDelivery<'_>,
     rate_limiters: ReceiveRateLimiters<'_>,
+    decoded_payload_pool: Option<&omq_proto::PayloadPool>,
 ) -> Result<DriverStep> {
     let ReceiveRateLimiters {
         connection: rate_connection,
@@ -1915,7 +1930,13 @@ fn drain_decoded_messages(
     while let Some(m) = connection.poll_message() {
         let m = match decoder.as_mut() {
             Some(dec) => match dec.decode(m)? {
-                Some(plain) => plain,
+                Some(plain) => {
+                    if let Some(pool) = decoded_payload_pool {
+                        pool.store_decoded_message(plain)
+                    } else {
+                        plain
+                    }
+                }
                 None => continue,
             },
             None => m,
@@ -5855,6 +5876,7 @@ mod tests {
                         connection: &mut None,
                         ip: None
                     },
+                    None,
                 )
                 .unwrap(),
                 DriverStep::Continue

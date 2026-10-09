@@ -6,18 +6,21 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
-use omq_proto::message::{Message, Payload, PayloadOwner};
+use crate::message::{Message, Payload, PayloadOwner};
 
-pub(crate) trait BufferReturn: fmt::Debug + Send + Sync + std::panic::RefUnwindSafe {
+/// Receive lifecycle callbacks implemented by I/O backends.
+/// Buffer returns publish credit only after the final payload owner is released.
+#[doc(hidden)]
+pub trait PayloadRelease: fmt::Debug + Send + Sync + std::panic::RefUnwindSafe {
+    /// Publish the number of reusable receive positions.
     fn publish(&self, count: usize);
+    /// Schedule a bounded deferred-reclamation turn.
     fn wake(&self);
-    #[cfg(feature = "dart")]
-    fn own(&self, body: Vec<u8>) -> Payload;
 }
 
 fn same_returns(
-    first: Option<&Arc<dyn BufferReturn>>,
-    second: Option<&Arc<dyn BufferReturn>>,
+    first: Option<&Arc<dyn PayloadRelease>>,
+    second: Option<&Arc<dyn PayloadRelease>>,
 ) -> bool {
     match (first, second) {
         (None, None) => true,
@@ -26,23 +29,28 @@ fn same_returns(
     }
 }
 
-/// Fixed-size reusable body buffers. Clones share the same bounded pool.
+/// Preallocated payload storage in ascending size classes.
 ///
-/// Initialization allocates every buffer. Exhaustion never grows the pool.
-/// Messages may be cloned, sent across threads, and outlive this handle.
-/// No socket or transport feature is required. Use [`Self::try_message`] for
-/// inline, pooled, or independently allocated bodies.
+/// Clones share storage. Construction allocates every slot; checkout and
+/// return never grow the pool. Message parts select the smallest fitting
+/// available class. Inline bodies skip checkout. Final message owners and
+/// byte views return their storage, including across threads.
+///
+/// `message` and `payload` fall back to owned storage. Their `try_` forms
+/// return `None` when no pooled storage fits or is available.
 ///
 /// ```
-/// use omq_tokio::BufferPool;
-///
-/// let pool = BufferPool::new(2048, 128);
-/// let message = pool.try_message(16, |body| body.fill(7))?.unwrap();
+/// use omq_proto::PayloadPool;
+/// let pool = PayloadPool::new([(1024, 128), (4096, 32)])?;
+/// let message = pool.message(16, |body| body.fill(7))?;
 /// assert_eq!(message.part_slice(0), Some([7; 16].as_slice()));
-/// # Ok::<(), omq_tokio::Error>(())
+/// # Ok::<(), omq_proto::Error>(())
 /// ```
 #[derive(Clone, Debug)]
-pub struct BufferPool(Arc<Pool>, Option<Arc<dyn BufferReturn>>);
+pub struct PayloadPool {
+    classes: Arc<[Arc<Pool>]>,
+    returns: Option<Arc<dyn PayloadRelease>>,
+}
 
 #[derive(Debug)]
 struct Pool {
@@ -121,7 +129,7 @@ impl FreeList {
         owner
     }
 
-    fn pop_many(&self, limit: usize, output: &mut Vec<MessageBuffer>) -> usize {
+    fn pop_many(&self, limit: usize, output: &mut Vec<PayloadBuffer>) -> usize {
         let limit = limit.min(TRANSFER).min(output.capacity() - output.len());
         if limit == 0 {
             return 0;
@@ -129,7 +137,7 @@ impl FreeList {
         // Sparse traffic takes the same scalar path as ordinary acquisition.
         if limit == 1 {
             if let Some(owner) = self.pop() {
-                output.push(MessageBuffer {
+                output.push(PayloadBuffer {
                     storage: Some(owner),
                     length: 0,
                     returns: None,
@@ -145,7 +153,7 @@ impl FreeList {
                 self.available.fetch_sub(batch.count, Ordering::Relaxed);
                 let count = (limit - taken).min(batch.count);
                 for owner in &mut batch.owners[..count] {
-                    output.push(MessageBuffer {
+                    output.push(PayloadBuffer {
                         storage: Some(owner.take().expect("returned owner")),
                         length: 0,
                         returns: None,
@@ -160,7 +168,7 @@ impl FreeList {
                     let Ok(owner) = self.singles.pop() else {
                         break;
                     };
-                    output.push(MessageBuffer {
+                    output.push(PayloadBuffer {
                         storage: Some(owner),
                         length: 0,
                         returns: None,
@@ -189,7 +197,7 @@ struct Storage {
     bytes: Box<[u8]>,
     pool: Weak<Pool>,
     slot: usize,
-    returns: Option<Arc<dyn BufferReturn>>,
+    returns: Option<Arc<dyn PayloadRelease>>,
 }
 
 impl AsRef<[u8]> for Storage {
@@ -287,7 +295,7 @@ impl Storage {
 impl Pool {
     fn reclaim(&self) {
         let limit = self.pending_count.load(Ordering::Relaxed).min(TRANSFER);
-        let mut budget = omq_proto::flow::DrainBudget::new(limit, TRANSFER_BYTES);
+        let mut budget = crate::flow::DrainBudget::new(limit, TRANSFER_BYTES);
         while !budget.exhausted() {
             let Ok(owner) = self.pending.pop() else {
                 break;
@@ -314,7 +322,7 @@ const TRANSFER_BYTES: usize = 64 * 1024;
 struct Recycling {
     active: bool,
     pool: Option<Arc<Pool>>,
-    returns: Option<Arc<dyn BufferReturn>>,
+    returns: Option<Arc<dyn PayloadRelease>>,
     owners: [Option<Arc<Storage>>; TRANSFER],
     count: usize,
 }
@@ -368,40 +376,37 @@ impl Drop for RecycleGuard {
     }
 }
 
-impl BufferPool {
-    #[cfg(feature = "dart")]
-    pub(super) fn copy_received(&self, bytes: &[u8]) -> Option<Payload> {
-        let returns = self.1.as_ref().expect("receiver credit");
-        let mut body = Vec::new();
-        body.try_reserve_exact(bytes.len()).ok()?;
-        body.extend_from_slice(bytes);
-        Some(returns.own(body))
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn with_returns(&self, returns: Arc<dyn BufferReturn>) -> Self {
-        Self(self.0.clone(), Some(returns))
-    }
-
-    #[cfg(feature = "dart")]
-    pub(crate) fn owned_payload(&self, body: Vec<u8>) -> Payload {
-        self.1.as_ref().expect("receive return hook").own(body)
-    }
-
-    /// Preallocate `capacity` buffers, each holding `buffer_size` bytes.
-    /// A zero capacity disables pooled checkout; inline and owned messages
-    /// can still be prepared. Buffers initially contain zeroes.
+impl PayloadPool {
+    /// Preallocate each `(bytes_per_slot, slots)` size class.
+    /// Zero slots and an empty class list are allowed. Reused bytes are not
+    /// cleared. Class definitions remain immutable after construction.
     ///
-    /// # Panics
-    /// Panics if `buffer_size` is zero or an allocation size overflows.
-    pub fn new(buffer_size: usize, capacity: usize) -> Self {
-        assert!(buffer_size > 0, "buffer size must be nonzero");
-        Self(
-            Arc::new_cyclic(|pool| {
+    /// # Errors
+    /// Returns a configuration error for zero slot size, size overflow, or
+    /// failure to reserve payload storage.
+    pub fn new(classes: impl IntoIterator<Item = (usize, usize)>) -> crate::Result<Self> {
+        let mut pools = Vec::new();
+        for (buffer_size, capacity) in classes {
+            if buffer_size == 0
+                || buffer_size > isize::MAX as usize
+                || buffer_size
+                    .checked_mul(capacity)
+                    .is_none_or(|bytes| bytes > isize::MAX as usize)
+            {
+                return Err(crate::Error::Config("invalid payload pool size".into()));
+            }
+            let mut buffers = Vec::new();
+            buffers
+                .try_reserve_exact(capacity)
+                .map_err(|_| crate::Error::Config("payload pool allocation failed".into()))?;
+            for _ in 0..capacity {
+                buffers.push(owned_body(buffer_size)?.into_boxed_slice());
+            }
+            pools.push(Arc::new_cyclic(move |pool| {
                 let free = FreeList::new(capacity);
-                for slot in 0..capacity {
+                for (slot, bytes) in buffers.into_iter().enumerate() {
                     free.push(Arc::new(Storage {
-                        bytes: vec![0; buffer_size].into_boxed_slice(),
+                        bytes,
                         pool: pool.clone(),
                         slot,
                         returns: None,
@@ -415,92 +420,200 @@ impl BufferPool {
                     capacity,
                     buffer_size,
                 }
-            }),
-            None,
-        )
-    }
-
-    /// Acquire exclusive writable storage, or `None` when no buffer is available.
-    /// The declared length starts at zero. Reused bytes are not cleared.
-    pub fn try_take(&self) -> Option<MessageBuffer> {
-        self.0.reclaim();
-        let storage = self.0.free.pop()?;
-        Some(MessageBuffer {
-            storage: Some(storage),
-            length: 0,
-            returns: self.1.clone(),
-            prepared: false,
+            }));
+        }
+        pools.sort_by_key(|pool| pool.buffer_size);
+        Ok(Self {
+            classes: pools.into(),
+            returns: None,
         })
     }
 
-    /// Prepare an ordinary message with exactly `size` body bytes.
-    /// Bodies up to 55 bytes stay inline without checking out a buffer.
-    /// Larger bodies use this pool when they fit, or an owned allocation
-    /// when they exceed [`Self::buffer_size`]. `None` means a fitting pool
-    /// is exhausted; exhaustion does not fall back to allocation.
-    ///
-    /// `fill` runs exactly once on success, and never on exhaustion or error.
-    /// Fill the entire slice: reused pooled bytes retain their previous contents.
+    /// Combine existing handles without allocating payload storage.
+    /// Repeated references to the same size class are included only once.
+    #[must_use]
+    pub fn combine(pools: impl IntoIterator<Item = Self>) -> Self {
+        let mut classes: Vec<Arc<Pool>> = Vec::new();
+        for pool in pools {
+            for class in pool.classes.iter() {
+                if !classes.iter().any(|existing| Arc::ptr_eq(existing, class)) {
+                    classes.push(class.clone());
+                }
+            }
+        }
+        classes.sort_by_key(|pool| pool.buffer_size);
+        Self {
+            classes: classes.into(),
+            returns: None,
+        }
+    }
+
+    /// Bind receive lifecycle callbacks while sharing the same storage.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_release(&self, returns: Arc<dyn PayloadRelease>) -> Self {
+        Self {
+            classes: self.classes.clone(),
+            returns: Some(returns),
+        }
+    }
+
+    /// Acquire the smallest fitting available slot, or `None`.
+    /// The declared length starts at zero. Storage never grows.
+    pub fn try_buffer(&self, size: usize) -> Option<PayloadBuffer> {
+        for pool in self.classes.iter().filter(|pool| pool.buffer_size >= size) {
+            pool.reclaim();
+            if let Some(storage) = pool.free.pop() {
+                return Some(PayloadBuffer {
+                    storage: Some(storage),
+                    length: 0,
+                    returns: self.returns.clone(),
+                    prepared: false,
+                });
+            }
+        }
+        None
+    }
+
+    /// Construct a single-part message, using inline, pooled, or owned storage.
+    /// `fill` receives exactly `size` writable bytes and runs once on success.
+    /// Fill the whole slice: pooled bytes retain their previous contents.
     ///
     /// # Errors
-    /// Returns [`omq_proto::Error::Config`] if owned storage cannot be reserved.
+    /// Returns a configuration error if owned storage cannot be reserved.
+    pub fn message(&self, size: usize, fill: impl FnOnce(&mut [u8])) -> crate::Result<Message> {
+        if size <= crate::message::MAX_INLINE_MESSAGE {
+            let mut body = [0; crate::message::MAX_INLINE_MESSAGE];
+            fill(&mut body[..size]);
+            return Ok(Message::from_slice(&body[..size]));
+        }
+        if let Some(mut buffer) = self.try_buffer(size) {
+            fill(&mut buffer.writable()[..size]);
+            buffer.set_len(size).expect("selected slot fits body");
+            return Ok(buffer.into_message());
+        }
+        let mut body = owned_body(size)?;
+        fill(&mut body);
+        let retained = body.capacity();
+        Ok(Message::from(Payload::from_bytes_with_retained_size(
+            bytes::Bytes::from(body),
+            retained,
+        )))
+    }
+
+    /// Construct a single-part message without an owned-storage fallback.
+    /// Bodies up to 55 bytes stay inline. `None` skips `fill` entirely.
+    ///
+    /// # Errors
+    /// Returns a configuration error if `size` exceeds the addressable limit.
     pub fn try_message(
         &self,
         size: usize,
         fill: impl FnOnce(&mut [u8]),
-    ) -> omq_proto::Result<Option<Message>> {
-        const INLINE: usize = omq_proto::message::MAX_INLINE_MESSAGE;
-        if size <= INLINE {
-            let mut body = [0; INLINE];
-            fill(&mut body[..size]);
-            return Ok(Some(Message::from_slice(&body[..size])));
+    ) -> crate::Result<Option<Message>> {
+        if size <= crate::message::MAX_INLINE_MESSAGE {
+            return self.message(size, fill).map(Some);
         }
-        if size > self.buffer_size() {
-            let mut body = Vec::new();
-            body.try_reserve_exact(size)
-                .map_err(|_| omq_proto::Error::Config("message allocation failed".into()))?;
-            body.resize(size, 0);
-            fill(&mut body);
-            return Ok(Some(Message::single(body)));
-        }
-        let Some(mut buffer) = self.try_take() else {
+        validate_size(size)?;
+        let Some(mut buffer) = self.try_buffer(size) else {
             return Ok(None);
         };
         fill(&mut buffer.writable()[..size]);
-        buffer.set_len(size).expect("body fits pool buffer");
+        buffer.set_len(size).expect("selected slot fits body");
         Ok(Some(buffer.into_message()))
     }
 
-    /// Append available buffers without growing `output`.
-    /// Checkout stops at `limit`, 64 buffers, the vector's remaining capacity,
-    /// or 64 KiB of buffer capacity. At least one oversized buffer may be taken.
-    /// Returns the number appended. Each starts empty with uncleared storage.
-    #[inline]
-    pub fn try_take_many_into(&self, limit: usize, output: &mut Vec<MessageBuffer>) -> usize {
-        self.0.reclaim();
-        // Keep exhaustion probes in the caller. The nonempty drain has a
-        // larger stack frame and touches both concurrent free queues.
-        if self.0.free.available.load(Ordering::Relaxed) == 0 {
-            return 0;
+    /// Construct one multipart payload, using inline, pooled, or owned storage.
+    /// Payloads up to 62 bytes stay inline. `fill` runs once on success.
+    ///
+    /// # Errors
+    /// Returns a configuration error if owned storage cannot be reserved.
+    pub fn payload(&self, size: usize, fill: impl FnOnce(&mut [u8])) -> crate::Result<Payload> {
+        let mut fill = Some(fill);
+        if let Some(payload) =
+            self.try_payload(size, |body| fill.take().expect("fill once")(body))?
+        {
+            return Ok(payload);
         }
+        let mut body = owned_body(size)?;
+        fill.take().expect("fill once")(&mut body);
+        let retained = body.capacity();
+        Ok(Payload::from_bytes_with_retained_size(
+            bytes::Bytes::from(body),
+            retained,
+        ))
+    }
+
+    /// Construct one payload without an owned-storage fallback.
+    /// Payloads up to 62 bytes stay inline. `None` skips `fill` entirely.
+    ///
+    /// # Errors
+    /// Returns a configuration error if `size` exceeds the addressable limit.
+    pub fn try_payload(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> crate::Result<Option<Payload>> {
+        if size <= crate::message::MAX_INLINE_PAYLOAD {
+            let mut body = [0; crate::message::MAX_INLINE_PAYLOAD];
+            fill(&mut body[..size]);
+            return Ok(Some(Payload::from_slice(&body[..size])));
+        }
+        validate_size(size)?;
+        let Some(mut buffer) = self.try_buffer(size) else {
+            return Ok(None);
+        };
+        fill(&mut buffer.writable()[..size]);
+        buffer.set_len(size).expect("selected slot fits body");
+        Ok(Some(buffer.into_payload()))
+    }
+
+    /// Append fitting slots without growing `output`.
+    /// Checkout is bounded by `limit`, 64 slots, remaining output capacity,
+    /// and 64 KiB of slot capacity. Each batch uses one available size class;
+    /// one oversized slot may cross the byte cap.
+    pub fn try_buffers_into(
+        &self,
+        size: usize,
+        limit: usize,
+        output: &mut Vec<PayloadBuffer>,
+    ) -> usize {
         let start = output.len();
-        let limit = limit.min((TRANSFER_BYTES / self.buffer_size()).max(1));
-        let count = self.0.free.pop_many(limit, output);
-        if let Some(returns) = &self.1 {
-            for buffer in &mut output[start..] {
-                buffer.returns = Some(returns.clone());
+        let mut budget = crate::flow::DrainBudget::new(
+            limit.min(TRANSFER).min(output.capacity() - start),
+            TRANSFER_BYTES,
+        );
+        for pool in self.classes.iter().filter(|pool| pool.buffer_size >= size) {
+            if budget.exhausted() {
+                break;
+            }
+            pool.reclaim();
+            if pool.free.available.load(Ordering::Relaxed) == 0 {
+                continue;
+            }
+            let count = pool.free.pop_many(
+                budget
+                    .remaining_msgs()
+                    .min((TRANSFER_BYTES.saturating_sub(budget.bytes()) / pool.buffer_size).max(1)),
+                output,
+            );
+            let batch_start = output.len() - count;
+            for buffer in &mut output[batch_start..] {
+                buffer.returns.clone_from(&self.returns);
+                let _ = budget.account(buffer.capacity());
+            }
+            if count != 0 {
+                break;
             }
         }
-        count
+        output.len() - start
     }
 
     /// Drop up to 64 messages within a 64 KiB body budget and publish their
     /// final pooled owners together, across any pools.
-    /// Returns the number removed from the front of `messages`. The final
-    /// message may cross the byte budget. Clones and byte views still prevent
-    /// reuse; deferred owners need a later bounded reclamation turn.
+    /// Clones and byte views retain storage until their final owner is released.
     pub fn recycle_many(messages: &mut Vec<Message>, limit: usize) -> usize {
-        let mut budget = omq_proto::flow::DrainBudget::new(limit.min(TRANSFER), TRANSFER_BYTES);
+        let mut budget = crate::flow::DrainBudget::new(limit.min(TRANSFER), TRANSFER_BYTES);
         let mut count = 0;
         for message in messages.iter().take(limit.min(TRANSFER)) {
             if budget.exhausted() {
@@ -509,46 +622,119 @@ impl BufferPool {
             let _ = budget.account(message.byte_len());
             count += 1;
         }
-        recycling(None, || {
-            drop(messages.drain(..count));
-        });
+        recycling(|| drop(messages.drain(..count)));
         count
     }
 
-    #[cfg(any(test, feature = "dart"))]
-    pub(crate) fn with_recycling_batch<R>(&self, operation: impl FnOnce() -> R) -> R {
-        recycling(Some(self.0.clone()), operation)
+    /// Select available storage for decoded transform output, preserving parts
+    /// and routing metadata. Inline parts and exhausted classes remain unchanged.
+    #[doc(hidden)]
+    pub fn store_decoded_message(&self, mut message: Message) -> Message {
+        use crate::message::MessageInner;
+        match &mut message.inner {
+            MessageInner::Single(payload) => {
+                self.store_payload(payload, crate::message::MAX_INLINE_MESSAGE);
+            }
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                for payload in parts.iter_mut() {
+                    self.store_payload(payload, crate::message::MAX_INLINE_PAYLOAD);
+                }
+            }
+            _ => {}
+        }
+        message
     }
 
-    /// Fixed byte capacity of each pooled buffer.
-    pub fn buffer_size(&self) -> usize {
-        self.0.buffer_size
+    fn store_payload(&self, payload: &mut Payload, inline: usize) {
+        if payload.len() > inline
+            && let Some(mut buffer) = self.try_buffer(payload.len())
+        {
+            buffer.writable()[..payload.len()].copy_from_slice(payload.as_slice());
+            buffer
+                .set_len(payload.len())
+                .expect("selected slot fits payload");
+            *payload = buffer.into_payload();
+        }
     }
 
-    /// Total number of pooled buffers, including checked-out buffers.
+    /// Batch synchronous final-owner returns, including during unwinding.
+    #[doc(hidden)]
+    pub fn with_recycling_batch<R>(&self, operation: impl FnOnce() -> R) -> R {
+        recycling(operation)
+    }
+
+    /// Return the smallest configured slot size that fits `size`.
+    /// Availability is checked separately during checkout.
+    pub fn class_size(&self, size: usize) -> Option<usize> {
+        self.classes
+            .iter()
+            .find(|pool| pool.buffer_size >= size)
+            .map(|pool| pool.buffer_size)
+    }
+
+    /// Ascending `(bytes_per_slot, total_slots)` class definitions.
+    pub fn classes(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.classes
+            .iter()
+            .map(|pool| (pool.buffer_size, pool.capacity))
+    }
+
+    /// Largest configured slot size, or zero for an empty pool.
+    pub fn max_size(&self) -> usize {
+        self.classes.last().map_or(0, |pool| pool.buffer_size)
+    }
+
+    /// Total slots across all classes, including checked-out slots.
     pub fn capacity(&self) -> usize {
-        self.0.capacity
+        self.classes.iter().map(|pool| pool.capacity).sum()
     }
 
-    /// Snapshot of currently returned buffers, after one bounded reclamation turn.
-    /// Concurrent returns may be in flight; this count is not a reservation.
+    /// Available slots after bounded deferred reclamation in each class.
+    /// Concurrent returns may be in flight; this snapshot is not a reservation.
     pub fn available(&self) -> usize {
-        self.0.reclaim();
-        self.0.free.len()
+        self.classes
+            .iter()
+            .map(|pool| {
+                pool.reclaim();
+                pool.free.len()
+            })
+            .sum()
     }
 
-    #[cfg(feature = "dart")]
-    pub(crate) fn reclaim(&self) {
-        self.0.reclaim();
+    /// Perform a bounded deferred-reclamation turn in each class.
+    #[doc(hidden)]
+    pub fn reclaim(&self) {
+        for pool in self.classes.iter() {
+            pool.reclaim();
+        }
     }
 }
 
-#[cfg(feature = "dart")]
-pub(crate) fn with_recycling_batch<R>(operation: impl FnOnce() -> R) -> R {
-    recycling(None, operation)
+/// Batch synchronous returns across independently configured pools.
+#[doc(hidden)]
+pub fn with_recycling_batch<R>(operation: impl FnOnce() -> R) -> R {
+    recycling(operation)
 }
 
-fn recycling<R>(pool: Option<Arc<Pool>>, operation: impl FnOnce() -> R) -> R {
+fn validate_size(size: usize) -> crate::Result<()> {
+    if size > isize::MAX as usize {
+        return Err(crate::Error::Config(
+            "payload size exceeds addressable limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn owned_body(size: usize) -> crate::Result<Vec<u8>> {
+    validate_size(size)?;
+    let mut body = Vec::new();
+    body.try_reserve_exact(size)
+        .map_err(|_| crate::Error::Config("payload allocation failed".into()))?;
+    body.resize(size, 0);
+    Ok(body)
+}
+
+fn recycling<R>(operation: impl FnOnce() -> R) -> R {
     let installed = RECYCLE
         .try_with(|recycle| {
             let mut recycle = recycle.borrow_mut();
@@ -556,7 +742,7 @@ fn recycling<R>(pool: Option<Arc<Pool>>, operation: impl FnOnce() -> R) -> R {
                 false
             } else {
                 recycle.active = true;
-                recycle.pool = pool;
+                recycle.pool = None;
                 true
             }
         })
@@ -572,43 +758,43 @@ fn recycling<R>(pool: Option<Arc<Pool>>, operation: impl FnOnce() -> R) -> R {
 /// remains checked out until its final message or byte view is dropped.
 /// Buffers never grow and can outlive their pool or any socket.
 #[derive(Debug)]
-pub struct MessageBuffer {
+pub struct PayloadBuffer {
     storage: Option<Arc<Storage>>,
     // The frozen payload captures this prefix length. Storage always exposes
     // its fixed capacity, so freezing requires no second Arc uniqueness check.
     length: usize,
     // Unused reservations return storage without reopening receive credit.
-    returns: Option<Arc<dyn BufferReturn>>,
+    returns: Option<Arc<dyn PayloadRelease>>,
     prepared: bool,
 }
 
 /// Requested body length exceeds the fixed buffer capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BufferLengthError {
+pub struct PayloadLengthError {
     /// Requested body length in bytes.
     pub requested: usize,
     /// Fixed buffer capacity in bytes.
     pub capacity: usize,
 }
 
-impl fmt::Display for BufferLengthError {
+impl fmt::Display for PayloadLengthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "body length {} exceeds buffer capacity {}",
+            "payload length {} exceeds slot capacity {}",
             self.requested, self.capacity,
         )
     }
 }
 
-impl std::error::Error for BufferLengthError {}
+impl std::error::Error for PayloadLengthError {}
 
-impl MessageBuffer {
+impl PayloadBuffer {
     /// Fixed byte capacity of this buffer.
     pub fn capacity(&self) -> usize {
         self.storage
             .as_ref()
-            .expect("live message buffer")
+            .expect("live payload buffer")
             .bytes
             .len()
     }
@@ -639,12 +825,13 @@ impl MessageBuffer {
         storage
     }
 
-    #[cfg(feature = "dart")]
-    pub(crate) fn writable_received(&mut self, pool: &BufferPool) -> &mut [u8] {
+    /// Fill receive storage with connection-specific lifecycle callbacks.
+    #[doc(hidden)]
+    pub fn writable_received(&mut self, pool: &PayloadPool) -> &mut [u8] {
         let storage = Arc::get_mut(self.storage.as_mut().expect("live buffer"))
             .expect("writable buffer storage must be unique");
-        if !same_returns(storage.returns.as_ref(), pool.1.as_ref()) {
-            storage.returns.clone_from(&pool.1);
+        if !same_returns(storage.returns.as_ref(), pool.returns.as_ref()) {
+            storage.returns.clone_from(&pool.returns);
         }
         self.returns = None;
         self.prepared = true;
@@ -655,11 +842,11 @@ impl MessageBuffer {
     /// The bytes must already be filled; this method does not clear them.
     ///
     /// # Errors
-    /// Returns [`BufferLengthError`] when `length` exceeds capacity.
+    /// Returns [`PayloadLengthError`] when `length` exceeds capacity.
     /// The previous length is preserved on error.
-    pub fn set_len(&mut self, length: usize) -> Result<(), BufferLengthError> {
+    pub fn set_len(&mut self, length: usize) -> Result<(), PayloadLengthError> {
         if length > self.capacity() {
-            return Err(BufferLengthError {
+            return Err(PayloadLengthError {
                 requested: length,
                 capacity: self.capacity(),
             });
@@ -676,8 +863,9 @@ impl MessageBuffer {
         Message::from(self.into_payload())
     }
 
+    /// Freeze the declared prefix into one message part without copying.
     #[inline]
-    pub(crate) fn into_payload(mut self) -> Payload {
+    pub fn into_payload(mut self) -> Payload {
         if !self.prepared {
             self.prepare();
         }
@@ -685,13 +873,13 @@ impl MessageBuffer {
     }
 }
 
-impl AsRef<[u8]> for MessageBuffer {
+impl AsRef<[u8]> for PayloadBuffer {
     fn as_ref(&self) -> &[u8] {
         &self.storage.as_ref().expect("live buffer").bytes[..self.length]
     }
 }
 
-impl Drop for MessageBuffer {
+impl Drop for PayloadBuffer {
     fn drop(&mut self) {
         if let Some(storage) = self.storage.take() {
             storage.release_owner(false);
@@ -706,21 +894,20 @@ mod tests {
 
     #[test]
     fn message_builder_selects_inline_pooled_and_owned_storage() {
-        let pool = BufferPool::new(128, 1);
-        for size in [0, 16, 55, 56, 62, 63, 128, 129, 256] {
+        let pool = PayloadPool::new([(128, 1), (256, 1)]).unwrap();
+        for size in [0, 16, 55, 56, 62, 63, 128, 129, 256, 512] {
             let mut calls = 0;
             let message = pool
-                .try_message(size, |body| {
+                .message(size, |body| {
                     calls += 1;
                     assert_eq!(body.len(), size);
                     body.fill(7);
                 })
-                .unwrap()
                 .unwrap();
             assert_eq!(calls, 1);
             assert_eq!(message.part_slice(0), Some(vec![7; size].as_slice()));
-            let pooled = (56..=128).contains(&size);
-            assert_eq!(pool.available(), usize::from(!pooled));
+            let pooled = (56..=256).contains(&size);
+            assert_eq!(pool.available(), 2 - usize::from(pooled));
             if size <= 55 {
                 assert_eq!(
                     message.retained_size(),
@@ -731,28 +918,25 @@ mod tests {
             let view = message.part_bytes(0).unwrap();
             drop(message);
             drop(clone);
-            assert_eq!(pool.available(), usize::from(!pooled));
+            assert_eq!(pool.available(), 2 - usize::from(pooled));
             assert_eq!(view.as_ref(), vec![7; size]);
             drop(view);
-            assert_eq!(pool.available(), 1);
+            assert_eq!(pool.available(), 2);
         }
     }
 
     #[test]
     fn exhausted_pool_skips_fill_without_blocking_other_storage_forms() {
         for capacity in [0, 1] {
-            let pool = BufferPool::new(128, capacity);
-            let held = pool.try_take();
+            let pool = PayloadPool::new([(128, capacity)]).unwrap();
+            let held = pool.try_buffer(1);
             assert!(
                 pool.try_message(56, |_| panic!("exhausted"))
                     .unwrap()
                     .is_none()
             );
             for size in [16, 129] {
-                let message = pool
-                    .try_message(size, |body| body.fill(3))
-                    .unwrap()
-                    .unwrap();
+                let message = pool.message(size, |body| body.fill(3)).unwrap();
                 assert_eq!(message.part_slice(0), Some(vec![3; size].as_slice()));
                 assert_eq!(pool.available(), 0);
             }
@@ -763,17 +947,17 @@ mod tests {
 
     #[test]
     fn failed_owned_allocation_skips_fill_and_preserves_pool_capacity() {
-        let pool = BufferPool::new(128, 1);
+        let pool = PayloadPool::new([(128, 1)]).unwrap();
         assert!(matches!(
-            pool.try_message(usize::MAX, |_| panic!("allocation failed")),
-            Err(omq_proto::Error::Config(_))
+            pool.message(usize::MAX, |_| panic!("allocation failed")),
+            Err(crate::Error::Config(_))
         ));
         assert_eq!(pool.available(), 1);
     }
 
     #[test]
     fn panicking_fill_returns_its_checked_out_buffer() {
-        let pool = BufferPool::new(128, 1);
+        let pool = PayloadPool::new([(128, 1)]).unwrap();
         let result = std::panic::catch_unwind(|| {
             let _ = pool.try_message(56, |_| panic!("fill failed"));
         });
@@ -782,13 +966,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "buffer size must be nonzero")]
+    #[should_panic(expected = "invalid payload pool size")]
     fn zero_buffer_size_is_rejected() {
-        let _ = BufferPool::new(0, 1);
+        let _ = PayloadPool::new([(0, 1)]).unwrap();
     }
 
-    fn body(pool: &BufferPool, length: usize, value: u8) -> Message {
-        let mut buffer = pool.try_take().unwrap();
+    fn body(pool: &PayloadPool, length: usize, value: u8) -> Message {
+        let mut buffer = pool.try_buffer(1).unwrap();
         buffer.writable()[..length].fill(value);
         buffer.set_len(length).unwrap();
         buffer.into_message()
@@ -796,28 +980,33 @@ mod tests {
 
     #[test]
     fn capacity_is_fixed_and_returns_after_drop() {
-        let pool = BufferPool::new(2048, 2);
-        let first = pool.try_take().unwrap();
-        let second = pool.try_take().unwrap();
-        assert!(pool.try_take().is_none());
+        let pool = PayloadPool::new([(2048, 2)]).unwrap();
+        let first = pool.try_buffer(1).unwrap();
+        let second = pool.try_buffer(1).unwrap();
+        assert!(pool.try_buffer(1).is_none());
         assert_eq!(pool.available(), 0);
         drop(first);
         assert_eq!(pool.available(), 1);
         drop(second);
         assert_eq!(pool.available(), 2);
-        assert!(BufferPool::new(2048, 0).try_take().is_none());
+        assert!(
+            PayloadPool::new([(2048, 0)])
+                .unwrap()
+                .try_buffer(1)
+                .is_none()
+        );
     }
 
     #[test]
     fn reused_storage_has_empty_length_and_valid_capacity() {
-        let pool = BufferPool::new(2048, 1);
+        let pool = PayloadPool::new([(2048, 1)]).unwrap();
         drop(body(&pool, BUFFER_CAPACITY, 7));
-        let mut buffer = pool.try_take().unwrap();
+        let mut buffer = pool.try_buffer(1).unwrap();
         assert_eq!(buffer.len(), 0);
         assert_eq!(buffer.writable().len(), BUFFER_CAPACITY);
         assert_eq!(
             buffer.set_len(BUFFER_CAPACITY + 1),
-            Err(BufferLengthError {
+            Err(PayloadLengthError {
                 requested: BUFFER_CAPACITY + 1,
                 capacity: BUFFER_CAPACITY,
             })
@@ -830,20 +1019,20 @@ mod tests {
     #[test]
     fn mixed_scalar_and_bulk_acquisition_preserve_capacity_with_unused_slots() {
         for grouped in [false, true] {
-            let pool = BufferPool::new(2048, 8);
+            let pool = PayloadPool::new([(2048, 8)]).unwrap();
             let mut buffers = Vec::with_capacity(8);
-            assert_eq!(pool.try_take_many_into(3, &mut buffers), 3);
+            assert_eq!(pool.try_buffers_into(1, 3, &mut buffers), 3);
             if grouped {
                 pool.with_recycling_batch(|| buffers.clear());
             } else {
                 buffers.clear();
             }
             assert_eq!(pool.available(), 8);
-            assert_eq!(pool.try_take_many_into(2, &mut buffers), 2);
-            buffers.push(pool.try_take().unwrap());
+            assert_eq!(pool.try_buffers_into(1, 2, &mut buffers), 2);
+            buffers.push(pool.try_buffer(1).unwrap());
             assert_eq!(pool.available(), 5);
-            assert_eq!(pool.try_take_many_into(8, &mut buffers), 5);
-            assert!(pool.try_take().is_none());
+            assert_eq!(pool.try_buffers_into(1, 8, &mut buffers), 5);
+            assert!(pool.try_buffer(1).is_none());
             let mut slots: Vec<_> = buffers
                 .iter()
                 .map(|buffer| buffer.storage.as_ref().unwrap().slot)
@@ -858,7 +1047,7 @@ mod tests {
     #[test]
     fn clones_and_bytes_views_prevent_early_reuse() {
         for length in [0, 1, 128, BUFFER_CAPACITY] {
-            let pool = BufferPool::new(2048, 1);
+            let pool = PayloadPool::new([(2048, 1)]).unwrap();
             let message = body(&pool, length, 7);
             let clone = message.clone();
             let bytes = message.part_bytes(0).unwrap();
@@ -873,7 +1062,7 @@ mod tests {
 
     #[test]
     fn concurrent_final_releases_return_exactly_one_buffer() {
-        let pool = BufferPool::new(2048, 1);
+        let pool = PayloadPool::new([(2048, 1)]).unwrap();
         for _ in 0..64 {
             let first = body(&pool, BUFFER_CAPACITY, 7);
             let second = first.clone();
@@ -887,15 +1076,15 @@ mod tests {
             drop(first);
             thread.join().unwrap();
             assert_eq!(pool.available(), 1);
-            assert_eq!(pool.try_take().unwrap().len(), 0);
+            assert_eq!(pool.try_buffer(1).unwrap().len(), 0);
         }
     }
 
     #[test]
     fn buffers_and_messages_outlive_pool_without_a_cycle() {
-        let pool = BufferPool::new(2048, 2);
-        let core = Arc::downgrade(&pool.0);
-        let buffer = pool.try_take().unwrap();
+        let pool = PayloadPool::new([(2048, 2)]).unwrap();
+        let core = Arc::downgrade(&pool.classes[0]);
+        let buffer = pool.try_buffer(1).unwrap();
         let message = body(&pool, BUFFER_CAPACITY, 7);
         drop(pool);
         assert!(core.upgrade().is_none());
@@ -906,14 +1095,14 @@ mod tests {
 
     #[test]
     fn concurrent_acquisition_and_return_preserve_every_slot() {
-        let pool = BufferPool::new(2048, 4);
+        let pool = PayloadPool::new([(2048, 4)]).unwrap();
         std::thread::scope(|scope| {
             for value in 1..=4 {
                 let pool = &pool;
                 scope.spawn(move || {
                     for _ in 0..256 {
                         let mut buffer = loop {
-                            if let Some(buffer) = pool.try_take() {
+                            if let Some(buffer) = pool.try_buffer(1) {
                                 break buffer;
                             }
                             std::thread::yield_now();
@@ -939,20 +1128,20 @@ mod tests {
     }
     #[test]
     fn bulk_acquisition_and_return_respect_capacity_and_live_views() {
-        let pool = BufferPool::new(2048, 70);
+        let pool = PayloadPool::new([(2048, 70)]).unwrap();
         let mut buffers = Vec::with_capacity(100);
-        assert_eq!(pool.try_take_many_into(100, &mut buffers), 32);
+        assert_eq!(pool.try_buffers_into(1, 100, &mut buffers), 32);
         assert_eq!(pool.available(), 38);
-        let mut messages: Vec<_> = buffers.drain(..).map(MessageBuffer::into_message).collect();
+        let mut messages: Vec<_> = buffers.drain(..).map(PayloadBuffer::into_message).collect();
         let view = messages[0].part_bytes(0).unwrap();
-        assert_eq!(BufferPool::recycle_many(&mut messages, 0), 0);
-        assert_eq!(BufferPool::recycle_many(&mut messages, 100), 32);
+        assert_eq!(PayloadPool::recycle_many(&mut messages, 0), 0);
+        assert_eq!(PayloadPool::recycle_many(&mut messages, 100), 32);
         assert_eq!(pool.available(), 69);
         drop(view);
         assert_eq!(pool.available(), 70);
         let mut small = Vec::with_capacity(2);
-        assert_eq!(pool.try_take_many_into(64, &mut small), 2);
-        assert_eq!(pool.try_take_many_into(64, &mut small), 0);
+        assert_eq!(pool.try_buffers_into(1, 64, &mut small), 2);
+        assert_eq!(pool.try_buffers_into(1, 64, &mut small), 0);
         assert_eq!(small.capacity(), 2);
         drop(small);
         assert_eq!(pool.available(), 70);
@@ -960,8 +1149,8 @@ mod tests {
 
     #[test]
     fn nested_foreign_and_unwinding_returns_leave_no_hidden_buffers() {
-        let first = BufferPool::new(2048, 4);
-        let second = BufferPool::new(2048, 4);
+        let first = PayloadPool::new([(2048, 4)]).unwrap();
+        let second = PayloadPool::new([(2048, 4)]).unwrap();
         let outcome = std::panic::catch_unwind(|| {
             first.with_recycling_batch(|| {
                 drop(body(&first, 16, 1));
@@ -984,7 +1173,7 @@ mod tests {
 
     #[test]
     fn concurrent_bulk_and_scalar_returns_preserve_unique_slots() {
-        let pool = BufferPool::new(2048, 8);
+        let pool = PayloadPool::new([(2048, 8)]).unwrap();
         std::thread::scope(|scope| {
             for value in 1..=4 {
                 let pool = &pool;
@@ -992,7 +1181,7 @@ mod tests {
                     let mut buffers = Vec::with_capacity(2);
                     let mut messages = Vec::with_capacity(2);
                     for _ in 0..256 {
-                        while pool.try_take_many_into(2, &mut buffers) == 0 {
+                        while pool.try_buffers_into(1, 2, &mut buffers) == 0 {
                             std::thread::yield_now();
                         }
                         for mut buffer in buffers.drain(..) {
@@ -1010,14 +1199,14 @@ mod tests {
                             );
                             drop(clone);
                         }
-                        BufferPool::recycle_many(&mut messages, 2);
+                        PayloadPool::recycle_many(&mut messages, 2);
                     }
                 });
             }
         });
         assert_eq!(pool.available(), 8);
         let mut buffers = Vec::with_capacity(8);
-        assert_eq!(pool.try_take_many_into(8, &mut buffers), 8);
+        assert_eq!(pool.try_buffers_into(1, 8, &mut buffers), 8);
         let mut slots: Vec<_> = buffers
             .iter()
             .map(|buffer| buffer.storage.as_ref().unwrap().slot)
@@ -1028,16 +1217,16 @@ mod tests {
     #[test]
     fn full_and_partial_groups_never_hide_capacity() {
         for capacity in [0, 1, 2, 63, 64, 65, 127, 128, 129] {
-            let pool = BufferPool::new(2048, capacity);
+            let pool = PayloadPool::new([(2048, capacity)]).unwrap();
             let mut buffers = Vec::with_capacity(capacity);
             for limit in [1, 2, 17, 63, 64] {
-                while pool.try_take_many_into(limit, &mut buffers) != 0 {}
+                while pool.try_buffers_into(1, limit, &mut buffers) != 0 {}
                 assert_eq!(buffers.len(), capacity);
                 assert_eq!(pool.available(), 0);
                 // Partial final transfers are all published by scope exit.
                 pool.with_recycling_batch(|| buffers.clear());
                 assert_eq!(pool.available(), capacity);
-                while let Some(buffer) = pool.try_take() {
+                while let Some(buffer) = pool.try_buffer(1) {
                     buffers.push(buffer);
                 }
                 assert_eq!(buffers.len(), capacity);
@@ -1048,19 +1237,19 @@ mod tests {
     }
     #[test]
     fn recycling_during_late_tls_destruction_falls_back_to_global_return() {
-        struct LateDrop(RefCell<Option<(BufferPool, Message)>>);
+        struct LateDrop(RefCell<Option<(PayloadPool, Message)>>);
         impl Drop for LateDrop {
             fn drop(&mut self) {
                 if let Some((_pool, message)) = self.0.get_mut().take() {
                     let mut messages = vec![message];
-                    BufferPool::recycle_many(&mut messages, 1);
+                    PayloadPool::recycle_many(&mut messages, 1);
                 }
             }
         }
         thread_local! {
             static LATE: LateDrop = const { LateDrop(RefCell::new(None)) };
         }
-        let pool = BufferPool::new(2048, 1);
+        let pool = PayloadPool::new([(2048, 1)]).unwrap();
         let other = pool.clone();
         std::thread::spawn(move || {
             // The recycler is initialized later, so it is destroyed first.

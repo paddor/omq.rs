@@ -92,15 +92,22 @@ fn prepare_wire_codec(
         .map_or(peer.options.max_message_size, |setup| {
             setup.decoder.max_wire_message_size()
         });
-    let codec = build_codec(
+    let mut codec = build_codec(
         socket,
         &peer.options,
         framing,
         &peer_ident,
         peer.is_server,
-        leftover,
         receive_wire_limit,
-    )?;
+    );
+    if transforms.is_none()
+        && let Some(pool) = &peer.options.recv_payload_pool
+    {
+        codec = codec.recv_payload_pool(pool);
+    }
+    if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
+        return None;
+    }
     Some(WireCodecSetup {
         stream,
         peer_ident,
@@ -590,9 +597,8 @@ fn build_codec(
     framing: WireFraming,
     peer_ident: &PeerIdent,
     is_server: bool,
-    leftover: bytes::Bytes,
     receive_wire_limit: Option<usize>,
-) -> Option<ZmtpConnection> {
+) -> ZmtpConnection {
     let mut codec = ZmtpConnection::new(connection_config(
         socket,
         options,
@@ -604,10 +610,7 @@ fn build_codec(
     if let Some(pool) = &socket.options.recv_message_pool {
         codec = codec.recv_message_pool(pool);
     }
-    if !leftover.is_empty() && codec.handle_input(leftover).is_err() {
-        return None;
-    }
-    Some(codec)
+    codec
 }
 
 fn connection_config(
@@ -761,7 +764,8 @@ fn attach_transforms(
     };
     let mut peer_driver = peer_driver
         .with_encoder(setup.encoder)
-        .with_decoder(setup.decoder);
+        .with_decoder(setup.decoder)
+        .with_decoded_payload_pool(socket.payload_pools.receive());
     if let Some(threshold) = socket.options.compression_offload_threshold {
         let pool = socket
             .compression_pool

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use omq_tokio::blocking::{BlockingRecvCancel, Socket};
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
-    BufferPool, Context, DartCongestion, DartStats, Message, Options, SocketType, TrySendError,
+    Context, DartCongestion, DartStats, Message, Options, PayloadPool, SocketType, TrySendError,
 };
 
 #[path = "perf_verify/affinity.rs"]
@@ -22,6 +22,8 @@ mod current;
 mod ws_bench_config;
 
 const CLOCK_MESSAGES: usize = 64;
+const POOL_SLOTS: usize = 8192;
+const POOL_SLOT_BYTES: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +124,10 @@ impl Config {
         options.dart.io_spin = self.io_spin;
         options.dart.window_messages = self.window_messages;
         options.dart.congestion = self.congestion;
+        if matches!(self.endpoint, omq_tokio::Endpoint::Dart { .. }) && self.role != "scatter" {
+            options.recv_payload_pool =
+                Some(PayloadPool::new([(POOL_SLOT_BYTES, POOL_SLOTS)]).unwrap());
+        }
         #[cfg(feature = "quic")]
         ws_bench_config::configure(&mut options);
         options
@@ -185,8 +191,8 @@ fn timed_cancel(at: Instant) -> Arc<BlockingRecvCancel> {
     cancel
 }
 
-fn make_body(pool: &BufferPool, size: usize, tag: u64) -> Option<Message> {
-    if size > pool.buffer_size() {
+fn make_body(pool: &PayloadPool, size: usize, tag: u64) -> Option<Message> {
+    if size > pool.max_size() {
         let mut body = vec![7; size];
         body[..8].copy_from_slice(&tag.to_le_bytes());
         return Some(Message::single(body));
@@ -225,8 +231,8 @@ impl CapacityWait {
     }
 }
 
-fn scatter(socket: &Socket, config: &Config, native: bool, pool: &BufferPool, at: Instant) {
-    let mut cache = (config.size > pool.buffer_size()).then(|| BodyCache::new(config.size));
+fn scatter(socket: &Socket, config: &Config, native: bool, pool: &PayloadPool, at: Instant) {
+    let mut cache = (config.size > pool.max_size()).then(|| BodyCache::new(config.size));
     let measure_at = at + config.throughput_warmup;
     let until = measure_at + config.duration;
     let mut pending = None;
@@ -438,7 +444,7 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
         }
         if recycle_pooled {
             while !batch.is_empty() {
-                BufferPool::recycle_many(&mut batch, 64);
+                PayloadPool::recycle_many(&mut batch, 64);
             }
         } else {
             batch.clear();
@@ -497,7 +503,7 @@ fn server(socket: &Socket) {
     ));
 }
 
-fn client(socket: &Socket, config: &Config, pool: &BufferPool) {
+fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
     let mut samples = Vec::with_capacity(config.iterations);
     for index in 0..config.warmup + config.iterations {
         let tag = u64::try_from(index).unwrap();
@@ -600,9 +606,9 @@ fn main() {
     let socket = context.blocking_socket(config.socket_type(), config.options());
     let pool = (!config.receiving()).then(|| {
         if native {
-            BufferPool::new(2048, 8192)
+            PayloadPool::new([(2048, 8192)]).unwrap()
         } else {
-            BufferPool::new(1024, 1024)
+            PayloadPool::new([(1024, 1024)]).unwrap()
         }
     });
     if config.receiving() {
@@ -620,12 +626,20 @@ fn main() {
         "null".into()
     };
     emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"dart_pool_buffers\":{},\"dart_buffer_capacity\":{}}}",
+        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{wire_version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
         affinity.description(),
         offloads(&socket),
         config.window_messages,
-        config.options().dart.pool_buffers,
-        omq_tokio::transport::dart::BUFFER_CAPACITY,
+        if native && config.role != "scatter" {
+            POOL_SLOTS
+        } else {
+            0
+        },
+        if native && config.role != "scatter" {
+            POOL_SLOT_BYTES
+        } else {
+            0
+        },
     ));
     let at = start();
     match config.role.as_str() {

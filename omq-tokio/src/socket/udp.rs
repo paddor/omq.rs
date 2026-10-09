@@ -59,6 +59,7 @@ pub(crate) fn spawn_dish_listener(
     recv_tx: std::sync::Arc<crate::socket::recv::SharedRecvPipe>,
     joined: JoinedGroups,
     cancel: CancellationToken,
+    pool: Option<crate::PayloadPool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0u8; udp::MAX_DATAGRAM_SIZE];
@@ -77,7 +78,14 @@ pub(crate) fn spawn_dish_listener(
                         if !joined_now {
                             continue;
                         }
-                        let msg = Message::multipart([group, body]);
+                        let msg = if let Some(pool) = &pool {
+                            let group = pool.payload(group.len(), |bytes| bytes.copy_from_slice(&group));
+                            let body = pool.payload(body.len(), |bytes| bytes.copy_from_slice(&body));
+                            let (Ok(group), Ok(body)) = (group, body) else { continue; };
+                            Message::multipart_payloads([group, body])
+                        } else {
+                            Message::multipart([group, body])
+                        };
                         if recv_tx.send(msg).await.is_err() {
                             break;
                         }

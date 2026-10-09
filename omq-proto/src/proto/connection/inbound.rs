@@ -332,6 +332,23 @@ impl Connection {
                 max,
             });
         }
+        let inline = if more || !self.pending_parts.is_empty() {
+            crate::message::MAX_INLINE_PAYLOAD
+        } else {
+            crate::message::MAX_INLINE_MESSAGE
+        };
+        let payload = if payload.len() > inline
+            && let Some(pool) = &self.recv_payload_pool
+            && let Some(mut buffer) = pool.try_buffer(payload.len())
+        {
+            buffer.writable()[..payload.len()].copy_from_slice(payload.as_slice());
+            buffer
+                .set_len(payload.len())
+                .expect("selected slot fits frame");
+            buffer.into_payload()
+        } else {
+            payload
+        };
         if more {
             self.pending_parts.push(payload);
         } else if self.pending_parts.is_empty() {

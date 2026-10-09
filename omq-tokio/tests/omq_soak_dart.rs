@@ -96,10 +96,10 @@ fn options(congestion: DartCongestion, backpressure: bool, latency: bool) -> Opt
         xpub_nodrop: true,
         workload_profile: latency.then_some(WorkloadProfile::Latency),
         max_message_size: Some(128 * 1024),
+        recv_payload_pool: Some(omq_tokio::PayloadPool::new([(2048, 64)]).unwrap()),
         dart: DartOptions {
             congestion,
             window_messages: if backpressure { 1 } else { 64 },
-            pool_buffers: 64,
             io_spin: if latency {
                 Duration::from_micros(50)
             } else {

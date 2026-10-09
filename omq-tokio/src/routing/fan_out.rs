@@ -552,7 +552,7 @@ impl FanOutSend {
             #[cfg(feature = "dart")]
             native_progress: Arc::new(crate::engine::signal::StateSignal::new()),
             #[cfg(feature = "dart")]
-            native_pending_limit: options.dart.pool_buffers,
+            native_pending_limit: options.send_hwm.max(1) as usize,
             #[cfg(feature = "dart")]
             native_peer_limit: options.dart.max_ready_peers,
         }

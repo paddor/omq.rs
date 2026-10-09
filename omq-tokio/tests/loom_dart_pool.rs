@@ -6,7 +6,7 @@ use loom::thread;
 
 // Model ownership separately from the bounded queue's publication. Queue
 // internals belong to concurrent-queue; mutexes below model queue publication,
-// while per-slot release uses the same deferred-owner flag as BufferPool.
+// while per-slot release uses the same deferred-owner flag as PayloadPool.
 struct Model {
     queued: [AtomicBool; 2],
     pending: Mutex<Vec<(usize, Arc<usize>)>>,

@@ -14,6 +14,7 @@
 #                       a few timing-sensitive tests may need one
 #                       retry on heavily loaded runners.
 #   OMQ_TEST_JOBS=N     max parallel test steps (default 2)
+#   OMQ_QUICK=1         run the default-feature workspace tests only
 #   OMQ_SKIP_PERF=1     skip the local perf smoke/hardware gate
 #   OMQ_PERF_WAIT_SECS=N
 #                       wait this long for prior test/build procs to exit
@@ -100,6 +101,12 @@ run() {
 omq_cargo_with_rust_tools() {
     RUSTC="$OMQ_RUSTC" RUSTDOC="$OMQ_RUSTDOC" exec omq_cargo "$@"
 }
+
+if [[ "${OMQ_QUICK:-}" == "1" ]]; then
+    run omq_cargo_with_rust_tools nextest run --workspace
+    echo "quick tests passed"
+    exit 0
+fi
 
 # Run a function in the background, keeping at most $jobs parallel workers.
 # Usage: par <func> [args...]

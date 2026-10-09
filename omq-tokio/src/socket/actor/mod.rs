@@ -293,6 +293,7 @@ pub(crate) struct SocketDriver {
     udp_dialers: Vec<UdpDialerEntry>,
     closing: bool,
     close_peers_requested: bool,
+    close_progress: Arc<crate::engine::signal::StateSignal>,
     close_deadline: Option<Instant>,
     close_ack: Option<oneshot::Sender<Result<()>>>,
     spsc: super::recv::SpscHandles,
@@ -380,6 +381,7 @@ impl SocketDriver {
             udp_dialers: Vec::new(),
             closing: false,
             close_peers_requested: false,
+            close_progress: Arc::new(crate::engine::signal::StateSignal::new()),
             close_deadline: None,
             close_ack: None,
             spsc,
@@ -436,9 +438,10 @@ impl SocketDriver {
             let linger_sleep = self
                 .close_deadline
                 .map(|t| tokio::time::sleep_until(t.into()));
-            let should_poll_close = self.closing && !self.close_peers_requested;
-            let close_poll_sleep =
-                should_poll_close.then(|| tokio::time::sleep(Duration::from_millis(1)));
+            let close_seen = self.close_drain_wait();
+            if close_seen.is_some() && self.send_strategy.is_drained() {
+                continue;
+            }
 
             tokio::select! {
                 biased;
@@ -450,7 +453,7 @@ impl SocketDriver {
                     self.teardown().await;
                     return;
                 }
-                () = async { close_poll_sleep.unwrap().await }, if should_poll_close => {}
+                () = self.close_progress.changed_after(close_seen.unwrap_or(0)), if close_seen.is_some() => {}
                 cmd = self.cmd_rx.recv(), if !self.closing || !self.cmd_rx.is_empty() => match cmd {
                     Some(_) if self.closing => {},
                     Some(c) => self.handle_command(c).await,
@@ -496,6 +499,14 @@ impl SocketDriver {
                     if !self.stream_disconnects.is_empty() && self.pending_receive.is_none() => {}
             }
         }
+    }
+
+    fn close_drain_wait(&self) -> Option<u64> {
+        if !self.closing || self.close_peers_requested {
+            return None;
+        }
+        self.send_strategy.watch_close(&self.close_progress);
+        Some(self.close_progress.generation())
     }
 
     fn should_exit(&self) -> bool {

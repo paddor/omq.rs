@@ -25,6 +25,7 @@ struct Shared {
     drained: futures::task::AtomicWaker,
     registration: Arc<StateSignal>,
     registration_hints: AtomicBool,
+    close_progress: std::sync::OnceLock<Arc<StateSignal>>,
     #[cfg(feature = "dart")]
     native_progress: std::sync::OnceLock<Arc<StateSignal>>,
     #[cfg(feature = "dart")]
@@ -32,6 +33,11 @@ struct Shared {
 }
 
 impl Shared {
+    fn notify_close_progress(&self) {
+        if let Some(signal) = self.close_progress.get() {
+            signal.notify_changed();
+        }
+    }
     #[cfg(feature = "dart")]
     fn notify_native_progress(&self) {
         if let Some(signal) = self.native_progress.get() {
@@ -166,14 +172,16 @@ impl Drop for Admission {
             #[cfg(feature = "dart")]
             self.lane.template.shared.notify_native_progress();
         }
-        if self
+        let remaining = self
             .lane
             .template
             .shared
             .admitted
-            .fetch_sub(1, Ordering::AcqRel)
-            == (CLOSED | 1)
-        {
+            .fetch_sub(1, Ordering::AcqRel);
+        if remaining & !CLOSED == 1 {
+            self.lane.template.shared.notify_close_progress();
+        }
+        if remaining == (CLOSED | 1) {
             self.lane.template.shared.drained.wake();
         }
     }
@@ -288,6 +296,7 @@ fn channel_inner(
             drained: futures::task::AtomicWaker::new(),
             registration: Arc::new(StateSignal::new()),
             registration_hints: AtomicBool::new(false),
+            close_progress: std::sync::OnceLock::new(),
             #[cfg(feature = "dart")]
             native_progress: std::sync::OnceLock::new(),
             #[cfg(feature = "dart")]
@@ -394,6 +403,15 @@ impl Lane {
 }
 
 impl Sender {
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        let shared = match self {
+            Self::Template(template) => &template.shared,
+            Self::Lane(lane) => &lane.template.shared,
+            Self::Legacy(_) => return,
+        };
+        let existing = shared.close_progress.get_or_init(|| progress.clone());
+        debug_assert!(Arc::ptr_eq(existing, progress));
+    }
     #[cfg(feature = "dart")]
     pub(crate) fn observe_native_progress(&self, signal: &Arc<StateSignal>) {
         let shared = match self {

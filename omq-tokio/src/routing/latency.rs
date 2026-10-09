@@ -150,6 +150,16 @@ impl LatencySend {
         state.peers.iter().all(|peer| peer.target.is_empty())
             && state.pending.iter().all(|pipe| pipe.tx.is_empty())
     }
+
+    pub(crate) fn watch_close(&self, progress: &Arc<crate::engine::signal::StateSignal>) {
+        let state = self.state.lock().expect("latency send state");
+        for peer in &state.peers {
+            peer.target.watch_close(progress);
+        }
+        for pipe in &state.pending {
+            pipe.tx.watch_close(progress);
+        }
+    }
 }
 
 impl Submitter {

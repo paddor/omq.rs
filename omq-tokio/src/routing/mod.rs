@@ -295,6 +295,19 @@ impl SendSubmitter {
 }
 
 impl SendStrategy {
+    pub(crate) fn watch_close(
+        &self,
+        progress: &std::sync::Arc<crate::engine::signal::StateSignal>,
+    ) {
+        match self {
+            Self::None => {}
+            Self::RoundRobin(send) => send.watch_close(progress),
+            Self::Latency(send) => send.watch_close(progress),
+            Self::Exclusive(send) => send.watch_close(progress),
+            Self::FanOut(send) => send.watch_close(progress),
+            Self::Identity(send) => send.watch_close(progress),
+        }
+    }
     pub(crate) fn for_socket_type(
         t: SocketType,
         options: &Options,

@@ -19,6 +19,16 @@ pub(crate) enum PeerOutbound {
 }
 
 impl PeerOutbound {
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        match self {
+            Self::Wire { slot, inbox, .. } => {
+                slot.data_signal.watch_idle(progress);
+                inbox.watch_close(progress);
+            }
+            Self::Inbox(inbox) => inbox.watch_close(progress),
+            Self::Inproc(sender) => sender.watch_close(progress),
+        }
+    }
     #[cfg(feature = "dart")]
     pub(crate) fn validate_dart(
         &self,

@@ -714,6 +714,14 @@ impl FanOutSend {
         let g = self.inner.lock().expect("fanout inner poisoned");
         lanes_empty && g.peers.values().all(|p| p.target.is_empty())
     }
+
+    pub(crate) fn watch_close(&self, progress: &Arc<crate::engine::signal::StateSignal>) {
+        self.lanes.watch_close(progress);
+        let guard = self.inner.lock().expect("fanout inner poisoned");
+        for peer in guard.peers.values() {
+            peer.target.watch_close(progress);
+        }
+    }
 }
 
 #[cfg(test)]

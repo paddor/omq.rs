@@ -186,7 +186,8 @@ policy. Peer disconnects and slow consumers do not turn ordinary sends into
 peer errors. Regular sockets reconnect and replay subscriptions or groups.
 
 Socket close stops new sends. Nonzero linger lets accepted output drain under
-one socket-wide deadline when finite; zero linger cancels immediately. Removing
+one socket-wide deadline when finite; queue drain signals wake the actor as
+accepted output clears. Zero linger cancels immediately. Removing
 a message from a queue does not complete its wire write. Wire completion does
 not prove remote application delivery. Heartbeats judge missing peer activity,
 not a slow application queue.

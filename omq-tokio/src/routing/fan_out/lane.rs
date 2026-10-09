@@ -630,6 +630,19 @@ impl FanOutLanes {
                             || endpoint.exited.load(Ordering::Acquire))
                 })
     }
+
+    pub(super) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        self.distributor
+            .lock()
+            .expect("distributor poisoned")
+            .signal
+            .watch_idle(progress);
+        let state = self.state.lock().expect("fanout lanes poisoned");
+        for endpoint in &state.endpoints {
+            endpoint.ctrl_notify.watch_idle(progress);
+            endpoint.data_signal.watch_idle(progress);
+        }
+    }
 }
 
 impl LaneWorker {
@@ -738,6 +751,7 @@ impl LaneWorker {
         self.codec_groups = std::array::from_fn(|_| None);
         self.subscribe_all_count = 0;
         self.exited.store(true, Ordering::Release);
+        self.data_signal.notify_close_progress();
         self.notify_data_space();
     }
 

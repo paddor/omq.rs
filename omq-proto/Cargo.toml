@@ -85,6 +85,9 @@ all-features = true
 [target.'cfg(target_pointer_width = "64")'.dev-dependencies]
 loom = "0.7"
 
+[target.'cfg(loom)'.dependencies]
+concurrent-queue = { version = "2.5.0", features = ["loom"] }
+
 [target.'cfg(all(loom, target_pointer_width = "64"))'.dependencies]
 loom = "0.7"
 

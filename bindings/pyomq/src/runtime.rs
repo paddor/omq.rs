@@ -551,6 +551,18 @@ pub fn proxy_handles(
     ctx.spawn_blocking(async move { proxy.run().await })
 }
 
+struct ForwardRecvWake(Arc<ReadinessSignal>);
+
+impl std::task::Wake for ForwardRecvWake {
+    fn wake(self: Arc<Self>) {
+        self.0.force_wake();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.force_wake();
+    }
+}
+
 /// Block the calling thread until at least one of the given sockets has
 /// an inbound message ready (or until `timeout_ms` elapses).
 pub fn wait_any(
@@ -602,6 +614,16 @@ pub fn wait_any(
     let recv_signal = global_recv_signal();
     let deadline = timeout_ms.and_then(|ms| Instant::now().checked_add(Duration::from_millis(ms)));
 
+    // Native blocking sockets wake threads, not the readiness fd. Forward
+    // their wakeups into the fd for the duration of this wait.
+    let waker = std::task::Waker::from(Arc::new(ForwardRecvWake(recv_signal.clone())));
+    let _registrations: Vec<_> = sockets
+        .iter()
+        .filter(|(_, inner)| inner.materialized.read().unwrap().is_none())
+        .filter_map(|(_, inner)| inner.ensure_blocking_socket().ok())
+        .map(|sock| sock.register_recv_waker(waker.clone()))
+        .collect();
+
     recv_signal.park_begin();
     let ready = poll_ready(&sockets);
     if !ready.is_empty() {
@@ -622,10 +644,7 @@ pub fn wait_any(
             None => Duration::from_millis(100),
         };
 
-        // Native blocking sockets have thread wakeups, not a readiness fd.
-        // Poll their try-recv path periodically while retaining the
-        // readiness-fd fast path for asyncio sockets.
-        recv_signal.wait_timeout(wait_dur.min(Duration::from_millis(10)));
+        recv_signal.wait_timeout(wait_dur);
 
         let ready = poll_ready(&sockets);
         if !ready.is_empty() {

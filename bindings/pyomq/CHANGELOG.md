@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Sync receives with `RCVTIMEO`, sends with `SNDTIMEO` on a full queue,
+  `Poller`/`poll()` waits on sync sockets, and all receives in forked children
+  park until woken instead of polling every 1-10 ms. This capped such
+  sockets at ~100-900 messages per second.
+- Forking no longer delays the first send of each socket by 100 ms.
+
 ## [0.23.0] - 2026-10-07
 
 - Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive

@@ -417,11 +417,12 @@ async fn concurrent_receive_batch(socket: std::sync::Arc<Socket>) -> Vec<u64> {
 
 #[tokio::test]
 async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardown_progress() {
+    let pool = omq_tokio::PayloadPool::new([(2048, 1)]).unwrap();
     let gather = Socket::new(
         SocketType::Gather,
         Options {
             recv_hwm: 1,
-            recv_payload_pool: Some(omq_tokio::PayloadPool::new([(2048, 1)]).unwrap()),
+            recv_payload_pool: Some(pool.clone()),
             workload_profile: Some(WorkloadProfile::Latency),
             dart: DartOptions {
                 window_messages: 1,
@@ -437,22 +438,35 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let session = response(&raw).await;
     ready(&gather, 1).await;
-    let pool = omq_tokio::PayloadPool::new([(2048, 1)]).unwrap();
-    let caller_held = pool.try_buffer(1).unwrap();
     send_data(&raw, target, session, 0, &[7; 256], None).await;
     let held = receive(&gather).await;
     let stop = tokio_util::sync::CancellationToken::new();
     let flood = {
         let stop = stop.clone();
+        let receiver = gather.clone_shared();
         tokio::spawn(async move {
             let oversized = [0u8; dart::MAX_DATAGRAM + 1];
             let started = std::time::Instant::now();
             while !stop.is_cancelled() && started.elapsed() < Duration::from_secs(2) {
-                for _ in 0..32 {
-                    for packet in [&[0; 17][..], &oversized[..], b"\xc0\x05READYbroken"] {
+                for packet in [&[0; 17][..], &oversized[..], b"\xc0\x05READYbroken"] {
+                    // Bound kernel backlog by receiver progress. Oversized GRO
+                    // buffers count as one rejection, so send those singly.
+                    let count = if packet.len() > dart::MAX_DATAGRAM {
+                        1
+                    } else {
+                        32
+                    };
+                    let until = receiver.dart_stats().invalid_datagrams + count;
+                    for _ in 0..count {
                         if raw.send_to(packet, target).await.is_err() {
                             return;
                         }
+                    }
+                    while receiver.dart_stats().invalid_datagrams < until {
+                        if stop.is_cancelled() || started.elapsed() >= Duration::from_secs(2) {
+                            return;
+                        }
+                        tokio::task::yield_now().await;
                     }
                 }
                 tokio::task::yield_now().await;
@@ -470,8 +484,8 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     })
     .await
     .unwrap();
-    // Flooding can drop the first HELLO in the kernel. Exercise the actual
-    // connector's handshake retries while requiring progress during the flood.
+    // Require the actual connector to make progress while malformed traffic
+    // continues and the sole receive slot is retained by the application.
     let probe = Socket::new(SocketType::Scatter, Options::default());
     probe.connect(bound.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -479,7 +493,7 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
         ready(&gather, 2).await;
     })
     .await
-    .unwrap();
+    .expect("DART handshake must progress with receive credit closed");
     assert!(
         pool.try_buffer(1).is_none(),
         "control cannot consume another body slot"
@@ -495,7 +509,6 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
         .unwrap()
         .unwrap();
     drop(held);
-    drop(caller_held);
     assert_eq!(pool.available(), 1);
     probe.close().await.unwrap();
     gather.close().await.unwrap();

@@ -328,7 +328,7 @@ async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 7 {
         return Err(
-            "usage: omq-rivals iroh|zenoh throughput|latency server|client size port control_file"
+            "usage: omq_rivals iroh|zenoh throughput|latency server|client size port control_file"
                 .into(),
         );
     }

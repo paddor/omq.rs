@@ -26,6 +26,8 @@ pub(crate) enum Command {
 pub(crate) enum ChartSub {
     /// Main TCP overview charts.
     Main,
+    /// Direct, RPC, and brokered messaging comparisons.
+    Mom,
     /// Per-transport PUSH/PULL and REQ/REP charts.
     Comparison,
     /// PUB/SUB multi-panel and CURVE charts.

@@ -26,6 +26,7 @@ fn main() {
         },
         Command::Chart { sub } => match sub {
             Some(ChartSub::Main) => chart::main_tcp::generate(),
+            Some(ChartSub::Mom) => chart::main_tcp::generate_mom(),
             Some(ChartSub::Comparison) => chart::comparison::generate(),
             Some(ChartSub::Pubsub) => chart::pubsub::generate(),
             Some(ChartSub::Fanio) => chart::fanio::generate(),
@@ -36,6 +37,7 @@ fn main() {
             Some(ChartSub::Zstd) => chart::zstd::generate(),
             None => {
                 chart::main_tcp::generate();
+                chart::main_tcp::generate_mom();
                 chart::comparison::generate();
                 chart::pubsub::generate();
                 chart::fanio::generate();

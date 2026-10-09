@@ -38,6 +38,97 @@ const IMPLS: &[Impl] = &[
 
 type Runs = BTreeMap<(u64, String, String), Vec<serde_json::Value>>;
 
+pub(crate) fn mom_rows(kind: &str, sizes: &[u64]) -> BTreeMap<u64, serde_json::Value> {
+    let rows = jsonl::load_jsonl::<serde_json::Value>(&jsonl::cache_dir().join("mom-dart.jsonl"));
+    let window = if kind == "throughput" { 512 } else { 256 };
+    let mut groups: BTreeMap<u64, Vec<serde_json::Value>> = BTreeMap::new();
+    for (_, row) in rows {
+        let Some(size) = row["msg_size"].as_u64().filter(|size| sizes.contains(size)) else {
+            continue;
+        };
+        if row["kind"] != kind
+            || row["transport"] != "dart"
+            || row["congestion"] != "adaptive"
+            || row["dart_wire_version"] != DART_WIRE_VERSION
+            || row["dart_window_messages"] != window
+            || row["profiled"] != false
+            || row["diagnostic"] != false
+            || row["continuous_spin"] != false
+            || row["continuous_io_spin"] != false
+            || row["runtime"] != "owned"
+            || row["runtime_polling"] != false
+            || row["io_threads"] != 1
+            || row["spin_us"] != 50
+            || row["io_spin_us"] != 50
+            || row["workload_profile"] != kind
+            || row["measurement_order"] != "rotate"
+            || row["cpus"] != "1,2,0,3,5,4"
+            || row["binary_sha256"].as_str().is_none()
+        {
+            continue;
+        }
+        if kind == "throughput" {
+            if row["sender"]["seconds"].as_f64() != Some(3.0)
+                || row["receiver"]["seconds"].as_f64() != Some(3.0)
+                || row["warmup_seconds"].as_f64() != Some(1.0)
+                || row["drain_seconds"].as_f64() != Some(2.0)
+                || row["recv_batching"] != true
+                || row["missing_count"] != 0
+                || row["excess_count"] != 0
+                || row["sender"]["offered"] != row["receiver"]["received_total"]
+                || row["sender"]["unacknowledged"] != 0
+                || ["duplicates", "gaps", "corrupt"]
+                    .iter()
+                    .any(|field| row["receiver"][field] != 0)
+            {
+                continue;
+            }
+        } else if row["iterations"] != 10_000
+            || row["warmup_iterations"] != 2_000
+            || row["timeouts"] != 0
+        {
+            continue;
+        }
+        let group = groups.entry(size).or_default();
+        if row["repeat"] == 1
+            || group
+                .last()
+                .is_some_and(|last| last["binary_sha256"] != row["binary_sha256"])
+        {
+            group.clear();
+        }
+        if row["repeat"].as_u64() == Some(group.len() as u64 + 1) {
+            group.push(row);
+        }
+    }
+    let metric = if kind == "throughput" {
+        "msgs_s"
+    } else {
+        "p99_us"
+    };
+    groups
+        .into_iter()
+        .filter_map(|(size, mut group)| {
+            if group.len() != 3
+                || group.iter().any(|row| {
+                    row[metric]
+                        .as_f64()
+                        .is_none_or(|value| !value.is_finite() || value <= 0.0)
+                })
+            {
+                return None;
+            }
+            group.sort_by(|a, b| {
+                a[metric]
+                    .as_f64()
+                    .unwrap()
+                    .total_cmp(&b[metric].as_f64().unwrap())
+            });
+            Some((size, group.remove(1)))
+        })
+        .collect()
+}
+
 fn eligible_runs() -> Runs {
     let rows = jsonl::load_jsonl::<serde_json::Value>(&jsonl::cache_dir().join("dart.jsonl"));
     let mut groups = Runs::new();

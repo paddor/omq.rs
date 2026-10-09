@@ -36,7 +36,7 @@ def command(name, mode, role, size, port, control, pin):
             str(size), str(port), str(control),
         ]
     else:
-        binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq-rivals"
+        binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq_rivals"
         cmd = [str(binary), name, mode, role, str(size), str(port), str(control)]
     return (["taskset", "-c", "3-4" if role == "server" else "1-2"] + cmd) if pin else cmd
 

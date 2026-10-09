@@ -44,7 +44,7 @@ javac -cp "$AERON_JAR" -d "$AERON_CLASSES" scripts/rivals/AeronUdpPeer.java
 python3 scripts/rivals/run_two_process.py aeron --pin
 python3 scripts/rivals/run_two_process.py zenoh --pin
 python3 scripts/rivals/run_two_process.py iroh --pin
-cargo run -p omq-bench -- chart main
+cargo run -p omq-bench -- chart mom
 ```
 
 The wrapper uses base port 43100 by default, plus two per case. Override with

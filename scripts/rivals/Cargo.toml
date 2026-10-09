@@ -3,6 +3,10 @@ name = "omq-rivals"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "omq_rivals"
+path = "src/main.rs"
+
 [dependencies]
 iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
 zenoh = { version = "=1.10.1", default-features = false, features = ["transport_tcp"] }

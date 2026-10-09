@@ -200,6 +200,39 @@ impl Socket {
         })
     }
 
+    /// Send one complete message, parking while the socket is muted until it
+    /// is accepted or `cancel` fires. Returns `Ok(false)` when canceled; a
+    /// canceled message is not sent.
+    pub fn send_cancelable(&self, msg: Message, cancel: &BlockingRecvCancel) -> Result<bool> {
+        let msg = match self.inner.try_send(msg) {
+            Ok(()) => return Ok(true),
+            Err(TrySendError::Full(msg)) => msg,
+            Err(TrySendError::Closed) => return Err(Error::Closed),
+            Err(TrySendError::Error(e)) => return Err(e),
+        };
+        cancel.register(&std::thread::current());
+        let _guard = crate::engine::signal::BlockingRecvCancelGuard { cancel };
+        if cancel.is_canceled() {
+            return Ok(false);
+        }
+        let _runtime = self.ctx.handle().enter();
+        // Cancel unparks this thread; block_on then polls the flag.
+        let canceled = std::future::poll_fn(|_| {
+            if cancel.is_canceled() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        });
+        crate::engine::signal::block_on(async {
+            tokio::select! {
+                biased;
+                result = self.inner.send(msg) => result.map(|()| true),
+                () = canceled => Ok(false),
+            }
+        })
+    }
+
     /// Try to send one complete message without blocking.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         self.inner.try_send(msg)

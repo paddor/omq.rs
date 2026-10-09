@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `blocking::Socket::send_timeout` waits for queue space up to a deadline.
+- `blocking::Socket::send_cancelable` waits for queue space until a
+  `BlockingRecvCancel` fires.
 - `blocking::Socket::register_recv_waker` forwards receive readiness to a
   `Waker` for external pollers.
 

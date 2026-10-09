@@ -3,10 +3,9 @@
 //! A full queue retains one decoded delivery without repeating metadata/rate
 //! admission. MPSC reservations stay pinned across select turns and use their
 //! actual permit. REP admits body and saved envelope together. Raw yring
-//! consumers have a 10 ms fallback check for consumer drop without a space signal.
+//! consumers signal queue space and closure through `StateSignal`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use omq_proto::error::TrySendError;
 use omq_proto::message::Message;
@@ -676,14 +675,9 @@ impl RecvSink {
         match unwrapped {
             Self::Channel(pipe) => pipe.space_ready().await,
             Self::Yring(sink) => {
-                // A raw yring consumer drop has no StateSignal callback.
-                // Preserve the old drop check without polling the data path.
-                tokio::select! {
-                    () = sink.space.wait_until(|| {
-                        sink.producer.is_consumer_dropped() || !sink.producer.is_full()
-                    }) => {},
-                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
+                sink.space
+                    .wait_until(|| sink.producer.is_consumer_dropped() || !sink.producer.is_full())
+                    .await;
             }
             Self::Authenticated(_) => unreachable!("authenticated admission retains its permit"),
             Self::Fanin(sink) => sink.ready().await,
@@ -728,6 +722,7 @@ impl RecvSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn concurrent_authenticated_waiters_keep_their_reserved_slots() {
@@ -756,17 +751,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn raw_yring_consumer_drop_releases_a_parked_sender_without_a_space_callback() {
+    async fn raw_yring_consumer_drop_signal_releases_a_parked_sender() {
         let (producer, consumer) = yring::spsc(1);
+        let space = Arc::new(StateSignal::new());
         let mut sink = RecvSink::Yring(YringSink {
             producer,
             signal: Box::new(|| {}),
-            space: Arc::new(StateSignal::new()),
+            space: space.clone(),
         });
         assert!(sink.send(Message::single("accepted")).await);
         let blocked = tokio::spawn(async move { sink.send(Message::single("blocked")).await });
         tokio::task::yield_now().await;
         drop(consumer);
+        space.notify_changed();
         assert!(
             !tokio::time::timeout(Duration::from_millis(50), blocked)
                 .await

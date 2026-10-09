@@ -39,11 +39,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "accept error backoff, not a readiness poll",
     ),
     (
-        "omq-tokio/src/engine/recv_sink.rs",
-        "sleep(Duration::from_millis(10))",
-        "receiver drop fallback: a raw yring consumer drop has no signal",
-    ),
-    (
         "omq-tokio/src/socket/actor/mod.rs",
         "sleep(Duration::from_millis(1))",
         "close drain: send queues have no became-empty signal",

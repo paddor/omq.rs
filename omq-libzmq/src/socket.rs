@@ -476,6 +476,16 @@ pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     // SAFETY: sock_ptr came from Box::into_raw in zmq_socket; reclaiming ownership.
     let arc = unsafe { *Box::from_raw(sock_ptr.cast::<Arc<OmqSocket>>()) };
 
+    // A full direct receive ring may have a driver waiting for space.
+    // Drop its consumer before signaling so the driver observes closure.
+    // SAFETY: close has exclusive socket access; the last recv may have run
+    // on a different thread before ownership returned to this caller.
+    let consumers = unsafe { arc.recv_cons.get_unchecked() }.take();
+    drop(consumers);
+    if let Some(space) = arc.recv_space.get() {
+        space.notify_changed();
+    }
+
     if arc.zap_handler.swap(false, Ordering::AcqRel) {
         arc.ctx.zap.unbind(arc.id);
     }

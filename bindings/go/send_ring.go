@@ -1,6 +1,7 @@
 package omq
 
 import (
+	"context"
 	"runtime"
 	"sync/atomic"
 	"time"
@@ -11,9 +12,13 @@ const (
 	defaultSendRingDescCapacity    = 4096
 	defaultSendRingPayloadCapacity = 16 * 1024 * 1024
 
-	sendRingControlHead   = 0
-	sendRingControlTail   = 128
-	sendRingControlClosed = 256
+	sendRingControlHead         = 0
+	sendRingControlTail         = 128
+	sendRingControlClosed       = 256
+	sendRingControlWorkerParked = 384
+	sendRingControlWakeEpoch    = 512
+
+	sendRingSpinLimit = 512
 )
 
 type sendRingDesc struct {
@@ -101,8 +106,34 @@ func (r *sendRing) trySend(body []byte) (bool, error) {
 	desc.payloadEnd = reservation.end
 	r.tail++
 	atomic.StoreUint64(r.tailPtr(), r.tail)
+	// Pairs with the worker's parked-flag store and tail recheck.
+	if atomic.LoadUint64(r.workerParkedPtr()) != 0 &&
+		atomic.CompareAndSwapUint64(r.workerParkedPtr(), 1, 0) {
+		sendRingWakeNative(r.handle)
+	}
 	runtime.KeepAlive(body)
 	return true, nil
+}
+
+// waitSpace parks until the ring head moves past seenHead, the ring closes,
+// or ctx ends.
+func (r *sendRing) waitSpace(ctx context.Context, seenHead uint64) error {
+	epoch := atomic.LoadUint64(r.wakeEpochPtr())
+	if r.headAcquire() != seenHead || r.closedAcquire() {
+		return nil
+	}
+	woken := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		sendRingWakeNative(r.handle)
+		close(woken)
+	})
+	if errFromContext(ctx) == nil {
+		sendRingWaitNative(r.handle, seenHead, epoch, -1)
+	}
+	if !stop() {
+		<-woken
+	}
+	return errFromContext(ctx)
 }
 
 func (r *sendRing) close() error {
@@ -125,17 +156,32 @@ func (r *sendRing) drain(timeoutMillis int64) (bool, error) {
 	start := time.Now()
 	timeout := saturatedNanos(timeoutMillis)
 	spins := 0
-	for r.tail != r.headAcquire() {
+	for {
+		epoch := atomic.LoadUint64(r.wakeEpochPtr())
+		head := r.headAcquire()
+		if r.tail == head {
+			break
+		}
 		if r.closedAcquire() {
 			return false, r.error()
 		}
 		if timeoutMillis == 0 {
 			return false, nil
 		}
-		if timeoutMillis > 0 && time.Since(start) >= timeout {
-			return false, nil
+		remaining := int64(-1)
+		if timeoutMillis > 0 {
+			elapsed := time.Since(start)
+			if elapsed >= timeout {
+				return false, nil
+			}
+			remaining = max(1, (timeout - elapsed).Milliseconds())
 		}
-		spins = sendRingBackoff(spins)
+		if spins < sendRingSpinLimit {
+			runtime.Gosched()
+			spins++
+			continue
+		}
+		sendRingWaitNative(r.handle, head, epoch, remaining)
 	}
 	r.reclaimConsumed()
 	return true, nil
@@ -202,6 +248,14 @@ func (r *sendRing) tailPtr() *uint64 {
 	return (*uint64)(unsafe.Add(r.control, sendRingControlTail))
 }
 
+func (r *sendRing) workerParkedPtr() *uint64 {
+	return (*uint64)(unsafe.Add(r.control, sendRingControlWorkerParked))
+}
+
+func (r *sendRing) wakeEpochPtr() *uint64 {
+	return (*uint64)(unsafe.Add(r.control, sendRingControlWakeEpoch))
+}
+
 func (r *sendRing) closedPtr() *uint64 {
 	return (*uint64)(unsafe.Add(r.control, sendRingControlClosed))
 }
@@ -209,19 +263,6 @@ func (r *sendRing) closedPtr() *uint64 {
 type sendRingReservation struct {
 	offset uint64
 	end    uint64
-}
-
-func sendRingBackoff(spins int) int {
-	if spins < 256 {
-		runtime.Gosched()
-		return spins + 1
-	}
-	if spins < 512 {
-		runtime.Gosched()
-		return spins + 1
-	}
-	time.Sleep(50 * time.Microsecond)
-	return spins
 }
 
 func saturatedNanos(timeoutMillis int64) time.Duration {

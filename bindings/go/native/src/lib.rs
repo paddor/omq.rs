@@ -10,7 +10,7 @@ use std::slice;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -218,6 +218,15 @@ struct SendRingControl {
     _pad1: [u8; 120],
     closed: AtomicUsize,
     _pad2: [u8; 120],
+    /// Set by the worker before it parks on an empty ring.
+    worker_parked: AtomicUsize,
+    _pad3: [u8; 120],
+    /// Bumped by every wake so producer waits never miss one.
+    wake_epoch: AtomicUsize,
+    _pad4: [u8; 120],
+    /// Set by the producer while it waits for ring space.
+    producer_waiting: AtomicUsize,
+    _pad5: [u8; 120],
 }
 
 impl SendRingControl {
@@ -229,6 +238,12 @@ impl SendRingControl {
             _pad1: [0; 120],
             closed: AtomicUsize::new(0),
             _pad2: [0; 120],
+            worker_parked: AtomicUsize::new(0),
+            _pad3: [0; 120],
+            wake_epoch: AtomicUsize::new(0),
+            _pad4: [0; 120],
+            producer_waiting: AtomicUsize::new(0),
+            _pad5: [0; 120],
         }
     }
 }
@@ -261,6 +276,11 @@ struct OmqGoSendRingShared {
     last_error_code: AtomicI32,
     last_error_message: Mutex<CString>,
     reclaim: Mutex<SendRingReclaim>,
+    worker: OnceLock<thread::Thread>,
+    /// Interrupts a worker send blocked on a muted socket at close.
+    send_cancel: BlockingRecvCancel,
+    space: Mutex<()>,
+    space_changed: Condvar,
 }
 
 struct SendRingReclaim {
@@ -749,9 +769,14 @@ impl OmqGoSendRing {
             last_error_code: AtomicI32::new(OK),
             last_error_message: Mutex::new(empty_cstring()),
             reclaim: Mutex::new(SendRingReclaim { cursor: 0 }),
+            worker: OnceLock::new(),
+            send_cancel: BlockingRecvCancel::new(),
+            space: Mutex::new(()),
+            space_changed: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::spawn(move || send_ring_worker(worker_shared));
+        let _ = shared.worker.set(worker.thread().clone());
         Self {
             shared,
             worker: Some(worker),
@@ -787,6 +812,8 @@ impl OmqGoSendRing {
 
     fn close(&mut self) {
         self.shared.control.closed.store(1, Ordering::Release);
+        self.shared.send_cancel.cancel();
+        self.shared.wake();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -824,6 +851,61 @@ impl OmqGoSendRingShared {
         self.control.closed.load(Ordering::Acquire) != 0
     }
 
+    /// Wake a parked worker and any producer waiting for space.
+    fn wake(&self) {
+        self.control.wake_epoch.fetch_add(1, Ordering::SeqCst);
+        if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+        let _space = self.space.lock();
+        self.space_changed.notify_all();
+    }
+
+    /// Park the worker until the producer publishes past `cursor` or closes.
+    fn park_worker(&self, cursor: usize) {
+        self.control.worker_parked.store(1, Ordering::SeqCst);
+        if self.control.tail.load(Ordering::SeqCst) == cursor && !self.closed() {
+            thread::park();
+        }
+        self.control.worker_parked.store(0, Ordering::Relaxed);
+    }
+
+    /// Park the producer until the head moves past `seen_head`, a wake bumps
+    /// the epoch past `seen_epoch`, the ring closes, or `timeout` elapses.
+    fn wait_space(&self, seen_head: usize, seen_epoch: usize, timeout: Option<Duration>) {
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+        let Ok(mut space) = self.space.lock() else {
+            return;
+        };
+        self.control.producer_waiting.store(1, Ordering::SeqCst);
+        loop {
+            if self.control.head.load(Ordering::SeqCst) != seen_head
+                || self.control.wake_epoch.load(Ordering::SeqCst) != seen_epoch
+                || self.closed()
+            {
+                break;
+            }
+            let next = match deadline {
+                None => self.space_changed.wait(space).ok(),
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    self.space_changed
+                        .wait_timeout(space, remaining)
+                        .ok()
+                        .map(|(space, _)| space)
+                }
+            };
+            let Some(next) = next else {
+                break;
+            };
+            space = next;
+        }
+        self.control.producer_waiting.store(0, Ordering::Relaxed);
+    }
+
     fn message_at(self: &Arc<Self>, cursor: usize) -> Message {
         let desc = self.desc[cursor & self.desc_mask];
         Message::single(Bytes::from_owner(SendSlotOwner {
@@ -845,7 +927,12 @@ impl OmqGoSendRingShared {
                 break;
             }
             reclaim.cursor = reclaim.cursor.wrapping_add(1);
-            self.control.head.store(reclaim.cursor, Ordering::Release);
+            self.control.head.store(reclaim.cursor, Ordering::SeqCst);
+        }
+        drop(reclaim);
+        if self.control.producer_waiting.load(Ordering::SeqCst) != 0 {
+            let _space = self.space.lock();
+            self.space_changed.notify_all();
         }
     }
 }
@@ -872,28 +959,37 @@ fn send_ring_worker(shared: Arc<OmqGoSendRingShared>) {
             if shared.closed() {
                 break;
             }
-            send_ring_backoff(&mut spins);
+            if spins < 512 {
+                send_ring_spin(&mut spins);
+            } else {
+                shared.park_worker(head);
+            }
             continue;
         }
+        spins = 0;
 
         match shared.socket.try_send_many(&mut batch, RING_BATCH) {
-            Ok(sent) => {
-                if sent == 0 {
-                    if shared.closed() {
+            Ok(sent) => head = head.wrapping_add(sent),
+            Err(TrySendError::Full(returned)) => {
+                // Park on queue space; ring close cancels the wait.
+                match shared
+                    .socket
+                    .send_cancelable(returned.clone(), &shared.send_cancel)
+                {
+                    Ok(true) => head = head.wrapping_add(1),
+                    Ok(false) => {
+                        batch.push_front(returned);
                         break;
                     }
-                    send_ring_backoff(&mut spins);
-                    continue;
+                    Err(Error::Closed) => {
+                        shared.set_error(CLOSED, "socket closed");
+                        break;
+                    }
+                    Err(error) => {
+                        shared.set_error(status_code_from_error(&error), error.to_string());
+                        break;
+                    }
                 }
-                head = head.wrapping_add(sent);
-                spins = 0;
-            }
-            Err(TrySendError::Full(returned)) => {
-                batch.push_front(returned);
-                if shared.closed() {
-                    break;
-                }
-                send_ring_backoff(&mut spins);
             }
             Err(TrySendError::Closed) => {
                 shared.set_error(CLOSED, "socket closed");
@@ -907,18 +1003,16 @@ fn send_ring_worker(shared: Arc<OmqGoSendRingShared>) {
     }
 
     shared.control.closed.store(1, Ordering::Release);
+    shared.wake();
 }
 
-fn send_ring_backoff(spins: &mut u32) {
+fn send_ring_spin(spins: &mut u32) {
     if *spins < 256 {
         std::hint::spin_loop();
-        *spins += 1;
-    } else if *spins < 512 {
-        thread::yield_now();
-        *spins += 1;
     } else {
-        thread::sleep(Duration::from_micros(50));
+        thread::yield_now();
     }
+    *spins += 1;
 }
 
 fn status_from_result(result: Result<(), Error>) -> OmqGoStatus {
@@ -1013,10 +1107,6 @@ fn duration_from_timeout_millis(timeout_millis: i64) -> Option<Duration> {
     } else {
         Some(Duration::from_millis(timeout_millis as u64))
     }
-}
-
-fn deadline_after(timeout: Duration) -> Option<Instant> {
-    Instant::now().checked_add(timeout)
 }
 
 fn duration_from_millis(millis: i64) -> Result<Duration, Error> {
@@ -1319,26 +1409,25 @@ async fn receive_any_loop(
     entries: Vec<ReceiveAnyEntry<'_>>,
     timeout: Option<Duration>,
 ) -> Result<Option<(usize, Message)>, Error> {
-    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
-    let mut spins = 0u32;
-
-    loop {
-        if let Some(event) = try_receive_any_entry(&entries)? {
-            return Ok(Some(event));
-        }
-
-        if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(None);
-            }
-            tokio::time::sleep(remaining.min(Duration::from_micros(50))).await;
-        } else if spins < 256 {
-            spins += 1;
-            tokio::task::yield_now().await;
-        } else {
-            tokio::time::sleep(Duration::from_micros(50)).await;
-        }
+    if let Some(event) = try_receive_any_entry(&entries)? {
+        return Ok(Some(event));
+    }
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Ok(None);
+    }
+    // Async receives are cancel-safe: the losers consume nothing.
+    let receives = entries.iter().map(|entry| {
+        let index = entry.index;
+        let socket = entry.native.clone_shared().into_async();
+        Box::pin(async move { socket.recv().await.map(|message| (index, message)) })
+    });
+    let any = futures::future::select_all(receives);
+    match timeout {
+        None => any.await.0.map(Some),
+        Some(timeout) => match tokio::time::timeout(timeout, any).await {
+            Ok((result, _, _)) => result.map(Some),
+            Err(_) => Ok(None),
+        },
     }
 }
 
@@ -1363,7 +1452,7 @@ fn copy_message_into(message: &Message, destination: &mut [u8]) -> Result<usize,
 
 fn try_send_with_timeout(
     native: &BlockingSocket,
-    mut message: Message,
+    message: Message,
     timeout_millis: i64,
 ) -> OmqGoStatus {
     if timeout_millis == 0 {
@@ -1377,19 +1466,10 @@ fn try_send_with_timeout(
         return status_from_result(native.send(message));
     }
 
-    let deadline = deadline_after(Duration::from_millis(timeout_millis as u64));
-    loop {
-        match native.try_send(message) {
-            Ok(()) => return OmqGoStatus::ok(),
-            Err(TrySendError::Full(returned)) => {
-                if deadline.is_some_and(|d| Instant::now() >= d) {
-                    return OmqGoStatus::err(TIMEOUT, "operation timed out");
-                }
-                message = returned;
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(error) => return OmqGoStatus::from_try_send(error),
-        }
+    match native.send_timeout(message, Duration::from_millis(timeout_millis as u64)) {
+        Ok(()) => OmqGoStatus::ok(),
+        Err(Error::Timeout) => OmqGoStatus::err(TIMEOUT, "operation timed out"),
+        Err(error) => OmqGoStatus::from_error(error),
     }
 }
 
@@ -2013,6 +2093,38 @@ pub extern "C" fn omq_go_socket_send(
     })();
     match result {
         Ok((native, message)) => try_send_with_timeout(&native, message, timeout_millis),
+        Err(error) => OmqGoStatus::from_error(error),
+    }
+}
+
+/// Send, parking on a muted socket until accepted or `cancel` fires.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_socket_send_cancelable(
+    socket: *mut OmqGoSocket,
+    cancel: *const OmqGoCancel,
+    parts: *const OmqGoPart,
+    part_count: usize,
+    routing_id: u32,
+) -> OmqGoStatus {
+    if socket.is_null() {
+        return OmqGoStatus::err(CLOSED, "socket closed");
+    }
+    if cancel.is_null() {
+        return OmqGoStatus::err(CONFIG, "send cancel handle is null");
+    }
+    let socket = unsafe { &*socket };
+    let cancel = unsafe { &*cancel };
+    let result = (|| {
+        if socket.closed.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        let native = socket.materialize()?;
+        let message = message_from_c(parts, part_count, routing_id)?;
+        native.send_cancelable(message, &cancel.inner)
+    })();
+    match result {
+        Ok(true) => OmqGoStatus::ok(),
+        Ok(false) => OmqGoStatus::err(CANCELED, "operation canceled"),
         Err(error) => OmqGoStatus::from_error(error),
     }
 }
@@ -3163,6 +3275,38 @@ pub extern "C" fn omq_go_send_ring_error(ring: *mut OmqGoSendRing) -> OmqGoStatu
     unsafe { (&*ring).status() }
 }
 
+/// Wake the ring worker and any producer waiting for space.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_wake(ring: *mut OmqGoSendRing) {
+    if ring.is_null() {
+        return;
+    }
+    unsafe { (&*ring).shared.wake() }
+}
+
+/// Park until the ring head moves past `seen_head`, a wake bumps the epoch
+/// past `seen_epoch`, the ring closes, or `timeout_millis` elapses (negative
+/// waits forever). Callers recheck their condition after it returns.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_go_send_ring_wait(
+    ring: *mut OmqGoSendRing,
+    seen_head: u64,
+    seen_epoch: u64,
+    timeout_millis: i64,
+) {
+    if ring.is_null() {
+        return;
+    }
+    let timeout = u64::try_from(timeout_millis)
+        .ok()
+        .map(Duration::from_millis);
+    unsafe {
+        (&*ring)
+            .shared
+            .wait_space(seen_head as usize, seen_epoch as usize, timeout);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_go_send_ring_close(ring: *mut OmqGoSendRing) {
     if ring.is_null() {
@@ -3416,20 +3560,5 @@ pub extern "C" fn omq_go_native_stats(out: *mut OmqGoNativeStats) {
             cancels_freed,
             cancels_live,
         };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn huge_deadline_overflow_is_effectively_forever() {
-        assert!(deadline_after(Duration::MAX).is_none());
-    }
-
-    #[test]
-    fn small_deadline_is_concrete() {
-        assert!(deadline_after(Duration::from_millis(1)).is_some());
     }
 }

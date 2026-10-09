@@ -142,6 +142,7 @@ OmqGoStatus omq_go_socket_connect_timeout(OmqGoSocket *socket, const char *endpo
 OmqGoStatus omq_go_socket_unbind(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_disconnect(OmqGoSocket *socket, const char *endpoint);
 OmqGoStatus omq_go_socket_send(OmqGoSocket *socket, const OmqGoPart *parts, size_t part_count, uint32_t routing_id, int64_t timeout_millis);
+OmqGoStatus omq_go_socket_send_cancelable(OmqGoSocket *socket, const OmqGoCancel *cancel, const OmqGoPart *parts, size_t part_count, uint32_t routing_id);
 OmqGoStatus omq_go_socket_send_one(OmqGoSocket *socket, const uint8_t *data, size_t len, uint32_t routing_id, int64_t timeout_millis);
 OmqGoStatus omq_go_socket_try_send_batch(OmqGoSocket *socket, const OmqGoWireMessage *messages, size_t message_count, size_t *sent);
 OmqGoStatus omq_go_receive_any(OmqGoSocket **sockets, size_t socket_count, int64_t timeout_millis, size_t *index, OmqGoMessage *out);
@@ -207,6 +208,8 @@ void omq_go_monitor_free(OmqGoMonitor *monitor);
 OmqGoStatus omq_go_send_ring_create(OmqGoSocket *socket, size_t desc_capacity, size_t payload_capacity, OmqGoSendRing **out);
 OmqGoStatus omq_go_send_ring_memory(OmqGoSendRing *ring, OmqGoSendRingMemory *out);
 OmqGoStatus omq_go_send_ring_error(OmqGoSendRing *ring);
+void omq_go_send_ring_wake(OmqGoSendRing *ring);
+void omq_go_send_ring_wait(OmqGoSendRing *ring, uint64_t seen_head, uint64_t seen_epoch, int64_t timeout_millis);
 void omq_go_send_ring_close(OmqGoSendRing *ring);
 
 OmqGoStatus omq_go_recv_ring_create(OmqGoSocket *socket, size_t desc_capacity, size_t payload_capacity, OmqGoRecvRing **out);

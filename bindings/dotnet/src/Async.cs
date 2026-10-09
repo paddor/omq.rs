@@ -6,11 +6,13 @@ using System.Runtime.InteropServices;
 /// Cancellation-aware asynchronous socket operations.
 public static class SocketAsyncExtensions
 {
-    /// Sends one frame, waiting for writability when the socket HWM is full.
-    public static async Task SendAsync(this Socket socket, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    /// Sends one frame, waiting for queue space when the socket HWM is full.
+    public static Task SendAsync(this Socket socket, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
-        var poller = new Poller(); poller.Add(socket, PollEvents.Writable);
-        while (!socket.TrySend(data.Span)) { cancellationToken.ThrowIfCancellationRequested(); await poller.WaitAsync(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false); }
+        cancellationToken.ThrowIfCancellationRequested();
+        // Poll reports POLLOUT unconditionally, so a muted socket must park in
+        // the native async send rather than retry on writability.
+        return socket.TrySend(data.Span) ? Task.CompletedTask : socket.SendAsync(new Message([data]), cancellationToken);
     }
 
     /// Sends all frames in a message and completes when the native async send finishes.

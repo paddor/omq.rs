@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `SendAsync(ReadOnlyMemory<byte>)` on a full queue parks in the native async
+  send instead of spinning on a poller that always reports writable.
+
 ## [0.2.2] - 2026-10-07
 
 ### Changed

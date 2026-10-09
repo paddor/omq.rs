@@ -133,6 +133,7 @@
                   <replacefilter token="control, CONTROL_HEAD / Long.BYTES" value="control, CONTROL_HEAD"/>
                   <replacefilter token="control, CONTROL_TAIL / Long.BYTES" value="control, CONTROL_TAIL"/>
                   <replacefilter token="control, CONTROL_CLOSED / Long.BYTES" value="control, CONTROL_CLOSED"/>
+                  <replacefilter token="control, CONTROL_WORKER_PARKED / Long.BYTES" value="control, CONTROL_WORKER_PARKED"/>
                 </replace>
               </target>
             </configuration>

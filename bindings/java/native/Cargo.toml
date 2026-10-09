@@ -23,6 +23,7 @@ zstd = ["omq-proto/zstd", "omq-tokio/zstd"]
 
 [dependencies]
 bytes = "1.12.0"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 jni = "0.21"
 omq-proto = { path = "../../../omq-proto", default-features = false }
 omq-tokio = { path = "../../../omq-tokio", default-features = false }

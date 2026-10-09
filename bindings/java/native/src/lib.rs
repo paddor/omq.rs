@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use jni::objects::{
 use jni::sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jsize, jstring};
 use jni::{JNIEnv, JavaVM};
 use omq_proto::TrySendError;
-use omq_tokio::blocking::Socket as BlockingSocket;
+use omq_tokio::blocking::{BlockingRecvCancel, Socket as BlockingSocket};
 use omq_tokio::options::{KeepAlive, OnMute, ReconnectPolicy, WorkloadProfile};
 use omq_tokio::{
     Authenticator, Context, ContextConfig, CurveKeypair, CurvePublicKey, CurveSecretKey,
@@ -83,6 +83,12 @@ struct SendRingControl {
     _pad1: [u8; 120],
     closed: AtomicUsize,
     _pad2: [u8; 120],
+    /// Set by the worker before it parks on an empty ring.
+    worker_parked: AtomicUsize,
+    _pad3: [u8; 120],
+    /// Set by the producer while it waits for ring space.
+    producer_waiting: AtomicUsize,
+    _pad4: [u8; 120],
 }
 
 impl SendRingControl {
@@ -94,6 +100,10 @@ impl SendRingControl {
             _pad1: [0; 120],
             closed: AtomicUsize::new(0),
             _pad2: [0; 120],
+            worker_parked: AtomicUsize::new(0),
+            _pad3: [0; 120],
+            producer_waiting: AtomicUsize::new(0),
+            _pad4: [0; 120],
         }
     }
 }
@@ -150,6 +160,11 @@ struct JavaSendRingShared {
     last_error_code: AtomicI32,
     last_error_message: Mutex<CString>,
     reclaim: Mutex<SendRingReclaim>,
+    worker: OnceLock<thread::Thread>,
+    /// Interrupts a worker send blocked on a muted socket at close.
+    send_cancel: BlockingRecvCancel,
+    space: Mutex<()>,
+    space_changed: Condvar,
 }
 
 struct SendRingReclaim {
@@ -506,9 +521,14 @@ impl JavaSendRing {
             last_error_code: AtomicI32::new(RECV_RING_STATUS_OK),
             last_error_message: Mutex::new(empty_cstring()),
             reclaim: Mutex::new(SendRingReclaim { cursor: 0 }),
+            worker: OnceLock::new(),
+            send_cancel: BlockingRecvCancel::new(),
+            space: Mutex::new(()),
+            space_changed: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::spawn(move || send_ring_worker(worker_shared));
+        let _ = shared.worker.set(worker.thread().clone());
         Self {
             shared,
             worker: Some(worker),
@@ -549,6 +569,8 @@ impl JavaSendRing {
 
     fn close(&mut self) {
         self.shared.control.closed.store(1, Ordering::Release);
+        self.shared.send_cancel.cancel();
+        self.shared.wake();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -574,6 +596,58 @@ impl JavaSendRingShared {
         self.control.closed.load(Ordering::Acquire) != 0
     }
 
+    /// Wake a parked worker and a producer waiting for space.
+    fn wake(&self) {
+        if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+        let _space = self.space.lock();
+        self.space_changed.notify_all();
+    }
+
+    /// Park the worker until the producer publishes past `cursor` or closes.
+    fn park_worker(&self, cursor: usize) {
+        self.control.worker_parked.store(1, Ordering::SeqCst);
+        if self.control.tail.load(Ordering::SeqCst) == cursor && !self.closed() {
+            thread::park();
+        }
+        self.control.worker_parked.store(0, Ordering::Relaxed);
+    }
+
+    /// Park the producer until the head moves past `seen`, the ring closes,
+    /// or `timeout` elapses. Returns false on timeout.
+    fn wait_space(&self, seen: usize, timeout: Option<Duration>) -> bool {
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+        let Ok(mut space) = self.space.lock() else {
+            return true;
+        };
+        self.control.producer_waiting.store(1, Ordering::SeqCst);
+        let moved = loop {
+            if self.control.head.load(Ordering::SeqCst) != seen || self.closed() {
+                break true;
+            }
+            let wait = match deadline {
+                None => self.space_changed.wait(space).ok(),
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break false;
+                    }
+                    self.space_changed
+                        .wait_timeout(space, remaining)
+                        .ok()
+                        .map(|(space, _)| space)
+                }
+            };
+            let Some(next) = wait else {
+                break true;
+            };
+            space = next;
+        };
+        self.control.producer_waiting.store(0, Ordering::Relaxed);
+        moved
+    }
+
     fn message_at(self: &Arc<Self>, cursor: usize) -> Message {
         let desc = self.desc[cursor & self.desc_mask];
         let len = desc.payload_len as usize;
@@ -597,7 +671,12 @@ impl JavaSendRingShared {
                 break;
             }
             reclaim.cursor = reclaim.cursor.wrapping_add(1);
-            self.control.head.store(reclaim.cursor, Ordering::Release);
+            self.control.head.store(reclaim.cursor, Ordering::SeqCst);
+        }
+        drop(reclaim);
+        if self.control.producer_waiting.load(Ordering::SeqCst) != 0 {
+            let _space = self.space.lock();
+            self.space_changed.notify_all();
         }
     }
 }
@@ -636,28 +715,37 @@ fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
             if shared.closed() {
                 break;
             }
-            send_ring_backoff(&mut spins);
+            if spins < 512 {
+                send_ring_spin(&mut spins);
+            } else {
+                shared.park_worker(head);
+            }
             continue;
         }
+        spins = 0;
 
         match shared.socket.try_send_many(&mut batch, 256) {
-            Ok(sent) => {
-                if sent == 0 {
-                    if shared.closed() {
+            Ok(sent) => head = head.wrapping_add(sent),
+            Err(TrySendError::Full(returned)) => {
+                // Park on queue space; ring close cancels the wait.
+                match shared
+                    .socket
+                    .send_cancelable(returned.clone(), &shared.send_cancel)
+                {
+                    Ok(true) => head = head.wrapping_add(1),
+                    Ok(false) => {
+                        batch.push_front(returned);
                         break;
                     }
-                    send_ring_backoff(&mut spins);
-                    continue;
+                    Err(Error::Closed) => {
+                        shared.set_error(RECV_RING_STATUS_CLOSED, "socket closed");
+                        break;
+                    }
+                    Err(error) => {
+                        shared.set_error(recv_ring_status(&error), error.to_string());
+                        break;
+                    }
                 }
-                head = head.wrapping_add(sent);
-                spins = 0;
-            }
-            Err(TrySendError::Full(returned)) => {
-                batch.push_front(returned);
-                if shared.closed() {
-                    break;
-                }
-                send_ring_backoff(&mut spins);
             }
             Err(TrySendError::Closed) => {
                 shared.set_error(RECV_RING_STATUS_CLOSED, "socket closed");
@@ -671,18 +759,16 @@ fn send_ring_worker(shared: Arc<JavaSendRingShared>) {
     }
 
     shared.control.closed.store(1, Ordering::Release);
+    shared.wake();
 }
 
-fn send_ring_backoff(spins: &mut u32) {
+fn send_ring_spin(spins: &mut u32) {
     if *spins < 256 {
         std::hint::spin_loop();
-        *spins += 1;
-    } else if *spins < 512 {
-        thread::yield_now();
-        *spins += 1;
     } else {
-        thread::sleep(Duration::from_micros(50));
+        thread::yield_now();
     }
+    *spins += 1;
 }
 
 thread_local! {
@@ -962,6 +1048,27 @@ pub extern "C" fn omq_java_send_ring_close(handle: i64) {
     let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
         drop(Box::from_raw(handle as *mut JavaSendRing));
     }));
+}
+
+/// Wake the ring worker and any producer waiting for space.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_wake(handle: i64) {
+    if let Ok(ring) = send_ring_from_handle(handle) {
+        ring.shared.wake();
+    }
+}
+
+/// Park until the ring head moves past `seen_head`, the ring closes, or
+/// `timeout_millis` elapses (negative waits forever). Returns 1 on timeout.
+#[unsafe(no_mangle)]
+pub extern "C" fn omq_java_send_ring_wait(handle: i64, seen_head: i64, timeout_millis: i64) -> i32 {
+    let Ok(ring) = send_ring_from_handle(handle) else {
+        return 0;
+    };
+    let timeout = u64::try_from(timeout_millis)
+        .ok()
+        .map(Duration::from_millis);
+    i32::from(!ring.shared.wait_space(seen_head as usize, timeout))
 }
 
 #[unsafe(no_mangle)]
@@ -1826,20 +1933,11 @@ fn java_try_send(
 }
 
 fn java_send(socket: &BlockingSocket, message: Message) -> Result<(), Error> {
-    match socket.socket_type() {
-        SocketType::Push | SocketType::Scatter => {
-            let mut message = message;
-            loop {
-                match java_try_send(socket, message) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Full(returned)) => message = returned,
-                    Err(TrySendError::Closed) => return Err(Error::Closed),
-                    Err(TrySendError::Error(error)) => return Err(error),
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-        _ => socket.send(message),
+    match java_try_send(socket, message) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(returned)) => socket.send(returned),
+        Err(TrySendError::Closed) => Err(Error::Closed),
+        Err(TrySendError::Error(error)) => Err(error),
     }
 }
 
@@ -1854,25 +1952,15 @@ fn send_with_timeout(
     }
 
     let timeout = duration_from_millis(timeout_millis)?;
-    let deadline = Instant::now().checked_add(timeout);
-    let mut message = message;
-    loop {
-        match java_try_send(socket, message) {
-            Ok(()) => return Ok(true),
-            Err(TrySendError::Full(returned)) => message = returned,
-            Err(TrySendError::Closed) => return Err(Error::Closed),
-            Err(TrySendError::Error(error)) => return Err(error),
-        }
-
-        let Some(deadline) = deadline else {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    match java_try_send(socket, message) {
+        Ok(()) => Ok(true),
+        Err(TrySendError::Full(returned)) => match socket.send_timeout(returned, timeout) {
+            Ok(()) => Ok(true),
+            Err(Error::Timeout) => Ok(false),
+            Err(error) => Err(error),
+        },
+        Err(TrySendError::Closed) => Err(Error::Closed),
+        Err(TrySendError::Error(error)) => Err(error),
     }
 }
 
@@ -2188,26 +2276,29 @@ async fn receive_any_loop(
     entries: Vec<(BlockingSocket, GlobalRef)>,
     timeout: Option<Duration>,
 ) -> Result<Option<(GlobalRef, Message)>, Error> {
-    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
-    let mut spins = 0u32;
-
-    loop {
-        if let Some(event) = try_receive_any(&entries)? {
-            return Ok(Some(event));
-        }
-
-        if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(None);
-            }
-            tokio::time::sleep(remaining.min(Duration::from_micros(50))).await;
-        } else if spins < 256 {
-            spins += 1;
-            tokio::task::yield_now().await;
-        } else {
-            tokio::time::sleep(Duration::from_micros(50)).await;
-        }
+    if let Some(event) = try_receive_any(&entries)? {
+        return Ok(Some(event));
+    }
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Ok(None);
+    }
+    // Async receives are cancel-safe: the losers consume nothing.
+    let receives = entries.iter().map(|(socket, java_socket)| {
+        let socket = socket.clone_shared().into_async();
+        Box::pin(async move {
+            socket
+                .recv()
+                .await
+                .map(|message| (java_socket.clone(), message))
+        })
+    });
+    let any = futures::future::select_all(receives);
+    match timeout {
+        None => any.await.0.map(Some),
+        Some(timeout) => match tokio::time::timeout(timeout, any).await {
+            Ok((result, _, _)) => result.map(Some),
+            Err(_) => Ok(None),
+        },
     }
 }
 

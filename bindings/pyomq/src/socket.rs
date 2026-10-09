@@ -7,7 +7,7 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use omq_proto::TrySendError;
@@ -35,14 +35,8 @@ pub(crate) struct SendBuffer {
 use std::sync::atomic::AtomicU32;
 
 static FORK_GEN: AtomicU32 = AtomicU32::new(0);
-static PARENT_FORK_GEN: AtomicU32 = AtomicU32::new(0);
-static FORKED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 static ATFORK_REGISTERED: std::sync::Once = std::sync::Once::new();
-
-fn deadline_after(timeout: Duration) -> Option<Instant> {
-    Instant::now().checked_add(timeout)
-}
 
 pub(crate) fn split_dish_message(msg: omq_tokio::Message) -> PyResult<(String, Bytes)> {
     let mut parts = msg.iter();
@@ -64,21 +58,13 @@ pub(crate) fn split_dish_message(msg: omq_tokio::Message) -> PyResult<(String, B
 
 #[cfg(unix)]
 extern "C" fn atfork_child() {
-    FORKED.store(true, Ordering::Relaxed);
     FORK_GEN.fetch_add(1, Ordering::Relaxed);
-}
-
-#[cfg(unix)]
-extern "C" fn atfork_parent() {
-    // The parent's runtime remains valid, but sockets materialized before
-    // fork need one safe receive to resynchronize with child-side peers.
-    PARENT_FORK_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(unix)]
 pub(crate) fn register_atfork() {
     ATFORK_REGISTERED.call_once(|| unsafe {
-        libc::pthread_atfork(None, Some(atfork_parent), Some(atfork_child));
+        libc::pthread_atfork(None, None, Some(atfork_child));
     });
 }
 
@@ -120,11 +106,6 @@ pub(crate) struct SocketInner {
     pub overlay: Mutex<options::Overlay>,
     pub subscriptions: Mutex<Vec<Bytes>>,
     pub endpoints: Mutex<Vec<(omq_tokio::Endpoint, bool)>>,
-    has_tcp_endpoint: AtomicBool,
-    send_fork_gen: AtomicU32,
-    parent_send_fork_gen: AtomicU32,
-    parent_fork_gen: AtomicU32,
-    post_fork: AtomicBool,
     pub sndbuf: Mutex<SendBuffer>,
     pub rxbuf: Mutex<Vec<Bytes>>,
     pub rxmsgs: Mutex<Vec<omq_tokio::Message>>,
@@ -144,11 +125,6 @@ impl SocketInner {
             overlay: Mutex::new(overlay),
             subscriptions: Mutex::new(Vec::new()),
             endpoints: Mutex::new(Vec::new()),
-            has_tcp_endpoint: AtomicBool::new(false),
-            send_fork_gen: AtomicU32::new(FORK_GEN.load(Ordering::Relaxed)),
-            parent_send_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
-            parent_fork_gen: AtomicU32::new(PARENT_FORK_GEN.load(Ordering::Relaxed)),
-            post_fork: AtomicBool::new(FORKED.load(Ordering::Relaxed)),
             sndbuf: Mutex::new(SendBuffer::default()),
             rxbuf: Mutex::new(Vec::new()),
             rxmsgs: Mutex::new(Vec::new()),
@@ -774,9 +750,6 @@ impl Socket {
             Ok(bound.to_string())
         })?;
         if let Ok(endpoint) = SocketInner::parse_endpoint(&bound) {
-            if endpoint.to_string().starts_with("tcp://") {
-                self.inner.has_tcp_endpoint.store(true, Ordering::Release);
-            }
             self.inner.endpoints.lock().unwrap().push((endpoint, true));
         }
         Ok(bound)
@@ -793,15 +766,11 @@ impl Socket {
             }
             Ok(())
         })?;
-        let is_tcp = recorded_ep.to_string().starts_with("tcp://");
         self.inner
             .endpoints
             .lock()
             .unwrap()
             .push((recorded_ep, false));
-        if is_tcp {
-            self.inner.has_tcp_endpoint.store(true, Ordering::Release);
-        }
         Ok(())
     }
 
@@ -1253,32 +1222,6 @@ impl Socket {
         let no_block = flags & crate::constants::NOBLOCK != 0;
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().sndtimeo;
-        let fork_gen = FORK_GEN.load(Ordering::Acquire);
-        let child_fork = self.inner.send_fork_gen.load(Ordering::Acquire) != fork_gen;
-        if child_fork {
-            self.inner.send_fork_gen.store(fork_gen, Ordering::Release);
-        }
-        let parent_fork_gen = PARENT_FORK_GEN.load(Ordering::Acquire);
-        let parent_fork =
-            self.inner.parent_send_fork_gen.load(Ordering::Acquire) != parent_fork_gen;
-        if parent_fork {
-            self.inner
-                .parent_send_fork_gen
-                .store(parent_fork_gen, Ordering::Release);
-        }
-        let post_fork =
-            self.inner.post_fork.swap(false, Ordering::AcqRel) || child_fork || parent_fork;
-        if post_fork && !no_block {
-            let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
-            let wait = timeout.unwrap_or(Duration::from_secs(1));
-            py.detach(|| {
-                if tcp {
-                    let _ = sock.wait_connected(1, wait);
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            });
-        }
-
         match sock.try_send(msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Closed) => Err(map_err(PError::Closed)),
@@ -1286,22 +1229,7 @@ impl Socket {
             Err(TrySendError::Full(_)) if no_block => Err(timeout_err()),
             Err(TrySendError::Full(msg)) => py.detach(|| match timeout {
                 None => sock.send(msg).map_err(map_err),
-                Some(timeout) => {
-                    let deadline = deadline_after(timeout);
-                    let mut msg = msg;
-                    loop {
-                        match sock.try_send(msg) {
-                            Ok(()) => return Ok(()),
-                            Err(TrySendError::Full(returned)) => msg = returned,
-                            Err(TrySendError::Closed) => return Err(map_err(PError::Closed)),
-                            Err(TrySendError::Error(e)) => return Err(map_err(e)),
-                        }
-                        if deadline.is_some_and(|d| Instant::now() >= d) {
-                            return Err(timeout_err());
-                        }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }
+                Some(timeout) => sock.send_timeout(msg, timeout).map_err(map_err),
             }),
         }
     }
@@ -1326,63 +1254,20 @@ impl Socket {
         }
         let sock = self.inner.ensure_blocking_socket()?;
         let timeout = self.inner.overlay.lock().unwrap().rcvtimeo;
-        let parent_fork = self.inner.parent_fork_gen.load(Ordering::Acquire)
-            != PARENT_FORK_GEN.load(Ordering::Acquire);
-        if parent_fork {
-            self.inner
-                .parent_fork_gen
-                .store(PARENT_FORK_GEN.load(Ordering::Acquire), Ordering::Release);
-        }
-        let post_fork_recv = self.inner.post_fork.load(Ordering::Acquire)
-            || FORKED.load(Ordering::Acquire)
-            || parent_fork;
-        let tcp = self.inner.has_tcp_endpoint.load(Ordering::Acquire);
-        if matches!(self.inner.socket_type, omq_tokio::SocketType::Pull) && post_fork_recv && tcp {
-            let wait = timeout.unwrap_or(Duration::from_secs(1));
-            let _ = sock.wait_connected(1, wait);
-            let _ = sock.connections();
-        }
         // Probe the backend pipe while holding the GIL. This is safe for
         // sockets with any mix of inproc, ipc, and tcp endpoints.
-        if !post_fork_recv {
-            match sock.try_recv() {
-                Ok(msg) => return Ok(msg),
-                Err(omq_proto::error::Error::Closed) => {
-                    return Err(map_err(omq_proto::error::Error::Closed));
-                }
-                Err(_) => {}
+        match sock.try_recv() {
+            Ok(msg) => return Ok(msg),
+            Err(omq_proto::error::Error::Closed) => {
+                return Err(map_err(omq_proto::error::Error::Closed));
             }
+            Err(_) => {}
         }
         py.detach(|| match timeout {
-            None if !post_fork_recv => sock.recv().map_err(map_err),
-            None => loop {
-                match sock.try_recv() {
-                    Ok(msg) => {
-                        self.inner.post_fork.store(false, Ordering::Release);
-                        break Ok(msg);
-                    }
-                    Err(omq_proto::error::Error::Closed) => {
-                        break Err(map_err(omq_proto::error::Error::Closed));
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(1)),
-                }
-            },
-            Some(timeout) => {
-                let deadline = deadline_after(timeout);
-                loop {
-                    match sock.try_recv() {
-                        Ok(msg) => return Ok(msg),
-                        Err(omq_proto::error::Error::Closed) => {
-                            return Err(map_err(omq_proto::error::Error::Closed));
-                        }
-                        Err(_) if deadline.is_none_or(|d| Instant::now() < d) => {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(_) => return Err(timeout_err()),
-                    }
-                }
-            }
+            None => sock.recv(),
+            Some(timeout) => sock.recv_timeout(timeout),
         })
+        .map_err(map_err)
     }
 
     fn try_recv_message(&self) -> PyResult<omq_tokio::Message> {

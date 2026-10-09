@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Timed sends, monitor receives, and `wait_any` park until woken instead of
+  polling every 1-10 ms.
+
 ## [0.2.2] - 2026-10-07
 
 - Bundle `omq-tokio` 0.25.0 and `omq-proto` 0.29.0 with bounded receive

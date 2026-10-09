@@ -143,7 +143,7 @@ fn java_peer(directory: &Path) -> PathBuf {
 }
 
 fn measure(args: &AeronArgs, directory: &Path, kind: &str, size: u64) -> Value {
-    let mut peers = Peers::new(Duration::from_secs(300));
+    let mut peers = Peers::new(Duration::from_mins(5));
     peers.spawn(
         Side::Receive,
         &mut command(args, directory, kind, Side::Receive, size),
@@ -153,7 +153,7 @@ fn measure(args: &AeronArgs, directory: &Path, kind: &str, size: u64) -> Value {
         Side::Send,
         &mut command(args, directory, kind, Side::Send, size),
     );
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     let mut closed = 0;
     let mut ready = [false; 2];
     let mut result = None;

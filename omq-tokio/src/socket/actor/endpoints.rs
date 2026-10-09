@@ -81,10 +81,7 @@ impl SocketDriver {
                 .any(|peer| peer.is_client && &peer.endpoint == endpoint)
     }
 
-    #[cfg_attr(
-        not(feature = "dart"),
-        allow(clippy::unused_async, clippy::unused_async_trait_impl)
-    )]
+    #[cfg_attr(not(feature = "dart"), allow(clippy::unused_async))]
     pub(super) async fn unbind(&mut self, endpoint: &Endpoint) -> Result<()> {
         #[cfg(feature = "dart")]
         if self.stop_dart_endpoints(Some((endpoint, false))).await {

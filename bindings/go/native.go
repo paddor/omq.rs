@@ -290,6 +290,43 @@ func socketMessageSendNativeTimeout(socket *nativeSocket, msg Message, timeoutMi
 	return statusErr(C.omq_go_socket_send((*C.OmqGoSocket)(socket), parts, count, C.uint32_t(msg.routingID), C.int64_t(timeoutMillis)))
 }
 
+func socketMessageSendCancelableNative(socket *nativeSocket, cancel *nativeCancel, msg Message) error {
+	parts, count, free := messageToC(msg)
+	defer free()
+	return statusErr(C.omq_go_socket_send_cancelable(
+		(*C.OmqGoSocket)(socket),
+		(*C.OmqGoCancel)(cancel),
+		parts,
+		count,
+		C.uint32_t(msg.routingID),
+	))
+}
+
+// sendCancelableNative parks on a muted socket until the message is accepted
+// or ctx ends.
+func sendCancelableNative(ctx context.Context, socket *nativeSocket, msg Message) error {
+	cancel := cancelNewNative()
+	if cancel == nil {
+		return &Error{Err: "send cancellation allocation failed"}
+	}
+	defer cancelFreeNative(cancel)
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		cancelNative(cancel)
+		close(cancelDone)
+	})
+	err := socketMessageSendCancelableNative(socket, cancel, msg)
+	if !stopCancel() {
+		<-cancelDone
+	}
+	if errors.Is(err, ErrCanceled) {
+		if ctxErr := errFromContext(ctx); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	return err
+}
+
 func socketMessagesTrySendNative(socket *nativeSocket, messages []Message) (int, error) {
 	if len(messages) == 0 {
 		return 0, nil
@@ -497,6 +534,21 @@ func sendRingErrorNative(ring *nativeSendRing) error {
 
 func sendRingCloseNative(ring *nativeSendRing) {
 	C.omq_go_send_ring_close((*C.OmqGoSendRing)(ring))
+}
+
+func sendRingWakeNative(ring *nativeSendRing) {
+	C.omq_go_send_ring_wake((*C.OmqGoSendRing)(ring))
+}
+
+// sendRingWaitNative parks until the ring head or wake epoch moves, the ring
+// closes, or the timeout elapses. Callers recheck their condition.
+func sendRingWaitNative(ring *nativeSendRing, seenHead, seenEpoch uint64, timeoutMillis int64) {
+	C.omq_go_send_ring_wait(
+		(*C.OmqGoSendRing)(ring),
+		C.uint64_t(seenHead),
+		C.uint64_t(seenEpoch),
+		C.int64_t(timeoutMillis),
+	)
 }
 
 func recvRingCreateNative(socket *nativeSocket, descCapacity, payloadCapacity int) (*nativeRecvRing, recvRingMemory, error) {
@@ -1040,6 +1092,8 @@ func retryDelay(iteration int) time.Duration {
 	return time.Millisecond
 }
 
+// waitRetry backs off with timers. Only waits without a native wakeup use it;
+// see timerWaitAllowlist.
 func waitRetry(ctx context.Context, iteration int) error {
 	if iteration < 8 {
 		return nil

@@ -20,6 +20,7 @@ ws = ["omq-proto/ws", "omq-tokio/ws"]
 
 [dependencies]
 bytes = "1.12.0"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 omq-proto = { path = "../../../omq-proto", default-features = false }
 omq-tokio = { path = "../../../omq-tokio", default-features = false }
 tokio = { version = "1.52.0", features = ["time"] }

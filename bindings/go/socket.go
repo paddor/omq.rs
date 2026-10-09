@@ -52,6 +52,7 @@ const (
 	socketOpRecvInto
 	socketOpRecvWait
 	socketOpRecvIntoWait
+	socketOpSendWait
 	socketOpSubscribe
 	socketOpUnsubscribe
 	socketOpJoin
@@ -188,6 +189,8 @@ func runSocketOp(state *socketState, handle *nativeSocket, op socketOp) socketRe
 		return runCancelableRecvOp(state, handle, op, false)
 	case socketOpRecvIntoWait:
 		return runCancelableRecvOp(state, handle, op, true)
+	case socketOpSendWait:
+		return runCancelableSendOp(state, handle, op)
 	case socketOpSubscribe:
 		return socketResult{err: socketSubscribeNative(handle, op.data)}
 	case socketOpUnsubscribe:
@@ -282,6 +285,39 @@ func runCancelableRecvOp(
 	return result
 }
 
+func runCancelableSendOp(state *socketState, handle *nativeSocket, op socketOp) socketResult {
+	cancel := cancelNewNative()
+	if cancel == nil {
+		return socketResult{err: &Error{Err: "send cancellation allocation failed"}}
+	}
+	state.setActiveCancel(cancel)
+	defer func() {
+		state.clearActiveCancel(cancel)
+		cancelFreeNative(cancel)
+	}()
+
+	if state.closed.Load() {
+		cancelNative(cancel)
+	}
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(op.ctx, func() {
+		cancelNative(cancel)
+		close(cancelDone)
+	})
+	err := socketMessageSendCancelableNative(handle, cancel, op.msg)
+	if !stopCancel() {
+		<-cancelDone
+	}
+	if errors.Is(err, ErrCanceled) {
+		if ctxErr := socketOpContextErr(op); ctxErr != nil {
+			err = ctxErr
+		} else if state.closed.Load() {
+			err = ErrClosed
+		}
+	}
+	return socketResult{err: err}
+}
+
 func (s *Socket) call(ctx context.Context, allowClosed bool, fn func(*nativeSocket) (any, error)) (value any, err error) {
 	state := s.stateOrNil()
 	if state == nil {
@@ -338,7 +374,8 @@ func (s *socketState) do(ctx context.Context, allowClosed bool, op socketOp) (re
 		return socketResult{}, ErrClosed
 	case <-ctx.Done():
 		if call.started.Load() &&
-			(op.kind == socketOpRecvWait || op.kind == socketOpRecvIntoWait) {
+			(op.kind == socketOpRecvWait || op.kind == socketOpRecvIntoWait ||
+				op.kind == socketOpSendWait) {
 			select {
 			case result := <-call.resp:
 				return result, result.err
@@ -480,21 +517,16 @@ func (s *Socket) Send(ctx context.Context, msg Message) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for i := 0; ; i++ {
-		if err := errFromContext(ctx); err != nil {
-			return err
-		}
-		err := s.trySend(ctx, msg)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, ErrAgain) {
-			return err
-		}
-		if err := waitRetry(ctx, i); err != nil {
-			return err
-		}
+	if err := errFromContext(ctx); err != nil {
+		return err
 	}
+	err := s.trySend(ctx, msg)
+	if !errors.Is(err, ErrAgain) {
+		return err
+	}
+	_, err = s.doData(ctx, socketOp{kind: socketOpSendWait, msg: msg})
+	keepAlive(s)
+	return err
 }
 
 // TrySend sends a message without waiting for queue capacity.
@@ -1031,17 +1063,36 @@ func (s *BoundSocket) Send(ctx context.Context, msg Message) error {
 		if err := errFromContext(ctx); err != nil {
 			return err
 		}
-		err := s.TrySend(msg)
+		if err := s.ensureOpen(); err != nil {
+			return err
+		}
+		handled, err := s.trySendRing(msg)
+		if !handled {
+			err = socketMessageSendNative(s.handle, msg)
+			if errors.Is(err, ErrAgain) {
+				return sendCancelableNative(ctx, s.handle, msg)
+			}
+			return err
+		}
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, ErrAgain) {
 			return err
 		}
-		if err := waitRetry(ctx, i); err != nil {
+		if err := s.waitSendRing(ctx, i); err != nil {
 			return err
 		}
 	}
+}
+
+// waitSendRing spins briefly, then parks until the send ring has space.
+func (s *BoundSocket) waitSendRing(ctx context.Context, iteration int) error {
+	if iteration < sendRingSpinLimit {
+		runtime.Gosched()
+		return errFromContext(ctx)
+	}
+	return s.sendRing.waitSpace(ctx, s.sendRing.cachedHead)
 }
 
 // TrySend sends without waiting from the owner goroutine.
@@ -1062,21 +1113,6 @@ func (s *BoundSocket) SendBlocking(msg Message) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	for i := 0; ; i++ {
-		handled, err := s.trySendRing(msg)
-		if !handled {
-			break
-		}
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, ErrAgain) {
-			return err
-		}
-		if err := waitRetry(ctx, i); err != nil {
-			return err
-		}
-	}
 	return s.Send(ctx, msg)
 }
 
@@ -1085,18 +1121,46 @@ func (s *BoundSocket) RecvInto(ctx context.Context, dst []byte) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for i := 0; ; i++ {
-		if err := errFromContext(ctx); err != nil {
-			return 0, err
+	if err := errFromContext(ctx); err != nil {
+		return 0, err
+	}
+	n, err := s.TryRecvInto(dst)
+	if !errors.Is(err, ErrAgain) {
+		return n, err
+	}
+	ring, err := s.ensureRecvRing()
+	if err != nil {
+		return 0, err
+	}
+	// The owner goroutine is locked to its OS thread, so the cancel handle
+	// registered here wakes the native wait below.
+	cancel := cancelNewNative()
+	if cancel == nil {
+		return 0, &Error{Err: "receive cancellation allocation failed"}
+	}
+	defer cancelFreeNative(cancel)
+	cancelRegisterCurrentNative(cancel)
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		cancelNative(cancel)
+		close(cancelDone)
+	})
+	defer func() {
+		if !stopCancel() {
+			<-cancelDone
 		}
-		n, err := s.TryRecvInto(dst)
+	}()
+	for {
+		n, err := ring.recvIntoCancelable(dst, cancel)
 		if err == nil {
 			return n, nil
 		}
-		if !errors.Is(err, ErrAgain) {
-			return 0, err
+		if errors.Is(err, ErrCanceled) {
+			if ctxErr := errFromContext(ctx); ctxErr != nil {
+				return 0, ctxErr
+			}
 		}
-		if err := waitRetry(ctx, i); err != nil {
+		if !errors.Is(err, ErrAgain) {
 			return 0, err
 		}
 	}

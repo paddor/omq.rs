@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `Send`, `SendTimeout`, `BoundSocket.Send`, `SendBlocking`, `RecvInto`, and
+  `ReceiveAny` park until woken or canceled instead of retrying on 50 us to
+  1 ms timers. An idle send ring no longer wakes its worker thread 20,000
+  times per second.
+
 ## [0.1.4] - 2026-10-07
 
 ### Changed

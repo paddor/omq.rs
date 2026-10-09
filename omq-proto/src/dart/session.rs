@@ -3,11 +3,13 @@
 
 use std::time::Duration;
 
+use crate::message::MessageInner;
 use crate::{DartCongestion, Message};
 
 use super::{DATA_HEADER, MAX_BODY, MAX_DATAGRAM, Packet, Status, encode_packet};
 #[path = "fragment.rs"]
 mod fragment;
+pub use fragment::FragmentBuffer;
 use fragment::{Assembly, FragmentPiece, FragmentReceive, FragmentSend};
 
 const STATUS_INTERVAL: Duration = Duration::from_micros(50);
@@ -77,18 +79,6 @@ impl Prepared<'_> {
             None => super::encode_sequenced_data(remote, sequence, self.body, self.group, output),
         }
     }
-    fn payload_len(&self) -> usize {
-        self.body.len() + self.group.map_or(0, |group| 1 + group.len())
-    }
-
-    fn write_payload(&self, output: &mut [u8]) {
-        let offset = self.group.map_or(0, |group| {
-            output[0] = group.len() as u8;
-            output[1..=group.len()].copy_from_slice(group);
-            1 + group.len()
-        });
-        output[offset..offset + self.body.len()].copy_from_slice(self.body);
-    }
 }
 
 /// A transmission prepared into caller storage. Commit only the prefix the
@@ -115,15 +105,16 @@ pub enum Admission {
 /// One ordered message sequence per peer and direction. All tables allocate
 /// at construction. Only this owner mutates sequencing or congestion state.
 #[derive(Debug)]
-pub struct Session {
+pub struct Session<B: FragmentBuffer = Vec<u8>> {
     local: u64,
     remote: u64,
     config: SessionConfig,
+    packed_mtu: usize,
     tx: Box<[Option<Sent>]>,
     rx: Box<[Option<Message>]>,
-    fragments: Box<[Option<FragmentReceive>]>,
+    fragments: Box<[Option<FragmentReceive<B>>]>,
     sending: Option<FragmentSend>,
-    assembly: Option<Assembly>,
+    assembly: Option<Assembly<B>>,
     receive_failed: bool,
     send_base: u64,
     send_next: u64,
@@ -142,6 +133,7 @@ pub struct Session {
     status_pending: bool,
     status_at: Duration,
     status_messages: usize,
+    status_threshold: usize,
     gap_high: u64,
     nak_at: Duration,
     probe_at: Duration,
@@ -155,21 +147,63 @@ pub struct Session {
     recovery_end: u64,
     rtt: Duration,
     rttvar: Duration,
+    pacing_rate: Option<u64>,
+    pacing_bytes: usize,
+    pacing_delay: Duration,
     pace_at: Duration,
     repairs: usize,
     stats: SessionStats,
 }
 
 impl Session {
+    /// Allocate a session using owned vectors for fragment assembly.
+    ///
+    /// # Panics
+    /// Panics for zero session IDs, a window outside the powers of two from
+    /// 1 through 65,536, or a zero `max_send_rate`.
     pub fn new(local: u64, remote: u64, config: SessionConfig) -> Self {
+        Self::with_receive_buffers(local, remote, config)
+    }
+
+    /// Take the next complete message, using owned storage for assembled bodies.
+    /// The caller returns its final receive credit through [`Self::release_receive`].
+    pub fn take_received(&mut self) -> Option<Message> {
+        self.take_received_with(crate::message::Payload::from)
+    }
+
+    /// Reserve an owned allocation for FIRST before acknowledging it.
+    pub fn commit_fragment(
+        &mut self,
+        sequence: u64,
+        length: Option<u64>,
+        message: Message,
+        ecn: Ecn,
+        now: Duration,
+    ) -> bool {
+        self.commit_fragment_with(sequence, length, message, ecn, now, |length| {
+            let mut body = Vec::new();
+            body.try_reserve_exact(length).ok()?;
+            Some(body)
+        })
+    }
+}
+
+impl<B: FragmentBuffer> Session<B> {
+    /// Use owner-supplied assembly storage, reserved by [`Self::commit_fragment_with`].
+    ///
+    /// # Panics
+    /// Panics for zero session IDs, a window outside the powers of two from
+    /// 1 through 65,536, or a zero `max_send_rate`.
+    pub fn with_receive_buffers(local: u64, remote: u64, config: SessionConfig) -> Self {
         assert!(local != 0 && remote != 0);
         assert!(config.window.is_power_of_two() && config.window <= 65_536);
         assert_ne!(config.max_send_rate, Some(0));
         let window = config.window;
-        Self {
+        let mut session = Self {
             local,
             remote,
             config,
+            packed_mtu: super::MAX_PACKED_DATAGRAM,
             tx: (0..window).map(|_| None).collect(),
             rx: (0..window).map(|_| None).collect(),
             fragments: (0..window).map(|_| None).collect(),
@@ -193,6 +227,7 @@ impl Session {
             status_pending: true,
             status_at: Duration::ZERO,
             status_messages: 0,
+            status_threshold: (window / 4).clamp(1, 128),
             gap_high: 0,
             nak_at: Duration::ZERO,
             probe_at: PROBE_INTERVAL,
@@ -206,10 +241,15 @@ impl Session {
             recovery_end: 0,
             rtt: INITIAL_RTT,
             rttvar: INITIAL_RTT / 2,
+            pacing_rate: None,
+            pacing_bytes: 0,
+            pacing_delay: Duration::ZERO,
             pace_at: Duration::ZERO,
             repairs: 0,
             stats: SessionStats::default(),
-        }
+        };
+        session.update_pacing_rate();
+        session
     }
 
     pub const fn local_session(&self) -> u64 {
@@ -259,6 +299,11 @@ impl Session {
         self.flight
     }
 
+    /// Retry locally oversized packets using the baseline datagram bound.
+    pub fn reduce_packing_mtu(&mut self) {
+        self.packed_mtu = MAX_DATAGRAM;
+    }
+
     /// Retire this incarnation before any wire position or serial can wrap.
     pub fn is_exhausted(&self) -> bool {
         let limit = u64::MAX - self.config.window as u64;
@@ -267,6 +312,7 @@ impl Session {
 
     /// Retain one immutable body, optionally prefixed with a RADIO group.
     /// Return ownership for an invalid shape or exhausted local capacity.
+    #[inline]
     pub fn submit(&mut self, message: Message) -> Result<u64, Message> {
         let grouped = message.len() == 2;
         let valid = if grouped {
@@ -289,14 +335,15 @@ impl Session {
         } else {
             0
         };
-        if body.len() > MAX_BODY || DATA_HEADER + metadata + body.len() > MAX_DATAGRAM {
+        let bytes = DATA_HEADER + metadata + body.len();
+        if body.len() > MAX_BODY || bytes > MAX_DATAGRAM {
             return self.submit_fragmented(message);
         }
         let sequence = self.send_next;
         let index = self.index(sequence);
         self.tx[index] = Some(Sent {
             fragment: None,
-            bytes: message.byte_len() + DATA_HEADER + usize::from(grouped),
+            bytes,
             message,
             first: None,
             last: Duration::ZERO,
@@ -336,6 +383,56 @@ impl Session {
             self.stats.reordered += 1;
         }
         self.rx[index] = Some(message);
+        self.record_receive(sequence, ecn, now);
+        // In-order receipt without a retained successor needs no prefix scan.
+        if sequence == self.receive_next && self.rx[self.index(sequence + 1)].is_none() {
+            self.receive_next += 1;
+        } else {
+            self.advance_receipt();
+        }
+    }
+
+    /// Deliver an independent inline value without retaining a receive slot.
+    /// Gaps, shared storage, and application rejection use ordinary retention.
+    /// The callback runs only for the next deliverable inline message.
+    #[inline]
+    pub fn commit_receive_with_delivery(
+        &mut self,
+        sequence: u64,
+        message: Message,
+        ecn: Ecn,
+        now: Duration,
+        deliver: impl FnOnce(Message) -> Result<(), Message>,
+    ) -> bool {
+        if sequence != self.receive_next
+            || sequence != self.deliver_next
+            || self.assembly.is_some()
+            || self.fragments[self.index(sequence)].is_some()
+            || match &message.inner {
+                MessageInner::Empty | MessageInner::Inline { .. } => false,
+                _ => message.retained_size() != Some(std::mem::size_of::<Message>()),
+            }
+        {
+            self.commit_receive(sequence, message, ecn, now);
+            return false;
+        }
+        assert!(sequence < self.receive_credit);
+        assert!(self.rx[self.index(sequence)].is_none());
+        let Err(message) = deliver(message) else {
+            self.record_receive(sequence, ecn, now);
+            self.receive_next += 1;
+            self.deliver_next += 1;
+            if self.rx[self.index(self.receive_next)].is_some() {
+                self.advance_receipt();
+            }
+            self.release_receive(1);
+            return true;
+        };
+        self.commit_receive(sequence, message, ecn, now);
+        false
+    }
+
+    fn record_receive(&mut self, sequence: u64, ecn: Ecn, now: Duration) {
         self.received += 1;
         self.ecn_counts[match ecn {
             Ecn::Ect0 => 0,
@@ -345,9 +442,8 @@ impl Session {
             Ecn::Unavailable => 4,
         }] += 1;
         self.gap_high = self.gap_high.max(sequence.saturating_add(1));
-        self.advance_receipt();
         self.status_messages += 1;
-        if self.status_messages >= 32 {
+        if self.status_messages >= self.status_threshold {
             self.status_pending = true;
         }
         self.status_at = self.status_at.min(now + STATUS_INTERVAL);
@@ -394,15 +490,11 @@ impl Session {
             .flatten()
     }
 
-    pub fn take_received(&mut self) -> Option<Message> {
-        self.take_received_with(crate::message::Payload::from)
-    }
-
     /// Supply the owner of a completed large body. Its final release must
     /// return one receive credit; intermediate fragments release immediately.
     pub fn take_received_with(
         &mut self,
-        finish: impl FnOnce(Vec<u8>) -> crate::message::Payload,
+        finish: impl FnOnce(B) -> crate::message::Payload,
     ) -> Option<Message> {
         if self.assembly.is_some() || self.fragments[self.index(self.deliver_next)].is_some() {
             return self.take_fragmented(finish);
@@ -549,11 +641,11 @@ impl Session {
     fn retire_acknowledged(&mut self) -> bool {
         let mut acknowledged_bytes = 0;
         let mut sample_at = None;
-        let mut budget = crate::flow::DrainBudget::new(64, 64_000);
+        let mut budget = crate::flow::DrainBudget::new(128, 64_000);
         while self.send_base < self.peer_ack && !budget.exhausted() {
             let index = self.index(self.send_base);
             let sent = self.tx[index]
-                .take()
+                .as_ref()
                 .expect("retained acknowledged message");
             if sent.in_flight {
                 self.flight -= sent.bytes;
@@ -568,6 +660,7 @@ impl Session {
             }
             self.send_base += 1;
             self.stats.acknowledged += u64::from(sent.fragment.is_none_or(|part| part.last));
+            self.tx[index] = None;
         }
         // One feedback timestamp represents the entire acknowledged prefix.
         // Sample its newest unretransmitted message once per bounded turn.
@@ -590,6 +683,9 @@ impl Session {
                 .saturating_add(increment)
                 .min(self.config.window * MAX_DATAGRAM);
         }
+        if acknowledged_bytes != 0 {
+            self.update_pacing_rate();
+        }
         budget.msgs() != 0
     }
 
@@ -600,7 +696,16 @@ impl Session {
             self.cwnd = (self.cwnd / 2).max(2 * MAX_DATAGRAM);
             self.ssthresh = self.cwnd;
             self.recovery_end = self.send_cursor;
+            self.update_pacing_rate();
         }
+    }
+
+    fn update_pacing_rate(&mut self) {
+        self.pacing_bytes = 0;
+        self.pacing_rate = self.config.max_send_rate.or_else(|| {
+            (self.config.congestion == DartCongestion::Adaptive)
+                .then(|| (self.cwnd as f64 / self.rtt.as_secs_f64().max(0.000_001)) as u64)
+        });
     }
 
     fn rto(&self) -> Duration {
@@ -709,7 +814,7 @@ impl Session {
         Some((prepared.token, length))
     }
 
-    /// Coalesce up to 64 already queued initial messages. An isolated
+    /// Coalesce up to 128 already queued initial messages. An isolated
     /// message, payloads over 255 bytes, and every repair retain ordinary DATA
     /// framing. The caller's preallocated token capacity bounds the turn;
     /// this never grows it.
@@ -724,12 +829,45 @@ impl Session {
         output: &mut [u8],
         tokens: &mut Vec<Transmit>,
     ) -> Option<usize> {
-        let limit = super::MAX_PACKED_MESSAGES.min(tokens.capacity() - tokens.len());
+        let (first_token, length, count) = self.prepare_packed_prefix(
+            first,
+            now,
+            grouped,
+            reserved_bytes,
+            output,
+            tokens.capacity() - tokens.len(),
+        )?;
+        for offset in 0..count {
+            tokens.push(if offset == 0 {
+                first_token
+            } else {
+                Transmit::Data {
+                    sequence: first + offset as u64,
+                    repair: false,
+                }
+            });
+        }
+        Some(length)
+    }
+
+    /// Prepare one datagram as a contiguous sequence prefix. Returns its first
+    /// token, encoded length, and number of wire positions. Repairs occupy one
+    /// position; initial prefixes can be committed without storing each token.
+    pub fn prepare_packed_prefix(
+        &mut self,
+        first: u64,
+        now: Duration,
+        grouped: bool,
+        reserved_bytes: &mut usize,
+        output: &mut [u8],
+        max_tokens: usize,
+    ) -> Option<(Transmit, usize, usize)> {
+        let limit = super::MAX_PACKED_MESSAGES.min(max_tokens);
         if limit == 0 {
             return None;
         }
         let remote = self.remote;
-        let capacity = output.len().min(MAX_DATAGRAM);
+        let capacity = output.len().min(self.packed_mtu);
         let mut count = 0;
         let mut payload_bytes = 0;
         // Plan the table using cached wire lengths. The common case writes
@@ -757,25 +895,57 @@ impl Session {
         if count < 2 {
             let prepared = self.prepare_parts(first, now, grouped, *reserved_bytes)?;
             let length = prepared.encode(remote, first, output)?;
-            tokens.push(prepared.token);
             *reserved_bytes += prepared.bytes;
-            return Some(length);
+            return Some((prepared.token, length, 1));
         }
         output[1 + count..9 + count].copy_from_slice(&remote.to_le_bytes());
         output[9 + count..DATA_HEADER + count].copy_from_slice(&first.to_le_bytes());
+        if first < self.peer_ack || first < self.send_cursor {
+            return None;
+        }
+        if now < self.pace_at {
+            self.stats.congestion_stalls += 1;
+            return None;
+        }
         let mut length = DATA_HEADER + count;
         let mut actual = 0;
         for offset in 0..count {
             let sequence = first + offset as u64;
-            let Some(prepared) = self.prepare_parts(sequence, now, grouped, *reserved_bytes) else {
+            let sent = self.tx[self.index(sequence)]
+                .as_ref()
+                .expect("planned retained message");
+            if self.config.congestion == DartCongestion::Adaptive
+                && !sent.in_flight
+                && self
+                    .flight
+                    .saturating_add(*reserved_bytes)
+                    .saturating_add(sent.bytes)
+                    > self.cwnd
+            {
+                self.stats.congestion_stalls += 1;
                 break;
-            };
+            }
+            if sent.message.len() != 1 + usize::from(grouped) {
+                break;
+            }
             let payload = usize::from(output[1 + offset]);
-            debug_assert_eq!(payload, prepared.payload_len());
-            prepared.write_payload(&mut output[length..length + payload]);
+            // The plan excludes fragments and repairs. Shape validation at
+            // submission and the cached wire length bound this payload.
+            let body = sent
+                .message
+                .part_slice(usize::from(grouped))
+                .expect("retained body");
+            let destination = &mut output[length..length + payload];
+            if grouped {
+                let group = sent.message.part_slice(0).expect("retained group");
+                destination[0] = group.len() as u8;
+                destination[1..=group.len()].copy_from_slice(group);
+                destination[1 + group.len()..].copy_from_slice(body);
+            } else {
+                destination.copy_from_slice(body);
+            }
             length += payload;
-            tokens.push(prepared.token);
-            *reserved_bytes += prepared.bytes;
+            *reserved_bytes += sent.bytes;
             actual += 1;
         }
         if actual == 0 {
@@ -790,9 +960,17 @@ impl Session {
             length -= count - table;
         }
         output[0] = actual as u8;
-        Some(length)
+        Some((
+            Transmit::Data {
+                sequence: first,
+                repair: false,
+            },
+            length,
+            actual,
+        ))
     }
 
+    #[inline]
     fn prepare_parts(
         &mut self,
         sequence: u64,
@@ -868,6 +1046,7 @@ impl Session {
         })
     }
 
+    #[inline]
     pub fn commit_transmit(&mut self, transmit: Transmit, now: Duration) {
         match transmit {
             Transmit::Data { sequence, repair } => {
@@ -893,15 +1072,14 @@ impl Session {
                 if self.ecn_enabled && !repair {
                     self.marked_sent += 1;
                 }
-                let rate = self.config.max_send_rate.or_else(|| {
-                    (self.config.congestion == DartCongestion::Adaptive)
-                        .then(|| (self.cwnd as f64 / self.rtt.as_secs_f64().max(0.000_001)) as u64)
-                });
-                if let Some(rate) = rate {
-                    self.pace_at = self.pace_at.max(now)
-                        + Duration::from_nanos(
+                if let Some(rate) = self.pacing_rate {
+                    if self.pacing_bytes != sent.bytes {
+                        self.pacing_bytes = sent.bytes;
+                        self.pacing_delay = Duration::from_nanos(
                             (sent.bytes as u64 * 1_000_000_000 / rate.max(1)).max(1),
                         );
+                    }
+                    self.pace_at = self.pace_at.max(now) + self.pacing_delay;
                 }
             }
             Transmit::Status => {
@@ -974,6 +1152,46 @@ mod tests {
     }
 
     #[test]
+    fn pacing_cache_preserves_delays_across_sizes_and_rates() {
+        let mut session = session(32);
+        assert!(session.handle_control(
+            Packet::Status(super::Status {
+                session: 2,
+                serial: 1,
+                ack: 0,
+                credit: 32,
+                counts: [0; 5],
+            }),
+            Duration::ZERO,
+        ));
+        let sizes = [16, 16, 32, 512, 16];
+        let mut output = [0; MAX_DATAGRAM];
+        for rate in [10_000_000, 3_000_000, u64::MAX, 1] {
+            session.config.max_send_rate = Some(rate);
+            session.update_pacing_rate();
+            assert_eq!(session.pacing_bytes, 0);
+            let now = session.pace_at + Duration::from_secs(1);
+            let mut tokens = Vec::new();
+            for size in sizes {
+                let sequence = session.submit(Message::from_slice(&vec![7; size])).unwrap();
+                let (token, _) = session
+                    .prepare_data(sequence, now, false, &mut output)
+                    .unwrap();
+                tokens.push(token);
+            }
+            let mut expected = now;
+            for (token, size) in tokens.into_iter().zip(sizes) {
+                expected += Duration::from_nanos(
+                    ((DATA_HEADER + size) as u64 * 1_000_000_000 / rate).max(1),
+                );
+                session.commit_transmit(token, now);
+                assert_eq!(session.pace_at, expected);
+                assert_eq!(session.pacing_bytes, DATA_HEADER + size);
+            }
+        }
+    }
+
+    #[test]
     fn send_capacity_stops_a_batch_before_sequence_exhaustion() {
         let mut session = session(2);
         let near_limit = u64::MAX - 3;
@@ -1008,17 +1226,17 @@ mod tests {
     #[test]
     fn ack_retirement_and_nak_marking_have_message_and_byte_budgets() {
         for size in [8, 1024] {
-            let mut session = session(128);
+            let mut session = session(256);
             let initial = Status {
                 session: 2,
                 serial: 1,
                 ack: 0,
-                credit: 128,
+                credit: 256,
                 counts: [0; 5],
             };
             assert!(session.handle_control(Packet::Status(initial), Duration::ZERO));
             let mut bytes = [0; MAX_DATAGRAM];
-            for sequence in 0..128 {
+            for sequence in 0..256 {
                 session.submit(Message::from_slice(&vec![7; size])).unwrap();
                 let (token, _) = session
                     .prepare_data(sequence, Duration::ZERO, false, &mut bytes)
@@ -1029,21 +1247,21 @@ mod tests {
                 Packet::Nak {
                     session: 2,
                     first: 0,
-                    count: 128,
+                    count: 256,
                 },
                 Duration::ZERO,
             );
             assert!(session.repairs <= 64);
             let ack = Status {
                 serial: 2,
-                ack: 128,
-                counts: [0, 0, 0, 128, 0],
+                ack: 256,
+                counts: [0, 0, 0, 256, 0],
                 ..initial
             };
             session.handle_control(Packet::Status(ack), Duration::from_micros(100));
-            assert!(session.outstanding() >= 64);
+            assert!(session.outstanding() >= 128);
             if size == 1024 {
-                assert!(session.outstanding() > 64);
+                assert!(session.outstanding() > 128);
             }
             while session.poll_progress() {}
             assert_eq!(session.outstanding(), 0);

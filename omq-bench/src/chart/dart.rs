@@ -12,13 +12,13 @@ const DART_WIRE_VERSION: u64 = 1;
 const IMPLS: &[Impl] = &[
     Impl {
         key: "dart-lan",
-        label: "OMQ / Dart-LAN",
+        label: "OMQ / DART-LAN",
         threads: "1 IO",
         color: common::C_OMQ_MT,
     },
     Impl {
         key: "dart-adaptive",
-        label: "OMQ / Dart-adaptive",
+        label: "OMQ / DART-adaptive",
         threads: "1 IO",
         color: RGBColor(255, 183, 77),
     },
@@ -219,7 +219,7 @@ pub(crate) fn generate() {
         let path = directory.join("scattergather.svg");
         common::draw_throughput_dual_panel(
             &path,
-            "Received throughput, Dart / TCP / Aeron UDP loopback, 2-process, median of 3",
+            "Received throughput, DART / TCP / Aeron UDP loopback, 2-process, median of 3",
             THROUGHPUT_SIZES,
             IMPLS,
             &bandwidth,
@@ -233,11 +233,24 @@ pub(crate) fn generate() {
     }
     if !latency.is_empty() {
         let path = directory.join("clientserver.svg");
+        let implementations: Vec<_> = IMPLS
+            .iter()
+            .map(|implementation| Impl {
+                key: implementation.key,
+                label: implementation.label,
+                threads: if implementation.key == "aeron" {
+                    implementation.threads
+                } else {
+                    "1 IO, app/IO spin 50 us"
+                },
+                color: implementation.color,
+            })
+            .collect();
         common::draw_latency_single_panel_100us(
             &path,
-            "Echo RTT, Dart / TCP / Aeron UDP loopback, 2-process, median-p99 run of 3",
+            "Echo RTT, DART / TCP / Aeron UDP loopback, 2-process, median-p99 run of 3",
             LATENCY_SIZES,
-            IMPLS,
+            &implementations,
             &latency,
             &BTreeMap::new(),
         )

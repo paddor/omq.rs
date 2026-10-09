@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use omq_proto::dart::{
-    self, Admission, CreditCounter, Ecn, Handshake, MAX_DATAGRAM, Packet, Phase, Ready, Session,
+    self, Admission, CreditCounter, Ecn, Handshake, MAX_DATAGRAM, Packet, Phase, Ready,
     SessionConfig, Transmit,
 };
 use omq_proto::{DartEcn, Message, SocketType, TrySendError};
@@ -18,15 +18,24 @@ use rustc_hash::FxHashMap;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::{DartBuffer, DartIo, DartPool, DartStats, ReceiveBatch, ReceivedDatagram, SocketState};
+use super::pool::ReceiveBody;
+use super::{DartIo, DartStats, ReceiveBatch, ReceivedDatagram, SocketState};
 use crate::engine::signal::DataSignal;
 use crate::engine::{PeerDriverCommand, PeerDriverData, RecvSink, SendPipeConsumer};
+use crate::{BufferPool, MessageBuffer};
 
 const RETRY: Duration = Duration::from_millis(100);
 const LEASE: Duration = Duration::from_secs(3);
 const TURN: Duration = Duration::from_micros(50);
 const MESSAGES: usize = 64;
+// Allow the final packed datagram to cross the normal message budget.
+const RECEIVE_MESSAGES: usize = MESSAGES + dart::MAX_PACKED_MESSAGES;
+// Keep enough logical messages for several packed datagrams in one IO turn.
+// Byte limits still bound ordinary and fragmented large bodies.
+const DATA_MESSAGES: usize = 512;
 const BYTES: usize = 64_000;
+
+type Session = dart::Session<ReceiveBody>;
 
 #[derive(Clone, Copy, Debug)]
 struct Timestamp {
@@ -103,8 +112,8 @@ impl PeerIo {
             active: false,
             draining: false,
             deadline: None,
-            staged: Vec::with_capacity(MESSAGES),
-            deferred: VecDeque::with_capacity(MESSAGES),
+            staged: Vec::with_capacity(DATA_MESSAGES),
+            deferred: VecDeque::with_capacity(DATA_MESSAGES),
             admissions: VecDeque::with_capacity(window),
             pipe_sequences: VecDeque::with_capacity(window),
             pending_flush: false,
@@ -157,45 +166,11 @@ impl PeerIo {
             return 0;
         }
         let capacity = session.send_capacity();
-        let limit = capacity.min(MESSAGES);
+        let limit = capacity.min(DATA_MESSAGES);
         if limit == 0 {
             return 0;
         }
-        let mut bytes = 0;
-        let mut count = 0;
-        if let Some(pipe) = &mut self.pipe {
-            if self.deferred.is_empty() {
-                pipe.drain_into(&mut self.staged, limit, BYTES);
-            } else {
-                while self.staged.len() < limit && bytes < BYTES {
-                    let Some(message) = self.deferred.pop_front() else {
-                        break;
-                    };
-                    bytes += message.byte_len();
-                    self.staged.push(message);
-                }
-                bytes = 0;
-            }
-            let mut staged = self.staged.drain(..);
-            while let Some(message) = staged.next() {
-                if session.send_capacity() == 0 {
-                    // Restore this prefix before older deferred messages.
-                    // Appending here would reorder when a partial window
-                    // interrupts draining an earlier deferred prefix.
-                    for pending in staged.rev() {
-                        self.deferred.push_front(pending);
-                    }
-                    self.deferred.push_front(message);
-                    break;
-                }
-                bytes += message.byte_len();
-                let sequence = session
-                    .submit(message)
-                    .expect("bounded validated send pipe");
-                self.pipe_sequences.push_back(sequence);
-                count += 1;
-            }
-        }
+        let (mut count, mut bytes) = self.refill_pipe(session, limit);
         while count < limit && bytes < BYTES && session.send_capacity() != 0 {
             let Some((data, admission)) = self.data.dart_try_recv() else {
                 break;
@@ -211,6 +186,53 @@ impl PeerIo {
         }
         self.data.release_consumed();
         count
+    }
+
+    fn refill_pipe(&mut self, session: &mut Session, limit: usize) -> (usize, usize) {
+        let Some(pipe) = &mut self.pipe else {
+            return (0, 0);
+        };
+        if self.deferred.is_empty() {
+            if let Some(progress) = pipe.drain_queue_with(limit, BYTES, |message| {
+                let sequence = session
+                    .submit(message)
+                    .expect("bounded validated send pipe");
+                self.pipe_sequences.push_back(sequence);
+                session.send_capacity() != 0
+            }) {
+                return progress;
+            }
+            pipe.drain_into(&mut self.staged, limit, BYTES);
+        } else {
+            let mut bytes = 0;
+            while self.staged.len() < limit && bytes < BYTES {
+                let Some(message) = self.deferred.pop_front() else {
+                    break;
+                };
+                bytes += message.byte_len();
+                self.staged.push(message);
+            }
+        }
+        let mut bytes = 0;
+        let mut count = 0;
+        let mut staged = self.staged.drain(..);
+        while let Some(message) = staged.next() {
+            if session.send_capacity() == 0 {
+                // Restore this prefix before older deferred messages.
+                for pending in staged.rev() {
+                    self.deferred.push_front(pending);
+                }
+                self.deferred.push_front(message);
+                break;
+            }
+            bytes += message.byte_len();
+            let sequence = session
+                .submit(message)
+                .expect("bounded validated send pipe");
+            self.pipe_sequences.push_back(sequence);
+            count += 1;
+        }
+        (count, bytes)
     }
 
     fn acknowledge(&mut self, ack: u64) {
@@ -241,8 +263,7 @@ impl PeerIo {
         &mut self,
         session: &mut Session,
         groups: Option<&crate::socket::udp::JoinedGroups>,
-        returns: &Arc<CreditCounter>,
-        signal: &Arc<DataSignal>,
+        pool: &BufferPool,
         stats: &mut DartStats,
     ) -> usize {
         if !self.active {
@@ -253,13 +274,12 @@ impl PeerIo {
         };
         let mut count = 0;
         let mut bytes = 0;
-        while count < MESSAGES && bytes < BYTES {
-            let Some(message) = session.take_received_with(|body| {
-                super::pool::large_payload(body, returns.clone(), signal.clone())
-            }) else {
+        while count < DATA_MESSAGES && bytes < BYTES {
+            let Some(message) = session.take_received_with(|body| body.finish(pool)) else {
                 break;
             };
             bytes += message.byte_len();
+            let inline_credit = message.retained_size() == Some(std::mem::size_of::<Message>());
             // Empty group is the internal marker for an intentionally filtered
             // DISH message. It owns no body slot and is released immediately.
             if groups.is_some() && message.part_slice(0).is_some_and(<[u8]>::is_empty) {
@@ -279,6 +299,12 @@ impl PeerIo {
             }
             match sink.try_deliver_datagram(message, &mut self.pending_flush) {
                 Ok(()) => {
+                    if inline_credit {
+                        // Inline bodies own no shared receive buffer. Once the
+                        // bounded application queue owns the value, reuse this
+                        // session slot independently of application clones.
+                        session.release_receive(1);
+                    }
                     stats.received_messages += 1;
                     count += 1;
                 }
@@ -299,6 +325,9 @@ impl PeerIo {
 
 impl Drop for PeerIo {
     fn drop(&mut self) {
+        if let Some(sink) = &mut self.sink {
+            sink.flush_delivery(&mut self.pending_flush);
+        }
         self.cancel.cancel();
         let _ = self
             .completion
@@ -330,8 +359,8 @@ struct Peer {
     retry: Instant,
     reported: bool,
     session: Option<Session>,
-    pool: Option<DartPool>,
-    receive_buffers: Vec<DartBuffer>,
+    pool: Option<BufferPool>,
+    receive_buffers: Vec<MessageBuffer>,
     returns: Arc<CreditCounter>,
     io: Option<Box<PeerIo>>,
     sampled: dart::SessionStats,
@@ -343,7 +372,7 @@ impl Peer {
         &mut self,
         generation: u64,
         mut io: Box<PeerIo>,
-        options: omq_proto::DartOptions,
+        shared: &SocketState,
         ecn_supported: bool,
         signal: &Arc<DataSignal>,
     ) {
@@ -356,13 +385,14 @@ impl Peer {
         }
         io.connect_signal(signal);
         io.register_space(signal);
-        self.pool = Some(DartPool::receiver(
-            options.window_messages,
+        let options = shared.options;
+        self.pool = Some(super::pool::receiver(
+            shared.receive_pool(),
             self.returns.clone(),
             signal.clone(),
         ));
         self.receive_buffers = Vec::with_capacity(MESSAGES.min(options.window_messages));
-        self.session = Some(Session::new(
+        self.session = Some(Session::with_receive_buffers(
             self.handshake.local(),
             self.handshake.remote(),
             SessionConfig {
@@ -410,7 +440,6 @@ impl Routes {
 /// containing several messages. The final segment may be shorter.
 struct Stage {
     bytes: Box<[u8]>,
-    tokens: Vec<Transmit>,
     packet_ends: Vec<usize>,
 }
 
@@ -418,7 +447,6 @@ impl Stage {
     fn new() -> Self {
         Self {
             bytes: vec![0; BYTES].into_boxed_slice(),
-            tokens: Vec::with_capacity(MESSAGES),
             packet_ends: Vec::with_capacity(MESSAGES),
         }
     }
@@ -475,6 +503,9 @@ impl EndpointWorker {
                 }
             }
             signal.begin_drain();
+            if let Some(pool) = self.shared.receive_pool.get() {
+                pool.reclaim();
+            }
             if !self.drain_commands(&mut routes, &signal) {
                 break;
             }
@@ -638,7 +669,7 @@ impl EndpointWorker {
         peer.install_io(
             generation,
             io,
-            self.shared.options,
+            &self.shared,
             self.io.ecn_receive_supported(source.ip()) == Some(true),
             signal,
         );
@@ -778,7 +809,7 @@ impl EndpointWorker {
                 routes,
                 generation,
                 timestamp,
-                MESSAGES - count,
+                RECEIVE_MESSAGES - count,
                 stats,
             );
             if received == 0 {
@@ -891,10 +922,13 @@ impl EndpointWorker {
                 first,
                 messages,
             } => {
-                // Validate every body before changing any session position.
-                if messages.iter().any(|payload| {
-                    dart::data_body(payload, self.socket_type == SocketType::Dish).is_none()
-                }) {
+                // Packed lengths already fit ordinary bodies. Validate group
+                // metadata before changing any session position.
+                if self.socket_type == SocketType::Dish
+                    && messages
+                        .iter()
+                        .any(|payload| dart::data_body(payload, true).is_none())
+                {
                     stats.invalid_datagrams += 1;
                     return;
                 }
@@ -910,10 +944,9 @@ impl EndpointWorker {
                 }
             }
             _ => {
-                let valid = self
-                    .shared
-                    .pool()
-                    .with_recycling_batch(|| session.handle_control(decoded, elapsed));
+                let valid = crate::buffer_pool::with_recycling_batch(|| {
+                    session.handle_control(decoded, elapsed)
+                });
                 if valid {
                     peer.expires = now + LEASE;
                     if matches!(decoded, Packet::Status(_))
@@ -1020,16 +1053,31 @@ impl EndpointWorker {
                 Ecn::Unavailable
             }
         };
-        let mut message = Message::from_slice(body);
+        if peer.receive_buffers.is_empty() {
+            self.shared
+                .receive_pool()
+                .try_take_many_into(MESSAGES, &mut peer.receive_buffers);
+        }
+        let mut message = if let Some(mut buffer) = peer.receive_buffers.pop() {
+            buffer.writable()[..body.len()].copy_from_slice(body);
+            buffer.set_len(body.len()).expect("validated fragment body");
+            buffer.into_message()
+        } else {
+            // A missing fragment must remain recoverable even if other peers
+            // retain every pooled slot. Session windows still bound ownership.
+            stats.pool_exhausted += 1;
+            Message::from_slice(body)
+        };
         if let Some(group) = group {
             message = Message::with_prefix(bytes::Bytes::copy_from_slice(group), message);
         }
-        if session.commit_fragment(
+        if session.commit_fragment_with(
             sequence,
             length,
             message,
             ecn,
             timestamp.at.duration_since(timestamp.epoch),
+            |length| ReceiveBody::reserve(peer.pool.as_ref().expect("receiver pool"), length),
         ) {
             peer.expires = timestamp.at + LEASE;
         } else {
@@ -1038,6 +1086,10 @@ impl EndpointWorker {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep native receive admission and buffer ownership in one path"
+    )]
     fn accept_data(
         &self,
         peer: &mut Peer,
@@ -1094,21 +1146,61 @@ impl EndpointWorker {
         } else {
             None
         };
+        // PEER adds an identity prefix during receive; shared bodies keep that
+        // routed representation allocation-free.
+        if group.is_none()
+            && self.socket_type != SocketType::Peer
+            && body.len() <= omq_proto::message::MAX_INLINE_MESSAGE
+        {
+            let message = Message::from_slice(body);
+            if let Some(io) = &mut peer.io
+                && io.active
+                && let Some(sink) = &mut io.sink
+            {
+                if session.commit_receive_with_delivery(
+                    sequence,
+                    message,
+                    ecn,
+                    elapsed,
+                    |message| match sink.try_deliver_datagram(message, &mut io.pending_flush) {
+                        Ok(()) => Ok(()),
+                        Err(TrySendError::Full(message)) => Err(message),
+                        Err(_) => {
+                            io.cancel.cancel();
+                            Err(Message::from_slice(body))
+                        }
+                    },
+                ) {
+                    stats.received_messages += 1;
+                }
+            } else {
+                session.commit_receive(sequence, message, ecn, elapsed);
+            }
+            return true;
+        }
         if peer.receive_buffers.is_empty() {
-            peer.pool
-                .as_ref()
-                .expect("receiver pool")
+            self.shared
+                .receive_pool()
                 .try_take_many_into(MESSAGES, &mut peer.receive_buffers);
         }
-        let Some(mut buffer) = peer.receive_buffers.pop() else {
-            // Advertised slots are private. Exhaustion means no successful
-            // ownership; retain sender data by withholding acknowledgment.
+        let mut message = if let Some(mut buffer) = peer.receive_buffers.pop() {
+            buffer.writable_received(peer.pool.as_ref().expect("receiver pool"))[..body.len()]
+                .copy_from_slice(body);
+            buffer.set_len(body.len()).expect("validated body");
+            buffer.into_message()
+        } else {
+            // Shared pool exhaustion must not block another peer's gap repair.
             stats.pool_exhausted += 1;
-            return false;
+            let Some(payload) = peer
+                .pool
+                .as_ref()
+                .expect("receiver pool")
+                .copy_received(body)
+            else {
+                return false;
+            };
+            Message::from(payload)
         };
-        buffer.writable()[..body.len()].copy_from_slice(body);
-        buffer.set_len(body.len()).expect("validated body");
-        let mut message = buffer.into_message();
         if let Some(group) = group {
             message = Message::with_prefix(group, message);
         }
@@ -1223,7 +1315,6 @@ impl EndpointWorker {
                     let turn = self.drive_peer(
                         source,
                         peer,
-                        signal,
                         Timestamp { at: now, epoch },
                         stage,
                         control,
@@ -1254,12 +1345,10 @@ impl EndpointWorker {
         (worked || routes.remaining != 0, deadline, blocked)
     }
 
-    #[expect(clippy::too_many_arguments)]
     fn drive_peer(
         &self,
         source: SocketAddr,
         peer: &mut Peer,
-        signal: &Arc<DataSignal>,
         timestamp: Timestamp,
         stage: &mut Stage,
         control: &mut [u8],
@@ -1280,20 +1369,18 @@ impl EndpointWorker {
             session.release_receive(returned);
         }
         if session.has_progress() {
-            turn.worked |= self
-                .shared
-                .pool()
-                .with_recycling_batch(|| session.poll_progress());
+            turn.worked |= crate::buffer_pool::with_recycling_batch(|| session.poll_progress());
             io.acknowledge(session.acknowledged_position());
         }
         session.handle_timeout(now);
-        turn.worked |= io.deliver(
-            session,
-            (self.socket_type == SocketType::Dish).then_some(&self.joined),
-            &peer.returns,
-            signal,
-            stats,
-        ) != 0;
+        turn.worked |= self.shared.receive_pool().with_recycling_batch(|| {
+            io.deliver(
+                session,
+                (self.socket_type == SocketType::Dish).then_some(&self.joined),
+                peer.pool.as_ref().expect("receiver pool"),
+                stats,
+            )
+        }) != 0;
         if session.receive_failed() {
             turn.retire = true;
             return turn;
@@ -1360,33 +1447,31 @@ impl EndpointWorker {
         stats: &mut DartStats,
         blocked: &mut bool,
     ) -> bool {
-        stage.tokens.clear();
         stage.packet_ends.clear();
         let first = session.next_repair().unwrap_or_else(|| session.next_send());
         let grouped = self.socket_type == SocketType::Radio;
         let mut reserved = 0;
-        let length = if self.shared.options.max_send_rate.is_some() {
+        let (token, length, mut prepared) = if self.shared.options.max_send_rate.is_some() {
             let Some((token, length)) = session.prepare_data(first, now, grouped, &mut stage.bytes)
             else {
                 return false;
             };
-            stage.tokens.push(token);
-            length
+            (token, length, 1)
         } else {
-            let Some(length) = session.prepare_packed_data(
+            let Some(prefix) = session.prepare_packed_prefix(
                 first,
                 now,
                 grouped,
                 &mut reserved,
                 &mut stage.bytes,
-                &mut stage.tokens,
+                DATA_MESSAGES,
             ) else {
                 return false;
             };
-            length
+            prefix
         };
-        stage.packet_ends.push(stage.tokens.len());
-        let repair = matches!(stage.tokens[0], Transmit::Data { repair: true, .. });
+        stage.packet_ends.push(prepared);
+        let repair = matches!(token, Transmit::Data { repair: true, .. });
         let batch_limit = if repair || self.shared.options.max_send_rate.is_some() {
             1
         } else {
@@ -1394,23 +1479,23 @@ impl EndpointWorker {
         };
         let mut total = length;
         for _ in 1..batch_limit {
-            let previous = stage.tokens.len();
-            let Some(next_length) = session.prepare_packed_data(
-                first + previous as u64,
+            let Some((next_token, next_length, count)) = session.prepare_packed_prefix(
+                first + prepared as u64,
                 now,
                 grouped,
                 &mut reserved,
                 &mut stage.bytes[total..],
-                &mut stage.tokens,
+                DATA_MESSAGES - prepared,
             ) else {
                 break;
             };
             if next_length > length {
-                stage.tokens.truncate(previous);
                 break;
             }
+            debug_assert!(matches!(next_token, Transmit::Data { repair: false, .. }));
+            prepared += count;
             total += next_length;
-            stage.packet_ends.push(stage.tokens.len());
+            stage.packet_ends.push(prepared);
             if next_length < length {
                 break;
             }
@@ -1424,11 +1509,13 @@ impl EndpointWorker {
                 let accepted = count
                     .checked_sub(1)
                     .map_or(0, |index| stage.packet_ends[index]);
-                for token in stage.tokens.iter().take(accepted) {
-                    session.commit_transmit(*token, now);
-                    if matches!(token, Transmit::Data { repair: false, .. })
-                        && session.transmit_completes_message(*token)
-                    {
+                for offset in 0..accepted {
+                    let token = Transmit::Data {
+                        sequence: first + offset as u64,
+                        repair,
+                    };
+                    session.commit_transmit(token, now);
+                    if !repair && session.transmit_completes_message(token) {
                         stats.sent_messages += 1;
                     }
                 }
@@ -1437,6 +1524,10 @@ impl EndpointWorker {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 *blocked = true;
                 false
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EMSGSIZE) && length > MAX_DATAGRAM => {
+                session.reduce_packing_mtu();
+                true
             }
             Err(_) => {
                 stats.send_failures += 1;

@@ -111,41 +111,6 @@ impl Socket {
         self.inner.dart.capabilities()
     }
 
-    /// Acquire one writable 1024-byte body buffer from this socket's bounded
-    /// pool. The first call initializes the pool; later calls never allocate.
-    /// `Ok(None)` means every buffer is held by a buffer, message, or byte view.
-    ///
-    /// Write through [`DartBuffer::writable`](crate::DartBuffer::writable),
-    /// set its length, then send its `into_message()` through the usual API.
-    /// Clones share the pool. Held buffers may outlive the socket.
-    ///
-    /// # Errors
-    /// Returns `Closed` after close or a protocol error for unsupported types.
-    #[cfg(feature = "dart")]
-    pub fn try_dart_buffer(&self) -> Result<Option<crate::DartBuffer>> {
-        Ok(self.dart_pool()?.try_take())
-    }
-
-    /// Borrow this socket's bounded DART body pool. Cache this reference or
-    /// clone the handle when preparing batches, avoiding socket lifecycle
-    /// checks for each buffer. The pool and its buffers may outlive the socket;
-    /// retaining a cloned pool handle retains its entire fixed capacity.
-    ///
-    /// # Errors
-    /// Returns `Closed` after close or a protocol error for unsupported types.
-    #[cfg(feature = "dart")]
-    pub fn dart_pool(&self) -> Result<&crate::DartPool> {
-        if self.inner.cancel.is_cancelled() || self.inner.cmd_tx.is_closed() {
-            return Err(Error::Closed);
-        }
-        if !omq_proto::dart::supports(self.inner.socket_type) {
-            return Err(Error::Protocol(
-                "DART buffers require a supported single-body socket type".into(),
-            ));
-        }
-        Ok(self.inner.dart.pool())
-    }
-
     /// View a ROUTER or PEER socket through its identity-routing API.
     pub fn identity_routing(&self) -> Result<super::identity::IdentitySocket> {
         super::identity::IdentitySocket::try_from(self)
@@ -654,6 +619,7 @@ impl Socket {
     /// For native round-robin sockets, a connect-side pre-ready pipe counts as
     /// an outbound buffer. `try_send()` can therefore succeed before any peer
     /// is ready. Bound no-peer sockets return `Full`.
+    #[inline]
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         match self.inner.socket_type {
             SocketType::Req => {
@@ -1464,6 +1430,7 @@ fn rep_send_without_request() -> Error {
     Error::Protocol("REP socket must receive a request before replying".into())
 }
 
+#[inline]
 fn check_pre_send_frame_count(t: SocketType, msg: &Message) -> Result<()> {
     match t {
         SocketType::Client | SocketType::Scatter | SocketType::Gather | SocketType::Channel

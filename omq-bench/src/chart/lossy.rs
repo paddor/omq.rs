@@ -14,13 +14,13 @@ const LOSS_LABELS: &[&str] = &["0%", "0.1%", "1%", "5%"];
 const IMPLS: &[Impl] = &[
     Impl {
         key: "dart-lan",
-        label: "OMQ / Dart-LAN",
+        label: "OMQ / DART-LAN",
         threads: "1 IO",
         color: common::C_OMQ_MT,
     },
     Impl {
         key: "dart-adaptive",
-        label: "OMQ / Dart-adaptive",
+        label: "OMQ / DART-adaptive",
         threads: "1 IO",
         color: RGBColor(255, 183, 77),
     },
@@ -341,7 +341,7 @@ fn draw(path: &std::path::Path, data: &Data) -> DrawResult {
         path,
         width,
         height,
-        "Dart / QUIC over simulated lossy links, 2-process",
+        "DART / QUIC over simulated lossy links, 2-process",
         common::detect_hardware().as_deref(),
     )
 }
@@ -365,7 +365,7 @@ pub(crate) fn generate() {
         }
     }
     let directory = common::out_dir().join("dart");
-    std::fs::create_dir_all(&directory).expect("create Dart chart directory");
+    std::fs::create_dir_all(&directory).expect("create DART chart directory");
     let path = directory.join("lossy.svg");
     draw(&path, &data).expect("draw lossy-link chart");
     eprintln!("Written: {}", path.display());

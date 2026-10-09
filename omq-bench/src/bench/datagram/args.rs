@@ -36,7 +36,7 @@ impl CommonArgs {
         let sizes = self.sizes.clone().unwrap_or_else(|| defaults.to_vec());
         assert!(self.repeats > 0 && !sizes.is_empty());
         for (i, size) in sizes.iter().enumerate() {
-            assert!((16..=8_388_608).contains(size) && !sizes[..i].contains(size));
+            assert!((8..=8_388_608).contains(size) && !sizes[..i].contains(size));
         }
         sizes
     }
@@ -86,7 +86,7 @@ pub(crate) struct DartArgs {
     /// Poll DART continuously, yielding bounded turns to other IO tasks.
     #[arg(long)]
     pub continuous_io_spin: bool,
-    /// Retained send and private receive slots per DART peer.
+    /// Retained send and receive positions per DART peer.
     #[arg(long, default_value_t = 256)]
     pub window_messages: usize,
     #[arg(long, default_value = "lan", value_parser = ["lan", "adaptive"])]

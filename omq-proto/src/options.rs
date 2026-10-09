@@ -418,7 +418,8 @@ pub enum DartEcn {
 #[cfg(feature = "dart")]
 #[derive(Clone, Copy, Debug)]
 pub struct DartOptions {
-    /// Caller-acquired send buffers per socket. Default 1024.
+    /// Internal receive buffers per socket. Default 8192, each holding 2 KiB.
+    /// Shared across peers; also bounds retained native RADIO publications.
     pub pool_buffers: usize,
     /// Maximum admitted peers across the socket. Default 1024.
     pub max_ready_peers: usize,
@@ -431,7 +432,7 @@ pub struct DartOptions {
     /// Network congestion policy. Default adaptive.
     pub congestion: DartCongestion,
     /// Preallocated receive and retention slots per peer. Default 256;
-    /// a power of two between 1 and 65536. Receive storage is private to peers.
+    /// a power of two between 1 and 65536. Independent of body pool capacity.
     pub window_messages: usize,
     /// Optional wire-byte rate cap per peer. Zero is invalid.
     pub max_send_rate: Option<u64>,
@@ -441,7 +442,7 @@ pub struct DartOptions {
 impl Default for DartOptions {
     fn default() -> Self {
         Self {
-            pool_buffers: 1024,
+            pool_buffers: 8192,
             max_ready_peers: 1024,
             io_spin: Duration::ZERO,
             ecn: DartEcn::Auto,
@@ -1403,7 +1404,7 @@ mod tests {
     #[test]
     fn dart_defaults_are_bounded_and_spinning_is_explicit() {
         let mut options = Options::default();
-        assert_eq!(options.dart.pool_buffers, 1024);
+        assert_eq!(options.dart.pool_buffers, 8192);
         assert_eq!(options.dart.max_ready_peers, 1024);
         assert_eq!(options.dart.io_spin, Duration::ZERO);
         assert_eq!(options.dart.ecn, DartEcn::Auto);

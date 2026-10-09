@@ -3,7 +3,7 @@
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
-use omq_tokio::{Context, DartPool, Socket};
+use omq_tokio::{BufferPool, Context, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::{Config, RuntimeMode, SETUP_TIMEOUT, affinity, emit, format_offloads, make_body};
@@ -11,6 +11,14 @@ use super::{Config, RuntimeMode, SETUP_TIMEOUT, affinity, emit, format_offloads,
 pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     let context = Context::current();
     let socket = context.socket(config.socket_type(), config.options());
+    let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
+    let pool = (!config.receiving()).then(|| {
+        if native {
+            BufferPool::new(2048, 8192)
+        } else {
+            BufferPool::new(1024, 1024)
+        }
+    });
     if config.receiving() {
         let endpoint = socket.bind(config.endpoint.clone()).await.unwrap();
         emit(&format!(
@@ -20,17 +28,18 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
         socket.connect(config.endpoint.clone()).await.unwrap();
     }
     socket.wait_connected(1, SETUP_TIMEOUT).await.unwrap();
-    let native = matches!(config.endpoint, omq_tokio::Endpoint::Dart { .. });
     let version = if native {
         omq_proto::dart::VERSION.to_string()
     } else {
         "null".into()
     };
     emit(&format!(
-        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{}}}",
+        "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{},\"dart_pool_buffers\":{},\"dart_buffer_capacity\":{}}}",
         affinity.description(),
         format_offloads(socket.dart_capabilities()),
         config.window_messages,
+        config.options().dart.pool_buffers,
+        omq_tokio::transport::dart::BUFFER_CAPACITY,
     ));
     // Keep driving connection setup and maintenance while awaiting the
     // runner's barrier. Stdin never blocks the current-thread runtime.
@@ -49,7 +58,7 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     if config.receiving() {
         server(&socket).await;
     } else {
-        client(&socket, config, native).await;
+        client(&socket, config, pool.as_ref().unwrap()).await;
     }
     stop.cancel();
     if let Some(poller) = poller {
@@ -81,16 +90,11 @@ async fn server(socket: &Socket) {
     ));
 }
 
-async fn client(socket: &Socket, config: &Config, native: bool) {
-    let pool = if native {
-        socket.dart_pool().unwrap().clone()
-    } else {
-        DartPool::new(1024)
-    };
+async fn client(socket: &Socket, config: &Config, pool: &BufferPool) {
     let mut samples = Vec::with_capacity(config.iterations);
     for index in 0..config.warmup + config.iterations {
         let tag = u64::try_from(index).unwrap();
-        let body = make_body(&pool, config.size, tag).expect("send pool exhausted");
+        let body = make_body(pool, config.size, tag).expect("send pool exhausted");
         let at = Instant::now();
         socket.send(body).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(1), socket.recv())

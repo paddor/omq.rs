@@ -84,19 +84,6 @@ impl Socket {
         self.inner.socket_type()
     }
 
-    /// Take an exclusively writable body from this socket's bounded pool.
-    #[cfg(feature = "dart")]
-    pub fn try_dart_buffer(&self) -> Result<Option<crate::DartBuffer>> {
-        self.inner.try_dart_buffer()
-    }
-
-    /// Borrow the socket's bounded body pool for reusable batch preparation.
-    /// A cloned pool handle may outlive the socket and retains its capacity.
-    #[cfg(feature = "dart")]
-    pub fn dart_pool(&self) -> Result<&crate::DartPool> {
-        self.inner.dart_pool()
-    }
-
     /// Approximate counters shared by every DART endpoint of this socket.
     #[cfg(feature = "dart")]
     pub fn dart_stats(&self) -> crate::DartStats {

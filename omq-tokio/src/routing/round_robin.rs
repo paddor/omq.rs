@@ -266,6 +266,7 @@ impl Submitter {
         space_available.changed_after(seen).await;
     }
 
+    #[inline]
     pub(crate) fn try_send(
         &self,
         mut msg: Message,

@@ -4,8 +4,10 @@ use crate::proto::SocketType;
 
 /// Largest ordinary DATA body. Larger messages are fragmented.
 pub const MAX_BODY: usize = 1024;
-/// Largest complete UDP payload, including tags and group metadata.
+/// Largest DATA, fragment, or control UDP payload.
 pub const MAX_DATAGRAM: usize = 1200;
+/// Largest PACKED payload on a 1500-byte IPv6 path, without IP fragmentation.
+pub const MAX_PACKED_DATAGRAM: usize = 1452;
 /// READY protocol version.
 pub const VERSION: u8 = 1;
 
@@ -14,14 +16,14 @@ mod handshake;
 mod session;
 pub use credit::{AdmissionCounter, CreditCounter};
 pub use handshake::Handshake;
-pub use session::{Admission, Ecn, Session, SessionConfig, SessionStats, Transmit};
+pub use session::{Admission, Ecn, FragmentBuffer, Session, SessionConfig, SessionStats, Transmit};
 
 pub const DATA_HEADER: usize = 17;
 pub const FIRST_HEADER: usize = DATA_HEADER + 8;
 /// Largest CONT body; FIRST's length and group occupy part of this space.
 pub const MAX_FRAGMENT_BODY: usize = MAX_DATAGRAM - DATA_HEADER;
 /// Maximum messages coalesced into one UDP datagram.
-pub const MAX_PACKED_MESSAGES: usize = 64;
+pub const MAX_PACKED_MESSAGES: usize = 128;
 
 /// Payloads with a byte-length table validated against their UDP boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,11 +148,11 @@ fn word(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
-    if bytes.len() > MAX_DATAGRAM {
-        return None;
-    }
     let tag = *bytes.first()?;
     if (2..=MAX_PACKED_MESSAGES as u8).contains(&tag) {
+        if bytes.len() > MAX_PACKED_DATAGRAM {
+            return None;
+        }
         let count = usize::from(tag);
         let lengths = bytes.get(1..1 + count)?;
         let session = word(bytes, 1 + count)?;
@@ -164,18 +166,21 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
             messages: decode_packed(lengths, &bytes[DATA_HEADER + count..], first)?,
         });
     }
+    if bytes.len() > MAX_DATAGRAM {
+        return None;
+    }
     let session = word(bytes, 1)?;
     if session == 0 {
         return None;
     }
     match tag {
-        0x41 => Some(Packet::First {
+        0x81 => Some(Packet::First {
             session,
             sequence: word(bytes, 9)?,
             length: word(bytes, 17)?,
             payload: &bytes[FIRST_HEADER..],
         }),
-        0x42 => Some(Packet::Continuation {
+        0x82 => Some(Packet::Continuation {
             session,
             sequence: word(bytes, 9)?,
             payload: &bytes[DATA_HEADER..],
@@ -185,7 +190,7 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
             sequence: word(bytes, 9)?,
             payload: &bytes[17..],
         }),
-        0x81 if bytes.len() == 73 => Some(Packet::Status(Status {
+        0xC1 if bytes.len() == 73 => Some(Packet::Status(Status {
             session,
             serial: word(bytes, 9)?,
             ack: word(bytes, 17)?,
@@ -198,12 +203,12 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
                 word(bytes, 65)?,
             ],
         })),
-        0x82 if bytes.len() == 21 => Some(Packet::Nak {
+        0xC2 if bytes.len() == 21 => Some(Packet::Nak {
             session,
             first: word(bytes, 9)?,
             count: u32::from_le_bytes(bytes[17..21].try_into().ok()?),
         }),
-        0x83 if bytes.len() == 17 => Some(Packet::Probe {
+        0xC3 if bytes.len() == 17 => Some(Packet::Probe {
             session,
             next: word(bytes, 9)?,
         }),
@@ -214,9 +219,9 @@ pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
 /// Encode a control packet without allocation or padding.
 pub fn encode_packet(packet: Packet<'_>, output: &mut [u8]) -> Option<usize> {
     let (tag, session, length) = match packet {
-        Packet::Status(status) => (0x81, status.session, 73),
-        Packet::Nak { session, .. } => (0x82, session, 21),
-        Packet::Probe { session, .. } => (0x83, session, 17),
+        Packet::Status(status) => (0xC1, status.session, 73),
+        Packet::Nak { session, .. } => (0xC2, session, 21),
+        Packet::Probe { session, .. } => (0xC3, session, 17),
         Packet::Data { .. }
         | Packet::Packed { .. }
         | Packet::First { .. }
@@ -253,6 +258,7 @@ pub fn encode_packet(packet: Packet<'_>, output: &mut [u8]) -> Option<usize> {
 
 /// Validate the body and routing metadata before local queue admission.
 /// `identity_prefix` is true for PEER's compatibility multipart send form.
+#[inline]
 pub fn validate_message(
     socket_type: SocketType,
     message: &crate::Message,
@@ -276,9 +282,8 @@ pub fn validate_message(
             ));
         }
     }
-    message
-        .part_slice(expected - 1)
-        .ok_or_else(|| crate::Error::Protocol("DART requires a contiguous body".into()))?;
+    // Every Message part has contiguous Payload storage. Checking its count
+    // already establishes that the body exists; no body borrow is needed.
     Ok(())
 }
 
@@ -310,7 +315,7 @@ pub fn encode_fragment(
     if size > MAX_DATAGRAM {
         return None;
     }
-    output[0] = if length.is_some() { 0x41 } else { 0x42 };
+    output[0] = if length.is_some() { 0x81 } else { 0x82 };
     output[1..9].copy_from_slice(&session.to_le_bytes());
     output[9..17].copy_from_slice(&sequence.to_le_bytes());
     if let Some(length) = length {
@@ -356,7 +361,7 @@ pub fn decode(bytes: &[u8]) -> Option<Datagram<'_>> {
     let (&tag, payload) = bytes.split_first()?;
     match tag {
         1 if payload.len() >= 16 => Some(Datagram::Data(&payload[16..])),
-        0x80 => {
+        0xC0 => {
             let (&length, payload) = payload.split_first()?;
             let (name, body) = payload.split_at_checked(usize::from(length))?;
             if name.is_empty() || !name.is_ascii() {
@@ -458,7 +463,7 @@ pub fn encode_ready(ready: Ready<'_>, output: &mut [u8]) -> Option<usize> {
         return None;
     }
     let mut writer = Writer { output, cursor: 0 };
-    writer.write(b"\x80\x05READY")?;
+    writer.write(b"\xc0\x05READY")?;
     writer.property(b"Socket-Type", ready.socket_type.as_str().as_bytes())?;
     if let Some(identity) = ready.identity {
         writer.property(b"Identity", identity)?;
@@ -619,9 +624,9 @@ mod tests {
             assert_eq!(decode(&[tag]), None);
         }
         assert_eq!(decode(b"\x01\x02\0\x03abc\0\x03def"), None);
-        assert_eq!(decode(b"\x80\x00"), None);
-        assert_eq!(decode(b"\x80\x05READ"), None);
-        assert_eq!(decode(b"\x80\x01\xff"), None);
+        assert_eq!(decode(b"\xc0\x00"), None);
+        assert_eq!(decode(b"\xc0\x05READ"), None);
+        assert_eq!(decode(b"\xc0\x01\xff"), None);
         assert_eq!(decode(&[0; MAX_DATAGRAM + 1]), None);
         assert!(data_body(&[0; MAX_BODY + 1], false).is_none());
     }
@@ -708,7 +713,7 @@ mod tests {
         assert_eq!(decode_ready(&extra), Some(ready));
         append_property(&mut extra, b"Extension", b"again");
         assert_eq!(decode_ready(&extra), None);
-        assert_eq!(decode_ready(b"\x80\x05READY"), None);
+        assert_eq!(decode_ready(b"\xc0\x05READY"), None);
         for (name, value) in [
             (b"DART-Version".as_slice(), b"\x00".as_slice()),
             (b"DART-Version", b"\x02"),
@@ -719,7 +724,7 @@ mod tests {
             (b"Socket-Type", b"PUSH"),
             (b"Socket-Type", b"unknown"),
         ] {
-            let mut bytes = b"\x80\x05READY".to_vec();
+            let mut bytes = b"\xc0\x05READY".to_vec();
             for (key, valid) in [
                 (b"Socket-Type".as_slice(), b"CHANNEL".as_slice()),
                 (b"DART-Version", &[VERSION]),
@@ -770,9 +775,9 @@ mod tests {
             ),
             None
         );
-        let mut bytes = b"\x80\x05READY".to_vec();
+        let mut bytes = b"\xc0\x05READY".to_vec();
         bytes.extend_from_slice(b"\x01X\xff\xff\xff\xff");
         assert_eq!(decode_ready(&bytes), None);
-        assert!(decode_ready(b"\x80\x05READY\x00\x00\x00\x00\x00").is_none());
+        assert!(decode_ready(b"\xc0\x05READY\x00\x00\x00\x00\x00").is_none());
     }
 }

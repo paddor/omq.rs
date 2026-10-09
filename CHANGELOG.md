@@ -97,7 +97,7 @@ All notable changes to omq.rs will be documented here. Format loosely follows
   Ordered delivery, duplicate suppression, loss recovery, receive-window
   backpressure, adaptive congestion control with ECN, and explicit LAN mode.
   Large atomic bodies use u64 length framing and enforce receiver
-  `max_message_size`; small messages pack up to 64 per datagram without a
+  `max_message_size`; small messages pack up to 128 per datagram without a
   fill delay. Includes reusable body pools, GSO/GRO fallback, diagnostics,
   optional bounded or continuous polling, a [draft RFC](doc/dart-rfc.md),
   and matched Dart/TCP/Aeron benchmark charts. No authentication or encryption.

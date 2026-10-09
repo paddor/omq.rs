@@ -205,12 +205,22 @@ pub(super) fn profiled(
 ) -> Command {
     let Some(path) = path else { return command };
     std::fs::create_dir_all(path).unwrap();
+    let frequency = std::env::var("OMQ_PERF_FREQUENCY").unwrap_or_else(|_| "997".into());
+    assert!(frequency.parse::<u32>().expect("perf sample frequency") > 0);
     let mut perf = Command::new("perf");
-    perf.args(["record", "-F", "997", "-g", "--call-graph", "dwarf", "-o"])
-        .arg(path.join(format!("{role}-{size}.data")))
-        .arg("--")
-        .arg(command.get_program())
-        .args(command.get_args());
+    perf.args([
+        "record",
+        "-F",
+        &frequency,
+        "-g",
+        "--call-graph",
+        "dwarf",
+        "-o",
+    ])
+    .arg(path.join(format!("{role}-{size}.data")))
+    .arg("--")
+    .arg(command.get_program())
+    .args(command.get_args());
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
             perf.env(key, value);

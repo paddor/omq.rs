@@ -192,6 +192,7 @@ impl SendSubmitter {
         }
     }
 
+    #[inline]
     pub(crate) fn try_send(
         &self,
         msg: Message,

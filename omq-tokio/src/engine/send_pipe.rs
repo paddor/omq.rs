@@ -263,6 +263,7 @@ impl SendPipeProducer {
         self.try_send_prepared(msg, SendPreparation::Plain)
     }
 
+    #[inline]
     pub(crate) fn try_send_prepared(
         &mut self,
         msg: Message,
@@ -302,6 +303,7 @@ impl SendPipeProducer {
         result
     }
 
+    #[inline]
     fn try_send_prepared_inner(
         &mut self,
         msg: Message,
@@ -363,18 +365,19 @@ impl SendPipeProducer {
         max: usize,
     ) -> core::result::Result<usize, SendPipeError> {
         #[cfg(feature = "dart")]
+        if let Some(socket_type) = self.dart {
+            for message in messages.iter().take(max) {
+                omq_proto::dart::validate_message(socket_type, message, false)
+                    .map_err(SendPipeError::Invalid)?;
+            }
+        }
+        #[cfg(feature = "dart")]
         if matches!(self.inner, SendPipeProducerInner::Queue(_))
             && self.data_signal.dart_admission.get().is_some()
         {
             let requested = max.min(messages.len());
             if requested == 0 {
                 return Ok(0);
-            }
-            if let Some(socket_type) = self.dart {
-                for message in messages.iter().take(requested) {
-                    omq_proto::dart::validate_message(socket_type, message, false)
-                        .map_err(SendPipeError::Invalid)?;
-                }
             }
             let counter = self
                 .data_signal
@@ -409,13 +412,6 @@ impl SendPipeProducer {
         messages: &mut VecDeque<Message>,
         max: usize,
     ) -> core::result::Result<usize, SendPipeError> {
-        #[cfg(feature = "dart")]
-        if let Some(socket_type) = self.dart {
-            for message in messages.iter().take(max) {
-                omq_proto::dart::validate_message(socket_type, message, false)
-                    .map_err(SendPipeError::Invalid)?;
-            }
-        }
         if matches!(self.inner, SendPipeProducerInner::Inproc(_)) {
             let mut count = 0usize;
             while count < max {
@@ -608,6 +604,46 @@ impl SendPipeConsumer {
         }
     }
 
+    /// Transfer Queue entries directly into the IO owner's storage. The
+    /// callback can stop after an entry consumes the remaining destination
+    /// capacity, leaving the following entries in the ring.
+    #[cfg(feature = "dart")]
+    #[inline]
+    pub(crate) fn drain_queue_with(
+        &mut self,
+        max_msgs: usize,
+        max_bytes: usize,
+        mut accept: impl FnMut(Message) -> bool,
+    ) -> Option<(usize, usize)> {
+        let SendPipeConsumerInner::Queue(consumer) = &mut self.inner else {
+            return None;
+        };
+        self.data_signal.begin_drain();
+        consumer.prefetch();
+        let mut count = 0;
+        let mut bytes = 0;
+        while count < max_msgs && bytes < max_bytes {
+            let Some(message) = consumer.pop() else {
+                break;
+            };
+            bytes += message.byte_len();
+            count += 1;
+            if !accept(message) {
+                break;
+            }
+        }
+        if count != 0 {
+            consumer.release();
+            if consumer.len() <= consumer.capacity() / SEND_PIPE_LWM_DIVISOR
+                && self.above_lwm.swap(false, Ordering::AcqRel)
+            {
+                self.space_available.notify_changed();
+            }
+        }
+        self.data_signal.clear_after(consumer.is_empty());
+        Some((count, bytes))
+    }
+
     pub(crate) fn drain_into(
         &mut self,
         batch: &mut Vec<Message>,
@@ -713,6 +749,136 @@ mod tests {
 
     #[cfg(feature = "dart")]
     #[test]
+    fn dart_direct_drain_obeys_budgets_and_preserves_the_suffix() {
+        let (mut tx, mut rx) = send_pipe(4);
+        for body in ["a", "bb", "ccc", "dddd"] {
+            tx.try_send(Message::single(body)).unwrap();
+        }
+        let mut received = Vec::new();
+        assert_eq!(
+            rx.drain_queue_with(0, 4, |_| panic!("zero count")),
+            Some((0, 0))
+        );
+        assert_eq!(
+            rx.drain_queue_with(4, 0, |_| panic!("zero bytes")),
+            Some((0, 0))
+        );
+        assert_eq!(
+            rx.drain_queue_with(1, 10, |message| {
+                received.push(message);
+                true
+            }),
+            Some((1, 1))
+        );
+        assert_eq!(
+            rx.drain_queue_with(4, 2, |message| {
+                received.push(message);
+                true
+            }),
+            Some((1, 2))
+        );
+        assert_eq!(
+            rx.drain_queue_with(4, 10, |message| {
+                received.push(message);
+                false
+            }),
+            Some((1, 3))
+        );
+        assert!(!rx.is_empty());
+        assert_eq!(
+            rx.drain_queue_with(4, 10, |message| {
+                received.push(message);
+                true
+            }),
+            Some((1, 4))
+        );
+        assert_eq!(
+            received
+                .iter()
+                .map(|message| message.part_bytes(0).unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "bb", "ccc", "dddd"]
+        );
+        assert!(rx.is_empty());
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_direct_drain_keeps_admission_until_ack_and_observes_close() {
+        let (mut tx, mut rx) = send_pipe(2);
+        tx.set_dart(omq_proto::SocketType::Scatter);
+        tx.try_send(Message::single("first")).unwrap();
+        tx.try_send(Message::single("second")).unwrap();
+        assert_eq!(rx.drain_queue_with(2, 2048, |_| true), Some((2, 11)));
+        assert!(matches!(
+            tx.try_send(Message::single("third")),
+            Err(SendPipeError::Full(_))
+        ));
+        rx.dart_acknowledge(1);
+        tx.try_send(Message::single("third")).unwrap();
+        drop(tx);
+        assert!(!rx.is_disconnected());
+        assert_eq!(rx.drain_queue_with(2, 2048, |_| true), Some((1, 5)));
+        assert!(rx.is_disconnected());
+
+        let (mut tx, mut rx) = send_pipe(1);
+        tx.set_dart(omq_proto::SocketType::Scatter);
+        tx.try_send(Message::single("retained")).unwrap();
+        assert_eq!(rx.drain_queue_with(1, 2048, |_| true), Some((1, 8)));
+        drop(rx);
+        assert!(matches!(
+            tx.try_send(Message::single("closed")),
+            Err(SendPipeError::Closed(_))
+        ));
+    }
+
+    #[cfg(feature = "dart")]
+    #[tokio::test]
+    async fn dart_direct_drain_rearms_and_reactivates_at_low_water() {
+        let (mut tx, mut rx) = send_pipe(4);
+        for _ in 0..4 {
+            tx.try_send(Message::single("x")).unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(Message::single("full")),
+            Err(SendPipeError::Full(_))
+        ));
+        assert_eq!(rx.drain_queue_with(4, 2048, |_| false), Some((1, 1)));
+        assert!(tx.above_lwm.load(Ordering::Acquire));
+        timeout(Duration::from_millis(10), rx.ready())
+            .await
+            .expect("suffix must rearm");
+        assert_eq!(rx.drain_queue_with(4, 2048, |_| false), Some((1, 1)));
+        assert!(!tx.above_lwm.load(Ordering::Acquire));
+        assert_eq!(rx.drain_queue_with(4, 2048, |_| true), Some((2, 2)));
+        assert!(
+            timeout(Duration::from_millis(10), rx.ready())
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
+    fn dart_direct_drain_leaves_peer_and_conflate_untouched() {
+        for (mut tx, mut rx) in [
+            peer_send_pipe(4, None),
+            send_pipe_with_mode(4, SendPipeMode::Conflate),
+        ] {
+            tx.try_send(Message::single("body")).unwrap();
+            assert_eq!(
+                rx.drain_queue_with(4, 2048, |_| panic!("not a Queue")),
+                None
+            );
+            assert!(!rx.data_signal.is_idle());
+            let mut staged = Vec::new();
+            assert_eq!(rx.drain_into(&mut staged, 4, 2048), 1);
+            assert_eq!(staged[0].part_bytes(0).unwrap().as_ref(), b"body");
+        }
+    }
+
+    #[cfg(feature = "dart")]
+    #[test]
     fn dart_drain_keeps_send_admission_until_ack() {
         let (mut tx, mut rx) = send_pipe(2);
         tx.set_dart(omq_proto::SocketType::Scatter);
@@ -740,7 +906,10 @@ mod tests {
         tx.set_dart(omq_proto::SocketType::Scatter);
         tx.try_send(Message::single("first")).unwrap();
         assert!(matches!(
-            tx.try_send(Message::from_slice(&[7; 1025])),
+            tx.try_send(Message::multipart([
+                bytes::Bytes::from_static(b"first"),
+                bytes::Bytes::from_static(b"second"),
+            ])),
             Err(SendPipeError::Invalid(_))
         ));
     }

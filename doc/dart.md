@@ -29,16 +29,18 @@ nonzero port. Endpoints are unicast. Other socket types are rejected.
 Each message has one application body; fragmented bodies advertise a u64 length.
 PEER identity and RADIO group prefixes are routing metadata. RADIO groups
 occupy 1 to 255 bytes. Small
-bodies use DATA packets; larger bodies use FIRST (`0x41`, with the full u64
-body length) and consecutive CONT (`0x42`) packets. Each complete UDP payload
-stays within 1200 bytes. Fragment sizes account for FIRST's extra metadata so
-nonfinal datagrams have equal wire lengths and can share a GSO batch.
+bodies use DATA packets; larger bodies use FIRST (`0x81`, with the full u64
+body length) and consecutive CONT (`0x82`) packets. DATA and fragments stay
+within 1200 bytes. Fragment sizes account for FIRST's extra metadata.
+When other messages are queued, the sender uses at most one extra fragment
+to equalize all wire lengths when possible, allowing GSO/GRO batches to span
+message boundaries. Isolated messages use the minimum fragment count.
 The receiver checks `max_message_size` before reserving the complete body,
 fills it incrementally, and delivers it atomically. There is no 64 KiB cap.
 Multipart application bodies fail before enqueueing.
 
-Data datagrams opportunistically pack up to 64 already queued messages for
-one peer, within the 1200-byte limit. A count byte and one byte per payload
+Data datagrams opportunistically pack up to 128 already queued messages for
+one peer, within a 1452-byte limit. A count byte and one byte per payload
 form the length table; payloads are concatenated after the session header.
 Payloads over 255 bytes, including group metadata, use individual DATA
 datagrams. There are no length escapes. An isolated message uses DATA framing and
@@ -51,47 +53,45 @@ liveness, including when the application holds all receive storage. Expired
 peers can return automatically.
 `wait_connected` confirms local admission; it does not guarantee delivery.
 
-## Write, freeze, send
+## Preparing messages
 
 Use ordinary `Socket` construction, bind/connect, and send/receive methods.
-After setup, acquire and fill a body without allocating another payload:
+Buffer preparation is transport-independent. Create an optional standalone
+pool with `BufferPool::new(bytes_per_buffer, count)` and reuse its handle:
 
 ```rust
-use omq_tokio::Socket;
+use omq_tokio::{BufferPool, Socket};
 
-async fn publish(scatter: &Socket) -> omq_tokio::Result<bool> {
-    let Some(mut buffer) = scatter.try_dart_buffer()? else {
+async fn publish(scatter: &Socket, pool: &BufferPool, data: &[u8]) -> omq_tokio::Result<bool> {
+    let Some(message) = pool.try_message(data.len(), |body| {
+        body.copy_from_slice(data);
+    })? else {
         return Ok(false); // Existing owners hold every buffer. Retry later.
     };
-    buffer.writable()[..5].copy_from_slice(b"hello");
-    buffer.set_len(5).expect("body fits");
-    scatter.send(buffer.into_message()).await?;
+    scatter.send(message).await?;
     Ok(true)
 }
 ```
 
-`try_dart_buffer` initializes the socket's fixed pool on first use.
-`Ok(None)` means exhaustion; it never grows the pool. Socket clones share
-the pool. Set the declared length before freezing. Only that prefix is sent.
-The pool still provides 1024-byte buffers. Send larger bodies as ordinary
-`Message` values; the IO task performs fragmentation.
+`try_message` stores bodies up to 55 bytes inline without a pool checkout or
+allocation. Larger bodies use pooled storage when they fit; `Ok(None)` means
+the pool is exhausted. Bodies exceeding its buffer size own a heap allocation.
+Pool buffers never grow. Dart fragmentation happens on the IO task above the
+1 KiB wire body limit.
 
-For repeated batch preparation, call `dart_pool` once and reuse its borrowed
-reference or clone the pool handle. `pool.try_take()` skips socket lifecycle
-checks for each buffer. A retained pool handle keeps the entire pool alive
-after socket close; sends through the closed socket still fail with `Closed`.
-
-Preallocate a `Vec<DartBuffer>` and use `pool.try_take_many_into(limit,
-&mut buffers)` for batch preparation. It appends up to 64 buffers without
-growing the vector. `pool.recycle_many(&mut messages, limit)` drops up to
-64 messages and returns their final pooled owners together. Retained clones
-and byte views still prevent reuse. Returned buffers are globally available
-when the call ends; no thread-local free cache survives it. Pool setup also
-reserves batch metadata, about 0.5 KiB per buffer on 64-bit targets.
+`pool.try_take()` exposes fixed writable storage for manual filling; set its
+length before `into_message`. This consumes writable access and transfers the
+body into an immutable message without copying. Pool clones share storage;
+they have no socket lifecycle dependency. Batch checkout and
+`BufferPool::recycle_many` are bounded by count and bytes. Concurrent clone
+releases use bounded deferred reclamation without per-slot locks.
 
 `try_send` returns the original message on `Full`. Retain and retry it.
-`recv` returns an immutable `Message`; small bodies use the receive pool and
-large bodies own their assembled allocation. Borrow with `part_slice`.
+`recv` returns an immutable `Message`; ungrouped bodies up to 55 bytes are
+inline, except PEER bodies, which use pooled storage for their identity prefix.
+Bodies up to 2 KiB normally use the receive pool, including fragment
+assembly. Larger bodies own their allocation.
+Borrow with `part_slice`.
 Message clones and byte views retain their storage until the last owner
 is dropped. Buffers and messages may outlive a closed socket. Creating an
 independently owned `Bytes` adapter can allocate; borrowing does not.
@@ -107,8 +107,8 @@ Configure `Options::dart` before constructing the socket:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `pool_buffers` | 1024 | Caller send body pool; must be nonzero |
-| `window_messages` | 256 | Private receive and retention slots per peer; power of two, at most 65536 |
+| `pool_buffers` | 8192 | Internal receive buffers per socket; 2 KiB each, must be nonzero |
+| `window_messages` | 256 | Receive and retention positions per peer; power of two, at most 65536 |
 | `max_ready_peers` | 1024 | Ready peer cap across all Dart endpoints |
 | `io_spin` | Zero | At most 50 microseconds; `Duration::MAX` polls continuously |
 | `congestion` | Adaptive | Congestion window, pacing, and validated ECN; LAN uses fixed credit |
@@ -117,9 +117,15 @@ Configure `Options::dart` before constructing the socket:
 
 `pool_buffers` also bounds simultaneous blocked native RADIO publications
 per sender scope. Queued and unacknowledged messages retain send admission.
-Full receive windows stop new transmissions until final message owners return
-storage. The caller pool is separate from each peer's receive pool. Control
-traffic continues while receive credit is closed.
+Full receive windows stop new transmissions until storage is reusable.
+All peers share the socket's internal receive pool, separate from application
+send pools. The default receive pool reserves 16 MiB of body storage plus
+metadata. Pooled credit returns with the last owner; inline credit returns
+when the bounded application queue accepts its independent message value.
+Control traffic continues while receive credit is closed.
+Receive ownership remains bounded by peer windows and socket HWM. If the
+shared pool is exhausted, owned receive allocations allow gap repair to
+progress without waiting for other peers' retained pooled storage.
 For large messages, intermediate fragment slots return credit as the reserved
 body fills. The final slot remains charged until the assembled body's last
 clone or byte view is dropped, so even a one-slot window can carry large bodies.

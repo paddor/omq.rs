@@ -181,6 +181,8 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
         "io_threads":usize::from(args.runtime == "owned"), "runtime_polling":args.runtime == "current-poll",
         "measurement_order":args.common.order, "dart_wire_version":receive_ready["dart_wire_version"],
         "dart_window_messages": (transport == "dart").then_some(args.window_messages),
+        "dart_pool_buffers": (transport == "dart").then_some(&receive_ready["dart_pool_buffers"]),
+        "dart_buffer_capacity": (transport == "dart").then_some(&receive_ready["dart_buffer_capacity"]),
         "congestion": if transport == "dart" { Some(&args.congestion) } else { None },
         "offloads_before":{"receive":receive_ready["offloads"], "send":send_ready["offloads"]}});
     verify(&mut row, args, samples);

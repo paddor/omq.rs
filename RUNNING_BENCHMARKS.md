@@ -252,7 +252,9 @@ perf report --stdio --no-inline --no-children -g none --percent-limit 1 \
 
 SCATTER/GATHER measures messages received by the application. CLIENT/SERVER
 measures RTT with the latency profile on both endpoints. Both transports use
-pooled bodies and the same body sizes, application spin, and CPU placement.
+the same body sizes, application spin, and CPU placement. Dart initializes an
+8192-buffer, 2 KiB standalone send pool, separate from its internal receive
+pool. Bodies up to 55 bytes stay inline; larger bodies use pooled or owned storage.
 Dart also has an independent IO spin budget. Bounded spins are at most 50 us.
 Use `--continuous-spin` and `--continuous-io-spin` to compare continuous
 application and Dart IO polling independently. These select `Duration::MAX`
@@ -260,17 +262,17 @@ instead of the corresponding bounded budget and are excluded from charts.
 Continuous IO polling requires `--transport dart`. Save experiments with
 `--output` to keep the normal benchmark cohorts separate.
 Throughput enables `recv_batching` for both transports. Latency uses ordinary
-single-message receives. Sender batch preparation reuses the bounded pool
-handle rather than checking socket lifecycle for every buffer. Preparation
-and recycling use bounded pool batches. Sender capacity retries also use the
-application spin limit, then yield; successful sends reset that wait window.
-Successful throughput batches check their phase and deadline once. Empty
-pool/capacity probes share a timestamp for up to eight attempts; capacity
-waits compare an absolute deadline. Latency still timestamps each measured
-round trip before send and after receive to retain individual percentiles.
+single-message receives. The sender submits one message per `try_send` call
+and reuses its pool handle. Datagram packing happens inside Dart.
+Sender capacity retries use the application spin limit, then yield;
+successful sends reset that wait window. Throughput checks time every 64
+successful sends. Empty pool/capacity probes share a timestamp for up to
+eight attempts; capacity waits compare an absolute deadline.
+Latency timestamps each measured round trip before send and after receive
+to retain individual percentiles.
 `--window-messages` varies Dart's receive/retention slots per peer (default
 256). Both peers report the actual window, and the runner checks it. Save
-window experiments with `--output`; standard charts require 256 slots.
+window experiments with `--output`; the Dart transport charts require 256 slots.
 
 Build the peer, then pass its executable path to the Linux runner:
 
@@ -299,7 +301,7 @@ counts, spin budgets, receive batching, receive/retention windows, and CPU IDs.
 Monotonic sequence tags and their complements verify ordered, unique,
 uncorrupted delivery. Missing
 messages or acknowledgments after the drain stop the run.
-Dart packs up to 64 already queued messages per datagram without waiting,
+Dart packs up to 128 already queued messages per datagram without waiting,
 using a count byte, byte-length table, session header, and concatenated
 payloads. Payloads over 255 bytes use individual DATA datagrams with no
 length escapes. GSO/GRO additionally batch complete datagrams.

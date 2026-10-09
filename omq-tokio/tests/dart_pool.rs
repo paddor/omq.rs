@@ -5,8 +5,8 @@ use std::cell::Cell;
 
 use omq_proto::dart;
 use omq_tokio::message::Message;
-use omq_tokio::transport::dart::{DartIo, DartPool, ReceiveBatch};
-use omq_tokio::{DartOptions, Endpoint, Error, Options, Socket, SocketType};
+use omq_tokio::transport::dart::{DartIo, ReceiveBatch};
+use omq_tokio::{BufferPool, Error, Options, Socket, SocketType};
 
 struct CountingAllocator;
 
@@ -42,8 +42,8 @@ async fn warm_runtime(task_count: usize) {
     }
 }
 
-async fn radio_delivery(radio: &Socket, dishes: &[Socket], size: usize) {
-    let mut buffer = radio.try_dart_buffer().unwrap().unwrap();
+async fn radio_delivery(pool: &BufferPool, radio: &Socket, dishes: &[Socket], size: usize) {
+    let mut buffer = pool.try_take().unwrap();
     buffer.writable()[..size].fill(7);
     buffer.set_len(size).unwrap();
     radio
@@ -71,6 +71,7 @@ async fn radio_delivery(radio: &Socket, dishes: &[Socket], size: usize) {
 async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
     let mut counts = [[0; 2]; 2];
     for (policy, nodrop) in [false, true].into_iter().enumerate() {
+        let pool = BufferPool::new(2048, 8192);
         let radio = Socket::new(
             SocketType::Radio,
             Options {
@@ -103,12 +104,12 @@ async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
         warm_runtime(2 * (dishes.len() + 1)).await;
         for (index, size) in [16, 1024].into_iter().enumerate() {
             for _ in 0..16 {
-                radio_delivery(&radio, &dishes, size).await;
+                radio_delivery(&pool, &radio, &dishes, size).await;
             }
             TRACE_FIRST.with(|trace| trace.set(std::env::var_os("OMQ_ALLOC_TRACE").is_some()));
             ALLOCATIONS.with(|count| count.set(Some(0)));
             for _ in 0..128 {
-                radio_delivery(&radio, &dishes, size).await;
+                radio_delivery(&pool, &radio, &dishes, size).await;
             }
             counts[policy][index] = ALLOCATIONS.with(|count| count.replace(None).unwrap());
         }
@@ -124,6 +125,7 @@ async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
 fn native_blocking_send_and_parked_receive_do_not_allocate() {
     let context = omq_tokio::Context::with_name("hf-alloc");
     let sender = context.blocking_socket(SocketType::Channel, Options::default());
+    let pool = BufferPool::new(2048, 8192);
     let receiver = context.blocking_socket(SocketType::Channel, Options::default());
     sender
         .connect(
@@ -149,7 +151,7 @@ fn native_blocking_send_and_parked_receive_do_not_allocate() {
             TRACE_FIRST.with(|trace| trace.set(std::env::var_os("OMQ_ALLOC_TRACE").is_some()));
             ALLOCATIONS.with(|count| count.set(Some(0)));
         }
-        let mut buffer = sender.try_dart_buffer().unwrap().unwrap();
+        let mut buffer = pool.try_take().unwrap();
         buffer.writable()[..16].fill(7);
         buffer.set_len(16).unwrap();
         sender.send(buffer.into_message()).unwrap();
@@ -182,6 +184,7 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
 
     let context = omq_tokio::Context::with_name("hf-full-alloc");
     let sender = context.blocking_socket(SocketType::Scatter, Options::default().send_hwm(1));
+    let pool = BufferPool::new(2048, 8192);
     let receiver = context.blocking_socket(SocketType::Gather, Options::default());
     sender
         .connect(
@@ -193,7 +196,6 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
     for socket in [&sender, &receiver] {
         socket.wait_connected(1, Duration::from_secs(3)).unwrap();
     }
-    let pool = sender.dart_pool().unwrap().clone();
     let mut allocations = 0;
     for iteration in 0..18 {
         // Receipt, rather than popping the send ring, now frees HWM capacity.
@@ -262,9 +264,9 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
     );
 }
 
-async fn radio_burst(radio: &Socket, dishes: &[Socket]) {
+async fn radio_burst(pool: &BufferPool, radio: &Socket, dishes: &[Socket]) {
     for value in 0..32u8 {
-        let mut buffer = radio.try_dart_buffer().unwrap().unwrap();
+        let mut buffer = pool.try_take().unwrap();
         buffer.writable()[..16].fill(value);
         buffer.set_len(16).unwrap();
         radio
@@ -294,6 +296,7 @@ async fn radio_burst(radio: &Socket, dishes: &[Socket]) {
 
 #[tokio::test]
 async fn native_radio_nodrop_bursts_do_not_allocate() {
+    let pool = BufferPool::new(2048, 8192);
     let radio = Socket::new(
         SocketType::Radio,
         Options {
@@ -329,12 +332,12 @@ async fn native_radio_nodrop_bursts_do_not_allocate() {
     }
     warm_runtime(2 * (dishes.len() + 1)).await;
     for _ in 0..2 {
-        radio_burst(&radio, &dishes).await;
+        radio_burst(&pool, &radio, &dishes).await;
     }
     TRACE_FIRST.with(|trace| trace.set(std::env::var_os("OMQ_ALLOC_TRACE").is_some()));
     ALLOCATIONS.with(|count| count.set(Some(0)));
     for _ in 0..4 {
-        radio_burst(&radio, &dishes).await;
+        radio_burst(&pool, &radio, &dishes).await;
     }
     let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
     radio.close().await.unwrap();
@@ -368,15 +371,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-fn message(pool: &DartPool, length: usize) -> Message {
+fn message(pool: &BufferPool, length: usize) -> Message {
     let mut buffer = pool.try_take().unwrap();
     buffer.writable()[..length].fill(7);
     buffer.set_len(length).unwrap();
     buffer.into_message()
 }
 
-async fn native_delivery(sender: &Socket, receiver: &Socket, size: usize) {
-    let mut buffer = sender.try_dart_buffer().unwrap().unwrap();
+async fn native_delivery(pool: &BufferPool, sender: &Socket, receiver: &Socket, size: usize) {
+    let mut buffer = pool.try_take().unwrap();
     buffer.writable()[..size].fill(7);
     buffer.set_len(size).unwrap();
     let body = buffer.into_message();
@@ -415,6 +418,7 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
         (SocketType::Peer, SocketType::Peer),
         (SocketType::Radio, SocketType::Dish),
     ] {
+        let pool = BufferPool::new(2048, 8192);
         let sender = Socket::new(
             send,
             Options::default().identity(bytes::Bytes::from_static(b"sender")),
@@ -445,11 +449,12 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         for size in [16, 64, 256, 1024] {
             for _ in 0..16 {
-                native_delivery(&sender, &receiver, size).await;
+                native_delivery(&pool, &sender, &receiver, size).await;
             }
+            TRACE_FIRST.with(|trace| trace.set(std::env::var_os("OMQ_ALLOC_TRACE").is_some()));
             ALLOCATIONS.with(|count| count.set(Some(0)));
             for _ in 0..128 {
-                native_delivery(&sender, &receiver, size).await;
+                native_delivery(&pool, &sender, &receiver, size).await;
             }
             let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
             assert_eq!(count, 0, "native {send:?}/{recv:?}, {size} bytes");
@@ -461,7 +466,7 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
 
 #[test]
 fn pooled_server_routing_and_cloning_do_not_allocate() {
-    let pool = DartPool::new(1);
+    let pool = BufferPool::new(2048, 1);
     for size in [0, 16, 64, 256, 1024] {
         let body = message(&pool, size);
         let pointer = body.part_slice(0).unwrap().as_ptr();
@@ -481,7 +486,7 @@ fn pooled_server_routing_and_cloning_do_not_allocate() {
 
 #[test]
 fn pooled_peer_and_radio_prefixes_and_cloning_do_not_allocate() {
-    let pool = DartPool::new(1);
+    let pool = BufferPool::new(2048, 1);
     for size in [0, 16, 64, 256, 1024] {
         let body = message(&pool, size);
         let pointer = body.part_slice(0).unwrap().as_ptr();
@@ -506,7 +511,7 @@ fn pooled_peer_and_radio_prefixes_and_cloning_do_not_allocate() {
 
 #[test]
 fn buffer_acquisition_clone_freeze_drop_and_exhaustion_do_not_allocate() {
-    let pool = DartPool::new(4);
+    let pool = BufferPool::new(2048, 4);
     let mut messages: [Option<Message>; 4] = std::array::from_fn(|_| None);
     ALLOCATIONS.with(|count| count.set(Some(0)));
     for size in [0, 16, 64, 256, 1024] {
@@ -515,7 +520,7 @@ fn buffer_acquisition_clone_freeze_drop_and_exhaustion_do_not_allocate() {
                 let mut buffer = pool.try_take().unwrap();
                 buffer.writable()[..size].fill(7);
                 buffer.set_len(size).unwrap();
-                assert!(buffer.set_len(1025).is_err());
+                assert!(buffer.set_len(buffer.capacity() + 1).is_err());
                 let owned = buffer.into_message();
                 let clone = owned.clone();
                 assert_eq!(clone.part_slice(0).unwrap().len(), size);
@@ -620,86 +625,9 @@ async fn reusable_udp_io_and_segmentation_do_not_allocate() {
     assert_eq!(allocations, 0);
 }
 
-#[tokio::test]
-async fn socket_clones_share_capacity_without_allocating_after_setup() {
-    let socket = Socket::new(
-        SocketType::Scatter,
-        Options {
-            dart: DartOptions {
-                pool_buffers: 1,
-                ..DartOptions::default()
-            },
-            ..Options::default()
-        },
-    );
-    let clone = socket.clone();
-    let pool = socket.dart_pool().unwrap().clone();
-    assert_eq!(pool.capacity(), 1);
-    drop(socket.try_dart_buffer().unwrap().unwrap());
-    ALLOCATIONS.with(|count| count.set(Some(0)));
-    for _ in 0..128 {
-        let mut buffer = pool.try_take().unwrap();
-        assert!(clone.try_dart_buffer().unwrap().is_none());
-        assert!(clone.dart_pool().unwrap().try_take().is_none());
-        buffer.writable()[..16].fill(7);
-        buffer.set_len(16).unwrap();
-        let message = buffer.into_message();
-        let held = message.clone();
-        drop(message);
-        assert!(socket.try_dart_buffer().unwrap().is_none());
-        drop(held);
-        assert!(clone.try_dart_buffer().unwrap().is_some());
-    }
-    let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
-    assert_eq!(count, 0);
-    let mut held = socket.try_dart_buffer().unwrap().unwrap();
-    clone.close().await.unwrap();
-    assert!(matches!(socket.try_dart_buffer(), Err(Error::Closed)));
-    assert!(matches!(socket.dart_pool(), Err(Error::Closed)));
-    held.writable()[0] = 9;
-    held.set_len(1).unwrap();
-    drop(socket);
-    let message = held.into_message();
-    assert_eq!(message.part_slice(0), Some([9].as_slice()));
-    assert!(pool.try_take().is_none());
-    drop(message);
-    assert_eq!(pool.available(), 1);
-    assert!(pool.try_take().is_some());
-}
-
-#[tokio::test]
-async fn socket_pool_messages_use_existing_socket_send_and_recv() {
-    let endpoint = Endpoint::Inproc {
-        name: "dart-pool-existing-routing".into(),
-    };
-    let sink = Socket::new(SocketType::Gather, Options::default());
-    sink.bind(endpoint.clone()).await.unwrap();
-    let source = Socket::new(SocketType::Scatter, Options::default());
-    source.connect(endpoint).await.unwrap();
-    for length in [0, 16, 64, 256, 1024] {
-        let mut buffer = source.try_dart_buffer().unwrap().unwrap();
-        buffer.writable()[..length].fill(7);
-        buffer.set_len(length).unwrap();
-        source.send(buffer.into_message()).await.unwrap();
-        let message = tokio::time::timeout(std::time::Duration::from_secs(5), sink.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(message.part_slice(0), Some([7; 1024][..length].as_ref()));
-    }
-    source.close().await.unwrap();
-    sink.close().await.unwrap();
-    let unsupported = Socket::new(SocketType::Push, Options::default());
-    assert!(matches!(
-        unsupported.try_dart_buffer(),
-        Err(Error::Protocol(_))
-    ));
-    unsupported.close().await.unwrap();
-}
-
 #[test]
 fn bulk_pool_transfers_do_not_allocate() {
-    let pool = DartPool::new(64);
+    let pool = BufferPool::new(1024, 64);
     let mut buffers = Vec::with_capacity(64);
     let mut messages = Vec::with_capacity(64);
     ALLOCATIONS.with(|count| count.set(Some(0)));
@@ -710,7 +638,7 @@ fn bulk_pool_transfers_do_not_allocate() {
             buffer.set_len(16).unwrap();
             messages.push(buffer.into_message());
         }
-        assert_eq!(pool.recycle_many(&mut messages, 64), 64);
+        assert_eq!(BufferPool::recycle_many(&mut messages, 64), 64);
         assert_eq!(pool.available(), 64);
     }
     assert_eq!(ALLOCATIONS.with(|count| count.replace(None).unwrap()), 0);

@@ -5,7 +5,7 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
+use omq_tokio::{BufferPool, Endpoint, Message, Options, Socket, SocketType};
 
 fn ipc_ep(name: &str) -> Endpoint {
     test_support::ipc_endpoint(&format!("cov-{name}"))
@@ -36,6 +36,77 @@ async fn push_pull_roundtrip(server: &Socket, client_ep: Endpoint) {
         .unwrap()
         .unwrap();
     assert_eq!(m, Message::single("hi"));
+}
+
+#[tokio::test]
+async fn explicit_buffers_work_over_inproc_and_tcp() {
+    for endpoint in [inproc_ep("buffers"), test_support::tcp_loopback(0)] {
+        let pull = Socket::new(SocketType::Pull, Options::default());
+        let push = Socket::new(SocketType::Push, Options::default());
+        let bound = pull.bind(endpoint).await.unwrap();
+        push.connect(bound).await.unwrap();
+        let pool = BufferPool::new(128, 1);
+        let clone = pool.clone();
+        for size in [0, 16, 55, 56, 128, 129, 4096] {
+            let message = pool
+                .try_message(size, |body| body.fill(7))
+                .unwrap()
+                .unwrap();
+            let held = message.clone();
+            let pooled = (56..=128).contains(&size);
+            push.send(message).await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.part_slice(0), Some(vec![7; size].as_slice()));
+            if pooled {
+                assert!(
+                    clone
+                        .try_message(size, |_| panic!("still held"))
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert_eq!(clone.available(), 1);
+            }
+            drop(held);
+            drop(received);
+        }
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    }
+}
+
+#[test]
+fn explicit_buffers_work_with_blocking_sockets_and_outlive_them() {
+    let context = omq_tokio::Context::new();
+    let pull = context.blocking_socket(SocketType::Pull, Options::default());
+    let push = context.blocking_socket(SocketType::Push, Options::default());
+    let bound = pull.bind(test_support::tcp_loopback(0)).unwrap();
+    push.connect(bound).unwrap();
+    let pool = BufferPool::new(128, 1);
+    for size in [16, 128, 129] {
+        let message = pool
+            .try_message(size, |body| body.fill(9))
+            .unwrap()
+            .unwrap();
+        push.send(message).unwrap();
+        let received = pull.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(received.part_slice(0), Some(vec![9; size].as_slice()));
+    }
+    // Explicit pools and checked-out buffers have no socket lifecycle dependency.
+    let mut buffer = pool.try_take().unwrap();
+    buffer.writable()[..64].fill(3);
+    buffer.set_len(64).unwrap();
+    push.close().unwrap();
+    pull.close().unwrap();
+    context.term();
+    let message = buffer.into_message();
+    assert_eq!(message.part_slice(0), Some([3; 64].as_slice()));
+    assert!(pool.try_take().is_none());
+    drop(message);
+    assert_eq!(pool.available(), 1);
 }
 
 async fn req_rep_roundtrip(server: &Socket, client_ep: Endpoint) {

@@ -237,6 +237,9 @@ use native blocking waits and RCVTIMEO. Multipart remainders live in `rxbuf`;
 Sync polling may stage a raw item using `try_recv_for_external_recv()`.
 `prepare_external_recv()` runs only when the application consumes that item,
 so polling cannot advance REQ/REP state or select a REP reply route.
+`Poller` reports POLLOUT when a nonblocking send would be accepted. Polls with
+async sockets subscribe private wait signals to the process receive signal;
+each waiting thread wakes on readiness without consuming another thread's wake.
 
 ## Async send/recv
 
@@ -459,9 +462,6 @@ that drains the tokio broadcast channel into a `flume::Receiver`. A
 ## Known limitations
 
 - `wait_ready` and `wait_any` return socket IDs, not file descriptors.
-- `Poller` reports POLLOUT like libzmq: when a nonblocking send would be
-  accepted. Polls that include an async socket wait in 100 ms slices on the
-  shared receive signal; other polls park until a socket wakes them.
 
 ## Direct-path measurements
 

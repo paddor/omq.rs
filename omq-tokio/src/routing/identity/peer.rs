@@ -278,14 +278,60 @@ impl PeerRoutes {
     pub(super) fn is_drained(&self) -> bool {
         self.table.load().as_ref().is_none_or(|table| {
             table.values().all(|route| {
-                route
+                let root_empty = route
                     .target
                     .lock()
                     .expect("peer send queue poisoned")
                     .as_ref()
-                    .is_none_or(PeerTarget::is_empty)
+                    .is_none_or(PeerTarget::is_empty);
+                root_empty
+                    && route
+                        .lanes
+                        .lock()
+                        .expect("peer lanes poisoned")
+                        .iter()
+                        .all(|lane| {
+                            lane.upgrade().is_none_or(|lane| {
+                                lane.producer
+                                    .lock()
+                                    .expect("peer producer poisoned")
+                                    .as_ref()
+                                    .is_none_or(SendPipeProducer::is_empty)
+                            })
+                        })
             })
         })
+    }
+
+    pub(super) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        if let Some(table) = self.table.load().as_ref() {
+            for route in table.values() {
+                if let Some(target) = route
+                    .target
+                    .lock()
+                    .expect("peer send queue poisoned")
+                    .as_ref()
+                {
+                    target.watch_close(progress);
+                }
+                for lane in route
+                    .lanes
+                    .lock()
+                    .expect("peer lanes poisoned")
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                {
+                    if let Some(producer) = lane
+                        .producer
+                        .lock()
+                        .expect("peer producer poisoned")
+                        .as_ref()
+                    {
+                        producer.watch_close(progress);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn try_send(

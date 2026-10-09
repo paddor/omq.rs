@@ -16,7 +16,7 @@
 //! peer task. Registry requests retain their multi-producer Tokio queue.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustc_hash::FxHashMap;
 
@@ -311,6 +311,7 @@ pub(crate) struct InprocSender {
 struct SenderInner {
     port: Arc<InprocPort>,
     backlog: ParkingMutex<Backlog>,
+    close_progress: OnceLock<Arc<StateSignal>>,
     /// True until the connect-side pipe is empty. Written under the
     /// backlog lock; the send fast path reads it without the lock.
     backlog_pending: std::sync::atomic::AtomicBool,
@@ -332,10 +333,22 @@ enum Flush {
 }
 
 impl InprocSender {
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        let existing = self.inner.close_progress.get_or_init(|| progress.clone());
+        debug_assert!(Arc::ptr_eq(existing, progress));
+    }
+
+    fn notify_close_progress(&self) {
+        if let Some(progress) = self.inner.close_progress.get() {
+            progress.notify_changed();
+        }
+    }
+
     pub(crate) fn new(port: Arc<InprocPort>, pre_ready: Option<SendPipeConsumer>) -> Self {
         Self {
             inner: Arc::new(SenderInner {
                 port,
+                close_progress: OnceLock::new(),
                 backlog_pending: std::sync::atomic::AtomicBool::new(pre_ready.is_some()),
                 backlog: ParkingMutex::new(Backlog {
                     pre_ready,
@@ -396,6 +409,7 @@ impl InprocSender {
                     Err(SendPipeError::Closed(_)) => {
                         backlog.pre_ready = None;
                         self.inner.backlog_pending.store(false, Ordering::Release);
+                        self.notify_close_progress();
                         return Flush::Closed;
                     }
                 }
@@ -409,6 +423,7 @@ impl InprocSender {
             if drained == 0 {
                 backlog.pre_ready = None;
                 self.inner.backlog_pending.store(false, Ordering::Release);
+                self.notify_close_progress();
                 return Flush::Done;
             }
             backlog.stalled = backlog.batch.pop();

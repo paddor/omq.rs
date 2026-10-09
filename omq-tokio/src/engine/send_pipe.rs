@@ -201,6 +201,15 @@ pub(crate) fn inproc_send_pipe(sender: crate::transport::inproc::InprocSender) -
 }
 
 impl SendPipeProducer {
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        self.data_signal.watch_idle(progress);
+        if let Some(slot) = &self.direct_slot {
+            slot.data_signal.watch_idle(progress);
+        }
+        if let SendPipeProducerInner::Inproc(sender) = &self.inner {
+            sender.watch_close(progress);
+        }
+    }
     #[cfg(feature = "dart")]
     pub(crate) fn set_dart(&mut self, socket_type: omq_proto::SocketType) {
         self.dart = Some(socket_type);

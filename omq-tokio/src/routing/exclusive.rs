@@ -186,6 +186,12 @@ impl ExclusiveSend {
         let guard = self.pipe.lock().expect("exclusive pipe");
         guard.as_ref().is_none_or(SendPipeProducer::is_empty)
     }
+
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        if let Some(pipe) = self.pipe.lock().expect("exclusive pipe").as_ref() {
+            pipe.watch_close(progress);
+        }
+    }
 }
 
 #[cfg(test)]

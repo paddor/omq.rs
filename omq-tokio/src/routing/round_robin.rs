@@ -601,6 +601,13 @@ impl RoundRobinSend {
         let inactive_empty = guard.inactive.iter().all(|pipe| pipe.tx.is_empty());
         active_empty && inactive_empty
     }
+
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        let guard = self.active.lock().expect("round_robin active");
+        for pipe in guard.active.iter().chain(&guard.inactive) {
+            pipe.tx.watch_close(progress);
+        }
+    }
 }
 
 #[cfg(test)]

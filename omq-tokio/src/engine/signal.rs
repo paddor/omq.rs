@@ -360,6 +360,7 @@ pub(crate) struct DataSignal {
     pub(crate) dart_admission: std::sync::OnceLock<omq_proto::dart::AdmissionCounter>,
     #[cfg(feature = "dart")]
     endpoint: std::sync::OnceLock<Arc<DataSignal>>,
+    close_progress: std::sync::OnceLock<Arc<StateSignal>>,
     state: AtomicU8,
     notify: Notify,
 }
@@ -380,8 +381,20 @@ impl DataSignal {
             dart_admission: std::sync::OnceLock::new(),
             #[cfg(feature = "dart")]
             endpoint: std::sync::OnceLock::new(),
+            close_progress: std::sync::OnceLock::new(),
             state: AtomicU8::new(IDLE),
             notify: new_notify(),
+        }
+    }
+
+    pub(crate) fn watch_idle(&self, progress: &Arc<StateSignal>) {
+        let existing = self.close_progress.get_or_init(|| progress.clone());
+        debug_assert!(Arc::ptr_eq(existing, progress));
+    }
+
+    pub(crate) fn notify_close_progress(&self) {
+        if let Some(progress) = self.close_progress.get() {
+            progress.notify_changed();
         }
     }
 
@@ -459,7 +472,12 @@ impl DataSignal {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => return false,
+                    Ok(_) => {
+                        if let Some(progress) = self.close_progress.get() {
+                            progress.notify_changed();
+                        }
+                        return false;
+                    }
                     Err(next) => state = next,
                 },
                 DIRTY => return self.rearm(),
@@ -507,6 +525,9 @@ impl DataSignal {
     pub(crate) fn wake_all(&self) {
         self.state.store(PENDING, Ordering::Release);
         self.notify.notify_waiters();
+        if let Some(progress) = self.close_progress.get() {
+            progress.notify_changed();
+        }
     }
 
     /// Wait until data is marked pending.

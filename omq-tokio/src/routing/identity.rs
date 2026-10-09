@@ -46,6 +46,13 @@ enum PeerTarget {
 }
 
 impl PeerTarget {
+    fn watch_close(&self, progress: &Arc<StateSignal>) {
+        match self {
+            Self::Pipe(pipe) | Self::RepInproc(pipe) => pipe.watch_close(progress),
+            Self::Direct(target) => target.watch_close(progress),
+            Self::Inbox(inbox) => inbox.watch_close(progress),
+        }
+    }
     fn outbound(&self, lanes: &crate::engine::data_inbox::SenderLanes) -> Option<PeerOutbound> {
         match self {
             Self::Direct(target) => Some(target.bind(lanes)),
@@ -842,6 +849,17 @@ impl IdentitySend {
         }
         let g = self.inner.lock().expect("identity inner poisoned");
         g.peers.values().all(|p| p.target.is_empty())
+    }
+
+    pub(crate) fn watch_close(&self, progress: &Arc<StateSignal>) {
+        if let Some(peer) = &self.peer {
+            peer.watch_close(progress);
+            return;
+        }
+        let guard = self.inner.lock().expect("identity inner poisoned");
+        for peer in guard.peers.values() {
+            peer.target.watch_close(progress);
+        }
     }
 }
 

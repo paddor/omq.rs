@@ -38,11 +38,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "sleep(Duration::from_millis(50))",
         "accept error backoff, not a readiness poll",
     ),
-    (
-        "omq-tokio/src/socket/actor/mod.rs",
-        "sleep(Duration::from_millis(1))",
-        "close drain: send queues have no became-empty signal",
-    ),
 ];
 
 #[test]

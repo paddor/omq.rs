@@ -54,9 +54,13 @@ fn usage() -> (Duration, i64) {
     // SAFETY: getrusage succeeded.
     let usage = unsafe { usage.assume_init() };
     let micros = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+    #[cfg(target_pointer_width = "32")]
+    let switches = i64::from(usage.ru_nvcsw);
+    #[cfg(target_pointer_width = "64")]
+    let switches = usage.ru_nvcsw;
     (
         Duration::from_micros(micros(usage.ru_utime) + micros(usage.ru_stime)),
-        usage.ru_nvcsw,
+        switches,
     )
 }
 

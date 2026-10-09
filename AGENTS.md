@@ -70,8 +70,9 @@ via `SendSubmitter` (flume MPMC). Per-peer `PeerTransmitSlot`
 frames, driver flushes via `DataSignal` select arm. `PeerOutbound`
 enum (`Wire`/`Inbox`) dispatches fan-out/identity/exclusive to
 per-peer slots without pump tasks. Latency-profile TCP peers may use
-a stateless `DirectTcpWriter` for one immediate nonblocking write from
-the slot arena; partial writes stay in `PeerTransmitSlot` and are
+a stateless `DirectTcpWriter` for one immediate nonblocking vectored
+write of the slot (arena plus large payloads); partial writes stay in
+`PeerTransmitSlot` and are
 flushed by the driver. Recv bypass: `ConnectionDriver`
 pushes straight to user `recv_tx` for PULL/SUB/REQ/etc. REP/ROUTER
 go through actor for identity routing. PEER uses one socket-owned fanring receiver

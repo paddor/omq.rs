@@ -106,8 +106,10 @@ Application handles enqueue raw messages; drivers own their encoding and
 transmission. Closing a socket either drains accepted output within its linger
 deadline or cancels the driver tasks.
 
-A latency-profile plain-TCP route can perform one immediate nonblocking write
-from the caller. The connection driver owns any unfinished output.
+A latency-profile plain-TCP route can perform one immediate nonblocking
+vectored write from the caller: framed small messages and headers from the
+slot arena, large payloads from their own buffers. The connection driver owns
+any unfinished output.
 
 ## Routing and fan-out
 

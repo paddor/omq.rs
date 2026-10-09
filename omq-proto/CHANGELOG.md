@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FrameBuffer::io_slices` and `FrameBuffer::advance` write queued frames
+  without draining them, large payloads from their own buffers.
+
 ## [0.29.0] - 2026-10-07
 
 ### Breaking

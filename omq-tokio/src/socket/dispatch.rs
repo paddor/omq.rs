@@ -89,9 +89,9 @@ impl<W: Write> DirectWriteState<W> {
         }
         // Admission succeeded. A subsequent peer failure must not become a
         // socket-closed error, nor cause the caller to retry accepted bytes.
-        match slot.try_direct_write_arena_only(|bytes| self.try_write(bytes)) {
-            Ok(true) if slot.is_empty() => {}
-            Ok(_) => {
+        match slot.try_direct_write(|slices| self.try_write(slices)) {
+            Ok(()) if slot.is_empty() => {}
+            Ok(()) => {
                 self.queued();
                 slot.data_signal.mark();
             }
@@ -103,8 +103,12 @@ impl<W: Write> DirectWriteState<W> {
         TryFrameResult::Ok
     }
 
-    fn try_write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match self.stream.write(bytes) {
+    fn try_write(&mut self, slices: &[IoSlice<'_>]) -> io::Result<usize> {
+        let written = match slices {
+            [one] => self.stream.write(one),
+            _ => self.stream.write_vectored(slices),
+        };
+        match written {
             Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "tcp write")),
             Ok(n) => Ok(n),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),

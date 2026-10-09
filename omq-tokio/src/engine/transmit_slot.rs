@@ -22,6 +22,8 @@ pub(crate) const TRANSMIT_SLOT_CAP_DEFAULT: usize = 512 * 1024;
 #[cfg(test)]
 pub(crate) const TRANSMIT_SLOT_MSG_CAP_DEFAULT: usize = 1000;
 const TRANSMIT_SLOT_LWM_DIVISOR: usize = 2;
+/// Slices per direct write. The latency path queues few messages.
+const DIRECT_WRITE_SLICES: usize = 64;
 
 type FanOutReactivation = Arc<dyn Fn(u64) + Send + Sync + 'static>;
 
@@ -352,18 +354,23 @@ impl PeerTransmitSlot {
         Some(DrainOutcome { space_available })
     }
 
-    pub(crate) fn try_direct_write_arena_only(
+    /// One caller-thread write of the queued bytes. Large payloads are
+    /// written from their own buffers; the slot keeps any unwritten tail.
+    pub(crate) fn try_direct_write(
         &self,
-        write: impl FnOnce(&[u8]) -> io::Result<usize>,
-    ) -> io::Result<bool> {
+        write: impl FnOnce(&[io::IoSlice<'_>]) -> io::Result<usize>,
+    ) -> io::Result<()> {
         let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
-        if !eq.has_arena_only() {
-            return Ok(false);
-        }
-
-        let n = write(eq.arena_bytes())?;
+        let n = if eq.has_arena_only() {
+            // Small messages: one contiguous slice, as before gathering.
+            write(&[io::IoSlice::new(eq.arena_bytes())])?
+        } else {
+            let mut slices = [io::IoSlice::new(&[]); DIRECT_WRITE_SLICES];
+            let count = eq.io_slices(&mut slices);
+            write(&slices[..count])?
+        };
         if n > 0 {
-            eq.advance_arena(n);
+            eq.advance(n);
         }
         let eq_empty = eq.is_empty();
         let eq_bytes = eq.total_bytes();
@@ -394,7 +401,7 @@ impl PeerTransmitSlot {
             cb(self.peer_id);
         }
 
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn drain(&self, buf: &mut Vec<Bytes>, max_chunks: usize) -> DrainOutcome {

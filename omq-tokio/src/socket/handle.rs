@@ -613,24 +613,34 @@ impl Socket {
                         ));
                     }
                 }
+                // Canceling the send must allow the next send.
+                let mut claim = ReqSendClaim {
+                    awaiting_reply: &self.inner.req_awaiting_reply,
+                    sent: false,
+                };
                 let msg = Message::with_prefix(Bytes::new(), msg);
                 let result = self.send_submitter.send(msg).await;
-                if result.is_err() {
-                    self.inner
-                        .req_awaiting_reply
-                        .store(false, Ordering::Release);
-                }
+                claim.sent = result.is_ok();
                 result
             }
             SocketType::Rep => {
                 let request = self.inner.rep_current.lock().expect("rep identity").take();
-                let Some((peer_id, envelope)) = request else {
+                let Some(request) = request else {
                     return Err(rep_send_without_request());
                 };
-                self.inner
+                // Canceling the send must keep the request answerable.
+                let mut claim = RepSendClaim {
+                    current: &self.inner.rep_current,
+                    request: Some(request),
+                };
+                let (peer_id, envelope) = claim.request.as_ref().expect("claimed request");
+                let result = self
+                    .inner
                     .send_submitter
-                    .send_rep_to_peer(peer_id, &envelope, msg)
-                    .await
+                    .send_rep_to_peer(*peer_id, envelope, msg)
+                    .await;
+                claim.request = None;
+                result
             }
             SocketType::Server => self.send_submitter.send_server(msg).await,
             SocketType::XSub => self.send_xsub_raw_command(&msg).await,
@@ -743,6 +753,13 @@ impl Socket {
                 Ok(sent)
             }
         }
+    }
+
+    pub(crate) fn register_recv_waker(
+        &self,
+        waker: std::task::Waker,
+    ) -> crate::engine::signal::WakerRegistration {
+        self.inner.recv_rx.register_recv_waker(waker)
     }
 
     #[doc(hidden)]
@@ -1458,6 +1475,37 @@ fn supports_recv_batching(t: SocketType) -> bool {
 /// `TypeState::pre_send` has no mutable side effects. This mirrors the check
 /// inside `TypeState::pre_send` for the relevant types so the actor-bypass
 /// send path still surfaces the same protocol errors.
+/// Clears the REQ alternation claim unless the request was sent.
+struct ReqSendClaim<'a> {
+    awaiting_reply: &'a AtomicBool,
+    sent: bool,
+}
+
+impl Drop for ReqSendClaim<'_> {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.awaiting_reply.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Restores an unanswered REP request when its send is canceled.
+struct RepSendClaim<'a> {
+    current: &'a Mutex<Option<(u64, RepEnvelope)>>,
+    request: Option<(u64, RepEnvelope)>,
+}
+
+impl Drop for RepSendClaim<'_> {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.current
+                .lock()
+                .expect("rep identity")
+                .get_or_insert(request);
+        }
+    }
+}
+
 fn rep_send_without_request() -> Error {
     Error::Protocol("REP socket must receive a request before replying".into())
 }

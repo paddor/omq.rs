@@ -3,6 +3,7 @@
 
 mod test_support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use omq_proto::endpoint::Host;
@@ -864,6 +865,67 @@ fn blocking_socket_push_pull_inproc() {
     push.send(Message::single("blocking")).unwrap();
     let m = pull.recv().unwrap();
     assert_eq!(m, Message::single("blocking"));
+}
+
+#[test]
+fn blocking_send_timeout_waits_for_peer() {
+    let ctx = Context::new();
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+    let ep = inproc_ep("blocking-send-timeout");
+    push.bind(ep.clone()).unwrap();
+
+    // Bind-side PUSH without a peer mutes.
+    let started = std::time::Instant::now();
+    let err = push
+        .send_timeout(Message::single("lost"), Duration::from_millis(50))
+        .unwrap_err();
+    assert!(matches!(err, Error::Timeout), "{err:?}");
+    assert!(started.elapsed() >= Duration::from_millis(50));
+
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    pull.connect(ep).unwrap();
+    push.send_timeout(Message::single("sent"), Duration::from_secs(2))
+        .unwrap();
+    let m = pull.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(m, Message::single("sent"));
+}
+
+#[test]
+fn blocking_recv_waker_wakes_on_message() {
+    struct Flag(std::sync::atomic::AtomicBool, std::thread::Thread);
+    impl std::task::Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+            self.1.unpark();
+        }
+    }
+
+    let ctx = Context::new();
+    let pull = ctx.blocking_socket(SocketType::Pull, Options::default());
+    let push = ctx.blocking_socket(SocketType::Push, Options::default());
+    let ep = inproc_ep("blocking-recv-waker");
+    pull.bind(ep.clone()).unwrap();
+    push.connect(ep).unwrap();
+
+    let flag = Arc::new(Flag(
+        std::sync::atomic::AtomicBool::new(false),
+        std::thread::current(),
+    ));
+    let registration = pull.register_recv_waker(std::task::Waker::from(flag.clone()));
+    assert!(matches!(pull.try_recv(), Err(Error::WouldBlock)));
+    push.send(Message::single("wake")).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !flag.0.load(std::sync::atomic::Ordering::Acquire) {
+        let now = std::time::Instant::now();
+        assert!(now < deadline, "receive waker was not woken");
+        std::thread::park_timeout(deadline - now);
+    }
+    drop(registration);
+    assert_eq!(pull.try_recv().unwrap(), Message::single("wake"));
 }
 
 #[test]

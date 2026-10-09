@@ -712,3 +712,28 @@ async fn req_full_returns_unmodified_application_message() {
     req.try_send(returned).unwrap();
     assert_eq!(rep.recv().await.unwrap(), original);
 }
+
+/// A canceled REQ send must not leave the socket waiting for a reply.
+#[tokio::test]
+async fn canceled_req_send_allows_next_send() {
+    let ep = inproc_ep("req-canceled-send");
+    let req = Socket::new(SocketType::Req, Options::default());
+    req.bind(ep.clone()).await.unwrap();
+
+    // Bind-side REQ without a peer mutes.
+    let canceled =
+        tokio::time::timeout(Duration::from_millis(50), req.send(Message::single("lost"))).await;
+    assert!(canceled.is_err(), "muted REQ send should time out");
+
+    let rep = Socket::new(SocketType::Rep, Options::default());
+    rep.connect(ep).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), req.send(Message::single("ping")))
+        .await
+        .expect("send after cancel")
+        .expect("REQ accepts a new request after a canceled send");
+    let request = tokio::time::timeout(Duration::from_secs(2), rep.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request, Message::single("ping"));
+}

@@ -40,6 +40,13 @@ pub use crate::socket::recv::BlockingRecvCancel;
 /// Methods panic if the context was created with
 /// [`Context::current()`] (use the async [`Socket`](crate::Socket)
 /// instead).
+/// Receive waker registered by [`Socket::register_recv_waker`].
+/// Dropping it unregisters the waker.
+#[derive(Debug)]
+pub struct RecvWakerRegistration {
+    _registration: crate::engine::signal::WakerRegistration,
+}
+
 #[derive(Clone, Debug)]
 pub struct Socket {
     inner: AsyncSocket,
@@ -171,6 +178,28 @@ impl Socket {
         }
     }
 
+    /// Send one complete message, or return `Timeout` if the socket stays
+    /// muted until `timeout` elapses. A timed-out message is not sent.
+    pub fn send_timeout(&self, msg: Message, timeout: Duration) -> Result<()> {
+        let msg = match self.inner.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(msg)) => msg,
+            Err(TrySendError::Closed) => return Err(Error::Closed),
+            Err(TrySendError::Error(e)) => return Err(e),
+        };
+        let Some(deadline) = std::time::Instant::now().checked_add(timeout) else {
+            return self.send(msg);
+        };
+        let _runtime = self.ctx.handle().enter();
+        crate::engine::signal::block_on(async {
+            tokio::select! {
+                biased;
+                result = self.inner.send(msg) => result,
+                () = tokio::time::sleep_until(deadline.into()) => Err(Error::Timeout),
+            }
+        })
+    }
+
     /// Try to send one complete message without blocking.
     pub fn try_send(&self, msg: Message) -> core::result::Result<(), TrySendError> {
         self.inner.try_send(msg)
@@ -199,6 +228,15 @@ impl Socket {
     /// Receive one complete message, or return `WouldBlock` on timeout.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Message> {
         self.inner.blocking_recv_timeout(timeout)
+    }
+
+    /// Wake `waker` whenever a message may have become receivable, until the
+    /// returned registration drops. Wakeups may be spurious. Register before
+    /// the final `try_recv` check to avoid missing a message.
+    pub fn register_recv_waker(&self, waker: std::task::Waker) -> RecvWakerRegistration {
+        RecvWakerRegistration {
+            _registration: self.inner.register_recv_waker(waker),
+        }
     }
 
     /// Receive up to `max` messages.

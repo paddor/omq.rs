@@ -782,6 +782,14 @@ impl SpscAwareRecv {
         self.blocking_recv_until(deadline)
     }
 
+    /// Wake `waker` whenever a message may have become receivable.
+    pub(crate) fn register_recv_waker(
+        &self,
+        waker: std::task::Waker,
+    ) -> crate::engine::signal::WakerRegistration {
+        self.blocking_recv_waker.register_waker(waker)
+    }
+
     pub(crate) fn blocking_recv_until(&self, deadline: Instant) -> Result<Message> {
         let mut waiter = None;
         loop {

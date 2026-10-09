@@ -84,8 +84,16 @@ pub(crate) struct BlockingSignal {
 
 #[derive(Debug)]
 struct BlockingThread {
-    thread: std::thread::Thread,
+    target: WakeTarget,
     armed: AtomicBool,
+}
+
+#[derive(Debug)]
+enum WakeTarget {
+    /// A parked receive. One wake per arm.
+    Thread(std::thread::Thread),
+    /// A foreign readiness waiter. Woken on every publication.
+    Waker(std::task::Waker),
 }
 
 struct CachedBlockingThread {
@@ -102,7 +110,7 @@ thread_local! {
 fn blocking_thread(signal: &Arc<BlockingSignal>) -> Arc<BlockingThread> {
     let new = || {
         Arc::new(BlockingThread {
-            thread: std::thread::current(),
+            target: WakeTarget::Thread(std::thread::current()),
             armed: AtomicBool::new(true),
         })
     };
@@ -169,19 +177,38 @@ impl BlockingSignal {
             return;
         }
         for waiter in self.waiters.lock().unwrap().iter() {
-            if waiter.armed.swap(false, Ordering::AcqRel) {
-                waiter.thread.unpark();
+            match &waiter.target {
+                WakeTarget::Thread(thread) => {
+                    if waiter.armed.swap(false, Ordering::AcqRel) {
+                        thread.unpark();
+                    }
+                }
+                WakeTarget::Waker(waker) => waker.wake_by_ref(),
             }
+        }
+    }
+
+    /// Wake `waker` on every publication until the registration drops.
+    /// The caller rechecks its queue after registering.
+    pub(crate) fn register_waker(self: &Arc<Self>, waker: std::task::Waker) -> WakerRegistration {
+        let state = Arc::new(BlockingThread {
+            target: WakeTarget::Waker(waker),
+            armed: AtomicBool::new(true),
+        });
+        self.waiters.lock().unwrap().push(state.clone());
+        self.active.fetch_add(1, Ordering::SeqCst);
+        WakerRegistration {
+            signal: self.clone(),
+            state,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn has_waiter(&self, thread: std::thread::ThreadId) -> bool {
-        self.waiters
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|waiter| waiter.thread.id() == thread && waiter.armed.load(Ordering::Acquire))
+        self.waiters.lock().unwrap().iter().any(|waiter| {
+            matches!(&waiter.target, WakeTarget::Thread(t) if t.id() == thread)
+                && waiter.armed.load(Ordering::Acquire)
+        })
     }
 }
 
@@ -209,9 +236,28 @@ impl BlockingWaiter<'_> {
 
 impl Drop for BlockingWaiter<'_> {
     fn drop(&mut self) {
-        let mut waiters = self.signal.waiters.lock().unwrap();
-        waiters.retain(|waiter| !Arc::ptr_eq(waiter, &self.state));
-        self.signal.active.fetch_sub(1, Ordering::Release);
+        self.signal.unregister(&self.state);
+    }
+}
+
+/// Owned [`BlockingSignal::register_waker`] registration.
+#[derive(Debug)]
+pub(crate) struct WakerRegistration {
+    signal: Arc<BlockingSignal>,
+    state: Arc<BlockingThread>,
+}
+
+impl Drop for WakerRegistration {
+    fn drop(&mut self) {
+        self.signal.unregister(&self.state);
+    }
+}
+
+impl BlockingSignal {
+    fn unregister(&self, state: &Arc<BlockingThread>) {
+        let mut waiters = self.waiters.lock().unwrap();
+        waiters.retain(|waiter| !Arc::ptr_eq(waiter, state));
+        self.active.fetch_sub(1, Ordering::Release);
     }
 }
 

@@ -17,10 +17,13 @@ use omq_tokio::{Context, ContextConfig, Endpoint, Message, Options, SocketType};
 
 #[path = "perf_verify/affinity.rs"]
 mod affinity;
+#[path = "perf_verify/contract.rs"]
+mod contract;
 #[path = "perf_verify/measurement.rs"]
 mod measurement;
 
 use affinity::{Affinity, Side};
+use contract::{Pattern, Shape};
 use measurement::{Counter, DrainResult, MEASURED_TAG, Received, Window, drain_ready};
 
 struct Settings {
@@ -146,7 +149,10 @@ fn read_thresholds() -> ThresholdConfig {
 }
 
 fn should_measure(name: &str, config: &ThresholdConfig) -> bool {
-    config.mode == ThresholdMode::Hardware || config.values.contains_key(name)
+    // Profile contracts compare within one run and need no thresholds.
+    config.mode == ThresholdMode::Hardware
+        || config.values.contains_key(name)
+        || name.starts_with("contract_")
 }
 
 async fn reqrep_latency() -> f64 {
@@ -638,7 +644,8 @@ fn pubsub_process_published_rate(size: usize, io_threads: usize, peers: usize) -
 fn verify(sample: &Sample, thresholds: &HashMap<String, f64>) -> bool {
     let key = &sample.name;
     println!("{:<24} {:>12.2} {}", sample.name, sample.value, sample.unit);
-    match thresholds.get(key) {
+    let contract = (sample.unit == "ratio").then_some(contract::MIN_RATIO);
+    match thresholds.get(key).or(contract.as_ref()) {
         Some(limit) if sample.unit == "us" && sample.value > *limit => {
             eprintln!(
                 "FAIL {key}: {:.2} above configured {:.2} {}",
@@ -719,6 +726,11 @@ enum Workload {
         peers: usize,
     },
     PubsubProcesses,
+    Contract {
+        pattern: Pattern,
+        shape: Shape,
+        size: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -766,7 +778,49 @@ fn cases() -> Vec<Case> {
             inproc: true,
         },
     });
+    contract_cases(&mut cases);
     cases
+}
+
+/// Round trips across socket types and peer counts, where a latency
+/// profile that copies or queues too much shows up as a loss to the
+/// throughput profile, and the reverse for one-way streams.
+fn contract_cases(cases: &mut Vec<Case>) {
+    // At 4 MiB a payload copy on the caller costs more than the profile gains.
+    let sizes = [(256, "256b"), (4 * 1024 * 1024, "4m")];
+    let round_trips = [
+        (Pattern::ReqRep, 1),
+        (Pattern::ReqRep, 8),
+        (Pattern::DealerRouter, 1),
+        (Pattern::DealerRouter, 8),
+        (Pattern::Peer, 1),
+        (Pattern::Peer, 8),
+        (Pattern::Pair, 1),
+    ];
+    for (pattern, peers) in round_trips {
+        for (size, suffix) in sizes {
+            cases.push(Case {
+                name: format!("contract_rr.{}_{peers}p_{suffix}", pattern.label()),
+                workload: Workload::Contract {
+                    pattern,
+                    shape: Shape::RoundTrip { peers },
+                    size,
+                },
+            });
+        }
+    }
+    for pattern in [Pattern::PushPull, Pattern::DealerRouter, Pattern::Pair] {
+        for (size, suffix) in [(64, "64b"), (16 * 1024, "16k")] {
+            cases.push(Case {
+                name: format!("contract_stream.{}_{suffix}", pattern.label()),
+                workload: Workload::Contract {
+                    pattern,
+                    shape: Shape::Stream,
+                    size,
+                },
+            });
+        }
+    }
 }
 
 async fn measure(case: &Case) -> Sample {
@@ -795,6 +849,19 @@ async fn measure(case: &Case) -> Sample {
             peers,
         } => (pubsub(size, io_threads, peers).await, "msg/s"),
         Workload::PubsubProcesses => (pubsub_process_published_rate(256, 2, 32), "msg/s"),
+        Workload::Contract {
+            pattern,
+            shape,
+            size,
+        } => (
+            tokio::task::spawn_blocking(move || {
+                SETTINGS.affinity.pin(0);
+                contract::ratio(pattern, shape, size)
+            })
+            .await
+            .expect("profile contract task"),
+            "ratio",
+        ),
     };
     Sample {
         name: case.name.clone(),

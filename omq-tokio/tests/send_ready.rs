@@ -122,7 +122,8 @@ fn full_queues_wake_when_drained() {
             (SocketType::Dealer, SocketType::Router),
             (SocketType::Pair, SocketType::Pair),
         ] {
-            for endpoint in endpoints() {
+            // Inproc has no kernel send buffer draining in the background.
+            for endpoint in ["inproc://send-ready".parse().unwrap()] {
                 let ctx = Context::new();
                 let options = Options::default()
                     .workload_profile(profile)
@@ -137,7 +138,7 @@ fn full_queues_wake_when_drained() {
                 let case = format!("{sender_type:?} {profile:?}");
                 assert!(sender.send_ready(), "{case}: connected");
 
-                // TCP buffers absorb a lot; refill until the queue stays full.
+                // Fill the bounded queue before registering for space.
                 let mut queued = fill(&sender);
                 let deadline = Instant::now() + TIMEOUT;
                 while sender.send_ready() {

@@ -62,6 +62,21 @@ p50_256b_us=1000
 16b_msgs_s=1000000
 ```
 
+## Profile contracts
+
+`contract_*` cases run with and without `.perf_hw`. Each measures one
+workload under both workload profiles in the same run and checks the
+favored profile's rate against the other's, with a minimum ratio of 0.85:
+
+- `contract_rr.*`: lockstep round trips over TCP favor the latency profile.
+  REQ/REP, DEALER/ROUTER, and PEER run with 1 and 8 requesters, PAIR with 1,
+  at 256B and 4MiB.
+- `contract_stream.*`: one-way PUSH/PULL, DEALER/ROUTER, and PAIR streams at
+  64B and 16KiB favor the throughput profile.
+
+A failing ratio is measured once more, keeping each profile's best rate. A
+`.perf_hw` key with the case name overrides the minimum ratio.
+
 ## Copy budget
 
 `omq_copy_budget` checks bytes copied per message across socket patterns,

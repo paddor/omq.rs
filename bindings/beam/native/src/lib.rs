@@ -8,8 +8,8 @@ use bytes::Bytes;
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
     ConnectionStatus, Context, ContextConfig, DisconnectReason, Endpoint, Error as OmqError,
-    KeepAlive, Message, MonitorEvent, MonitorStream, MonitorTryRecvError, OnMute, Options,
-    PeerCommandKind, PeerInfo, ReconnectPolicy, SocketType, TrySendError,
+    KeepAlive, Message, MonitorEvent, MonitorRecvError, MonitorStream, MonitorTryRecvError, OnMute,
+    Options, PeerCommandKind, PeerInfo, ReconnectPolicy, SocketType, TrySendError,
 };
 #[cfg(feature = "curve")]
 use omq_tokio::{CurveKeypair, CurvePublicKey, CurveSecretKey};
@@ -105,7 +105,9 @@ impl rustler::Resource for NativeSocket {
 }
 
 struct NativeMonitor {
-    stream: Mutex<MonitorStream>,
+    ctx: Context,
+    /// Taken out while a blocking receive waits.
+    stream: Mutex<Option<MonitorStream>>,
 }
 
 #[rustler::resource_impl]
@@ -589,22 +591,7 @@ fn send_with_timeout(
             TrySendError::Closed => OmqError::Closed,
             TrySendError::Error(err) => err,
         }),
-        Some(timeout) => {
-            let deadline = deadline_after(timeout);
-            let mut message = message;
-            loop {
-                match socket.try_send(message) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Full(returned)) => message = returned,
-                    Err(TrySendError::Closed) => return Err(OmqError::Closed),
-                    Err(TrySendError::Error(err)) => return Err(err),
-                }
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    return Err(OmqError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
+        Some(timeout) => socket.send_timeout(message, timeout),
     }
 }
 
@@ -829,7 +816,8 @@ fn monitor<'a>(env: Env<'a>, socket: ResourceArc<NativeSocket>) -> Term<'a> {
         Ok(materialized) => ok(
             env,
             ResourceArc::new(NativeMonitor {
-                stream: Mutex::new(materialized.monitor()),
+                ctx: socket.ctx.clone(),
+                stream: Mutex::new(Some(materialized.monitor())),
             }),
         ),
         Err(error) => map_error(env, error),
@@ -842,29 +830,50 @@ fn monitor_recv<'a>(
     monitor: ResourceArc<NativeMonitor>,
     timeout_ms: i64,
 ) -> Term<'a> {
-    let deadline = duration_from_millis(timeout_ms).and_then(deadline_after);
-    loop {
-        match monitor.stream.lock().unwrap().try_recv() {
-            Ok(event) => return ok(env, monitor_event_term(env, event)),
+    let Some(mut stream) = monitor.stream.lock().unwrap().take() else {
+        return err_term(env, atoms::badarg(), "monitor receive already in progress");
+    };
+    let immediate = stream.try_recv();
+    if !matches!(immediate, Err(MonitorTryRecvError::Empty)) || timeout_ms == 0 {
+        *monitor.stream.lock().unwrap() = Some(stream);
+        return match immediate {
+            Ok(event) => ok(env, monitor_event_term(env, event)),
             Err(MonitorTryRecvError::Lagged(count)) => {
-                return ok(env, lagged_monitor_event_term(env, count));
+                ok(env, lagged_monitor_event_term(env, count))
             }
-            Err(MonitorTryRecvError::Closed) => {
-                return err_term(env, atoms::closed(), "monitor closed");
+            Err(MonitorTryRecvError::Empty) => {
+                err_term(env, atoms::timeout(), "operation timed out")
             }
-            Err(MonitorTryRecvError::Empty) => {}
-            Err(_) => return err_term(env, atoms::closed(), "monitor closed"),
+            Err(_) => err_term(env, atoms::closed(), "monitor closed"),
+        };
+    }
+    let timeout = duration_from_millis(timeout_ms);
+    let (stream, received) = monitor.ctx.block_on(async move {
+        let received = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, stream.recv()).await.ok(),
+            None => Some(stream.recv().await),
+        };
+        (stream, received)
+    });
+    *monitor.stream.lock().unwrap() = Some(stream);
+    match received {
+        Some(Ok(event)) => ok(env, monitor_event_term(env, event)),
+        Some(Err(MonitorRecvError::Lagged(count))) => {
+            ok(env, lagged_monitor_event_term(env, count))
         }
-        if timeout_ms == 0 || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return err_term(env, atoms::timeout(), "operation timed out");
-        }
-        std::thread::sleep(Duration::from_millis(1));
+        Some(Err(_)) => err_term(env, atoms::closed(), "monitor closed"),
+        None => err_term(env, atoms::timeout(), "operation timed out"),
     }
 }
 
 #[rustler::nif]
 fn monitor_try_recv<'a>(env: Env<'a>, monitor: ResourceArc<NativeMonitor>) -> Term<'a> {
-    match monitor.stream.lock().unwrap().try_recv() {
+    let mut guard = monitor.stream.lock().unwrap();
+    // A blocking receive in progress owns the stream.
+    let Some(stream) = guard.as_mut() else {
+        return err_term(env, atoms::would_block(), "operation would block");
+    };
+    match stream.try_recv() {
         Ok(event) => ok(env, monitor_event_term(env, event)),
         Err(MonitorTryRecvError::Lagged(count)) => ok(env, lagged_monitor_event_term(env, count)),
         Err(MonitorTryRecvError::Closed) => err_term(env, atoms::closed(), "monitor closed"),
@@ -1064,6 +1073,8 @@ fn wait_any<'a>(
         return ok(env, Vec::<usize>::new());
     }
     let deadline = duration_from_millis(timeout_ms).and_then(deadline_after);
+    let waker = std::task::Waker::from(std::sync::Arc::new(ThreadWake(std::thread::current())));
+    let mut registrations = Vec::new();
     loop {
         let ready: Vec<_> = sockets
             .iter()
@@ -1076,7 +1087,34 @@ fn wait_any<'a>(
         if timeout_ms == 0 || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return ok(env, Vec::<usize>::new());
         }
-        std::thread::sleep(Duration::from_millis(10));
+        if registrations.is_empty() {
+            // Register, then recheck before the first park.
+            registrations = sockets
+                .iter()
+                .filter_map(|socket| socket.materialize().ok())
+                .map(|socket| socket.register_recv_waker(waker.clone()))
+                .collect();
+            continue;
+        }
+        match deadline {
+            Some(deadline) => {
+                std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+            }
+            None => std::thread::park(),
+        }
+    }
+}
+
+/// Unparks a thread waiting in `wait_any`.
+struct ThreadWake(std::thread::Thread);
+
+impl std::task::Wake for ThreadWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.unpark();
     }
 }
 

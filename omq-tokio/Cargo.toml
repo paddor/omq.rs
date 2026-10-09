@@ -504,6 +504,10 @@ name = "omq_raw_notify_ban"
 path = "tests/raw_notify_ban.rs"
 
 [[test]]
+name = "omq_sleep_poll_ban"
+path = "tests/sleep_poll_ban.rs"
+
+[[test]]
 name = "omq_radio_dish"
 path = "tests/radio_dish.rs"
 

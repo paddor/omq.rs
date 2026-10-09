@@ -238,6 +238,23 @@ fn mom_tcp_impls() -> Vec<Impl> {
         .collect()
 }
 
+fn mom_latency_impls() -> Vec<Impl> {
+    let mut impls = Vec::with_capacity(MOM_IMPLS.len() + 1);
+    for mut imp in MOM_IMPLS.iter().copied() {
+        if imp.key == "omq-dart" {
+            impls.push(Impl {
+                key: "omq-dart-no-spin",
+                label: "OMQ / DART (no spin)",
+                threads: imp.threads,
+                color: plotters::style::RGBColor(239, 108, 0),
+            });
+            imp.label = "OMQ / DART (50 μs app/IO spin)";
+        }
+        impls.push(imp);
+    }
+    impls
+}
+
 fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuData>) {
     let mut tcp_impls = mom_tcp_impls();
     tcp_impls.retain(|imp| imp.key != "omq-tokio-1t-spin50");
@@ -248,7 +265,7 @@ fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuDa
         merge_values(&mut msgs, other_msgs);
         cpu.extend(other_cpu);
     }
-    for (size, row) in super::dart::mom_rows("throughput", TPUT_SIZES) {
+    for (size, row) in super::dart::mom_rows("throughput", TPUT_SIZES, 50) {
         let rate = row["msgs_s"].as_f64().unwrap();
         msgs.entry(size)
             .or_default()
@@ -269,15 +286,17 @@ fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
         }
         cpu.extend(other_cpu);
     }
-    for (size, row) in super::dart::mom_rows("latency", MOM_LAT_SIZES) {
-        lat.entry(size).or_default().insert(
-            "omq-dart".into(),
-            LatencyEntry {
-                p50: row["p50_us"].as_f64().unwrap(),
-                p99: row["p99_us"].as_f64().unwrap(),
-                p999: row["p999_us"].as_f64().unwrap(),
-            },
-        );
+    for (key, spin_us) in [("omq-dart-no-spin", 0), ("omq-dart", 50)] {
+        for (size, row) in super::dart::mom_rows("latency", MOM_LAT_SIZES, spin_us) {
+            lat.entry(size).or_default().insert(
+                key.into(),
+                LatencyEntry {
+                    p50: row["p50_us"].as_f64().unwrap(),
+                    p99: row["p99_us"].as_f64().unwrap(),
+                    p999: row["p999_us"].as_f64().unwrap(),
+                },
+            );
+        }
     }
     (lat, cpu)
 }
@@ -431,7 +450,7 @@ pub(crate) fn generate_mom() {
             &out,
             "Sequential request/reply-like latency, loopback, one flow",
             MOM_LAT_SIZES,
-            MOM_IMPLS,
+            &mom_latency_impls(),
             &lat,
             &cpu,
         )

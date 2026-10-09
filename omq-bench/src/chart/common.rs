@@ -532,7 +532,7 @@ fn draw_legend_table_with_versions(
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
         "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.24.0",
-        "omq-quic" | "omq-dart" => "omq-tokio v0.25.0",
+        "omq-quic" | "omq-dart" | "omq-dart-no-spin" => "omq-tokio v0.25.0",
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
         "aeron-udp-2proc" => "Aeron v1.51.0",

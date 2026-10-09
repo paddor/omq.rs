@@ -38,7 +38,11 @@ const IMPLS: &[Impl] = &[
 
 type Runs = BTreeMap<(u64, String, String), Vec<serde_json::Value>>;
 
-pub(crate) fn mom_rows(kind: &str, sizes: &[u64]) -> BTreeMap<u64, serde_json::Value> {
+pub(crate) fn mom_rows(
+    kind: &str,
+    sizes: &[u64],
+    spin_us: u64,
+) -> BTreeMap<u64, serde_json::Value> {
     let rows = jsonl::load_jsonl::<serde_json::Value>(&jsonl::cache_dir().join("mom-dart.jsonl"));
     let window = if kind == "throughput" { 512 } else { 256 };
     let mut groups: BTreeMap<u64, Vec<serde_json::Value>> = BTreeMap::new();
@@ -58,8 +62,8 @@ pub(crate) fn mom_rows(kind: &str, sizes: &[u64]) -> BTreeMap<u64, serde_json::V
             || row["runtime"] != "owned"
             || row["runtime_polling"] != false
             || row["io_threads"] != 1
-            || row["spin_us"] != 50
-            || row["io_spin_us"] != 50
+            || row["spin_us"] != spin_us
+            || row["io_spin_us"] != spin_us
             || row["workload_profile"] != kind
             || row["measurement_order"] != "rotate"
             || row["cpus"] != "1,2,0,3,5,4"

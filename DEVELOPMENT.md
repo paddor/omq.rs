@@ -68,12 +68,13 @@ overrides. In `bindings/pyomq`, use paths
 
 Keep these overrides local. Registry dependencies must be published before OMQ
 CI or packaging can resolve them without overrides. Refresh binding lockfiles
-against the registry after publishing a new queue version. PR CI covers native
-and Python binding tests on Windows as well as Linux and macOS.
+against the registry after publishing a new queue version. Weekly CI covers
+native and Python binding tests on Windows, Linux, and macOS.
 
 Full sweep:
 
 ```sh
+OMQ_QUICK=1 ./scripts/test-all.sh      # default-feature workspace tests
 ./scripts/test-all.sh
 OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
 OMQ_SKIP_PERF=1 ./scripts/test-all.sh
@@ -107,15 +108,14 @@ cargo test -p omq-tokio --test omq_stress_connect_before_bind -- --test-threads=
 
 ## Continuous Integration
 
-GitHub CI runs `cargo fmt` and clippy on Linux, macOS Intel, macOS
-ARM64, and Windows. It runs workspace tests on Linux x86_64 with MSRV
-1.93, macOS ARM64, and Windows. Feature jobs cover CURVE and LZ4 on
-Linux, macOS ARM64, and Windows. macOS test jobs run serially with
-`--test-threads=1`. PR CI also runs 32-bit Linux cross-checks.
-Extended CI adds Ubuntu ARM64.
+PR and `main` CI runs Linux fmt, clippy, default workspace tests, MSRV
+checks for DART and QUIC, and the current binding smoke tests on Linux.
+The full platform and feature matrix runs Saturdays at 04:00 UTC and on
+`workflow_dispatch`. It covers macOS, Windows, 32-bit Linux, compression,
+CURVE, interop, packaging, and binding version matrices. macOS test jobs
+run serially with `--test-threads=1`. Extended CI adds Ubuntu ARM64.
 
-`.github/workflows/ci.yml` gates every PR. Beyond fmt/clippy/tests it
-runs, on Linux only:
+The scheduled `.github/workflows/ci.yml` run also runs, on Linux only:
 
 | job | what |
 |-----|------|

@@ -741,16 +741,15 @@ pub fn wait_ready(pollin: PollSet, pollout: PollSet, timeout_ms: Option<u64>) ->
     }
 }
 
-/// Wait on the process-global receive signal, which async-materialized
-/// sockets signal. Concurrent waiters share and drain that one signal, so
-/// waits are sliced to recover a wakeup another waiter consumed.
+/// Wait on a private signal subscribed to the process-global receive signal.
+/// Every waiter sees each wake even when another thread drains the shared fd.
 fn wait_ready_shared(
     poll_ready: &dyn Fn() -> Vec<(u64, i32)>,
     pollin: &PollSet,
     pollout: &PollSet,
     deadline: Option<Instant>,
 ) -> Vec<(u64, i32)> {
-    let recv_signal = global_recv_signal();
+    let recv_signal = global_recv_signal().subscribe();
     // Native blocking sockets wake threads, not the readiness fd. Forward
     // their wakeups into the fd for the duration of this wait.
     let waker = std::task::Waker::from(Arc::new(ForwardRecvWake(recv_signal.clone())));
@@ -777,9 +776,9 @@ fn wait_ready_shared(
                 if now >= d {
                     break vec![];
                 }
-                (d - now).min(Duration::from_millis(100))
+                d - now
             }
-            None => Duration::from_millis(100),
+            None => Duration::MAX,
         };
         recv_signal.wait_timeout(wait_dur);
     };

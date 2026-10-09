@@ -1,5 +1,5 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 /// Native callbacks can run while an inproc producer owns its queue lock.
@@ -156,6 +156,8 @@ type SignalBackend = WindowsSignal;
 pub(crate) struct ReadinessSignal {
     parking: AtomicBool,
     backend: SignalBackend,
+    listener_count: AtomicUsize,
+    listeners: Mutex<Vec<Weak<Self>>>,
 }
 
 impl ReadinessSignal {
@@ -163,6 +165,8 @@ impl ReadinessSignal {
         Self {
             parking: AtomicBool::new(false),
             backend: SignalBackend::new(),
+            listener_count: AtomicUsize::new(0),
+            listeners: Mutex::new(Vec::new()),
         }
     }
 
@@ -175,6 +179,29 @@ impl ReadinessSignal {
         {
             self.backend.signal(self.parking.load(Ordering::Acquire));
         }
+        if self.listener_count.load(Ordering::Acquire) != 0 {
+            let mut listeners = self.listeners.lock().unwrap();
+            let live: Vec<_> = listeners.iter().filter_map(Weak::upgrade).collect();
+            listeners.retain(|listener| listener.strong_count() != 0);
+            self.listener_count
+                .store(listeners.len(), Ordering::Release);
+            drop(listeners);
+            for listener in live {
+                listener.force_wake();
+            }
+        }
+    }
+
+    /// Give each blocking waiter its own wake transport. A receive signal
+    /// wakes every waiter, even when another thread drains the shared fd.
+    pub fn subscribe(&self) -> Arc<Self> {
+        let listener = Arc::new(Self::new());
+        let mut listeners = self.listeners.lock().unwrap();
+        listeners.retain(|listener| listener.strong_count() != 0);
+        listeners.push(Arc::downgrade(&listener));
+        self.listener_count
+            .store(listeners.len(), Ordering::Release);
+        listener
     }
 
     pub fn force_wake(&self) {
@@ -243,6 +270,21 @@ impl ReadinessSignal {
 mod tests {
     use super::{CallbackDispatch, ReadinessSignal};
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    #[test]
+    fn shared_receive_signal_wakes_each_subscriber() {
+        let shared = ReadinessSignal::new();
+        let first = shared.subscribe();
+        let second = shared.subscribe();
+        first.park_begin();
+        second.park_begin();
+        shared.signal();
+        assert!(first.wait_timeout(Duration::ZERO));
+        assert!(second.wait_timeout(Duration::ZERO));
+        first.park_end();
+        second.park_end();
+    }
 
     #[test]
     fn native_callback_defers_hooks_and_preserves_a_wake_during_dispatch() {

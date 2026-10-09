@@ -38,6 +38,7 @@ is covered by `tests/coverage_matrix.rs`.
 | `dart` | `dart://` reliable ordered messages with fragmentation | `quinn-udp`, Linux `nix` (backend-level) |
 | `fuzz` | fuzz test suites | - |
 | `soak` | soak test suites | - |
+| `copy-stats` | per-site message copy counters for `omq_copy_budget` | - |
 
 ## Architecture summary
 

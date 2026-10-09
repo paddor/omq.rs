@@ -3,6 +3,7 @@ use std::io::IoSlice;
 
 use bytes::{Buf, Bytes, BytesMut};
 
+use crate::copy_stats::{self, Site};
 use crate::message::Message;
 use crate::proto::frame;
 
@@ -29,7 +30,22 @@ enum Entry {
         protected: bool,
     },
     /// External payload bytes (large message body, pre-encoded data).
-    External { bytes: Bytes, protected: bool },
+    /// `continues` marks a chunk followed by more chunks of one message.
+    External {
+        bytes: Bytes,
+        protected: bool,
+        continues: bool,
+    },
+}
+
+/// What one drain removed from the queue.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Drained {
+    /// Protected entries drained.
+    pub protected: usize,
+    /// Entries drained, counting a chunk group as one entry once its last
+    /// chunk drains.
+    pub entries: usize,
 }
 
 pub struct FrameBuffer {
@@ -193,6 +209,7 @@ impl FrameBuffer {
     }
 
     pub fn take_arena_bytes(&mut self) -> Bytes {
+        copy_stats::record(Site::ArenaDrain, self.arena.len());
         let frozen = Bytes::copy_from_slice(&self.arena);
         self.arena.clear();
         self.arena_mark = 0;
@@ -202,6 +219,7 @@ impl FrameBuffer {
 
     pub fn push_pre_framed(&mut self, data: &[u8]) {
         self.reserve_arena(data.len());
+        copy_stats::record(Site::PreFramed, data.len());
         self.arena.extend_from_slice(data);
         self.total_bytes += data.len();
     }
@@ -265,6 +283,7 @@ impl FrameBuffer {
         self.reserve_arena(msg.byte_len() + msg.len() * 9);
         let before = self.arena.len();
         frame::encode_message_flat(msg, &mut self.arena);
+        copy_stats::record(Site::FrameInline, self.arena.len() - before);
         self.total_bytes += self.arena.len() - before;
     }
 
@@ -283,6 +302,7 @@ impl FrameBuffer {
                 self.entries.push_back(Entry::External {
                     bytes: b,
                     protected: false,
+                    continues: false,
                 });
             }
         }
@@ -297,6 +317,7 @@ impl FrameBuffer {
         } else {
             frame::encode_message_flat_ws(msg, &mut self.arena);
         }
+        copy_stats::record(Site::WebSocket, self.arena.len() - before);
         self.total_bytes += self.arena.len() - before;
     }
 
@@ -304,6 +325,7 @@ impl FrameBuffer {
         self.reserve_arena(msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9);
         let before = self.arena.len();
         frame::encode_message_prefixed_flat(prefix, msg, &mut self.arena);
+        copy_stats::record(Site::FrameInline, self.arena.len() - before);
         self.total_bytes += self.arena.len() - before;
     }
 
@@ -343,6 +365,7 @@ impl FrameBuffer {
                 self.entries.push_back(Entry::External {
                     bytes,
                     protected: false,
+                    continues: false,
                 });
             }
         }
@@ -370,6 +393,7 @@ impl FrameBuffer {
             self.entries.push_back(Entry::External {
                 bytes: prefix.clone(),
                 protected: false,
+                continues: false,
             });
             let b = part.as_bytes();
             if !b.is_empty() {
@@ -377,6 +401,7 @@ impl FrameBuffer {
                 self.entries.push_back(Entry::External {
                     bytes: b,
                     protected: false,
+                    continues: false,
                 });
             }
         }
@@ -397,6 +422,21 @@ impl FrameBuffer {
             self.entries.push_back(Entry::External {
                 bytes: chunk,
                 protected,
+                continues: false,
+            });
+        }
+    }
+
+    /// Queue one encoded message as shared chunks. Eviction removes the
+    /// whole message; drains count it once.
+    pub fn push_raw_message(&mut self, chunks: &[Bytes], protected: bool) {
+        self.commit_arena_range();
+        for (index, chunk) in chunks.iter().enumerate() {
+            self.total_bytes += chunk.len();
+            self.entries.push_back(Entry::External {
+                bytes: chunk.clone(),
+                protected,
+                continues: index + 1 < chunks.len(),
             });
         }
     }
@@ -412,17 +452,23 @@ impl FrameBuffer {
         true
     }
 
+    /// Remove the oldest unprotected entry, or its whole message when it
+    /// starts a chunk group from [`Self::push_raw_message`].
     pub fn pop_oldest_unprotected_entry(&mut self) -> bool {
         self.commit_arena_range();
         let Some(pos) = self.entries.iter().position(|entry| !entry.is_protected()) else {
             return false;
         };
-        let entry = self
-            .entries
-            .remove(pos)
-            .expect("position came from entries");
-        let len = entry.len();
-        self.total_bytes = self.total_bytes.saturating_sub(len);
+        loop {
+            let entry = self
+                .entries
+                .remove(pos)
+                .expect("position came from entries");
+            self.total_bytes = self.total_bytes.saturating_sub(entry.len());
+            if !entry.continues() {
+                break;
+            }
+        }
         self.clear_empty_arena();
         true
     }
@@ -441,11 +487,12 @@ impl FrameBuffer {
             self.entries.push_back(Entry::External {
                 bytes: chunk.clone(),
                 protected: false,
+                continues: false,
             });
         }
     }
 
-    pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> usize {
+    pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> Drained {
         self.drain_arena(buf, max_chunks, false)
     }
 
@@ -453,14 +500,15 @@ impl FrameBuffer {
     /// chunks instead of copying them. For writers that keep the chunks
     /// until the peer acknowledges them (QUIC). The next encode reuses a
     /// retired arena once its chunks are dropped, else allocates.
-    pub fn drain_owned(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> usize {
+    pub fn drain_owned(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> Drained {
         self.drain_arena(buf, max_chunks, true)
     }
 
-    fn drain_arena(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> usize {
+    fn drain_arena(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize, owned: bool) -> Drained {
         self.commit_arena_range();
+        let mut drained = Drained::default();
         if self.entries.is_empty() {
-            return 0;
+            return drained;
         }
 
         let mut retired_capacity = 0;
@@ -480,6 +528,7 @@ impl FrameBuffer {
                 // entire backing to the frozen Bytes, forcing a fresh
                 // reserve() that causes page-fault storms on glibc's
                 // per-thread arenas.
+                copy_stats::record(Site::ArenaDrain, self.arena.len());
                 let frozen = Bytes::copy_from_slice(&self.arena);
                 self.arena.clear();
                 Some(frozen)
@@ -487,10 +536,12 @@ impl FrameBuffer {
         };
 
         let take = max_chunks.min(self.entries.len());
-        let mut protected_drained = 0;
         for entry in self.entries.drain(..take) {
             if entry.is_protected() {
-                protected_drained += 1;
+                drained.protected += 1;
+            }
+            if !entry.continues() {
+                drained.entries += 1;
             }
             let b = match entry {
                 Entry::Arena { offset, len, .. } => frozen
@@ -517,6 +568,7 @@ impl FrameBuffer {
                     *entry = Entry::External {
                         bytes: frozen.slice(offset as usize..(offset + len) as usize),
                         protected,
+                        continues: false,
                     };
                 }
             }
@@ -526,7 +578,7 @@ impl FrameBuffer {
         if owned && let Some(frozen) = frozen {
             self.retire_arena(frozen, retired_capacity);
         }
-        protected_drained
+        drained
     }
 
     pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
@@ -550,6 +602,7 @@ impl FrameBuffer {
             self.entries.push_front(Entry::External {
                 bytes: chunk,
                 protected: false,
+                continues: false,
             });
         }
     }
@@ -579,6 +632,16 @@ impl Entry {
             }
             Self::External { bytes, .. } => bytes.advance(n),
         }
+    }
+
+    fn continues(&self) -> bool {
+        matches!(
+            self,
+            Self::External {
+                continues: true,
+                ..
+            }
+        )
     }
 
     fn is_protected(&self) -> bool {

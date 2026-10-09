@@ -62,5 +62,17 @@ p50_256b_us=1000
 16b_msgs_s=1000000
 ```
 
+## Copy budget
+
+`omq_copy_budget` checks bytes copied per message across socket patterns,
+peer counts, transports, profiles, and sizes. It needs the `copy-stats`
+feature and runs weekly in `extended.yml`:
+
+```text
+cargo test -p omq-tokio --features copy-stats --test omq_copy_budget
+```
+
+`OMQ_COPY_BUDGET_VERBOSE=1` prints every cell.
+
 `scripts/test-all.sh` runs the verifier locally, skips it when `CI` or
 `GITHUB_ACTIONS` is set, and can skip it locally with `OMQ_SKIP_PERF=1`.

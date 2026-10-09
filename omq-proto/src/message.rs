@@ -111,6 +111,7 @@ impl Payload {
 
     fn bound_storage(&mut self) {
         if self.retained_size().is_none() {
+            crate::copy_stats::record(crate::copy_stats::Site::BoundStorage, self.len());
             let bytes = Bytes::copy_from_slice(self.as_slice());
             *self = Self::from_bytes_with_retained_size(bytes, self.len());
         }

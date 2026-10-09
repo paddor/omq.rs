@@ -1273,7 +1273,13 @@ enum PreparedFrame {
 impl PreparedFrame {
     fn from_frame(frame: &FanOutFrame<'_>) -> Self {
         match frame {
-            FanOutFrame::Arena(raw) => Self::Arena(Bytes::copy_from_slice(raw)),
+            FanOutFrame::Arena(raw) => {
+                omq_proto::copy_stats::record(
+                    omq_proto::copy_stats::Site::FanOutPrepared,
+                    raw.len(),
+                );
+                Self::Arena(Bytes::copy_from_slice(raw))
+            }
             FanOutFrame::Chunks(chunks) => Self::Chunks(chunks.to_vec()),
         }
     }

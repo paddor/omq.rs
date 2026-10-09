@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use futures::stream::FuturesOrdered;
+use omq_proto::copy_stats::{self, Site};
 use omq_proto::error::{Error, Result, TrySendError};
 use omq_proto::message::Message;
 use omq_proto::proto::transform::{MessageDecoder, MessageEncoder, TransformedOut};
@@ -417,6 +418,7 @@ fn coalesce_small_chunks(chunks: &mut Vec<Bytes>) {
         let merged = if read - start == 1 {
             std::mem::take(&mut chunks[start])
         } else {
+            copy_stats::record(Site::Coalesce, run_len);
             let mut merged = bytes::BytesMut::with_capacity(run_len);
             for chunk in &chunks[start..read] {
                 merged.extend_from_slice(chunk);
@@ -2438,6 +2440,7 @@ impl PendingLargeRead {
             BytesMut::with_capacity(target)
         };
         // Release the shared input prefix before the caller refills read_buf.
+        copy_stats::record(Site::RecvLargePrefix, prefix.len());
         buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
             buf,

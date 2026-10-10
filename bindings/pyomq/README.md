@@ -137,7 +137,7 @@ Run `scripts/update_perf.py` (after `maturin develop --release`) to re-measure, 
 ## Compression transports
 
 OMQ.rs adds transparent compression transports on top of TCP:
-`lz4+tcp://` and experimental `zstd+tcp://`.
+`lz4+tcp://` and `zstd+tcp://`.
 Swap the scheme in your endpoint string and everything else stays the same:
 
 ```python

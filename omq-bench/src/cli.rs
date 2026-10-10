@@ -50,7 +50,7 @@ pub(crate) enum RunSub {
     Comparisons(ComparisonsArgs),
     /// PUSH/PULL with LZ4 compression.
     PushpullLz4(PushpullLz4Args),
-    /// PUSH/PULL with experimental Zstd compression.
+    /// PUSH/PULL with Zstd compression.
     PushpullZstd(PushpullZstdArgs),
     /// Push/pull compression benchmarks.
     Compression(CompressionArgs),

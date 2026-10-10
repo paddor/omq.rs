@@ -124,7 +124,7 @@ It needs no libzmq, libsodium, or C compiler. Optional features:
 | `plain` | PLAIN username/password authentication (RFC 24) |
 | `curve` | CURVE authentication and encryption (RFC 26) |
 | `lz4` | `lz4+tcp://` compression ([RFC](doc/lz4-rfc.md)) |
-| `zstd` | Experimental `zstd+tcp://` compression |
+| `zstd` | `zstd+tcp://` compression ([RFC](doc/zstd-rfc.md)) |
 | `ws` | WebSocket (`ws://`) and verified TLS (`wss://`) |
 | `quic` | TLS-encrypted QUIC (`quic://`): [overview](doc/udp_transports.md#quic), [example](examples/quic.rs) |
 | `dart` | Reliable ordered UDP (`dart://`) for low latency: [overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md) |

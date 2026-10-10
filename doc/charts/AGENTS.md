@@ -18,10 +18,9 @@ cargo run --release -p omq-bench -- chart zstd      # Zstd compression
 A chart refresh without new benchmarks just re-renders existing data.
 Benchmark processes must not run in parallel.
 
-## Overview charts (5 files)
+## Main charts (3 files)
 
-Data: `comparisons.jsonl`; MOM Dart rows: `mom-dart.jsonl`.
-External impls required.
+Data: `comparisons.jsonl`. External impls required.
 
 | file | impls |
 |------|-------|
@@ -48,6 +47,23 @@ Older cache rows without pair/profile metadata remain valid REQ/REP defaults.
 On `main`, only the three `main_*.svg` overview charts include other
 implementations, except the DART charts, which also include Aeron.
 All other secondary charts in `doc/charts/` show OMQ and libzmq only.
+
+## MOM charts (3 files)
+
+Outputs: `moms/throughput.svg`, `moms/latency.svg` (no explicit spin),
+and `moms/latency_spin.svg` (Aeron and OMQ with receive spin).
+Generate with `omq_bench chart mom`. TCP, QUIC, and DART use consistent
+red, blue, and orange colors, with 1 owned IO thread each. OMQ latency uses
+matched CLIENT/SERVER runs in `mom-omq.jsonl`: 0 or 50 us application spin;
+DART also sets the same IO spin budget. Aeron uses a SHARED Media Driver
+and continuously polling application threads. Its cached version is in the legend.
+External rows and TCP/QUIC throughput come from `comparisons.jsonl`.
+DART adaptive throughput uses `mom-omq.jsonl`, a 512-message window,
+1 s warmup, 3 s timing, 2 s drain, and three repeats at all 15 TCP chart sizes.
+Latency uses a 256-message window, 2,000 warmup and 10,000 measured exchanges,
+three passes at 16 B, 32 B, 64 B, 256 B, 1 KiB, and 4 KiB. Select the middle
+p99 run; its p50 and p99.9 supply the whiskers. Require clean, verified,
+complete cohorts with one binary digest and CPU placement `1,2,0,3,5,4`.
 
 ## Secondary comparison charts (6 files)
 

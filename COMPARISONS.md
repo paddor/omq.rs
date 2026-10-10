@@ -71,7 +71,7 @@ See [other protocol comparisons](PROTOCOL_COMPARISONS.md) for the setup and
 latency chart.
 
 <p align="center">
-  <img src="doc/charts/mom_throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+  <img src="doc/charts/moms/throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>
 
 <p align="center">

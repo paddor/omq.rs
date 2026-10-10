@@ -67,7 +67,7 @@
   <polyline points="60.0,193.7 115.8,199.6 171.7,216.0 227.5,217.4 283.3,217.1 339.2,213.0 395.0,217.2" fill="none" stroke="#ff4fa3" stroke-width="2" stroke-dasharray="6,4"/>
   <polyline points="60.0,323.2 115.8,321.0 171.7,326.5 227.5,309.2 283.3,284.8 339.2,284.8 395.0,317.5" fill="none" stroke="#fb923c" stroke-width="2" stroke-dasharray="6,4"/>
   <polyline points="60.0,266.0 115.8,270.0 171.7,285.9 227.5,311.2 283.3,335.9 339.2,321.3 395.0,345.8" fill="none" stroke="#60a5fa" stroke-width="2" stroke-dasharray="6,4"/>
-  <polyline points="60.0,444.0 115.8,444.0 171.7,444.0 227.5,444.0 283.3,444.0 339.2,444.0 395.0,444.0" fill="none" stroke="#06b6d4" stroke-width="2" stroke-dasharray="6,4"/>
+  <polyline points="60.0,267.9 115.8,275.0 171.7,289.3 227.5,313.8 283.3,339.4 339.2,321.7 395.0,343.6" fill="none" stroke="#06b6d4" stroke-width="2" stroke-dasharray="6,4"/>
   <polyline points="60.0,435.8 115.8,435.3 171.7,435.4 227.5,435.3 283.3,435.6 339.2,435.4 395.0,435.8" fill="none" stroke="#a855f7" stroke-width="2" stroke-dasharray="6,4"/>
   <polyline points="455.0,420.4 502.9,398.3 550.7,352.3 598.6,263.3 646.4,200.3 694.3,177.0 742.1,168.8 790.0,161.6" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="455.0" cy="420.4" r="3" fill="#ef4444" stroke="#000000" stroke-width="1"/>
@@ -105,15 +105,15 @@
   <circle cx="694.3" cy="372.5" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
   <circle cx="742.1" cy="367.6" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
   <circle cx="790.0" cy="321.4" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
-  <polyline points="455.0,444.0 502.9,444.0 550.7,444.0 598.6,444.0 646.4,444.0 694.3,444.0 742.1,444.0 790.0,444.0" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="455.0" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="502.9" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="550.7" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="598.6" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="646.4" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="694.3" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="742.1" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="790.0" cy="444.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <polyline points="455.0,433.3 502.9,419.0 550.7,402.9 598.6,386.7 646.4,373.6 694.3,372.4 742.1,368.1 790.0,320.4" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="455.0" cy="433.3" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="502.9" cy="419.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="550.7" cy="402.9" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="598.6" cy="386.7" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="646.4" cy="373.6" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="694.3" cy="372.4" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="742.1" cy="368.1" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="790.0" cy="320.4" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
   <polyline points="455.0,443.1 502.9,442.2 550.7,440.6 598.6,437.5 646.4,431.0 694.3,418.4 742.1,395.0 790.0,356.1" fill="none" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="455.0" cy="443.1" r="3" fill="#a855f7" stroke="#000000" stroke-width="1"/>
   <circle cx="502.9" cy="442.2" r="3" fill="#a855f7" stroke="#000000" stroke-width="1"/>
@@ -211,16 +211,16 @@
   <circle cx="607.5" cy="638.2" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
   <circle cx="698.8" cy="636.0" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
   <circle cx="790.0" cy="633.5" r="3" fill="#60a5fa" stroke="#000000" stroke-width="1"/>
-  <polyline points="60.0,749.0 151.2,749.0 242.5,749.0 333.8,749.0 425.0,749.0 516.2,749.0 607.5,749.0 698.8,749.0 790.0,749.0" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="60.0" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="151.2" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="242.5" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="333.8" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="425.0" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="516.2" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="607.5" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="698.8" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
-  <circle cx="790.0" cy="749.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <polyline points="60.0,641.0 151.2,642.3 242.5,640.0 333.8,640.8 425.0,638.5 516.2,638.7 607.5,638.4 698.8,638.8 790.0,635.8" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60.0" cy="641.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="151.2" cy="642.3" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="242.5" cy="640.0" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="333.8" cy="640.8" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="425.0" cy="638.5" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="516.2" cy="638.7" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="607.5" cy="638.4" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="698.8" cy="638.8" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
+  <circle cx="790.0" cy="635.8" r="3" fill="#06b6d4" stroke="#000000" stroke-width="1"/>
   <polyline points="60.0,551.4 151.2,553.3 242.5,549.2 333.8,548.2 425.0,550.0 516.2,547.4 607.5,547.9 698.8,544.6 790.0,544.6" fill="none" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="60.0" cy="551.4" r="3" fill="#a855f7" stroke="#000000" stroke-width="1"/>
   <circle cx="151.2" cy="553.3" r="3" fill="#a855f7" stroke="#000000" stroke-width="1"/>

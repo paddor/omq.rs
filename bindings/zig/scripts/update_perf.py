@@ -50,12 +50,12 @@ IMPLS = {
     },
     "zzmq": {
         "repo": "https://github.com/nine-lives-later/zzmq",
-        "bench": os.path.join(BIN_DIR, "zzmq-bench"),
+        "bench": os.path.join(BIN_DIR, "omq_zzmq_bench"),
     },
     "zimq": {
         "repo": "https://github.com/uyha/zimq",
         "tag": "zig-0.16",
-        "bench": os.path.join(BIN_DIR, "zimq-bench"),
+        "bench": os.path.join(BIN_DIR, "omq_zimq_bench"),
     },
 }
 
@@ -141,6 +141,7 @@ def run(cmd, *, cwd=None, timeout=None):
         text=True,
         capture_output=True,
         timeout=timeout,
+        check=False,
     )
     if r.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed:\n{r.stdout}{r.stderr}")
@@ -223,7 +224,7 @@ pub fn build(b: *std.Build) void {{
         .curve = false,
     }});
     const exe = b.addExecutable(.{{
-        .name = "zimq-bench",
+        .name = "omq_zimq_bench",
         .root_module = b.createModule(.{{
             .root_source_file = .{{ .cwd_relative = "{os.path.join(BINDING_DIR, 'scripts', 'bench', 'zimq_bench.zig')}" }},
             .target = target,
@@ -234,16 +235,16 @@ pub fn build(b: *std.Build) void {{
     b.installArtifact(exe);
 }}
 """
-        build_zon = f""".{{
+        build_zon = """.{
     .name = .zimq_bench,
     .version = "0.0.0",
     .fingerprint = 0xaef28a37f715d243,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{{
-        .zimq = .{{ .path = "deps/zimq" }},
-    }},
-    .paths = .{{ "build.zig" }},
-}}
+    .dependencies = .{
+        .zimq = .{ .path = "deps/zimq" },
+    },
+    .paths = .{ "build.zig" },
+}
 """
         with open(os.path.join(work, "build.zig"), "w") as f:
             f.write(build_zig)
@@ -279,8 +280,7 @@ def load_jsonl():
 def append_jsonl(rows):
     os.makedirs(os.path.dirname(JSONL_FILE), exist_ok=True)
     with open(JSONL_FILE, "a") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+        f.writelines(json.dumps(r) + "\n" for r in rows)
 
 
 def latency_sizes_from(sizes):
@@ -475,11 +475,11 @@ def chart_data_from_jsonl():
 
     def get_tp(impl, size):
         r = latest.get((impl, "throughput", "sync", "tcp", size))
-        return r["msgs_s"] if r else 0.0
+        return r["msgs_s"] if r else None
 
     def get_lat(impl, size):
         r = latest.get((impl, "latency", "sync", "tcp", size))
-        return r["p50_us"] if r else 0.0
+        return r["p50_us"] if r else None
 
     latency_sizes = latency_sizes_from(SIZES)
     return {
@@ -490,6 +490,20 @@ def chart_data_from_jsonl():
 
 # SVG chart generation. Layout copied from bindings/pyomq/scripts/update_perf.py;
 # only series names, title text, and input data keys differ.
+
+def _series_segments(values):
+    """Yield measured runs without connecting across missing data points."""
+    segment = []
+    for index, value in enumerate(values):
+        if value is None:
+            if segment:
+                yield segment
+            segment = []
+        else:
+            segment.append((index, value))
+    if segment:
+        yield segment
+
 
 C_OMQ = "#ef4444"
 C_ZZMQ = "#60a5fa"
@@ -561,8 +575,8 @@ def gen_combined_chart(data, path):
     chart_series = [
         (label, color)
         for label, color in CHART_SERIES
-        if all(value > 0 for value in data["throughput"][label])
-        and all(value > 0 for value in data["latency"][label])
+        if any(value is not None for value in data["throughput"][label])
+        or any(value is not None for value in data["latency"][label])
     ]
     latency_sizes = latency_sizes_from(SIZES)
     lat_n = len(latency_sizes)
@@ -603,6 +617,7 @@ def gen_combined_chart(data, path):
         vals[i] * SIZES[i] / 1_000_000_000
         for _, _, vals in tp_series
         for i in large_indices
+        if vals[i] is not None
     ]
     gbs_max = max(1, math.ceil(max(gbs_values, default=0)))
 
@@ -687,23 +702,27 @@ def gen_combined_chart(data, path):
     )
 
     for _, color, vals in tp_series:
-        pts = " ".join(
-            f"{small_xs[j]:.1f},{y_msg(vals[i]):.1f}"
-            for j, i in enumerate(small_indices)
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
+        for segment in _series_segments([vals[i] for i in small_indices]):
+            pts = " ".join(f"{small_xs[j]:.1f},{y_msg(v):.1f}" for j, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2" stroke-dasharray="6,4"/>'
+            )
 
     for _, color, vals in tp_series:
-        gbs = [vals[i] * SIZES[i] / 1e9 for i in large_indices]
-        pts = " ".join(f"{large_xs[j]:.1f},{y_gbs(v):.1f}" for j, v in enumerate(gbs))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
+        gbs = [
+            vals[i] * SIZES[i] / 1e9 if vals[i] is not None else None
+            for i in large_indices
+        ]
+        for segment in _series_segments(gbs):
+            pts = " ".join(f"{large_xs[j]:.1f},{y_gbs(v):.1f}" for j, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+            )
         for j, v in enumerate(gbs):
+            if v is None:
+                continue
             yy = y_gbs(v)
             L.append(
                 f'  <circle cx="{large_xs[j]:.1f}" cy="{yy:.1f}" r="3"'
@@ -755,12 +774,15 @@ def gen_combined_chart(data, path):
 
     for label, color in chart_series:
         vals = data["latency"][label]
-        pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
+        for segment in _series_segments(vals):
+            pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+            )
         for i, v in enumerate(vals):
+            if v is None:
+                continue
             yy = y_lat(v)
             L.append(
                 f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'

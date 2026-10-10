@@ -28,7 +28,9 @@ const LEN_MASK: u8 = 0x7F;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WsRole {
+    /// Connecting side; outgoing frames are masked.
     Client,
+    /// Accepting side; outgoing frames are unmasked.
     Server,
 }
 

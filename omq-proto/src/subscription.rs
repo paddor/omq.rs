@@ -8,6 +8,7 @@
 
 use patricia_tree::PatriciaMap;
 
+/// Reference-counted topic prefixes used for subscription matching.
 #[derive(Debug, Default, Clone)]
 pub struct SubscriptionSet {
     set: PatriciaMap<u64>,

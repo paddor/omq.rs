@@ -41,33 +41,55 @@ pub enum Command {
     Cancel(Bytes),
     /// Heartbeat PING (ZMTP 3.1+).
     Ping {
+        /// Peer silence timeout hint in tenths of a second; zero disables it.
         ttl_deciseconds: u16,
+        /// Opaque heartbeat context echoed by PONG.
         context: Bytes,
     },
     /// Heartbeat PONG (ZMTP 3.1+), echoes the sender's context.
-    Pong { context: Bytes },
+    Pong {
+        /// Opaque context echoed from PING.
+        context: Bytes,
+    },
     /// Peer-signaled protocol error.
-    Error { reason: String },
+    Error {
+        /// Peer-provided error description.
+        reason: String,
+    },
     /// DISH joined a group (ZMTP 3.1+, draft).
     Join(Bytes),
     /// DISH left a group (ZMTP 3.1+, draft).
     Leave(Bytes),
     /// Unrecognized command. Preserved so the peer can ignore politely.
-    Unknown { name: Bytes, body: Bytes },
+    Unknown {
+        /// Unrecognized command name.
+        name: Bytes,
+        /// Unparsed command-specific body.
+        body: Bytes,
+    },
 }
 
 /// One kind per [`Command`] variant, useful for telemetry and dispatch logic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CommandKind {
+    /// Handshake completion metadata.
     Ready,
+    /// Topic prefix subscription.
     Subscribe,
+    /// Topic prefix cancellation.
     Cancel,
+    /// Heartbeat request.
     Ping,
+    /// Heartbeat response.
     Pong,
+    /// Peer-signaled protocol error.
     Error,
+    /// Group subscription.
     Join,
+    /// Group cancellation.
     Leave,
+    /// Unrecognized command name.
     Unknown,
 }
 
@@ -109,12 +131,14 @@ impl PeerProperties {
         Self::default()
     }
 
+    /// Set the declared socket type.
     #[must_use]
     pub fn with_socket_type(mut self, t: SocketType) -> Self {
         self.socket_type = Some(t);
         self
     }
 
+    /// Set a nonempty routing identity.
     #[must_use]
     pub fn with_identity(mut self, id: Bytes) -> Self {
         if !id.is_empty() {

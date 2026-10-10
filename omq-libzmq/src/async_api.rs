@@ -70,6 +70,8 @@ fn decode_message(encoded: *const u8, length: usize) -> Option<Message> {
     })
 }
 
+/// Copy an encoded multipart message and submit it asynchronously; the callback receives an
+/// errno status.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_socket_send_async(
     socket_ptr: *mut c_void,
@@ -118,6 +120,7 @@ pub extern "C" fn omq_socket_send_async(
     }))
 }
 
+/// Request cancellation of a live async send task; a null handle is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_async_task_cancel(task: *mut OmqAsyncTask) {
     if task.is_null() {
@@ -129,6 +132,7 @@ pub extern "C" fn omq_async_task_cancel(task: *mut OmqAsyncTask) {
     task.cancel.notify_changed();
 }
 
+/// Release an async task handle; this does not wait for or cancel its callback.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_async_task_free(task: *mut OmqAsyncTask) {
     if task.is_null() {

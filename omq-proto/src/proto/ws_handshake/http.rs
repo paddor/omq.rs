@@ -8,7 +8,9 @@
 use super::{valid_ws_key, validate_ws_accept};
 use crate::{Error, Result};
 
+/// Maximum HTTP upgrade head size including its terminator.
 pub const MAX_HTTP_BYTES: usize = 4096;
+/// Maximum header fields in one HTTP upgrade head.
 pub const MAX_HTTP_FIELDS: usize = 64;
 const MAX_SUBPROTOCOLS: usize = 64;
 
@@ -169,10 +171,15 @@ impl<'a> Head<'a> {
 /// Parsed fields from a complete client HTTP upgrade head.
 #[derive(Debug)]
 pub struct UpgradeRequest {
+    /// Validated Sec-WebSocket-Key value.
     pub key: String,
+    /// Offered WebSocket subprotocols in client order.
     pub subprotocols: Vec<String>,
+    /// HTTP request target.
     pub path: String,
+    /// HTTP Host header value.
     pub host: String,
+    /// Optional HTTP Origin header value.
     pub origin: Option<String>,
 }
 

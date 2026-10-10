@@ -228,6 +228,7 @@ impl std::fmt::Debug for OmqContext {
 
 // Context handle: Box<Arc<OmqContext>> cast to *mut c_void.
 
+/// Create a context handle with one IO thread; close it with `zmq_ctx_term`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
     install_process_guards();
@@ -235,6 +236,7 @@ pub extern "C" fn zmq_ctx_new() -> *mut libc::c_void {
     Box::into_raw(Box::new(arc)).cast()
 }
 
+/// Create a context with the requested IO thread count; legacy alias for context creation.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
     install_process_guards();
@@ -243,6 +245,7 @@ pub extern "C" fn zmq_init(io_threads: c_int) -> *mut libc::c_void {
     Box::into_raw(Box::new(arc)).cast()
 }
 
+/// Stop context activity and wake blocked socket calls without releasing the context handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
@@ -254,6 +257,7 @@ pub extern "C" fn zmq_ctx_shutdown(ctx_ptr: *mut libc::c_void) -> c_int {
     0
 }
 
+/// Shut down the context, wait for sockets and linger work, and release its handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     if ctx_ptr.is_null() {
@@ -291,6 +295,7 @@ pub extern "C" fn zmq_ctx_term(ctx_ptr: *mut libc::c_void) -> c_int {
     0
 }
 
+/// Write the context's process-local 128-bit IO runtime sharing key as two u64 words.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_ctx_share_key(
     ctx_ptr: *mut c_void,
@@ -317,6 +322,8 @@ pub extern "C" fn omq_ctx_share_key(
     0
 }
 
+/// Create a context handle sharing an existing process-local IO runtime; null indicates an
+/// invalid key.
 #[unsafe(no_mangle)]
 pub extern "C" fn omq_ctx_from_share_key(key_hi: u64, key_lo: u64) -> *mut c_void {
     install_process_guards();
@@ -328,11 +335,13 @@ pub extern "C" fn omq_ctx_from_share_key(key_hi: u64, key_lo: u64) -> *mut c_voi
     Box::into_raw(Box::new(OmqContext::from_io_context(ctx))).cast()
 }
 
+/// Terminate and release a context; alias for `zmq_ctx_term`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_destroy(ctx_ptr: *mut libc::c_void) -> c_int {
     zmq_ctx_term(ctx_ptr)
 }
 
+/// Terminate and release a context; legacy alias for `zmq_ctx_term`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_term(ctx_ptr: *mut libc::c_void) -> c_int {
     zmq_ctx_term(ctx_ptr)
@@ -348,6 +357,7 @@ const ZMQ_ZERO_COPY_RECV: c_int = 10;
 const ZMQ_IPV6_CTX: c_int = 42;
 const ZMQ_BLOCKY: c_int = 70;
 
+/// Set an integer context option; return zero on success or -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: c_int) -> c_int {
     if ctx_ptr.is_null() {
@@ -392,6 +402,7 @@ pub extern "C" fn zmq_ctx_set(ctx_ptr: *mut libc::c_void, option: c_int, value: 
     0
 }
 
+/// Read an integer context option; return -1 with errno on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_int {
     if ctx_ptr.is_null() {
@@ -412,6 +423,7 @@ pub extern "C" fn zmq_ctx_get(ctx_ptr: *mut libc::c_void, option: c_int) -> c_in
     }
 }
 
+/// Set a context option from a caller-owned byte buffer; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_set_ext(
     ctx_ptr: *mut libc::c_void,
@@ -453,6 +465,8 @@ pub extern "C" fn zmq_ctx_set_ext(
     zmq_ctx_set(ctx_ptr, option, value)
 }
 
+/// Write a context option into caller storage and update its length; return zero or -1 with
+/// errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ctx_get_ext(
     ctx_ptr: *mut libc::c_void,

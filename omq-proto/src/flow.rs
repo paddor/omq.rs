@@ -46,6 +46,7 @@ impl DrainBudget {
     /// drain rounds, not individual messages.
     pub const WIRE_DRAIN: Self = Self::new(1024, 1024 * 1024);
 
+    /// Create a drain budget bounded by message count and payload bytes.
     #[must_use]
     pub const fn new(max_msgs: usize, max_bytes: usize) -> Self {
         Self {

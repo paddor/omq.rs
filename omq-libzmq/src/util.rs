@@ -6,6 +6,7 @@ use crate::error::fail;
 
 type ThreadFn = unsafe extern "C" fn(*mut libc::c_void);
 
+/// Write the emulated libzmq version to each non-null output pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_version(major: *mut c_int, minor: *mut c_int, patch: *mut c_int) {
     // SAFETY: each pointer is checked for null before writing.
@@ -22,6 +23,7 @@ pub extern "C" fn zmq_version(major: *mut c_int, minor: *mut c_int, patch: *mut 
     }
 }
 
+/// Return one when a null-terminated capability name is supported, otherwise zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
     if capability.is_null() {
@@ -37,6 +39,7 @@ pub extern "C" fn zmq_has(capability: *const libc::c_char) -> c_int {
     }
 }
 
+/// Block the calling thread for a positive number of seconds.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_sleep(seconds: c_int) {
     if seconds > 0 {
@@ -44,12 +47,14 @@ pub extern "C" fn zmq_sleep(seconds: c_int) {
     }
 }
 
+/// Create a monotonic stopwatch handle; release it with `zmq_stopwatch_stop`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_stopwatch_start() -> *mut libc::c_void {
     let now = Box::new(std::time::Instant::now());
     Box::into_raw(now).cast()
 }
 
+/// Return elapsed microseconds and release the stopwatch; null returns zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_stopwatch_stop(watch: *mut libc::c_void) -> libc::c_ulong {
     if watch.is_null() {
@@ -60,6 +65,7 @@ pub extern "C" fn zmq_stopwatch_stop(watch: *mut libc::c_void) -> libc::c_ulong 
     start.elapsed().as_micros() as libc::c_ulong
 }
 
+/// Return elapsed microseconds without releasing the stopwatch; null returns zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_stopwatch_intermediate(watch: *mut libc::c_void) -> libc::c_ulong {
     if watch.is_null() {
@@ -70,12 +76,14 @@ pub extern "C" fn zmq_stopwatch_intermediate(watch: *mut libc::c_void) -> libc::
     start.elapsed().as_micros() as libc::c_ulong
 }
 
+/// Create an atomic integer counter initialized to zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_new() -> *mut libc::c_void {
     let counter = Box::new(std::sync::atomic::AtomicI32::new(0));
     Box::into_raw(counter).cast()
 }
 
+/// Store a new counter value; a null handle is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_set(counter: *mut libc::c_void, value: c_int) {
     if !counter.is_null() {
@@ -85,6 +93,7 @@ pub extern "C" fn zmq_atomic_counter_set(counter: *mut libc::c_void, value: c_in
     }
 }
 
+/// Increment the counter and return its previous value; null returns zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_inc(counter: *mut libc::c_void) -> c_int {
     if counter.is_null() {
@@ -95,6 +104,7 @@ pub extern "C" fn zmq_atomic_counter_inc(counter: *mut libc::c_void) -> c_int {
     c.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Decrement the counter and return one if its previous value exceeded one.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_dec(counter: *mut libc::c_void) -> c_int {
     if counter.is_null() {
@@ -106,6 +116,7 @@ pub extern "C" fn zmq_atomic_counter_dec(counter: *mut libc::c_void) -> c_int {
     i32::from(prev > 1)
 }
 
+/// Return the current counter value; null returns zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_value(counter: *mut libc::c_void) -> c_int {
     if counter.is_null() {
@@ -116,6 +127,7 @@ pub extern "C" fn zmq_atomic_counter_value(counter: *mut libc::c_void) -> c_int 
     c.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Release an atomic counter and clear the caller's handle pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_atomic_counter_destroy(counter_p: *mut *mut libc::c_void) {
     if !counter_p.is_null() {
@@ -129,6 +141,7 @@ pub extern "C" fn zmq_atomic_counter_destroy(counter_p: *mut *mut libc::c_void) 
     }
 }
 
+/// Run a forwarding proxy for a legacy device type; invalid types return -1 with EINVAL.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_device(
     device: c_int,
@@ -141,6 +154,8 @@ pub extern "C" fn zmq_device(
     }
 }
 
+/// Start a thread invoking the callback with its argument; return a handle or null with
+/// errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_threadstart(
     func: Option<ThreadFn>,
@@ -161,6 +176,7 @@ pub extern "C" fn zmq_threadstart(
     Box::into_raw(Box::new(handle)).cast()
 }
 
+/// Join and release a thread handle created by `zmq_threadstart`; null is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_threadclose(thread: *mut libc::c_void) {
     if thread.is_null() {

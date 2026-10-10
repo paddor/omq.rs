@@ -18,7 +18,9 @@ pub use credit::{AdmissionCounter, CreditCounter};
 pub use handshake::Handshake;
 pub use session::{Admission, Ecn, FragmentBuffer, Session, SessionConfig, SessionStats, Transmit};
 
+/// Bytes in the tag, session ID, and sequence header.
 pub const DATA_HEADER: usize = 17;
+/// Bytes in a first-fragment header, including the full message length.
 pub const FIRST_HEADER: usize = DATA_HEADER + 8;
 /// Largest CONT body; FIRST's length and group occupy part of this space.
 pub const MAX_FRAGMENT_BODY: usize = MAX_DATAGRAM - DATA_HEADER;
@@ -33,10 +35,12 @@ pub struct PackedMessages<'a> {
 }
 
 impl<'a> PackedMessages<'a> {
+    /// Return the number of packed messages.
     pub const fn message_count(self) -> usize {
         self.lengths.len()
     }
 
+    /// Iterate over validated message bodies in wire order.
     pub fn iter(self) -> impl ExactSizeIterator<Item = &'a [u8]> + Clone {
         Payloads {
             lengths: self.lengths,
@@ -89,8 +93,11 @@ fn decode_packed<'a>(lengths: &'a [u8], bytes: &'a [u8], first: u64) -> Option<P
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Phase {
+    /// Connector announces its receiver session.
     Hello,
+    /// Listener announces its receiver session and echoes the connector's.
     Welcome,
+    /// Connector confirms the listener's receiver session.
     Confirm,
 }
 
@@ -98,45 +105,75 @@ pub enum Phase {
 /// not UDP arrivals that could be duplicated or rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
+    /// Receiver session ID whose sequence is being acknowledged.
     pub session: u64,
+    /// Monotonically increasing feedback serial number.
     pub serial: u64,
+    /// First sequence position not cumulatively retained.
     pub ack: u64,
+    /// Exclusive receive-credit right edge.
     pub credit: u64,
+    /// Unique retained units by ECT(0), ECT(1), CE, Not-ECT, and unavailable ECN.
     pub counts: [u64; 5],
 }
 
 /// Borrowed reliable packet, validated against its complete UDP boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Packet<'a> {
+    /// First fragment announcing the complete message length.
     First {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// Sequence position of the message or fragment.
         sequence: u64,
+        /// Complete message body length in bytes.
         length: u64,
+        /// Borrowed body bytes, including socket-specific metadata where applicable.
         payload: &'a [u8],
     },
+    /// Subsequent fragment; sequence order determines its position.
     Continuation {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// Sequence position of the message or fragment.
         sequence: u64,
+        /// Borrowed body bytes, including socket-specific metadata where applicable.
         payload: &'a [u8],
     },
+    /// Complete unfragmented application message.
     Data {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// Sequence position of the message or fragment.
         sequence: u64,
+        /// Borrowed body bytes, including socket-specific metadata where applicable.
         payload: &'a [u8],
     },
+    /// Consecutive small messages sharing one UDP datagram.
     Packed {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// First sequence position in this range.
         first: u64,
+        /// Validated consecutive message bodies.
         messages: PackedMessages<'a>,
     },
+    /// Cumulative receipt, credit, and ECN feedback.
     Status(Status),
+    /// Request retransmission of a missing sequence range.
     Nak {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// First sequence position in this range.
         first: u64,
+        /// Number of consecutive missing sequence units.
         count: u32,
     },
+    /// Announce the sender's next sequence position and request feedback.
     Probe {
+        /// Receiver session ID identifying this sequence.
         session: u64,
+        /// Next sequence position awaiting initial transmission.
         next: u64,
     },
 }
@@ -147,6 +184,7 @@ fn word(bytes: &[u8], offset: usize) -> Option<u64> {
     ))
 }
 
+/// Decode a reliable packet; return `None` for an invalid UDP payload.
 pub fn decode_packet(bytes: &[u8]) -> Option<Packet<'_>> {
     let tag = *bytes.first()?;
     if (2..=MAX_PACKED_MESSAGES as u8).contains(&tag) {
@@ -335,10 +373,15 @@ pub enum Datagram<'a> {
     /// Body plus any socket-specific group metadata.
     Data(&'a [u8]),
     /// A control command with borrowed name and body.
-    Command { name: &'a [u8], body: &'a [u8] },
+    Command {
+        /// ASCII command name without its length prefix.
+        name: &'a [u8],
+        /// Command-specific bytes following the name.
+        body: &'a [u8],
+    },
 }
 
-/// Supported socket types. PEER still has exactly one application body.
+/// Supported socket types. DART accepts only single-part application messages.
 pub const fn supports(socket_type: SocketType) -> bool {
     matches!(
         socket_type,
@@ -435,11 +478,17 @@ pub fn encode_sequenced_data(
 /// READY metadata, borrowed from one datagram.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ready<'a> {
+    /// Socket type advertised for compatibility checking.
     pub socket_type: SocketType,
+    /// Optional peer routing identity.
     pub identity: Option<&'a [u8]>,
+    /// Whether the peer requests a READY response.
     pub reply_requested: bool,
+    /// Fresh nonzero local receiver session ID.
     pub session: u64,
+    /// Echoed remote session ID; zero in HELLO.
     pub echo: u64,
+    /// Challenge-confirmation phase.
     pub phase: Phase,
 }
 

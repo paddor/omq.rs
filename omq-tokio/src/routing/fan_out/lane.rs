@@ -87,6 +87,7 @@ struct LanePeer {
     slot: Arc<PeerTransmitSlot>,
     dict_shipped: bool,
     codec_group: usize,
+    needs_flush: bool,
 }
 
 struct LaneEndpoint {
@@ -546,8 +547,10 @@ impl FanOutLanes {
 impl LaneWorker {
     async fn run(mut self) {
         let mut budget = DrainBudget::WORKER;
+        let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
+        let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
         loop {
-            let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
+            batch.clear();
             self.data_signal.begin_drain();
 
             // 1. ALL control commands, unconditionally.
@@ -560,7 +563,6 @@ impl LaneWorker {
             // directly by the caller and can encode independently.
             budget.reset();
             let mut drained = false;
-            let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
             self.data_rx.prefetch();
             while let Some(data) = self.data_rx.pop() {
                 drained = true;
@@ -658,6 +660,7 @@ impl LaneWorker {
                         any_groups: add.any_groups,
                         dict_shipped: add.slot.fanout_dict_shipped(),
                         codec_group,
+                        needs_flush: false,
                         slot: add.slot,
                     },
                 );
@@ -768,7 +771,7 @@ impl LaneWorker {
                     if Self::try_push_frame(&peer.slot, &frame) == TryFrameResult::Ok {
                         peer.dict_shipped = true;
                         peer.slot.mark_fanout_dict_shipped();
-                        touched.push(peer_id);
+                        Self::touch_peer(peer_id, peer, touched);
                     } else {
                         owned_dict
                             .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)));
@@ -793,7 +796,7 @@ impl LaneWorker {
         );
         let mut owned_payload = None;
         for &peer_id in peer_ids {
-            let Some(peer) = self.peers.get(&peer_id) else {
+            let Some(peer) = self.peers.get_mut(&peer_id) else {
                 continue;
             };
             let needs_dict = dictionary.is_some() && !peer.dict_shipped;
@@ -803,7 +806,7 @@ impl LaneWorker {
                 Self::try_push_frame(&peer.slot, &frame)
             };
             match result {
-                TryFrameResult::Ok => touched.push(peer_id),
+                TryFrameResult::Ok => Self::touch_peer(peer_id, peer, touched),
                 TryFrameResult::Full => {
                     let payload = owned_payload
                         .get_or_insert_with(|| Arc::new(PreparedFrame::from_frame(&frame)))
@@ -844,7 +847,7 @@ impl LaneWorker {
                         TryFrameResult::Ok => {
                             peer.dict_shipped = true;
                             target.slot.mark_fanout_dict_shipped();
-                            touched.push(target.peer_id);
+                            Self::touch_peer(target.peer_id, peer, touched);
                             target.dictionary = None;
                         }
                         TryFrameResult::Full => {}
@@ -854,7 +857,7 @@ impl LaneWorker {
                 if target.dictionary.is_none() {
                     match Self::try_push_frame(&target.slot, &target.payload.as_frame()) {
                         TryFrameResult::Ok => {
-                            touched.push(target.peer_id);
+                            Self::touch_peer(target.peer_id, peer, touched);
                             return false;
                         }
                         TryFrameResult::Full => {}
@@ -1053,7 +1056,7 @@ impl LaneWorker {
                     peer.dict_shipped = true;
                     peer.slot.mark_fanout_dict_shipped();
                 }
-                touched.push(peer_id);
+                Self::touch_peer(peer_id, peer, touched);
                 true
             }
             TryFrameResult::Dead | TryFrameResult::Ineligible => false,
@@ -1066,11 +1069,17 @@ impl LaneWorker {
         }
     }
 
-    fn flush_touched(&self, touched: &mut SmallVec<[u64; 32]>) {
-        touched.sort_unstable();
-        touched.dedup();
-        for &peer_id in touched.iter() {
-            if let Some(peer) = self.peers.get(&peer_id) {
+    fn touch_peer(peer_id: u64, peer: &mut LanePeer, touched: &mut SmallVec<[u64; 32]>) {
+        if !peer.needs_flush {
+            peer.needs_flush = true;
+            touched.push(peer_id);
+        }
+    }
+
+    fn flush_touched(&mut self, touched: &mut SmallVec<[u64; 32]>) {
+        for peer_id in touched.drain(..) {
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                peer.needs_flush = false;
                 peer.slot.signal_encoded();
             }
         }
@@ -1387,6 +1396,7 @@ mod tests {
                 slot: slot.clone(),
                 dict_shipped: false,
                 codec_group: 0,
+                needs_flush: false,
             },
         );
         let mut worker = LaneWorker {
@@ -1436,6 +1446,7 @@ mod tests {
                 slot: slot.clone(),
                 dict_shipped: false,
                 codec_group: 0,
+                needs_flush: false,
             },
         );
         let mut worker = LaneWorker {
@@ -1518,6 +1529,7 @@ mod tests {
                 slot: slot.clone(),
                 dict_shipped: false,
                 codec_group: 0,
+                needs_flush: false,
             },
         );
         let mut worker = LaneWorker {

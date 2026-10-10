@@ -1,9 +1,7 @@
 use super::common::{
-    C_AERON, C_GRPC, C_IROH, C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_NATS, C_OMQ_1T, C_OMQ_2T,
-    C_OMQ_3T, C_OMQ_CT, C_OMQ_MT, C_OMQ_QUIC, C_OMQ_SPIN, C_R0Z, C_RABBITMQ, C_REDIS,
-    C_RZMQ_IOURING, C_TMQ, C_ZENOH, C_ZMQRS, CpuData, Impl, LatencyEntry, LatencyMap, ValMap,
-    draw_latency_brokered_with_versions, draw_latency_single_panel_with_versions,
-    draw_throughput_dual_panel_brokered_with_versions,
+    C_LIBZMQ, C_LIBZMQ_2T, C_MONOCOQUE, C_OMQ_1T, C_OMQ_2T, C_OMQ_3T, C_OMQ_CT, C_OMQ_MT,
+    C_OMQ_SPIN, C_R0Z, C_RZMQ_IOURING, C_TMQ, C_ZMQRS, Impl,
+    draw_latency_single_panel_with_versions,
     draw_throughput_dual_panel_fixed_2m_msgs_with_versions,
     draw_throughput_dual_panel_with_versions, load_latency, load_tput, out_dir,
 };
@@ -12,7 +10,7 @@ const TPUT_SIZES: &[u64] = &[
     16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 262_144, 4_194_304, 8_388_608,
 ];
 const PUBSUB_SIZES: &[u64] = &[16, 64, 256, 1024, 4096, 16384];
-const LAT_SIZES: &[u64] = &[16, 32, 64, 256, 1024, 4096];
+const LAT_SIZES: &[u64] = &[16, 64, 256, 1024, 4096];
 
 const PUSHPULL_IMPLS: &[Impl] = &[
     Impl {
@@ -128,179 +126,6 @@ const REQREP_IMPLS: &[Impl] = &[
     },
 ];
 
-const MOM_IMPLS: &[Impl] = &[
-    Impl {
-        key: "omq-tokio-1t",
-        label: "OMQ / TCP",
-        threads: "",
-        color: C_OMQ_1T,
-    },
-    Impl {
-        key: "omq-tokio-1t-spin50",
-        label: "OMQ / TCP (50 μs spin)",
-        threads: "",
-        color: C_OMQ_SPIN,
-    },
-    Impl {
-        key: "omq-quic",
-        label: "OMQ / QUIC",
-        threads: "",
-        color: C_OMQ_QUIC,
-    },
-    Impl {
-        key: "omq-dart",
-        label: "OMQ / DART",
-        threads: "",
-        color: plotters::style::RGBColor(255, 183, 77),
-    },
-    Impl {
-        key: "grpc-rust",
-        label: "gRPC over HTTP/2",
-        threads: "",
-        color: C_GRPC,
-    },
-    Impl {
-        key: "rabbitmq",
-        label: "AMQP 0-9-1",
-        threads: "RabbitMQ",
-        color: C_RABBITMQ,
-    },
-    Impl {
-        key: "aeron-udp-2proc",
-        label: "Aeron / UDP (SHARED)",
-        threads: "",
-        color: C_AERON,
-    },
-    Impl {
-        key: "nats",
-        label: "NATS",
-        threads: "nats-server",
-        color: C_NATS,
-    },
-    Impl {
-        key: "redis-streams",
-        label: "Redis Streams",
-        threads: "Redis",
-        color: C_REDIS,
-    },
-    Impl {
-        key: "zenoh-tcp-2proc",
-        label: "zenoh / TCP",
-        threads: "",
-        color: C_ZENOH,
-    },
-    Impl {
-        key: "iroh-quic-2proc",
-        label: "iroh / QUIC",
-        threads: "",
-        color: C_IROH,
-    },
-];
-
-const MOM_UDP_IMPLS: &[Impl] = &[Impl {
-    key: "aeron-udp-2proc",
-    label: "Aeron / UDP",
-    threads: "",
-    color: C_AERON,
-}];
-
-const MOM_QUIC_TPUT_IMPLS: &[Impl] = &[
-    Impl {
-        key: "omq-quic",
-        label: "OMQ / QUIC",
-        threads: "",
-        color: C_OMQ_QUIC,
-    },
-    Impl {
-        key: "iroh-quic-2proc",
-        label: "iroh / QUIC",
-        threads: "",
-        color: C_IROH,
-    },
-];
-
-fn merge_values(dst: &mut ValMap, src: ValMap) {
-    for (size, values) in src {
-        dst.entry(size).or_default().extend(values);
-    }
-}
-
-fn mom_tcp_impls() -> Vec<Impl> {
-    MOM_IMPLS
-        .iter()
-        .copied()
-        .filter(|imp| {
-            !matches!(
-                imp.key,
-                "aeron-udp-2proc" | "iroh-quic-2proc" | "omq-quic" | "omq-dart"
-            )
-        })
-        .collect()
-}
-
-fn mom_latency_impls() -> Vec<Impl> {
-    let mut impls = Vec::with_capacity(MOM_IMPLS.len() + 1);
-    for mut imp in MOM_IMPLS.iter().copied() {
-        if imp.key == "omq-dart" {
-            impls.push(Impl {
-                key: "omq-dart-no-spin",
-                label: "OMQ / DART (no spin)",
-                threads: imp.threads,
-                color: plotters::style::RGBColor(239, 108, 0),
-            });
-            imp.label = "OMQ / DART (50 μs app/IO spin)";
-        }
-        impls.push(imp);
-    }
-    impls
-}
-
-fn mom_throughput() -> (ValMap, ValMap, std::collections::BTreeMap<String, CpuData>) {
-    let mut tcp_impls = mom_tcp_impls();
-    tcp_impls.retain(|imp| imp.key != "omq-tokio-1t-spin50");
-    let (mut tput, mut msgs, mut cpu) = load_tput("throughput", "tcp", None, &tcp_impls);
-    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_TPUT_IMPLS)] {
-        let (other_tput, other_msgs, other_cpu) = load_tput("throughput", transport, None, impls);
-        merge_values(&mut tput, other_tput);
-        merge_values(&mut msgs, other_msgs);
-        cpu.extend(other_cpu);
-    }
-    for (size, row) in super::dart::mom_rows("throughput", TPUT_SIZES, 50) {
-        let rate = row["msgs_s"].as_f64().unwrap();
-        msgs.entry(size)
-            .or_default()
-            .insert("omq-dart".into(), rate);
-        tput.entry(size)
-            .or_default()
-            .insert("omq-dart".into(), rate * size as f64 / 1e6);
-    }
-    (tput, msgs, cpu)
-}
-
-fn mom_latency() -> (LatencyMap, std::collections::BTreeMap<String, CpuData>) {
-    let (mut lat, mut cpu) = load_latency("tcp", LAT_SIZES, &mom_tcp_impls());
-    for (transport, impls) in [("udp", MOM_UDP_IMPLS), ("quic", MOM_QUIC_TPUT_IMPLS)] {
-        let (other_lat, other_cpu) = load_latency(transport, LAT_SIZES, impls);
-        for (size, values) in other_lat {
-            lat.entry(size).or_default().extend(values);
-        }
-        cpu.extend(other_cpu);
-    }
-    for (key, spin_us) in [("omq-dart-no-spin", 0), ("omq-dart", 50)] {
-        for (size, row) in super::dart::mom_rows("latency", MOM_LAT_SIZES, spin_us) {
-            lat.entry(size).or_default().insert(
-                key.into(),
-                LatencyEntry {
-                    p50: row["p50_us"].as_f64().unwrap(),
-                    p99: row["p99_us"].as_f64().unwrap(),
-                    p999: row["p999_us"].as_f64().unwrap(),
-                },
-            );
-        }
-    }
-    (lat, cpu)
-}
-
 const PUBSUB_IMPLS: &[Impl] = &[
     Impl {
         key: "libzmq",
@@ -373,7 +198,7 @@ pub(crate) fn generate() {
         let out = dir.join("main_pushpull_tcp.svg");
         draw_throughput_dual_panel_fixed_2m_msgs_with_versions(
             &out,
-            "PUSH/PULL throughput, ZMQ-family TCP loopback, 2-process",
+            "PUSH/PULL throughput, TCP loopback, 2-process",
             TPUT_SIZES,
             PUSHPULL_IMPLS,
             &tput,
@@ -418,43 +243,6 @@ pub(crate) fn generate() {
             &cpu,
         )
         .expect("draw reqrep chart");
-        eprintln!("Written: {}", out.display());
-    }
-}
-
-pub(crate) fn generate_mom() {
-    let dir = out_dir();
-    let (tput, msgs, cpu) = mom_throughput();
-    if !tput.is_empty() {
-        let out = dir.join("mom_throughput.svg");
-        draw_throughput_dual_panel_brokered_with_versions(
-            &out,
-            "Producer/consumer throughput, loopback, one flow",
-            TPUT_SIZES,
-            MOM_IMPLS,
-            &tput,
-            &msgs,
-            &cpu,
-            "snd CPU%",
-            "broker CPU%",
-            "rcv CPU%",
-        )
-        .expect("draw MOM throughput chart");
-        eprintln!("Written: {}", out.display());
-    }
-
-    let (lat, cpu) = mom_latency();
-    if !lat.is_empty() {
-        let out = dir.join("mom_latency.svg");
-        draw_latency_brokered_with_versions(
-            &out,
-            "Sequential request/reply-like latency, loopback, one flow",
-            MOM_LAT_SIZES,
-            &mom_latency_impls(),
-            &lat,
-            &cpu,
-        )
-        .expect("draw MOM latency chart");
         eprintln!("Written: {}", out.display());
     }
 }

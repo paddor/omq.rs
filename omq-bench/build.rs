@@ -1,10 +1,11 @@
-fn main() {
-    if std::env::var_os("CARGO_FEATURE_MOM_BENCH").is_none() {
-        return;
-    }
+#[cfg(not(feature = "mom-bench"))]
+fn main() {}
 
+#[cfg(feature = "mom-bench")]
+fn main() {
     println!("cargo:rerun-if-changed=proto/bench.proto");
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("find vendored protoc");
+    // SAFETY: This build script has not started any threads.
     unsafe { std::env::set_var("PROTOC", protoc) };
     tonic_build::configure()
         .build_client(true)

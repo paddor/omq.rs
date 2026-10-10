@@ -414,6 +414,38 @@ perf report --stdio --no-inline -g none \
   -i /mnt/bench/tmp/dart-profile/gather-16.data
 ```
 
+### MOM Charts
+
+`omq_bench chart mom` generates `doc/charts/moms/{throughput,latency,latency_spin}.svg`.
+OMQ latency uses matched CLIENT/SERVER pairs, one owned IO thread, and either
+0 or 50 us application receive spin. DART additionally sets that IO spin budget.
+The spinning panel includes Aeron's continuously polling applications and SHARED
+Media Drivers. The other panel includes the non-spinning protocol baselines.
+
+Build `omq_dart_bench_peer` with `dart quic`, then collect both OMQ latency
+cohorts. The six CPU IDs place the sender caller/IO on 1/2 and receiver IO/caller
+on 3/4; the remaining two slots are unused by these socket pairs.
+
+```sh
+for spin in 0 50; do
+  omq_bench run dart --binary path/to/omq_dart_bench_peer \
+    --transport tcp,quic,dart --congestion adaptive --kind latency \
+    --spin "$spin" --io-spin "$spin" --cpus 1,2,0,3,5,4 \
+    --sizes 16,32,64,256,1024,4096 --iterations 10000 --warmup 2000 --repeats 3 \
+    --output "$HOME/.cache/omq/mom-omq.jsonl"
+done
+omq_bench run dart --binary path/to/omq_dart_bench_peer \
+  --transport dart --congestion adaptive --kind throughput --window-messages 512 \
+  --spin 50 --io-spin 50 --cpus 1,2,0,3,5,4 --warmup-seconds 1 --repeats 3 \
+  --sizes 16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,262144,4194304,8388608 \
+  --output "$HOME/.cache/omq/mom-omq.jsonl"
+omq_bench chart mom
+```
+
+The optional `omq_mom_bench` executable provides broker adapters. Run it with
+`cargo run --release -p omq-bench --features mom-bench --bin omq_mom_bench -- --help`.
+Rival adapters: [scripts/rivals](scripts/rivals/README.md).
+
 ### Cross-library Comparison Charts
 
 Produces `doc/charts/{pushpull,pubsub,reqrep}/*.svg`,

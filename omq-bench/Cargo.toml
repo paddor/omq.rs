@@ -14,7 +14,7 @@ name = "omq_bench"
 path = "src/main.rs"
 
 [[bin]]
-name = "mom_bench"
+name = "omq_mom_bench"
 path = "src/bin/mom_bench.rs"
 required-features = ["mom-bench"]
 
@@ -27,10 +27,12 @@ mom-bench = [
   "dep:iggy",
   "dep:lapin",
   "dep:prost",
+  "dep:protoc-bin-vendored",
   "dep:rdkafka",
   "dep:redis",
   "dep:tokio-stream",
   "dep:tonic",
+  "dep:tonic-build",
   "dep:uuid",
 ]
 
@@ -57,8 +59,8 @@ tonic = { version = "0.12", features = ["transport"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [build-dependencies]
-protoc-bin-vendored = "3"
-tonic-build = "0.12"
+protoc-bin-vendored = { version = "3", optional = true }
+tonic-build = { version = "0.12", optional = true }
 
 [lints]
 workspace = true

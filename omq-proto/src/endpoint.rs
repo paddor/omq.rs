@@ -20,6 +20,8 @@ use crate::proto::transform::CompressionKind;
 ///
 /// The scheme picks the transport; the rest of the string carries transport-
 /// specific addressing.
+/// Socket methods accept URI strings or owned/borrowed endpoints. Strings use
+/// the same validation as [`FromStr`]; owned endpoints are passed without cloning.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Endpoint {
@@ -189,6 +191,36 @@ impl FromStr for Endpoint {
                 .with_compression(kind);
         }
         Err(Error::UnsupportedScheme(scheme.to_string()))
+    }
+}
+
+impl TryFrom<&str> for Endpoint {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        value.parse()
+    }
+}
+
+impl TryFrom<String> for Endpoint {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        value.as_str().try_into()
+    }
+}
+
+impl TryFrom<&String> for Endpoint {
+    type Error = Error;
+
+    fn try_from(value: &String) -> Result<Self> {
+        value.as_str().try_into()
+    }
+}
+
+impl From<&Endpoint> for Endpoint {
+    fn from(value: &Endpoint) -> Self {
+        value.clone()
     }
 }
 
@@ -641,6 +673,70 @@ fn parse_udp(rest: &str) -> Result<Endpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint_argument(value: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<Endpoint> {
+        value.try_into().map_err(Into::into)
+    }
+
+    #[test]
+    fn endpoint_argument_conversions_accept_strings_and_typed_values() {
+        for uri in [
+            "tcp://127.0.0.1:5555",
+            "inproc://service",
+            "udp://localhost:5555",
+        ] {
+            let owned_uri = uri.to_owned();
+            let endpoint: Endpoint = uri.parse().unwrap();
+            assert_eq!(Endpoint::try_from(uri).unwrap(), endpoint);
+            assert_eq!(Endpoint::try_from(owned_uri.clone()).unwrap(), endpoint);
+            assert_eq!(Endpoint::try_from(&owned_uri).unwrap(), endpoint);
+            assert_eq!(Endpoint::from(&endpoint), endpoint);
+
+            let moved = endpoint_argument(endpoint.clone()).unwrap();
+            assert_eq!(moved, endpoint);
+        }
+    }
+
+    #[test]
+    fn endpoint_argument_conversions_preserve_validation_errors() {
+        for uri in [
+            "",
+            "not-an-endpoint",
+            "tcp://127.0.0.1",
+            "tcp://127.0.0.1:65536",
+            "unknown://host",
+        ] {
+            let owned_uri = uri.to_owned();
+            let expected = uri.parse::<Endpoint>().unwrap_err().to_string();
+            assert_eq!(Endpoint::try_from(uri).unwrap_err().to_string(), expected);
+            assert_eq!(
+                Endpoint::try_from(owned_uri.clone())
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                Endpoint::try_from(&owned_uri).unwrap_err().to_string(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn owned_endpoint_argument_preserves_its_storage() {
+        let endpoint = Endpoint::Inproc {
+            name: "service".to_owned(),
+        };
+        let Endpoint::Inproc { name } = &endpoint else {
+            unreachable!()
+        };
+        let storage = name.as_ptr();
+        let moved = endpoint_argument(endpoint).unwrap();
+        let Endpoint::Inproc { name } = moved else {
+            unreachable!()
+        };
+        assert_eq!(name.as_ptr(), storage);
+    }
 
     #[test]
     fn tcp_endpoint_parses() {

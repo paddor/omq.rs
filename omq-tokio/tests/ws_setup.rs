@@ -57,7 +57,7 @@ async fn stalled_http_and_tls_peers_do_not_serialize_accepts() {
         let (server_options, client_options) = tls_options();
         let server = Socket::new(SocketType::Pull, server_options);
         let endpoint = server
-            .bind(format!("{scheme}://127.0.0.1:0/").parse().unwrap())
+            .bind(format!("{scheme}://127.0.0.1:0/"))
             .await
             .unwrap();
         let mut idle = TcpStream::connect(address(&endpoint)).await.unwrap();
@@ -88,18 +88,9 @@ async fn ready_limit_is_shared_by_ws_wss_and_recovers_without_limiting_tcp() {
     server_options.ws.max_ready_peers = 1;
     let server = Socket::new(SocketType::Pull, server_options);
     let mut monitor = server.monitor();
-    let ws = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
-    let wss = server
-        .bind("wss://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
-    let tcp = server
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let ws = server.bind("ws://127.0.0.1:0/").await.unwrap();
+    let wss = server.bind("wss://127.0.0.1:0/").await.unwrap();
+    let tcp = server.bind("tcp://127.0.0.1:0").await.unwrap();
     let first = Socket::new(SocketType::Push, Options::default());
     first.connect(ws.clone()).await.unwrap();
     server
@@ -153,10 +144,7 @@ async fn router_identity_handover_reuses_a_ready_ws_slot() {
     let mut options = Options::default();
     options.ws.max_ready_peers = 1;
     let router = Socket::new(SocketType::Router, options);
-    let endpoint = router
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = router.bind("ws://127.0.0.1:0/").await.unwrap();
     let dealer_options = Options {
         reconnect: omq_tokio::options::ReconnectPolicy::Disabled,
         ..Options::default().identity(bytes::Bytes::from_static(b"same"))
@@ -207,15 +195,9 @@ async fn router_identity_handover_reuses_a_ready_ws_slot() {
 #[tokio::test]
 async fn outbound_ready_limit_spans_dialers_and_disconnect_releases_a_slot() {
     let first = Socket::new(SocketType::Pull, Options::default());
-    let first_endpoint = first
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let first_endpoint = first.bind("ws://127.0.0.1:0/").await.unwrap();
     let second = Socket::new(SocketType::Pull, Options::default());
-    let second_endpoint = second
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let second_endpoint = second.bind("ws://127.0.0.1:0/").await.unwrap();
     let mut options = Options::default();
     options.ws.max_ready_peers = 1;
     let sender = Socket::new(SocketType::Push, options);
@@ -254,7 +236,7 @@ async fn accepted_http_and_tls_setup_has_a_deadline() {
         options.max_pending_handshakes = 1;
         let server = Socket::new(SocketType::Pull, options);
         let endpoint = server
-            .bind(format!("{scheme}://127.0.0.1:0/").parse().unwrap())
+            .bind(format!("{scheme}://127.0.0.1:0/"))
             .await
             .unwrap();
         let idle = TcpStream::connect(address(&endpoint)).await.unwrap();
@@ -301,14 +283,8 @@ async fn setup_slot_spans_http_and_zmtp_and_is_shared_between_listeners() {
             ..Options::default()
         },
     );
-    let first = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
-    let second = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let first = server.bind("ws://127.0.0.1:0/").await.unwrap();
+    let second = server.bind("ws://127.0.0.1:0/").await.unwrap();
     let mut pending = TcpStream::connect(address(&first)).await.unwrap();
     upgrade(&mut pending).await;
     // HTTP succeeded, but no ZMTP READY was sent. Admission must remain held.
@@ -338,10 +314,7 @@ async fn http_upgrade_does_not_restart_zmtp_deadline() {
             ..Options::default()
         },
     );
-    let endpoint = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = server.bind("ws://127.0.0.1:0/").await.unwrap();
     let mut stream = TcpStream::connect(address(&endpoint)).await.unwrap();
     stream.write_all(b"G").await.unwrap();
     tokio::time::sleep(Duration::from_millis(450)).await;
@@ -363,10 +336,7 @@ async fn http_upgrade_does_not_restart_zmtp_deadline() {
 #[tokio::test]
 async fn unbind_cancels_pending_zmtp_but_preserves_ready_peers() {
     let server = Socket::new(SocketType::Pull, Options::default());
-    let endpoint = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = server.bind("ws://127.0.0.1:0/").await.unwrap();
     let client = Socket::new(SocketType::Push, Options::default());
     client.connect(endpoint.clone()).await.unwrap();
     client
@@ -394,7 +364,7 @@ async fn unbind_cancels_pending_zmtp_but_preserves_ready_peers() {
 async fn outbound_http_and_tls_setup_has_a_deadline() {
     for scheme in ["ws", "wss"] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("{scheme}://{}/", listener.local_addr().unwrap())
+        let endpoint: Endpoint = format!("{scheme}://{}/", listener.local_addr().unwrap())
             .parse()
             .unwrap();
         let client = Socket::new(
@@ -468,10 +438,7 @@ async fn listener_applies_configured_origin_path_and_profile_before_upgrade() {
     let mut options = Options::default();
     options.ws.allowed_origins = vec!["https://app.example.com".into()];
     let server = Socket::new(SocketType::Pull, options);
-    let endpoint = server
-        .bind("ws://127.0.0.1:0/app?tenant=1".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = server.bind("ws://127.0.0.1:0/app?tenant=1").await.unwrap();
     for (path, origin, profile, allowed) in [
         ("/app?tenant=1", "https://app.example.com", "ZWS2.0", true),
         ("/app?tenant=1", "https://evil.example.com", "ZWS2.0", false),
@@ -510,10 +477,7 @@ async fn native_curve_uses_matching_upgrade_profile() {
     let keypair = omq_tokio::CurveKeypair::generate();
     let public = keypair.public;
     let server = Socket::new(SocketType::Pull, Options::default().curve_server(keypair));
-    let endpoint = server
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = server.bind("ws://127.0.0.1:0/").await.unwrap();
     let client = Socket::new(
         SocketType::Push,
         Options::default().curve_client(omq_tokio::CurveKeypair::generate(), public),
@@ -549,11 +513,7 @@ async fn named_ws_bind_and_connect_keep_resource_and_original_server_name() {
         };
         let client = Socket::new(SocketType::Push, Options::default());
         client
-            .connect(
-                format!("{scheme}://localhost:{port}/room?x=1")
-                    .parse()
-                    .unwrap(),
-            )
+            .connect(format!("{scheme}://localhost:{port}/room?x=1"))
             .await
             .unwrap();
         client

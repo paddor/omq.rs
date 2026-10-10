@@ -201,14 +201,14 @@ mod tests {
     fn popped_fallback_remains_a_fifo_barrier_until_native_admission() {
         let ctx = omq_tokio::Context::new();
         let push = ctx.blocking_socket(SocketType::Push, omq_tokio::Options::default());
-        push.bind("inproc://binding-inflight-fifo".parse().unwrap())
+        push.bind("inproc://binding-inflight-fifo")
             .unwrap();
         let socket = push.clone().into_async();
         let (queue, mut consumer) = SendQueue::new(256, Arc::new(|| {}));
         queue.try_send(&socket, Message::single("first")).unwrap();
         let first = consumer.next().now_or_never().flatten().unwrap();
         let pull = ctx.blocking_socket(SocketType::Pull, omq_tokio::Options::default());
-        pull.connect("inproc://binding-inflight-fifo".parse().unwrap())
+        pull.connect("inproc://binding-inflight-fifo")
             .unwrap();
         push.wait_connected(1, std::time::Duration::from_secs(2))
             .unwrap();

@@ -123,7 +123,7 @@ fn full_queues_wake_when_drained() {
             (SocketType::Pair, SocketType::Pair),
         ] {
             // Inproc has no kernel send buffer draining in the background.
-            for endpoint in ["inproc://send-ready".parse().unwrap()] {
+            for endpoint in ["inproc://send-ready"] {
                 let ctx = Context::new();
                 let options = Options::default()
                     .workload_profile(profile)
@@ -203,10 +203,7 @@ async fn async_wait_send_ready_tracks_peer_queues() {
     let ctx = Context::current();
     let options = Options::default().send_hwm(2).recv_hwm(2);
     let pull = ctx.socket(SocketType::Pull, options.clone());
-    let endpoint = pull
-        .bind("inproc://async-send-ready".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = pull.bind("inproc://async-send-ready").await.unwrap();
     let push = ctx.socket(SocketType::Push, options);
     push.connect(endpoint).await.unwrap();
     push.wait_connected(1, TIMEOUT).await.unwrap();

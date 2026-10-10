@@ -65,10 +65,7 @@ async fn handshake(stream: &mut TcpStream, peer_type: &[u8], version: (u8, u8)) 
 }
 
 async fn raw_peer(local: &Socket, peer_type: &[u8], version: (u8, u8)) -> TcpStream {
-    let endpoint = local
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = local.bind("tcp://127.0.0.1:0").await.unwrap();
     let Endpoint::Tcp { port, .. } = endpoint else {
         unreachable!()
     };
@@ -171,7 +168,7 @@ async fn duplicate_subscriptions_survive_one_cancel_and_replay() {
                 } else {
                     format!("inproc://duplicate-{kind:?}-{}", prefix.len())
                 };
-                let endpoint = publisher.bind(endpoint.parse().unwrap()).await.unwrap();
+                let endpoint = publisher.bind(endpoint).await.unwrap();
                 for attempt in 0..2 {
                     subscriber.connect(endpoint.clone()).await.unwrap();
                     // XPUB notifications provide a control-plane barrier for both replayed copies.
@@ -372,10 +369,7 @@ async fn heartbeat_interval_does_not_send_ping_to_zmtp_30_peer() {
 #[tokio::test]
 async fn incompatible_socket_types_send_error_before_closing() {
     let local = Socket::new(SocketType::Pull, Options::default().linger(Duration::ZERO));
-    let endpoint = local
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = local.bind("tcp://127.0.0.1:0").await.unwrap();
     let Endpoint::Tcp { port, .. } = endpoint else {
         unreachable!()
     };

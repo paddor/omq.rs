@@ -186,12 +186,7 @@ async fn recv(socket: &Socket) -> Message {
 async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
     let tls = tls();
     let pull = Socket::new(SocketType::Pull, server_options(&tls));
-    let port = port_of(
-        &pull
-            .bind("quic://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap(),
-    );
+    let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -203,7 +198,7 @@ async fn fifo_and_atomic_multipart_survive_loss_duplication_and_reordering() {
     )
     .await;
     let push = Socket::new(SocketType::Push, client_options(&tls));
-    push.connect(format!("quic://{}", proxy.addr).parse().unwrap())
+    push.connect(format!("quic://{}", proxy.addr))
         .await
         .unwrap();
 
@@ -248,7 +243,7 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
     server.recv_hwm = 8;
     server.send_hwm = 8;
     let a = Socket::new(SocketType::Pair, server);
-    let port = port_of(&a.bind("quic://127.0.0.1:0".parse().unwrap()).await.unwrap());
+    let port = port_of(&a.bind("quic://127.0.0.1:0").await.unwrap());
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -267,9 +262,7 @@ async fn liveness_holds_under_loss_and_bidirectional_saturation() {
     client.send_hwm = 8;
     let b = Socket::new(SocketType::Pair, client);
     let mut monitor = b.monitor();
-    b.connect(format!("quic://{}", proxy.addr).parse().unwrap())
-        .await
-        .unwrap();
+    b.connect(format!("quic://{}", proxy.addr)).await.unwrap();
 
     // Both sides send while neither reads: every queue and window fills.
     let body = Bytes::from(vec![5u8; 8 * 1024]);
@@ -313,12 +306,7 @@ async fn address_rebinding_recovers_through_reconnect() {
     server.quic.idle_timeout = Duration::from_secs(2);
     server.quic.keep_alive_interval = Duration::from_millis(500);
     let pull = Socket::new(SocketType::Pull, server);
-    let port = port_of(
-        &pull
-            .bind("quic://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap(),
-    );
+    let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -333,7 +321,7 @@ async fn address_rebinding_recovers_through_reconnect() {
     client.quic.idle_timeout = Duration::from_secs(2);
     client.quic.keep_alive_interval = Duration::from_millis(500);
     let push = Socket::new(SocketType::Push, client);
-    push.connect(format!("quic://{}", proxy.addr).parse().unwrap())
+    push.connect(format!("quic://{}", proxy.addr))
         .await
         .unwrap();
     push.send(Message::single("before")).await.unwrap();
@@ -365,12 +353,7 @@ async fn finite_linger_completes_through_a_lossy_path() {
     let mut server = server_options(&tls);
     server.recv_hwm = 10_000;
     let pull = Socket::new(SocketType::Pull, server);
-    let port = port_of(
-        &pull
-            .bind("quic://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap(),
-    );
+    let port = port_of(&pull.bind("quic://127.0.0.1:0").await.unwrap());
     let proxy = proxy(
         format!("127.0.0.1:{port}").parse().unwrap(),
         Impairment {
@@ -385,7 +368,7 @@ async fn finite_linger_completes_through_a_lossy_path() {
     client.linger = Some(Duration::from_secs(20));
     client.send_hwm = 10_000;
     let push = Socket::new(SocketType::Push, client);
-    push.connect(format!("quic://{}", proxy.addr).parse().unwrap())
+    push.connect(format!("quic://{}", proxy.addr))
         .await
         .unwrap();
     let body = Bytes::from(vec![0x42; 4096]);

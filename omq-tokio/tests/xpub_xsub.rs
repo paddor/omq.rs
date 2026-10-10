@@ -35,7 +35,7 @@ async fn xpub_full_notifications_preserve_fifo_and_allow_another_peer() {
         } else {
             format!("{transport}://127.0.0.1:0")
         };
-        let endpoint = publisher.bind(endpoint.parse().unwrap()).await.unwrap();
+        let endpoint = publisher.bind(endpoint).await.unwrap();
         let busy = Socket::new(SocketType::Sub, Options::default().linger(Duration::ZERO));
         busy.connect(endpoint.clone()).await.unwrap();
         busy.wait_connected(1, Duration::from_secs(1))
@@ -283,11 +283,11 @@ async fn xsub_subscribe_filters_messages_from_xpub() {
 async fn xsub_send_raw_subscribe_commands() {
     let publisher_side = Socket::new(SocketType::XPub, Options::default());
     let subscriber_side = Socket::new(SocketType::XSub, Options::default());
-    let endpoint = "inproc://xsub-send-raw-subscribe".parse().unwrap();
+    let endpoint: Endpoint = "inproc://xsub-send-raw-subscribe".parse().unwrap();
 
     publisher_side.bind(endpoint).await.unwrap();
     subscriber_side
-        .connect("inproc://xsub-send-raw-subscribe".parse().unwrap())
+        .connect("inproc://xsub-send-raw-subscribe")
         .await
         .unwrap();
 

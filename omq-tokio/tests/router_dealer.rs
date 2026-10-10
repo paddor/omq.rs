@@ -1069,10 +1069,7 @@ async fn handshake_progresses_while_router_receive_is_full() {
             SocketType::Router,
             Options::default().recv_hwm(1).linger(Duration::ZERO),
         );
-        let endpoint = router
-            .bind("tcp://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap();
         let busy = Socket::new(
             SocketType::Dealer,
             Options::default().send_hwm(2048).linger(Duration::ZERO),
@@ -1099,7 +1096,7 @@ async fn handshake_progresses_while_router_receive_is_full() {
             } else {
                 "ws://127.0.0.1:0".to_owned()
             };
-            router.bind(name.parse().unwrap()).await.unwrap()
+            router.bind(name).await.unwrap()
         };
         let newcomer = Socket::new(
             SocketType::Dealer,

@@ -59,7 +59,7 @@ fn run(writers: usize, size: usize, seconds: u64) {
     let ctx = Context::new();
     let recv_batching = std::env::var("OMQ_BENCH_RECV_BATCHING").is_ok_and(|value| value == "1");
     let pull = ctx.blocking_socket(SocketType::Pull, options().recv_batching(recv_batching));
-    let endpoint = pull.bind("tcp://127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = pull.bind("tcp://127.0.0.1:0").unwrap();
     let mut children = Writers(Vec::new());
     for id in 0..writers {
         children.0.push(

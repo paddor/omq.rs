@@ -5,7 +5,172 @@ mod test_support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use omq_tokio::{Endpoint, Message, Options, PayloadPool, Socket, SocketType};
+use omq_tokio::{
+    CompressionOptions, Context, Endpoint, Error, Message, Options, PayloadPool, Socket, SocketType,
+};
+
+#[tokio::test]
+async fn endpoint_arguments_work_with_owned_async_sockets() {
+    let context = Context::new();
+    let uri = "tcp://127.0.0.1:0".to_owned();
+    let typed: Endpoint = uri.parse().unwrap();
+    for argument in 0..5 {
+        let pull = context.socket(SocketType::Pull, Options::default());
+        let push = context.socket(SocketType::Push, Options::default());
+        let bound = match argument {
+            0 => omq_proto::socket_api::SocketApi::bind(&pull, uri.as_str()).await,
+            1 => pull.bind(uri.clone()).await,
+            2 => pull.bind(&uri).await,
+            3 => pull.bind(typed.clone()).await,
+            _ => pull.bind(&typed).await,
+        }
+        .unwrap();
+        let address = bound.to_string();
+        match argument {
+            0 => push.connect(address.as_str()).await,
+            1 => push.connect(address.clone()).await,
+            2 => push.connect(&address).await,
+            3 => push.connect(bound.clone()).await,
+            _ => omq_proto::socket_api::SocketApi::connect(&push, &bound).await,
+        }
+        .unwrap();
+        push.send(Message::single("endpoint arguments"))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), pull.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message, Message::single("endpoint arguments"));
+        omq_proto::socket_api::SocketApi::disconnect(&push, &bound)
+            .await
+            .unwrap();
+        omq_proto::socket_api::SocketApi::unbind(&pull, address)
+            .await
+            .unwrap();
+        push.close().await.unwrap();
+        pull.close().await.unwrap();
+    }
+}
+
+#[test]
+fn endpoint_arguments_work_with_blocking_sockets() {
+    let context = Context::new();
+    let uri = "tcp://127.0.0.1:0".to_owned();
+    let typed: Endpoint = uri.parse().unwrap();
+    for argument in 0..5 {
+        let pull = context.blocking_socket(SocketType::Pull, Options::default());
+        let push = context.blocking_socket(SocketType::Push, Options::default());
+        let bound = match argument {
+            0 => pull.bind(uri.as_str()),
+            1 => pull.bind(uri.clone()),
+            2 => pull.bind(&uri),
+            3 => pull.bind(typed.clone()),
+            _ => pull.bind(&typed),
+        }
+        .unwrap();
+        let address = bound.to_string();
+        match argument {
+            0 => push.connect(address.as_str()),
+            1 => push.connect(address.clone()),
+            2 => push.connect(&address),
+            3 => push.connect(bound.clone()),
+            _ => push.connect(&bound),
+        }
+        .unwrap();
+        push.send(Message::single("endpoint arguments")).unwrap();
+        assert_eq!(
+            pull.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Message::single("endpoint arguments")
+        );
+        push.disconnect(&bound).unwrap();
+        pull.unbind(address).unwrap();
+        push.close().unwrap();
+        pull.close().unwrap();
+    }
+}
+
+#[test]
+fn endpoint_arguments_work_with_blocking_deadlines() {
+    let context = Context::new();
+    let pull = context.blocking_socket(SocketType::Pull, Options::default());
+    let push = context.blocking_socket(SocketType::Push, Options::default());
+    let uri = "tcp://127.0.0.1:0".to_owned();
+    let bound = pull.bind_timeout(&uri, Duration::from_secs(5)).unwrap();
+    push.connect_timeout(&bound, Duration::from_secs(5))
+        .unwrap();
+    push.send(Message::single("deadline arguments")).unwrap();
+    assert_eq!(
+        pull.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Message::single("deadline arguments")
+    );
+    push.close().unwrap();
+    pull.close().unwrap();
+}
+
+#[tokio::test]
+async fn invalid_endpoint_arguments_do_not_freeze_async_configuration() {
+    let context = Context::new();
+    let socket = context.socket(SocketType::Pull, Options::default());
+    for uri in ["invalid", "unknown://host"] {
+        for error in [
+            socket.bind(uri).await.unwrap_err(),
+            socket.connect(uri).await.unwrap_err(),
+            socket.unbind(uri).await.unwrap_err(),
+            socket.disconnect(uri).await.unwrap_err(),
+            socket
+                .bind_with_compression_options(uri, CompressionOptions::default())
+                .await
+                .unwrap_err(),
+            socket
+                .connect_with_compression_options(uri, CompressionOptions::default())
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                Error::InvalidEndpoint(_) | Error::UnsupportedScheme(_)
+            ));
+        }
+    }
+    assert!(socket.last_bound_endpoint().is_none());
+    socket
+        .set_recv_payload_pool(PayloadPool::new([(128, 1)]).unwrap())
+        .unwrap();
+    socket.bind("tcp://127.0.0.1:0").await.unwrap();
+    socket.close().await.unwrap();
+}
+
+#[test]
+fn invalid_endpoint_arguments_do_not_freeze_blocking_configuration() {
+    let context = Context::new();
+    let socket = context.blocking_socket(SocketType::Pull, Options::default());
+    for uri in ["invalid", "unknown://host"] {
+        for error in [
+            socket.bind(uri).unwrap_err(),
+            socket.connect(uri).unwrap_err(),
+            socket.unbind(uri).unwrap_err(),
+            socket.disconnect(uri).unwrap_err(),
+            socket
+                .bind_timeout(uri, Duration::from_secs(5))
+                .unwrap_err(),
+            socket
+                .connect_timeout(uri, Duration::from_secs(5))
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                Error::InvalidEndpoint(_) | Error::UnsupportedScheme(_)
+            ));
+        }
+    }
+    assert!(socket.last_bound_endpoint().is_none());
+    socket
+        .set_recv_payload_pool(PayloadPool::new([(128, 1)]).unwrap())
+        .unwrap();
+    socket.bind("tcp://127.0.0.1:0").unwrap();
+    socket.close().unwrap();
+}
 
 fn ipc_ep(name: &str) -> Endpoint {
     test_support::ipc_endpoint(&format!("cov-{name}"))

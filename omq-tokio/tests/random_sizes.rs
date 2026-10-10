@@ -14,10 +14,7 @@ async fn random_message_sizes() {
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF);
 
     let pull = Socket::new(SocketType::Pull, Options::default());
-    let ep = pull
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let ep = pull.bind("tcp://127.0.0.1:0").await.unwrap();
     let push = Socket::new(SocketType::Push, Options::default());
     push.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -59,10 +56,7 @@ async fn random_multipart_sizes() {
     let mut rng = StdRng::seed_from_u64(0xCAFE_BABE);
 
     let rep = Socket::new(SocketType::Rep, Options::default());
-    let ep = rep
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let ep = rep.bind("tcp://127.0.0.1:0").await.unwrap();
     let req = Socket::new(SocketType::Req, Options::default());
     req.connect(ep).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

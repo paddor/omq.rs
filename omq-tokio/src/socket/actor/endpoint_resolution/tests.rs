@@ -61,7 +61,7 @@ async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
     let lookup =
         crate::transport::dns::test_lookup::ScopedLookup::new(address.port(), Some(address.ip()));
     let push = Socket::new(SocketType::Push, Options::default());
-    let endpoint = format!("tcp://omq-test-lookup.invalid:{}", address.port())
+    let endpoint: Endpoint = format!("tcp://omq-test-lookup.invalid:{}", address.port())
         .parse()
         .unwrap();
     push.connect(endpoint).await.unwrap();
@@ -78,9 +78,7 @@ async fn reconnect_dns_failure_retries_and_recovers_without_api_errors() {
     .unwrap();
     drop(listener);
     let pull = Socket::new(SocketType::Pull, Options::default());
-    pull.bind(format!("tcp://{address}").parse().unwrap())
-        .await
-        .unwrap();
+    pull.bind(format!("tcp://{address}")).await.unwrap();
     lookup.set_address(Some(address.ip()));
     push.wait_connected(1, Duration::from_secs(1))
         .await
@@ -105,11 +103,7 @@ async fn stalled_quic_dns_leaves_controls_responsive() {
     let before = crate::transport::dns::stalled_test_lookups();
     let connecting = tokio::spawn({
         let socket = socket.clone();
-        async move {
-            socket
-                .connect("quic://omq-test-stall.invalid:12003".parse().unwrap())
-                .await
-        }
+        async move { socket.connect("quic://omq-test-stall.invalid:12003").await }
     });
     wait_stalled(before + 1).await;
     let responsive =
@@ -135,7 +129,7 @@ async fn tcp_dns_uses_the_configured_setup_deadline() {
     );
     let result = tokio::time::timeout(
         Duration::from_millis(200),
-        socket.connect("tcp://omq-test-stall.invalid:12004".parse().unwrap()),
+        socket.connect("tcp://omq-test-stall.invalid:12004"),
     )
     .await;
     socket.close().await.unwrap();
@@ -199,10 +193,7 @@ async fn named_connect_waits_for_shared_setup_credit_before_dns() {
             ..Options::default()
         },
     );
-    let listener = socket
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let listener = socket.bind("ws://127.0.0.1:0/").await.unwrap();
     let Endpoint::Ws { host, port, .. } = listener else {
         unreachable!()
     };
@@ -259,15 +250,13 @@ async fn pending_endpoint_jobs_have_a_finite_socket_cap() {
     let mut pending = Vec::new();
     for port in 12000..12000 + u16::try_from(MAX_PENDING_ENDPOINTS).unwrap() {
         let socket = socket.clone();
-        let endpoint = format!("ws://omq-test-stall.invalid:{port}/")
+        let endpoint: Endpoint = format!("ws://omq-test-stall.invalid:{port}/")
             .parse()
             .unwrap();
         pending.push(tokio::spawn(async move { socket.connect(endpoint).await }));
     }
     wait_stalled(before + MAX_PENDING_ENDPOINTS).await;
-    let excess = socket
-        .connect("ws://omq-test-stall.invalid:13000/".parse().unwrap())
-        .await;
+    let excess = socket.connect("ws://omq-test-stall.invalid:13000/").await;
     assert!(
         matches!(excess, Err(Error::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
@@ -290,22 +279,14 @@ async fn canceled_connect_caller_releases_dns_setup_admission() {
     let before = crate::transport::dns::stalled_test_lookups();
     let first = tokio::spawn({
         let socket = socket.clone();
-        async move {
-            socket
-                .connect("ws://omq-test-stall.invalid:12001/".parse().unwrap())
-                .await
-        }
+        async move { socket.connect("ws://omq-test-stall.invalid:12001/").await }
     });
     wait_stalled(before + 1).await;
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     let second = tokio::spawn({
         let socket = socket.clone();
-        async move {
-            socket
-                .connect("ws://omq-test-stall.invalid:12002/".parse().unwrap())
-                .await
-        }
+        async move { socket.connect("ws://omq-test-stall.invalid:12002/").await }
     });
     // Reaching DNS proves the canceled caller released the only credit.
     wait_stalled(before + 2).await;

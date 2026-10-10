@@ -114,6 +114,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+impl From<core::convert::Infallible> for Error {
+    fn from(value: core::convert::Infallible) -> Self {
+        match value {}
+    }
+}
+
 impl Error {
     /// Returns whether this is an OS-level connection-refused error.
     #[must_use]

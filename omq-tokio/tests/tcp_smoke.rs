@@ -55,7 +55,7 @@ async fn req_rep_tcp_smoke() {
 async fn pair_tcp_connect_by_localhost_name() {
     let server = Socket::new(SocketType::Pair, Options::default());
     let port = test_support::bind_loopback(&server).await;
-    let ep = format!("tcp://localhost:{port}").parse().unwrap();
+    let ep: omq_tokio::Endpoint = format!("tcp://localhost:{port}").parse().unwrap();
 
     let client = Socket::new(SocketType::Pair, Options::default());
     client.connect(ep).await.unwrap();

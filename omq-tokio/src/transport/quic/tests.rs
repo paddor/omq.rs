@@ -151,13 +151,9 @@ impl ConnectorFixture {
         )
         .unwrap();
         let push = crate::Socket::new(omq_proto::SocketType::Push, options);
-        push.connect(
-            format!("quic://{}", endpoint.local_addr().unwrap())
-                .parse()
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        push.connect(format!("quic://{}", endpoint.local_addr().unwrap()))
+            .await
+            .unwrap();
         let connection = endpoint.accept().await.unwrap().await.unwrap();
         let (data_send, data_recv) = connection.accept_bi().await.unwrap();
         let (control_send, mut control_recv) = connection.accept_bi().await.unwrap();

@@ -1,7 +1,7 @@
 //! Runtime-independent async message-queue socket interface.
 
 use crate::endpoint::Endpoint;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::options::Options;
 use crate::proto::SocketType;
@@ -14,10 +14,10 @@ pub trait SocketApi: Clone {
     /// Return the configured socket type.
     fn socket_type(&self) -> SocketType;
 
-    /// Bind a local endpoint and return its resolved address.
-    async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint>;
-    /// Register a remote endpoint for connection and reconnection.
-    async fn connect(&self, endpoint: Endpoint) -> Result<()>;
+    /// Bind a URI string or typed endpoint and return its resolved address.
+    async fn bind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<Endpoint>;
+    /// Register a URI string or typed endpoint for connection and reconnection.
+    async fn connect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()>;
     /// Submit a complete message, waiting for send admission.
     async fn send(&self, msg: Message) -> Result<()>;
     /// Wait for and receive one complete message.
@@ -34,10 +34,10 @@ pub trait SocketApi: Clone {
     async fn join(&self, group: impl Into<bytes::Bytes>) -> Result<()>;
     /// Leave a RADIO/DISH group.
     async fn leave(&self, group: impl Into<bytes::Bytes>) -> Result<()>;
-    /// Remove a bound endpoint.
-    async fn unbind(&self, endpoint: Endpoint) -> Result<()>;
-    /// Remove a remote endpoint and stop its reconnection attempts.
-    async fn disconnect(&self, endpoint: Endpoint) -> Result<()>;
+    /// Remove a bound endpoint, supplied as a URI string or typed endpoint.
+    async fn unbind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()>;
+    /// Remove a URI string or typed endpoint and stop its reconnection attempts.
+    async fn disconnect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()>;
     /// Close the socket according to its linger policy.
     async fn close(self) -> Result<()>;
 }

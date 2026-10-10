@@ -497,10 +497,7 @@ async fn ready_peer_cap_limits_quic_without_limiting_tcp() {
     let pull = Socket::new(SocketType::Pull, server);
     let mut monitor = pull.monitor();
     let quic_ep = pull.bind(quic(0)).await.unwrap();
-    let tcp_ep = pull
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let tcp_ep = pull.bind("tcp://127.0.0.1:0").await.unwrap();
 
     let first = Socket::new(SocketType::Push, client_options(&tls));
     first.connect(quic_ep.clone()).await.unwrap();

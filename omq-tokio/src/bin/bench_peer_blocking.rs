@@ -63,8 +63,7 @@ fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
     };
     let coord = COORD_SOCK.get_or_init(|| {
         let s = ctx.blocking_socket(SocketType::Push, Options::default());
-        s.connect(coord_ep.parse().expect("valid coord endpoint"))
-            .unwrap();
+        s.connect(coord_ep).unwrap();
         s.wait_connected(1, Duration::from_secs(5)).unwrap();
         s
     });

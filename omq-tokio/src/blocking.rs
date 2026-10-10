@@ -10,7 +10,7 @@
 //!
 //! let ctx = Context::new();
 //! let push = ctx.blocking_socket(SocketType::Push, Options::default());
-//! push.bind("tcp://*:5555".parse().unwrap()).unwrap();
+//! push.bind("tcp://*:5555").unwrap();
 //! push.send(Message::from("hello")).unwrap();
 //! ```
 
@@ -139,14 +139,20 @@ impl Socket {
         self.inner.init_payload_pools()
     }
 
-    /// Bind this socket, returning its concrete endpoint.
-    pub fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
+    /// Bind a URI string or typed endpoint, returning its concrete endpoint.
+    pub fn bind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<Endpoint> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.bind(endpoint).await })
     }
 
-    /// Bind this socket to an endpoint before `timeout` elapses.
-    pub fn bind_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<Endpoint> {
+    /// Bind a URI string or typed endpoint before `timeout` elapses.
+    pub fn bind_timeout(
+        &self,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
+        timeout: Duration,
+    ) -> Result<Endpoint> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move {
             tokio::time::timeout(timeout, s.bind(endpoint))
@@ -155,14 +161,20 @@ impl Socket {
         })
     }
 
-    /// Connect this socket to an endpoint.
-    pub fn connect(&self, endpoint: Endpoint) -> Result<()> {
+    /// Connect this socket to a URI string or typed endpoint.
+    pub fn connect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.connect(endpoint).await })
     }
 
-    /// Connect this socket to an endpoint before `timeout` elapses.
-    pub fn connect_timeout(&self, endpoint: Endpoint, timeout: Duration) -> Result<()> {
+    /// Connect to a URI string or typed endpoint before `timeout` elapses.
+    pub fn connect_timeout(
+        &self,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move {
             tokio::time::timeout(timeout, s.connect(endpoint))
@@ -409,14 +421,16 @@ impl Socket {
         self.ctx.block_on(async move { s.leave(g).await })
     }
 
-    /// Stop listening on a previously bound endpoint.
-    pub fn unbind(&self, endpoint: Endpoint) -> Result<()> {
+    /// Stop listening on a bound endpoint, supplied as a URI string or typed endpoint.
+    pub fn unbind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx.block_on(async move { s.unbind(endpoint).await })
     }
 
-    /// Stop dialing a previously connected endpoint.
-    pub fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
+    /// Stop dialing a remote endpoint, supplied as a URI string or typed endpoint.
+    pub fn disconnect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let s = self.inner.clone_shared();
         self.ctx
             .block_on(async move { s.disconnect(endpoint).await })

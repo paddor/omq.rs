@@ -23,10 +23,7 @@ async fn null_refusal_stops_only_its_endpoint() {
         .parse()
         .unwrap();
     let healthy = Socket::new(SocketType::Pull, Options::default());
-    let healthy_endpoint = healthy
-        .bind("tcp://127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let healthy_endpoint = healthy.bind("tcp://127.0.0.1:0").await.unwrap();
     let push = Socket::new(
         SocketType::Push,
         Options::default().reconnect(ReconnectPolicy::Fixed(Duration::from_millis(10))),
@@ -139,7 +136,7 @@ async fn failed_driver_handshake_waits_before_reconnecting() {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
-    let endpoint = format!("tcp://{}", listener.local_addr().unwrap())
+    let endpoint: omq_tokio::Endpoint = format!("tcp://{}", listener.local_addr().unwrap())
         .parse()
         .unwrap();
     let push = Socket::new(

@@ -380,7 +380,7 @@ impl IoPoolHandle {
 /// # async fn example() {
 /// let ctx = Context::new();
 /// let sock = ctx.socket(SocketType::Push, Options::default());
-/// sock.bind("tcp://*:5555".parse().unwrap()).await.unwrap();
+/// sock.bind("tcp://*:5555").await.unwrap();
 /// sock.send(Message::from("hello")).await.unwrap();
 /// # }
 /// ```
@@ -880,10 +880,10 @@ mod tests {
         let pool = handle.pool.as_ref().unwrap();
         let receiver = context.socket(crate::SocketType::Pull, crate::Options::default());
         let sender = context.socket(crate::SocketType::Push, crate::Options::default());
-        let endpoint = "inproc://io-assignment-release".parse().unwrap();
+        let endpoint: crate::Endpoint = "inproc://io-assignment-release".parse().unwrap();
         receiver.bind(endpoint).await.unwrap();
         sender
-            .connect("inproc://io-assignment-release".parse().unwrap())
+            .connect("inproc://io-assignment-release")
             .await
             .unwrap();
         sender

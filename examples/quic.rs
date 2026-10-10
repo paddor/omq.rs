@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let context = Context::new();
     let pull = context.socket(SocketType::Pull, server);
-    let endpoint = pull.bind("quic://127.0.0.1:0".parse()?).await?;
+    let endpoint = pull.bind("quic://127.0.0.1:0").await?;
 
     let push = context.socket(SocketType::Push, client);
     push.connect(endpoint).await?;

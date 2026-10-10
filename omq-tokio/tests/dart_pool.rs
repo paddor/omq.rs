@@ -89,10 +89,7 @@ async fn native_radio_fanout_above_inline_target_capacity_does_not_allocate() {
             dish.join(bytes::Bytes::from_static(b"group"))
                 .await
                 .unwrap();
-            let endpoint = dish
-                .bind("dart://127.0.0.1:0".parse().unwrap())
-                .await
-                .unwrap();
+            let endpoint = dish.bind("dart://127.0.0.1:0").await.unwrap();
             radio.connect(endpoint).await.unwrap();
             dishes.push(dish);
         }
@@ -132,11 +129,7 @@ fn native_blocking_send_and_parked_receive_do_not_allocate() {
     let pool = PayloadPool::new([(2048, 8192)]).unwrap();
     let receiver = context.blocking_socket(SocketType::Channel, Options::default());
     sender
-        .connect(
-            receiver
-                .bind("dart://127.0.0.1:0".parse().unwrap())
-                .unwrap(),
-        )
+        .connect(receiver.bind("dart://127.0.0.1:0").unwrap())
         .unwrap();
     sender
         .wait_connected(1, std::time::Duration::from_secs(3))
@@ -191,11 +184,7 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
     let pool = PayloadPool::new([(2048, 8192)]).unwrap();
     let receiver = context.blocking_socket(SocketType::Gather, Options::default());
     sender
-        .connect(
-            receiver
-                .bind("dart://127.0.0.1:0".parse().unwrap())
-                .unwrap(),
-        )
+        .connect(receiver.bind("dart://127.0.0.1:0").unwrap())
         .unwrap();
     for socket in [&sender, &receiver] {
         socket.wait_connected(1, Duration::from_secs(3)).unwrap();
@@ -319,11 +308,7 @@ async fn native_radio_nodrop_bursts_do_not_allocate() {
             .await
             .unwrap();
         radio
-            .connect(
-                dish.bind("dart://127.0.0.1:0".parse().unwrap())
-                    .await
-                    .unwrap(),
-            )
+            .connect(dish.bind("dart://127.0.0.1:0").await.unwrap())
             .await
             .unwrap();
         dishes.push(dish);
@@ -442,10 +427,7 @@ async fn native_socket_delivery_reuses_storage_without_allocating() {
                 .await
                 .unwrap();
         }
-        let endpoint = receiver
-            .bind("dart://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let endpoint = receiver.bind("dart://127.0.0.1:0").await.unwrap();
         sender.connect(endpoint).await.unwrap();
         sender
             .wait_connected(1, std::time::Duration::from_secs(3))

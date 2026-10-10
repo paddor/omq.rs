@@ -197,10 +197,7 @@ fn scatter_to_tokio_gather_large_tcp() {
     rt.block_on(async {
         let gather =
             omq_tokio::Socket::new(omq_tokio::SocketType::Gather, omq_tokio::Options::default());
-        let endpoint = gather
-            .bind("tcp://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let endpoint = gather.bind("tcp://127.0.0.1:0").await.unwrap();
         let endpoint = CString::new(endpoint.to_string()).unwrap();
         let payload = vec![0x5au8; 157_197];
         let expected = payload.clone();

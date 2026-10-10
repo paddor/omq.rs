@@ -11,14 +11,11 @@ use omq_tokio::{Context, Message, Options, SocketType};
 async fn main() {
     let ctx = Context::new();
     let publisher = ctx.socket(SocketType::Pub, Options::default());
-    publisher
-        .bind("lz4+tcp://127.0.0.1:5556".parse().unwrap())
-        .await
-        .unwrap();
+    publisher.bind("lz4+tcp://127.0.0.1:5556").await.unwrap();
 
     let subscriber = ctx.socket(SocketType::Sub, Options::default());
     subscriber
-        .connect("lz4+tcp://127.0.0.1:5556".parse().unwrap())
+        .connect("lz4+tcp://127.0.0.1:5556")
         .await
         .unwrap();
     subscriber.subscribe("news.").await.unwrap(); // prefix match

@@ -479,14 +479,18 @@ impl Socket {
         }
     }
 
-    /// Bind to an endpoint. Returns the resolved endpoint once the
-    /// listener is active. For wildcard binds (`tcp://...:0`) the
-    /// returned endpoint contains the actual port.
-    pub async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
-        self.bind_with_codec_snapshot(endpoint, None).await
+    /// Bind a URI string or typed endpoint. Returns the resolved endpoint once
+    /// the listener is active. For wildcard binds (`tcp://...:0`), the returned
+    /// endpoint contains the actual port.
+    pub async fn bind(
+        &self,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
+    ) -> Result<Endpoint> {
+        self.bind_with_codec_snapshot(endpoint.try_into().map_err(Into::into)?, None)
+            .await
     }
 
-    /// Bind with a complete compression-parameter snapshot for this listener.
+    /// Bind a URI string or typed endpoint with a compression-parameter snapshot.
     /// The endpoint selects the codec; `None` parameter fields use codec
     /// defaults. Existing listeners/connections and decoder limits retain their
     /// configuration. CURVE and unsupported carrier profiles remain rejected.
@@ -495,10 +499,10 @@ impl Socket {
     /// Returns an error for invalid configuration, bind failure, or a closed socket.
     pub async fn bind_with_compression_options(
         &self,
-        endpoint: Endpoint,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
         compression: omq_proto::CompressionOptions,
     ) -> Result<Endpoint> {
-        self.bind_with_codec_snapshot(endpoint, Some(compression))
+        self.bind_with_codec_snapshot(endpoint.try_into().map_err(Into::into)?, Some(compression))
             .await
     }
 
@@ -528,25 +532,33 @@ impl Socket {
         self.inner.last_bound_endpoint.read().unwrap().clone()
     }
 
-    /// Queue a connect attempt. Returns immediately; the background reconnect
-    /// loop handles retries per the configured `ReconnectPolicy`.
-    pub async fn connect(&self, endpoint: Endpoint) -> Result<()> {
-        self.connect_with_codec_snapshot(endpoint, None).await
+    /// Queue a connect attempt to a URI string or typed endpoint.
+    /// The background reconnect loop handles retries per `ReconnectPolicy`.
+    pub async fn connect(
+        &self,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
+    ) -> Result<()> {
+        self.connect_with_codec_snapshot(endpoint.try_into().map_err(Into::into)?, None)
+            .await
     }
 
-    /// Connect with a complete compression-parameter snapshot, retained across
-    /// retries and reconnects. The endpoint selects the codec kind. Existing
-    /// peers retain their settings; this does not reconfigure a live dictionary.
+    /// Connect a URI string or typed endpoint with a compression snapshot.
+    /// The snapshot is retained across retries and reconnects. The endpoint
+    /// selects the codec kind. Existing peers retain their settings;
+    /// this does not reconfigure a live dictionary.
     ///
     /// # Errors
     /// Returns an error for invalid local configuration or a closed socket.
     pub async fn connect_with_compression_options(
         &self,
-        endpoint: Endpoint,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
         compression: omq_proto::CompressionOptions,
     ) -> Result<()> {
-        self.connect_with_codec_snapshot(endpoint, Some(compression))
-            .await
+        self.connect_with_codec_snapshot(
+            endpoint.try_into().map_err(Into::into)?,
+            Some(compression),
+        )
+        .await
     }
 
     async fn connect_with_codec_snapshot(
@@ -1185,7 +1197,9 @@ impl Socket {
     /// accept loop and releases its socket file (filesystem IPC) without
     /// closing already-accepted peers. Returns `Error::Unroutable` if
     /// no listener at `endpoint` is registered.
-    pub async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
+    /// Accepts a URI string or typed endpoint.
+    pub async fn unbind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
@@ -1198,8 +1212,12 @@ impl Socket {
     /// Tear down a previously-started connect. Cancels the dial loop,
     /// any in-flight reconnect backoff, and live peers connected through
     /// `endpoint`. Returns `Error::Unroutable` if no dialer or live peer
-    /// at `endpoint` is registered.
-    pub async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
+    /// at `endpoint` is registered. Accepts a URI string or typed endpoint.
+    pub async fn disconnect(
+        &self,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
+    ) -> Result<()> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         let (ack, rx) = oneshot::channel();
         self.inner
             .cmd_tx
@@ -1410,10 +1428,10 @@ impl omq_proto::socket_api::SocketApi for Socket {
     fn socket_type(&self) -> SocketType {
         self.socket_type()
     }
-    async fn bind(&self, endpoint: Endpoint) -> Result<Endpoint> {
+    async fn bind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<Endpoint> {
         self.bind(endpoint).await
     }
-    async fn connect(&self, endpoint: Endpoint) -> Result<()> {
+    async fn connect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
         self.connect(endpoint).await
     }
     async fn send(&self, msg: Message) -> Result<()> {
@@ -1444,10 +1462,10 @@ impl omq_proto::socket_api::SocketApi for Socket {
     async fn leave(&self, group: impl Into<bytes::Bytes>) -> Result<()> {
         self.leave(group).await
     }
-    async fn unbind(&self, endpoint: Endpoint) -> Result<()> {
+    async fn unbind(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
         self.unbind(endpoint).await
     }
-    async fn disconnect(&self, endpoint: Endpoint) -> Result<()> {
+    async fn disconnect(&self, endpoint: impl TryInto<Endpoint, Error: Into<Error>>) -> Result<()> {
         self.disconnect(endpoint).await
     }
     async fn close(self) -> Result<()> {

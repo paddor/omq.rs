@@ -857,7 +857,7 @@ async fn unsupported_types_destinations_and_spin_budgets_fail_during_setup() {
         "dart://127.0.0.1:0",
         "dart://239.1.2.3:1234",
     ] {
-        assert!(socket.connect(target.parse().unwrap()).await.is_err());
+        assert!(socket.connect(target).await.is_err());
     }
     socket.close().await.unwrap();
 }
@@ -998,7 +998,7 @@ async fn ipv6_and_hostname_endpoints_use_native_datagrams() {
         let gather = Socket::new(SocketType::Gather, Options::default());
         let scatter = Socket::new(SocketType::Scatter, Options::default());
         scatter
-            .connect(gather.bind(bind.parse().unwrap()).await.unwrap())
+            .connect(gather.bind(bind).await.unwrap())
             .await
             .unwrap();
         ready(&scatter, 1).await;

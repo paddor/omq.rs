@@ -84,7 +84,7 @@ cargo run --release -p omq-tokio --bin omq_bench_peer_blocking -- \
 ```
 
 The comparison runner also exposes `--impl omq-tokio-1t-spin50` as a latency-only
-variant, alongside `omq-tokio-1t` and `omq-tokio-ct`. Its 50 us spin budget applies
+variant, alongside `omq-tokio-1t` and `omq-tokio-ct`. Its 50 μs spin budget applies
 to both receiving endpoints. Pair and profile selection is available for OMQ
 peers:
 
@@ -233,7 +233,7 @@ application/IO slots 0/1 and 5/3. `--layout multi` uses two Tokio workers per
 process on those same pairs of CPUs. Application spin is only available with
 the split layout; repeatedly polling Quinn's receive API contends for its
 connection lock. `--io-spin 50` selects a benchmark socket adapter that probes
-UDP for at most 50 us after activity, scheduling a fresh endpoint turn after
+UDP for at most 50 μs after activity, scheduling a fresh endpoint turn after
 each empty probe, then uses ordinary Tokio readiness waits when idle.
 Quinn's packet protection and congestion control are unchanged.
 
@@ -267,7 +267,7 @@ measures RTT with the latency profile on both endpoints. Both transports use
 the same body sizes, application spin, and CPU placement. Dart initializes an
 8192-buffer, 2 KiB standalone send pool, separate from its internal receive
 pool. Bodies up to 55 bytes stay inline; larger bodies use pooled or owned storage.
-Dart also has an independent IO spin budget. Bounded spins are at most 50 us.
+Dart also has an independent IO spin budget. Bounded spins are at most 50 μs.
 Use `--continuous-spin` and `--continuous-io-spin` to compare continuous
 application and Dart IO polling independently. These select `Duration::MAX`
 instead of the corresponding bounded budget and are excluded from charts.
@@ -328,7 +328,7 @@ order between repeats to distribute startup effects; `--order fixed` supports
 order investigations and is excluded from RTT charts. It prints each result
 and the median/minimum/maximum for each size. `--check-gates` requires LAN
 medians of at least 5 million 16-byte messages/s, 1 GB/s of 1024-byte payloads,
-and RTT p99 at most 25 us. These experiment gates are separate from the RFC.
+and RTT p99 at most 25 μs. These experiment gates are separate from the RFC.
 Run `--congestion adaptive` separately; it is excluded from LAN gate checks.
 
 Charts require three eligible runs from the same binary, matching workload
@@ -339,8 +339,8 @@ They plot LAN and
 adaptive separately; historical unreliable rows are excluded.
 Outputs: `doc/charts/dart/{scattergather,clientserver}.svg`.
 RTT sizes are 16 B, 32 B, 64 B, 128 B, 256 B, 512 B, 1 KiB, 2 KiB, 4 KiB,
-8 KiB, and 16 KiB. The RTT chart uses a linear Y axis from 1 to 100 us with
-10 us ticks. A triangle and measured value
+8 KiB, and 16 KiB. The RTT chart uses a linear Y axis from 1 to 100 μs with
+10 μs ticks. A triangle and measured value
 identify p99.9 whiskers that extend above the axis limit.
 Throughput adds 32 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, and 8 MiB. Its two
 panels show messages/s through 1 KiB on the left and GB/s from 256 B on the

@@ -146,8 +146,8 @@ unchanged. Original version 6 supports the current small-message format;
 large sizes require original version 7 or newer. Each size still requires
 its own complete three-run cohort.
 RTT sizes are 16 B, 32 B, 64 B, 128 B, 256 B, 512 B, 1 KiB, 2 KiB, 4 KiB,
-8 KiB, and 16 KiB. The RTT Y axis is linear from 1 to 100 us, with ticks at
-1 us and multiples of 10 us. Whiskers above 100 us
+8 KiB, and 16 KiB. The RTT Y axis is linear from 1 to 100 μs, with ticks at
+1 μs and multiples of 10 μs. Whiskers above 100 μs
 end at the axis limit and show a triangle and their measured p99.9 value.
 When p99 itself exceeds the limit, clip its plotted position and label all
 three measured percentiles. Labels face inward near the boundary and use
@@ -155,8 +155,8 @@ separate rows when they overlap.
 Labels are `OMQ / TCP` (red), `OMQ / DART-LAN` and
 `OMQ / DART-adaptive` (different orange shades), and `Aeron v1.53.3 / UDP`.
 Thread labels are `1 IO`, with `1 IO (SHARED)` for Aeron's Media Driver.
-The RTT legend shows 50 us application receive spin for OMQ; only DART
-also uses 50 us IO spin.
+The RTT legend shows 50 μs application receive spin for OMQ; only DART
+also uses 50 μs IO spin.
 Throughput adds 32 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, and 8 MiB. Use the
 main TCP chart layout: messages/s on the left through 1 KiB, GB/s on the
 right from 256 B. The panels overlap at 256 B, 512 B, and 1 KiB.

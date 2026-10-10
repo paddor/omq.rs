@@ -266,8 +266,8 @@ STATUS serials, and counters MUST NOT wrap; retire the session first.
 | RADIO/DISH | Unicast fan-out, local group filtering | [48/RADIODISH](https://rfc.zeromq.org/spec/48/) |
 | CHANNEL/CHANNEL | One live peer | [52/CHANNEL](https://rfc.zeromq.org/spec/52/) |
 
-Each message has one application body. Identity and group prefixes are
-routing metadata. Other socket types and multipart bodies MUST be rejected
+Each application message MUST be single-part. Identity and group prefixes are
+routing metadata. Other socket types and multipart messages MUST be rejected
 before enqueueing. Ordinary HWM and mute policies apply. RADIO MAY drop
 new unsequenced publications for muted peers but MUST NOT abandon retained
 transmissions in a live session. Filtered publications still advance receipt

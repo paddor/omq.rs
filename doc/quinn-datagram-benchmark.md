@@ -19,19 +19,19 @@ is received application messages during a 3-second window; 200 ms warmup and
 by 100,000 measured exchanges. Every latency run had zero timeouts.
 GB/s is decimal payload bandwidth.
 
-| UDP adapter | Body | Received M/s | Payload GB/s | RTT p50 us | RTT p99 us | RTT p99 range us |
+| UDP adapter | Body | Received M/s | Payload GB/s | RTT p50 μs | RTT p99 μs | RTT p99 range μs |
 |---|---:|---:|---:|---:|---:|---:|
 | Stock Tokio | 16 B | 3.416 | 0.055 | 53.388 | 64.531 | 64.187-65.737 |
 | Stock Tokio | 1 KiB | 0.582 | 0.596 | 56.088 | 65.794 | 65.188-68.752 |
-| UDP probing, 50 us idle budget | 16 B | 3.311 | 0.053 | 28.075 | 63.640 | 39.580-64.520 |
-| UDP probing, 50 us idle budget | 1 KiB | 0.417 | 0.427 | 30.985 | 51.012 | 43.125-60.920 |
+| UDP probing, 50 μs idle budget | 16 B | 3.311 | 0.053 | 28.075 | 63.640 | 39.580-64.520 |
+| UDP probing, 50 μs idle budget | 1 KiB | 0.417 | 0.427 | 30.985 | 51.012 | 43.125-60.920 |
 
 Increasing the stock application's drain budget from 256 to 1,024 messages
 (still capped at 64 KiB) raised 16 B received throughput to a median 3.651 M/s,
 with runs at 3.602, 3.651, and 3.703 M/s. Offered throughput was 8.69-8.75 M/s;
 57-58% of measured messages were missing at the application. Thus the offered
 rate is not the delivery ceiling. The evaluated 5 M/s at 16 B, 1 GB/s at 1 KiB,
-and RTT p99 <=25 us were not reached, including the best individual runs.
+and RTT p99 <=25 μs were not reached, including the best individual runs.
 These are results on this machine, not a universal Quinn limit.
 
 The default 16 B runs lost 48-51% of offered messages with the stock adapter,

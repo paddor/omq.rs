@@ -888,7 +888,7 @@ impl LaneWorker {
     fn try_push_frame(slot: &PeerTransmitSlot, frame: &FanOutFrame<'_>) -> TryFrameResult {
         match frame {
             FanOutFrame::Arena(raw) => slot.try_push_pre_framed_no_signal(raw),
-            FanOutFrame::Chunks(chunks) => slot.try_push_encoded(chunks),
+            FanOutFrame::Chunks(chunks) => slot.try_push_encoded_no_signal(chunks),
         }
     }
 
@@ -1047,7 +1047,7 @@ impl LaneWorker {
             FanOutMutePolicy::DropOldest => peer.slot.try_push_fanout_drop_oldest(frame),
             FanOutMutePolicy::DropNewest | FanOutMutePolicy::Block => match frame {
                 FanOutFrame::Arena(raw) => peer.slot.try_push_pre_framed_no_signal(raw),
-                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded(chunks),
+                FanOutFrame::Chunks(chunks) => peer.slot.try_push_encoded_no_signal(chunks),
             },
         };
         match result {

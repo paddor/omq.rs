@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use omq_tokio::blocking::{BlockingRecvCancel, Socket};
+use omq_tokio::diagnostics::{dart_capabilities, dart_stats};
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{
     Context, DartCongestion, DartStats, Message, Options, PayloadPool, SocketType, TrySendError,
@@ -148,7 +149,7 @@ fn emit(event: &str) {
 }
 
 fn offloads(socket: &Socket) -> String {
-    format_offloads(socket.dart_capabilities())
+    format_offloads(dart_capabilities(socket))
 }
 
 fn format_offloads(capabilities: Option<omq_tokio::DartCapabilities>) -> String {
@@ -319,7 +320,7 @@ fn scatter_result(
     warmup_offered: u64,
     pool_empty: u64,
 ) {
-    let stats = socket.dart_stats();
+    let stats = dart_stats(socket);
     let unacknowledged = if native {
         (offered + warmup_offered).saturating_sub(stats.acknowledged)
     } else {
@@ -386,7 +387,7 @@ impl BodyCache {
 }
 
 fn wait_acknowledged(socket: &Socket, count: u64, deadline: Instant, wait: &mut CapacityWait) {
-    while socket.dart_stats().acknowledged < count {
+    while dart_stats(socket).acknowledged < count {
         let now = Instant::now();
         if now >= deadline {
             break;
@@ -450,7 +451,7 @@ fn gather(socket: &Socket, config: &Config, at: Instant) {
             batch.clear();
         }
     }
-    let stats = socket.dart_stats();
+    let stats = dart_stats(socket);
     emit(&format!(
         "{{\"event\":\"result\",\"received\":{received},\"received_total\":{total},\"duplicates\":{duplicates},\"gaps\":{gaps},\"corrupt\":{corrupt},\"seconds\":{},\"received_datagrams\":{},\"pool_exhausted\":{},\"receive_overflow\":{},\"invalid_datagrams\":{},\"receive_failures\":{},\"ect0\":{},\"ect1\":{},\"ce\":{},\"ecn_unavailable\":{},\"offloads\":{}}}",
         config.duration.as_secs_f64(),
@@ -499,7 +500,7 @@ fn server(socket: &Socket) {
     emit(&format!(
         "{{\"event\":\"result\",\"offloads\":{},{} }}",
         offloads(socket),
-        latency_counters(socket.dart_stats()),
+        latency_counters(dart_stats(socket)),
     ));
 }
 
@@ -519,7 +520,7 @@ fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
             samples.push(elapsed);
         }
     }
-    latency_result(&mut samples, config, &offloads(socket), socket.dart_stats());
+    latency_result(&mut samples, config, &offloads(socket), dart_stats(socket));
 }
 
 fn validate_reply(reply: &Message, size: usize, tag: u64) {

@@ -66,6 +66,12 @@ pub struct Socket {
     ctx: Context,
 }
 
+impl AsRef<AsyncSocket> for Socket {
+    fn as_ref(&self) -> &AsyncSocket {
+        &self.inner
+    }
+}
+
 impl Socket {
     /// Copy an internal binding handle while retaining its send lanes.
     #[doc(hidden)]
@@ -102,18 +108,6 @@ impl Socket {
     /// Return this socket's type.
     pub fn socket_type(&self) -> omq_proto::proto::SocketType {
         self.inner.socket_type()
-    }
-
-    /// Approximate counters shared by every DART endpoint of this socket.
-    #[cfg(feature = "dart")]
-    pub fn dart_stats(&self) -> crate::DartStats {
-        self.inner.dart_stats()
-    }
-
-    /// Current conservative capabilities across live DART endpoints.
-    #[cfg(feature = "dart")]
-    pub fn dart_capabilities(&self) -> Option<crate::DartCapabilities> {
-        self.inner.dart_capabilities()
     }
 
     /// Subscribe to connection-lifecycle events for this socket.

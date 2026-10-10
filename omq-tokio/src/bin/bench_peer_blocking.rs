@@ -920,8 +920,13 @@ fn run_multi_sub(
                         break;
                     }
                     if sock.try_recv().is_err() {
-                        std::thread::yield_now();
-                        continue;
+                        // Park empty subscribers so they leave CPU time for IO.
+                        match sock.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        {
+                            Ok(_) => {}
+                            Err(omq_tokio::Error::Timeout) => break,
+                            Err(error) => panic!("pub/sub receive failed: {error}"),
+                        }
                     }
                     n += 1;
                     for _ in 1..drain_batch {

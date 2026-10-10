@@ -222,8 +222,10 @@ impl PeerTransmitSlot {
             return TryFrameResult::Full;
         }
         eq.push_pre_framed(data);
-        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
+        // Count writers are serialized by eq, including drains and disconnects.
+        let queued = self.queued_msgs.load(Ordering::Relaxed) + 1;
+        self.queued_msgs.store(queued, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
         TryFrameResult::Ok
     }
 

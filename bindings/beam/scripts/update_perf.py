@@ -96,10 +96,22 @@ def build(no_build):
     priv_nif = ROOT / "priv" / "omq_beam_native.so"
     priv_nif.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(release_nif, priv_nif)
-    run(["mix", "compile", "--warnings-as-errors"], cwd=ROOT / "elixir")
+    elixir_ebin = ROOT / "elixir" / "_build" / "dev" / "lib" / "omq_elixir" / "ebin"
+    elixir_ebin.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "elixirc",
+            "--warnings-as-errors",
+            "-pa",
+            ROOT / "_build" / "default" / "lib" / "omq" / "ebin",
+            "-o",
+            elixir_ebin,
+            *sorted((ROOT / "elixir" / "lib").glob("*.ex")),
+        ]
+    )
     gleam = gleam_bin()
     if gleam:
-        run([gleam, "build"], cwd=ROOT / "gleam")
+        run([gleam, "build", "--warnings-as-errors"], cwd=ROOT / "gleam")
 
 
 def gleam_bin():

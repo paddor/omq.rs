@@ -2,14 +2,15 @@
 """Measure OMQ.Net vs NetMQ throughput and latency (sync, ReceiveInto, async).
 
 Run from the repository root after building the .NET benchmark peer.
-Full runs append to doc/charts/bindings.jsonl (latest run_id wins per impl).
-They also generate doc/charts/bindings.svg and update the README proxy table.
+Full runs append medians to the benchmark cache (latest run_id wins per impl)
+and regenerate doc/charts/bindings.svg.
 """
 
 import argparse
 import json
 import math
 import os
+import selectors
 import socket
 import subprocess
 import time
@@ -395,12 +396,11 @@ def gen_combined_chart(data, path):
         ("NetMQ", C_NETMQ),
         ("NetMQ async", C_NETMQ_ASYNC),
     ]
-    item_w = 140
-    total_w = len(legend_items) * item_w
-    start_x = mid_x - total_w / 2
+    item_widths = [36 + len(label) * 7 for label, _ in legend_items]
+    total_w = sum(item_widths)
+    lx = mid_x - total_w / 2
 
-    for idx, (label, color) in enumerate(legend_items):
-        lx = start_x + idx * item_w
+    for (label, color), item_width in zip(legend_items, item_widths):
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'
             f' stroke="{color}" stroke-width="2.5"/>'
@@ -410,6 +410,7 @@ def gen_combined_chart(data, path):
             f'  <text x="{lx + 20:.0f}" y="{leg_y + 4}" fill="#e5e7eb"'
             f' font-size="11" font-weight="500">{label}</text>'
         )
+        lx += item_width
 
     footer_y = leg_y + 18
     L.append(
@@ -481,10 +482,18 @@ def _peer(impl, role, pattern, endpoint, size, duration, warmup):
     return command
 
 
+def _read_line(process, timeout):
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        if not selector.select(timeout):
+            raise RuntimeError("benchmark peer output timeout")
+        return process.stdout.readline()
+
+
 def _read_ready(process, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        line = process.stdout.readline()
+        line = _read_line(process, max(0, deadline - time.monotonic()))
         if line:
             return line.strip()
         if process.poll() is not None:
@@ -528,10 +537,9 @@ def run_cell(impl, pattern, size, duration, warmup):
         )
         _read_ready(client)
         source_process = client if pattern == "reqrep" else server
-        source = source_process.stdout
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            line = source.readline()
+            line = _read_line(source_process, max(0, deadline - time.monotonic()))
             if line.startswith("RESULT "):
                 return json.loads(line[7:])
             if not line:
@@ -568,6 +576,9 @@ def main():
     parser.add_argument("--sizes")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--no-build", action="store_true")
+    measurements = parser.add_mutually_exclusive_group()
+    measurements.add_argument("--throughput-only", action="store_true")
+    measurements.add_argument("--latency-only", action="store_true")
     parser.add_argument(
         "--impl",
         action="append",
@@ -607,6 +618,10 @@ def main():
         "netmq-async",
     ]
     for pattern in ("pushpull", "reqrep"):
+        if (pattern == "pushpull" and args.latency_only) or (
+            pattern == "reqrep" and args.throughput_only
+        ):
+            continue
         for size in SIZES:
             if pattern == "reqrep" and size > LATENCY_MAX_SIZE:
                 continue

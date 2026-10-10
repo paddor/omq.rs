@@ -238,10 +238,10 @@ pub(crate) fn generate() {
             .map(|implementation| Impl {
                 key: implementation.key,
                 label: implementation.label,
-                threads: if implementation.key == "aeron" {
-                    implementation.threads
-                } else {
-                    "1 IO, app/IO spin 50 us"
+                threads: match implementation.key {
+                    "aeron" => implementation.threads,
+                    "tcp" => "1 IO, recv spin 50 us",
+                    _ => "1 IO, app/IO spin 50 us",
                 },
                 color: implementation.color,
             })

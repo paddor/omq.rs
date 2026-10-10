@@ -72,18 +72,9 @@ void RunOmq(bool receiveInto)
         if (receiveInto)
         {
             var buffer = new byte[size];
-            WaitFirstOmqInto(socket, buffer); socket.Send(payload);
-            DrainRepOmqInto(socket, buffer, warmup);
-            var intoWatch = Stopwatch.StartNew(); long intoCount = 0;
-            while (Active(intoWatch, seconds)) { try { ReceiveIntoExact(socket, buffer); socket.Send(payload); intoCount++; } catch (OmqAgainException) { } }
-            Result(intoCount, intoWatch.Elapsed.TotalSeconds);
-            return;
+            while (true) { try { ReceiveIntoExact(socket, buffer); } catch (OmqAgainException) { continue; } socket.Send(payload); }
         }
-        WaitFirstOmq(socket); socket.Send(payload);
-        DrainRepOmq(socket, warmup);
-        var watch = Stopwatch.StartNew(); long count = 0;
-        while (Active(watch, seconds)) { try { socket.Receive(); socket.Send(payload); count++; } catch (OmqAgainException) { } }
-        Result(count, watch.Elapsed.TotalSeconds);
+        while (true) { try { socket.Receive(); } catch (OmqAgainException) { continue; } socket.Send(payload); }
     }
 }
 
@@ -102,11 +93,7 @@ void WaitFirstOmqInto(Omq.Socket socket, byte[] buffer)
 }
 void DrainReqOmqInto(Omq.Socket socket, byte[] buffer, double duration)
 {
-    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { socket.Send(payload); try { ReceiveIntoExact(socket, buffer); } catch (OmqAgainException) { } }
-}
-void DrainRepOmqInto(Omq.Socket socket, byte[] buffer, double duration)
-{
-    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { try { ReceiveIntoExact(socket, buffer); socket.Send(payload); } catch (OmqAgainException) { } }
+    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { socket.Send(payload); WaitFirstOmqInto(socket, buffer); }
 }
 
 void DrainOmq(Omq.Socket socket, double duration)
@@ -119,11 +106,7 @@ void WaitFirstOmq(Omq.Socket socket)
 }
 void DrainReqOmq(Omq.Socket socket, double duration)
 {
-    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { socket.Send(payload); try { socket.Receive(); } catch (OmqAgainException) { } }
-}
-void DrainRepOmq(Omq.Socket socket, double duration)
-{
-    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { try { socket.Receive(); socket.Send(payload); } catch (OmqAgainException) { } }
+    var watch = Stopwatch.StartNew(); while (Active(watch, duration)) { socket.Send(payload); WaitFirstOmq(socket); }
 }
 
 void RunNetMq()
@@ -159,9 +142,7 @@ async Task RunOmqAsyncOther()
         var watch = Stopwatch.StartNew(); long count = 0; while (Active(watch, seconds)) { await socket.ReceiveAsync(); count++; }
         Result(count, watch.Elapsed.TotalSeconds); return;
     }
-    await socket.ReceiveAsync(); await socket.SendAsync(payload); var warmRep = Stopwatch.StartNew(); while (Active(warmRep, warmup)) { await socket.ReceiveAsync(); await socket.SendAsync(payload); }
-    var repWatch = Stopwatch.StartNew(); long repCount = 0; while (Active(repWatch, seconds)) { await socket.ReceiveAsync(); await socket.SendAsync(payload); repCount++; }
-    Result(repCount, repWatch.Elapsed.TotalSeconds);
+    while (true) { await socket.ReceiveAsync(); await socket.SendAsync(payload); }
 }
 
 void RunNetMqAsync()
@@ -186,9 +167,8 @@ async Task RunNetMqAsyncCore()
         var watch = Stopwatch.StartNew(); long count = 0; var samples = new List<double>(); while (Active(watch, seconds)) { var one = Stopwatch.StartNew(); await Task.Run(() => socket.SendFrame(payload)); await socket.ReceiveFrameBytesAsync(); samples.Add(one.Elapsed.TotalMicroseconds); count++; }
         samples.Sort(); Result(count, watch.Elapsed.TotalSeconds, samples[samples.Count / 2]); return;
     }
-    using var rep = new ResponseSocket(); rep.Options.Linger = TimeSpan.Zero; rep.Bind(endpoint); Ready(); await rep.ReceiveFrameBytesAsync(); await Task.Run(() => rep.SendFrame(payload)); var warmRep = Stopwatch.StartNew(); while (Active(warmRep, warmup)) { await rep.ReceiveFrameBytesAsync(); await Task.Run(() => rep.SendFrame(payload)); }
-    var repWatch = Stopwatch.StartNew(); long repCount = 0; while (Active(repWatch, seconds)) { await rep.ReceiveFrameBytesAsync(); await Task.Run(() => rep.SendFrame(payload)); repCount++; }
-    Result(repCount, repWatch.Elapsed.TotalSeconds);
+    using var rep = new ResponseSocket(); rep.Options.Linger = TimeSpan.Zero; rep.Bind(endpoint); Ready();
+    while (true) { await rep.ReceiveFrameBytesAsync(); await Task.Run(() => rep.SendFrame(payload)); }
 }
 void RunNetMqPushPull()
 {
@@ -214,9 +194,5 @@ void RunNetMqReqRep()
         samples.Sort(); Result(count, watch.Elapsed.TotalSeconds, samples.Count == 0 ? 0 : samples[samples.Count / 2]); return;
     }
     using var rep = new ResponseSocket(); rep.Options.Linger = TimeSpan.Zero; rep.Bind(endpoint); Ready();
-    while (!rep.TryReceiveFrameBytes(TimeSpan.FromMilliseconds(20), out _)) { }
-    rep.SendFrame(payload);
-    var warmRep = Stopwatch.StartNew(); while (Active(warmRep, warmup)) { if (rep.TryReceiveFrameBytes(TimeSpan.FromMilliseconds(20), out _)) rep.SendFrame(payload); }
-    var watchRep = Stopwatch.StartNew(); long countRep = 0; while (Active(watchRep, seconds)) { if (rep.TryReceiveFrameBytes(TimeSpan.FromMilliseconds(20), out _)) { rep.SendFrame(payload); countRep++; } }
-    Result(countRep, watchRep.Elapsed.TotalSeconds);
+    while (true) { if (rep.TryReceiveFrameBytes(TimeSpan.FromMilliseconds(20), out _)) rep.SendFrame(payload); }
 }

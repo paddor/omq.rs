@@ -750,10 +750,10 @@ def print_table(rows, sizes, impls):
         base_msgs = base["msgs_s"] if base else 0.0
         for impl in impls:
             row = by_key[(size, impl)]
-            ratio = row["msgs_s"] / base_msgs if base_msgs else 0.0
+            comparison = f"{row['msgs_s'] / base_msgs:.2f}x" if base_msgs else "--"
             print(
                 f"{size:5d} {impl:8s} {row['msgs_s']:11.0f} "
-                f"{row['gb_s']:8.3f} {ratio:9.2f}x"
+                f"{row['gb_s']:8.3f} {comparison:>10}"
             )
         print()
 
@@ -767,10 +767,14 @@ def print_latency_table(rows, sizes, impls):
         base_p50 = base["p50_us"] if base else 0.0
         for impl in impls:
             row = by_key[(size, impl)]
-            ratio = base_p50 / row["p50_us"] if base_p50 and row["p50_us"] else 0.0
+            comparison = (
+                f"{base_p50 / row['p50_us']:.2f}x"
+                if base_p50 and row["p50_us"]
+                else "--"
+            )
             print(
                 f"{size:5d} {impl:8s} {row['p50_us']:9.1f} "
-                f"{row['p99_us']:9.1f} {ratio:11.2f}x"
+                f"{row['p99_us']:9.1f} {comparison:>12}"
             )
         print()
 

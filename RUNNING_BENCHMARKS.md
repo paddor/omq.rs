@@ -123,6 +123,11 @@ application-level QoS are disabled.
 
 Results go to `~/.cache/omq/comparisons.jsonl`. APPEND-ONLY!
 
+OMQ PUSH/PULL sends reuse immutable bodies; tiny messages stay inline. Each send
+submits one message. Receive turns use a 128-message, 64 KiB budget, permitting
+one larger message. Each turn has one clock check; boundary-crossing turns are
+excluded.
+
 ## Updating Charts
 
 Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers

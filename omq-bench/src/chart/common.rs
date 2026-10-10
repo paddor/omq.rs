@@ -73,7 +73,7 @@ impl LegendTableLayout {
     fn meta_label(self) -> &'static str {
         match self {
             Self::Threads => "threads",
-            Self::BrokeredMom => "broker",
+            Self::BrokeredMom => "runtime / broker",
         }
     }
 
@@ -531,8 +531,9 @@ fn draw_legend_table_with_versions(
 
 fn mom_client_crate_label(key: &str) -> &'static str {
     match key {
-        "omq-tokio-1t" | "omq-tokio-1t-spin50" => "omq-tokio v0.24.0",
-        "omq-quic" | "omq-dart" | "omq-dart-no-spin" => "omq-tokio v0.25.0",
+        "omq-tokio-1t" | "omq-tokio-1t-spin50" | "omq-quic" | "omq-dart" | "omq-dart-no-spin" => {
+            "omq-tokio v0.25.0"
+        }
         "grpc-rust" => "tonic v0.12.3",
         "rabbitmq" => "lapin v2.5.5",
         "aeron-udp-2proc" => "Aeron v1.51.0",
@@ -1024,7 +1025,6 @@ pub(crate) fn draw_throughput_dual_panel_brokered_with_versions(
         ThroughputChartConfig {
             chart_h: 520,
             msg_target_ticks: 10,
-            msg_log_scale: false,
             legend_layout: LegendTableLayout::BrokeredMom,
             ..ThroughputChartConfig::default()
         },
@@ -1038,7 +1038,6 @@ struct ThroughputChartConfig {
     msg_target_ticks: usize,
     gbs_target_ticks: usize,
     msg_axis: MsgAxisMode,
-    msg_log_scale: bool,
     legend_layout: LegendTableLayout,
 }
 
@@ -1049,7 +1048,6 @@ impl Default for ThroughputChartConfig {
             msg_target_ticks: 6,
             gbs_target_ticks: 6,
             msg_axis: MsgAxisMode::Auto,
-            msg_log_scale: false,
             legend_layout: LegendTableLayout::Threads,
         }
     }
@@ -1119,13 +1117,9 @@ fn draw_throughput_dual_panel_with_msg_axis(
     let (msgs_max, msgs_ticks) = config.msg_axis.bounds(msgs_raw, config.msg_target_ticks);
 
     if !small.is_empty() {
-        if config.msg_log_scale {
-            draw_msgs_log_panel(&left_area, &small, &present, msgs, config.msg_target_ticks)?;
-        } else {
-            draw_msgs_panel(
-                &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
-            )?;
-        }
+        draw_msgs_panel(
+            &left_area, &small, &present, msgs, msgs_max, msgs_ticks, None,
+        )?;
     }
     if !large.is_empty() {
         draw_gbs_panel(
@@ -1202,86 +1196,6 @@ pub(crate) fn draw_msgs_panel(
             .iter()
             .enumerate()
             .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
-            .collect();
-        if pts.is_empty() {
-            continue;
-        }
-        chart.draw_series(DashedLineSeries::new(
-            pts.iter().copied(),
-            6,
-            3,
-            imp.color.stroke_width(2),
-        ))?;
-        chart.draw_series(
-            pts.iter()
-                .map(|&(x, y)| Circle::new((x, y), 2, imp.color.filled())),
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn draw_msgs_log_panel(
-    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    sizes: &[u64],
-    present: &[&Impl],
-    msgs: &ValMap,
-    n_ticks: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let values = sizes
-        .iter()
-        .filter_map(|s| msgs.get(s))
-        .flat_map(|m| m.values())
-        .copied()
-        .filter(|v| *v > 0.0);
-    let (min_val, max_val) = values.fold((f64::MAX, 0.0_f64), |(min_val, max_val), v| {
-        (min_val.min(v), max_val.max(v))
-    });
-    let y_min = if min_val.is_finite() {
-        10.0_f64.powf(min_val.log10().floor()).max(1.0)
-    } else {
-        1.0
-    };
-    let y_max = if max_val > 0.0 {
-        10.0_f64.powf(max_val.log10().ceil()).max(y_min * 10.0)
-    } else {
-        10.0
-    };
-
-    let mut chart = ChartBuilder::on(area)
-        .caption(
-            "small messages, log scale (higher is better)",
-            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
-        )
-        .set_label_area_size(LabelAreaPosition::Bottom, 28)
-        .set_label_area_size(LabelAreaPosition::Left, 70)
-        .margin_top(36)
-        .margin_left(10)
-        .margin_right(20)
-        .build_cartesian_2d(0.0..(sizes.len() - 1) as f64, (y_min..y_max).log_scale())?;
-
-    chart
-        .configure_mesh()
-        .x_labels(sizes.len())
-        .x_label_formatter(&|v| {
-            sizes
-                .get(v.round() as usize)
-                .map_or(String::new(), |&s| fmt_size(s))
-        })
-        .y_labels(n_ticks + 1)
-        .y_label_formatter(&|v| fmt_msgs(*v))
-        .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
-        .light_line_style(TRANSPARENT)
-        .bold_line_style(GRID_COLOR)
-        .axis_style(AXIS_COLOR)
-        .draw()?;
-
-    for imp in present.iter().rev() {
-        let pts: Vec<(f64, f64)> = sizes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &s)| msgs.get(&s)?.get(imp.key).map(|&v| (i as f64, v)))
-            .filter(|(_, v)| *v > 0.0)
             .collect();
         if pts.is_empty() {
             continue;
@@ -1448,6 +1362,7 @@ fn draw_mom_latency_whiskers<DB: DrawingBackend>(
     lat_max: f64,
 ) -> Result<(), plotters::drawing::DrawingAreaErrorKind<DB::ErrorType>> {
     let mut offscale_counts = vec![0usize; sizes.len()];
+    let units_per_pixel = lat_max / f64::from(chart.plotting_area().dim_in_pixel().1.max(1));
     for imp in present.iter().rev() {
         let stroke = imp.color.mix(0.65).stroke_width(1);
         for (index, size) in sizes.iter().enumerate() {
@@ -1473,15 +1388,16 @@ fn draw_mom_latency_whiskers<DB: DrawingBackend>(
                     (x + 0.06, HPos::Left)
                 };
                 chart.draw_series([TriangleMarker::new(
-                    (x, lat_max - 10.0),
+                    (x, lat_max - 6.0 * units_per_pixel),
                     5,
                     imp.color.filled(),
                 )])?;
                 chart.draw_series([Text::new(
-                    format!("p99.9 {:.0} μs", entry.p999),
+                    format!("p99.9 {:.0} \u{03bc}s", entry.p999),
                     (
                         label_x,
-                        lat_max - 49.0 - (index % 2 + label_row * 2) as f64 * 20.0,
+                        lat_max
+                            - (20.0 + (index % 2 + label_row * 2) as f64 * 10.0) * units_per_pixel,
                     ),
                     ("sans-serif", 10)
                         .into_font()
@@ -1553,7 +1469,7 @@ pub(crate) fn draw_latency_brokered_with_versions(
         .y_labels(tick_intervals as usize + 1)
         .y_label_formatter(&|value| {
             if *value == 0.0 {
-                "0 μs".to_string()
+                "0 \u{03bc}s".to_string()
             } else {
                 fmt_us(*value)
             }

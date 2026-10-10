@@ -129,6 +129,7 @@ impl Socket {
     }
 
     /// Install explicit receive storage before the first bind/connect.
+    /// Pools supply destinations without copying decoded bodies.
     ///
     /// # Errors
     /// Returns a configuration error once setup starts, or `Closed` after close.

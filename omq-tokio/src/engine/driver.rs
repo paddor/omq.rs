@@ -880,7 +880,7 @@ where
         self
     }
 
-    /// Select receive payload storage after decoding a message transform.
+    /// Select output storage before decompressing a message transform.
     #[must_use]
     pub(crate) fn with_decoded_payload_pool(
         mut self,
@@ -1931,14 +1931,8 @@ fn drain_decoded_messages(
     let mut pending_yring_flush = false;
     while let Some(m) = connection.poll_message() {
         let m = match decoder.as_mut() {
-            Some(dec) => match dec.decode(m)? {
-                Some(plain) => {
-                    if let Some(pool) = decoded_payload_pool {
-                        pool.store_decoded_message(plain)
-                    } else {
-                        plain
-                    }
-                }
+            Some(dec) => match dec.decode_with_payload_pool(m, decoded_payload_pool)? {
+                Some(plain) => plain,
                 None => continue,
             },
             None => m,
@@ -2406,9 +2400,14 @@ impl Drop for PooledRecvBuf {
 /// Own a claimed payload across cancel-safe, bounded reads in the main select.
 #[derive(Debug)]
 struct PendingLargeRead {
-    buf: BytesMut,
+    buf: ReceiveBody,
     target: usize,
-    pooled: bool,
+}
+
+#[derive(Debug)]
+enum ReceiveBody {
+    Stream { buf: BytesMut, pooled: bool },
+    Payload(omq_proto::PayloadBuffer),
 }
 
 impl PendingLargeRead {
@@ -2421,42 +2420,86 @@ impl PendingLargeRead {
         let skip_large = connection.is_ws();
         #[cfg(not(feature = "ws"))]
         let skip_large = false;
-        if config.large_message_threshold == 0 || connection.has_frame_transform() || skip_large {
+        if matches!(config.large_message_threshold, 0 | usize::MAX)
+            || connection.has_frame_transform()
+            || skip_large
+        {
             return Ok(None);
         }
         let Some(info) = connection.peek_next_frame_payload_size()? else {
             return Ok(None);
         };
-        if info.payload_len < config.large_message_threshold {
+        // Complete frames retain their byte views, including frames left by
+        // a bounded codec turn. No pool checkout should make a second copy.
+        if info.buffered_payload_prefix == info.payload_len {
             return Ok(None);
+        }
+        let payload_buffer = if info.flags.command {
+            None
+        } else {
+            connection.try_recv_payload_buffer(info.payload_len)
+        };
+        if payload_buffer.is_none() && info.payload_len < config.large_message_threshold {
+            return Ok(None);
+        }
+        if let Some(mut buffer) = payload_buffer {
+            let Some((target, filled)) =
+                connection.begin_supplied_payload_into(buffer.writable())?
+            else {
+                return Ok(None);
+            };
+            copy_stats::record(Site::RecvLargePrefix, filled);
+            buffer.set_len(filled).expect("selected slot fits body");
+            return Ok(Some(Self {
+                buf: ReceiveBody::Payload(buffer),
+                target,
+            }));
         }
         let Some((target, prefix)) = connection.begin_supplied_payload_with_prefix() else {
             return Ok(None);
         };
+        // Release the shared input prefix before the caller refills read_buf.
+        copy_stats::record(Site::RecvLargePrefix, prefix.len());
         let pooled = target <= RECV_POOL_MAX_BUFFER_BYTES;
         let mut buf = if pooled {
             pool.take(target)
         } else {
             BytesMut::with_capacity(target)
         };
-        // Release the shared input prefix before the caller refills read_buf.
-        copy_stats::record(Site::RecvLargePrefix, prefix.len());
         buf.extend_from_slice(prefix.as_slice());
         Ok(Some(Self {
-            buf,
+            buf: ReceiveBody::Stream { buf, pooled },
             target,
-            pooled,
         }))
     }
 
+    fn filled(&self) -> usize {
+        match &self.buf {
+            ReceiveBody::Stream { buf, .. } => buf.len(),
+            ReceiveBody::Payload(buf) => buf.len(),
+        }
+    }
+
     fn complete(&self) -> bool {
-        self.buf.len() == self.target
+        self.filled() == self.target
     }
 
     async fn read<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<usize> {
-        let remaining = self.target - self.buf.len();
-        let mut limited = (&mut self.buf).limit(remaining.min(64 * 1024));
-        let n = reader.read_buf(&mut limited).await?;
+        let filled = self.filled();
+        let remaining = (self.target - filled).min(64 * 1024);
+        let n = match &mut self.buf {
+            ReceiveBody::Stream { buf, .. } => {
+                let mut limited = buf.limit(remaining);
+                reader.read_buf(&mut limited).await?
+            }
+            ReceiveBody::Payload(buf) => {
+                let n = reader
+                    .read(&mut buf.writable()[filled..filled + remaining])
+                    .await?;
+                buf.set_len(filled + n).expect("read stays within body");
+                n
+            }
+        };
         if n == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
@@ -2465,15 +2508,15 @@ impl PendingLargeRead {
 
     fn finish(self, connection: &mut Connection, pool: &Arc<RecvBufPool>) -> Result<()> {
         debug_assert!(self.complete());
-        let capacity = self.buf.capacity();
-        let payload = if self.pooled {
-            pool.wrap(self.buf)
-        } else {
-            self.buf.freeze()
+        let payload = match self.buf {
+            ReceiveBody::Payload(buf) => buf.into_payload(),
+            ReceiveBody::Stream { buf, pooled } => {
+                let capacity = buf.capacity();
+                let bytes = if pooled { pool.wrap(buf) } else { buf.freeze() };
+                omq_proto::Payload::from_bytes_with_retained_size(bytes, capacity)
+            }
         };
-        connection.supply_payload_frame(omq_proto::message::Payload::from_bytes_with_retained_size(
-            payload, capacity,
-        ))
+        connection.supply_payload_frame(payload)
     }
 }
 

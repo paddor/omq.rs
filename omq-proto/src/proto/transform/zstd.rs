@@ -425,16 +425,18 @@ impl ZstdDecoder {
             ));
         }
         take_budget(budget, decompressed_size)?;
-        let result = self
-            .dctx
-            .decompress_with_limit(bytes, decompressed_size)
+        // Decode into the final owner instead of copying the context's scratch
+        // output. zrip's destination API requires Vec rather than fixed slices.
+        let mut result = Vec::new();
+        self.dctx
+            .decompress_into_with_limit(bytes, &mut result, decompressed_size)
             .map_err(|e| decompress_err(&e))?;
         if result.len() != decompressed_size {
             return Err(Error::Protocol(
                 "zstd decompressed length disagrees with declared".into(),
             ));
         }
-        Ok(Payload::from_bytes(Bytes::from(result.into_owned())))
+        Ok(Payload::from_bytes(Bytes::from(result)))
     }
 }
 

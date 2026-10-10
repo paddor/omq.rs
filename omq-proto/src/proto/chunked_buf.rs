@@ -209,20 +209,30 @@ impl ChunkedInputBuf {
     }
 
     /// Take the first `n` bytes as a [`Payload`], consuming them from the
-    /// buffer. Each contiguous chunk contributes one chunk to the returned
-    /// `Payload`; no copies are made.
+    /// buffer. Contiguous bodies keep their byte views; bodies spanning chunks
+    /// are coalesced into a single allocation.
     /// Panics in debug mode if `n > self.len()`.
     #[inline]
     pub(crate) fn split_to(&mut self, n: usize) -> Payload {
+        self.split_to_with_pool(n, None)
+    }
+
+    /// Use configured storage only when coalescing needs a new destination.
+    #[inline]
+    pub(crate) fn split_to_with_pool(
+        &mut self,
+        n: usize,
+        pool: Option<&crate::PayloadPool>,
+    ) -> Payload {
         debug_assert!(n <= self.total_len, "split_to past end");
         if n == 0 {
             return Payload::new();
         }
-        self.total_len -= n;
 
         // Fast path: entirely within the front chunk past front_offset.
         let avail = self.front.len() - self.front_offset;
         if n <= avail {
+            self.total_len -= n;
             let start = self.front_offset;
             let payload = if n <= MAX_INLINE_PAYLOAD {
                 Payload::inline(&self.front[start..start + n])
@@ -238,6 +248,14 @@ impl ChunkedInputBuf {
 
         // Slow path: spans front + rest chunks. Coalesce into one contiguous buffer.
         crate::copy_stats::record(crate::copy_stats::Site::RecvAssemble, n);
+        if n > MAX_INLINE_PAYLOAD
+            && let Some(mut buffer) = pool.and_then(|pool| pool.try_buffer(n))
+        {
+            self.read_into(n, buffer.writable());
+            buffer.set_len(n).expect("selected slot fits body");
+            return buffer.into_payload();
+        }
+        self.total_len -= n;
         let mut remaining = n;
         let mut buf = BytesMut::with_capacity(n);
 

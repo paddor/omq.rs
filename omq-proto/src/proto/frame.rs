@@ -270,9 +270,28 @@ pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFr
 /// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
 #[inline]
 pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame>> {
+    try_decode_frame_with_pool(buf, None)
+}
+
+/// Choose pooled storage only for data bodies that need coalescing.
+#[inline]
+pub(crate) fn try_decode_frame_with_pool(
+    buf: &mut ChunkedInputBuf,
+    pool: Option<&crate::PayloadPool>,
+) -> Result<Option<Frame>> {
     let Some(hdr) = peek_frame_header(buf)? else {
         return Ok(None);
     };
+    try_decode_frame_with_header(buf, hdr, pool)
+}
+
+/// Consume a complete frame using an already validated header.
+#[inline]
+pub(crate) fn try_decode_frame_with_header(
+    buf: &mut ChunkedInputBuf,
+    hdr: PeekedFrameHeader,
+    pool: Option<&crate::PayloadPool>,
+) -> Result<Option<Frame>> {
     let total = hdr
         .header_len
         .checked_add(hdr.payload_len)
@@ -281,7 +300,11 @@ pub(crate) fn try_decode_frame(buf: &mut ChunkedInputBuf) -> Result<Option<Frame
         return Ok(None);
     }
     buf.advance(hdr.header_len);
-    let payload = buf.split_to(hdr.payload_len);
+    let payload = if hdr.flags.command {
+        buf.split_to(hdr.payload_len)
+    } else {
+        buf.split_to_with_pool(hdr.payload_len, pool)
+    };
     Ok(Some(Frame {
         flags: hdr.flags,
         payload,

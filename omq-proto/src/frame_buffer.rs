@@ -7,8 +7,11 @@ use crate::copy_stats::{self, Site};
 use crate::message::Message;
 use crate::proto::frame;
 
+/// Default payload size below which framing copies into the arena.
 pub const ARENA_THRESHOLD: usize = 4 * 1024;
+/// Initial arena capacity for TCP and WebSocket framing.
 pub const ARENA_INITIAL_CAP: usize = 16 * 1024;
+/// Initial arena capacity for IPC framing.
 pub const ARENA_INITIAL_CAP_IPC: usize = 64 * 1024;
 /// Arenas moved out by [`FrameBuffer::drain_owned`] stay available for
 /// reuse once the writer drops every chunk taken from them. Bounded by
@@ -48,6 +51,7 @@ pub struct Drained {
     pub entries: usize,
 }
 
+/// Ordered encoded frames stored in an arena or external shared payloads.
 pub struct FrameBuffer {
     entries: VecDeque<Entry>,
     total_bytes: usize,
@@ -81,10 +85,12 @@ impl std::fmt::Debug for FrameBuffer {
 }
 
 impl FrameBuffer {
+    /// Create a frame queue with the default arena threshold and capacity.
     pub fn new() -> Self {
         Self::with_config(ARENA_THRESHOLD, ARENA_INITIAL_CAP)
     }
 
+    /// Create a queue with explicit arena threshold and initial capacity.
     pub fn with_config(arena_threshold: usize, arena_cap: usize) -> Self {
         Self {
             entries: VecDeque::with_capacity(32),
@@ -98,6 +104,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Create a queue that allocates its arena on first use.
     pub fn with_config_lazy(arena_threshold: usize, arena_cap: usize) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -111,6 +118,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Create an allocation-lazy queue without a retained arena capacity hint.
     pub fn one_shot() -> Self {
         Self {
             entries: VecDeque::new(),
@@ -124,22 +132,27 @@ impl FrameBuffer {
         }
     }
 
+    /// Whether no encoded bytes remain queued.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.arena.len() == self.arena_mark as usize
     }
 
+    /// Return the number of queued encoded bytes.
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
+    /// Return the payload threshold selecting arena framing.
     pub fn arena_threshold(&self) -> usize {
         self.arena_threshold
     }
 
+    /// Borrow all current arena bytes, including committed entry ranges.
     pub fn arena_bytes(&self) -> &[u8] {
         &self.arena
     }
 
+    /// Clear arena-only output after writing it; requires no queued entries.
     pub fn clear_arena(&mut self) {
         debug_assert!(
             self.entries.is_empty(),
@@ -150,6 +163,7 @@ impl FrameBuffer {
         self.total_bytes = 0;
     }
 
+    /// Whether output consists solely of an uncommitted arena range.
     pub fn has_arena_only(&self) -> bool {
         self.entries.is_empty() && !self.arena.is_empty()
     }
@@ -204,10 +218,12 @@ impl FrameBuffer {
         }
     }
 
+    /// Borrow the arena suffix not yet represented by queue entries.
     pub fn uncommitted_arena(&self) -> &[u8] {
         &self.arena[self.arena_mark as usize..]
     }
 
+    /// Copy and clear arena-only output; requires no queued entries.
     pub fn take_arena_bytes(&mut self) -> Bytes {
         copy_stats::record(Site::ArenaDrain, self.arena.len());
         let frozen = Bytes::copy_from_slice(&self.arena);
@@ -217,6 +233,7 @@ impl FrameBuffer {
         frozen
     }
 
+    /// Append already framed bytes to the arena.
     pub fn push_pre_framed(&mut self, data: &[u8]) {
         self.reserve_arena(data.len());
         copy_stats::record(Site::PreFramed, data.len());
@@ -278,6 +295,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Encode message headers and payloads contiguously into the arena.
     #[inline]
     pub fn frame_inline(&mut self, msg: &Message) {
         self.reserve_arena(msg.byte_len() + msg.len() * 9);
@@ -287,6 +305,7 @@ impl FrameBuffer {
         self.total_bytes += self.arena.len() - before;
     }
 
+    /// Encode headers into the arena and retain shared payload entries.
     pub fn frame_gather(&mut self, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
@@ -308,6 +327,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Encode ZWS frames into the arena, optionally applying client masking.
     #[cfg(feature = "ws")]
     pub fn frame_ws(&mut self, msg: &Message, masked: bool) {
         self.reserve_arena(msg.byte_len() + msg.len() * 14);
@@ -321,6 +341,7 @@ impl FrameBuffer {
         self.total_bytes += self.arena.len() - before;
     }
 
+    /// Encode each part with a payload prefix contiguously into the arena.
     pub fn frame_prefixed_inline(&mut self, prefix: &Bytes, msg: &Message) {
         self.reserve_arena(msg.byte_len() + prefix.len() * msg.len() + msg.len() * 9);
         let before = self.arena.len();
@@ -329,6 +350,7 @@ impl FrameBuffer {
         self.total_bytes += self.arena.len() - before;
     }
 
+    /// Encode a message using the configured arena threshold.
     #[inline]
     pub fn frame(&mut self, msg: &Message) {
         if msg.byte_len() < self.arena_threshold {
@@ -371,6 +393,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Encode prefixed parts using the configured arena threshold.
     pub fn frame_prefixed(&mut self, prefix: &Bytes, msg: &Message) {
         if msg.byte_len() + prefix.len() * msg.len() < self.arena_threshold {
             self.frame_prefixed_inline(prefix, msg);
@@ -379,6 +402,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Encode prefixed headers and retain prefixes and payloads as shared entries.
     pub fn frame_prefixed_gather(&mut self, prefix: &Bytes, msg: &Message) {
         let parts = msg.parts_payload();
         let n = parts.len();
@@ -407,10 +431,12 @@ impl FrameBuffer {
         }
     }
 
+    /// Append owned wire chunks as unprotected entries.
     pub fn push_raw(&mut self, chunks: Vec<Bytes>) {
         self.push_raw_with_protection(chunks, false);
     }
 
+    /// Append owned wire chunks protected from unprotected-entry eviction.
     pub fn push_raw_protected(&mut self, chunks: Vec<Bytes>) {
         self.push_raw_with_protection(chunks, true);
     }
@@ -441,6 +467,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Discard the first encoded entry; return whether an entry existed.
     pub fn pop_front_entry(&mut self) -> bool {
         self.commit_arena_range();
         let Some(entry) = self.entries.pop_front() else {
@@ -480,6 +507,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Append shared wire chunks as separate unprotected entries.
     pub fn push_shared_chunks(&mut self, chunks: &[Bytes]) {
         self.commit_arena_range();
         for chunk in chunks {
@@ -492,6 +520,7 @@ impl FrameBuffer {
         }
     }
 
+    /// Append at most `max_chunks` output chunks, copying arena bytes.
     pub fn drain(&mut self, buf: &mut Vec<Bytes>, max_chunks: usize) -> Drained {
         self.drain_arena(buf, max_chunks, false)
     }
@@ -581,6 +610,7 @@ impl FrameBuffer {
         drained
     }
 
+    /// Restore drained chunks at the front after skipping `written` bytes.
     pub fn put_back_unwritten(&mut self, returned: Vec<Bytes>, written: usize) {
         let mut consumed = 0usize;
         let mut to_restore: Vec<Bytes> = Vec::new();

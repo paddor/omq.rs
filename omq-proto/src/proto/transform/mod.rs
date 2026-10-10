@@ -44,8 +44,10 @@ use crate::proto::mechanism::MechanismSetup;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CompressionKind {
+    /// LZ4 per-part compression.
     #[cfg(feature = "lz4")]
     Lz4,
+    /// Zstd per-part compression.
     #[cfg(feature = "zstd")]
     Zstd,
 }
@@ -140,8 +142,10 @@ pub type TransformedOut = SmallVec<[Message; 2]>;
 /// state lives in the variants. Variants are cfg-gated to their features.
 #[derive(Debug)]
 pub enum MessageEncoder {
+    /// LZ4 encoder and dictionary shipment state.
     #[cfg(feature = "lz4")]
     Lz4(Box<Lz4Encoder>),
+    /// Zstd encoder and dictionary shipment state.
     #[cfg(feature = "zstd")]
     Zstd(Box<ZstdEncoder>),
 }
@@ -149,8 +153,10 @@ pub enum MessageEncoder {
 /// Receive-side message transform. Symmetric to [`MessageEncoder`].
 #[derive(Debug)]
 pub enum MessageDecoder {
+    /// LZ4 decoder and received dictionary state.
     #[cfg(feature = "lz4")]
     Lz4(Lz4Decoder),
+    /// Zstd decoder and received dictionary state.
     #[cfg(feature = "zstd")]
     Zstd(ZstdDecoder),
 }

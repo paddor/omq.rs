@@ -10,8 +10,11 @@ use smallvec::SmallVec;
 use crate::error::{Error, Result};
 use crate::message::{Frame, FrameFlags, Message, Payload};
 
+/// Final application frame of a ZWS message.
 pub const FLAG_FINAL: u8 = 0x00;
+/// Application frame followed by another part.
 pub const FLAG_MORE: u8 = 0x01;
+/// ZMTP command frame carried by ZWS.
 pub const FLAG_COMMAND: u8 = 0x02;
 
 /// Convert ZMTP frame flags to a ZWS flag byte.

@@ -270,6 +270,7 @@ impl Connection {
         Ok(())
     }
 
+    /// Return queued wire bytes remaining after partial writes.
     pub fn pending_transmit_size(&self) -> usize {
         self.out_bytes_total.saturating_sub(self.front_consumed)
     }

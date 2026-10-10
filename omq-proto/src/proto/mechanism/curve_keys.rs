@@ -17,15 +17,19 @@ pub struct CurveSecretKey(pub [u8; 32]);
 /// A long-term Curve25519 keypair.
 #[derive(Clone)]
 pub struct CurveKeypair {
+    /// Long-term public key shared with peers.
     pub public: CurvePublicKey,
+    /// Long-term secret key, zeroed when dropped.
     pub secret: CurveSecretKey,
 }
 
 impl CurvePublicKey {
+    /// Construct a key from its raw 32-byte representation.
     pub fn from_bytes(b: [u8; 32]) -> Self {
         Self(b)
     }
 
+    /// Borrow the raw 32-byte key representation.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -57,10 +61,12 @@ impl std::fmt::Debug for CurvePublicKey {
 }
 
 impl CurveSecretKey {
+    /// Construct a key from its raw 32-byte representation.
     pub fn from_bytes(b: [u8; 32]) -> Self {
         Self(b)
     }
 
+    /// Borrow the raw 32-byte key representation.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

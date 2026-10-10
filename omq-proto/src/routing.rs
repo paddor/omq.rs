@@ -8,25 +8,35 @@ use crate::proto::SocketType;
 /// Send-side routing category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendCategory {
+    /// Distribute messages across writable peers.
     RoundRobin,
+    /// Send to the socket's sole peer.
     Exclusive,
+    /// Select a peer by message identity or routing ID.
     IdentityRouted,
+    /// Send copies to all matching peers.
     FanOut(FanOutKind),
+    /// No application data path in this direction.
     None,
 }
 
 /// Fan-out sub-kind (subscription-prefix vs. group-based).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FanOutKind {
+    /// Match topic prefixes for each subscriber.
     SubscriptionPrefix,
+    /// Match group membership for each subscriber.
     Group,
 }
 
 /// Recv-side routing category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecvCategory {
+    /// Receive fairly across peer queues.
     FairQueue,
+    /// Retain the sending peer's identity or routing ID.
     Identity,
+    /// No application data path in this direction.
     None,
 }
 

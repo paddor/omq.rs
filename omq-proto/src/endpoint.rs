@@ -49,29 +49,70 @@ pub enum Endpoint {
     },
     /// `lz4+tcp://host:port` LZ4-compressed TCP. Requires the `lz4` feature.
     #[cfg(feature = "lz4")]
-    Lz4Tcp { host: Host, port: u16 },
+    Lz4Tcp {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+    },
     /// `zstd+tcp://host:port` Zstd-compressed TCP. Requires the `zstd` feature.
     #[cfg(feature = "zstd")]
-    ZstdTcp { host: Host, port: u16 },
+    ZstdTcp {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+    },
     /// `ws://host:port/path` ZeroMQ over WebSocket (RFC 45). Requires the
     /// `ws` feature.
     #[cfg(feature = "ws")]
-    Ws { host: Host, port: u16, path: String },
+    Ws {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+        /// HTTP upgrade request target.
+        path: String,
+    },
     /// `wss://host:port/path` ZeroMQ over WebSocket with TLS. Requires the
     /// `ws` feature.
     #[cfg(feature = "ws")]
-    Wss { host: Host, port: u16, path: String },
+    Wss {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+        /// HTTP upgrade request target.
+        path: String,
+    },
     /// `lz4+ws://host:port/path` LZ4-compressed WebSocket. Requires the
     /// `lz4` and `ws` features.
     #[cfg(all(feature = "lz4", feature = "ws"))]
-    Lz4Ws { host: Host, port: u16, path: String },
+    Lz4Ws {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+        /// HTTP upgrade request target.
+        path: String,
+    },
     /// `quic://host:port` OMQ over QUIC (UDP port, TLS 1.3).
     /// Uses ALPN `omq-zmtp/1`. Never compressed.
     #[cfg(feature = "quic")]
-    Quic { host: Host, port: u16 },
+    Quic {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+    },
     /// `dart://host:port` reliable ordered OMQ messages over UDP.
     #[cfg(feature = "dart")]
-    Dart { host: Host, port: u16 },
+    Dart {
+        /// Local bind address or remote host.
+        host: Host,
+        /// Local bind port or remote service port.
+        port: u16,
+    },
 }
 
 /// TCP / UDP host specification: either an IP address or a DNS name.

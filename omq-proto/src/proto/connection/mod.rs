@@ -67,7 +67,9 @@ use super::mechanism::{MechanismSetup, SecurityMechanism};
 /// independently by [`MechanismSetup`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
+    /// Bound side accepting a transport connection.
     Server,
+    /// Connecting side initiating a transport connection.
     Client,
 }
 
@@ -124,12 +126,14 @@ impl ConnectionConfig {
         }
     }
 
+    /// Set the routing identity advertised during the handshake.
     #[must_use]
     pub fn identity(mut self, id: bytes::Bytes) -> Self {
         self.identity = id;
         self
     }
 
+    /// Set the inbound body-plus-payload-slot size limit.
     #[must_use]
     pub fn max_message_size(mut self, n: usize) -> Self {
         self.max_message_size = Some(n);
@@ -156,18 +160,21 @@ impl ConnectionConfig {
         }
     }
 
+    /// Select the security handshake and frame transform.
     #[must_use]
     pub fn mechanism(mut self, m: MechanismSetup) -> Self {
         self.mechanism = m;
         self
     }
 
+    /// Set the remote address exposed to authentication callbacks.
     #[must_use]
     pub fn peer_address(mut self, address: impl Into<String>) -> Self {
         self.peer_address = Some(address.into());
         self
     }
 
+    /// Enable ZWS framing with the selected masking role.
     #[cfg(feature = "ws")]
     #[must_use]
     pub fn ws_role(mut self, role: WsRole) -> Self {
@@ -195,7 +202,9 @@ pub enum Event {
     /// Handshake is complete. Carries the effective ZMTP minor version and
     /// the peer's properties (socket type, identity, extras).
     HandshakeSucceeded {
+        /// Negotiated ZMTP minor version.
         peer_minor: u8,
+        /// Properties advertised by the authenticated peer.
         peer_properties: Arc<PeerProperties>,
     },
     /// A fully assembled application message.

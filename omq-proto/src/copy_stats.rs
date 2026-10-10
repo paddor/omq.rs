@@ -34,6 +34,7 @@ pub enum Site {
 }
 
 impl Site {
+    /// All copy sites in counter index order.
     pub const ALL: [Self; 10] = [
         Self::FrameInline,
         Self::PreFramed,
@@ -73,14 +74,17 @@ pub fn record(site: Site, bytes: usize) {
 pub struct CopyCounts([u64; Site::ALL.len()]);
 
 impl CopyCounts {
+    /// Return copied bytes recorded at one site.
     pub fn get(&self, site: Site) -> u64 {
         self.0[site as usize]
     }
 
+    /// Return the total copied bytes on send paths.
     pub fn send(&self) -> u64 {
         self.sum(|site| !site.is_recv())
     }
 
+    /// Return the total copied bytes on receive paths.
     pub fn recv(&self) -> u64 {
         self.sum(Site::is_recv)
     }

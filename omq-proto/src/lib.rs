@@ -14,6 +14,7 @@ pub mod endpoint;
 pub mod error;
 pub mod fan_out_frame;
 pub mod flow;
+/// Encoded frame queue with arena storage and external payload entries.
 pub mod frame_buffer;
 pub mod handle_frame;
 pub mod inproc;
@@ -23,6 +24,7 @@ pub mod options;
 pub mod payload_pool;
 pub mod proto;
 pub mod routing;
+/// Runtime-independent async socket interface.
 pub mod socket_api;
 pub mod socket_ref;
 pub mod subscription;

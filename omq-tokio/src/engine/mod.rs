@@ -11,6 +11,7 @@
 
 pub(crate) mod actor_output;
 pub(crate) mod codec;
+/// Bounded blocking workers for compression transforms.
 pub mod compression_pool;
 pub(crate) mod control_inbox;
 pub(crate) mod data_inbox;

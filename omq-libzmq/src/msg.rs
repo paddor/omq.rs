@@ -265,6 +265,7 @@ unsafe fn repr_ref<'a>(msg: *const OmqMsgRepr) -> &'a OmqMsgRepr {
     unsafe { &*msg }
 }
 
+/// Initialize caller-owned message storage as an empty message; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_init(msg: *mut OmqMsgRepr) -> c_int {
     if msg.is_null() {
@@ -275,6 +276,8 @@ pub extern "C" fn zmq_msg_init(msg: *mut OmqMsgRepr) -> c_int {
     0
 }
 
+/// Initialize message storage with an uninitialized payload of `size` bytes; return zero or
+/// -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_init_size(msg: *mut OmqMsgRepr, size: usize) -> c_int {
     if msg.is_null() {
@@ -300,6 +303,8 @@ pub extern "C" fn zmq_msg_init_size(msg: *mut OmqMsgRepr, size: usize) -> c_int 
     0
 }
 
+/// Initialize a message over external data; `ffn(data, hint)` releases it after its last
+/// reference.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_init_data(
     msg: *mut OmqMsgRepr,
@@ -329,6 +334,7 @@ pub extern "C" fn zmq_msg_init_data(
     0
 }
 
+/// Initialize a message by copying `size` bytes from the supplied buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_init_buffer(
     msg: *mut OmqMsgRepr,
@@ -351,6 +357,8 @@ pub extern "C" fn zmq_msg_init_buffer(
     0
 }
 
+/// Return the payload pointer of an initialized message; valid until its storage changes or
+/// closes.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_data(msg: *mut OmqMsgRepr) -> *mut libc::c_void {
     if msg.is_null() {
@@ -361,6 +369,7 @@ pub extern "C" fn zmq_msg_data(msg: *mut OmqMsgRepr) -> *mut libc::c_void {
     r.ptr().cast()
 }
 
+/// Return the payload length of an initialized message in bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_size(msg: *const OmqMsgRepr) -> usize {
     if msg.is_null() {
@@ -371,6 +380,7 @@ pub extern "C" fn zmq_msg_size(msg: *const OmqMsgRepr) -> usize {
     unsafe { repr_ref(msg).size() }
 }
 
+/// Return one if another multipart frame follows, otherwise zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_more(msg: *const OmqMsgRepr) -> c_int {
     if msg.is_null() {
@@ -380,6 +390,7 @@ pub extern "C" fn zmq_msg_more(msg: *const OmqMsgRepr) -> c_int {
     c_int::from(unsafe { repr_ref(msg).more() })
 }
 
+/// Release an initialized message's payload and metadata; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
     if msg.is_null() {
@@ -423,6 +434,7 @@ pub extern "C" fn zmq_msg_close(msg: *mut OmqMsgRepr) -> c_int {
     0
 }
 
+/// Move a message into an initialized destination and leave the source empty.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_move(dst: *mut OmqMsgRepr, src: *mut OmqMsgRepr) -> c_int {
     if dst.is_null() || src.is_null() {
@@ -442,6 +454,7 @@ pub extern "C" fn zmq_msg_move(dst: *mut OmqMsgRepr, src: *mut OmqMsgRepr) -> c_
     0
 }
 
+/// Copy a message into an initialized destination, sharing payload storage where supported.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> c_int {
     if dst.is_null() || src.is_null() {
@@ -542,6 +555,7 @@ pub extern "C" fn zmq_msg_copy(dst: *mut OmqMsgRepr, src: *const OmqMsgRepr) -> 
     0
 }
 
+/// Read a supported integer message property; return -1 with errno for an invalid property.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int {
     if msg.is_null() {
@@ -565,6 +579,7 @@ pub extern "C" fn zmq_msg_get(msg: *const OmqMsgRepr, property: c_int) -> c_int 
     }
 }
 
+/// Set a supported integer message property; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_set(msg: *mut OmqMsgRepr, property: c_int, val: c_int) -> c_int {
     if msg.is_null() {
@@ -585,6 +600,8 @@ pub extern "C" fn zmq_msg_set(msg: *mut OmqMsgRepr, property: c_int, val: c_int)
     }
 }
 
+/// Return borrowed, null-terminated message metadata; null with errno indicates an invalid
+/// property.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_gets(
     msg: *const OmqMsgRepr,
@@ -627,6 +644,7 @@ pub extern "C" fn zmq_msg_set_routing_id(msg: *mut OmqMsgRepr, routing_id: u32) 
     0
 }
 
+/// Return the message's opaque routing ID, or zero when unset.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_routing_id(msg: *const OmqMsgRepr) -> u32 {
     if msg.is_null() {
@@ -656,6 +674,7 @@ pub extern "C" fn zmq_msg_set_group(msg: *mut OmqMsgRepr, group: *const libc::c_
     0
 }
 
+/// Return the message's borrowed null-terminated RADIO/DISH group name.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_msg_group(msg: *const OmqMsgRepr) -> *const libc::c_char {
     if msg.is_null() {

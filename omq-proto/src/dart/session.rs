@@ -20,20 +20,29 @@ const INITIAL_RTT: Duration = Duration::from_millis(1);
 /// ECN metadata for one complete UDP datagram.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Ecn {
+    /// ECN metadata is unavailable or its support is unconfirmed.
     #[default]
     Unavailable,
+    /// The datagram is confirmed as not ECN capable.
     NotEct,
+    /// The datagram carries the ECT(0) codepoint.
     Ect0,
+    /// The datagram carries the ECT(1) codepoint.
     Ect1,
+    /// The network marked the datagram Congestion Experienced.
     Ce,
 }
 
 /// Fixed limits for one peer, independent in each direction.
 #[derive(Clone, Copy, Debug)]
 pub struct SessionConfig {
+    /// Maximum retained sequence units per direction.
     pub window: usize,
+    /// Congestion control and pacing policy.
     pub congestion: DartCongestion,
+    /// Whether adaptive control may validate and enable ECN.
     pub ecn: bool,
+    /// Optional wire-byte pacing limit per second.
     pub max_send_rate: Option<u64>,
 }
 
@@ -41,12 +50,19 @@ pub struct SessionConfig {
 /// retransmissions and can be sampled without changing protocol state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionStats {
+    /// Application messages retired after remote acknowledgment.
     pub acknowledged: u64,
+    /// Successfully retransmitted sequence units, including fragments.
     pub retransmitted: u64,
+    /// Duplicate sequence units received.
     pub duplicates: u64,
+    /// Out-of-order sequence units received.
     pub reordered: u64,
+    /// Transmission attempts blocked by remote receive credit.
     pub credit_stalls: u64,
+    /// Transmission attempts blocked by congestion control or pacing.
     pub congestion_stalls: u64,
+    /// ECN feedback validation failures.
     pub ecn_failures: u64,
 }
 
@@ -88,17 +104,32 @@ impl Prepared<'_> {
 /// in the same batch is allowed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transmit {
-    Data { sequence: u64, repair: bool },
+    /// Application message or fragment transmission.
+    Data {
+        /// Retained sequence position encoded into the datagram.
+        sequence: u64,
+        /// Whether this submission repairs a prior transmission.
+        repair: bool,
+    },
+    /// Cumulative receipt, credit, and ECN feedback transmission.
     Status,
-    Nak { first: u64 },
+    /// Missing-range repair request.
+    Nak {
+        /// First missing sequence position.
+        first: u64,
+    },
+    /// Liveness and next-sequence probe transmission.
     Probe,
 }
 
 /// Result of classifying a data packet before acquiring body storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission {
+    /// The sequence unit may be retained in receive storage.
     Accept,
+    /// The sequence unit has already been retained or delivered.
     Duplicate,
+    /// The sequence unit exceeds advertised receive credit.
     OutsideWindow,
 }
 
@@ -252,18 +283,23 @@ impl<B: FragmentBuffer> Session<B> {
         session
     }
 
+    /// Return the local receiver session ID.
     pub const fn local_session(&self) -> u64 {
         self.local
     }
+    /// Return the remote receiver session ID.
     pub const fn remote_session(&self) -> u64 {
         self.remote
     }
+    /// Return cumulative protocol counters.
     pub const fn stats(&self) -> SessionStats {
         self.stats
     }
+    /// Return retained sequence capacity per direction.
     pub const fn window_capacity(&self) -> usize {
         self.config.window
     }
+    /// Return available submission slots; zero while fragment submission is pending.
     pub fn send_capacity(&self) -> usize {
         if self.is_exhausted() || self.sending.is_some() {
             return 0;
@@ -271,30 +307,39 @@ impl<B: FragmentBuffer> Session<B> {
         ((self.config.window - self.outstanding()) as u64)
             .min(u64::MAX - self.config.window as u64 - self.send_next) as usize
     }
+    /// Return retained outbound sequence units awaiting retirement.
     pub const fn outstanding(&self) -> usize {
         (self.send_next - self.send_base) as usize
     }
+    /// Whether outgoing data currently uses ECN marking.
     pub const fn ecn_enabled(&self) -> bool {
         self.ecn_enabled
     }
+    /// Return the first sequence position not cumulatively received.
     pub const fn next_receive(&self) -> u64 {
         self.receive_next
     }
+    /// Return the exclusive end of local receive credit.
     pub const fn receive_right_edge(&self) -> u64 {
         self.receive_credit
     }
+    /// Return the next sequence position awaiting initial transmission.
     pub const fn next_send(&self) -> u64 {
         self.send_cursor
     }
+    /// Return the exclusive end of submitted outbound sequence units.
     pub const fn submitted(&self) -> u64 {
         self.send_next
     }
+    /// Return the first outbound sequence position not yet retired.
     pub const fn acknowledged_position(&self) -> u64 {
         self.send_base
     }
+    /// Return the congestion window in wire bytes.
     pub const fn congestion_window(&self) -> usize {
         self.cwnd
     }
+    /// Return transmitted wire bytes awaiting acknowledgment or repair.
     pub const fn bytes_in_flight(&self) -> usize {
         self.flight
     }
@@ -473,6 +518,7 @@ impl<B: FragmentBuffer> Session<B> {
         received || retired || filled
     }
 
+    /// Whether local receive, retirement, or fragmentation work remains.
     pub fn has_progress(&self) -> bool {
         self.send_base < self.peer_ack
             || (self.sending.is_some() && self.outstanding() < self.config.window)
@@ -481,6 +527,7 @@ impl<B: FragmentBuffer> Session<B> {
                 && self.rx[self.index(self.receive_next)].is_some())
     }
 
+    /// Borrow the next deliverable unfragmented message, if available.
     pub fn front(&self) -> Option<&Message> {
         if self.assembly.is_some() || self.fragments[self.index(self.deliver_next)].is_some() {
             return None;
@@ -718,6 +765,7 @@ impl<B: FragmentBuffer> Session<B> {
             .min(PROBE_INTERVAL)
     }
 
+    /// Schedule overdue repair and update congestion state using caller time.
     pub fn handle_timeout(&mut self, now: Duration) {
         if self.peer_ack < self.send_cursor {
             let index = self.index(self.peer_ack);
@@ -738,6 +786,7 @@ impl<B: FragmentBuffer> Session<B> {
         }
     }
 
+    /// Encode pending feedback without committing it; return its token and length.
     pub fn prepare_control(&self, now: Duration, output: &mut [u8]) -> Option<(Transmit, usize)> {
         let (transmit, packet) = if self.status_pending || now >= self.status_at {
             (
@@ -1046,6 +1095,7 @@ impl<B: FragmentBuffer> Session<B> {
         })
     }
 
+    /// Commit a prepared token only after the carrier accepts its datagram.
     #[inline]
     pub fn commit_transmit(&mut self, transmit: Transmit, now: Duration) {
         match transmit {
@@ -1110,6 +1160,7 @@ impl<B: FragmentBuffer> Session<B> {
         }
     }
 
+    /// Return the next absolute protocol deadline; zero requests immediate progress.
     pub fn next_deadline(&self, now: Duration) -> Duration {
         let mut deadline = self.status_at.min(self.probe_at);
         if self.status_pending || self.has_progress() {

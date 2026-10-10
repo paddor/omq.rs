@@ -24,6 +24,10 @@ use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
 
 impl Connection {
+    /// Feed received wire bytes and advance parsing.
+    ///
+    /// # Errors
+    /// Returns errors for invalid framing, handshake failure, size limits, or closure.
     pub fn handle_input(&mut self, src: Bytes) -> Result<()> {
         match self.state {
             State::Closed => return Err(Error::Closed),

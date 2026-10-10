@@ -628,6 +628,7 @@ impl StateSignal {
         }
     }
 
+    /// Create a signal with generation zero.
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "dart")]
@@ -637,11 +638,13 @@ impl StateSignal {
         }
     }
 
+    /// Return the current notification generation.
     #[inline]
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Advance the generation and wake registered waiters.
     #[inline]
     pub fn notify_changed(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -656,6 +659,7 @@ impl StateSignal {
         }
     }
 
+    /// Wait until the notification generation differs from `seen`.
     pub async fn changed_after(&self, seen: u64) {
         if self.generation() != seen {
             return;
@@ -674,6 +678,7 @@ impl StateSignal {
         block_on(self.wait_until(ready));
     }
 
+    /// Wait until the predicate holds or a registered state change occurs.
     pub async fn wait_until(&self, mut ready: impl FnMut() -> bool) {
         loop {
             if ready() {

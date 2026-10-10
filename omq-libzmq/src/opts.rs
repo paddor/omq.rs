@@ -547,6 +547,7 @@ const ZSTD_LEVEL_MAX: i32 = 4;
 const COMPRESSION_DICT_MAX: usize = 8 * 1024;
 
 #[expect(clippy::too_many_lines)]
+/// Set a socket option from caller storage; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_setsockopt(
     sock: *mut libc::c_void,
@@ -1291,6 +1292,8 @@ fn do_subscribe(
 }
 
 #[expect(clippy::too_many_lines)]
+/// Write a socket option into caller storage and update its length; return zero or -1 with
+/// errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_getsockopt(
     sock: *mut libc::c_void,

@@ -67,6 +67,7 @@ pub trait Transport: Send + Sync + 'static {
 
 /// A bound listener accepting peer connections.
 pub trait Listener: Send + 'static {
+    /// Established stream returned by `accept`.
     type Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static;
 
     /// The endpoint we're bound to, with the wildcard / port 0 resolved to

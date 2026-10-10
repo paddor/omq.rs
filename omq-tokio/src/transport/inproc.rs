@@ -487,8 +487,11 @@ impl InprocSender {
 /// without a direct route, relayed messages.
 #[derive(Debug)]
 pub struct InprocConn {
+    /// Outbound commands and fallback messages.
     pub out: RelaySender,
+    /// Incoming commands and fallback messages.
     pub in_rx: RelayReceiver,
+    /// Peer socket type, metadata, and connection options.
     pub peer: InprocPeerSnapshot,
     /// The peer's send HWM, for sizing this socket's receive ring.
     pub(crate) peer_send_hwm: usize,

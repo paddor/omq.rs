@@ -74,11 +74,13 @@ fn fd_entry(entries: &[PollerEntry], fd: ZmqFd) -> Option<usize> {
         .position(|entry| matches!(entry.target, PollerTarget::Fd(f) if f == fd))
 }
 
+/// Create an empty poller handle; release it with `zmq_poller_destroy`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_new() -> *mut c_void {
     Box::into_raw(Box::<ZmqPoller>::default()).cast()
 }
 
+/// Release the poller and clear the caller's handle pointer; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_destroy(poller_p: *mut *mut c_void) -> c_int {
     if poller_p.is_null() {
@@ -97,6 +99,7 @@ pub extern "C" fn zmq_poller_destroy(poller_p: *mut *mut c_void) -> c_int {
     0
 }
 
+/// Return the number of registered poller items, or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_size(poller_ptr: *mut c_void) -> c_int {
     match unsafe { poller(poller_ptr) } {
@@ -105,6 +108,7 @@ pub extern "C" fn zmq_poller_size(poller_ptr: *mut c_void) -> c_int {
     }
 }
 
+/// Register a socket with event interests and opaque user data; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_add(
     poller_ptr: *mut c_void,
@@ -130,6 +134,7 @@ pub extern "C" fn zmq_poller_add(
     0
 }
 
+/// Replace a registered socket's event interests; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_modify(
     poller_ptr: *mut c_void,
@@ -150,6 +155,7 @@ pub extern "C" fn zmq_poller_modify(
     0
 }
 
+/// Remove a registered socket; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_remove(poller_ptr: *mut c_void, socket: *mut c_void) -> c_int {
     if socket.is_null() {
@@ -166,6 +172,8 @@ pub extern "C" fn zmq_poller_remove(poller_ptr: *mut c_void, socket: *mut c_void
     0
 }
 
+/// Register a native descriptor with event interests and user data; return zero or -1 with
+/// errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_add_fd(
     poller_ptr: *mut c_void,
@@ -191,6 +199,7 @@ pub extern "C" fn zmq_poller_add_fd(
     0
 }
 
+/// Replace a registered descriptor's event interests; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_modify_fd(
     poller_ptr: *mut c_void,
@@ -208,6 +217,7 @@ pub extern "C" fn zmq_poller_modify_fd(
     0
 }
 
+/// Remove a registered native descriptor; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_remove_fd(poller_ptr: *mut c_void, fd: ZmqFd) -> c_int {
     let p = match unsafe { poller(poller_ptr) } {
@@ -221,6 +231,7 @@ pub extern "C" fn zmq_poller_remove_fd(poller_ptr: *mut c_void, fd: ZmqFd) -> c_
     0
 }
 
+/// Wait for one event using a millisecond timeout; return one or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_wait(
     poller_ptr: *mut c_void,
@@ -230,6 +241,8 @@ pub extern "C" fn zmq_poller_wait(
     zmq_poller_wait_all(poller_ptr, event, 1, timeout)
 }
 
+/// Wait for at most `n_events` events using a millisecond timeout; return their count or -1
+/// with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_wait_all(
     poller_ptr: *mut c_void,
@@ -317,6 +330,7 @@ pub extern "C" fn zmq_poller_wait_all(
     c_int::try_from(written).unwrap_or(c_int::MAX)
 }
 
+/// Unsupported poller descriptor query; return -1 with EINVAL for valid arguments.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poller_fd(poller_ptr: *mut c_void, fd: *mut ZmqFd) -> c_int {
     if fd.is_null() {

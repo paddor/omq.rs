@@ -12,7 +12,9 @@ use crate::proto::command::Command;
 /// are in the same process.
 #[derive(Debug)]
 pub enum InboundFrame {
+    /// A complete application message.
     Message(Message),
+    /// A subscription, group, or other protocol command.
     Command(Box<Command>),
 }
 
@@ -21,6 +23,8 @@ pub enum InboundFrame {
 /// exchanges over the wire.
 #[derive(Clone, Debug)]
 pub struct InprocPeerSnapshot {
+    /// Peer socket type used for compatibility checks.
     pub socket_type: SocketType,
+    /// Peer routing identity; empty means anonymous.
     pub identity: Bytes,
 }

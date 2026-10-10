@@ -549,6 +549,7 @@ fn submit_message(
     }
 }
 
+/// Copy and send one frame with the requested flags; return its byte length or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_send(
     sock_ptr: *mut libc::c_void,
@@ -578,6 +579,7 @@ pub extern "C" fn zmq_send(
     send_bytes(sock, data, flags)
 }
 
+/// Send one frame by copying caller storage; equivalent to `zmq_send`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_send_const(
     sock_ptr: *mut libc::c_void,
@@ -588,6 +590,8 @@ pub extern "C" fn zmq_send_const(
     zmq_send(sock_ptr, buf, len, flags)
 }
 
+/// Receive one frame, truncating the copy to buffer capacity; return its full length or -1
+/// with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_recv(
     sock_ptr: *mut libc::c_void,
@@ -610,6 +614,7 @@ pub extern "C" fn zmq_recv(
     zmq_recv_impl(sock, buf, buf_len, flags)
 }
 
+/// Unsupported vectored send entry point; return -1 with ENOTSUP for valid arguments.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_sendiov(
     sock_ptr: *mut libc::c_void,
@@ -626,6 +631,7 @@ pub extern "C" fn zmq_sendiov(
     fail(crate::error::ENOTSUP)
 }
 
+/// Unsupported vectored receive entry point; return -1 with ENOTSUP for valid arguments.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_recviov(
     sock_ptr: *mut libc::c_void,

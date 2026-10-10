@@ -16,6 +16,10 @@ pub struct AdmissionCounter {
 }
 
 impl AdmissionCounter {
+    /// Create an empty admission budget.
+    ///
+    /// # Panics
+    /// Panics if capacity is zero or uses the highest bit of `usize`.
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0 && capacity < CLOSED);
         Self {
@@ -24,6 +28,7 @@ impl AdmissionCounter {
         }
     }
 
+    /// Reserve up to `requested` slots; return zero after closure.
     pub fn acquire(&self, requested: usize) -> usize {
         let mut state = self.state.load(Ordering::Acquire);
         loop {
@@ -46,11 +51,16 @@ impl AdmissionCounter {
         }
     }
 
+    /// Return previously acquired slots.
+    ///
+    /// # Panics
+    /// Panics if `count` exceeds the number of acquired slots.
     pub fn release(&self, count: usize) {
         let previous = self.state.fetch_sub(count, Ordering::AcqRel);
         assert!(previous & !CLOSED >= count);
     }
 
+    /// Return unreserved slots, or zero after closure.
     pub fn available(&self) -> usize {
         let state = self.state.load(Ordering::Acquire);
         if state & CLOSED != 0 {
@@ -60,9 +70,11 @@ impl AdmissionCounter {
         }
     }
 
+    /// Permanently prevent further acquisitions.
     pub fn close(&self) {
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
+    /// Whether admission has been closed.
     pub fn is_closed(&self) -> bool {
         self.state.load(Ordering::Acquire) & CLOSED != 0
     }
@@ -74,9 +86,11 @@ impl AdmissionCounter {
 pub struct CreditCounter(AtomicUsize);
 
 impl CreditCounter {
+    /// Publish credits after their reusable storage has been returned.
     pub fn publish(&self, count: usize) {
         self.0.fetch_add(count, Ordering::Release);
     }
+    /// Atomically take all published credits, leaving the counter empty.
     pub fn take(&self) -> usize {
         self.0.swap(0, Ordering::AcqRel)
     }

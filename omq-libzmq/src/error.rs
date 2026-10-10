@@ -31,11 +31,13 @@ pub(crate) const ETERM: c_int = 156_384_765;
 pub(crate) const EFSM: c_int = 156_384_763;
 pub(crate) const ENOCOMPATPROTO: c_int = 156_384_764;
 
+/// Return the calling thread's last compatibility API error number.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_errno() -> c_int {
     ERRNO.with(std::cell::Cell::get)
 }
 
+/// Return a borrowed null-terminated description of an error number.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_strerror(errnum: c_int) -> *const libc::c_char {
     match errnum {

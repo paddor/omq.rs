@@ -114,6 +114,7 @@ impl tokio::io::AsyncWrite for IpcStream {
     }
 }
 
+/// Interprocess transport using Unix sockets or Windows named pipes.
 #[derive(Debug)]
 pub struct IpcTransport;
 

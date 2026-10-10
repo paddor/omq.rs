@@ -448,6 +448,8 @@ fn socket_can_send(socket_type: omq_tokio::SocketType) -> bool {
     )
 }
 
+/// Forward messages between frontend and backend, optionally copying them to a capture
+/// socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_proxy(
     frontend: *mut c_void,
@@ -457,6 +459,7 @@ pub extern "C" fn zmq_proxy(
     zmq_proxy_steerable(frontend, backend, capture, std::ptr::null_mut())
 }
 
+/// Run a forwarding proxy with optional capture and control sockets.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_proxy_steerable(
     frontend: *mut c_void,

@@ -35,31 +35,46 @@ pub enum MechanismSetup {
     Null,
     /// NULL server side with an admission callback. This is primarily used
     /// by compatibility layers that implement ZAP address filtering.
-    NullServer { authenticator: Authenticator },
+    NullServer {
+        /// Admission callback receiving the peer address and identity.
+        authenticator: Authenticator,
+    },
     /// CURVE server side: this socket accepts incoming CURVE clients
     /// authenticated against `our_keypair.public`. Server-specific
     /// CURVE behavior lives in `options`; each connection still gets
     /// its own cookie key.
     #[cfg(feature = "curve")]
     CurveServer {
+        /// Local long-term Curve25519 keypair.
         our_keypair: CurveKeypair,
+        /// Server cookie lifetime and client admission policy.
         options: CurveServerOptions,
     },
     /// CURVE client side: this socket connects to a server identified by
     /// `server_public`, authenticating with `our_keypair`.
     #[cfg(feature = "curve")]
     CurveClient {
+        /// Local long-term Curve25519 keypair.
         our_keypair: CurveKeypair,
+        /// Expected server long-term public key.
         server_public: CurvePublicKey,
     },
     /// PLAIN server side (RFC 24): authenticates incoming clients by
     /// username + password. No encryption. The authenticator is
     /// required. PLAIN without auth serves no purpose.
     #[cfg(feature = "plain")]
-    PlainServer { authenticator: Authenticator },
+    PlainServer {
+        /// Admission callback receiving the supplied credentials.
+        authenticator: Authenticator,
+    },
     /// PLAIN client side: sends username + password to the server.
     #[cfg(feature = "plain")]
-    PlainClient { username: String, password: String },
+    PlainClient {
+        /// Username sent during the PLAIN handshake.
+        username: String,
+        /// Password sent unencrypted during the PLAIN handshake.
+        password: String,
+    },
 }
 
 impl std::fmt::Debug for MechanismSetup {
@@ -218,16 +233,19 @@ pub struct CurveServerOptions {
 
 #[cfg(feature = "curve")]
 impl CurveServerOptions {
+    /// Create server options with the default cookie lifetime and no admission callback.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the maximum lifetime of a WELCOME cookie.
     #[must_use]
     pub fn cookie_lifetime(mut self, lifetime: std::time::Duration) -> Self {
         self.cookie_lifetime = lifetime;
         self
     }
 
+    /// Set the client admission callback invoked after vouch verification.
     #[must_use]
     pub fn authenticator<F>(mut self, f: F) -> Self
     where
@@ -343,6 +361,7 @@ pub struct AuthenticationResult {
 }
 
 impl AuthenticationResult {
+    /// Accept the peer without additional authenticated properties.
     #[must_use]
     pub const fn allow() -> Self {
         Self {
@@ -352,6 +371,7 @@ impl AuthenticationResult {
         }
     }
 
+    /// Reject the peer without additional authenticated properties.
     #[must_use]
     pub const fn deny() -> Self {
         Self {
@@ -361,12 +381,14 @@ impl AuthenticationResult {
         }
     }
 
+    /// Attach an authenticated application user identity.
     #[must_use]
     pub fn with_user_id(mut self, user_id: impl Into<Bytes>) -> Self {
         self.user_id = Some(user_id.into());
         self
     }
 
+    /// Set additional authenticated connection properties.
     #[must_use]
     pub fn with_metadata(mut self, metadata: Vec<(String, Bytes)>) -> Self {
         self.metadata = metadata;
@@ -388,6 +410,7 @@ impl AuthenticationResult {
 pub struct Authenticator(Arc<dyn Fn(&MechanismPeerInfo) -> AuthenticationResult + Send + Sync>);
 
 impl Authenticator {
+    /// Create a boolean admission callback; false rejects the peer.
     pub fn new<F>(f: F) -> Self
     where
         F: Fn(&MechanismPeerInfo) -> bool + Send + Sync + 'static,
@@ -555,6 +578,7 @@ impl SecurityMechanism {
     reason = "created once per connection, inline avoids per-frame indirection"
 )]
 pub enum FrameTransform {
+    /// Authenticated CURVE encryption and decryption state.
     #[cfg(feature = "curve")]
     Curve(CurveTransform),
 }

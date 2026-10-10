@@ -111,6 +111,7 @@ pub struct DartIo {
 }
 
 impl DartIo {
+    /// Return current UDP offload and ECN capabilities.
     pub fn capabilities(&self) -> super::DartCapabilities {
         super::DartCapabilities {
             max_gso_segments: self.max_gso_segments(),
@@ -121,6 +122,13 @@ impl DartIo {
         }
     }
 
+    /// Configure UDP offloads and register the socket with the current runtime.
+    ///
+    /// # Errors
+    /// Returns errors configuring the carrier or registering the socket.
+    ///
+    /// # Panics
+    /// Panics outside a Tokio runtime with I/O enabled.
     pub fn new(socket: std::net::UdpSocket) -> io::Result<Self> {
         let state = UdpSocketState::new((&socket).into())?;
         let (ecn_v4, ecn_v6) = ecn_support(&socket);
@@ -132,6 +140,10 @@ impl DartIo {
         })
     }
 
+    /// Return the bound local address.
+    ///
+    /// # Errors
+    /// Returns errors querying the underlying socket.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -141,10 +153,12 @@ impl DartIo {
         self.state.max_gso_segments().clamp(1, MAX_SEGMENTS)
     }
 
+    /// Return the maximum datagrams per receive offload aggregate.
     pub fn gro_segments(&self) -> usize {
         self.state.gro_segments().clamp(1, MAX_SEGMENTS)
     }
 
+    /// Whether the carrier may permit IP fragmentation.
     pub fn may_fragment(&self) -> bool {
         self.state.may_fragment()
     }
@@ -158,10 +172,18 @@ impl DartIo {
         }
     }
 
+    /// Wait for socket read readiness.
+    ///
+    /// # Errors
+    /// Returns errors polling socket readiness.
     pub async fn readable(&self) -> io::Result<()> {
         self.socket.readable().await
     }
 
+    /// Wait for socket write readiness.
+    ///
+    /// # Errors
+    /// Returns errors polling socket readiness.
     pub async fn writable(&self) -> io::Result<()> {
         self.socket.writable().await
     }
@@ -280,13 +302,18 @@ pub struct ReceiveBatch {
 /// One complete datagram borrowed from the most recent receive batch.
 #[derive(Clone, Copy, Debug)]
 pub struct ReceivedDatagram<'a> {
+    /// Remote sender address.
     pub source: SocketAddr,
+    /// Local destination address, when receive metadata supplies it.
     pub destination: Option<IpAddr>,
+    /// Received ECN marking; interpret `None` using carrier capabilities.
     pub ecn: Option<EcnCodepoint>,
+    /// UDP payload without IP or UDP headers.
     pub bytes: &'a [u8],
 }
 
 impl ReceiveBatch {
+    /// Allocate reusable receive arenas for the carrier's GRO limit.
     pub fn new(gro_segments: usize) -> Self {
         // Linux's batched Quinn receive does not expose MSG_TRUNC. Keep one
         // guard byte beyond every admissible aggregate and drop full arenas.
@@ -343,6 +370,7 @@ impl ReceiveBatch {
         Ok(self.count)
     }
 
+    /// Number of buffers received by the most recent socket read.
     pub fn received_buffers(&self) -> usize {
         self.count
     }
@@ -404,6 +432,7 @@ impl ReceiveBatch {
         }
     }
 
+    /// Whether undrained receive buffers remain.
     pub fn has_pending_datagrams(&self) -> bool {
         self.cursor < self.count
     }

@@ -195,6 +195,8 @@ where
     orx.recv().map_err(|_| ())
 }
 
+/// Create a socket handle of the requested type in a context; return null with errno on
+/// failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket(ctx_ptr: *mut c_void, type_int: c_int) -> *mut c_void {
     if ctx_ptr.is_null() {
@@ -468,6 +470,7 @@ pub(crate) fn ensure_materialized(sock: &Arc<OmqSocket>) -> Result<(), c_int> {
     Ok(())
 }
 
+/// Close the socket handle; accepted output follows its configured linger policy.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_close(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
@@ -627,6 +630,7 @@ fn compression_options_for_endpoint(
     Ok(Some(omq_tokio::CompressionOptions::from(&options)))
 }
 
+/// Bind a null-terminated endpoint URI; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
     let (sock, addr_str, mut endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
@@ -693,6 +697,7 @@ pub extern "C" fn zmq_bind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> 
     }
 }
 
+/// Register a null-terminated endpoint URI for connection and automatic reconnection.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
     let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
@@ -747,6 +752,7 @@ pub extern "C" fn zmq_connect(sock_ptr: *mut c_void, addr: *const libc::c_char) 
     }
 }
 
+/// Remove a bound endpoint by its null-terminated URI; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
     let (sock, addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
@@ -774,6 +780,7 @@ pub extern "C" fn zmq_unbind(sock_ptr: *mut c_void, addr: *const libc::c_char) -
     result_to_rc(&result)
 }
 
+/// Remove a connected endpoint and stop retries; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_char) -> c_int {
     let (sock, _addr_str, endpoint) = match unsafe { parse_endpoint_args(sock_ptr, addr) } {
@@ -805,6 +812,7 @@ pub extern "C" fn zmq_disconnect(sock_ptr: *mut c_void, addr: *const libc::c_cha
     }
 }
 
+/// Unsupported peer-connect entry point; return zero with ENOTSUP for a valid socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_char) -> u32 {
     if sock_ptr.is_null() {
@@ -815,6 +823,7 @@ pub extern "C" fn zmq_connect_peer(sock_ptr: *mut c_void, _addr: *const libc::c_
     0
 }
 
+/// Unsupported peer-disconnect entry point; return -1 with ENOTSUP for a valid socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, _routing_id: u32) -> c_int {
     if sock_ptr.is_null() {
@@ -823,6 +832,7 @@ pub extern "C" fn zmq_disconnect_peer(sock_ptr: *mut c_void, _routing_id: u32) -
     fail(crate::error::ENOTSUP)
 }
 
+/// Join a null-terminated DISH group; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
     let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
@@ -839,6 +849,7 @@ pub extern "C" fn zmq_join(sock_ptr: *mut c_void, group: *const libc::c_char) ->
     result_to_rc(&result)
 }
 
+/// Leave a null-terminated DISH group; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_leave(sock_ptr: *mut c_void, group: *const libc::c_char) -> c_int {
     let (sock, g) = match unsafe { parse_group_args(sock_ptr, group) } {
@@ -930,6 +941,7 @@ pub extern "C" fn zmq_socket_monitor(
     }
 }
 
+/// Configure a version-1 socket monitor; other versions return ENOTSUP.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket_monitor_versioned(
     sock_ptr: *mut c_void,
@@ -944,6 +956,7 @@ pub extern "C" fn zmq_socket_monitor_versioned(
     zmq_socket_monitor(sock_ptr, addr, events as c_int)
 }
 
+/// Unsupported pipe-statistics request; return -1 with ENOTSUP for a valid socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket_monitor_pipes_stats(sock_ptr: *mut c_void) -> c_int {
     if sock_ptr.is_null() {
@@ -952,6 +965,7 @@ pub extern "C" fn zmq_socket_monitor_pipes_stats(sock_ptr: *mut c_void) -> c_int
     fail(crate::error::ENOTSUP)
 }
 
+/// Unsupported peer-state query; return -1 with ENOTSUP for a valid socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_socket_get_peer_state(
     socket: *mut c_void,

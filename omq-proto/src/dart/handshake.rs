@@ -12,6 +12,10 @@ pub struct Handshake {
 }
 
 impl Handshake {
+    /// Start a connector attempt with a pending HELLO.
+    ///
+    /// # Panics
+    /// Panics if the local session ID is zero.
     pub fn connector(local: u64) -> Self {
         assert_ne!(local, 0);
         Self {
@@ -23,6 +27,10 @@ impl Handshake {
         }
     }
 
+    /// Start a listener attempt with a pending WELCOME.
+    ///
+    /// # Panics
+    /// Panics if either session ID is zero.
     pub fn listener(local: u64, remote: u64) -> Self {
         assert!(local != 0 && remote != 0);
         Self {
@@ -34,15 +42,19 @@ impl Handshake {
         }
     }
 
+    /// Return the local receiver session ID.
     pub const fn local(&self) -> u64 {
         self.local
     }
+    /// Return the remote receiver session ID, or zero before WELCOME.
     pub const fn remote(&self) -> u64 {
         self.remote
     }
+    /// Whether the remote receiver session has been confirmed.
     pub const fn confirmed(&self) -> bool {
         self.confirmed
     }
+    /// Return the next handshake phase awaiting transmission.
     pub const fn pending(&self) -> Option<Phase> {
         self.pending
     }
@@ -74,6 +86,7 @@ impl Handshake {
         true
     }
 
+    /// Schedule retransmission of the current handshake phase.
     pub fn retry(&mut self) {
         self.pending = Some(if self.connector {
             if self.confirmed {
@@ -86,6 +99,7 @@ impl Handshake {
         });
     }
 
+    /// Clear the pending phase after successful transmission.
     pub fn committed(&mut self) {
         self.pending = None;
     }

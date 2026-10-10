@@ -27,6 +27,7 @@ use crate::Socket;
 /// reduce worst-case delay for the opposite direction and control socket.
 pub const DEFAULT_PROXY_BURST_SIZE: usize = 64;
 
+/// Reason a proxy forwarding loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyExit {
     /// A control message requested termination.

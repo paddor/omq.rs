@@ -214,6 +214,7 @@ pub struct PeerInfo {
     pub zmtp_version: (u8, u8),
 }
 
+/// Error returned while waiting for a monitor event.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MonitorRecvError {

@@ -32,9 +32,13 @@ pub(crate) const ZMQ_POLLERR: libc::c_short = consts::ZMQ_POLLERR as libc::c_sho
 #[repr(C)]
 #[derive(Debug)]
 pub struct ZmqPollItem {
+    /// OMQ socket handle, or null to poll a native descriptor.
     pub socket: *mut libc::c_void,
+    /// Native descriptor used when `socket` is null.
     pub fd: ZmqFd,
+    /// Requested readiness mask.
     pub events: libc::c_short,
+    /// Observed readiness mask written by the poll operation.
     pub revents: libc::c_short,
 }
 
@@ -115,6 +119,8 @@ fn any_socket_terminated(items: &[ZmqPollItem]) -> bool {
     })
 }
 
+/// Wait for socket or descriptor events, with a millisecond timeout; negative means
+/// indefinite.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_poll(
     items: *mut ZmqPollItem,
@@ -190,6 +196,7 @@ pub extern "C" fn zmq_poll(
     }
 }
 
+/// Poll with a millisecond timeout; non-null signal masks are unsupported and return ENOTSUP.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_ppoll(
     items: *mut ZmqPollItem,

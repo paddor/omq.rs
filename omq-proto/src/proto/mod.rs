@@ -42,25 +42,45 @@ pub use greeting::{Greeting, MechanismName, VERSION_SNIFF_LEN, ZMTP_MAJOR, ZMTP_
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SocketType {
+    /// Strict request sender, alternating send and receive.
     Req,
+    /// Strict reply sender, alternating receive and send.
     Rep,
+    /// Publisher with per-peer topic filtering.
     Pub,
+    /// Subscriber matching topic prefixes.
     Sub,
+    /// Publisher exposing subscription commands to the application.
     XPub,
+    /// Subscriber accepting explicit subscription commands.
     XSub,
+    /// Pipeline sender distributing messages round-robin.
     Push,
+    /// Pipeline receiver fair-queuing peer messages.
     Pull,
+    /// Asynchronous request socket without strict alternation.
     Dealer,
+    /// Identity-routed socket with application-visible envelopes.
     Router,
+    /// Bidirectional socket accepting one peer.
     Pair,
+    /// Single-part asynchronous request socket.
     Client,
+    /// Single-part reply socket using opaque routing IDs.
     Server,
+    /// Group publisher.
     Radio,
+    /// Group subscriber.
     Dish,
+    /// Single-part pipeline sender.
     Scatter,
+    /// Single-part pipeline receiver.
     Gather,
+    /// Single-part bidirectional socket accepting one peer.
     Channel,
+    /// Bidirectional socket routing messages by peer identity.
     Peer,
+    /// Raw TCP socket exposing peer identities without ZMTP framing.
     Stream,
 }
 

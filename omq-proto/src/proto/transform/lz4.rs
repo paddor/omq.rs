@@ -81,6 +81,7 @@ fn decode_len(declared: u64, label: &str) -> Result<usize> {
     Ok(size)
 }
 
+/// Whether a single-part message starts with the LZ4 dictionary sentinel.
 pub fn is_dict_shipment(msg: &Message) -> bool {
     msg.len() == 1
         && msg
@@ -161,6 +162,7 @@ impl std::fmt::Debug for Lz4Encoder {
 }
 
 impl Lz4Encoder {
+    /// Create a transform with default thresholds and no dictionary.
     pub fn new() -> Self {
         Self::default()
     }
@@ -232,6 +234,7 @@ impl Lz4Encoder {
         self
     }
 
+    /// Set the minimum part size at which compression is attempted.
     #[must_use]
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.threshold_override = Some(threshold);
@@ -325,6 +328,10 @@ impl Lz4Encoder {
         self.dict_capacity = primary.dict_capacity;
     }
 
+    /// Encode message parts, emitting at most one preceding dictionary shipment.
+    ///
+    /// # Errors
+    /// Returns errors for invalid message sizes or compression failure.
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         if let Some(trainer) = &mut self.trainer {
             for part in &msg.parts_payload() {
@@ -441,6 +448,7 @@ impl Default for Lz4Decoder {
 }
 
 impl Lz4Decoder {
+    /// Create a transform with default thresholds and no dictionary.
     pub fn new() -> Self {
         Self::default()
     }
@@ -453,6 +461,7 @@ impl Lz4Decoder {
         self
     }
 
+    /// Set the maximum received dictionary size, capped at the protocol limit.
     #[must_use]
     pub fn with_max_recv_dict_size(mut self, max: usize) -> Self {
         self.max_recv_dict_size = max.min(MAX_DICT_BYTES);
@@ -474,6 +483,10 @@ impl Lz4Decoder {
         self
     }
 
+    /// Decode message parts; return `None` for a consumed dictionary shipment.
+    ///
+    /// # Errors
+    /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         self.decode_with_budget(msg, self.max_message_size, None)
     }

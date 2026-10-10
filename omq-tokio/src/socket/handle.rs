@@ -97,6 +97,12 @@ struct Inner {
 
 const SEND_YIELD_INTERVAL: u32 = 4096;
 
+impl AsRef<Self> for Socket {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
 impl Socket {
     /// Set shared receive payload storage before the first bind/connect.
     /// Supplies incomplete bodies, reassembly, and supported decode destinations;
@@ -127,18 +133,9 @@ impl Socket {
         self.inner.payload_pools.initialize()
     }
 
-    /// Current DART counters across this socket's endpoints. Unknown ECN
-    /// metadata is recorded as unavailable, not as a measured zero CE rate.
     #[cfg(feature = "dart")]
-    pub fn dart_stats(&self) -> crate::DartStats {
-        self.inner.dart.counters.snapshot()
-    }
-
-    /// Current conservative capabilities across live DART endpoints. Returns
-    /// `None` when none are live.
-    #[cfg(feature = "dart")]
-    pub fn dart_capabilities(&self) -> Option<crate::DartCapabilities> {
-        self.inner.dart.capabilities()
+    pub(crate) fn dart_state(&self) -> &crate::transport::dart::SocketState {
+        &self.inner.dart
     }
 
     /// View a ROUTER or PEER socket through its identity-routing API.

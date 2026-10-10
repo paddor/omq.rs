@@ -4,6 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use omq_proto::dart;
+use omq_tokio::diagnostics::dart_stats;
 use omq_tokio::message::Message;
 use omq_tokio::transport::dart::{DartIo, ReceiveBatch};
 use omq_tokio::{Error, Options, PayloadPool, Socket, SocketType};
@@ -204,7 +205,7 @@ fn native_blocking_send_on_full_pipe_does_not_allocate() {
         // Receipt, rather than popping the send ring, now frees HWM capacity.
         // Let the previous iteration's ACK retire before pausing its IO owner.
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while sender.dart_stats().acknowledged < iteration * 2 {
+        while dart_stats(&sender).acknowledged < iteration * 2 {
             assert!(
                 std::time::Instant::now() < deadline,
                 "ACK retirement stalled"

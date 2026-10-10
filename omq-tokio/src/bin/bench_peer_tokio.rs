@@ -40,6 +40,7 @@ use omq_tokio::{Endpoint, Error, Message, MonitorEvent, Options, Socket, SocketT
 use std::net::Ipv4Addr;
 
 mod latency_common;
+mod pushpull_common;
 #[cfg(any(feature = "ws", feature = "quic"))]
 mod ws_bench_config;
 
@@ -496,39 +497,35 @@ async fn recv_before_deadline(sock: &Socket, deadline: Instant) -> bool {
     )
 }
 
-fn recv_timer_check_interval(size: usize) -> usize {
-    if size <= 1024 { 4096 } else { 256 }
-}
-
 async fn recv_loop(sock: &Socket, duration: Duration, size: usize) -> (u64, f64) {
+    let batch = pushpull_common::receive_batch(size);
     let t0 = Instant::now();
     let deadline = t0 + duration;
-    let timer_check_interval = recv_timer_check_interval(size);
-    let mut until_timer_check = timer_check_interval;
     let mut count: u64 = 0;
 
     loop {
-        if !recv_before_deadline(sock, deadline).await {
+        match sock.try_recv() {
+            Ok(_) => {}
+            Err(Error::WouldBlock) => {
+                if !recv_before_deadline(sock, deadline).await {
+                    break;
+                }
+            }
+            Err(error) => panic!("throughput receive failed: {error}"),
+        }
+        let mut received = 1;
+        for _ in 1..batch {
+            match sock.try_recv() {
+                Ok(_) => received += 1,
+                Err(Error::WouldBlock) => break,
+                Err(error) => panic!("throughput receive failed: {error}"),
+            }
+        }
+        if Instant::now() >= deadline {
             break;
         }
-        count += 1;
-        until_timer_check -= 1;
-        if until_timer_check == 0 {
-            if Instant::now() >= deadline {
-                break;
-            }
-            until_timer_check = timer_check_interval;
-        }
-        while sock.try_recv().is_ok() {
-            count += 1;
-            until_timer_check -= 1;
-            if until_timer_check == 0 {
-                if Instant::now() >= deadline {
-                    return (count, t0.elapsed().as_secs_f64());
-                }
-                until_timer_check = timer_check_interval;
-            }
-        }
+        count += received;
+        tokio::task::coop::consume_budget().await;
     }
 
     (count, t0.elapsed().as_secs_f64())

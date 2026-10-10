@@ -17,6 +17,7 @@ use std::net::Ipv4Addr;
 
 mod blocking_inproc;
 mod latency_common;
+mod pushpull_common;
 #[cfg(any(feature = "ws", feature = "quic"))]
 mod ws_bench_config;
 
@@ -503,34 +504,30 @@ fn warmup_duration() -> Duration {
         .map_or(Duration::ZERO, Duration::from_millis)
 }
 
-fn recv_timer_check_interval(size: usize) -> usize {
-    if size <= 1024 { 4096 } else { 256 }
-}
-
 fn recv_loop(sock: &blocking::Socket, duration: Duration, size: usize) -> (u64, f64) {
     std::thread::sleep(Duration::from_millis(500));
     wait_for_start_barrier();
     drain_warmup(sock);
 
+    let batch = pushpull_common::receive_batch(size);
     let t0 = Instant::now();
     let deadline = t0 + duration;
     let mut count: u64 = 0;
-    let timer_check_interval = recv_timer_check_interval(size);
-    let mut until_timer_check = timer_check_interval;
     loop {
-        if sock.try_recv().is_ok() {
-            count += 1;
-            until_timer_check -= 1;
-            if until_timer_check == 0 {
-                if Instant::now() >= deadline {
-                    break;
-                }
-                until_timer_check = timer_check_interval;
+        let mut received = 0;
+        for _ in 0..batch {
+            match sock.try_recv() {
+                Ok(_) => received += 1,
+                Err(omq_tokio::Error::WouldBlock) => break,
+                Err(error) => panic!("throughput receive failed: {error}"),
             }
-        } else {
-            if Instant::now() >= deadline {
-                break;
-            }
+        }
+        // Exclude the whole batch that crosses the measurement boundary.
+        if Instant::now() >= deadline {
+            break;
+        }
+        count += received;
+        if received == 0 {
             std::thread::yield_now();
         }
     }

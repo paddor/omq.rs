@@ -682,6 +682,7 @@ impl Message {
     }
 
     /// Total byte length across all parts.
+    #[inline]
     pub fn byte_len(&self) -> usize {
         match &self.inner {
             MessageInner::Empty | MessageInner::RoutedEmpty { .. } => 0,

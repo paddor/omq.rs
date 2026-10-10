@@ -1293,7 +1293,13 @@ impl SpscAwareRecv {
             .is_some_and(|peer| peer.lock().take_yield_pending())
     }
 
+    #[inline]
     pub(crate) fn try_recv(&self) -> Result<Message> {
+        if let Some(fanin) = self.active_fanin()
+            && !self.has_ring_sources()
+        {
+            return fanin.try_recv();
+        }
         match self.try_drain() {
             DrainResult::Message(msg) => Ok(msg),
             DrainResult::Closed => Err(Error::Closed),

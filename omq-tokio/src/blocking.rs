@@ -372,6 +372,7 @@ impl Socket {
     }
 
     /// Try to receive one ready message without blocking.
+    #[inline]
     pub fn try_recv(&self) -> Result<Message> {
         self.inner.try_recv()
     }

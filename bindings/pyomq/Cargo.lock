@@ -598,6 +598,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "crossbeam-utils",
  "fanring",
  "futures",
  "libc",

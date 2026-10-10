@@ -1105,6 +1105,7 @@ impl Socket {
     /// Non-blocking receive. Returns `Err(Error::WouldBlock)` if no message is
     /// currently queued. Does not drive the I/O engine; messages already
     /// delivered by the background driver are visible.
+    #[inline]
     pub fn try_recv(&self) -> Result<Message> {
         if !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep) {
             return self.inner.recv_rx.try_recv();

@@ -235,19 +235,22 @@ impl Fanin {
         self.try_recv_inner(true)
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "Measured scalar receives avoid intermediate Message return buffers"
+    )]
+    #[inline(always)]
     fn try_recv_inner(&self, spinning: bool) -> Result<Message> {
         let mut guard = self.receiver.lock();
         let state = guard.as_mut().ok_or(Error::Closed)?;
         state.process_changes(self);
         let spinning = spinning && !state.scan_lanes;
-        if !spinning && !state.scan_lanes {
-            self.signal.begin_drain();
-        }
         state.poll_sources(false);
         let mut result = state.receiver.try_recv_fair();
-        if result.is_err() && state.scan_lanes {
-            // An externally signaled lane may have published after the last
-            // bounded readiness poll. Fence and scan before claiming empty.
+        if result.is_err() && !spinning {
+            // Ready messages need no signal transition. Before reporting
+            // empty, establish the drain fence and recheck all ready sources
+            // so a concurrent publication cannot lose its wakeup.
             self.signal.begin_drain();
             state.poll_sources(true);
             result = state.receiver.try_recv_fair();

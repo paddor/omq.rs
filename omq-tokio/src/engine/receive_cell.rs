@@ -2,22 +2,33 @@
 //! multiple handles also serialize through a mutex. The transfer remains
 //! necessary because concurrent calls can borrow the same socket handle.
 
+use std::fmt;
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Mutex, MutexGuard, Weak};
 
-use concurrent_queue::ConcurrentQueue;
+use crossbeam_utils::atomic::AtomicCell;
 
-#[derive(Debug)]
 pub(crate) struct ReceiveCell<T> {
-    available: ConcurrentQueue<Box<T>>,
+    available: AtomicCell<ManuallyDrop<Option<Box<T>>>>,
     shared: Mutex<()>,
     handles: Weak<()>,
 }
 
+impl<T> fmt::Debug for ReceiveCell<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReceiveCell")
+            .field("shared", &self.shared)
+            .field("handles", &self.handles)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> ReceiveCell<T> {
     pub(crate) fn new(value: T, handles: Weak<()>) -> Self {
-        let available = ConcurrentQueue::bounded(1);
-        assert!(available.push(Box::new(value)).is_ok());
+        assert!(AtomicCell::<ManuallyDrop<Option<Box<T>>>>::is_lock_free());
+        let available = AtomicCell::new(ManuallyDrop::new(Some(Box::new(value))));
         Self {
             available,
             shared: Mutex::new(()),
@@ -29,11 +40,16 @@ impl<T> ReceiveCell<T> {
         self.handles = handles;
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "Measured scalar receives avoid out-of-line ownership transfers"
+    )]
+    #[inline(always)]
     pub(crate) fn lock(&self) -> ReceiveGuard<'_, T> {
         let shared = (self.handles.strong_count() > 1)
             .then(|| self.shared.lock().expect("receive ownership poisoned"));
         let value = loop {
-            if let Ok(value) = self.available.pop() {
+            if let Some(value) = ManuallyDrop::into_inner(self.available.take()) {
                 break value;
             }
             // A single handle may still have overlapping calls through &self,
@@ -47,6 +63,7 @@ impl<T> ReceiveCell<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn try_lock(&self) -> Option<ReceiveGuard<'_, T>> {
         let shared = if self.handles.strong_count() > 1 {
             Some(self.shared.try_lock().ok()?)
@@ -55,9 +72,18 @@ impl<T> ReceiveCell<T> {
         };
         Some(ReceiveGuard {
             cell: self,
-            value: Some(self.available.pop().ok()?),
+            value: Some(ManuallyDrop::into_inner(self.available.take())?),
             serialization: shared,
         })
+    }
+}
+
+impl<T> Drop for ReceiveCell<T> {
+    fn drop(&mut self) {
+        // The cell's exclusive destructor owns any value still available.
+        drop(ManuallyDrop::into_inner(
+            std::mem::take(&mut self.available).into_inner(),
+        ));
     }
 }
 
@@ -83,9 +109,19 @@ impl<T> DerefMut for ReceiveGuard<'_, T> {
 }
 
 impl<T> Drop for ReceiveGuard<'_, T> {
+    #[expect(
+        clippy::inline_always,
+        reason = "Measured scalar receives avoid out-of-line ownership transfers"
+    )]
+    #[inline(always)]
     fn drop(&mut self) {
         // Publish ownership before releasing the optional shared-handle lock.
-        assert!(self.cell.available.push(self.value.take().unwrap()).is_ok());
+        // This guard owns the only value, so the slot is empty. ManuallyDrop
+        // lets AtomicCell use a release store instead of exchanging and
+        // dropping the known-empty previous value. ReceiveCell drops storage.
+        self.cell
+            .available
+            .store(ManuallyDrop::new(self.value.take()));
         drop(self.serialization.take());
     }
 }

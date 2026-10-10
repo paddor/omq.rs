@@ -45,6 +45,7 @@ yring = "0.3.20"
 arc-swap = "1.7.1"
 bytes = "1.12.0"
 concurrent-queue = "2.5.0"
+crossbeam-utils = "0.8.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 parking_lot = "0.12.5"
 rand = "0.10"

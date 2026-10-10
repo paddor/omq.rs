@@ -30,8 +30,10 @@ Data: `comparisons.jsonl`. External impls required.
 PUSH/PULL sizes: 16B..8MiB (15 points). PUB/SUB sizes: 16B..16KiB
 (6 points, 32 peers). REQ/REP latency sizes: 16B, 64B, 256B, 1KiB, 4KiB.
 
-MT uses Tokio's multithread application runtime with one worker per available
-CPU. The legend shows workers per process (6 on the current chart VM).
+MT uses a standard Tokio multithread runtime with one worker per available CPU
+in each sender and receiver (6 on this VM). MT peers retain the full CPU set,
+including when `OMQ_BENCH_TASKSET` pins other runtime modes. The legend uses
+recorded workers per process when available.
 
 The main REQ/REP latency chart uses a 600 px panel with a Y axis from
 0 to 250 μs in 25 μs steps.

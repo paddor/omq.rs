@@ -71,6 +71,8 @@ pub(crate) struct ComparisonRow {
     pub transport: String,
     pub msg_size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_workers: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub peers: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub msgs_s: Option<f64>,

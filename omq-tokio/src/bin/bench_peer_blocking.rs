@@ -870,7 +870,6 @@ fn run_multi_sub(
     duration: Duration,
     socket_count: usize,
 ) {
-    let drain_batch = multi_pull_drain_batch(size);
     let mut sockets = Vec::with_capacity(socket_count);
     for _ in 0..socket_count {
         let s = ctx.blocking_socket(SocketType::Sub, bench_options_client(size));
@@ -880,73 +879,15 @@ fn run_multi_sub(
     }
 
     wait_for_warmup_barrier();
-    let warmup_deadline = Instant::now() + warmup_duration();
-    let warmup_handles: Vec<_> = sockets
-        .iter()
-        .map(|sock| {
-            let sock = sock.clone();
-            std::thread::spawn(move || {
-                while Instant::now() < warmup_deadline {
-                    for _ in 0..drain_batch {
-                        if sock.try_recv().is_err() {
-                            break;
-                        }
-                    }
-                    std::thread::yield_now();
-                }
-            })
-        })
-        .collect();
-    for handle in warmup_handles {
-        handle.join().unwrap();
-    }
+    drain_subscribers(&sockets, size, Instant::now() + warmup_duration());
     wait_for_start_barrier();
 
-    let counters: Vec<Arc<AtomicU64>> = (0..socket_count)
-        .map(|_| Arc::new(AtomicU64::new(0)))
-        .collect();
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
-    let deadline = t0 + duration;
-
-    let handles: Vec<_> = sockets
-        .into_iter()
-        .zip(counters.iter().cloned())
-        .map(|(sock, counter)| {
-            std::thread::spawn(move || {
-                let mut n: u64 = 0;
-                loop {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    if sock.try_recv().is_err() {
-                        // Park empty subscribers so they leave CPU time for IO.
-                        match sock.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                        {
-                            Ok(_) => {}
-                            Err(omq_tokio::Error::Timeout) => break,
-                            Err(error) => panic!("pub/sub receive failed: {error}"),
-                        }
-                    }
-                    n += 1;
-                    for _ in 1..drain_batch {
-                        if sock.try_recv().is_err() {
-                            break;
-                        }
-                        n += 1;
-                    }
-                }
-                counter.store(n, Ordering::Relaxed);
-            })
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
-    }
+    let per_socket = drain_subscribers(&sockets, size, t0 + duration);
 
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = cpu_time_secs() - cpu_before;
-    let per_socket: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
     let total: u64 = per_socket.iter().sum();
     let per_min = per_socket.iter().copied().min().unwrap_or(0);
     let per_max = per_socket.iter().copied().max().unwrap_or(0);
@@ -960,6 +901,65 @@ fn run_multi_sub(
          per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
         total as f64 / elapsed,
     );
+}
+
+#[derive(Debug)]
+struct SubscriberWake(std::thread::Thread);
+
+impl std::task::Wake for SubscriberWake {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+fn drain_subscribers(sockets: &[blocking::Socket], size: usize, deadline: Instant) -> Vec<u64> {
+    let drain_batch = multi_pull_drain_batch(size);
+    let mut counts = vec![0; sockets.len()];
+    let waker = std::task::Waker::from(Arc::new(SubscriberWake(std::thread::current())));
+    while Instant::now() < deadline {
+        let mut received = false;
+        for (socket, count) in sockets.iter().zip(&mut counts) {
+            for _ in 0..drain_batch {
+                match socket.try_recv() {
+                    Ok(_) => {
+                        *count += 1;
+                        received = true;
+                    }
+                    Err(omq_tokio::Error::WouldBlock) => break,
+                    Err(error) => panic!("pub/sub receive failed: {error}"),
+                }
+            }
+        }
+        if received {
+            continue;
+        }
+
+        // Arm every socket before rechecking; a receive between the check
+        // and park leaves an unpark token. No registrations on busy turns.
+        let registrations: Vec<_> = sockets
+            .iter()
+            .map(|socket| socket.register_recv_waker(waker.clone()))
+            .collect();
+        for (socket, count) in sockets.iter().zip(&mut counts) {
+            match socket.try_recv() {
+                Ok(_) => {
+                    *count += 1;
+                    received = true;
+                }
+                Err(omq_tokio::Error::WouldBlock) => {}
+                Err(error) => panic!("pub/sub receive failed: {error}"),
+            }
+        }
+        if !received {
+            std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+        drop(registrations);
+    }
+    counts
 }
 
 fn run_rep(ctx: &omq_tokio::Context, ep: Endpoint, size: usize) {

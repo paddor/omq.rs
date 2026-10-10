@@ -1,49 +1,68 @@
 <img src="doc/omq-logo.svg" alt="OMQ" width="525" />
 
-Connect threads, processes, hosts, and languages without a broker. OMQ gives
-you the same small send/recv model across in-process queues, IPC, TCP,
-QUIC, UDP, WebSocket, compressed links, and language boundaries.
+**ZeroMQ messaging, built in Rust.**
 
-Your app shouldn't have to care about the network. Queues all the way!
+Connect threads, processes, hosts, and languages without a broker.
+Your application sends messages, OMQ handles the network. Queues all the way!
 
-OMQ follows [ZeroMQ](https://zeromq.org): same socket patterns, compatible
-wire protocol, and libzmq-style APIs. The core is memory-safe Rust and does
-not depend on libzmq, libsodium, or a C compiler.
+- **libzmq compatibility.** Familiar [ZeroMQ](https://zeromq.org) socket
+  patterns, compatible wire protocol, and a drop-in C API.
+- **High throughput, low latency.** Millions of messages per second,
+  low p99 latency, and scalable background IO. See the [benchmarks](#performance).
+- **Compression.** LZ4 and experimental Zstd transports save bandwidth
+  without changing application messages.
+- **One API across transports.** inproc, IPC, TCP, UDP, QUIC, DART, and
+  WebSocket. Sockets handle framing, reconnection, and back-pressure.
+- **Language support.** Rust plus [bindings](#workspace) for C/C++, Python,
+  Ruby, Go, Java, Node.js, .NET, Lua, BEAM, Zig, and Crystal.
 
-- Messaging patterns for pipelines, publish/subscribe, request/reply,
-  routed services, exclusive peers, and raw streams.
-- Transports for threads, processes, hosts, browsers, and compressed links:
-  inproc, IPC, TCP, UDP/QUIC/DART, WebSocket,
-  `lz4+tcp://`, `lz4+ws://`, and `zstd+tcp://`.
-- Security for open, password-authenticated, and encrypted connections:
-  NULL, PLAIN, CURVE, and verified TLS for QUIC and secure WebSocket.
-- Near-linear I/O scalability with OMQ-owned background threads on Linux,
-  macOS, and Windows.
-- No C compiler, no libzmq, no libsodium.
-- Native bindings and compatibility APIs:
-  - [C/C++](omq-libzmq/)
-  - [Crystal](https://github.com/paddor/omq-binding.cr)
-  - [BEAM: Erlang, Elixir, and Gleam](bindings/beam/)
-  - [Go](bindings/go/)
-  - [Java](bindings/java/)
-  - [Lua](bindings/lua/)
-  - [.NET](bindings/dotnet/)
-  - [Node.js](bindings/node/)
-  - [Python](bindings/pyomq/)
-  - [Ruby](bindings/ruby/) and pure Ruby [OMQ.rb](https://github.com/zeromq/omq.rb)
-  - [TypeScript](https://github.com/paddor/omq.ts) for browsers (ZWS transport only)
-  - [Zig](bindings/zig/)
+## Usage
+
+Same socket types, same connect/bind/send/recv:
+
+```sh
+cargo add omq-tokio --rename omq
+cargo add tokio --features macros,rt-multi-thread
+```
+
+```rust
+use omq::{Context, Message, Options, Result, SocketType};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let ctx = Context::new();
+
+    let pull = ctx.socket(SocketType::Pull, Options::default());
+    let endpoint = pull.bind("tcp://127.0.0.1:0").await?;
+
+    let push = ctx.socket(SocketType::Push, Options::default());
+    push.connect(endpoint).await?;
+    push.send(Message::single("hello")).await?;
+
+    let msg = pull.recv().await?;
+    assert_eq!(&msg[0], b"hello");
+    Ok(())
+}
+```
+
+The application can await `bind`, `connect`, `send`, and `recv` on any runtime
+like Tokio or Compio. OMQ handles the network on its own background IO threads.
+Port `0` selects a free TCP port, returned by `bind()`.
+
+More examples in [examples/zguide/](examples/zguide/), a port of the
+ZeroMQ Guide patterns to OMQ.
 
 ## Performance
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pushpull_tcp.svg" alt="PUSH/PULL throughput: TCP implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pushpull/tcp.svg" alt="PUSH/PULL throughput over TCP: OMQ and libzmq" width="950">
 </p>
+
 <details>
 <summary>REQ/REP latency</summary>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_reqrep_tcp.svg" alt="REQ/REP latency: TCP implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/reqrep/tcp.svg" alt="REQ/REP latency over TCP: OMQ and libzmq" width="950">
 </p>
 </details>
 
@@ -51,7 +70,7 @@ not depend on libzmq, libsodium, or a C compiler.
 <summary>PUB/SUB throughput</summary>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/main_pubsub_tcp.svg" alt="PUB/SUB throughput: TCP implementations" width="950">
+  <img src="https://raw.githubusercontent.com/paddor/omq.rs/main/doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput over TCP: OMQ and libzmq" width="950">
 </p>
 </details>
 
@@ -68,83 +87,83 @@ not depend on libzmq, libsodium, or a C compiler.
 [Full comparison charts](COMPARISONS.md) |
 [Other protocol comparisons](PROTOCOL_COMPARISONS.md)
 
-## The hard parts
+## Behavior under load
 
-OMQ is designed for real ZeroMQ behavior, not just happy-path PUSH/PULL throughput. You get:
+- **Automatic recovery.** Connect before bind, reconnect after peer failures,
+  and survive peer restarts without application retry loops.
+- **Bounded queues.** High-water marks apply back-pressure or drop on mute
+  according to the socket pattern and options. Peer failures do not become
+  send/recv errors.
+- **Fairness.** Fair receive queues and bounded IO batches keep peers and
+  control commands progressing under load.
+- **Efficient payloads.** Tiny messages stay inline; inproc passes messages
+  by value; large wire payloads use gather writes to avoid extra copies.
 
-- ZeroMQ semantics without extra tuning: no topology-specific socket types, no user-visible batching API, no manual reconnection loop.
-- Transport failures are normal: reconnect, connect-before-bind, peer churn, and bind-side restarts are part of the design.
-- Peer failures do not become user errors: `send()` and `recv()` keep working through disconnects, reconnects, slow consumers, and bind-side restarts.
-- HWM back-pressure and routing fairness under load, not only in empty-queue examples.
-- The hot paths are lock-free, size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
-- The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and peers are assigned to IO lanes statically. Ready for your thread-per-core app!
-- Extensive tests and benchmarks: throughput, latency, CPU, fan-in/fan-out, fairness across transports.
+OMQ normally runs transport work on dedicated background IO threads,
+separate from application threads. Embedded and exclusive APIs are also
+available:
 
-## Usage
+<details>
+<summary>Runtime placement</summary>
 
-If you know ZeroMQ, you know OMQ. Same socket types, same connect/bind/send/recv:
+| API | IO placement |
+|-----|--------------|
+| `Context::new().socket(...)` | OMQ-owned background IO threads; async API |
+| `Context::new().blocking_socket(...)` | OMQ-owned background IO threads; synchronous API |
+| `Context::current().socket(...)` | Existing tokio runtime |
+| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Caller task; one TCP peer, no socket driver task |
 
-```rust
-use omq_tokio::{Context, Message, Options, SocketType};
-
-let ctx = Context::new();
-
-let push = ctx.socket(SocketType::Push, Options::default());
-push.connect("tcp://127.0.0.1:5555".parse()?).await?;
-push.send(Message::single("hello")).await?;
-
-let pull = ctx.socket(SocketType::Pull, Options::default());
-pull.bind("tcp://127.0.0.1:5555".parse()?).await?;
-let msg = pull.recv().await?;
-assert_eq!(&msg[0], b"hello");
-```
-
-Runtime flavors:
-
-| Flavor | Use when | IO placement |
-|--------|----------|--------------|
-| `Context::new().socket(...)` | Async API with OMQ-managed transport work | OMQ-owned background IO threads |
-| `Context::new().blocking_socket(...)` | Classic/libzmq-like synchronous API | OMQ-owned background IO threads |
-| `Context::current().socket(...)` | Embedding OMQ into an existing tokio app/runtime | Caller runtime, no OMQ-owned IO thread |
-| `omq_tokio::exclusive::Socket::{connect, bind}(...)` | Lowest latency for one TCP peer | Caller task, no socket driver task |
-
-More examples in [examples/zguide/](examples/zguide/), a
-port of the ZeroMQ Guide patterns to OMQ.
+</details>
 
 ## Cargo features
 
-All optional. Default build is the smallest deploy: NULL mechanism +
-TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
+The default build includes the NULL mechanism and TCP / IPC / inproc / UDP.
+It needs no libzmq, libsodium, or C compiler. Optional features:
 
-| feature | what it adds                                      | extra deps                       |
-|---------|---------------------------------------------------|----------------------------------|
-| `plain` | PLAIN username/password auth (RFC 24)             | -                                |
-| `curve` | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `lz4`   | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
-| `zstd`  | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
-| `ws`    | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
-| `quic`  | QUIC (`quic://`) transport ([overview](doc/udp_transports.md#quic), [example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
-| `dart`  | Reliable ordered UDP messages (`dart://`) with ultra-low p99 latency ([overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md)) | `quinn-udp` |
+| Feature | Adds |
+|---------|------|
+| `plain` | PLAIN username/password authentication (RFC 24) |
+| `curve` | CURVE authentication and encryption (RFC 26) |
+| `lz4` | `lz4+tcp://` compression ([RFC](doc/lz4-rfc.md)) |
+| `zstd` | Experimental `zstd+tcp://` compression |
+| `ws` | WebSocket (`ws://`) and verified TLS (`wss://`) |
+| `quic` | TLS-encrypted QUIC (`quic://`): [overview](doc/udp_transports.md#quic), [example](examples/quic.rs) |
+| `dart` | Reliable ordered UDP (`dart://`) for low latency: [overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md) |
 
 ## Workspace
 
-Four Cargo workspace crates plus language bindings.
+Four Cargo workspace crates. The protocol core and tokio backend forbid
+unsafe Rust; native interfaces contain the FFI boundaries.
 
-| Crate | What it does | Unsafe policy |
-|-------|--------------|---------------|
-| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x core: codec, messages, mechanisms, subscriptions | `#![forbid(unsafe_code)]` |
-| [`omq-tokio`](omq-tokio/) | Multi-thread tokio backend (Linux/macOS/Windows) | `#![forbid(unsafe_code)]` |
-| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) | Unsafe C ABI boundary |
-| [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator | Bench-only process control and CPU accounting |
-| [`pyomq`](bindings/pyomq/) | Python binding (PyO3 over omq-tokio, sync + asyncio) | PyO3 FFI boundary |
-| [`OMQ.Net`](bindings/dotnet/) | .NET binding (managed wrapper over omq-libzmq) | P/Invoke/native ABI boundary |
-| [`omq-rs`](bindings/ruby/) | Ruby binding (rb-sys over omq-tokio, scheduler-aware synchronous API) | Ruby C API/native extension boundary |
-| [`OMQ.java`](bindings/java/) | Java 21+ binding (JNI/FFM over omq-tokio, sync + async) | JNI/FFM boundary |
-| [`OMQ.go`](bindings/go/) | Go 1.25 binding (cgo over omq-tokio, goroutine-safe API) | cgo/native ABI boundary |
-| [`OMQ.node`](bindings/node/) | Node.js 24.11 binding (NAPI over omq-tokio, native addon) | NAPI/native addon boundary |
-| [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
-| [`OMQ.beam`](bindings/beam/) | Erlang binding plus Elixir and Gleam wrappers (Rustler NIF over omq-tokio) | BEAM NIF boundary |
-| [`OMQ.zig`](bindings/zig/) | Zig 0.16 binding (thin wrapper over omq-libzmq) | C ABI boundary |
+| Crate | What it does |
+|-------|--------------|
+| [`omq-proto`](omq-proto/) | Sans-I/O ZMTP 3.x: codec, messages, mechanisms, subscriptions |
+| [`omq-tokio`](omq-tokio/) | Tokio backend for Linux, macOS, and Windows |
+| [`omq-libzmq`](omq-libzmq/) | libzmq-compatible C interface (`libomq_zmq` dynamic/static library) |
+| [`omq-bench`](omq-bench/) | Benchmark runner and SVG chart generator |
+
+Language bindings:
+
+| Language | Binding |
+|----------|---------|
+| C/C++ | [`omq-libzmq`](omq-libzmq/): libzmq-compatible C API |
+| Python | [`pyomq`](bindings/pyomq/): synchronous and asyncio APIs |
+| Ruby | [`omq-rs`](bindings/ruby/): scheduler-aware synchronous API |
+| Go | [`OMQ.go`](bindings/go/): goroutine-safe API |
+| Java | [`OMQ.java`](bindings/java/): synchronous and async APIs |
+| Node.js | [`OMQ.node`](bindings/node/): native addon |
+| .NET | [`OMQ.Net`](bindings/dotnet/): managed wrapper |
+| Lua | [`OMQ.lua`](bindings/lua/): native module |
+| Erlang, Elixir, Gleam | [`OMQ.beam`](bindings/beam/): NIF and wrappers |
+| Zig | [`OMQ.zig`](bindings/zig/): C API wrapper |
+| Crystal | [`omq-binding.cr`](https://github.com/paddor/omq-binding.cr): native binding |
+
+## Sister projects
+
+- [OMQ.rb](https://github.com/zeromq/omq.rb): Ruby implementation with
+  compatible compression and an optional Rust backend.
+- [OMQ.ts](https://github.com/paddor/omq.ts): TypeScript implementation
+  for browsers using the ZWS transport.
 
 ## Further reading
 

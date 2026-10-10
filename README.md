@@ -2,7 +2,7 @@
 
 Connect threads, processes, hosts, and languages without a broker. OMQ gives
 you the same small send/recv model across in-process queues, IPC, TCP,
-QUIC, WebSocket, compressed links, and language boundaries.
+QUIC, UDP, WebSocket, compressed links, and language boundaries.
 
 Your app shouldn't have to care about the network. Queues all the way!
 
@@ -13,7 +13,7 @@ not depend on libzmq, libsodium, or a C compiler.
 - Messaging patterns for pipelines, publish/subscribe, request/reply,
   routed services, exclusive peers, and raw streams.
 - Transports for threads, processes, hosts, browsers, and compressed links:
-  inproc, IPC, TCP, UDP, QUIC, WebSocket,
+  inproc, IPC, TCP, UDP/QUIC/DART, WebSocket,
   `lz4+tcp://`, `lz4+ws://`, and `zstd+tcp://`.
 - Security for open, password-authenticated, and encrypted connections:
   NULL, PLAIN, CURVE, and verified TLS for QUIC and secure WebSocket.
@@ -123,8 +123,8 @@ TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 | `lz4`   | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
 | `zstd`  | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
 | `ws`    | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
-| `quic`  | QUIC (`quic://`) transport ([example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
-| `dart`  | Reliable ordered UDP messages (`dart://`) with ultra-low p99 latency, [RFC](doc/dart-rfc.md), [native Rust API](doc/dart.md) | `quinn-udp` |
+| `quic`  | QUIC (`quic://`) transport ([overview](doc/udp_transports.md#quic), [example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
+| `dart`  | Reliable ordered UDP messages (`dart://`) with ultra-low p99 latency ([overview](doc/udp_transports.md#dart), [RFC](doc/dart-rfc.md)) | `quinn-udp` |
 
 ## Workspace
 
@@ -161,8 +161,8 @@ Four Cargo workspace crates plus language bindings.
   format and dictionary shipping rules.
 - [doc/quic-rfc.md](doc/quic-rfc.md): native QUIC transport, TLS verification,
   liveness, and reconnect rules.
-- [doc/dart.md](doc/dart.md): reliable UDP messages, buffer ownership,
-  capacity, and diagnostics.
+- [doc/udp_transports.md](doc/udp_transports.md): UDP, QUIC, and DART purposes,
+  configuration, and benchmarks over loopback and lossy links.
 
 ## Platform and requirements
 

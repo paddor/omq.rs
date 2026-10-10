@@ -1,4 +1,4 @@
-//! Fast local performance gate for the core TCP paths.
+//! Local performance gates for TCP and optional QUIC/DART paths.
 //!
 //! Thresholds are read from `.perf_hw`, which is intentionally ignored.
 //! Without that file, this command runs a smaller smoke gate.
@@ -103,6 +103,109 @@ fn inproc_endpoint() -> Endpoint {
     "inproc://perf-gate".parse().expect("valid inproc endpoint")
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Transport {
+    Tcp,
+    Inproc,
+    #[cfg(feature = "quic")]
+    Quic,
+    #[cfg(feature = "dart")]
+    Dart,
+}
+
+impl Transport {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Tcp => "",
+            Self::Inproc => "inproc_",
+            #[cfg(feature = "quic")]
+            Self::Quic => "quic_",
+            #[cfg(feature = "dart")]
+            Self::Dart => "dart_",
+        }
+    }
+
+    fn endpoint(self) -> Endpoint {
+        match self {
+            Self::Tcp => tcp_zero(),
+            Self::Inproc => inproc_endpoint(),
+            #[cfg(feature = "quic")]
+            Self::Quic => "quic://127.0.0.1:0".parse().expect("QUIC endpoint"),
+            #[cfg(feature = "dart")]
+            Self::Dart => "dart://127.0.0.1:0".parse().expect("DART endpoint"),
+        }
+    }
+
+    fn options(self) -> Options {
+        match self {
+            #[cfg(feature = "quic")]
+            Self::Quic => {
+                let (cert, key) = &*QUIC_CREDENTIALS;
+                Options {
+                    quic: omq_tokio::options::QuicOptions {
+                        server_cert_pem: Some(cert.clone()),
+                        server_key_pem: Some(key.clone()),
+                        trust_pem: Some(cert.clone()),
+                        trust_system: false,
+                        ..Default::default()
+                    },
+                    recv_buffer_size: Some(4 * 1024 * 1024),
+                    send_buffer_size: Some(4 * 1024 * 1024),
+                    ..Options::default()
+                }
+            }
+            _ => Options::default(),
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+static QUIC_CREDENTIALS: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("omq-perf-tls-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).expect("create benchmark TLS directory");
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    let output = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-out",
+        ])
+        .arg(&cert)
+        .arg("-keyout")
+        .arg(&key)
+        .output()
+        .expect("openssl is required for QUIC performance gates");
+    assert!(
+        output.status.success(),
+        "generate benchmark TLS certificate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let credentials = (
+        std::fs::read(&cert).expect("read benchmark certificate"),
+        std::fs::read(&key).expect("read benchmark key"),
+    );
+    std::fs::remove_dir_all(dir).expect("remove benchmark TLS directory");
+    credentials
+});
+
 fn smoke_thresholds() -> HashMap<String, f64> {
     HashMap::from([
         ("reqrep_ct.p50_256b_us".to_string(), 1_000.0),
@@ -150,8 +253,10 @@ fn read_thresholds() -> ThresholdConfig {
 
 fn should_measure(name: &str, config: &ThresholdConfig) -> bool {
     // Profile contracts compare within one run and need no thresholds.
-    config.mode == ThresholdMode::Hardware
-        || config.values.contains_key(name)
+    config.values.contains_key(name)
+        || (config.mode == ThresholdMode::Hardware
+            && !name.starts_with("quic_")
+            && !name.starts_with("dart_"))
         || name.starts_with("contract_")
 }
 
@@ -199,33 +304,6 @@ async fn reqrep_latency() -> f64 {
     samples[samples.len() / 2]
 }
 
-async fn send_batch_until(sock: &omq_tokio::Socket, message: &Message, deadline: Instant) -> bool {
-    if Instant::now() >= deadline {
-        return false;
-    }
-    let mut budget = DrainBudget::WORKER;
-    let bytes = message.byte_len();
-    loop {
-        let mut msg = message.clone();
-        loop {
-            match sock.try_send(msg) {
-                Ok(()) => break,
-                Err(omq_tokio::TrySendError::Full(returned)) => {
-                    if Instant::now() >= deadline {
-                        return false;
-                    }
-                    msg = returned;
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => panic!("perf send failed: {error}"),
-            }
-        }
-        if !budget.account(bytes) {
-            return true;
-        }
-    }
-}
-
 fn send_blocking_batch_until(
     sock: &omq_tokio::blocking::Socket,
     message: &Message,
@@ -257,35 +335,6 @@ fn send_blocking_batch_until(
     }
 }
 
-async fn count_messages(sock: omq_tokio::Socket, window: Window) -> Received {
-    let mut counter = Counter::new(window);
-    loop {
-        let mut budget = DrainBudget::WORKER;
-        match drain_ready(
-            || sock.try_recv(),
-            &mut counter,
-            window,
-            &mut budget,
-            Instant::now,
-        ) {
-            DrainResult::Deadline => break,
-            DrainResult::Budget => {}
-            DrainResult::Empty => {
-                match tokio::time::timeout_at(window.end.into(), sock.recv()).await {
-                    Ok(Ok(message)) => {
-                        counter.record(&message, Instant::now());
-                        let _ = budget.account(message.byte_len());
-                    }
-                    Ok(Err(error)) => panic!("perf recv failed: {error}"),
-                    Err(_) => break, // Normal end of this measurement window.
-                }
-            }
-        }
-        tokio::task::yield_now().await;
-    }
-    counter.finish(Instant::now())
-}
-
 fn count_blocking(sock: &omq_tokio::blocking::Socket, window: Window) -> Received {
     let mut counter = Counter::new(window);
     loop {
@@ -310,16 +359,58 @@ fn transfer_blocking(
     receiver: omq_tokio::blocking::Socket,
     size: usize,
 ) -> f64 {
+    transfer_blocking_many(sender, vec![receiver], size)
+}
+
+fn count_blocking_many(sockets: &[omq_tokio::blocking::Socket], window: Window) -> Received {
+    assert!(!sockets.is_empty(), "at least one receiver is required");
+    let mut counters: Vec<_> = sockets.iter().map(|_| Counter::new(window)).collect();
+    'receive: loop {
+        for (socket, counter) in sockets.iter().zip(&mut counters) {
+            let mut budget = DrainBudget::new(64, 64 * 1024);
+            if drain_ready(
+                || socket.try_recv(),
+                counter,
+                window,
+                &mut budget,
+                Instant::now,
+            ) == DrainResult::Deadline
+            {
+                break 'receive;
+            }
+        }
+        thread::yield_now();
+    }
+    let now = Instant::now();
+    counters
+        .into_iter()
+        .map(|counter| counter.finish(now))
+        .fold(
+            Received {
+                count: 0,
+                elapsed: now.duration_since(window.start),
+            },
+            Received::combine,
+        )
+}
+
+fn transfer_blocking_many(
+    sender: &omq_tokio::blocking::Socket,
+    receivers: Vec<omq_tokio::blocking::Socket>,
+    size: usize,
+) -> f64 {
     let (window_tx, window_rx) = mpsc::channel();
     let ready = Arc::new(Barrier::new(2));
     let receiver_ready = ready.clone();
     let handle = thread::spawn(move || {
         SETTINGS.affinity.pin(5);
         receiver_ready.wait();
-        count_blocking(
-            &receiver,
-            window_rx.recv().expect("receive benchmark window"),
-        )
+        let window = window_rx.recv().expect("receive benchmark window");
+        if receivers.len() == 1 {
+            count_blocking(&receivers[0], window)
+        } else {
+            count_blocking_many(&receivers, window)
+        }
     });
     ready.wait();
     let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
@@ -335,29 +426,34 @@ fn transfer_blocking(
     handle.join().expect("receiver thread").rate()
 }
 
-async fn pushpull(size: usize, io_threads: usize, endpoint: Endpoint) -> f64 {
+async fn pipeline(size: usize, io_threads: usize, transport: Transport) -> f64 {
     tokio::task::spawn_blocking(move || {
         SETTINGS.affinity.pin(0);
-        let is_inproc = matches!(endpoint, Endpoint::Inproc { .. });
-        let pull_ctx = context(io_threads, Side::Receiver);
-        let push_ctx = if is_inproc {
-            pull_ctx.clone()
+        let receiver_ctx = context(io_threads, Side::Receiver);
+        let sender_ctx = if matches!(transport, Transport::Inproc) {
+            receiver_ctx.clone()
         } else {
             context(io_threads, Side::Sender)
         };
-        let pull = pull_ctx.blocking_socket(SocketType::Pull, Options::default());
-        let push = push_ctx.blocking_socket(SocketType::Push, Options::default());
-        let endpoint = pull.bind(endpoint).expect("PULL bind");
-        push.connect(endpoint).expect("PUSH connect");
-        pull.wait_connected(1, Duration::from_secs(1))
-            .expect("PULL connect timeout");
-        let rate = transfer_blocking(&push, pull, size);
-        push_ctx.term();
-        pull_ctx.term();
+        let (sender_type, receiver_type) = match transport {
+            #[cfg(feature = "dart")]
+            Transport::Dart => (SocketType::Scatter, SocketType::Gather),
+            _ => (SocketType::Push, SocketType::Pull),
+        };
+        let receiver = receiver_ctx.blocking_socket(receiver_type, transport.options());
+        let sender = sender_ctx.blocking_socket(sender_type, transport.options());
+        let endpoint = receiver.bind(transport.endpoint()).expect("pipeline bind");
+        sender.connect(endpoint).expect("pipeline connect");
+        receiver
+            .wait_connected(1, Duration::from_secs(1))
+            .expect("pipeline connect timeout");
+        let rate = transfer_blocking(&sender, receiver, size);
+        sender_ctx.term();
+        receiver_ctx.term();
         rate
     })
     .await
-    .expect("PUSH/PULL task")
+    .expect("pipeline task")
 }
 
 async fn fanin(
@@ -419,59 +515,30 @@ async fn compare_fanin() {
     }
 }
 
-async fn pubsub(size: usize, io_threads: usize, peers: usize) -> f64 {
-    let pub_ctx = context(io_threads, Side::Sender);
-    let sub_ctx = context(io_threads, Side::Receiver);
-    let publisher = pub_ctx.socket(SocketType::Pub, Options::default());
-    let endpoint = publisher.bind(tcp_zero()).await.expect("PUB bind");
-    let ready = Arc::new(tokio::sync::Barrier::new(peers + 1));
-    let mut receivers = Vec::with_capacity(peers);
-    let mut windows = Vec::with_capacity(peers);
-    for _ in 0..peers {
-        let subscriber = sub_ctx.socket(SocketType::Sub, Options::default());
-        subscriber
-            .connect(endpoint.clone())
-            .await
-            .expect("SUB connect");
-        subscriber
-            .subscribe(Bytes::new())
-            .await
-            .expect("SUB subscribe");
-        let ready = ready.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        windows.push(tx);
-        receivers.push(tokio::spawn(async move {
-            ready.wait().await;
-            count_messages(subscriber, rx.await.expect("receive benchmark window")).await
-        }));
-    }
-    publisher
-        .wait_subscribed(peers as u64, Duration::from_secs(1))
-        .await
-        .expect("SUB subscribe timeout");
-    ready.wait().await;
-    let window = Window::new(Instant::now(), SETTINGS.warmup, SETTINGS.measure);
-    for tx in windows {
-        tx.send(window).expect("send benchmark window");
-    }
-    for (message, deadline) in [
-        (tagged_payload(size, 0), window.start),
-        (payload(size), window.end),
-    ] {
-        while send_batch_until(&publisher, &message, deadline).await {
-            tokio::task::yield_now().await;
+async fn pubsub(size: usize, io_threads: usize, peers: usize, transport: Transport) -> f64 {
+    tokio::task::spawn_blocking(move || {
+        SETTINGS.affinity.pin(0);
+        let pub_ctx = context(io_threads, Side::Sender);
+        let sub_ctx = context(io_threads, Side::Receiver);
+        let publisher = pub_ctx.blocking_socket(SocketType::Pub, transport.options());
+        let endpoint = publisher.bind(transport.endpoint()).expect("PUB bind");
+        let mut receivers = Vec::with_capacity(peers);
+        for _ in 0..peers {
+            let subscriber = sub_ctx.blocking_socket(SocketType::Sub, transport.options());
+            subscriber.connect(endpoint.clone()).expect("SUB connect");
+            subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
+            receivers.push(subscriber);
         }
-    }
-    let mut received = Received {
-        count: 0,
-        elapsed: SETTINGS.measure,
-    };
-    for receiver in receivers {
-        received = received.combine(receiver.await.expect("SUB task"));
-    }
-    pub_ctx.term();
-    sub_ctx.term();
-    received.rate()
+        publisher
+            .wait_subscribed(peers as u64, Duration::from_secs(5))
+            .expect("SUB subscribe timeout");
+        let rate = transfer_blocking_many(&publisher, receivers, size);
+        pub_ctx.term();
+        sub_ctx.term();
+        rate
+    })
+    .await
+    .expect("PUB/SUB task")
 }
 
 fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize) {
@@ -514,45 +581,30 @@ fn run_pubsub_pub_child(size: usize, io_threads: usize, peers: usize) {
     panic!("PUB child exceeded measurement deadline");
 }
 
-fn run_pubsub_sub_child(endpoint: &Endpoint, duration: Duration, peers: usize) {
+fn run_pubsub_sub_child(endpoint: &Endpoint, duration: Duration, peers: usize, io_threads: usize) {
     SETTINGS.affinity.pin(5);
-    let ctx = context(2, Side::Receiver);
-    let ready = Arc::new(Barrier::new(peers + 1));
+    let ctx = context(io_threads, Side::Receiver);
     let mut receivers = Vec::with_capacity(peers);
-    let mut windows = Vec::with_capacity(peers);
-    for index in 0..peers {
+    for _ in 0..peers {
         let subscriber = ctx.blocking_socket(SocketType::Sub, Options::default());
         subscriber.connect(endpoint.clone()).expect("SUB connect");
         subscriber.subscribe(Bytes::new()).expect("SUB subscribe");
-        let ready = ready.clone();
-        let (tx, rx) = mpsc::channel();
-        windows.push(tx);
-        receivers.push(thread::spawn(move || {
-            SETTINGS.affinity.pin(5 + index);
-            ready.wait();
-            count_blocking(&subscriber, rx.recv().expect("receive benchmark window"))
-        }));
+        receivers.push(subscriber);
     }
-    ready.wait();
     let warmup = duration_env("OMQ_PERF_WARMUP_MS", PUBSUB_32P_WARMUP);
     let window = Window::new(Instant::now(), warmup, duration);
-    for tx in windows {
-        tx.send(window).expect("send benchmark window");
-    }
     // The publisher tags all traffic as warmup until this command reaches it.
     // Any warmup still in flight is discarded by the receiving counters.
-    thread::sleep(window.start.saturating_duration_since(Instant::now()));
-    println!("MEASURE");
-    std::io::stdout()
-        .flush()
-        .expect("flush measurement command");
-    let mut received = Received {
-        count: 0,
-        elapsed: duration,
-    };
-    for receiver in receivers {
-        received = received.combine(receiver.join().expect("SUB thread"));
-    }
+    let coordinator = thread::spawn(move || {
+        SETTINGS.affinity.pin(5);
+        thread::sleep(window.start.saturating_duration_since(Instant::now()));
+        println!("MEASURE");
+        std::io::stdout()
+            .flush()
+            .expect("flush measurement command");
+    });
+    let received = count_blocking_many(&receivers, window);
+    coordinator.join().expect("measurement coordinator");
     ctx.term();
     println!(
         "RESULT {} {:.9}",
@@ -608,6 +660,7 @@ fn pubsub_process_published_rate(size: usize, io_threads: usize, peers: usize) -
             .arg(size.to_string())
             .arg(duration.as_secs_f64().to_string())
             .arg(peers.to_string())
+            .arg(io_threads.to_string())
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn SUB child"),
@@ -705,7 +758,8 @@ async fn run_mode(args: &[String]) -> bool {
             let endpoint = args[2].parse().expect("endpoint");
             let duration = Duration::from_secs_f64(args[4].parse().expect("duration"));
             let peers = args[5].parse().expect("peers");
-            run_pubsub_sub_child(&endpoint, duration, peers);
+            let io_threads = args[6].parse().expect("io_threads");
+            run_pubsub_sub_child(&endpoint, duration, peers, io_threads);
             true
         }
         _ => false,
@@ -715,15 +769,16 @@ async fn run_mode(args: &[String]) -> bool {
 #[derive(Debug)]
 enum Workload {
     Reqrep,
-    Pushpull {
+    Pipeline {
         size: usize,
         io_threads: usize,
-        inproc: bool,
+        transport: Transport,
     },
     Pubsub {
         size: usize,
         io_threads: usize,
         peers: usize,
+        transport: Transport,
     },
     PubsubProcesses,
     Contract {
@@ -744,26 +799,57 @@ fn cases() -> Vec<Case> {
         name: "reqrep_ct.p50_256b_us".to_owned(),
         workload: Workload::Reqrep,
     }];
-    for io_threads in [1, 2] {
-        for (size, suffix) in [(16, "16b"), (1024, "1k"), (16 * 1024, "16k")] {
-            cases.push(Case {
-                name: format!("pushpull_{io_threads}io.{suffix}_msgs_s"),
-                workload: Workload::Pushpull {
-                    size,
-                    io_threads,
-                    inproc: false,
-                },
-            });
-        }
-        for (size, suffix) in [(16, "16b"), (4096, "4k")] {
-            cases.push(Case {
-                name: format!("pubsub_{io_threads}io.{suffix}_msgs_s"),
-                workload: Workload::Pubsub {
-                    size,
-                    io_threads,
-                    peers: 4,
-                },
-            });
+    let transports = [
+        Transport::Tcp,
+        #[cfg(feature = "quic")]
+        Transport::Quic,
+        #[cfg(feature = "dart")]
+        Transport::Dart,
+    ];
+    for transport in transports {
+        let pipeline = match transport {
+            #[cfg(feature = "dart")]
+            Transport::Dart => "scattergather",
+            _ => "pushpull",
+        };
+        for io_threads in [1, 2] {
+            for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (16 * 1024, "16k")] {
+                if size > 1024 && !matches!(transport, Transport::Tcp) {
+                    continue;
+                }
+                cases.push(Case {
+                    name: format!(
+                        "{}{pipeline}_{io_threads}io.{suffix}_msgs_s",
+                        transport.prefix()
+                    ),
+                    workload: Workload::Pipeline {
+                        size,
+                        io_threads,
+                        transport,
+                    },
+                });
+            }
+            #[cfg(feature = "dart")]
+            if matches!(transport, Transport::Dart) {
+                continue;
+            }
+            for (size, suffix) in [(16, "16b"), (256, "256b"), (1024, "1k"), (4096, "4k")] {
+                if size > 1024 && !matches!(transport, Transport::Tcp) {
+                    continue;
+                }
+                cases.push(Case {
+                    name: format!(
+                        "{}pubsub_{io_threads}io.{suffix}_msgs_s",
+                        transport.prefix()
+                    ),
+                    workload: Workload::Pubsub {
+                        size,
+                        io_threads,
+                        peers: 4,
+                        transport,
+                    },
+                });
+            }
         }
     }
     cases.push(Case {
@@ -772,10 +858,10 @@ fn cases() -> Vec<Case> {
     });
     cases.push(Case {
         name: "inproc_pushpull_1io.16b_msgs_s".to_owned(),
-        workload: Workload::Pushpull {
+        workload: Workload::Pipeline {
             size: 16,
             io_threads: 1,
-            inproc: true,
+            transport: Transport::Inproc,
         },
     });
     contract_cases(&mut cases);
@@ -826,28 +912,17 @@ fn contract_cases(cases: &mut Vec<Case>) {
 async fn measure(case: &Case) -> Sample {
     let (value, unit) = match case.workload {
         Workload::Reqrep => (reqrep_latency().await, "us"),
-        Workload::Pushpull {
+        Workload::Pipeline {
             size,
             io_threads,
-            inproc,
-        } => (
-            pushpull(
-                size,
-                io_threads,
-                if inproc {
-                    inproc_endpoint()
-                } else {
-                    tcp_zero()
-                },
-            )
-            .await,
-            "msg/s",
-        ),
+            transport,
+        } => (pipeline(size, io_threads, transport).await, "msg/s"),
         Workload::Pubsub {
             size,
             io_threads,
             peers,
-        } => (pubsub(size, io_threads, peers).await, "msg/s"),
+            transport,
+        } => (pubsub(size, io_threads, peers, transport).await, "msg/s"),
         Workload::PubsubProcesses => (pubsub_process_published_rate(256, 2, 32), "msg/s"),
         Workload::Contract {
             pattern,
@@ -1004,21 +1079,43 @@ mod tests {
         ctx.term();
     }
 
-    #[tokio::test]
-    async fn full_async_sender_stops_at_deadline() {
-        let ctx = Context::current();
-        let sock = ctx.socket(SocketType::Push, Options::default());
-        let deadline = Instant::now() + Duration::from_millis(5);
-        assert!(!send_batch_until(&sock, &payload(16), deadline).await);
-    }
-
-    #[tokio::test]
-    async fn idle_receiver_finishes_without_a_wakeup_message() {
-        let ctx = Context::current();
-        let sock = ctx.socket(SocketType::Pull, Options::default());
+    #[test]
+    fn idle_receivers_finish_without_a_wakeup_message() {
+        let ctx = Context::new();
+        let sockets = [
+            ctx.blocking_socket(SocketType::Sub, Options::default()),
+            ctx.blocking_socket(SocketType::Sub, Options::default()),
+        ];
         let window = Window::new(Instant::now(), Duration::ZERO, Duration::from_millis(5));
-        let received = count_messages(sock, window).await;
+        let received = count_blocking_many(&sockets, window);
         assert_eq!(received.count, 0);
         assert!(received.elapsed >= Duration::from_millis(5));
+        ctx.term();
+    }
+
+    #[test]
+    fn transport_cases_cover_key_sizes_without_duplicate_names() {
+        let cases = cases();
+        let names: std::collections::HashSet<_> = cases.iter().map(|case| &case.name).collect();
+        assert_eq!(names.len(), cases.len());
+        for prefix in [
+            "",
+            #[cfg(feature = "quic")]
+            "quic_",
+        ] {
+            for pattern in ["pushpull", "pubsub"] {
+                for io in [1, 2] {
+                    for size in ["16b", "256b", "1k"] {
+                        assert!(names.contains(&format!("{prefix}{pattern}_{io}io.{size}_msgs_s")));
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "dart")]
+        for io in [1, 2] {
+            for size in ["16b", "256b", "1k"] {
+                assert!(names.contains(&format!("dart_scattergather_{io}io.{size}_msgs_s")));
+            }
+        }
     }
 }

@@ -68,7 +68,7 @@ jobs:
           if-no-files-found: ignore
 
   soak:
-    name: soak (${{ matrix.test }})
+    name: soak (${{ matrix.case || matrix.test }})
     if: github.repository == 'paddor/omq.rs'
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -99,8 +99,34 @@ jobs:
           - test: omq_soak_cancel_safety
           - test: omq_soak_inproc_cross_thread
           - test: omq_soak_multi_socket
+          - test: omq_soak_driver_control
+          - test: omq_soak_exclusive
+          - test: omq_soak_rate_limit
+          - test: omq_soak_dart
+            features: soak dart
+            case: soak_dart_sustained
+          - test: omq_soak_dart
+            features: soak dart
+            case: soak_dart_backpressure
+          - test: omq_soak_dart
+            features: soak dart
+            case: soak_dart_recovery
+          - test: omq_soak_quic_churn
+            features: soak quic
+          - test: omq_soak_quic_long
+            features: soak quic
+            case: soak_quic_integrity_10m
+            ignored: true
+          - test: omq_soak_quic_long
+            features: soak quic
+            case: soak_quic_reconnect_30m
+            ignored: true
+          - test: omq_soak_quic_long
+            features: soak quic
+            case: soak_quic_slow_sub_60m
+            ignored: true
     env:
-      SOAK_FEATURES: soak plain curve lz4 zstd ws
+      SOAK_FEATURES: ${{ matrix.features || 'soak plain curve lz4 zstd ws' }}
       OMQ_SOAK_DURATION_SECS: ${{ inputs.soak_duration_secs || '7200' }}
       OMQ_SOAK_SEED: ${{ inputs.soak_seed || '' }}
     steps:
@@ -114,14 +140,21 @@ jobs:
         run: cargo test -p omq-tokio --features "$SOAK_FEATURES" --release --test ${{ matrix.test }} --no-run
       - name: run soak test
         run: |
+          args=()
+          if [[ -n '${{ matrix.case }}' ]]; then
+            args+=(-E 'test(${{ matrix.case }})')
+          fi
+          if [[ '${{ matrix.ignored }}' == 'true' ]]; then
+            args+=(--run-ignored=only --test-threads=1)
+          fi
           bash scripts/ci-run-with-forensics.sh "soak ${{ matrix.test }}" 10200 -- \
             cargo nextest run --profile extended -p omq-tokio \
-            --features "$SOAK_FEATURES" --release --test ${{ matrix.test }}
+            --features "$SOAK_FEATURES" --release --test ${{ matrix.test }} "${args[@]}"
       - name: upload hang forensics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: hang-forensics-soak-${{ matrix.test }}
+          name: hang-forensics-soak-${{ matrix.case || matrix.test }}
           path: target/hang-forensics
           if-no-files-found: ignore
 

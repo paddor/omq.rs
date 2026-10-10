@@ -22,13 +22,11 @@ mod pushpull_common;
 mod ws_bench_config;
 
 fn multi_pull_drain_batch(size: usize) -> usize {
-    if let Some(batch) = std::env::var("OMQ_BENCH_DRAIN_BATCH")
+    let batch = std::env::var("OMQ_BENCH_DRAIN_BATCH")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-    {
-        return batch.max(1);
-    }
-    if size <= 1024 { 64 } else { 256 }
+        .unwrap_or(if size <= 1024 { 64 } else { 256 });
+    batch.clamp(1, 256).min((64 * 1024 / size.max(1)).max(1))
 }
 
 fn parse_ep(s: &str) -> Endpoint {
@@ -682,55 +680,50 @@ fn run_multi_pull(
         drain_warmup(s);
     }
 
-    let counters: Vec<Arc<AtomicU64>> = (0..socket_count)
-        .map(|_| Arc::new(AtomicU64::new(0)))
-        .collect();
     let started = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
-    let cpu_before = cpu_time_secs();
 
     let handles: Vec<_> = sockets
         .into_iter()
-        .zip(counters.iter().cloned())
-        .map(|(sock, counter)| {
+        .map(|sock| {
             let started = Arc::clone(&started);
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
+                let mut count = 0_u64;
                 loop {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if sock.try_recv().is_err() {
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    for _ in 1..drain_batch {
+                    let measuring = started.load(Ordering::Acquire);
+                    let mut received = 0;
+                    for _ in 0..drain_batch {
                         if sock.try_recv().is_err() {
                             break;
                         }
-                        if started.load(Ordering::Relaxed) {
-                            counter.fetch_add(1, Ordering::Relaxed);
-                        }
+                        received += 1;
                     }
-                    if started.load(Ordering::Relaxed) {
-                        counter.fetch_add(1, Ordering::Relaxed);
+                    // Count only whole turns inside the measured interval.
+                    if measuring && !stop.load(Ordering::Acquire) {
+                        count += received;
+                    }
+                    if received == 0 {
+                        std::thread::yield_now();
                     }
                 }
+                count
             })
         })
         .collect();
 
     std::thread::sleep(Duration::from_millis(500));
-    started.store(true, Ordering::Release);
+    let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
+    started.store(true, Ordering::Release);
     std::thread::sleep(duration);
-    let elapsed = t0.elapsed().as_secs_f64();
     stop.store(true, Ordering::Release);
-    for h in handles {
-        h.join().unwrap();
-    }
+    let elapsed = t0.elapsed().as_secs_f64();
+    let per_socket: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let cpu = cpu_time_secs() - cpu_before;
-    let per_socket: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
     let total: u64 = per_socket.iter().sum();
     let per_min = per_socket.iter().copied().min().unwrap_or(0);
     let per_max = per_socket.iter().copied().max().unwrap_or(0);
@@ -770,6 +763,7 @@ fn run_multi_push(
     socket_count: usize,
     duration: Option<f64>,
 ) {
+    let batch = multi_pull_drain_batch(size);
     let mut sockets = Vec::with_capacity(socket_count);
     for _ in 0..socket_count {
         let s = ctx.blocking_socket(SocketType::Push, bench_options_client(size));
@@ -788,16 +782,23 @@ fn run_multi_push(
         .map(|(sock, counter)| {
             let p = payload.clone();
             std::thread::spawn(move || {
+                let mut count = 0_u64;
                 if p.len() <= omq_tokio::message::MAX_INLINE_MESSAGE {
                     loop {
-                        send_fast(&sock, Message::from_slice(&p));
-                        counter.fetch_add(1, Ordering::Relaxed);
+                        for _ in 0..batch {
+                            send_fast(&sock, Message::from_slice(&p));
+                            count += 1;
+                        }
+                        counter.store(count, Ordering::Relaxed);
                     }
                 }
                 let msg = Message::single(p);
                 loop {
-                    send_fast(&sock, msg.clone());
-                    counter.fetch_add(1, Ordering::Relaxed);
+                    for _ in 0..batch {
+                        send_fast(&sock, msg.clone());
+                        count += 1;
+                    }
+                    counter.store(count, Ordering::Relaxed);
                 }
             })
         })
@@ -886,7 +887,11 @@ fn run_multi_sub(
             let sock = sock.clone();
             std::thread::spawn(move || {
                 while Instant::now() < warmup_deadline {
-                    while sock.try_recv().is_ok() {}
+                    for _ in 0..drain_batch {
+                        if sock.try_recv().is_err() {
+                            break;
+                        }
+                    }
                     std::thread::yield_now();
                 }
             })

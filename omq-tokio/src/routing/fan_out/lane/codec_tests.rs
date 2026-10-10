@@ -33,8 +33,6 @@ fn worker(
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
             codec_groups: std::array::from_fn(|_| None),
-            distribution_targets: Vec::new(),
-            active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
         },
         ctrl_tx,
@@ -83,7 +81,6 @@ fn add_peer(
 fn dispatch(body: &[u8]) -> LaneDispatch {
     LaneDispatch {
         msg: Message::multipart([Bytes::from_static(b"topic"), Bytes::copy_from_slice(body)]),
-        topic: Bytes::from_static(b"topic"),
     }
 }
 
@@ -173,8 +170,10 @@ async fn encodes_once_per_matched_group_per_lane_in_both_registration_orders() {
                             assert_eq!(receive(slot, decoder), (vec![publication.msg.clone()], 0));
                         }
                         let unmatched = LaneDispatch {
-                            topic: Bytes::from_static(b"other"),
-                            ..publication
+                            msg: Message::multipart([
+                                Bytes::from_static(b"other"),
+                                Bytes::from(vec![0x5a; 4096]),
+                            ]),
                         };
                         assert!(!worker.dispatch(&unmatched, &mut SmallVec::new()).await);
                         for group in worker.codec_groups.iter().flatten() {
@@ -355,7 +354,6 @@ async fn grouped_large_multipart_remains_atomic_with_all_mute_policies() {
                     std::iter::once(Bytes::from_static(b"topic"))
                         .chain((0..parts).map(|_| Bytes::from_static(&[0x5a; 1024]))),
                 ),
-                topic: Bytes::from_static(b"topic"),
             };
             assert!(!worker.dispatch(&publication, &mut SmallVec::new()).await);
             for (slot, decoder) in &mut peers {

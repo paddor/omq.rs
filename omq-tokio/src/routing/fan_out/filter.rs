@@ -40,8 +40,8 @@ fn validate_group(msg: Message) -> core::result::Result<(Message, Option<Bytes>)
     Ok((msg, Some(group_bytes)))
 }
 
-pub(super) fn first_frame_bytes(msg: &Message) -> Bytes {
-    msg.part_bytes(0).unwrap_or_default()
+pub(super) fn first_frame_slice(msg: &Message) -> &[u8] {
+    msg.part_slice(0).unwrap_or_default()
 }
 
 pub(super) fn peer_matches(
@@ -49,7 +49,7 @@ pub(super) fn peer_matches(
     subscriptions: &SubscriptionSet,
     groups: &FxHashSet<Bytes>,
     any_groups: bool,
-    topic: &Bytes,
+    topic: &[u8],
     group: Option<&[u8]>,
 ) -> bool {
     match (mode, group) {

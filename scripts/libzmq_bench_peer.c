@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
@@ -345,6 +346,91 @@ static void *send_thread(void *arg) {
     }
     free(buf);
     return NULL;
+}
+
+static void drain_subscribers(void **sockets, int count, int size,
+                              double deadline, long long *counts) {
+    zmq_pollitem_t items[256] = {{0}};
+    for (int i = 0; i < count; i++) {
+        items[i].socket = sockets[i];
+        items[i].events = ZMQ_POLLIN;
+    }
+    int batch = size <= 1024 ? 64 : 256;
+    int byte_limit = 65536 / (size > 0 ? size : 1);
+    if (byte_limit < 1) byte_limit = 1;
+    if (batch > byte_limit) batch = byte_limit;
+    zmq_msg_t msg;
+    if (zmq_msg_init(&msg) != 0) die("zmq_msg_init");
+    while (now_secs() < deadline) {
+        int received = 0;
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < batch; j++) {
+                if (zmq_msg_recv(&msg, sockets[i], ZMQ_DONTWAIT) < 0) {
+                    if (zmq_errno() == EAGAIN) break;
+                    if (zmq_errno() == EINTR) continue;
+                    die("multi-sub recv");
+                }
+                counts[i]++;
+                received = 1;
+            }
+        }
+        if (!received) {
+            double remaining_ms = (deadline - now_secs()) * 1000.0;
+            if (remaining_ms <= 0) break;
+            long timeout_ms = (long)remaining_ms + 1;
+            if (zmq_poll(items, count, timeout_ms) < 0 && zmq_errno() != EINTR)
+                die("multi-sub poll");
+        }
+    }
+    zmq_msg_close(&msg);
+}
+
+static void run_multi_sub(void *ctx, const char *addr, int size,
+                          double duration, int count) {
+    void *sockets[256];
+    long long counts[256] = {0};
+    for (int i = 0; i < count; i++) {
+        sockets[i] = zmq_socket(ctx, ZMQ_SUB);
+        if (!sockets[i]) die("zmq_socket SUB");
+        if (bench_curve_enabled()) setup_curve_client(sockets[i]);
+        if (zmq_setsockopt(sockets[i], ZMQ_SUBSCRIBE, "", 0) != 0)
+            die("subscribe");
+        if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
+    }
+    const char *warmup_env = getenv("OMQ_BENCH_WARMUP_MS");
+    double warmup = warmup_env ? atof(warmup_env) / 1000.0 : 0.5;
+    const char *start_env = getenv("OMQ_BENCH_START_AT");
+    if (start_env && *start_env) {
+        double remaining = atof(start_env) - warmup - wall_secs();
+        if (remaining > 0) {
+            struct timespec ts = {
+                (time_t)remaining,
+                (long)((remaining - (time_t)remaining) * 1e9)
+            };
+            nanosleep(&ts, NULL);
+        }
+    }
+    drain_subscribers(sockets, count, size, now_secs() + warmup, counts);
+    wait_for_start_barrier();
+    memset(counts, 0, sizeof(counts));
+    double cpu_before = cpu_time_secs();
+    double t0 = now_secs();
+    drain_subscribers(sockets, count, size, t0 + duration, counts);
+    double elapsed = now_secs() - t0;
+    double cpu = cpu_time_secs() - cpu_before;
+    long long total = 0;
+    double rates[256];
+    double per_min = 1e18, per_max = 0;
+    for (int i = 0; i < count; i++) {
+        total += counts[i];
+        rates[i] = (double)counts[i] / elapsed;
+        if (rates[i] < per_min) per_min = rates[i];
+        if (rates[i] > per_max) per_max = rates[i];
+    }
+    printf("%lld %.6f %d %.6f %d %.1f %.1f",
+           total, elapsed, size, cpu, count, per_min, per_max);
+    print_fairness(rates, count, elapsed);
+    for (int i = 0; i < count; i++) zmq_close(sockets[i]);
 }
 
 int main(int argc, char **argv) {
@@ -717,8 +803,16 @@ done_inproc_pubsub:;
         for (int i = 0; i < actual_peers; i++) zmq_close(subs[i]);
         exit(0);
 
-    } else if (strcmp(role, "multi-pull") == 0 ||
-               strcmp(role, "multi-sub") == 0) {
+    } else if (strcmp(role, "multi-sub") == 0) {
+        if (argc < 6) goto usage;
+        int count = atoi(argv[5]);
+        if (count < 1 || count > 256) {
+            fprintf(stderr, "socket_count must be 1..256\n");
+            return 1;
+        }
+        run_multi_sub(ctx, addr, size, atof(argv[4]), count);
+
+    } else if (strcmp(role, "multi-pull") == 0) {
         if (argc < 6) goto usage;
         double duration = atof(argv[4]);
         int count = atoi(argv[5]);
@@ -726,22 +820,14 @@ done_inproc_pubsub:;
             fprintf(stderr, "socket_count must be 1..256\n");
             return 1;
         }
-        int is_sub = (strcmp(role, "multi-sub") == 0);
 
         RecvWorker workers[256];
         void *sockets[256];
         pthread_t threads[256];
 
         for (int i = 0; i < count; i++) {
-            if (is_sub) {
-                sockets[i] = zmq_socket(ctx, ZMQ_SUB);
-                if (!sockets[i]) die("zmq_socket SUB");
-                if (bench_curve_enabled()) setup_curve_client(sockets[i]);
-                zmq_setsockopt(sockets[i], ZMQ_SUBSCRIBE, "", 0);
-            } else {
-                sockets[i] = zmq_socket(ctx, ZMQ_PULL);
-                if (!sockets[i]) die("zmq_socket PULL");
-            }
+            sockets[i] = zmq_socket(ctx, ZMQ_PULL);
+            if (!sockets[i]) die("zmq_socket PULL");
             if (zmq_connect(sockets[i], addr) != 0) die("zmq_connect");
             workers[i].sock = sockets[i];
             atomic_store(&workers[i].counter, 0);

@@ -128,6 +128,12 @@ submits one message. Receive turns use a 128-message, 64 KiB budget, permitting
 one larger message. Each turn has one clock check; boundary-crossing turns are
 excluded.
 
+The main TCP PUB/SUB chart uses one publisher and 32 subscriber sockets in a
+second process. Blocking OMQ and libzmq use one application thread per process;
+the receiver fair-drains subscribers and parks when all are empty. Both
+processes use the same configured IO-thread count and, with taskset enabled,
+two CPU cores each.
+
 ## Updating Charts
 
 Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers

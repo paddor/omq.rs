@@ -160,7 +160,7 @@ impl Relay {
             .parse()
             .unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("dart://{}", socket.local_addr().unwrap())
+        let endpoint: Endpoint = format!("dart://{}", socket.local_addr().unwrap())
             .parse()
             .unwrap();
         let stop = CancellationToken::new();
@@ -284,10 +284,7 @@ impl Scenario {
         if flow == Flow::RadioDish {
             bound.join(Bytes::from_static(GROUP)).await.unwrap();
         }
-        let endpoint = bound
-            .bind("dart://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let endpoint = bound.bind("dart://127.0.0.1:0").await.unwrap();
         let relay = if workload == Workload::Recovery {
             Some(Relay::new(&endpoint).await)
         } else {

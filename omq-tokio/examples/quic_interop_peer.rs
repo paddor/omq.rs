@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.quic.server_cert_pem = Some(cert);
             options.quic.server_key_pem = Some(std::fs::read(directory.join("server.key"))?);
             let rep = context.blocking_socket(SocketType::Rep, options);
-            print_line(rep.bind(endpoint.parse()?)?)?;
+            print_line(rep.bind(endpoint)?)?;
             if command == "bind-rep" {
                 for _ in cases() {
                     let message = rep.recv_timeout(Duration::from_secs(10))?;
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.quic.trust_pem = Some(cert);
             options.quic.server_name = Some("localhost".into());
             let req = context.blocking_socket(SocketType::Req, options);
-            req.connect(endpoint.parse()?)?;
+            req.connect(endpoint)?;
             print_line("CONNECTED")?;
             for expected in cases() {
                 req.send(expected.clone())?;

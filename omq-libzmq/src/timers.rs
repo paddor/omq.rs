@@ -51,11 +51,13 @@ fn deadline_after(interval: Duration) -> Option<Instant> {
     Instant::now().checked_add(interval)
 }
 
+/// Create an empty timer set; release it with `zmq_timers_destroy`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_new() -> *mut c_void {
     Box::into_raw(Box::<ZmqTimers>::default()).cast()
 }
 
+/// Release a timer set and clear the caller's handle pointer; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_destroy(timers_p: *mut *mut c_void) -> c_int {
     if timers_p.is_null() {
@@ -74,6 +76,7 @@ pub extern "C" fn zmq_timers_destroy(timers_p: *mut *mut c_void) -> c_int {
     0
 }
 
+/// Add a periodic millisecond timer and callback; return its ID or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_add(
     timers_ptr: *mut c_void,
@@ -101,6 +104,7 @@ pub extern "C" fn zmq_timers_add(
     id
 }
 
+/// Remove a timer by ID; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_cancel(timers_ptr: *mut c_void, timer_id: c_int) -> c_int {
     let timers = match unsafe { timers(timers_ptr) } {
@@ -114,6 +118,8 @@ pub extern "C" fn zmq_timers_cancel(timers_ptr: *mut c_void, timer_id: c_int) ->
     0
 }
 
+/// Replace a timer's millisecond interval and restart its deadline; return zero or -1 with
+/// errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_set_interval(
     timers_ptr: *mut c_void,
@@ -133,6 +139,7 @@ pub extern "C" fn zmq_timers_set_interval(
     0
 }
 
+/// Restart a timer's deadline using its current interval; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_reset(timers_ptr: *mut c_void, timer_id: c_int) -> c_int {
     let timers = match unsafe { timers(timers_ptr) } {
@@ -146,6 +153,7 @@ pub extern "C" fn zmq_timers_reset(timers_ptr: *mut c_void, timer_id: c_int) -> 
     0
 }
 
+/// Return milliseconds until the next timer, or -1 when the set is empty or invalid.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_timeout(timers_ptr: *mut c_void) -> c_long {
     let timers = match unsafe { timers(timers_ptr) } {
@@ -165,6 +173,7 @@ pub extern "C" fn zmq_timers_timeout(timers_ptr: *mut c_void) -> c_long {
     c_long::try_from((next - now).as_millis()).unwrap_or(c_long::MAX)
 }
 
+/// Run due timer callbacks and reschedule their deadlines; return zero or -1 with errno.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_timers_execute(timers_ptr: *mut c_void) -> c_int {
     let callbacks = {

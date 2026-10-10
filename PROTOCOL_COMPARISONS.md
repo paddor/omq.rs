@@ -56,8 +56,8 @@ every hop.
 ## Request/Reply-Like Latency
 
 OMQ uses CLIENT/SERVER, one owned IO thread, and the latency workload profile.
-The first panel uses no explicit receive spin. The second uses 50 us OMQ receive
-spin; DART also spins its IO task for 50 us. Aeron's applications poll
+The first panel uses no explicit receive spin. The second uses 50 μs OMQ receive
+spin; DART also spins its IO task for 50 μs. Aeron's applications poll
 continuously. Colors identify the same implementation in both panels.
 
 <p align="center">

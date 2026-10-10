@@ -196,10 +196,7 @@ async fn linger_drains_fanout_on_two_io_threads() {
                 .linger(Duration::from_secs(4))
         },
     );
-    let endpoint = publisher
-        .bind("ws://127.0.0.1:0/".parse().unwrap())
-        .await
-        .unwrap();
+    let endpoint = publisher.bind("ws://127.0.0.1:0/").await.unwrap();
     let mut subscribers = Vec::new();
     for _ in 0..4 {
         let subscriber = Socket::new(SocketType::Sub, Options::default().recv_hwm(1));
@@ -268,7 +265,7 @@ async fn drain_large_partial_writes(scheme: &str) {
     let receiver = Socket::new(SocketType::Pull, receiver_options);
     let suffix = if scheme == "tcp" { "" } else { "/" };
     let endpoint = receiver
-        .bind(format!("{scheme}://127.0.0.1:0{suffix}").parse().unwrap())
+        .bind(format!("{scheme}://127.0.0.1:0{suffix}"))
         .await
         .unwrap();
     let sender = Socket::new(SocketType::Push, sender_options);

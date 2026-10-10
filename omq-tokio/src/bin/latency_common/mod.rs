@@ -145,7 +145,7 @@ mod tests {
             let responder =
                 ctx.blocking_socket(pair.responder(), pair.options(Options::default(), false));
             let endpoint = responder
-                .bind(format!("inproc://latency-pair-{pair:?}").parse().unwrap())
+                .bind(format!("inproc://latency-pair-{pair:?}"))
                 .unwrap();
             let requester =
                 ctx.blocking_socket(pair.requester(), pair.options(Options::default(), true));

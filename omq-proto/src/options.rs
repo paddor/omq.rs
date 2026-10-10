@@ -88,6 +88,9 @@ impl From<&Options> for CompressionOptions {
     }
 }
 
+const ZSTD_LEVEL_MIN: i32 = -8;
+const ZSTD_LEVEL_MAX: i32 = 4;
+
 /// Per-socket configuration.
 ///
 /// # Compatibility warnings
@@ -105,8 +108,6 @@ impl From<&Options> for CompressionOptions {
 /// - The same socket types with a `connect()` endpoint allocate a pre-ready
 ///   pipe at `connect()` time. Sends may queue there before the peer reaches
 ///   READY. Native OMQ has no `ZMQ_IMMEDIATE` option to disable that queue.
-const ZSTD_LEVEL_MIN: i32 = -8;
-const ZSTD_LEVEL_MAX: i32 = 4;
 
 // Compression fields (compression_dict through compression_offload_threshold)
 // could be grouped into a sub-struct, but the public API change would touch
@@ -416,8 +417,10 @@ pub enum DartCongestion {
 #[cfg(feature = "dart")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DartEcn {
+    /// Validate ECN feedback before using it for adaptive congestion control.
     #[default]
     Auto,
+    /// Disable outgoing ECN marking and feedback validation.
     Disabled,
 }
 
@@ -427,7 +430,7 @@ pub enum DartEcn {
 pub struct DartOptions {
     /// Maximum admitted peers across the socket. Default 1024.
     pub max_ready_peers: usize,
-    /// Busy wait before readiness waiting. Default zero, maximum 50 us.
+    /// UDP polling budget on the IO runtime. Default zero, at most 50 microseconds.
     /// [`Duration::MAX`] polls continuously, including while idle. Endpoint
     /// turns remain bounded so other runtime tasks and controls make progress.
     pub io_spin: Duration,

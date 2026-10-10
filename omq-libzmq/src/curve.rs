@@ -2,6 +2,8 @@
 
 use omq_tokio::proto::z85;
 
+/// Generate CURVE keys as two null-terminated 40-character Z85 strings in 41-byte output
+/// buffers.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_curve_keypair(
     z85_public_key: *mut libc::c_char,
@@ -24,6 +26,7 @@ pub extern "C" fn zmq_curve_keypair(
     0
 }
 
+/// Derive a Z85 public key from a Z85 secret key into a 41-byte output buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_curve_public(
     z85_public_key: *mut libc::c_char,
@@ -53,6 +56,8 @@ pub extern "C" fn zmq_curve_public(
     0
 }
 
+/// Encode bytes into caller-owned, null-terminated Z85 storage; return the destination or
+/// null on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_z85_encode(
     dest: *mut libc::c_char,
@@ -78,6 +83,8 @@ pub extern "C" fn zmq_z85_encode(
     dest
 }
 
+/// Decode a null-terminated Z85 string into caller-owned byte storage; return the destination
+/// or null.
 #[unsafe(no_mangle)]
 pub extern "C" fn zmq_z85_decode(dest: *mut u8, string: *const libc::c_char) -> *mut u8 {
     if dest.is_null() || string.is_null() {

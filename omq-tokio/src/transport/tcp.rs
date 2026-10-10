@@ -15,6 +15,7 @@ use omq_proto::error::{Error, Result};
 
 use super::{Listener, PeerIdent, Transport};
 
+/// TCP transport with DNS resolution and nonblocking stream I/O.
 #[derive(Debug)]
 pub struct TcpTransport;
 

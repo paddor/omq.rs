@@ -183,15 +183,16 @@ pub struct Socket {
 }
 
 impl Socket {
-    /// Connect a caller-driven TCP socket.
+    /// Connect a caller-driven TCP socket to a URI string or typed endpoint.
     ///
     /// Currently supports `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`,
     /// `CLIENT`, and `SERVER`.
     pub async fn connect(
         socket_type: SocketType,
-        endpoint: Endpoint,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
         options: Options,
     ) -> Result<Self> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         validate_connect_mode(socket_type, &endpoint, &options)?;
         let (monitor, _) = broadcast::channel(1024);
         let mut socket = Self {
@@ -212,7 +213,7 @@ impl Socket {
         Ok(socket)
     }
 
-    /// Bind a caller-driven TCP socket and return its bound endpoint.
+    /// Bind a URI string or typed endpoint and return a caller-driven TCP socket.
     ///
     /// The socket accepts one peer at a time. If the peer disconnects, the next
     /// operation waits for a new peer on the same listener.
@@ -221,9 +222,10 @@ impl Socket {
     /// `CLIENT`, and `SERVER`.
     pub async fn bind(
         socket_type: SocketType,
-        endpoint: Endpoint,
+        endpoint: impl TryInto<Endpoint, Error: Into<Error>>,
         options: Options,
     ) -> Result<(Self, Endpoint)> {
+        let endpoint = endpoint.try_into().map_err(Into::into)?;
         validate_bind_mode(socket_type, &endpoint, &options)?;
         let (listener, bound) = bind_tcp_listener(&endpoint).await?;
         let (monitor, _) = broadcast::channel(1024);
@@ -1061,13 +1063,10 @@ mod tests {
 
     #[tokio::test]
     async fn bound_rep_round_trips_with_exclusive_req() {
-        let (mut rep, endpoint) = Socket::bind(
-            SocketType::Rep,
-            "tcp://127.0.0.1:0".parse().unwrap(),
-            Options::default(),
-        )
-        .await
-        .unwrap();
+        let (mut rep, endpoint) =
+            Socket::bind(SocketType::Rep, "tcp://127.0.0.1:0", Options::default())
+                .await
+                .unwrap();
         let server = tokio::spawn(async move {
             for sequence in 0_u64..10 {
                 assert_eq!(
@@ -1135,13 +1134,10 @@ mod tests {
 
     #[tokio::test]
     async fn client_server_round_trip() {
-        let (mut server, endpoint) = Socket::bind(
-            SocketType::Server,
-            "tcp://127.0.0.1:0".parse().unwrap(),
-            Options::default(),
-        )
-        .await
-        .unwrap();
+        let (mut server, endpoint) =
+            Socket::bind(SocketType::Server, "tcp://127.0.0.1:0", Options::default())
+                .await
+                .unwrap();
         let server_task = tokio::spawn(async move {
             let request = server.recv().await.unwrap();
             assert_eq!(request, Message::single("request"));
@@ -1168,13 +1164,10 @@ mod tests {
 
     #[tokio::test]
     async fn server_rejects_stale_routing_id_after_reconnect() {
-        let (mut server, endpoint) = Socket::bind(
-            SocketType::Server,
-            "tcp://127.0.0.1:0".parse().unwrap(),
-            Options::default(),
-        )
-        .await
-        .unwrap();
+        let (mut server, endpoint) =
+            Socket::bind(SocketType::Server, "tcp://127.0.0.1:0", Options::default())
+                .await
+                .unwrap();
 
         let connect = Socket::connect(SocketType::Client, endpoint.clone(), Options::default());
         let accept = server.maintain();
@@ -1219,13 +1212,10 @@ mod tests {
 
     #[tokio::test]
     async fn client_rejects_multipart_send() {
-        let (mut server, endpoint) = Socket::bind(
-            SocketType::Server,
-            "tcp://127.0.0.1:0".parse().unwrap(),
-            Options::default(),
-        )
-        .await
-        .unwrap();
+        let (mut server, endpoint) =
+            Socket::bind(SocketType::Server, "tcp://127.0.0.1:0", Options::default())
+                .await
+                .unwrap();
         let server_task = tokio::spawn(async move {
             let _ = server.recv().await;
         });
@@ -1245,13 +1235,10 @@ mod tests {
 
     #[tokio::test]
     async fn pair_round_trips() {
-        let (mut bound, endpoint) = Socket::bind(
-            SocketType::Pair,
-            "tcp://127.0.0.1:0".parse().unwrap(),
-            Options::default(),
-        )
-        .await
-        .unwrap();
+        let (mut bound, endpoint) =
+            Socket::bind(SocketType::Pair, "tcp://127.0.0.1:0", Options::default())
+                .await
+                .unwrap();
         let server = tokio::spawn(async move {
             assert_eq!(bound.recv().await.unwrap(), Message::single("from-client"));
             bound.send(&Message::single("from-server")).await

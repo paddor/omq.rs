@@ -39,10 +39,7 @@ fn soak_quic_peer_churn() {
             SocketType::Push,
             quic_options(&cert, Some(&key)).send_hwm(1024),
         );
-        let ep: Endpoint = push
-            .bind("quic://127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let ep: Endpoint = push.bind("quic://127.0.0.1:0").await.unwrap();
         let mut rng = soak_common::seeded_rng("quic_churn");
         let mut peers: Vec<Socket> = Vec::new();
         let mut sent: u64 = 0;

@@ -28,10 +28,14 @@ const TRAIN_MAX_SAMPLE_LEN: usize = 2048;
 const USER_DICT_ID_MIN: u32 = 32_768;
 const USER_DICT_ID_MAX: u32 = 0x7FFF_FFFF;
 
+/// Maximum dictionary shipment size in bytes.
 pub const MAX_DICT_BYTES: usize = 8 * 1024;
+/// Default Zstd compression level.
 pub const DEFAULT_LEVEL: i32 = 1;
+/// Default trained dictionary capacity in bytes.
 pub const DEFAULT_DICT_CAPACITY: usize = 2048;
 
+/// Train a bounded ZDICT dictionary; return `None` for unusable samples or output.
 pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
     use zrip::dict::fastcover::{FastCoverParams, select_segments};
     use zrip::dict::finalize::finalize_dictionary;
@@ -47,6 +51,7 @@ pub fn train_zdict(samples: &[&[u8]], capacity: usize) -> Option<Bytes> {
     Some(Bytes::from(dict))
 }
 
+/// Whether a single-part message starts with ZDICT magic.
 pub fn is_dict_shipment(msg: &Message) -> bool {
     msg.len() == 1
         && msg
@@ -59,6 +64,7 @@ struct TrainState {
     total_bytes: usize,
 }
 
+/// Per-part Zstd encoder with optional static or trained dictionary.
 pub struct ZstdEncoder {
     send_dict: Option<Bytes>,
     send_dict_shipped: bool,
@@ -104,10 +110,12 @@ impl Default for ZstdEncoder {
 }
 
 impl ZstdEncoder {
+    /// Create a transform with default thresholds and no dictionary.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Train one outbound dictionary unless a static dictionary is configured.
     #[must_use]
     pub fn with_auto_train(mut self) -> Self {
         if self.send_dict.is_none() {
@@ -119,18 +127,24 @@ impl ZstdEncoder {
         self
     }
 
+    /// Set the minimum part size at which compression is attempted.
     #[must_use]
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.threshold_override = Some(threshold);
         self
     }
 
+    /// Set trained dictionary capacity, capped at the protocol limit.
     #[must_use]
     pub fn with_dict_capacity(mut self, capacity: usize) -> Self {
         self.dict_capacity = capacity.min(MAX_DICT_BYTES);
         self
     }
 
+    /// Create an encoder using a static ZDICT dictionary.
+    ///
+    /// # Errors
+    /// Returns errors for an empty, oversized, or invalid ZDICT dictionary.
     pub fn with_send_dict(dict: Bytes) -> Result<Self> {
         validate_dict(&dict, "Zstd", MAX_DICT_BYTES)?;
         if dict.len() < 4 || dict[..4] != ZDICT_MAGIC {
@@ -147,6 +161,7 @@ impl ZstdEncoder {
         })
     }
 
+    /// Set the Zstd compression level and invalidate cached encoder contexts.
     #[must_use]
     pub fn with_level(mut self, level: i32) -> Self {
         self.level = level;
@@ -154,12 +169,14 @@ impl ZstdEncoder {
         self
     }
 
+    /// Set the maximum outbound message body size; `None` removes the limit.
     #[must_use]
     pub fn with_max_message_size(mut self, max: Option<usize>) -> Self {
         self.max_message_size = max;
         self
     }
 
+    /// Return a guaranteed per-part plaintext threshold, or `None` if dynamic.
     pub fn passthrough_threshold(&self) -> Option<usize> {
         if self.threshold_override.is_some() {
             Some(self.effective_threshold())
@@ -172,10 +189,12 @@ impl ZstdEncoder {
         }
     }
 
+    /// Whether encoding requires neither training nor a dictionary shipment.
     pub fn can_offload(&self) -> bool {
         self.train.is_none() && (self.send_dict.is_none() || self.send_dict_shipped)
     }
 
+    /// Create an independent encoder sharing configuration and dictionary bytes.
     #[must_use]
     pub fn new_offload(&self) -> Self {
         Self {
@@ -190,6 +209,7 @@ impl ZstdEncoder {
         }
     }
 
+    /// Copy the primary encoder's dictionary and invalidate stale contexts.
     pub fn sync_dict(&mut self, primary: &Self) {
         let same = match (&self.send_dict, &primary.send_dict) {
             (None, None) => true,
@@ -217,6 +237,10 @@ impl ZstdEncoder {
         self.dict_capacity = primary.dict_capacity;
     }
 
+    /// Encode message parts, emitting at most one preceding dictionary shipment.
+    ///
+    /// # Errors
+    /// Returns errors for invalid message sizes or compression failure.
     pub fn encode(&mut self, msg: &Message) -> Result<TransformedOut> {
         for part in &msg.parts_payload() {
             self.maybe_train(&part.as_bytes());
@@ -297,6 +321,7 @@ impl ZstdEncoder {
     }
 }
 
+/// Per-part Zstd decoder with bounded dictionary and message sizes.
 pub struct ZstdDecoder {
     recv_dict: Option<Bytes>,
     max_message_size: Option<usize>,
@@ -325,6 +350,7 @@ impl Default for ZstdDecoder {
 }
 
 impl ZstdDecoder {
+    /// Create a transform with default thresholds and no dictionary.
     pub fn new() -> Self {
         Self::default()
     }
@@ -337,12 +363,17 @@ impl ZstdDecoder {
         self
     }
 
+    /// Set the maximum received dictionary size, capped at the protocol limit.
     #[must_use]
     pub fn with_max_recv_dict_size(mut self, max: usize) -> Self {
         self.max_recv_dict_size = max.min(MAX_DICT_BYTES);
         self
     }
 
+    /// Decode message parts; return `None` for a consumed dictionary shipment.
+    ///
+    /// # Errors
+    /// Returns errors for invalid envelopes, dictionaries, sizes, or compressed data.
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
         self.decode_with_budget(msg, self.max_message_size)
     }

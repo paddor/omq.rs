@@ -2,25 +2,26 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use omq_proto::dart::{self, Ready};
+use omq_tokio::diagnostics::{dart_capabilities, dart_stats};
 use omq_tokio::options::WorkloadProfile;
 use omq_tokio::{DartCongestion, DartOptions, Endpoint, Message, Options, Socket, SocketType};
 
 #[tokio::test]
 async fn capabilities_follow_live_carriers_without_retaining_closed_endpoints() {
     let socket = Socket::new(SocketType::Channel, Options::default());
-    assert_eq!(socket.dart_capabilities(), None);
+    assert_eq!(dart_capabilities(&socket), None);
     let first = socket.bind(endpoint(0)).await.unwrap();
-    let initial = socket.dart_capabilities().unwrap();
+    let initial = dart_capabilities(&socket).unwrap();
     assert!((1..=64).contains(&initial.max_gso_segments));
     assert!((1..=64).contains(&initial.max_gro_segments));
     let second = socket.bind(endpoint(0)).await.unwrap();
-    assert_eq!(socket.dart_capabilities(), Some(initial));
+    assert_eq!(dart_capabilities(&socket), Some(initial));
     socket.unbind(first).await.unwrap();
-    assert_eq!(socket.dart_capabilities(), Some(initial));
+    assert_eq!(dart_capabilities(&socket), Some(initial));
     socket.unbind(second).await.unwrap();
-    assert_eq!(socket.dart_capabilities(), None);
+    assert_eq!(dart_capabilities(&socket), None);
     socket.clone_shared().close().await.unwrap();
-    assert_eq!(socket.dart_capabilities(), None);
+    assert_eq!(dart_capabilities(&socket), None);
 }
 
 fn address(endpoint: &Endpoint) -> std::net::SocketAddr {
@@ -331,7 +332,7 @@ async fn held_receive_storage_backpressures_and_final_clone_drop_returns_credit(
             .is_err()
     );
     assert_eq!(gather.connections().await.unwrap().len(), 1);
-    assert_eq!(gather.dart_stats().pool_exhausted, 0);
+    assert_eq!(dart_stats(&gather).pool_exhausted, 0);
     // Receive storage is independent of application-created send buffers.
     assert!(pool.try_buffer(1).is_some());
     drop(clone);
@@ -456,13 +457,13 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
                     } else {
                         32
                     };
-                    let until = receiver.dart_stats().invalid_datagrams + count;
+                    let until = dart_stats(&receiver).invalid_datagrams + count;
                     for _ in 0..count {
                         if raw.send_to(packet, target).await.is_err() {
                             return;
                         }
                     }
-                    while receiver.dart_stats().invalid_datagrams < until {
+                    while dart_stats(&receiver).invalid_datagrams < until {
                         if stop.is_cancelled() || started.elapsed() >= Duration::from_secs(2) {
                             return;
                         }
@@ -475,7 +476,7 @@ async fn malformed_flood_and_closed_receive_window_preserve_handshake_and_teardo
     };
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let stats = gather.dart_stats();
+            let stats = dart_stats(&gather);
             if stats.invalid_datagrams != 0 {
                 break;
             }
@@ -683,16 +684,16 @@ async fn recover_faults(congestion: DartCongestion, profile: WorkloadProfile, si
     assert!(
         delivery.is_ok(),
         "size={size} congestion={congestion:?} profile={profile:?} received={received} sender={:?} receiver={:?}",
-        scatter.dart_stats(),
-        gather.dart_stats()
+        dart_stats(&scatter),
+        dart_stats(&gather)
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), gather.recv())
             .await
             .is_err()
     );
-    assert!(scatter.dart_stats().retransmitted >= 3);
-    assert!(gather.dart_stats().duplicates >= 1);
+    assert!(dart_stats(&scatter).retransmitted >= 3);
+    assert!(dart_stats(&gather).duplicates >= 1);
     stop.cancel();
     let faults = forwarder.await.unwrap();
     assert_eq!(faults, ([true; 3], true, true, true));
@@ -795,7 +796,7 @@ async fn full_receive_lane_retains_messages_and_other_sources_progress() {
                 .unwrap();
         assert_eq!(queued.part_slice(0).unwrap(), &[2; 16]);
     }
-    assert_eq!(gather.dart_stats().receive_overflow, 0);
+    assert_eq!(dart_stats(&gather).receive_overflow, 0);
     slow.close().await.unwrap();
     fast.close().await.unwrap();
     gather.close().await.unwrap();
@@ -856,7 +857,7 @@ async fn unsupported_types_destinations_and_spin_budgets_fail_during_setup() {
         "dart://127.0.0.1:0",
         "dart://239.1.2.3:1234",
     ] {
-        assert!(socket.connect(target.parse().unwrap()).await.is_err());
+        assert!(socket.connect(target).await.is_err());
     }
     socket.close().await.unwrap();
 }
@@ -997,7 +998,7 @@ async fn ipv6_and_hostname_endpoints_use_native_datagrams() {
         let gather = Socket::new(SocketType::Gather, Options::default());
         let scatter = Socket::new(SocketType::Scatter, Options::default());
         scatter
-            .connect(gather.bind(bind.parse().unwrap()).await.unwrap())
+            .connect(gather.bind(bind).await.unwrap())
             .await
             .unwrap();
         ready(&scatter, 1).await;
@@ -1035,7 +1036,7 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
     send_ready(&raw, target, SocketType::Scatter, None, true).await;
     let session = response(&raw).await;
     ready(&gather, 1).await;
-    let before = gather.dart_stats();
+    let before = dart_stats(&gather);
     let bodies: Vec<_> = (0..97).map(|index| vec![index; 16]).collect();
     for (sequence, body) in bodies.iter().enumerate() {
         send_data(&raw, target, session, sequence as u64, body, None).await;
@@ -1051,7 +1052,7 @@ async fn separate_datagrams(profile: WorkloadProfile, io_spin: Duration) {
     assert_eq!(received, (0..97).collect::<Vec<_>>());
     // Counters are published at the end of the bounded receive turn.
     tokio::task::yield_now().await;
-    let after = gather.dart_stats();
+    let after = dart_stats(&gather);
     assert!(after.received_datagrams - before.received_datagrams >= 97);
     assert_eq!(after.received_messages - before.received_messages, 97);
     assert_eq!(after.invalid_datagrams, 0);

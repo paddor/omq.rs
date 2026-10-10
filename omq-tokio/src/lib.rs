@@ -23,6 +23,8 @@ compile_error!("omq-tokio requires target_has_atomic = \"64\"");
 
 pub mod blocking;
 pub mod context;
+#[cfg(feature = "dart")]
+pub mod diagnostics;
 pub mod engine;
 pub mod exclusive;
 pub mod proxy;

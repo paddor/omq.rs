@@ -29,13 +29,21 @@ pub(crate) async fn reserve_authenticated(
 /// signal, used by omq-libzmq for direct delivery.
 #[allow(private_interfaces)]
 pub enum RecvSink {
+    /// Shared socket receive queue.
     Channel(Arc<crate::socket::recv::SharedRecvPipe>),
+    /// Direct SPSC ring with a consumer notification callback.
     Yring(YringSink),
+    /// Fair receive queues partitioned by peer.
     Fanin(crate::socket::fanin::Sink),
+    /// Messages accompanied by authenticated peer properties.
     Authenticated(AuthenticatedRecvSink),
+    /// Latest-message slot replacing earlier unread messages.
     Conflate(Arc<crate::socket::recv::ConflateRecvSlot>),
+    /// REP receive path retaining the request route and envelope.
     Rep(RepRecvSink),
+    /// SERVER receive path attaching an opaque routing ID.
     Server(ServerRecvSink),
+    /// Fair PEER receive path retaining peer routing information.
     Peer(crate::socket::peer_recv::PeerRecvSink),
 }
 
@@ -85,8 +93,11 @@ pub struct ServerRecvSink {
 /// empty-to-non-empty transitions.
 #[allow(private_interfaces)]
 pub struct YringSink {
+    /// Producer for the receiving peer's ring.
     pub producer: yring::Producer<Message>,
+    /// Notify the consumer when the queue becomes nonempty.
     pub signal: Box<dyn Fn() + Send + Sync>,
+    /// Notify producers when receive capacity or closure changes.
     pub space: Arc<StateSignal>,
 }
 
@@ -99,6 +110,7 @@ pub struct AuthenticatedRecvItem {
 }
 
 impl AuthenticatedRecvItem {
+    /// Separate the message from its authenticated peer properties.
     pub fn into_parts(self) -> (Message, Arc<omq_proto::proto::command::PeerProperties>) {
         (self.message, self.peer_properties)
     }
@@ -146,6 +158,7 @@ impl std::fmt::Debug for RecvSinkConfig {
 }
 
 impl RecvSinkConfig {
+    /// Configure the initial sink and capacity for replacement receive rings.
     pub fn new(
         initial_sink: RecvSink,
         signal: Arc<dyn Fn() + Send + Sync>,
@@ -192,6 +205,7 @@ impl RecvSinkConfig {
         *pending = Some(cons);
     }
 
+    /// Take the current sink, or clone an authenticated shared sink.
     pub fn take_sink(&self) -> Option<RecvSink> {
         self.take_for_owner(None)
     }
@@ -230,11 +244,13 @@ impl RecvSinkConfig {
         Some(RecvSink::Authenticated(sink.clone()))
     }
 
+    /// Take a replacement ring consumer without waiting for its configuration lock.
     #[allow(private_interfaces)]
     pub fn try_take_pending_consumer(&self) -> Option<yring::Consumer<Message>> {
         self.pending_consumer.try_lock().ok()?.take()
     }
 
+    /// Wake drivers waiting for receive capacity.
     pub fn notify_space(&self) {
         self.space.notify_changed();
     }

@@ -64,9 +64,12 @@ pub(crate) enum ReceiveProfile {
 
 /// Stream abstraction allowing production TCP streams to use owned halves.
 pub trait DriverStream: Sized {
+    /// Owned read half used by the connection driver.
     type Reader: AsyncRead + Send + Unpin + 'static;
+    /// Write half used by the connection driver.
     type Writer: DriverWrite;
 
+    /// Split the stream; `fast_write` enables supported immediate write paths.
     fn split(self, fast_write: bool) -> (Self::Reader, Self::Writer);
 }
 
@@ -288,7 +291,10 @@ pub enum PeerDriverCommand {
     SendCommand(Command),
     /// Finish accepted output before shutting down the transport. The deadline
     /// belongs to the socket close operation and must not restart per stage.
-    DrainAndClose { deadline: Option<Instant> },
+    DrainAndClose {
+        /// Absolute linger deadline; `None` waits indefinitely.
+        deadline: Option<Instant>,
+    },
     /// Stop immediately, including any staged output.
     Close,
 }
@@ -312,6 +318,7 @@ pub struct PeerDriverHandle {
     pub inbox: mpsc::Sender<PeerDriverCommand>,
     /// Fallback data plane for peers without a send pipe or transmit slot.
     pub data_inbox: mpsc::Sender<PeerDriverData>,
+    /// Request immediate driver teardown.
     pub cancel: CancellationToken,
     pub(crate) transmit_slot: Option<Arc<PeerTransmitSlot>>,
     pub(crate) direct_tcp_writer: Option<Arc<crate::socket::dispatch::DirectTcpWriter>>,
@@ -353,8 +360,13 @@ impl From<PeerDriverHandle> for ActorPeerDriverHandle {
 /// events independently of their bounded application-data lane.
 #[derive(Debug)]
 pub enum PeerEvent {
+    /// A decoded protocol event.
     Event(Event),
-    Closed { error: Option<String> },
+    /// The driver terminated.
+    Closed {
+        /// Failure description, or `None` for orderly shutdown.
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -741,6 +753,7 @@ impl<T> ConnectionDriver<T>
 where
     T: DriverStream,
 {
+    /// Create a standalone driver with default configuration.
     pub fn new(
         stream: T,
         connection: Connection,
@@ -760,6 +773,7 @@ where
         )
     }
 
+    /// Create a standalone driver with explicit limits and receive configuration.
     pub fn with_config(
         stream: T,
         connection: Connection,

@@ -85,10 +85,15 @@ impl SocketState {
 /// on at least one endpoint. Endpoints for an unused IP family may report None.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DartCapabilities {
+    /// Maximum datagrams per UDP segmentation offload submission.
     pub max_gso_segments: usize,
+    /// Maximum datagrams per UDP receive offload aggregate.
     pub max_gro_segments: usize,
+    /// IPv4 ECN metadata support; `None` means unconfirmed.
     pub ecn_ipv4: Option<bool>,
+    /// IPv6 ECN metadata support; `None` means unconfirmed.
     pub ecn_ipv6: Option<bool>,
+    /// Whether the UDP carrier may permit IP fragmentation.
     pub may_fragment: bool,
 }
 
@@ -112,11 +117,11 @@ impl DartCapabilities {
 }
 
 macro_rules! statistics {
-    ($($field:ident),* $(,)?) => {
+    ($($(#[$meta:meta])* $field:ident),* $(,)?) => {
         /// Approximate socket-wide DART counters. A snapshot is not atomic
         /// across fields. ECN absence is counted separately from Not-ECT.
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-        pub struct DartStats { $(pub $field: u64,)* }
+        pub struct DartStats { $($(#[$meta])* pub $field: u64,)* }
 
         #[derive(Debug, Default)]
         pub(crate) struct Counters { $($field: AtomicU64,)* }
@@ -136,24 +141,44 @@ macro_rules! statistics {
 }
 
 statistics!(
+    /// Received UDP datagrams, including control and invalid packets.
     received_datagrams,
+    /// Complete application messages delivered to the receive queue.
     received_messages,
+    /// Application messages whose initial transmission completed.
     sent_messages,
+    /// Malformed datagrams and rejected receive aggregates.
     invalid_datagrams,
+    /// Receive payload pool misses requiring fallback allocation.
     pool_exhausted,
+    /// Reserved receive-capacity overflow counter; currently always zero.
     receive_overflow,
+    /// UDP receive errors.
     receive_failures,
+    /// UDP send errors.
     send_failures,
+    /// Accepted sequence units marked ECT(0).
     ect0,
+    /// Accepted sequence units marked ECT(1).
     ect1,
+    /// Accepted sequence units marked Congestion Experienced.
     ce,
+    /// Accepted sequence units confirmed as Not-ECT.
     not_ect,
+    /// Accepted sequence units without confirmed ECN metadata.
     ecn_unavailable,
+    /// Application messages retired after remote acknowledgment.
     acknowledged,
+    /// Retransmitted sequence units, including fragments.
     retransmitted,
+    /// Duplicate sequence units received.
     duplicates,
+    /// Out-of-order sequence units received.
     reordered,
+    /// Transmission attempts blocked by receive credit.
     credit_stalls,
+    /// Transmission attempts blocked by congestion control or pacing.
     congestion_stalls,
+    /// ECN feedback validation failures.
     ecn_failures,
 );

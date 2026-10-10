@@ -25,10 +25,7 @@ async fn proxy_into_muted_nodrop_publisher_does_not_spin() {
     let ctx = Context::current();
     let options = Options::default().send_hwm(16).recv_hwm(16);
     let frontend = ctx.socket(SocketType::Pull, options.clone());
-    let frontend_endpoint = frontend
-        .bind("inproc://proxy-idle-frontend".parse().unwrap())
-        .await
-        .unwrap();
+    let frontend_endpoint = frontend.bind("inproc://proxy-idle-frontend").await.unwrap();
     let backend = ctx.socket(
         SocketType::Pub,
         Options {

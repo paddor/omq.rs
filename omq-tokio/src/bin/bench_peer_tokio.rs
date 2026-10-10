@@ -84,10 +84,7 @@ async fn report_bound_port(ctx: &omq_tokio::Context, ep: &Endpoint) {
         return;
     };
     let coord = ctx.socket(SocketType::Push, Options::default());
-    coord
-        .connect(coord_ep.parse().expect("valid coord endpoint"))
-        .await
-        .unwrap();
+    coord.connect(coord_ep).await.unwrap();
     coord
         .wait_connected(1, Duration::from_secs(5))
         .await

@@ -3,6 +3,7 @@
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
+use omq_tokio::diagnostics::{dart_capabilities, dart_stats};
 use omq_tokio::{Context, PayloadPool, Socket};
 use tokio_util::sync::CancellationToken;
 
@@ -36,7 +37,7 @@ pub(super) async fn run(config: &Config, affinity: &affinity::Affinity) {
     emit(&format!(
         "{{\"event\":\"ready\",\"affinity\":\"{}\",\"offloads\":{},\"dart_wire_version\":{version},\"dart_window_messages\":{},\"recv_pool_capacity\":{},\"recv_pool_slot_bytes\":{}}}",
         affinity.description(),
-        format_offloads(socket.dart_capabilities()),
+        format_offloads(dart_capabilities(&socket)),
         config.window_messages,
         if native { super::POOL_SLOTS } else { 0 },
         if native { super::POOL_SLOT_BYTES } else { 0 },
@@ -85,8 +86,8 @@ async fn server(socket: &Socket) {
     }
     emit(&format!(
         "{{\"event\":\"result\",\"offloads\":{},{} }}",
-        format_offloads(socket.dart_capabilities()),
-        super::latency_counters(socket.dart_stats()),
+        format_offloads(dart_capabilities(socket)),
+        super::latency_counters(dart_stats(socket)),
     ));
 }
 
@@ -110,7 +111,7 @@ async fn client(socket: &Socket, config: &Config, pool: &PayloadPool) {
     super::latency_result(
         &mut samples,
         config,
-        &format_offloads(socket.dart_capabilities()),
-        socket.dart_stats(),
+        &format_offloads(dart_capabilities(socket)),
+        dart_stats(socket),
     );
 }

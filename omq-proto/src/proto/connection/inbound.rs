@@ -240,7 +240,12 @@ impl Connection {
                 max,
             });
         }
-        let Some(frame) = frame::try_decode_frame(&mut self.in_buf)? else {
+        let pool = if self.has_frame_transform() {
+            None
+        } else {
+            self.recv_payload_pool.as_ref()
+        };
+        let Some(frame) = frame::try_decode_frame_with_pool(&mut self.in_buf, pool)? else {
             return Ok(false);
         };
         self.decode_assembled_frame(frame.flags, frame.payload)?;
@@ -332,23 +337,6 @@ impl Connection {
                 max,
             });
         }
-        let inline = if more || !self.pending_parts.is_empty() {
-            crate::message::MAX_INLINE_PAYLOAD
-        } else {
-            crate::message::MAX_INLINE_MESSAGE
-        };
-        let payload = if payload.len() > inline
-            && let Some(pool) = &self.recv_payload_pool
-            && let Some(mut buffer) = pool.try_buffer(payload.len())
-        {
-            buffer.writable()[..payload.len()].copy_from_slice(payload.as_slice());
-            buffer
-                .set_len(payload.len())
-                .expect("selected slot fits frame");
-            buffer.into_payload()
-        } else {
-            payload
-        };
         if more {
             self.pending_parts.push(payload);
         } else if self.pending_parts.is_empty() {
@@ -537,6 +525,34 @@ impl Connection {
             payload_len: hdr.payload_len,
         };
         Some((hdr.payload_len, prefix))
+    }
+
+    /// Claim the next frame and copy its buffered prefix directly into the
+    /// final destination. Returns `(payload_len, filled_prefix_len)`; the
+    /// backend fills the remainder and calls [`Self::supply_payload_frame`].
+    /// Returns `None` when no ready-state frame header is available.
+    ///
+    /// # Errors
+    /// Rejects invalid frame headers, configured size-limit violations, or a
+    /// destination smaller than the declared body. No input is consumed then.
+    pub fn begin_supplied_payload_into(
+        &mut self,
+        destination: &mut [u8],
+    ) -> Result<Option<(usize, usize)>> {
+        let Some(info) = self.peek_next_frame_payload_size()? else {
+            return Ok(None);
+        };
+        if destination.len() < info.payload_len {
+            return Err(Error::Config("receive destination is too small".into()));
+        }
+        self.in_buf.advance(info.header_len);
+        self.in_buf
+            .read_into(info.buffered_payload_prefix, destination);
+        self.state = State::AwaitingSuppliedPayload {
+            flags: info.flags,
+            payload_len: info.payload_len,
+        };
+        Ok(Some((info.payload_len, info.buffered_payload_prefix)))
     }
 
     /// Deliver the payload of a frame whose header was consumed by a prior

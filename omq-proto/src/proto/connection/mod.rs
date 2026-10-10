@@ -361,12 +361,23 @@ impl Connection {
         self
     }
 
-    /// Select explicit receive payload size classes. Exhaustion and oversized
-    /// bodies retain ordinary owned storage. Inline payloads skip checkout.
+    /// Select explicit storage for incomplete receive bodies. Contiguous frames
+    /// keep their existing byte views. Exhaustion and oversized bodies retain
+    /// ordinary owned storage. Inline payloads skip checkout.
     #[must_use]
     pub fn recv_payload_pool(mut self, pool: &crate::PayloadPool) -> Self {
         self.recv_payload_pool = Some(pool.clone());
         self
+    }
+
+    /// Acquire an incomplete body's destination before an I/O backend fills it.
+    /// Inline payloads, exhaustion, and oversized bodies return `None`.
+    #[doc(hidden)]
+    pub fn try_recv_payload_buffer(&self, size: usize) -> Option<crate::PayloadBuffer> {
+        if size <= crate::message::MAX_INLINE_PAYLOAD {
+            return None;
+        }
+        self.recv_payload_pool.as_ref()?.try_buffer(size)
     }
 
     /// Initialize the connection in ZWS mode: skip the greeting,

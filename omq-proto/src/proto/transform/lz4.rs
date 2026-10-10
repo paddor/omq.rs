@@ -475,15 +475,19 @@ impl Lz4Decoder {
     }
 
     pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
-        self.decode_with_budget(msg, self.max_message_size)
+        self.decode_with_budget(msg, self.max_message_size, None)
     }
 
-    pub(super) fn decode_with_payload_slots(&mut self, msg: Message) -> Result<Option<Message>> {
+    pub(super) fn decode_with_payload_slots(
+        &mut self,
+        msg: Message,
+        pool: Option<&crate::PayloadPool>,
+    ) -> Result<Option<Message>> {
         if is_dict_shipment(&msg) {
             return self.decode(msg);
         }
         let budget = body_budget(msg.len(), self.max_message_size)?;
-        self.decode_with_budget(msg, budget)
+        self.decode_with_budget(msg, budget, pool)
     }
 
     pub(super) fn max_wire_message_size(&self) -> Option<usize> {
@@ -505,6 +509,7 @@ impl Lz4Decoder {
         &mut self,
         msg: Message,
         mut budget_left: Option<usize>,
+        pool: Option<&crate::PayloadPool>,
     ) -> Result<Option<Message>> {
         let mut parts = msg.into_parts_payload();
         let multipart = parts.len() > 1;
@@ -528,6 +533,7 @@ impl Lz4Decoder {
                         self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
+                        pool,
                     )?;
                 }
                 SENTINEL_LZ4M => {
@@ -536,6 +542,7 @@ impl Lz4Decoder {
                         self.decompressor.as_ref(),
                         &mut budget_left,
                         self.block_size,
+                        pool,
                     )?;
                 }
                 SENTINEL_LZ4D => {
@@ -568,6 +575,7 @@ fn decode_lz4b(
     decompressor: Option<&Decompressor>,
     budget: &mut Option<usize>,
     block_size: usize,
+    pool: Option<&crate::PayloadPool>,
 ) -> Result<Payload> {
     if body.len() < 8 {
         return Err(Error::Protocol(
@@ -583,20 +591,21 @@ fn decode_lz4b(
         ));
     }
     take_budget(budget, decompressed_size)?;
-    let mut out = vec![0u8; decompressed_size];
-    let n = match decompressor {
-        Some(d) => d
-            .decompress_into(block, &mut out)
-            .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-        None => block::decompress_into(block, &mut out)
-            .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-    };
-    if n != decompressed_size {
-        return Err(Error::Protocol(
-            "LZ4B decompressed length does not match declared".into(),
-        ));
-    }
-    Ok(Payload::from_bytes(Bytes::from(out)))
+    super::common::decode_payload(decompressed_size, pool, |out| {
+        let n = match decompressor {
+            Some(d) => d
+                .decompress_into(block, out)
+                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+            None => block::decompress_into(block, out)
+                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+        };
+        if n != decompressed_size {
+            return Err(Error::Protocol(
+                "LZ4B decompressed length does not match declared".into(),
+            ));
+        }
+        Ok(())
+    })
 }
 
 fn decode_lz4m(
@@ -604,6 +613,7 @@ fn decode_lz4m(
     decompressor: Option<&Decompressor>,
     budget: &mut Option<usize>,
     block_size: usize,
+    pool: Option<&crate::PayloadPool>,
 ) -> Result<Payload> {
     if body.len() < 8 {
         return Err(Error::Protocol(
@@ -626,50 +636,52 @@ fn decode_lz4m(
         ));
     }
 
-    let mut out = vec![0u8; decompressed_size];
-    let mut src_pos = 8;
-    let mut dst_pos = 0;
+    super::common::decode_payload(decompressed_size, pool, |out| {
+        let mut src_pos = 8;
+        let mut dst_pos = 0;
 
-    while dst_pos < decompressed_size {
-        if src_pos + 4 > body.len() {
-            return Err(Error::Protocol("LZ4M truncated block length".into()));
-        }
-        let compressed_len =
-            u32::from_le_bytes(body[src_pos..src_pos + 4].try_into().unwrap()) as usize;
-        src_pos += 4;
-        if src_pos + compressed_len > body.len() {
-            return Err(Error::Protocol("LZ4M truncated block data".into()));
-        }
-        let block_data = &body[src_pos..src_pos + compressed_len];
-        src_pos += compressed_len;
-
-        let remaining = decompressed_size - dst_pos;
-        let block_decompressed = remaining.min(block_size);
-
-        let n = match decompressor {
-            Some(d) => d
-                .decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
-                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
-            None => {
-                block::decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
-                    .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?
+        while dst_pos < decompressed_size {
+            if src_pos + 4 > body.len() {
+                return Err(Error::Protocol("LZ4M truncated block length".into()));
             }
-        };
-        if n != block_decompressed {
+            let compressed_len =
+                u32::from_le_bytes(body[src_pos..src_pos + 4].try_into().unwrap()) as usize;
+            src_pos += 4;
+            if src_pos + compressed_len > body.len() {
+                return Err(Error::Protocol("LZ4M truncated block data".into()));
+            }
+            let block_data = &body[src_pos..src_pos + compressed_len];
+            src_pos += compressed_len;
+
+            let remaining = decompressed_size - dst_pos;
+            let block_decompressed = remaining.min(block_size);
+
+            let n = match decompressor {
+                Some(d) => d
+                    .decompress_into(block_data, &mut out[dst_pos..dst_pos + block_decompressed])
+                    .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+                None => block::decompress_into(
+                    block_data,
+                    &mut out[dst_pos..dst_pos + block_decompressed],
+                )
+                .map_err(|e| Error::Protocol(format!("lz4 decompress: {e}")))?,
+            };
+            if n != block_decompressed {
+                return Err(Error::Protocol(
+                    "LZ4M block decompressed length mismatch".into(),
+                ));
+            }
+            dst_pos += n;
+        }
+
+        if src_pos != body.len() {
             return Err(Error::Protocol(
-                "LZ4M block decompressed length mismatch".into(),
+                "LZ4M trailing bytes after last block".into(),
             ));
         }
-        dst_pos += n;
-    }
 
-    if src_pos != body.len() {
-        return Err(Error::Protocol(
-            "LZ4M trailing bytes after last block".into(),
-        ));
-    }
-
-    Ok(Payload::from_bytes(Bytes::from(out)))
+        Ok(())
+    })
 }
 
 #[cfg(test)]

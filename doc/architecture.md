@@ -202,8 +202,10 @@ Applications explicitly create transport-independent `PayloadPool` handles
 with fixed storage classes. Message construction selects inline storage or
 the smallest fitting available class, with an owned allocation fallback.
 Multipart parts select independently; `MessagePool` caches frame tables.
-`Options::recv_payload_pool` supplies socket-wide receive storage. Configuration
-freezes before the first bind/connect; inproc transfers existing owners.
+`Options::recv_payload_pool` supplies socket-wide destinations for incomplete
+bodies, reassembly, and LZ4 output. Contiguous buffered bodies retain byte views;
+Zstd decodes into owned vectors. Configuration freezes before the first
+bind/connect; inproc transfers existing owners.
 Final owners return slots; overlapping releases use bounded reclamation.
 
 `FrameBuffer` owns encoded headers and small bodies. Large bodies use shared

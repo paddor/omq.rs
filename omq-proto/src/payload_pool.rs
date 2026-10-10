@@ -626,37 +626,6 @@ impl PayloadPool {
         count
     }
 
-    /// Select available storage for decoded transform output, preserving parts
-    /// and routing metadata. Inline parts and exhausted classes remain unchanged.
-    #[doc(hidden)]
-    pub fn store_decoded_message(&self, mut message: Message) -> Message {
-        use crate::message::MessageInner;
-        match &mut message.inner {
-            MessageInner::Single(payload) => {
-                self.store_payload(payload, crate::message::MAX_INLINE_MESSAGE);
-            }
-            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
-                for payload in parts.iter_mut() {
-                    self.store_payload(payload, crate::message::MAX_INLINE_PAYLOAD);
-                }
-            }
-            _ => {}
-        }
-        message
-    }
-
-    fn store_payload(&self, payload: &mut Payload, inline: usize) {
-        if payload.len() > inline
-            && let Some(mut buffer) = self.try_buffer(payload.len())
-        {
-            buffer.writable()[..payload.len()].copy_from_slice(payload.as_slice());
-            buffer
-                .set_len(payload.len())
-                .expect("selected slot fits payload");
-            *payload = buffer.into_payload();
-        }
-    }
-
     /// Batch synchronous final-owner returns, including during unwinding.
     #[doc(hidden)]
     pub fn with_recycling_batch<R>(&self, operation: impl FnOnce() -> R) -> R {

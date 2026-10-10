@@ -167,8 +167,9 @@ pub struct Options {
     pub recv_message_pool: Option<crate::message::MessagePool>,
 
     /// Optional application-selected receive payload storage. Shared across
-    /// connections; inline parts skip checkout and exhaustion uses owned
-    /// storage. Default: disabled. Frozen before the first bind/connect.
+    /// connections; supplies destinations without copying decoded bodies.
+    /// Inline parts skip checkout and exhaustion uses owned storage.
+    /// Default: disabled. Frozen before the first bind/connect.
     pub recv_payload_pool: Option<crate::PayloadPool>,
 
     /// Per-connection receive token bucket. `None` disables it.
@@ -351,7 +352,8 @@ pub struct Options {
     /// large payloads into a single pre-sized buffer instead of
     /// accumulating fixed-size reads through the codec. Medium-large
     /// payloads may use bounded pooled buffers; larger payloads use
-    /// one-shot owned buffers.
+    /// one-shot owned buffers. Explicit receive pools also supply destinations
+    /// for incomplete smaller bodies when this path is enabled.
     pub large_message_threshold: Option<usize>,
 
     /// Payload size at which the encoder switches from contiguous arena
@@ -906,8 +908,10 @@ impl Options {
     }
 
     /// Set explicit receive payload size classes, shared across connections.
-    /// Inline bodies skip checkout; exhaustion and oversized bodies use owned
-    /// allocations. Inproc transfers existing payload owners unchanged.
+    /// Pools supply destinations for incomplete bodies, fragmentation, and
+    /// decoders that support fixed storage. Contiguous buffered bodies keep their
+    /// byte views. Inline bodies skip checkout; exhaustion and oversized bodies
+    /// use owned allocations. Inproc transfers payload owners unchanged.
     #[must_use]
     pub fn recv_payload_pool(mut self, pool: crate::PayloadPool) -> Self {
         self.recv_payload_pool = Some(pool);

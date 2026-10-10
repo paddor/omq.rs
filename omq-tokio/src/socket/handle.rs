@@ -99,6 +99,8 @@ const SEND_YIELD_INTERVAL: u32 = 4096;
 
 impl Socket {
     /// Set shared receive payload storage before the first bind/connect.
+    /// Supplies incomplete bodies, reassembly, and supported decode destinations;
+    /// contiguous buffered bodies keep their existing byte views.
     ///
     /// # Errors
     /// Returns a configuration error after endpoint setup has started, or

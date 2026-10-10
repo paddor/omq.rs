@@ -14,6 +14,30 @@ use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::message::Payload;
 
+/// Select output storage before decoding; never copy an already decoded body.
+#[cfg(feature = "lz4")]
+pub(super) fn decode_payload(
+    size: usize,
+    pool: Option<&crate::PayloadPool>,
+    decode: impl FnOnce(&mut [u8]) -> Result<()>,
+) -> Result<Payload> {
+    if size <= crate::message::MAX_INLINE_PAYLOAD {
+        let mut body = [0; crate::message::MAX_INLINE_PAYLOAD];
+        decode(&mut body[..size])?;
+        return Ok(Payload::from_slice(&body[..size]));
+    }
+    if let Some(mut buffer) = pool.and_then(|pool| pool.try_buffer(size)) {
+        decode(&mut buffer.writable()[..size])?;
+        buffer
+            .set_len(size)
+            .expect("selected slot fits decoded body");
+        return Ok(buffer.into_payload());
+    }
+    let mut body = vec![0; size];
+    decode(&mut body)?;
+    Ok(Payload::from_bytes(Bytes::from(body)))
+}
+
 /// Plaintext-passthrough sentinel. Identical for every compression
 /// transport so a peer that doesn't recognize the upper sentinel can
 /// still decode plaintext fall-backs.

@@ -402,14 +402,27 @@ impl MessageDecoder {
     /// consumed by the transport (dict shipment) and must not surface.
     /// The configured decoded limit includes a payload slot per part, reserved
     /// before decompression. Raw codec decoders retain their body-only limits.
+    pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+        self.decode_with_payload_pool(msg, None)
+    }
+
+    /// Decode into fitting pooled destinations when the codec supports fixed
+    /// storage. Passthrough parts retain byte views; exhaustion and oversized
+    /// bodies use owned allocations. Zstd requires an owned `Vec` destination.
     #[cfg_attr(
         not(any(feature = "lz4", feature = "zstd")),
         allow(clippy::needless_pass_by_value)
     )]
-    pub fn decode(&mut self, msg: Message) -> Result<Option<Message>> {
+    pub fn decode_with_payload_pool(
+        &mut self,
+        msg: Message,
+        pool: Option<&crate::PayloadPool>,
+    ) -> Result<Option<Message>> {
+        #[cfg(not(feature = "lz4"))]
+        let _ = pool;
         match self {
             #[cfg(feature = "lz4")]
-            Self::Lz4(t) => t.decode_with_payload_slots(msg),
+            Self::Lz4(t) => t.decode_with_payload_slots(msg, pool),
             #[cfg(feature = "zstd")]
             Self::Zstd(t) => t.decode_with_payload_slots(msg),
             #[cfg(not(any(feature = "lz4", feature = "zstd")))]

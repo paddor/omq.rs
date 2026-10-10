@@ -436,6 +436,19 @@ fn find_impl(name: &str) -> Option<&'static ImplDef> {
     IMPLS.iter().find(|i| i.name == name)
 }
 
+impl ImplDef {
+    fn uses_mt_runtime(&self) -> bool {
+        matches!(
+            self.name,
+            "omq-tokio-mt" | "zmq.rs" | "rzmq" | "rzmq-iouring"
+        )
+    }
+
+    fn affinity(&self, cpus: &'static str) -> Option<&'static str> {
+        (!self.uses_mt_runtime()).then_some(cpus)
+    }
+}
+
 fn supports_pushpull(def: &ImplDef) -> bool {
     !matches!(def.name, "omq-tokio-exclusive" | "omq-tokio-1t-spin50")
 }
@@ -855,7 +868,7 @@ fn run_throughput_once(
                 &dur_str,
             ],
             &env,
-            Some(process::MEASURED_CPU),
+            def.affinity(process::MEASURED_CPU),
             Duration::from_secs(duration as u64 + 30),
         ) && let Some(r) = parse::parse_throughput(&out, size)
         {
@@ -900,7 +913,7 @@ fn run_throughput_once(
             push_cmd = vec![binary_str, "push", bind_any.as_deref().unwrap(), &size_str];
             let mut env = push_env.clone();
             env.push(("OMQ_BENCH_COORD", coord.endpoint()));
-            push_proc = process::spawn(&push_cmd, &env, Some(process::MEASURED_CPU));
+            push_proc = process::spawn(&push_cmd, &env, def.affinity(process::MEASURED_CPU));
             let port = coord
                 .recv_ready_port(Duration::from_secs(10))
                 .expect("coord: no READY from push peer");
@@ -909,13 +922,13 @@ fn run_throughput_once(
         }
         TransportKind::Ws => {
             push_cmd = vec![binary_str, "push", &addr, &size_str];
-            push_proc = process::spawn(&push_cmd, &push_env, Some(process::MEASURED_CPU));
+            push_proc = process::spawn(&push_cmd, &push_env, def.affinity(process::MEASURED_CPU));
             std::thread::sleep(Duration::from_millis(200));
             addr.clone()
         }
         _ => {
             push_cmd = vec![binary_str, "push", &addr, &size_str];
-            push_proc = process::spawn(&push_cmd, &push_env, Some(process::MEASURED_CPU));
+            push_proc = process::spawn(&push_cmd, &push_env, def.affinity(process::MEASURED_CPU));
             std::thread::sleep(Duration::from_millis(100));
             addr.clone()
         }
@@ -924,7 +937,7 @@ fn run_throughput_once(
     let pull_result = process::capture(
         &[peer_binary_str, "pull", &connect_addr, &size_str, &dur_str],
         &pull_env,
-        Some(process::OTHER_CPU),
+        def.affinity(process::OTHER_CPU),
         Duration::from_secs(duration as u64 + 30),
     )
     .map(|output| (output, 0.0));
@@ -1018,7 +1031,7 @@ fn run_pubsub_once(
         if let Some((out, cpu)) = process::capture_with_cpu(
             &cmd,
             &env,
-            Some(process::MEASURED_CPU),
+            def.affinity(process::MEASURED_CPU),
             Duration::from_secs(duration as u64 + 30),
         ) && let Some(r) = parse::parse_throughput(&out, size)
         {
@@ -1078,7 +1091,7 @@ fn run_pubsub_once(
     if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
     }
-    let mut pub_proc = process::spawn(&pub_cmd, &spawn_env, Some(process::MEASURED_CPU));
+    let mut pub_proc = process::spawn(&pub_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
 
     if let Some(ref c) = coord {
         let port = c
@@ -1101,7 +1114,7 @@ fn run_pubsub_once(
             &peers_str,
         ],
         &sub_env,
-        Some(process::OTHER_CPU),
+        def.affinity(process::OTHER_CPU),
         Duration::from_secs(duration as u64 + 30),
     );
 
@@ -1219,7 +1232,7 @@ fn run_fanout_once(
     if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
     }
-    let mut push_proc = process::spawn(&push_cmd, &spawn_env, Some(process::MEASURED_CPU));
+    let mut push_proc = process::spawn(&push_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
 
     if let Some(ref c) = coord {
         let port = c
@@ -1250,7 +1263,7 @@ fn run_fanout_once(
                 &local_peers_str,
             ],
             &pull_env,
-            Some(process::OTHER_CPU),
+            def.affinity(process::OTHER_CPU),
         ));
     }
     let timeout = Duration::from_secs(duration as u64 + 30);
@@ -1389,7 +1402,7 @@ fn run_fanin_once(
     if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
     }
-    let mut pull_proc = process::spawn(&pull_cmd, &spawn_env, Some(process::MEASURED_CPU));
+    let mut pull_proc = process::spawn(&pull_cmd, &spawn_env, def.affinity(process::MEASURED_CPU));
 
     if let Some(c) = coord {
         let port = c
@@ -1411,7 +1424,7 @@ fn run_fanin_once(
             &dur_str,
         ],
         &push_env,
-        Some(process::OTHER_CPU),
+        def.affinity(process::OTHER_CPU),
     );
 
     let pull_output = pull_proc.wait_with_output(Duration::from_secs(duration as u64 + 30));
@@ -1508,7 +1521,7 @@ fn run_latency_cell(
                 &warmup_str,
             ],
             &env,
-            Some(process::MEASURED_CPU),
+            def.affinity(process::MEASURED_CPU),
             Duration::from_secs(timeout + 30),
         )?;
         let r = parse::parse_latency(&out)?;
@@ -1549,7 +1562,7 @@ fn run_latency_cell(
     if let Some(ref c) = coord {
         spawn_env.push(("OMQ_BENCH_COORD", c.endpoint()));
     }
-    let mut rep_proc = process::spawn(&rep_cmd, &spawn_env, Some(process::OTHER_CPU));
+    let mut rep_proc = process::spawn(&rep_cmd, &spawn_env, def.affinity(process::OTHER_CPU));
 
     if let Some(c) = coord {
         let port = c
@@ -1571,7 +1584,7 @@ fn run_latency_cell(
             &warmup_str,
         ],
         &req_env,
-        Some(process::MEASURED_CPU),
+        def.affinity(process::MEASURED_CPU),
         Duration::from_secs(timeout + 30),
     )
     .map(|output| (output, 0.0));
@@ -1748,6 +1761,17 @@ impl ComparisonRun<'_> {
             kind: kind.to_owned(),
             transport: transport.as_str().to_owned(),
             msg_size: size,
+            runtime_workers: find_impl(name)
+                .is_some_and(ImplDef::uses_mt_runtime)
+                .then(|| {
+                    std::env::var("TOKIO_WORKER_THREADS")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .filter(|workers| *workers > 0)
+                        .unwrap_or_else(|| {
+                            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+                        })
+                }),
             ..ComparisonRow::default()
         }
     }

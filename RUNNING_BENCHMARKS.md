@@ -145,9 +145,10 @@ postfix=6 cores, performance governor, turbo off
 automatically.
 
 Run throughput benchmarks with `OMQ_BENCH_TASKSET=1`. It pins the measured
-peer to CPUs 1-2 and the other peer to CPUs 3-4. Unpinned multi-peer runs are
-bimodal: the scheduler can stack several IO threads on one CPU. Run latency
-benchmarks unpinned: pinned REQ/REP runs show more p99 spikes.
+peer to CPUs 1-2 and the other peer to CPUs 3-4. MT comparison peers keep the
+full CPU set and use one runtime worker per available CPU. Unpinned multi-peer
+runs are bimodal: the scheduler can stack several IO threads on one CPU. Run
+latency benchmarks unpinned: pinned REQ/REP runs show more p99 spikes.
 
 ### Main TCP Charts
 

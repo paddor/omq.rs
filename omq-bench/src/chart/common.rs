@@ -42,6 +42,7 @@ pub(crate) type LatencyMap = BTreeMap<u64, BTreeMap<String, LatencyEntry>>;
 pub(crate) struct CpuData {
     pub sender: Option<f64>,
     pub receiver: Option<f64>,
+    pub runtime_workers: Option<usize>,
 }
 
 pub(crate) struct FairnessEntry {
@@ -429,7 +430,11 @@ fn draw_legend_table_with_versions(
         table_area.draw_text(&label, &style_val, (col_name, y))?;
 
         let threads = if imp.threads.is_empty() {
-            format!("{cores} MT")
+            let workers = cpu
+                .get(imp.key)
+                .and_then(|data| data.runtime_workers)
+                .unwrap_or(cores);
+            format!("{workers} MT")
         } else {
             imp.threads.to_string()
         };
@@ -459,6 +464,7 @@ struct CpuAccum {
     receiver_sum: f64,
     sender_count: u32,
     receiver_count: u32,
+    runtime_workers: Option<usize>,
 }
 
 impl CpuAccum {
@@ -482,6 +488,7 @@ impl CpuAccum {
 
     fn into_data(self) -> CpuData {
         CpuData {
+            runtime_workers: self.runtime_workers,
             sender: (self.sender_count > 0).then(|| self.sender_sum / f64::from(self.sender_count)),
             receiver: (self.receiver_count > 0)
                 .then(|| self.receiver_sum / f64::from(self.receiver_count)),
@@ -497,6 +504,7 @@ pub(crate) fn merge_cpu_data<'a>(
     for cpu in panel_cpus {
         for (name, data) in cpu {
             let accum = cpu_sums.entry(name.clone()).or_default();
+            accum.runtime_workers = data.runtime_workers.or(accum.runtime_workers);
             if let Some(sender) = data.sender {
                 accum.add_sender_pct(sender);
             }
@@ -561,6 +569,7 @@ pub(crate) fn load_tput(
             && elapsed > 0.0
         {
             let e = cpu_sums.entry(row.impl_name.clone()).or_default();
+            e.runtime_workers = row.runtime_workers.or(e.runtime_workers);
             if let Some(push) = row.push_cpu_time.or(row.pub_cpu_time) {
                 e.add_sender(push, elapsed);
             }

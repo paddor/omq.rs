@@ -43,6 +43,10 @@ endpoints, with one owned IO thread per process. Main and comparison REQ/REP
 charts exclude other socket pairs and explicit non-default profile runs.
 Older cache rows without pair/profile metadata remain valid REQ/REP defaults.
 
+On `main`, only the three `main_*.svg` overview charts include other
+implementations, except the DART charts, which also include Aeron.
+All other secondary charts in `doc/charts/` show OMQ and libzmq only.
+
 ## Secondary comparison charts (6 files)
 
 Data: `comparisons.jsonl`. OMQ vs libzmq only.
@@ -67,7 +71,7 @@ Data: `comparisons.jsonl`, kind `pub_sub`.
 
 | file | panels | impls |
 |------|--------|-------|
-| `pubsub/tcp.svg` | 4, 32 subscribers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO, monocoque CT + 1 worker |
+| `pubsub/tcp.svg` | 4, 32 subscribers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO |
 | `pubsub/curve_tcp.svg` | 16 peers | libzmq-curve 1IO/2IO, omq-curve 1IO/2IO |
 
 ## Fan-out / fan-in charts (2 files)

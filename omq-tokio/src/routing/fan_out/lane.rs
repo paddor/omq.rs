@@ -25,6 +25,8 @@ use super::filter::{self, FanOutMode};
 use super::{FAN_OUT_TOTAL_COPY_BUDGET, FanOutMutePolicy};
 
 const LANE_CTRL_RING_CAP: usize = 64;
+const PLAIN_BATCH_MESSAGES: usize = 8;
+const PLAIN_BATCH_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]
 enum LaneControl {
@@ -88,6 +90,13 @@ struct LanePeer {
     dict_shipped: bool,
     codec_group: usize,
     needs_flush: bool,
+}
+
+#[derive(Debug)]
+struct PendingBatchPeer {
+    peer_id: u64,
+    slot: Arc<PeerTransmitSlot>,
+    next: usize,
 }
 
 struct LaneEndpoint {
@@ -549,6 +558,8 @@ impl LaneWorker {
         let mut budget = DrainBudget::WORKER;
         let mut touched: SmallVec<[u64; 32]> = SmallVec::new();
         let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
+        let mut wire = FrameBuffer::new();
+        let mut ends = SmallVec::<[usize; PLAIN_BATCH_MESSAGES]>::new();
         loop {
             batch.clear();
             self.data_signal.begin_drain();
@@ -583,11 +594,20 @@ impl LaneWorker {
                     self.stop(&mut touched);
                     return;
                 }
-                for data in &batch {
-                    if self.handle_data(data, &mut touched).await {
+                let mut next = 0;
+                while next < batch.len() {
+                    let count = self.encode_plain_batch(&batch[next..], &mut wire, &mut ends);
+                    let shutdown = if count > 1 {
+                        self.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched)
+                            .await
+                    } else {
+                        self.handle_data(&batch[next], &mut touched).await
+                    };
+                    if shutdown {
                         self.stop(&mut touched);
                         return;
                     }
+                    next += count.max(1);
                 }
             }
 
@@ -642,6 +662,131 @@ impl LaneWorker {
     async fn handle_data(&mut self, data: &LaneData, touched: &mut SmallVec<[u64; 32]>) -> bool {
         let LaneData::Dispatch(dispatch) = data;
         self.dispatch(dispatch, touched).await
+    }
+
+    /// Reuse the contiguous small-message path when every peer wants the
+    /// same plaintext publications. Other filters, codecs and oldest eviction
+    /// retain their existing per-publication dispatch.
+    fn encode_plain_batch(
+        &self,
+        batch: &[LaneData],
+        wire: &mut FrameBuffer,
+        ends: &mut SmallVec<[usize; PLAIN_BATCH_MESSAGES]>,
+    ) -> usize {
+        if batch.len() < 2 || self.mute_policy == FanOutMutePolicy::DropOldest {
+            return 0;
+        }
+        let LaneData::Dispatch(first) = &batch[0];
+        let first_max_bytes = first
+            .msg
+            .byte_len()
+            .saturating_add(first.msg.len().saturating_mul(9));
+        if first_max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
+            || first_max_bytes >= omq_proto::frame_buffer::ARENA_THRESHOLD
+            || !filter::all_peers_subscribe_all(
+                self.mode,
+                self.subscribe_all_count,
+                self.peers.len(),
+            )
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.slot.has_transform || peer.slot.codec_profile().is_some())
+        {
+            return 0;
+        }
+        wire.clear_arena();
+        ends.clear();
+        let mut budget = DrainBudget::new(PLAIN_BATCH_MESSAGES, PLAIN_BATCH_BYTES);
+        for data in batch.iter().take(PLAIN_BATCH_MESSAGES) {
+            let LaneData::Dispatch(dispatch) = data;
+            let max_bytes = dispatch
+                .msg
+                .byte_len()
+                .saturating_add(dispatch.msg.len().saturating_mul(9));
+            if max_bytes.saturating_mul(self.peers.len()) > FAN_OUT_TOTAL_COPY_BUDGET
+                || max_bytes >= omq_proto::frame_buffer::ARENA_THRESHOLD
+                || wire.total_bytes().saturating_add(max_bytes) > PLAIN_BATCH_BYTES
+            {
+                break;
+            }
+            let start = wire.total_bytes();
+            wire.frame_inline(&dispatch.msg);
+            ends.push(wire.total_bytes());
+            if !budget.account(wire.total_bytes() - start) {
+                break;
+            }
+        }
+        ends.len()
+    }
+
+    async fn dispatch_plain_batch(
+        &mut self,
+        wire: &[u8],
+        ends: &[usize],
+        touched: &mut SmallVec<[u64; 32]>,
+    ) -> bool {
+        let mut pending = SmallVec::<[PendingBatchPeer; 8]>::new();
+        for (&peer_id, peer) in &mut self.peers {
+            if !peer.slot.fanout_active() {
+                continue;
+            }
+            let (next, result) = peer.slot.try_push_pre_framed_batch_no_signal(wire, ends, 0);
+            if next > 0 {
+                Self::touch_peer(peer_id, peer, touched);
+            }
+            if result == TryFrameResult::Full {
+                if self.mute_policy == FanOutMutePolicy::DropNewest {
+                    peer.slot.deactivate_fanout();
+                    continue;
+                }
+                pending.push(PendingBatchPeer {
+                    peer_id,
+                    slot: peer.slot.clone(),
+                    next,
+                });
+            }
+        }
+        while !pending.is_empty() {
+            let mut waits = FuturesUnordered::new();
+            pending.retain_mut(|target| {
+                let Some(peer) = self
+                    .peers
+                    .get_mut(&target.peer_id)
+                    .filter(|peer| Arc::ptr_eq(&peer.slot, &target.slot))
+                else {
+                    return false;
+                };
+                let seen = target.slot.space_available.generation();
+                let (next, result) =
+                    target
+                        .slot
+                        .try_push_pre_framed_batch_no_signal(wire, ends, target.next);
+                if next > target.next {
+                    Self::touch_peer(target.peer_id, peer, touched);
+                    target.next = next;
+                }
+                if result != TryFrameResult::Full {
+                    return false;
+                }
+                target.slot.signal_encoded();
+                let space = target.slot.space_available.clone();
+                waits.push(async move { space.changed_after(seen).await });
+                true
+            });
+            self.flush_touched(touched);
+            if pending.is_empty() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                () = self.ctrl_notify.ready() => {
+                    if self.drain_control() { return true; }
+                }
+                _ = waits.next() => {}
+            }
+        }
+        false
     }
 
     fn handle_control(&mut self, cmd: LaneControl) -> bool {
@@ -1141,8 +1286,8 @@ mod tests {
     use crate::routing::subscription::SubscriptionSet;
 
     use super::{
-        FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneData, LaneDispatch,
-        LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
+        FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneControl, LaneData,
+        LaneDispatch, LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
     };
 
     #[test]
@@ -1557,6 +1702,166 @@ mod tests {
         let mut actual = Vec::new();
         slot.drain(&mut actual, 1024);
         assert_eq!(actual, vec![encoded_dispatches(&["first", "second"])]);
+    }
+
+    fn batch_worker(
+        mute_policy: FanOutMutePolicy,
+        slots: &[Arc<crate::engine::transmit_slot::PeerTransmitSlot>],
+    ) -> (LaneWorker, yring::Producer<LaneControl>) {
+        let (_data_tx, data_rx) = yring::spsc(4);
+        let (ctrl_tx, ctrl_rx) = yring::spsc(4);
+        let peers = slots
+            .iter()
+            .map(|slot| {
+                let mut subscriptions = SubscriptionSet::new();
+                subscriptions.add(b"");
+                (
+                    slot.peer_id,
+                    LanePeer {
+                        subscriptions,
+                        groups: FxHashSet::default(),
+                        any_groups: false,
+                        slot: slot.clone(),
+                        dict_shipped: false,
+                        codec_group: 0,
+                        needs_flush: false,
+                    },
+                )
+            })
+            .collect();
+        (
+            LaneWorker {
+                data_rx,
+                ctrl_rx,
+                data_signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                data_space: Arc::new(crate::engine::signal::StateSignal::new()),
+                ctrl_notify: Arc::new(crate::engine::signal::DataSignal::new()),
+                mode: FanOutMode::SubscriptionPrefix,
+                mute_policy,
+                peers,
+                subscribe_all_count: slots.len(),
+                eq: FrameBuffer::one_shot(),
+                chunks: Vec::new(),
+                codec_groups: test_plain_groups(),
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            ctrl_tx,
+        )
+    }
+
+    fn batch_wire(worker: &LaneWorker) -> (FrameBuffer, SmallVec<[usize; 8]>) {
+        let batch: Vec<_> = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
+            .into_iter()
+            .map(|body| LaneData::Dispatch(test_dispatch(body)))
+            .collect();
+        let mut wire = FrameBuffer::new();
+        let mut ends = SmallVec::new();
+        assert_eq!(worker.encode_plain_batch(&batch, &mut wire, &mut ends), 8);
+        (wire, ends)
+    }
+
+    fn poll_once<F: std::future::Future>(
+        future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn plain_batch_retries_only_blocked_suffix_and_wakes_ready_peers() {
+        let slow = test_slot_with_msg_cap(7, 2);
+        let fast = test_slot(8);
+        let (mut worker, _control) =
+            batch_worker(FanOutMutePolicy::Block, &[slow.clone(), fast.clone()]);
+        let (wire, ends) = batch_wire(&worker);
+        let mut touched = SmallVec::new();
+        let dispatch = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
+        tokio::pin!(dispatch);
+        assert!(poll_once(dispatch.as_mut()).is_pending());
+        assert!(
+            !fast.data_signal.is_idle(),
+            "ready peers must wake before waiting for slow peers"
+        );
+        assert!(
+            !slow.data_signal.is_idle(),
+            "accepted prefix must wake its driver"
+        );
+        let mut fast_received = Vec::new();
+        fast.drain(&mut fast_received, 1024);
+        assert_eq!(fast_received.concat(), wire.uncommitted_arena());
+
+        let mut slow_received = Vec::new();
+        for turn in 0..3 {
+            assert!(slow.drain(&mut slow_received, 1024).space_available);
+            slow.space_available.notify_changed();
+            let result = poll_once(dispatch.as_mut());
+            if turn < 2 {
+                assert!(result.is_pending());
+            } else {
+                assert_eq!(result, std::task::Poll::Ready(false));
+            }
+        }
+        slow.drain(&mut slow_received, 1024);
+        assert_eq!(
+            slow_received.concat(),
+            wire.uncommitted_arena(),
+            "no repeated or missing publications"
+        );
+        assert!(fast.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_batch_services_shutdown_while_peer_stays_full() {
+        let slow = test_slot_with_msg_cap(7, 1);
+        let (mut worker, mut control) =
+            batch_worker(FanOutMutePolicy::Block, std::slice::from_ref(&slow));
+        let notify = worker.ctrl_notify.clone();
+        let (wire, ends) = batch_wire(&worker);
+        let mut touched = SmallVec::new();
+        let dispatch = worker.dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched);
+        tokio::pin!(dispatch);
+        assert!(poll_once(dispatch.as_mut()).is_pending());
+        control.push(LaneControl::Shutdown).unwrap();
+        control.flush();
+        notify.mark();
+        assert_eq!(poll_once(dispatch.as_mut()), std::task::Poll::Ready(true));
+        assert!(
+            !slow.data_signal.is_idle(),
+            "shutdown must not hide accepted data"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_batch_muted_peer_does_not_starve_ready_peer() {
+        let slow = test_slot_with_msg_cap(7, 1);
+        let fast = test_slot(8);
+        let (mut worker, _control) =
+            batch_worker(FanOutMutePolicy::DropNewest, &[slow.clone(), fast.clone()]);
+        let (wire, ends) = batch_wire(&worker);
+        let mut touched = SmallVec::new();
+        assert!(
+            !worker
+                .dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched)
+                .await
+        );
+        assert!(!slow.fanout_active());
+        // The slow peer remains full during the next batch.
+        assert!(
+            !worker
+                .dispatch_plain_batch(wire.uncommitted_arena(), &ends, &mut touched)
+                .await
+        );
+        worker.flush_touched(&mut touched);
+        assert!(!fast.data_signal.is_idle());
+        let mut received = Vec::new();
+        fast.drain(&mut received, 1024);
+        assert_eq!(received.concat(), wire.uncommitted_arena().repeat(2));
+        let mut prefix = Vec::new();
+        slow.drain(&mut prefix, 1024);
+        assert_eq!(prefix.concat(), &wire.uncommitted_arena()[..ends[0]]);
+        assert!(
+            slow.fanout_active(),
+            "draining below LWM must reactivate the peer"
+        );
     }
 
     fn test_plain_groups() -> [Option<super::CodecGroup>; super::MAX_CODEC_GROUPS] {

@@ -238,6 +238,50 @@ impl PeerTransmitSlot {
         TryFrameResult::Ok
     }
 
+    /// Admit a prefix of complete publications under one lock. `ends` holds
+    /// their cumulative wire lengths; the caller retries any unaccepted suffix.
+    pub(crate) fn try_push_pre_framed_batch_no_signal(
+        &self,
+        data: &[u8],
+        ends: &[usize],
+        start: usize,
+    ) -> (usize, TryFrameResult) {
+        if self.dead.load(Ordering::Acquire) {
+            return (start, TryFrameResult::Dead);
+        }
+        let mut eq = self.eq.lock().expect("transmit_slot eq poisoned");
+        if self.dead.load(Ordering::Acquire) {
+            return (start, TryFrameResult::Dead);
+        }
+        let offset = if start == 0 { 0 } else { ends[start - 1] };
+        let queued = self.queued_msgs.load(Ordering::Relaxed);
+        let bytes = eq.total_bytes();
+        let mut next = start;
+        let mut end = offset;
+        for &message_end in &ends[start..] {
+            // Match single-publication admission: the last accepted message
+            // may cross the byte cap, but never the message cap.
+            if queued + next - start >= self.msg_cap || bytes + end - offset >= self.cap {
+                break;
+            }
+            end = message_end;
+            next += 1;
+        }
+        if next != start {
+            eq.push_pre_framed(&data[offset..end]);
+            let queued = queued + next - start;
+            self.queued_msgs.store(queued, Ordering::Relaxed);
+            self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
+        }
+        let result = if next == ends.len() {
+            TryFrameResult::Ok
+        } else {
+            self.above_lwm.store(true, Ordering::Relaxed);
+            TryFrameResult::Full
+        };
+        (next, result)
+    }
+
     pub(crate) fn try_push_fanout_drop_oldest(&self, frame: &FanOutFrame<'_>) -> TryFrameResult {
         self.try_push_fanout_drop_oldest_with_protection(frame, false)
     }
@@ -577,6 +621,75 @@ mod tests {
         let mut chunks = Vec::new();
         slot.drain(&mut chunks, 1024);
         assert_eq!(slot.try_encode(&msg), TryFrameResult::Ok);
+    }
+
+    #[test]
+    fn pre_framed_batch_matches_single_admission_and_retries_suffix() {
+        let messages = [
+            Message::from("one"),
+            Message::from("two"),
+            Message::from("three"),
+        ];
+        let mut wire = FrameBuffer::new();
+        let mut ends = Vec::new();
+        for message in &messages {
+            wire.frame_inline(message);
+            ends.push(wire.total_bytes());
+        }
+        let data = wire.uncommitted_arena();
+        for byte_cap in [1, 5, 8, 100] {
+            for msg_cap in [1, 2, 8] {
+                let make_slot = || {
+                    PeerTransmitSlot::new(
+                        1,
+                        false,
+                        None,
+                        None,
+                        4096,
+                        16 * 1024,
+                        byte_cap,
+                        msg_cap,
+                        crate::engine::framing::WireFraming::Zmtp,
+                    )
+                };
+                let batched = make_slot();
+                let singles = make_slot();
+                let mut start = 0;
+                let mut received = Vec::new();
+                while start < ends.len() {
+                    let mut expected = start;
+                    let mut offset = if start == 0 { 0 } else { ends[start - 1] };
+                    while expected < ends.len() {
+                        let end = ends[expected];
+                        if singles.try_push_pre_framed_no_signal(&data[offset..end])
+                            != TryFrameResult::Ok
+                        {
+                            break;
+                        }
+                        expected += 1;
+                        offset = end;
+                    }
+                    let (next, result) =
+                        batched.try_push_pre_framed_batch_no_signal(data, &ends, start);
+                    assert_eq!(next, expected);
+                    assert!(next > start, "an empty slot must accept one whole message");
+                    assert_eq!(batched.queued_msgs.load(Ordering::Relaxed), next - start);
+                    assert_eq!(result == TryFrameResult::Ok, next == ends.len());
+                    assert!(batched.data_signal.is_idle(), "caller owns the batch wake");
+                    batched.signal_encoded();
+                    assert!(!batched.data_signal.is_idle());
+                    let mut actual = Vec::new();
+                    let mut reference = Vec::new();
+                    batched.drain(&mut actual, 1024);
+                    singles.drain(&mut reference, 1024);
+                    assert_eq!(actual, reference);
+                    assert_eq!(batched.queued_msgs.load(Ordering::Relaxed), 0);
+                    received.extend(actual.into_iter().flat_map(|chunk| chunk.to_vec()));
+                    start = next;
+                }
+                assert_eq!(received, data);
+            }
+        }
     }
 
     #[test]

@@ -50,6 +50,7 @@ impl Counter {
         Self { window, count: 0 }
     }
 
+    #[cfg(test)]
     pub(super) fn record(&mut self, message: &Message, now: Instant) {
         if now >= self.window.start && now < self.window.end && is_measured(message) {
             self.count += 1;

@@ -1,19 +1,26 @@
 # Performance verification
 
-Run the fast TCP core-path gate with:
+Run the local performance gates with:
 
 ```text
-cargo run --release -p omq-tokio --bin omq_perf_verify
+cargo run --release -p omq-tokio --features 'quic dart' --bin omq_perf_verify
 ```
 
-With `.perf_hw` present, the verifier measures CT REQ/REP latency at
-256B, canonical 1-IO PUSH/PULL at 16B, 1KiB, and 16KiB, and canonical
-1-IO PUB/SUB with four subscribers at 16B and 4KiB. It also checks the
-2-IO variants, a 32-subscriber 2-IO PUB/SUB 256B fan-out gate, and
-16B inproc PUSH/PULL. TCP cases use separate OMQ contexts and loopback
-TCP. The inproc case uses one shared `ContextCore`, matching scoped
-`inproc://` semantics.
-Warmup and measurement windows are bounded.
+With `.perf_hw` present, TCP PUSH/PULL covers 16B, 256B, 1KiB, and
+16KiB; PUB/SUB covers 16B, 256B, 1KiB, and 4KiB with four subscribers.
+Both use 1 and 2 IO threads and one application thread per side.
+The verifier also measures CT REQ/REP at 256B, 32-subscriber PUB/SUB
+at 256B with 2 IO threads, and 16B inproc PUSH/PULL.
+Four-subscriber rates count aggregate deliveries; the 32-subscriber
+gate reports the average per subscriber. Inproc shares one context;
+wire cases use separate contexts. Measurement excludes tagged warmup.
+
+With their features enabled, QUIC covers PUSH/PULL and four-subscriber
+PUB/SUB; DART covers SCATTER/GATHER. Both cover 16B, 256B, and 1KiB
+with 1 and 2 IO threads, and run only for configured thresholds.
+Prefix the section with `quic_` or `dart_`, for example
+`[dart_scattergather_1io]`. QUIC generates a fresh
+trusted loopback certificate using `openssl`; UDP buffers request 4 MiB.
 
 Thresholds are machine-specific. Create the ignored `.perf_hw` file in the
 repository root. Keys match the measurement names printed by the verifier:
@@ -24,20 +31,26 @@ p50_256b_us=50
 
 [pushpull_1io]
 16b_msgs_s=9500000
+256b_msgs_s=5000000
 1k_msgs_s=3000000
 16k_msgs_s=250000
 
 [pushpull_2io]
 16b_msgs_s=8000000
+256b_msgs_s=5000000
 1k_msgs_s=3000000
 16k_msgs_s=250000
 
 [pubsub_1io]
 16b_msgs_s=1500000
+256b_msgs_s=1500000
+1k_msgs_s=1000000
 4k_msgs_s=200000
 
 [pubsub_2io]
 16b_msgs_s=1100000
+256b_msgs_s=1500000
+1k_msgs_s=1000000
 256b_32p_msgs_s=250000
 4k_msgs_s=430000
 
@@ -45,7 +58,7 @@ p50_256b_us=50
 16b_msgs_s=1000000
 ```
 
-Use measured local baselines for the twelve throughput values. A
+Use measured local baselines for throughput thresholds. A
 missing file runs a smaller smoke gate with loose thresholds:
 
 ```text

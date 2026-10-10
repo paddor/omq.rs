@@ -186,6 +186,15 @@ impl PeerTransmitSlot {
     }
 
     pub(crate) fn try_push_encoded(&self, chunks: &[Bytes]) -> TryFrameResult {
+        let result = self.try_push_encoded_no_signal(chunks);
+        if result == TryFrameResult::Ok {
+            self.signal_encoded();
+        }
+        result
+    }
+
+    /// Admit one encoded publication; the caller signals accepted batches.
+    pub(crate) fn try_push_encoded_no_signal(&self, chunks: &[Bytes]) -> TryFrameResult {
         if self.dead.load(Ordering::Acquire) {
             return TryFrameResult::Dead;
         }
@@ -202,10 +211,10 @@ impl PeerTransmitSlot {
             return TryFrameResult::Full;
         }
         eq.push_shared_chunks(chunks);
-        self.queued_msgs.fetch_add(1, Ordering::Relaxed);
-        self.mark_above_lwm_if_needed(eq.total_bytes(), self.queued_msgs.load(Ordering::Relaxed));
-        drop(eq);
-        self.signal_encoded();
+        // Count writers are serialized by eq, including drains and disconnects.
+        let queued = queued_msgs + 1;
+        self.queued_msgs.store(queued, Ordering::Relaxed);
+        self.mark_above_lwm_if_needed(eq.total_bytes(), queued);
         TryFrameResult::Ok
     }
 

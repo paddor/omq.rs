@@ -40,7 +40,7 @@ use lane::{FanOutLanes, LaneDispatch};
 /// Total bytes copied into per-peer wire queues before switching to
 /// shared `Bytes` chunks. This is fan-out specific. Do not change
 /// `FrameBuffer::ARENA_THRESHOLD` for this: PUSH/SCATTER use it too.
-const FAN_OUT_TOTAL_COPY_BUDGET: usize = 8 * 1024;
+const FAN_OUT_TOTAL_COPY_BUDGET: usize = 16 * 1024;
 
 /// Yield every N sends to keep latency bounded. Scales down with peer
 /// count and message size: fewer sends per yield when one send queues

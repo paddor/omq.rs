@@ -281,13 +281,13 @@ def chart_data_from_jsonl():
 
     def get_tp(mode, impl, transport, size):
         r = latest.get((impl, "throughput", mode, transport, size, ""))
-        return r["msgs_s"] if r else 0.0
+        return r["msgs_s"] if r else None
 
     def get_lat(mode, impl, size):
         r = latest.get((impl, "latency", mode, "tcp", size, ""))
         if r is None:
             r = latest.get((impl, "latency", mode, "", size, ""))
-        return r["p50_us"] if r else 0.0
+        return r["p50_us"] if r else None
 
     sync_omq_tp = [get_tp("sync", "pyomq", "tcp", s) for s in SIZES]
     sync_omq_into_tp = [get_tp("sync-into", "pyomq", "tcp", s) for s in SIZES]
@@ -878,6 +878,8 @@ while True:
     {rep_receive}
     rep.send(msg)
     if len(msg) == len(stop) and msg == stop:
+        # Keep the socket alive until the requester received the final reply.
+        sys.stdin.readline()
         break
 rep.close()
 sys.stdout.flush()
@@ -928,6 +930,7 @@ os._exit(0)
     label = f"{lib_name}{suffix} tcp lat {size}B"
     rep_proc = subprocess.Popen(
         _bench_command("rep", sys.executable, "-c", rep_code, endpoint),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -964,7 +967,7 @@ os._exit(0)
         if result.returncode != 0:
             raise RuntimeError(f"{label} req failed:\n{result.stdout}{result.stderr}")
         try:
-            rep_proc.wait(timeout=5)
+            rep_proc.communicate(input="\n", timeout=5)
         except subprocess.TimeoutExpired as error:
             raise RuntimeError(f"{label} rep did not exit") from error
         return tuple(json.loads(result.stdout.strip()))
@@ -1443,6 +1446,21 @@ def run_proxy(lib_name):
 
 # SVG chart generation
 
+
+def _series_segments(values):
+    """Yield measured runs without connecting across missing data points."""
+    segment = []
+    for index, value in enumerate(values):
+        if value is None:
+            if segment:
+                yield segment
+            segment = []
+        else:
+            segment.append((index, value))
+    if segment:
+        yield segment
+
+
 # Colors: warm = pyomq, cool = pyzmq
 C_PYOMQ = "#ef4444"
 C_PYOMQ_INTO = "#ff4fa3"
@@ -1570,6 +1588,7 @@ def gen_combined_chart(data, path):
         values[i] * SIZES[i] / 1_000_000_000
         for values in tp_values
         for i in large_indices
+        if values[i] is not None
     ]
     gbs_max = max(1, math.ceil(max(gbs_values, default=0)))
 
@@ -1669,23 +1688,27 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in tp_series:
-        pts = " ".join(
-            f"{small_xs[j]:.1f},{y_msg(vals[i]):.1f}"
-            for j, i in enumerate(small_indices)
-        )
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2" stroke-dasharray="6,4"/>'
-        )
+        for segment in _series_segments([vals[i] for i in small_indices]):
+            pts = " ".join(f"{small_xs[j]:.1f},{y_msg(v):.1f}" for j, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2" stroke-dasharray="6,4"/>'
+            )
 
     for _, color, vals in tp_series:
-        gbs = [vals[i] * SIZES[i] / 1e9 for i in large_indices]
-        pts = " ".join(f"{large_xs[j]:.1f},{y_gbs(v):.1f}" for j, v in enumerate(gbs))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
+        gbs = [
+            vals[i] * SIZES[i] / 1e9 if vals[i] is not None else None
+            for i in large_indices
+        ]
+        for segment in _series_segments(gbs):
+            pts = " ".join(f"{large_xs[j]:.1f},{y_gbs(v):.1f}" for j, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+            )
         for j, v in enumerate(gbs):
+            if v is None:
+                continue
             yy = y_gbs(v)
             L.append(
                 f'  <circle cx="{large_xs[j]:.1f}" cy="{yy:.1f}" r="3"'
@@ -1758,12 +1781,15 @@ def gen_combined_chart(data, path):
     ]
 
     for _, color, vals in lat_series:
-        pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
-        L.append(
-            f'  <polyline points="{pts}" fill="none" stroke="{color}"'
-            f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
+        for segment in _series_segments(vals):
+            pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in segment)
+            L.append(
+                f'  <polyline points="{pts}" fill="none" stroke="{color}"'
+                f' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
+            )
         for i, v in enumerate(vals):
+            if v is None:
+                continue
             yy = y_lat(v)
             L.append(
                 f'  <circle cx="{lat_xs[i]:.1f}" cy="{yy:.1f}" r="3"'

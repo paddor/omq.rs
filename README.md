@@ -85,8 +85,7 @@ ZeroMQ Guide patterns to OMQ.
 </details>
 
 [Full comparison charts](COMPARISONS.md) |
-[Other protocol comparisons](PROTOCOL_COMPARISONS.md) |
-[Brokered messaging comparison](COMPARISONS.md#producerconsumer-throughput)
+[Other protocol comparisons](PROTOCOL_COMPARISONS.md)
 
 ## Behavior under load
 

@@ -670,7 +670,6 @@ impl SendPipeConsumer {
     /// Transfer Queue entries directly into the IO owner's storage. The
     /// callback can stop after an entry consumes the remaining destination
     /// capacity, leaving the following entries in the ring.
-    #[cfg(feature = "dart")]
     #[inline]
     pub(crate) fn drain_queue_with(
         &mut self,

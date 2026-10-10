@@ -23,23 +23,6 @@ use super::{Connection, Event, NextFrameInfo, State, decode_command_raw};
 /// making us buffer unbounded data during the handshake.
 const MAX_HANDSHAKE_COMMAND: usize = 256 * 1024;
 
-/// Build a `Message::Inline` from a `ChunkedInputBuf`. The caller must
-/// ensure `payload_len` bytes are available in `buf`.
-#[inline]
-fn inline_message_from_buf(
-    buf: &mut super::super::chunked_buf::ChunkedInputBuf,
-    payload_len: usize,
-) -> Message {
-    let mut data = [0u8; crate::message::MAX_INLINE_MESSAGE];
-    buf.read_into(payload_len, &mut data);
-    Message {
-        inner: crate::message::MessageInner::Inline {
-            len: payload_len as u8,
-            data,
-        },
-    }
-}
-
 impl Connection {
     pub fn handle_input(&mut self, src: Bytes) -> Result<()> {
         match self.state {
@@ -204,17 +187,15 @@ impl Connection {
     #[inline]
     fn try_advance_ready(&mut self) -> Result<bool> {
         self.clear_peer_ttl_if_input_buffered();
-        // Fast path: single non-more, non-command data frame with
-        // inline-sized payload, no crypto transform, no pending
-        // multi-part accumulation. Reads frame bytes directly into
-        // Message::Inline, skipping the Payload intermediary.
+        let Some(hdr) = frame::peek_frame_header(&self.in_buf)? else {
+            return Ok(false);
+        };
+        // Complete single-part data messages need no frame or multipart assembly.
         if !self.has_frame_transform()
             && self.pending_parts.is_empty()
             && !self.discarding_multipart
-            && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
             && !hdr.flags.command
             && !hdr.flags.more
-            && hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE
             && self.in_buf.len() >= hdr.header_len + hdr.payload_len
         {
             if let Some(max) = self.config.data_size_limit()
@@ -226,12 +207,31 @@ impl Connection {
                 });
             }
             self.in_buf.advance(hdr.header_len);
-            self.messages
-                .push_back(inline_message_from_buf(&mut self.in_buf, hdr.payload_len));
+            if hdr.payload_len <= crate::message::MAX_INLINE_MESSAGE {
+                self.messages.push_back(Message {
+                    inner: crate::message::MessageInner::Inline {
+                        len: hdr.payload_len as u8,
+                        data: [0; crate::message::MAX_INLINE_MESSAGE],
+                    },
+                });
+                let crate::message::MessageInner::Inline { data, .. } = &mut self
+                    .messages
+                    .back_mut()
+                    .expect("inserted inline message")
+                    .inner
+                else {
+                    unreachable!("inserted inline message");
+                };
+                self.in_buf.read_into(hdr.payload_len, data);
+            } else {
+                let payload = self
+                    .in_buf
+                    .split_to_with_pool(hdr.payload_len, self.recv_payload_pool.as_ref());
+                self.messages.push_back(Message::from_payload(payload));
+            }
             return Ok(true);
         }
         if self.config.data_size_limit().is_some()
-            && let Some(hdr) = frame::peek_frame_header(&self.in_buf)?
             && let Some(max) = self.config.frame_size_limit(hdr.flags.command)
             && hdr.payload_len.saturating_add(size_of::<Payload>()) > max
         {
@@ -245,7 +245,7 @@ impl Connection {
         } else {
             self.recv_payload_pool.as_ref()
         };
-        let Some(frame) = frame::try_decode_frame_with_pool(&mut self.in_buf, pool)? else {
+        let Some(frame) = frame::try_decode_frame_with_header(&mut self.in_buf, hdr, pool)? else {
             return Ok(false);
         };
         self.decode_assembled_frame(frame.flags, frame.payload)?;

@@ -2149,6 +2149,30 @@ fn handle_send_pipe_ready(
     eq: &mut FrameBuffer,
 ) -> Result<DriverStep> {
     let rx = send_pipe_rx.as_mut().expect("send pipe select guard");
+    if outbound.encoder.is_none() {
+        // Untransformed messages need no staging vector or reverse pass.
+        // Encode in FIFO order while retaining the same drain/time budgets.
+        let started = Instant::now();
+        let mut count = 0usize;
+        let mut encoded = Ok(());
+        if let Some((drained, _)) =
+            rx.drain_queue_with(OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes(), |message| {
+                encoded = encode_msg(&message, &mut outbound.encoder, connection, eq, None);
+                count += 1;
+                encoded.is_ok()
+                    && (!count.is_multiple_of(32) || started.elapsed() < OUTBOUND_BATCH_TIME)
+            })
+        {
+            encoded?;
+            return Ok(if drained != 0 {
+                DriverStep::Continue
+            } else if rx.is_disconnected() {
+                DriverStep::Close
+            } else {
+                DriverStep::Yield
+            });
+        }
+    }
     let drained = rx.drain_into(
         pipe_batch,
         crate::routing::OUTBOUND_BATCH_MAX_MSGS,

@@ -124,7 +124,7 @@ impl ChunkedInputBuf {
         Some(out)
     }
 
-    #[inline]
+    #[cold]
     fn advance_front(&mut self) {
         if let Some(next) = self.rest.pop_front() {
             self.front = next;
@@ -153,23 +153,43 @@ impl ChunkedInputBuf {
     }
 
     /// Copy `n` bytes into `dest[..n]` and advance.
-    #[inline]
+    #[expect(
+        clippy::inline_always,
+        reason = "Inline frame bodies avoid an out-of-line copy and retain fixed-size loads"
+    )]
+    #[inline(always)]
     pub(crate) fn read_into(&mut self, n: usize, dest: &mut [u8]) {
         debug_assert!(n <= self.total_len);
         debug_assert!(n <= dest.len());
         if n == 0 {
             return;
         }
-        self.total_len -= n;
         let avail = self.front.len() - self.front_offset;
         if n <= avail {
-            dest[..n].copy_from_slice(&self.front[self.front_offset..self.front_offset + n]);
+            self.total_len -= n;
+            let src = &self.front[self.front_offset..self.front_offset + n];
+            // Constant lengths let LLVM use register copies for inline bodies.
+            match n {
+                1 => dest[0] = src[0],
+                2 => dest[..2].copy_from_slice(src),
+                4 => dest[..4].copy_from_slice(src),
+                8 => dest[..8].copy_from_slice(src),
+                16 => dest[..16].copy_from_slice(src),
+                32 => dest[..32].copy_from_slice(src),
+                _ => dest[..n].copy_from_slice(src),
+            }
             self.front_offset += n;
             if self.front_offset >= self.front.len() {
                 self.advance_front();
             }
             return;
         }
+        self.read_spanning_into(n, dest);
+    }
+
+    #[cold]
+    fn read_spanning_into(&mut self, n: usize, dest: &mut [u8]) {
+        self.total_len -= n;
         let mut remaining = n;
         let mut pos = 0;
         while remaining > 0 {

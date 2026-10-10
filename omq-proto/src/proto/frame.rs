@@ -222,8 +222,14 @@ pub(crate) struct PeekedFrameHeader {
 /// - `Err(_)` on protocol violation (reserved flag bits set, COMMAND+MORE).
 #[inline]
 pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFrameHeader>> {
-    let Some([flags]) = buf.peek_array::<1>() else {
-        return Ok(None);
+    let short_header = buf.peek_array::<2>();
+    let flags = if let Some([flags, _]) = short_header {
+        flags
+    } else {
+        let Some([flags]) = buf.peek_array::<1>() else {
+            return Ok(None);
+        };
+        flags
     };
     if flags & FLAG_RESERVED_MASK != 0 {
         return Err(Error::Protocol(format!(
@@ -250,10 +256,10 @@ pub(crate) fn peek_frame_header(buf: &ChunkedInputBuf) -> Result<Option<PeekedFr
         }
         (MAX_FRAME_HEADER_LEN, payload_len)
     } else {
-        let Some(hdr) = buf.peek_array::<2>() else {
+        let Some([_, size]) = short_header else {
             return Ok(None);
         };
-        (2, hdr[1] as usize)
+        (2, size as usize)
     };
     Ok(Some(PeekedFrameHeader {
         flags: FrameFlags { more, command },

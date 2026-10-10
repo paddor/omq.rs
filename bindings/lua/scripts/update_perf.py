@@ -467,10 +467,10 @@ def print_table(rows, sizes, latency_sizes, impls, latency_impls):
                 row = by_key.get(("pushpull_tcp", size, impl))
                 if row is None:
                     continue
-                ratio = row["msgs_s"] / base_msgs if base_msgs else 0.0
+                comparison = f"{row['msgs_s'] / base_msgs:.2f}x" if base_msgs else "--"
                 print(
                     f"{size:6d} {impl:12s} {row['msgs_s']:11.0f} "
-                    f"{row['gb_s']:8.3f} {ratio:9.2f}x"
+                    f"{row['gb_s']:8.3f} {comparison:>10}"
                 )
             print()
     if latency_impls:
@@ -483,10 +483,14 @@ def print_table(rows, sizes, latency_sizes, impls, latency_impls):
                 row = by_key.get(("reqrep_tcp_latency", size, impl))
                 if row is None:
                     continue
-                ratio = base_p50 / row["p50_us"] if row["p50_us"] else 0.0
+                comparison = (
+                    f"{base_p50 / row['p50_us']:.2f}x"
+                    if base_p50 and row["p50_us"]
+                    else "--"
+                )
                 print(
                     f"{size:6d} {impl:12s} {row['p50_us']:9.1f} "
-                    f"{row['p99_us']:9.1f} {ratio:9.2f}x"
+                    f"{row['p99_us']:9.1f} {comparison:>10}"
                 )
             print()
 

@@ -30,7 +30,7 @@ CACHE_DIR = Path(
 )
 JSONL = CACHE_DIR / "bindings.jsonl"
 HARNESS_DIR = CACHE_DIR / "pushpull_tcp_peer"
-HARNESS_BIN = HARNESS_DIR / "omq-go-bench-peer"
+HARNESS_BIN = HARNESS_DIR / "omq_go_bench_peer"
 CHART_DIR = ROOT / "doc" / "charts"
 CHART = CHART_DIR / "bindings.svg"
 
@@ -209,7 +209,7 @@ type result struct {
 
 func main() {
 	if len(os.Args) != 8 {
-		die("usage: omq-go-bench-peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <duration> <warmup>")
+		die("usage: omq_go_bench_peer <pushpull|reqrep> <omq|omq-run|omq-run-into|zmq4> <push|pull|req|rep> <endpoint> <size> <duration> <warmup>")
 	}
 	bench := os.Args[1]
 	impl := os.Args[2]
@@ -1266,10 +1266,10 @@ def print_table(rows, sizes, latency_sizes, impls, latency_impls):
                 row = by_key.get(("pushpull_tcp", size, impl))
                 if row is None:
                     continue
-                ratio = row["msgs_s"] / base_msgs if base_msgs else 0.0
+                comparison = f"{row['msgs_s'] / base_msgs:.2f}x" if base_msgs else "--"
                 print(
                     f"{size:6d} {impl:12s} {row['msgs_s']:11.0f} "
-                    f"{row['gb_s']:8.3f} {ratio:9.2f}x"
+                    f"{row['gb_s']:8.3f} {comparison:>10}"
                 )
             print()
     if latency_impls:
@@ -1282,10 +1282,14 @@ def print_table(rows, sizes, latency_sizes, impls, latency_impls):
                 row = by_key.get(("reqrep_tcp_latency", size, impl))
                 if row is None:
                     continue
-                ratio = base_p50 / row["p50_us"] if row["p50_us"] else 0.0
+                comparison = (
+                    f"{base_p50 / row['p50_us']:.2f}x"
+                    if base_p50 and row["p50_us"]
+                    else "--"
+                )
                 print(
                     f"{size:6d} {impl:12s} {row['p50_us']:9.1f} "
-                    f"{row['p99_us']:9.1f} {ratio:9.2f}x"
+                    f"{row['p99_us']:9.1f} {comparison:>10}"
                 )
             print()
 
@@ -1620,6 +1624,12 @@ def gen_chart(data, path, sizes, latency_sizes, impls, latency_impls):
             f' fill="#e5e7eb" font-size="8.5">{fmt_size(size)}</text>'
         )
 
+    add_legend(
+        lines,
+        [(IMPL_LABELS[impl], COLORS[impl]) for impl in impls],
+        mid_x,
+        t1_bot + 60,
+    )
     add_legend(lines, [(IMPL_LABELS[impl], COLORS[impl]) for impl in latency_impls], mid_x, t2_bot + 40)
     lines.append("</svg>")
 

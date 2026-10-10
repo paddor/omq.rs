@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
     docs_step.dependOn(&install_docs.step);
 
     const bench = b.addExecutable(.{
-        .name = "omq-zig-bench",
+        .name = "omq_zig_bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("scripts/bench/omq_bench.zig"),
             .target = target,

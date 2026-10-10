@@ -49,7 +49,6 @@ defmodule OmqBenchPeer do
 
   defp add_paths(root) do
     Code.prepend_path(Path.join([root, "_build", "default", "lib", "omq", "ebin"]))
-    Code.prepend_path(Path.join([root, "_build", "test", "lib", "omq", "ebin"]))
     Code.prepend_path(Path.join([root, "elixir", "_build", "dev", "lib", "omq_elixir", "ebin"]))
   end
 

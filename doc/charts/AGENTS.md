@@ -151,7 +151,8 @@ separate rows when they overlap.
 Labels are `OMQ / TCP` (red), `OMQ / DART-LAN` and
 `OMQ / DART-adaptive` (different orange shades), and `Aeron v1.53.3 / UDP`.
 Thread labels are `1 IO`, with `1 IO (SHARED)` for Aeron's Media Driver.
-The RTT legend also shows the 50 us application/IO spin budgets for OMQ.
+The RTT legend shows 50 us application receive spin for OMQ; only DART
+also uses 50 us IO spin.
 Throughput adds 32 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, and 8 MiB. Use the
 main TCP chart layout: messages/s on the left through 1 KiB, GB/s on the
 right from 256 B. The panels overlap at 256 B, 512 B, and 1 KiB.

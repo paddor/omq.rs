@@ -12,5 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libc = "0.2"
-mlua = { version = "0.11", features = ["lua54", "macros", "module"] }
+mlua = { version = "0.11", features = ["lua54", "module"] }
 omq_zmq = { package = "omq-libzmq", path = "../../../omq-libzmq" }

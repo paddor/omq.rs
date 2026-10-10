@@ -46,7 +46,7 @@ BIN_DIR = os.path.join(CACHE_DIR, "bin")
 IMPLS = {
     "omq.zig": {
         "repo": None,
-        "bench": os.path.join(BINDING_DIR, "zig-out", "bin", "omq-zig-bench"),
+        "bench": os.path.join(BINDING_DIR, "zig-out", "bin", "omq_zig_bench"),
     },
     "zzmq": {
         "repo": "https://github.com/nine-lives-later/zzmq",
@@ -163,7 +163,15 @@ def ensure_clone(name):
 
 def build_omq():
     run(["cargo", "build", "--release", "-p", "omq-libzmq"], cwd=REPO_ROOT, timeout=180)
-    run(["zig", "build", "-Doptimize=ReleaseFast"], cwd=BINDING_DIR, timeout=120)
+    metadata = run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=REPO_ROOT
+    )
+    lib_dir = os.path.join(json.loads(metadata.stdout)["target_directory"], "release")
+    run(
+        ["zig", "build", "-Doptimize=ReleaseFast", f"-Domq-lib-dir={lib_dir}"],
+        cwd=BINDING_DIR,
+        timeout=120,
+    )
 
 
 def build_zzmq():
@@ -550,6 +558,12 @@ def _nice_ceil(v):
 
 
 def gen_combined_chart(data, path):
+    chart_series = [
+        (label, color)
+        for label, color in CHART_SERIES
+        if all(value > 0 for value in data["throughput"][label])
+        and all(value > 0 for value in data["latency"][label])
+    ]
     latency_sizes = latency_sizes_from(SIZES)
     lat_n = len(latency_sizes)
     hw_label = _detect_hardware()
@@ -583,7 +597,7 @@ def gen_combined_chart(data, path):
     lat_xs = [x_left + i * plot_w / max(lat_n - 1, 1) for i in range(lat_n)]
     mid_x = (x_left + x_right) / 2
 
-    tp_series = [(label, color, data["throughput"][label]) for label, color in CHART_SERIES]
+    tp_series = [(label, color, data["throughput"][label]) for label, color in chart_series]
     msg_max = THROUGHPUT_MSG_MAX
     gbs_values = [
         vals[i] * SIZES[i] / 1_000_000_000
@@ -739,7 +753,7 @@ def gen_combined_chart(data, path):
     L.append(f'  <line x1="{x_left}" y1="{t2_top}" x2="{x_left}" y2="{t2_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
     L.append(f'  <line x1="{x_left}" y1="{t2_bot}" x2="{x_right}" y2="{t2_bot}" stroke="#9ca3af" stroke-width="1.5"/>')
 
-    for label, color in CHART_SERIES:
+    for label, color in chart_series:
         vals = data["latency"][label]
         pts = " ".join(f"{lat_xs[i]:.1f},{y_lat(v):.1f}" for i, v in enumerate(vals))
         L.append(
@@ -763,10 +777,10 @@ def gen_combined_chart(data, path):
 
     leg_y = t2_bot + 40
     item_w = 120
-    total_w = len(CHART_SERIES) * item_w
+    total_w = len(chart_series) * item_w
     start_x = mid_x - total_w / 2
 
-    for idx, (label, color) in enumerate(CHART_SERIES):
+    for idx, (label, color) in enumerate(chart_series):
         lx = start_x + idx * item_w
         L.append(
             f'  <line x1="{lx:.0f}" y1="{leg_y}" x2="{lx + 14:.0f}" y2="{leg_y}"'

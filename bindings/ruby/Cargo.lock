@@ -649,8 +649,10 @@ name = "omq-proto"
 version = "0.29.0"
 dependencies = [
  "bytes",
+ "concurrent-queue",
  "crypto_box",
  "crypto_secretbox",
+ "loom",
  "lz4rip",
  "patricia_tree",
  "rand",
@@ -670,6 +672,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "crossbeam-utils",
  "fanring",
  "futures",
  "libc",

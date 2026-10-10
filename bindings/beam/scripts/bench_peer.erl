@@ -21,7 +21,6 @@ main(_) ->
 add_paths(Root) ->
     Paths = [
         ["_build", "default", "lib", "omq", "ebin"],
-        ["_build", "test", "lib", "omq", "ebin"],
         ["gleam", "build", "dev", "erlang", "omq_gleam", "ebin"],
         ["gleam", "build", "dev", "erlang", "gleam_stdlib", "ebin"]
     ],

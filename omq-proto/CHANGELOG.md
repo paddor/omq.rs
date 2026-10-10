@@ -7,19 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-11
+
 ### Breaking
 
 - `FrameBuffer::drain` and `FrameBuffer::drain_owned` return `Drained`, the
   protected and drained entry counts, instead of the protected count.
+- Add `Options::dart` and `Options::recv_payload_pool`. Construct options
+  with `Default` or update exhaustive struct literals.
+- `SocketApi` endpoint arguments accept `TryInto<Endpoint>`. Pass URI strings
+  directly or use `.parse::<Endpoint>()` where type inference is ambiguous.
 
 ### Added
 
+- Sans-I/O DART protocol with ordered delivery, loss repair, receive credit,
+  congestion control, fragmentation, and packed small messages.
+- Transport-independent `PayloadPool` with multiple size classes, reusable
+  payload buffers, and inline-aware message construction.
+- `Endpoint` conversions from borrowed and owned URI strings.
 - `FrameBuffer::io_slices` and `FrameBuffer::advance` write queued frames
   without draining them, large payloads from their own buffers.
 - `FrameBuffer::push_raw_message` queues one message's chunks as a group that
   eviction removes whole.
 - `copy_stats` and the `copy-stats` feature count copied message bytes per
   data-path site.
+
+### Changed
+
+- Decode into selected receive storage directly, including pooled LZ4 output.
+- Reduce atomic operations and allocations in inline frame decoding and
+  multipart table reuse.
+- `MessagePool` caches multipart tables through a bounded atomic MPMC queue
+  instead of a mutex.
 
 ## [0.29.0] - 2026-10-07
 

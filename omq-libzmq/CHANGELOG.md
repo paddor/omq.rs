@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-10-11
+
+### Changed
+
+- Update the bundled backend to `omq-tokio` 0.26.0 and `omq-proto` 0.30.0,
+  including TCP receive and PUB fan-out performance improvements.
+
 ### Fixed
 
 - `zmq_poll` and `ZMQ_EVENTS` report `ZMQ_POLLOUT` only when a nonblocking

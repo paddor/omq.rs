@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-11
+
+### Breaking
+
+- Endpoint methods accept URI strings and typed endpoints through
+  `TryInto<Endpoint>`. Existing untyped `.parse()` calls may require
+  `.parse::<Endpoint>()` or passing the URI string directly.
+- Re-export `omq-proto` 0.30.0, including its configuration and codec API
+  changes.
+
 ### Added
 
+- Native `dart://` reliable ordered UDP transport behind the `dart` feature.
+  Supports fragmentation, packed small messages, loss repair, receive-window
+  backpressure, adaptive congestion control, ECN, and optional LAN mode.
+  DART provides no authentication or encryption.
+- Re-export transport-independent `PayloadPool` and reusable payload buffers.
+  Explicit receive pools select storage before decoding. Socket configuration
+  freezes at the first bind or connect.
 - `blocking::Socket::send_timeout` waits for queue space up to a deadline.
 - `blocking::Socket::send_cancelable` waits for queue space until a
   `BlockingRecvCancel` fires.
@@ -22,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Improve TCP and DART receive decoding, queue drainage, and wake coalescing.
+  PUB fan-out publishes to each IO lane, reuses framing buffers, and admits
+  batches under one peer lock.
+- Fill TCP receive bodies directly into selected storage instead of copying
+  decoded messages into a pool.
 - Latency-profile peers frame messages of 4 KiB and more from their own
   buffers instead of copying them into the send arena. The caller-thread TCP
   write is vectored. 1 MiB REQ/REP round trips take ~22% less time, and RR
@@ -29,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wake parked senders, pollers, and graceful close when queues drain. Wake
+  full receive queues when their consumer closes.
+- Repair DART loss recovery timing and preserve bounded control progress
+  under malformed traffic and closed receive windows.
 - Canceling a REQ or REP `send` no longer leaves the socket unable to send.
 - `Proxy` waits in the target's send instead of retrying on a 1 ms timer. A
   muted `xpub_nodrop` target no longer spins the proxy.

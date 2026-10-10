@@ -289,9 +289,11 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.28.1"
+version = "0.30.0"
 dependencies = [
  "bytes",
+ "concurrent-queue",
+ "loom",
  "patricia_tree",
  "rand",
  "smallvec",
@@ -301,11 +303,12 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.24.0"
+version = "0.26.0"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "crossbeam-utils",
  "fanring",
  "futures",
  "libc",

@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -66,7 +65,6 @@ pub(super) struct LanePeerAdd {
 #[derive(Clone, Debug)]
 pub(super) struct LaneDispatch {
     pub(super) msg: Message,
-    pub(super) topic: Bytes,
 }
 
 #[derive(Clone, Debug)]
@@ -107,101 +105,17 @@ struct GroupAdmission {
     peers: usize,
 }
 
-/// Lane 0's input. Every `Socket` clone sends through this one producer
-/// under the `FanOutLanes::distributor` mutex.
-///
-/// NOTE: A lock-free variant was tried and rejected (2026-09). It gave each
-/// `Socket` clone its own fanring MPSC sender lane into lane 0, published
-/// with `try_send_unsignaled`, and had lane 0 scan all clone lanes. A
-/// compression dictionary switch was ordered by a generation counter that
-/// each clone lane forwarded. Measured against this mutex on 6 cores, the
-/// rate delivered to subscribers did not improve (flat to -10%, worse with
-/// more sender threads than cores). Only the caller-side drop rate on a full
-/// lane went up. It cost about 1200 changed lines, two new fanring APIs,
-/// lost FIFO order between clones, and needed a new blocking-clone
-/// semantic. Sockets are rarely shared across threads, and an uncontended
-/// mutex is cheap. Revisit only with a workload where this lock is the
-/// profiled bottleneck.
+/// Producers for every IO lane. One publication lock preserves socket order
+/// and reserves all participating queues before a non-dropping send.
 struct LaneDistributor {
+    lanes: Vec<LaneInput>,
+    space: Arc<StateSignal>,
+}
+
+struct LaneInput {
     tx: yring::Producer<LaneData>,
     signal: Arc<DataSignal>,
-    space: Arc<StateSignal>,
-}
-
-struct LaneDistributionTarget {
-    lane: usize,
-    data_tx: yring::Producer<LaneData>,
-    data_signal: Arc<DataSignal>,
-    data_space: Arc<StateSignal>,
-}
-
-struct LaneWorkerData {
-    rx: yring::Consumer<LaneData>,
-    signal: Arc<DataSignal>,
-    space: Arc<StateSignal>,
-    targets: Vec<LaneDistributionTarget>,
-    active_flags: Option<Arc<Vec<AtomicBool>>>,
-}
-
-struct LaneDataSetup {
-    distributor: LaneDistributor,
-    primary: Option<LaneWorkerData>,
-    secondary: VecDeque<LaneWorkerData>,
-}
-
-impl LaneDataSetup {
-    fn new(lane_count: usize, pipe_cap: usize, active_flags: Arc<Vec<AtomicBool>>) -> Self {
-        let mut data_channels: Vec<_> = (0..lane_count)
-            .map(|_| {
-                let (tx, rx) = yring::spsc(pipe_cap);
-                let signal = Arc::new(DataSignal::new());
-                let space = Arc::new(StateSignal::new());
-                (tx, rx, signal, space)
-            })
-            .collect();
-        let (dist_tx, dist_rx, dist_signal, dist_space) = data_channels.remove(0);
-        let distributor = LaneDistributor {
-            tx: dist_tx,
-            signal: Arc::clone(&dist_signal),
-            space: Arc::clone(&dist_space),
-        };
-        let mut targets = Vec::with_capacity(data_channels.len());
-        let mut secondary = VecDeque::with_capacity(data_channels.len());
-        for (index, (tx, rx, signal, space)) in data_channels.into_iter().enumerate() {
-            targets.push(LaneDistributionTarget {
-                lane: index + 1,
-                data_tx: tx,
-                data_signal: Arc::clone(&signal),
-                data_space: Arc::clone(&space),
-            });
-            secondary.push_back(LaneWorkerData {
-                rx,
-                signal,
-                space,
-                targets: Vec::new(),
-                active_flags: None,
-            });
-        }
-        Self {
-            distributor,
-            primary: Some(LaneWorkerData {
-                rx: dist_rx,
-                signal: dist_signal,
-                space: dist_space,
-                targets,
-                active_flags: Some(active_flags),
-            }),
-            secondary,
-        }
-    }
-
-    fn take(&mut self, index: usize) -> LaneWorkerData {
-        if index == 0 {
-            self.primary.take().expect("lane 0 data")
-        } else {
-            self.secondary.pop_front().expect("secondary lane data")
-        }
-    }
+    exited: Arc<AtomicBool>,
 }
 
 struct FanOutLaneState {
@@ -212,8 +126,6 @@ pub(super) struct FanOutLanes {
     state: Mutex<FanOutLaneState>,
     active_flags: Arc<Vec<AtomicBool>>,
     distributor: Mutex<LaneDistributor>,
-    /// Set when lane 0's worker has returned; nothing drains after that.
-    distributor_exited: Arc<AtomicBool>,
     admission_closed: AtomicBool,
     mute_policy: FanOutMutePolicy,
 }
@@ -221,13 +133,6 @@ pub(super) struct FanOutLanes {
 impl std::fmt::Debug for LaneDistributor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LaneDistributor").finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for LaneDistributionTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LaneDistributionTarget")
-            .finish_non_exhaustive()
     }
 }
 
@@ -269,8 +174,6 @@ struct LaneWorker {
     eq: FrameBuffer,
     chunks: Vec<Bytes>,
     codec_groups: [Option<CodecGroup>; MAX_CODEC_GROUPS],
-    distribution_targets: Vec<LaneDistributionTarget>,
-    active_flags: Option<Arc<Vec<AtomicBool>>>,
     /// Set when `run` returns.
     exited: Arc<AtomicBool>,
 }
@@ -281,7 +184,6 @@ impl std::fmt::Debug for LaneWorker {
             .field("mode", &self.mode)
             .field("mute_policy", &self.mute_policy)
             .field("peers", &self.peers.len())
-            .field("distribution_targets", &self.distribution_targets.len())
             .finish_non_exhaustive()
     }
 }
@@ -301,7 +203,8 @@ impl FanOutLanes {
                 .collect::<Vec<_>>(),
         );
 
-        let mut data = LaneDataSetup::new(lane_count, pipe_cap, Arc::clone(&active_flags));
+        let space = Arc::new(StateSignal::new());
+        let mut inputs = Vec::with_capacity(lane_count);
         let mut ctrl_channels: Vec<_> = (0..lane_count)
             .map(|_| {
                 let (tx, rx) = yring::spsc(LANE_CTRL_RING_CAP);
@@ -311,24 +214,24 @@ impl FanOutLanes {
             .collect();
 
         // Build endpoints (ctrl only) and spawn workers.
-        let distributor_exited = Arc::new(AtomicBool::new(false));
         let mut endpoints = Vec::with_capacity(lane_count);
         for i in 0..lane_count {
             let (ctrl_tx, ctrl_rx, ctrl_notify) = ctrl_channels.remove(0);
-            let worker_data = data.take(i);
-            let endpoint_data_signal = worker_data.signal.clone();
-            let exited = if i == 0 {
-                Arc::clone(&distributor_exited)
-            } else {
-                Arc::default()
-            };
+            let (data_tx, data_rx) = yring::spsc(pipe_cap);
+            let data_signal = Arc::new(DataSignal::new());
+            let exited = Arc::new(AtomicBool::new(false));
+            inputs.push(LaneInput {
+                tx: data_tx,
+                signal: data_signal.clone(),
+                exited: exited.clone(),
+            });
             io_pool.spawn_on(
                 i,
                 LaneWorker {
-                    data_rx: worker_data.rx,
+                    data_rx,
                     ctrl_rx,
-                    data_signal: worker_data.signal,
-                    data_space: worker_data.space,
+                    data_signal: data_signal.clone(),
+                    data_space: space.clone(),
                     ctrl_notify: ctrl_notify.clone(),
                     mode,
                     mute_policy,
@@ -337,8 +240,6 @@ impl FanOutLanes {
                     eq: FrameBuffer::one_shot(),
                     chunks: Vec::new(),
                     codec_groups: std::array::from_fn(|_| None),
-                    distribution_targets: worker_data.targets,
-                    active_flags: worker_data.active_flags,
                     exited: exited.clone(),
                 }
                 .run(),
@@ -346,7 +247,7 @@ impl FanOutLanes {
             endpoints.push(LaneEndpoint {
                 ctrl_tx,
                 ctrl_notify,
-                data_signal: endpoint_data_signal,
+                data_signal,
                 exited,
                 peer_count: 0,
                 codec_groups: std::array::from_fn(|_| None),
@@ -356,8 +257,10 @@ impl FanOutLanes {
         Arc::new(Self {
             state: Mutex::new(FanOutLaneState { endpoints }),
             active_flags,
-            distributor: Mutex::new(data.distributor),
-            distributor_exited,
+            distributor: Mutex::new(LaneDistributor {
+                lanes: inputs,
+                space,
+            }),
             admission_closed: AtomicBool::new(false),
             mute_policy,
         })
@@ -414,8 +317,8 @@ impl FanOutLanes {
         group.peers += 1;
         endpoint.peer_groups.insert(add.peer_id, codec_group);
         endpoint.peer_count += 1;
-        self.active_flags[lane].store(true, Ordering::Release);
         Self::push_control(endpoint, LaneControl::AddPeer { add, codec_group });
+        self.active_flags[lane].store(true, Ordering::Release);
         Some(lane)
     }
 
@@ -484,8 +387,7 @@ impl FanOutLanes {
         }
     }
 
-    /// Push a raw message into lane 0's data ring. Lane 0 distributes
-    /// to secondary lanes in batches.
+    /// Publish directly into each active IO lane's queue.
     pub(super) fn try_dispatch(
         &self,
         dispatch: LaneDispatch,
@@ -494,26 +396,48 @@ impl FanOutLanes {
         if self.admission_closed.load(Ordering::Acquire) {
             return Err(dispatch);
         }
-        match dist.tx.push(LaneData::Dispatch(dispatch)) {
-            Ok(()) => {
-                dist.tx.flush();
-                dist.signal.mark();
-                Ok(())
+        self.publish(&mut dist, dispatch)
+    }
+
+    fn publish(
+        &self,
+        dist: &mut LaneDistributor,
+        dispatch: LaneDispatch,
+    ) -> core::result::Result<(), LaneDispatch> {
+        let mut selected: SmallVec<[usize; 4]> = SmallVec::new();
+        for (index, input) in dist.lanes.iter_mut().enumerate() {
+            if !self.active_flags[index].load(Ordering::Acquire)
+                || input.exited.load(Ordering::Acquire)
+                || input.tx.is_consumer_dropped()
+            {
+                continue;
             }
-            Err(returned) if self.mute_policy.is_lossy() => {
-                dist.tx.flush();
-                dist.signal.mark();
-                drop(returned);
-                Ok(())
-            }
-            Err(returned) => {
-                dist.tx.flush();
-                dist.signal.mark();
-                match returned {
-                    LaneData::Dispatch(dispatch) => Err(dispatch),
+            if input.tx.is_full() {
+                input.tx.flush();
+                input.signal.mark();
+                if !self.mute_policy.is_lossy() {
+                    return Err(dispatch);
                 }
+            } else {
+                selected.push(index);
             }
         }
+        // This lock owns every producer. Capacity cannot be stolen between
+        // admission and publication; a disconnected consumer may drop data.
+        let data = LaneData::Dispatch(dispatch);
+        if let Some(last) = selected.pop() {
+            for index in selected {
+                let input = &mut dist.lanes[index];
+                let _ = input.tx.push(data.clone());
+                input.tx.flush();
+                input.signal.mark();
+            }
+            let input = &mut dist.lanes[last];
+            let _ = input.tx.push(data);
+            input.tx.flush();
+            input.signal.mark();
+        }
+        Ok(())
     }
 
     pub(super) async fn dispatch(&self, mut dispatch: LaneDispatch) {
@@ -523,46 +447,31 @@ impl FanOutLanes {
                 if self.admission_closed.load(Ordering::Acquire) {
                     return;
                 }
-                // Capture before trying the ring so a space release or worker
-                // exit during the push cannot become the generation we await.
+                // Snapshot before admission: any worker's release or exit
+                // must remain observable when a full queue makes us wait.
                 let seen = dist.space.generation();
-                match dist.tx.push(LaneData::Dispatch(dispatch)) {
-                    Ok(()) => {
-                        dist.tx.flush();
-                        dist.signal.mark();
-                        return;
-                    }
-                    Err(returned) if self.mute_policy.is_lossy() => {
-                        dist.tx.flush();
-                        dist.signal.mark();
-                        drop(returned);
-                        return;
-                    }
-                    Err(LaneData::Dispatch(returned)) => {
-                        dist.tx.flush();
-                        dist.signal.mark();
+                match self.publish(&mut dist, dispatch) {
+                    Ok(()) => return,
+                    Err(returned) => {
                         dispatch = returned;
                         (dist.space.clone(), seen)
                     }
                 }
             };
-            // The worker sets this flag before its final space wake. Nothing
-            // drains the ring after that. Check before parking in case that
-            // final wake preceded our generation snapshot.
-            if self.distributor_exited.load(Ordering::Acquire) {
-                return;
-            }
             wait.0.changed_after(wait.1).await;
         }
     }
 
-    /// Whether lane 0 would admit a dispatch now, and the signal its space
-    /// changes on. Closed or exited lanes admit: sending reports or drops.
+    /// Closed or exited queues admit: sending reports or drops.
     pub(super) fn dispatch_space(&self) -> (bool, Arc<StateSignal>) {
         let mut dist = self.distributor.lock().expect("distributor poisoned");
         let ready = self.admission_closed.load(Ordering::Acquire)
-            || self.distributor_exited.load(Ordering::Acquire)
-            || !dist.tx.is_full();
+            || dist.lanes.iter_mut().enumerate().all(|(index, input)| {
+                !self.active_flags[index].load(Ordering::Acquire)
+                    || input.exited.load(Ordering::Acquire)
+                    || input.tx.is_consumer_dropped()
+                    || !input.tx.is_full()
+            });
         (ready, dist.space.clone())
     }
 
@@ -606,18 +515,14 @@ impl FanOutLanes {
         }
     }
 
-    /// Whether no accepted data or control command is still queued. Once
-    /// lane 0's worker has exited, nothing can drain, so queued data no
-    /// longer counts.
+    /// Include worker-owned batches after ring slots have been released.
     pub(super) fn is_empty(&self) -> bool {
         let dist = self.distributor.lock().expect("distributor poisoned");
-        // DRAINING covers worker-owned batches after release of ring slots.
-        // Observe lane 0 first: once it is idle with admission stopped, it
-        // cannot publish more work to secondary lanes after their idle checks.
-        let dist_empty = (dist.tx.is_empty() && dist.signal.is_idle())
-            || self.distributor_exited.load(Ordering::Acquire);
+        let empty = dist.lanes.iter().all(|input| {
+            (input.tx.is_empty() && input.signal.is_idle()) || input.exited.load(Ordering::Acquire)
+        });
         drop(dist);
-        dist_empty
+        empty
             && self
                 .state
                 .lock()
@@ -625,18 +530,11 @@ impl FanOutLanes {
                 .endpoints
                 .iter()
                 .all(|endpoint| {
-                    endpoint.ctrl_tx.is_empty()
-                        && (endpoint.data_signal.is_idle()
-                            || endpoint.exited.load(Ordering::Acquire))
+                    endpoint.ctrl_tx.is_empty() || endpoint.exited.load(Ordering::Acquire)
                 })
     }
 
     pub(super) fn watch_close(&self, progress: &Arc<StateSignal>) {
-        self.distributor
-            .lock()
-            .expect("distributor poisoned")
-            .signal
-            .watch_idle(progress);
         let state = self.state.lock().expect("fanout lanes poisoned");
         for endpoint in &state.endpoints {
             endpoint.ctrl_notify.watch_idle(progress);
@@ -658,74 +556,35 @@ impl LaneWorker {
                 return;
             }
 
-            // 2. Data up to budget. Lane 0 drains into
-            //    a batch, distributes to secondary lanes FIRST (so
-            //    they can start encoding in parallel), then processes
-            //    its own peers.
+            // 2. Encode this lane's bounded batch. Other lanes are fed
+            // directly by the caller and can encode independently.
             budget.reset();
             let mut drained = false;
-            let is_distributor = !self.distribution_targets.is_empty();
-            if is_distributor {
-                let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
-                self.data_rx.prefetch();
-                while let Some(data) = self.data_rx.pop() {
-                    drained = true;
-                    if !budget.account(data.byte_len()) {
-                        batch.push(data);
-                        break;
-                    }
-                    batch.push(data);
+            let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
+            self.data_rx.prefetch();
+            while let Some(data) = self.data_rx.pop() {
+                drained = true;
+                let msg_bytes = data.byte_len();
+                batch.push(data);
+                if !budget.account(msg_bytes) {
+                    break;
                 }
-                self.data_rx.release();
-                if drained {
-                    self.notify_data_space();
+            }
+            self.data_rx.release();
+            if drained {
+                self.notify_data_space();
+            }
+            if !batch.is_empty() {
+                // Control sent before publication may race with the first
+                // drain. Observe it again before processing the data batch.
+                if self.drain_control() {
+                    self.stop(&mut touched);
+                    return;
                 }
-
-                if !batch.is_empty() {
-                    // Control sent before this data can race with the first
-                    // control drain. Drain once more after observing data so
-                    // subscriptions and group registration apply first.
-                    if self.drain_control() {
+                for data in &batch {
+                    if self.handle_data(data, &mut touched).await {
                         self.stop(&mut touched);
                         return;
-                    }
-                    if self.distribute_batch(&batch).await {
-                        self.stop(&mut touched);
-                        return;
-                    }
-                    for data in &batch {
-                        if self.handle_data(data, &mut touched).await {
-                            self.stop(&mut touched);
-                            return;
-                        }
-                    }
-                }
-            } else {
-                let mut batch: SmallVec<[LaneData; 32]> = SmallVec::new();
-                self.data_rx.prefetch();
-                while let Some(data) = self.data_rx.pop() {
-                    drained = true;
-                    let msg_bytes = data.byte_len();
-                    batch.push(data);
-                    if !budget.account(msg_bytes) {
-                        break;
-                    }
-                }
-                self.data_rx.release();
-                if drained {
-                    self.notify_data_space();
-                }
-
-                if !batch.is_empty() {
-                    if self.drain_control() {
-                        self.stop(&mut touched);
-                        return;
-                    }
-                    for data in &batch {
-                        if self.handle_data(data, &mut touched).await {
-                            self.stop(&mut touched);
-                            return;
-                        }
                     }
                 }
             }
@@ -776,76 +635,6 @@ impl LaneWorker {
         self.ctrl_rx.release();
         self.ctrl_notify.clear_after(self.ctrl_rx.is_empty());
         shutdown
-    }
-
-    async fn distribute_batch(&mut self, batch: &[LaneData]) -> bool {
-        if self.mute_policy.is_lossy() {
-            self.distribute_batch_lossy(batch);
-            return false;
-        }
-        let Some(active_flags) = self.active_flags.clone() else {
-            return false;
-        };
-        for target_idx in 0..self.distribution_targets.len() {
-            if !active_flags[self.distribution_targets[target_idx].lane].load(Ordering::Acquire) {
-                continue;
-            }
-            for data in batch {
-                loop {
-                    let wait = {
-                        let target = &mut self.distribution_targets[target_idx];
-                        match target.data_tx.push(data.clone()) {
-                            Ok(()) => None,
-                            Err(returned) if self.mute_policy.is_lossy() => {
-                                drop(returned);
-                                None
-                            }
-                            Err(returned) => {
-                                target.data_tx.flush();
-                                target.data_signal.mark();
-                                let seen = target.data_space.generation();
-                                let space = target.data_space.clone();
-                                drop(returned);
-                                Some((space, seen))
-                            }
-                        }
-                    };
-                    let Some((space, seen)) = wait else {
-                        break;
-                    };
-                    let changed = space.changed_after(seen);
-                    tokio::pin!(changed);
-                    tokio::select! {
-                        () = &mut changed => {}
-                        () = self.ctrl_notify.ready() => {
-                            if self.drain_control() {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            let target = &mut self.distribution_targets[target_idx];
-            target.data_tx.flush();
-            target.data_signal.mark();
-        }
-        false
-    }
-
-    fn distribute_batch_lossy(&mut self, batch: &[LaneData]) {
-        let Some(ref active_flags) = self.active_flags else {
-            return;
-        };
-        for target in &mut self.distribution_targets {
-            if !active_flags[target.lane].load(Ordering::Acquire) {
-                continue;
-            }
-            for data in batch {
-                let _ = target.data_tx.push(data.clone());
-            }
-            target.data_tx.flush();
-            target.data_signal.mark();
-        }
     }
 
     async fn handle_data(&mut self, data: &LaneData, touched: &mut SmallVec<[u64; 32]>) -> bool {
@@ -1116,8 +905,9 @@ impl LaneWorker {
                         &peer.subscriptions,
                         &peer.groups,
                         peer.any_groups,
-                        &dispatch.topic,
-                        matches!(self.mode, FanOutMode::Group).then_some(dispatch.topic.as_ref()),
+                        dispatch.msg.part_slice(0).unwrap_or_default(),
+                        matches!(self.mode, FanOutMode::Group)
+                            .then(|| dispatch.msg.part_slice(0).unwrap_or_default()),
                     ))
             {
                 groups[peer.codec_group].push(peer_id);
@@ -1343,7 +1133,7 @@ mod tests {
 
     use super::{
         FanOutLaneState, FanOutLanes, FanOutMode, FanOutMutePolicy, LaneData, LaneDispatch,
-        LaneDistributor, LaneEndpoint, LanePeer, LanePeerAdd, LaneWorker,
+        LaneDistributor, LaneEndpoint, LaneInput, LanePeer, LanePeerAdd, LaneWorker,
     };
 
     #[test]
@@ -1400,7 +1190,7 @@ mod tests {
         let lanes = test_lanes(2);
         lanes.stop_admission();
         assert!(lanes.is_empty());
-        let distributor = lanes.distributor.lock().unwrap().signal.clone();
+        let distributor = lanes.distributor.lock().unwrap().lanes[0].signal.clone();
         distributor.mark();
         distributor.begin_drain();
         assert!(
@@ -1424,13 +1214,15 @@ mod tests {
         let data_space = Arc::new(crate::engine::signal::StateSignal::new());
         let lanes = FanOutLanes {
             state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
-            active_flags: Arc::new(vec![AtomicBool::new(false)]),
+            active_flags: Arc::new(vec![AtomicBool::new(true)]),
             distributor: Mutex::new(LaneDistributor {
-                tx: data_tx,
-                signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                lanes: vec![LaneInput {
+                    tx: data_tx,
+                    signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                    exited: Arc::new(AtomicBool::new(false)),
+                }],
                 space: data_space.clone(),
             }),
-            distributor_exited: Arc::new(AtomicBool::new(false)),
             admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::Block,
         };
@@ -1462,13 +1254,15 @@ mod tests {
         let data_space = Arc::new(crate::engine::signal::StateSignal::new());
         let lanes = FanOutLanes {
             state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
-            active_flags: Arc::new(vec![AtomicBool::new(false)]),
+            active_flags: Arc::new(vec![AtomicBool::new(true)]),
             distributor: Mutex::new(LaneDistributor {
-                tx: data_tx,
-                signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                lanes: vec![LaneInput {
+                    tx: data_tx,
+                    signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                    exited: Arc::new(AtomicBool::new(false)),
+                }],
                 space: data_space.clone(),
             }),
-            distributor_exited: Arc::new(AtomicBool::new(false)),
             admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::Block,
         };
@@ -1483,8 +1277,8 @@ mod tests {
 
         // The worker's exit: flag, then the final space wake. The ring stays
         // full because nothing drains it anymore.
-        lanes
-            .distributor_exited
+        lanes.distributor.lock().unwrap().lanes[0]
+            .exited
             .store(true, std::sync::atomic::Ordering::Release);
         data_space.notify_changed();
         tokio::time::timeout(std::time::Duration::from_secs(1), send_second)
@@ -1507,13 +1301,15 @@ mod tests {
             let data_space = Arc::new(crate::engine::signal::StateSignal::new());
             let lanes = FanOutLanes {
                 state: std::sync::Mutex::new(FanOutLaneState { endpoints: vec![] }),
-                active_flags: Arc::new(vec![AtomicBool::new(false)]),
+                active_flags: Arc::new(vec![AtomicBool::new(true)]),
                 distributor: Mutex::new(LaneDistributor {
-                    tx: data_tx,
-                    signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                    lanes: vec![LaneInput {
+                        tx: data_tx,
+                        signal: Arc::new(crate::engine::signal::DataSignal::new()),
+                        exited: Arc::new(AtomicBool::new(false)),
+                    }],
                     space: data_space.clone(),
                 }),
-                distributor_exited: Arc::new(AtomicBool::new(false)),
                 admission_closed: AtomicBool::new(false),
                 mute_policy: FanOutMutePolicy::Block,
             };
@@ -1521,8 +1317,8 @@ mod tests {
 
             // Stop can publish its final wake before an in-flight sender
             // tries to push. No later space notification will arrive.
-            lanes
-                .distributor_exited
+            lanes.distributor.lock().unwrap().lanes[0]
+                .exited
                 .store(true, std::sync::atomic::Ordering::Release);
             data_space.notify_changed();
             if drop_ring {
@@ -1556,8 +1352,6 @@ mod tests {
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
             codec_groups: test_plain_groups(),
-            distribution_targets: Vec::new(),
-            active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1608,8 +1402,6 @@ mod tests {
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
             codec_groups: test_plain_groups(),
-            distribution_targets: Vec::new(),
-            active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
@@ -1671,8 +1463,6 @@ mod tests {
                 );
                 groups
             },
-            distribution_targets: Vec::new(),
-            active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
@@ -1743,8 +1533,6 @@ mod tests {
             eq: FrameBuffer::one_shot(),
             chunks: Vec::new(),
             codec_groups: test_plain_groups(),
-            distribution_targets: Vec::new(),
-            active_flags: None,
             exited: Arc::new(AtomicBool::new(false)),
         };
         let mut touched = SmallVec::new();
@@ -1766,17 +1554,29 @@ mod tests {
     }
 
     fn test_lanes(count: usize) -> FanOutLanes {
+        let endpoints = test_endpoints(count);
+        let inputs = endpoints
+            .iter()
+            .map(|endpoint| {
+                let (tx, _rx) = yring::spsc(4);
+                LaneInput {
+                    tx,
+                    signal: endpoint.data_signal.clone(),
+                    exited: endpoint.exited.clone(),
+                }
+            })
+            .collect();
         FanOutLanes {
-            state: std::sync::Mutex::new(FanOutLaneState {
-                endpoints: test_endpoints(count),
-            }),
+            state: std::sync::Mutex::new(FanOutLaneState { endpoints }),
             active_flags: Arc::new(
                 (0..count)
                     .map(|_| AtomicBool::new(false))
                     .collect::<Vec<_>>(),
             ),
-            distributor: test_distributor(),
-            distributor_exited: Arc::new(AtomicBool::new(false)),
+            distributor: Mutex::new(LaneDistributor {
+                lanes: inputs,
+                space: Arc::new(crate::engine::signal::StateSignal::new()),
+            }),
             admission_closed: AtomicBool::new(false),
             mute_policy: FanOutMutePolicy::DropNewest,
         }
@@ -1820,21 +1620,9 @@ mod tests {
         )
     }
 
-    fn test_distributor() -> Mutex<LaneDistributor> {
-        let (data_tx, _data_rx) = yring::spsc::<LaneData>(4);
-        Mutex::new(LaneDistributor {
-            tx: data_tx,
-            signal: Arc::new(crate::engine::signal::DataSignal::new()),
-            space: Arc::new(crate::engine::signal::StateSignal::new()),
-        })
-    }
-
     fn test_dispatch(body: &str) -> LaneDispatch {
         let msg = omq_proto::message::Message::from_slice(body.as_bytes());
-        LaneDispatch {
-            topic: msg.part_bytes(0).unwrap(),
-            msg,
-        }
+        LaneDispatch { msg }
     }
 
     fn encoded_dispatch(body: &str) -> Bytes {

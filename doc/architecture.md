@@ -127,16 +127,16 @@ their order through handshake and reconnect. A bind-side
 socket without a ready pipe is mute. HWM limits each pipe's queued messages;
 it does not cap total socket memory.
 
-Owned contexts distribute publications across fan-out lanes on their I/O
-threads; borrowed contexts use one lane. Each lane matches
+Callers enqueue publications directly into each active I/O lane's ring;
+borrowed contexts use one lane. Publication is serialized across lanes,
+with capacity admitted in every lane before a non-dropping send. Each lane matches
 subscribers or groups before encoding. Peers with compatible codec settings
 can share encoded output within that lane. Connection-specific transforms
 run on the peer's driver.
 
 ```text
- caller -> fan-out lane -> match + encode -> peer slots -> drivers
-                    |
-                    +-> other lanes -> match + encode -> peer slots
+ caller -> lane ring -> match + encode -> peer slots -> drivers
+       +-> lane ring -> match + encode -> peer slots -> drivers
 
  socket actor -> separate control channels -> lanes
 ```

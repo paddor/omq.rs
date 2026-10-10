@@ -190,7 +190,7 @@ impl Submitter {
         deactivate_fanout_target(&self.inner, &self.generation, target);
     }
 
-    fn fallback_targets(&self, topic: &Bytes, group: Option<&[u8]>) -> (FallbackTargets, bool) {
+    fn fallback_targets(&self, topic: &[u8], group: Option<&[u8]>) -> (FallbackTargets, bool) {
         let g = self.inner.lock().expect("fanout inner poisoned");
         #[cfg(feature = "dart")]
         if let Some((targets, has_lanes)) = self.native_targets(&g) {
@@ -225,16 +225,11 @@ impl Submitter {
         msg: &Message,
         group: Option<&[u8]>,
     ) -> core::result::Result<(), omq_proto::error::TrySendError> {
-        let topic = filter::first_frame_bytes(msg);
-
         // Fast path: no fallback peers, push raw message directly to lanes.
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
-                let dispatch = LaneDispatch {
-                    msg: msg.clone(),
-                    topic,
-                };
+                let dispatch = LaneDispatch { msg: msg.clone() };
                 if let Err(returned) = lanes.try_dispatch(dispatch) {
                     return Err(omq_proto::error::TrySendError::Full(returned.msg));
                 }
@@ -242,7 +237,8 @@ impl Submitter {
             return Ok(());
         }
 
-        let (targets, has_lane_peers) = self.fallback_targets(&topic, group);
+        let topic = filter::first_frame_slice(msg);
+        let (targets, has_lane_peers) = self.fallback_targets(topic, group);
         let fallback_targets = targets.as_slice();
         #[cfg(feature = "dart")]
         for target in fallback_targets {
@@ -262,10 +258,7 @@ impl Submitter {
                     .publish(fallback_targets, msg, || {
                         if has_lane_peers {
                             lanes
-                                .try_dispatch(LaneDispatch {
-                                    msg: msg.clone(),
-                                    topic,
-                                })
+                                .try_dispatch(LaneDispatch { msg: msg.clone() })
                                 .map_err(|returned| omq_proto::TrySendError::Full(returned.msg))?;
                         }
                         Ok(())
@@ -280,10 +273,7 @@ impl Submitter {
                 return Err(omq_proto::error::TrySendError::Full(msg.clone()));
             };
             if has_lane_peers {
-                let dispatch = LaneDispatch {
-                    msg: msg.clone(),
-                    topic,
-                };
+                let dispatch = LaneDispatch { msg: msg.clone() };
                 if let Err(returned) = lanes.try_dispatch(dispatch) {
                     return Err(omq_proto::error::TrySendError::Full(returned.msg));
                 }
@@ -301,10 +291,7 @@ impl Submitter {
         }
 
         if has_lane_peers {
-            let dispatch = LaneDispatch {
-                msg: msg.clone(),
-                topic,
-            };
+            let dispatch = LaneDispatch { msg: msg.clone() };
             if let Err(returned) = lanes.try_dispatch(dispatch) {
                 return Err(omq_proto::error::TrySendError::Full(returned.msg));
             }
@@ -318,23 +305,17 @@ impl Submitter {
         msg: &Message,
         group: Option<&[u8]>,
     ) -> Result<()> {
-        let topic = filter::first_frame_bytes(msg);
-
         // Fast path: no fallback peers, push raw message directly to lanes.
         if self.fallback_peer_count.load(Ordering::Relaxed) == 0 {
             let lane_count = self.lane_peer_count.load(Ordering::Acquire);
             if lane_count > 0 {
-                lanes
-                    .dispatch(LaneDispatch {
-                        msg: msg.clone(),
-                        topic,
-                    })
-                    .await;
+                lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
             }
             return Ok(());
         }
 
-        let (targets, has_lane_peers) = self.fallback_targets(&topic, group);
+        let topic = filter::first_frame_slice(msg);
+        let (targets, has_lane_peers) = self.fallback_targets(topic, group);
         let fallback_targets = targets.as_slice();
         #[cfg(feature = "dart")]
         for target in fallback_targets {
@@ -361,12 +342,7 @@ impl Submitter {
             };
             let native = async {
                 if has_lane_peers {
-                    lanes
-                        .dispatch(LaneDispatch {
-                            msg: msg.clone(),
-                            topic,
-                        })
-                        .await;
+                    lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
                 }
             };
             if published {
@@ -395,12 +371,7 @@ impl Submitter {
             )?;
         }
         if has_lane_peers {
-            lanes
-                .dispatch(LaneDispatch {
-                    msg: msg.clone(),
-                    topic,
-                })
-                .await;
+            lanes.dispatch(LaneDispatch { msg: msg.clone() }).await;
         }
         Ok(())
     }

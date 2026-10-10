@@ -66,7 +66,7 @@ fn collect(repo: &Path, dir: &Path, violations: &mut Vec<String>) {
             // Tests, benches, peers, and build output may sleep.
             if !matches!(
                 name,
-                "target" | "node_modules" | "tests" | "test" | "bin" | "benches"
+                "target" | "build" | "node_modules" | "tests" | "test" | "bin" | "benches"
             ) {
                 collect(repo, &path, violations);
             }
@@ -100,4 +100,29 @@ fn collect(repo: &Path, dir: &Path, violations: &mut Vec<String>) {
             }
         }
     }
+}
+
+#[test]
+fn generated_build_sources_are_skipped_but_native_sources_are_checked() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let repo = std::env::temp_dir().join(format!("omq-sleep-poll-{}-{nonce}", std::process::id()));
+    for relative in ["build/packages/omq/native/src", "native/src"] {
+        let dir = repo.join(relative);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("lib.rs"),
+            "thread::sleep(Duration::from_millis(1));\n",
+        )
+        .unwrap();
+    }
+    let mut violations = Vec::new();
+    collect(&repo, &repo, &mut violations);
+    fs::remove_dir_all(repo).unwrap();
+    assert_eq!(
+        violations,
+        ["native/src/lib.rs:1: thread::sleep(Duration::from_millis(1));"]
+    );
 }

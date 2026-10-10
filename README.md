@@ -4,6 +4,8 @@ Connect threads, processes, hosts, and languages without a broker. OMQ gives
 you the same small send/recv model across in-process queues, IPC, TCP,
 QUIC, WebSocket, compressed links, and language boundaries.
 
+Your app shouldn't have to care about the network. Queues all the way!
+
 OMQ follows [ZeroMQ](https://zeromq.org): same socket patterns, compatible
 wire protocol, and libzmq-style APIs. The core is memory-safe Rust and does
 not depend on libzmq, libsodium, or a C compiler.
@@ -68,21 +70,15 @@ not depend on libzmq, libsodium, or a C compiler.
 
 ## The hard parts
 
-OMQ is designed for real ZMQ behavior, not just happy-path PUSH/PULL throughput. You get:
+OMQ is designed for real ZeroMQ behavior, not just happy-path PUSH/PULL throughput. You get:
 
 - ZeroMQ semantics without extra tuning: no topology-specific socket types, no user-visible batching API, no manual reconnection loop.
 - Transport failures are normal: reconnect, connect-before-bind, peer churn, and bind-side restarts are part of the design.
 - Peer failures do not become user errors: `send()` and `recv()` keep working through disconnects, reconnects, slow consumers, and bind-side restarts.
 - HWM back-pressure and routing fairness under load, not only in empty-queue examples.
-- Documented libzmq compatibility edges for no-peer sends, linger, and HWM:
-  [doc/libzmq/semantics.md](doc/libzmq/semantics.md).
-- The hot paths are size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
-- Latency-sensitive single-peer TCP flows can use `omq_tokio::exclusive::Socket`
-  to drive `PAIR`, `DEALER`, `ROUTER`, `REQ`, `REP`, `CLIENT`, or `SERVER`
-  directly from the caller task.
-- The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and PUB peers are assigned to IO lanes automatically.
-- The Rust protocol and async backend crates forbid `unsafe` code.
-- Benchmarks cover the real shapes: CPU accounting, fan-in/fan-out, fairness, transport differences.
+- The hot paths are lock-free, size-aware and latency-conscious: tiny messages stay inline without allocation, inproc passes messages by value, and large payloads use zero-copy buffers where it matters.
+- The only Rust ZeroMQ implementation following libzmq's architecture: application threads stay separate from dedicated background IO threads, IO work scales linearly across those threads, and peers are assigned to IO lanes statically. Ready for your thread-per-core app!
+- Extensive tests and benchmarks: throughput, latency, CPU, fan-in/fan-out, fairness across transports.
 
 ## Usage
 
@@ -120,27 +116,15 @@ port of the ZeroMQ Guide patterns to OMQ.
 All optional. Default build is the smallest deploy: NULL mechanism +
 TCP / IPC / inproc / UDP, no C compiler required. Enable any of:
 
-| feature           | what it adds                                      | extra deps                       |
-|-------------------|---------------------------------------------------|----------------------------------|
-| `plain`           | PLAIN username/password auth (RFC 24)             | -                                |
-| `curve`           | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
-| `lz4`             | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
-| `zstd`            | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
-| `ws`              | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
-| `quic`            | QUIC (`quic://`) transport ([example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
-| `dart`            | Reliable ordered UDP messages (`dart://`), [RFC](doc/dart-rfc.md), [native Rust API](doc/dart.md) | `quinn-udp` |
-
-## Design highlights
-
-| Feature | Details |
-|---------|---------|
-| **Sans-I/O ZMTP codec** ([`omq-proto`](omq-proto/)) | Byte-in / events-out. No async. |
-| **Message-count HWM** | `send_hwm`/`recv_hwm` count complete messages, not bytes. Send HWM is per outbound pipe/ring, so total native buffered messages can exceed one `send_hwm` when several pipes or transmit slots exist. |
-| **Contiguous frame payloads** | `&msg[0]` gives `&[u8]` directly; no fallible borrow, no coalesce step. |
-| **Zero-copy send and recv** | Send: large `Bytes` payloads reach the kernel `writev` without a single data copy. Recv: large frames read directly into a pre-allocated buffer, bypassing intermediate queues. |
-| **Patricia-trie subscription matcher** | O(M) on topic length, not O(NxM). |
-| **Compression dictionary auto-training** | LZ4 and zstd can train dictionaries from early messages and send them to each peer once. This helps compress small structured payloads without manual dictionary setup. |
-| **Monitor events** | Socket-like `Stream` with owned `PeerInfo` on every connect / disconnect / handshake event. |
+| feature | what it adds                                      | extra deps                       |
+|---------|---------------------------------------------------|----------------------------------|
+| `plain` | PLAIN username/password auth (RFC 24)             | -                                |
+| `curve` | CURVE encrypted-handshake mechanism (RFC 26)      | `crypto_box`, `crypto_secretbox` |
+| `lz4`   | `lz4+tcp://` compression transport ([RFC](doc/lz4-rfc.md)) | `lz4rip` |
+| `zstd`  | Experimental `zstd+tcp://` compression transport  | `zrip`                           |
+| `ws`    | WebSocket (`ws://`) and secure WebSocket (`wss://`) transports | `rustls`, `rustls-native-certs` |
+| `quic`  | QUIC (`quic://`) transport ([example](examples/quic.rs)) | `quinn`, `rustls`, `rustls-native-certs` |
+| `dart`  | Reliable ordered UDP messages (`dart://`) with ultra-low p99 latency, [RFC](doc/dart-rfc.md), [native Rust API](doc/dart.md) | `quinn-udp` |
 
 ## Workspace
 
@@ -161,42 +145,6 @@ Four Cargo workspace crates plus language bindings.
 | [`OMQ.lua`](bindings/lua/) | Lua 5.4 binding (mlua native module over omq-libzmq) | mlua/native ABI boundary |
 | [`OMQ.beam`](bindings/beam/) | Erlang binding plus Elixir and Gleam wrappers (Rustler NIF over omq-tokio) | BEAM NIF boundary |
 | [`OMQ.zig`](bindings/zig/) | Zig 0.16 binding (thin wrapper over omq-libzmq) | C ABI boundary |
-
-## Testing
-
-Every socket type, transport, mechanism, and feature combination is
-covered by integration tests. The suite is layered:
-
-- **700+ Rust tests** across socket types, transports, mechanisms, and
-  libzmq-compatible C API behavior.
-- **Feature-gated coverage** for PLAIN, CURVE, LZ4, and pyzmq/libzmq
-  interop. QUIC and WebSocket have dedicated tests and soak coverage.
-- **Protocol fuzzing** (~1M iterations in the default opt-in run, with
-  longer runs configurable): hand-rolled fuzz of the wire parser and the
-  socket-action state machine.
-- **20+ soak scenarios** across Rust and pyomq: peer churn, reconnect
-  storms, PUB/SUB churn, ROUTER/DEALER churn, HWM reconnect, cancel
-  safety, compression (lz4), PLAIN / CURVE auth, mechanism reconnect,
-  large-message throughput, multi-socket, inproc cross-thread,
-  WebSocket throughput and reconnect. Soak runs sample RSS and FD counts.
-- **Loom** coverage for `omq-tokio` signal race windows.
-- **Release semver review** through `release-plz`.
-
-```sh
-./scripts/test-all.sh              # standard sweep with local perf gate
-OMQ_FUZZ=1 ./scripts/test-all.sh   # include fuzz suites
-OMQ_SKIP_PYOMQ=1 ./scripts/test-all.sh
-OMQ_SKIP_LUA=1 ./scripts/test-all.sh
-OMQ_SKIP_PERF=1 ./scripts/test-all.sh
-```
-
-Soak tests are intentionally separate from the full sweep:
-
-```sh
-FEATURES="soak lz4 plain curve ws"
-OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
-  --features "$FEATURES" --release --test omq_soak_peer_churn -- --nocapture
-```
 
 ## Further reading
 
@@ -219,10 +167,11 @@ OMQ_SOAK_DURATION_SECS=600 cargo test -p omq-tokio \
 ## Platform and requirements
 
 - Rust 1.93 or newer (edition 2024).
-- Linux, macOS, and Windows.
-- Linux is the primary development and benchmarking platform.
-- Supported 32-bit Linux targets: `i686-unknown-linux-gnu` and
-  `armv7-unknown-linux-gnueabihf`.
+- Linux (`x86_64`, `aarch64`, `i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`)
+- macOS (ARM/Intel)
+- Windows
+
+Linux is the primary development and benchmarking platform.
 
 ## Contributing
 

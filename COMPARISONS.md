@@ -17,12 +17,12 @@ Comparisons with other messaging and RPC protocols live in
 
 ## Methodology
 
-TCP and IPC charts use one benchmark process per peer, not multiple
-threads inside one process.
+TCP and IPC charts run communicating sides in separate processes.
 
 - Two-peer charts use two processes.
-- PUB/SUB and PUSH/PULL fan-in/fan-out charts use one process for each
-  publisher, subscriber, pusher, or puller.
+- PUB/SUB charts use two processes, with all subscriber sockets in one
+  receiver process. Receive workers drain disjoint socket subsets.
+- PUSH/PULL fan-in/fan-out charts use one process for each pusher or puller.
 - `inproc` charts stay inside one process by definition.
 
 Multi-peer charts report total throughput. PUSH fan-out charts also show
@@ -117,6 +117,10 @@ N-to-1 PUSH/PULL over TCP.
 
 <p align="center">
   <img src="doc/charts/pubsub/tcp.svg" alt="PUB/SUB throughput: TCP" width="850">
+</p>
+
+<p align="center">
+  <img src="doc/charts/pubsub/ipc.svg" alt="PUB/SUB throughput: IPC" width="850">
 </p>
 
 <p align="center">

@@ -881,9 +881,13 @@ fn run_multi_sub(
     drain_subscribers(&sockets, size, Instant::now() + warmup_duration());
     wait_for_start_barrier();
 
+    let workers = std::env::var("OMQ_BENCH_RECV_WORKERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
     let cpu_before = cpu_time_secs();
     let t0 = Instant::now();
-    let per_socket = drain_subscribers(&sockets, size, t0 + duration);
+    let per_socket = drain_subscriber_workers(&sockets, size, t0 + duration, workers);
 
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = cpu_time_secs() - cpu_before;
@@ -900,6 +904,34 @@ fn run_multi_sub(
          per-socket [{per_min_rate:.0}, {per_max_rate:.0}] msg/s",
         total as f64 / elapsed,
     );
+}
+
+fn drain_subscriber_workers(
+    sockets: &[blocking::Socket],
+    size: usize,
+    deadline: Instant,
+    workers: usize,
+) -> Vec<u64> {
+    let workers = workers.clamp(1, sockets.len().max(1));
+    if workers == 1 {
+        return drain_subscribers(sockets, size, deadline);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let shard = &sockets
+                    [worker * sockets.len() / workers..(worker + 1) * sockets.len() / workers];
+                std::thread::Builder::new()
+                    .name(format!("omq_sub{worker}"))
+                    .spawn_scoped(scope, move || drain_subscribers(shard, size, deadline))
+                    .expect("spawn subscriber worker")
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("subscriber worker"))
+            .collect()
+    })
 }
 
 #[derive(Debug)]

@@ -385,6 +385,46 @@ static void drain_subscribers(void **sockets, int count, int size,
     zmq_msg_close(&msg);
 }
 
+typedef struct {
+    void **sockets;
+    int count;
+    int size;
+    double deadline;
+    long long *counts;
+} SubDrainWorker;
+
+static void *drain_sub_thread(void *arg) {
+    SubDrainWorker *worker = arg;
+    drain_subscribers(worker->sockets, worker->count, worker->size,
+                      worker->deadline, worker->counts);
+    return NULL;
+}
+
+static void drain_subscriber_workers(void **sockets, int count, int size,
+                                     double deadline, long long *counts,
+                                     int workers) {
+    if (workers <= 1) {
+        drain_subscribers(sockets, count, size, deadline, counts);
+        return;
+    }
+    if (workers > count) workers = count;
+    pthread_t threads[256];
+    SubDrainWorker args[256];
+    for (int i = 0; i < workers; i++) {
+        int first = i * count / workers;
+        int last = (i + 1) * count / workers;
+        args[i] = (SubDrainWorker){
+            sockets + first, last - first, size, deadline, counts + first
+        };
+        int error = pthread_create(&threads[i], NULL, drain_sub_thread, &args[i]);
+        if (error != 0) {
+            fprintf(stderr, "pthread_create: %s\n", strerror(error));
+            exit(1);
+        }
+    }
+    for (int i = 0; i < workers; i++) pthread_join(threads[i], NULL);
+}
+
 static void run_multi_sub(void *ctx, const char *addr, int size,
                           double duration, int count) {
     void *sockets[256];
@@ -413,9 +453,11 @@ static void run_multi_sub(void *ctx, const char *addr, int size,
     drain_subscribers(sockets, count, size, now_secs() + warmup, counts);
     wait_for_start_barrier();
     memset(counts, 0, sizeof(counts));
+    const char *workers_env = getenv("OMQ_BENCH_RECV_WORKERS");
+    int workers = workers_env ? atoi(workers_env) : 1;
     double cpu_before = cpu_time_secs();
     double t0 = now_secs();
-    drain_subscribers(sockets, count, size, t0 + duration, counts);
+    drain_subscriber_workers(sockets, count, size, t0 + duration, counts, workers);
     double elapsed = now_secs() - t0;
     double cpu = cpu_time_secs() - cpu_before;
     long long total = 0;

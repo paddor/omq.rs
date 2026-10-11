@@ -116,7 +116,7 @@ pub(crate) struct ComparisonsArgs {
     #[arg(long)]
     pub duration: Option<f64>,
 
-    /// Measurement rounds. Defaults to 1; N>1 keeps the median throughput round.
+    /// Measurement rounds. Defaults to 1; keeps the median throughput or p99-latency round.
     #[arg(long)]
     pub rounds: Option<u32>,
 
@@ -143,6 +143,18 @@ pub(crate) struct ComparisonsArgs {
     /// Pub/sub peer counts (comma-separated).
     #[arg(long, value_delimiter = ',', default_values_t = [4, 32])]
     pub pubsub_peers: Vec<u64>,
+
+    /// Fixed IO-thread count for OMQ/libzmq PUB/SUB receivers.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub pubsub_receiver_io_threads: Option<u32>,
+
+    /// Fixed application worker count for blocking OMQ/libzmq PUB/SUB receivers.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=256))]
+    pub pubsub_receiver_workers: Option<u32>,
+
+    /// Receiver CPU mask for PUB/SUB (requires `OMQ_BENCH_TASKSET`).
+    #[arg(long)]
+    pub pubsub_receiver_cpus: Option<String>,
 
     /// Latency iterations.
     #[arg(long, default_value_t = 5000)]

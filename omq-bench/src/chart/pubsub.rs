@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::common::{
     C_LIBZMQ, C_LIBZMQ_2T, C_OMQ_1T, C_OMQ_2T, COMPARISON_SIZES, CpuData, Impl, ValMap,
@@ -68,38 +68,44 @@ pub(crate) fn generate() {
     std::fs::create_dir_all(&sub).ok();
 
     // PUB/SUB multi-panel
-    let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>)> = Vec::new();
-    for &peers in PUBSUB_PEERS {
-        let (tput, msgs, cpu) = load_tput("pub_sub", "tcp", Some(peers), PUBSUB_IMPLS);
-        if !tput.is_empty() {
-            panel_data.push((peers, tput, msgs, cpu));
+    for (transport, title) in [
+        ("tcp", "PUB/SUB throughput, TCP loopback, 2-process"),
+        ("ipc", "PUB/SUB throughput, IPC, 2-process"),
+    ] {
+        let mut panel_data: Vec<(u64, ValMap, ValMap, BTreeMap<String, CpuData>)> = Vec::new();
+        for &peers in PUBSUB_PEERS {
+            let (tput, msgs, cpu) = load_tput("pub_sub", transport, Some(peers), PUBSUB_IMPLS);
+            if !tput.is_empty() {
+                panel_data.push((peers, tput, msgs, cpu));
+            }
         }
-    }
-    if !panel_data.is_empty() {
-        let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
-        let rows: Vec<(u64, &ValMap, &ValMap)> =
-            panel_data.iter().map(|(p, t, m, _)| (*p, t, m)).collect();
-        let out = sub.join("tcp.svg");
-        draw_multirow_throughput(
-            &out,
-            "PUB/SUB throughput, TCP loopback, 2-process",
-            &rows,
-            COMPARISON_SIZES,
-            PUBSUB_IMPLS,
-            &merged_cpu,
-            &|peers| {
-                if peers == 1 {
-                    "1 subscriber".to_string()
-                } else {
-                    format!("{peers} subscribers")
-                }
-            },
-            "snd CPU%",
-            "",
-            None,
-        )
-        .expect("draw pubsub chart");
-        eprintln!("Written: {}", out.display());
+        if !panel_data.is_empty() {
+            let title = format!("{title}{}", receiver_label(transport));
+            let merged_cpu = merge_cpu_data(panel_data.iter().map(|(_, _, _, cpu)| cpu));
+            let rows: Vec<(u64, &ValMap, &ValMap)> =
+                panel_data.iter().map(|(p, t, m, _)| (*p, t, m)).collect();
+            let out = sub.join(format!("{transport}.svg"));
+            draw_multirow_throughput(
+                &out,
+                &title,
+                &rows,
+                COMPARISON_SIZES,
+                PUBSUB_IMPLS,
+                &merged_cpu,
+                &|peers| {
+                    if peers == 1 {
+                        "1 subscriber".to_string()
+                    } else {
+                        format!("{peers} subscribers")
+                    }
+                },
+                "snd CPU%",
+                "",
+                None,
+            )
+            .expect("draw pubsub chart");
+            eprintln!("Written: {}", out.display());
+        }
     }
 
     // CURVE PUB/SUB
@@ -119,5 +125,42 @@ pub(crate) fn generate() {
         )
         .expect("draw curve chart");
         eprintln!("Written: {}", out.display());
+    }
+}
+
+fn receiver_label(transport: &str) -> String {
+    let path = crate::jsonl::cache_dir().join("comparisons.jsonl");
+    let rows: Vec<(_, crate::jsonl::ComparisonRow)> = crate::jsonl::load_jsonl(&path);
+    let mut latest = BTreeMap::new();
+    for (_, row) in rows {
+        if row.kind == "pub_sub"
+            && row.transport == transport
+            && row.peers.is_some_and(|peers| PUBSUB_PEERS.contains(&peers))
+            && COMPARISON_SIZES.contains(&row.msg_size)
+            && PUBSUB_IMPLS.iter().any(|def| def.key == row.impl_name)
+        {
+            latest.insert(
+                (row.impl_name, row.peers, row.msg_size),
+                (row.receiver_io_threads, row.receiver_workers),
+            );
+        }
+    }
+    let io_counts: BTreeSet<_> = latest.values().map(|(io, _)| *io).collect();
+    let Some(Some(io)) = io_counts.first() else {
+        return String::new();
+    };
+    if io_counts.len() != 1 {
+        return String::new();
+    }
+    let workers: BTreeSet<_> = latest
+        .into_values()
+        .map(|(_, workers)| workers.unwrap_or(1))
+        .collect();
+    match (workers.first(), workers.last()) {
+        (Some(min), Some(max)) if min != max => {
+            format!(", receiver {io} IO / {min}-{max} workers")
+        }
+        (Some(count), _) => format!(", receiver {io} IO / {count} workers"),
+        _ => format!(", receiver {io} IO"),
     }
 }

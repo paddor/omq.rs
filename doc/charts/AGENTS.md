@@ -57,22 +57,31 @@ Data: `comparisons.jsonl`. OMQ vs libzmq only.
 
 **Latency** (`reqrep/{tcp,ipc,inproc}.svg`):
 - TCP: libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT, omq EXCL
-- IPC: libzmq 1IO, omq 1IO, omq CT
+- IPC: libzmq 1IO, omq 1IO, omq 1IO with 50 μs receive spin, omq CT
 - Inproc: libzmq 2 UT, omq 2 UT, omq CT
 
 Main and comparison latency charts plot p99 round-trip latency with whiskers
 from p50 to p99.9. Each point and its whiskers come from the same cached run.
 Comparison Y axes include the full whisker range. All latency charts include CT.
 Sizes: 16B, 64B, 256B, 1KiB, 4KiB.
+The IPC refresh uses three runs per cell, 100,000 measured exchanges after
+20,000 warmup exchanges, retaining the median-p99 run.
 
-## PUB/SUB charts (2 files)
+## PUB/SUB charts (3 files)
 
 Data: `comparisons.jsonl`, kind `pub_sub`.
 
 | file | panels | impls |
 |------|--------|-------|
 | `pubsub/tcp.svg` | 4, 32 subscribers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO |
+| `pubsub/ipc.svg` | 4, 32 subscribers | libzmq 1IO, libzmq 2IO, omq 1IO, omq 2IO |
 | `pubsub/curve_tcp.svg` | 16 peers | libzmq-curve 1IO/2IO, omq-curve 1IO/2IO |
+
+IO labels refer to the publisher. IPC uses one receiver process with a fixed
+3 IO threads on CPUs 0,3-5; publishers use CPUs 1-2. Receive workers own
+disjoint socket subsets: 4 workers through 1 KiB, 1 for larger messages.
+Each cell retains the median of three runs. Receiver CPU usage is recorded
+separately.
 
 ## Fan-out / fan-in charts (2 files)
 

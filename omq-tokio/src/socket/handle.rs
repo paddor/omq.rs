@@ -915,7 +915,7 @@ impl Socket {
     /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
+    #[must_use = "message streams do nothing unless polled"]
     pub fn message(&self) -> impl futures::stream::FusedStream<Item = Result<Message>> + Send + '_ {
         super::recv_stream::MessageStream::new(self, || self.recv())
     }

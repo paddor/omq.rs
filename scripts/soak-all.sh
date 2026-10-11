@@ -24,7 +24,7 @@ case "${BASH_REMATCH[2]:-s}" in
 esac
 duration_seconds=$((10#$duration_value * duration_multiplier))
 
-export SOAK_FEATURES="${SOAK_FEATURES:-soak plain curve lz4 zstd ws}"
+export SOAK_FEATURES="${SOAK_FEATURES:-soak plain curve lz4 zstd ws dart quic}"
 export OMQ_SOAK_DURATION_SECS="$duration_seconds"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 if [[ -z "${RUBY:-}" ]]; then
@@ -140,6 +140,7 @@ nextest_common=(
   --profile extended -p omq-tokio
   --config-file "$nextest_config"
   --features "$SOAK_FEATURES" --release
+  --run-ignored all
 )
 
 for target in "${soak_targets[@]}"; do
@@ -157,9 +158,12 @@ read_cpu_count() {
 }
 
 cpu_count="$(read_cpu_count)"
-mapfile -t soak_tests < <(
-  cargo nextest list "${nextest_common[@]}" -T oneline
-)
+cargo_cmd="${CARGO:-cargo}"
+soak_test_list="$("$cargo_cmd" nextest list "${nextest_common[@]}" -T oneline)"
+soak_tests=()
+if [[ -n "$soak_test_list" ]]; then
+  mapfile -t soak_tests <<<"$soak_test_list"
+fi
 if [[ ${#soak_tests[@]} -eq 0 ]]; then
   printf 'error: no soak tests found\n' >&2
   exit 1
@@ -190,8 +194,6 @@ printf 'soak_test_threads=%s\n' "$SOAK_TEST_THREADS"
 printf 'soak_test_waves=%s\n' "$rust_waves"
 printf 'soak_cpu_count=%s\n' "$cpu_count"
 printf 'rust_timeout=%ss\n' "$rust_timeout_seconds"
-
-cargo_cmd="${CARGO:-cargo}"
 
 if [[ "${SOAK_SKIP_PREBUILD:-0}" != "1" ]]; then
   printf 'prebuild=1\n'
@@ -302,7 +304,7 @@ jobs_running=1
 failed=0
 run_job rust env OMQ_SOAK_ALLOW_MONITOR_LAG=1 OMQ_SOAK_DISABLE_THROUGHPUT_STABILITY=1 \
   bash scripts/ci-run-with-forensics.sh "all soak ${duration}" "$rust_timeout_seconds" -- \
-  cargo nextest run "${nextest_common[@]}" --test-threads="$SOAK_TEST_THREADS"
+  "$cargo_cmd" nextest run "${nextest_common[@]}" --test-threads="$SOAK_TEST_THREADS"
 run_job pyomq bindings/pyomq/scripts/soak.sh "$duration"
 run_job go env OMQ_GO_SOAK_DURATIONS="$duration_seconds" OMQ_GO_SOAK_WORKERS="$binding_workers" \
   bindings/go/scripts/soak.sh

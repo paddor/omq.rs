@@ -44,6 +44,17 @@ threads.
 
 Full [API documentation](https://docs.rs/omq-tokio/latest/omq_tokio/).
 
+| Socket method | Purpose |
+|---|---|
+| `bind`, `connect` | Listen or connect using an endpoint URI |
+| `send`, `try_send` | Send a message |
+| `recv`, `try_recv` | Receive one complete message |
+| `message` | Stream messages asynchronously |
+| `sink` | Send messages from a stream |
+| `recv_many_into` | Receive into reusable batch storage |
+| `blocking::Socket::dispatch` | Handle messages on the calling thread |
+| `close` | Close with configured linger |
+
 ### QUIC
 
 The `quic` feature adds `quic://` endpoints. See the

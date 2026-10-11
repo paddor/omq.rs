@@ -48,6 +48,7 @@ concurrent-queue = "2.5.0"
 crossbeam-utils = "0.8.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 parking_lot = "0.12.5"
+pin-project-lite = "0.2"
 rand = "0.10"
 rustc-hash = "2.1.0"
 smallvec = { version = "1", features = ["const_generics", "union"] }
@@ -224,6 +225,10 @@ path = "tests/connection_errors.rs"
 [[test]]
 name = "omq_context"
 path = "tests/context.rs"
+
+[[test]]
+name = "omq_message_dispatch"
+path = "tests/message_dispatch.rs"
 
 [[test]]
 name = "omq_coverage_matrix"

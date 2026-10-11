@@ -257,6 +257,10 @@ The receive path applies socket-type routing and request/reply rules. ROUTER
 messages carry the peer identity, SERVER messages carry a routing ID, and REP
 admits the saved reply route when the application receives the request.
 
+Message streams and sinks use the normal receive and send paths without extra
+tasks or queues. Blocking dispatch runs handlers on the calling application
+thread after receive ownership is released.
+
 Connection setup, subscription commands, and lifecycle management run on the
 context runtime. Relay paths, including PEER and conflate, forward messages
 through peer tasks. Their data and control queues are separate, so a blocked

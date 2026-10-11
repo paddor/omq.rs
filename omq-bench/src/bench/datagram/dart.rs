@@ -128,16 +128,19 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     } else {
         ("server", "client")
     };
+    let ipc_path = std::env::temp_dir().join(format!(
+        "omq-mom-{}-{}.sock",
+        std::process::id(),
+        timestamp()
+    ));
+    let endpoint = if transport == "ipc" {
+        format!("ipc://{}", ipc_path.display())
+    } else {
+        format!("{transport}://127.0.0.1:0")
+    };
     peers.spawn(
         Side::Receive,
-        &mut command(
-            args,
-            Side::Receive,
-            receive_role,
-            &format!("{transport}://127.0.0.1:0"),
-            size,
-        )
-        .0,
+        &mut command(args, Side::Receive, receive_role, &endpoint, size).0,
     );
     let bound = peers.wait_json(Side::Receive, "bound");
     let (mut send, samples) = command(
@@ -172,6 +175,9 @@ fn measure(args: &DartArgs, transport: &str, kind: &str, size: u64) -> Value {
     }
     let receiver = peers.wait_json(Side::Receive, "result");
     peers.finish();
+    if transport == "ipc" {
+        let _ = std::fs::remove_file(ipc_path);
+    }
     let mut row = json!({"timestamp_ns":timestamp(), "kind":kind, "transport":transport,
         "msg_size":size, "spin_us":args.spin, "io_spin_us":args.io_spin,
         "continuous_spin":args.continuous_spin, "continuous_io_spin":args.continuous_io_spin,

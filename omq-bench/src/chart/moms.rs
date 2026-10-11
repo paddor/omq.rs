@@ -72,19 +72,27 @@ const IMPLS: &[Impl] = &[
         threads: "",
         color: common::C_IROH,
     },
+    Impl {
+        key: "iceoryx2-shm-2proc",
+        label: "iceoryx2 / SHM",
+        threads: "polling; copy-in",
+        color: plotters::style::RGBColor(206, 147, 216),
+    },
 ];
 
 fn transport(key: &str) -> &str {
     match key {
         "omq-dart" => "dart",
+        "omq-ipc" => "ipc",
         "omq-quic" | "iroh-quic-2proc" => "quic",
         "aeron-udp-2proc" => "udp",
+        "iceoryx2-shm-2proc" => "shm",
         _ => "tcp",
     }
 }
 
 fn latency_impls(spinning: bool) -> Vec<Impl> {
-    IMPLS
+    let mut impls: Vec<_> = IMPLS
         .iter()
         .copied()
         .filter_map(|mut imp| {
@@ -97,13 +105,20 @@ fn latency_impls(spinning: bool) -> Vec<Impl> {
                     };
                 }
                 Some(imp)
-            } else if (imp.key == "aeron-udp-2proc") == spinning {
+            } else if matches!(imp.key, "aeron-udp-2proc" | "iceoryx2-shm-2proc") == spinning {
                 Some(imp)
             } else {
                 None
             }
         })
-        .collect()
+        .collect();
+    impls.push(Impl {
+        key: "omq-ipc",
+        label: "OMQ / IPC",
+        threads: if spinning { "1 IO; 50 us recv" } else { "1 IO" },
+        color: plotters::style::RGBColor(239, 83, 168),
+    });
+    impls
 }
 
 fn valid_omq_row(row: &Value, kind: &str, transport: &str, spin: u64) -> bool {
@@ -118,7 +133,7 @@ fn valid_omq_row(row: &Value, kind: &str, transport: &str, spin: u64) -> bool {
         || row["runtime_polling"] != false
         || row["io_threads"] != 1
         || row["spin_us"] != spin
-        || row["io_spin_us"] != spin
+        || row["io_spin_us"] != if transport == "ipc" { 0 } else { spin }
         || row["workload_profile"] != kind
         || row["measurement_order"] != "rotate"
         || row["cpus"] != "1,2,0,3,5,4"
@@ -277,8 +292,16 @@ fn latency(spinning: bool, impls: &[Impl]) -> (LatencyMap, BTreeMap<String, CpuD
     (latency, cpu)
 }
 
-fn require_omq_points<T>(values: &BTreeMap<u64, BTreeMap<String, T>>, sizes: &[u64], kind: &str) {
-    for imp in IMPLS.iter().filter(|imp| imp.key.starts_with("omq-")) {
+fn require_points<T>(
+    values: &BTreeMap<u64, BTreeMap<String, T>>,
+    sizes: &[u64],
+    impls: &[Impl],
+    kind: &str,
+) {
+    for imp in impls
+        .iter()
+        .filter(|imp| imp.key.starts_with("omq-") || imp.key.ends_with("-2proc"))
+    {
         for size in sizes {
             assert!(
                 values
@@ -292,18 +315,20 @@ fn require_omq_points<T>(values: &BTreeMap<u64, BTreeMap<String, T>>, sizes: &[u
 }
 
 pub(crate) fn generate() {
+    let fanout = super::moms_fanout::prepare();
     let directory = common::out_dir().join("moms");
     std::fs::create_dir_all(&directory).expect("create MOM chart directory");
     let (bandwidth, messages, cpu) = throughput();
-    require_omq_points(&messages, THROUGHPUT_SIZES, "throughput");
+    require_points(&messages, THROUGHPUT_SIZES, IMPLS, "throughput");
     let latencies: Vec<_> = [false, true]
         .into_iter()
         .map(|spinning| {
             let impls = latency_impls(spinning);
             let (values, cpu) = latency(spinning, &impls);
-            require_omq_points(
+            require_points(
                 &values,
                 LATENCY_SIZES,
+                &impls,
                 if spinning { "spin latency" } else { "latency" },
             );
             (spinning, impls, values, cpu)
@@ -312,7 +337,7 @@ pub(crate) fn generate() {
     let path = directory.join("throughput.svg");
     common::draw_throughput_dual_panel_brokered_with_versions(
         &path,
-        "Producer/consumer throughput, loopback, one flow",
+        "Producer/consumer throughput, same host, one flow",
         THROUGHPUT_SIZES,
         IMPLS,
         &bandwidth,
@@ -331,9 +356,9 @@ pub(crate) fn generate() {
             "latency.svg"
         });
         let title = if spinning {
-            "Echo RTT, loopback, receive spinning"
+            "Echo RTT, same host, receive spinning"
         } else {
-            "Echo RTT, loopback, no explicit receive spinning"
+            "Echo RTT, same host, no explicit receive spinning"
         };
         common::draw_latency_brokered_with_versions(
             &path,
@@ -346,4 +371,5 @@ pub(crate) fn generate() {
         .expect("draw MOM latency chart");
         eprintln!("Written: {}", path.display());
     }
+    super::moms_fanout::draw(&fanout);
 }

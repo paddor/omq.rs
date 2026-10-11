@@ -1,0 +1,27 @@
+[package]
+name = "omq-fanout-peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[[bin]]
+name = "omq_fanout_peer"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+omq-tokio = { path = "../../omq-tokio", features = ["dart", "quic"] }
+iceoryx2 = "=0.10.0"
+zenoh = { version = "=1.10.1", default-features = false, features = ["transport_tcp"] }
+zmq = "0.10"
+zmq-sys = "0.12"
+serde_json = "1"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

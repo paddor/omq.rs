@@ -20,10 +20,10 @@ SIZES = {
     ),
     "latency": (16, 32, 64, 256, 1024, 4096),
 }
-TRANSPORT = {"aeron": "udp", "zenoh": "tcp", "iroh": "quic"}
+TRANSPORT = {"aeron": "udp", "zenoh": "tcp", "iroh": "quic", "iceoryx2": "shm"}
 IMPL = {name: f"{name}-{transport}-2proc" for name, transport in TRANSPORT.items()}
 RESULT = re.compile(r"^impl=(\S+) kind=(\S+) size=(\d+) round=(\d+) (.*)$")
-BAD = re.compile(r"\bwarn(?:ing)?\b|timeout", re.IGNORECASE)
+BAD = re.compile(r"\bwarn(?:ing)?\b|timeout|\[[WEF]\]", re.IGNORECASE)
 
 
 def command(name, mode, role, size, port, control, pin):
@@ -31,10 +31,14 @@ def command(name, mode, role, size, port, control, pin):
         jar = Path(os.environ["AERON_JAR"])
         classes = Path(os.environ["AERON_CLASSES"])
         cmd = [
-            "java", "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
+            str(Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq_aeron_peer"),
+            "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
             "-cp", f"{classes}:{jar}", "AeronUdpPeer", mode, role,
             str(size), str(port), str(control),
         ]
+    elif name == "iceoryx2":
+        binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq_iceoryx2_bench_peer"
+        cmd = [str(binary), mode, role, str(size), str(port), str(control)]
     else:
         binary = Path(os.environ["CARGO_TARGET_DIR"]) / "release/omq_rivals"
         cmd = [str(binary), name, mode, role, str(size), str(port), str(control)]
@@ -120,6 +124,15 @@ def comparison_row(name, mode, size, rounds, run_id):
         "transport": TRANSPORT[name],
         "msg_size": size,
     }
+    if name == "iceoryx2":
+        row.update({
+            "library_version": "0.10.0",
+            "payload_mode": "copy-in-borrowed-receive",
+            "continuous_spin": True,
+            "safe_overflow": False,
+            "buffer_capacity": max(2, min(256, 8 * 1024 * 1024 // size)),
+            "rounds": [value for _, value in rounds],
+        })
     values = [value for _, value in rounds]
     fields = ("msgs_s", "mbps") if mode == "throughput" else (
         "p50_us", "p99_us", "p999_us",

@@ -428,11 +428,12 @@ perf report --stdio --no-inline -g none \
 
 ### MOM Charts
 
-`omq_bench chart mom` generates `doc/charts/moms/{throughput,latency,latency_spin}.svg`.
+`omq_bench chart mom` generates `doc/charts/moms/{throughput,latency,latency_spin,fanout_network,fanout_local}.svg`.
 OMQ latency uses matched CLIENT/SERVER pairs, one owned IO thread, and either
 0 or 50 us application receive spin. DART additionally sets that IO spin budget.
 The spinning panel includes Aeron's continuously polling applications and SHARED
-Media Drivers. The other panel includes the non-spinning protocol baselines.
+Media Drivers, plus iceoryx2's polling SHM peers (copy-in, borrowed receive).
+The other panel includes the non-spinning protocol baselines.
 
 Build `omq_dart_bench_peer` with `dart quic`, then collect both OMQ latency
 cohorts. The six CPU IDs place the sender caller/IO on 1/2 and receiver IO/caller
@@ -443,6 +444,10 @@ for spin in 0 50; do
   omq_bench run dart --binary path/to/omq_dart_bench_peer \
     --transport tcp,quic,dart --congestion adaptive --kind latency \
     --spin "$spin" --io-spin "$spin" --cpus 1,2,0,3,5,4 \
+    --sizes 16,32,64,256,1024,4096 --iterations 10000 --warmup 2000 --repeats 3 \
+    --output "$HOME/.cache/omq/mom-omq.jsonl"
+  omq_bench run dart --binary path/to/omq_dart_bench_peer \
+    --transport ipc --kind latency --spin "$spin" --io-spin 0 --cpus 1,2,0,3,5,4 \
     --sizes 16,32,64,256,1024,4096 --iterations 10000 --warmup 2000 --repeats 3 \
     --output "$HOME/.cache/omq/mom-omq.jsonl"
 done
@@ -457,6 +462,30 @@ omq_bench chart mom
 The optional `omq_mom_bench` executable provides broker adapters. Run it with
 `cargo run --release -p omq-bench --features mom-bench --bin omq_mom_bench -- --help`.
 Rival adapters: [scripts/rivals](scripts/rivals/README.md).
+
+Fan-out uses `scripts/rivals/run_fanout.rb`, one publisher process and 1/4/32
+subscriber sockets/handles in one receiver process, with one application thread
+per reader. OMQ sockets share one context and IO thread, as in main's PUB/SUB
+benchmarks. Three 3-second verified windows follow 1-second warmup.
+Data append to `~/.cache/omq/mom-fanout.jsonl`. Rates are complete publications/s
+per reader; aggregate delivered messages/s is that rate times reader count.
+All readers verify sequence, count, size, and a sentinel. The score includes the
+slowest reader's drain time, and whiskers span the three windows. Setup/probes
+and round acknowledgments are outside timing. Publisher CPUs: 1-2; receiver
+CPUs: 3-4. These are four-CPU throughput comparisons, including
+oversubscription at 32 readers. Network protocols use loopback.
+
+OMQ/libzmq enable no-drop fan-out; zenoh uses blocking congestion control;
+iceoryx2 disables overflow and history. libzmq shares one context; zenoh shares
+one receiver session with native FIFO polling; Aeron shares one receiver client and UDP image. Aeron IPC
+clients share the publisher's driver. Mapped Aeron logs use `/dev/shm`.
+zenoh/Aeron can coalesce network copies within the receiver process; this is not
+remote-host fan-out. Payload publication copies in;
+iceoryx2 receive borrows. Logical GB/s does not imply a full payload scan.
+Missing or invalid full cohorts fail before any MOM SVG is replaced. The
+existing PUB/SUB cache is excluded because it does not verify every delivery.
+IPC latency rows are a dated baseline while that transport is being optimized,
+not an achievable-latency ceiling.
 
 ### Cross-library Comparison Charts
 

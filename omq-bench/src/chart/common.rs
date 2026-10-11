@@ -540,6 +540,7 @@ fn mom_client_crate_label(key: &str) -> &'static str {
         "redis-streams" => "redis v0.32.7",
         "zenoh-tcp-2proc" => "zenoh v1.10.1",
         "iroh-quic-2proc" => "iroh v1.3.0",
+        "iceoryx2-shm-2proc" => "iceoryx2 v0.10.0",
         _ => "",
     }
 }

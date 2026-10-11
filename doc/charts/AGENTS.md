@@ -48,22 +48,47 @@ On `main`, only the three `main_*.svg` overview charts include other
 implementations, except the DART charts, which also include Aeron.
 All other secondary charts in `doc/charts/` show OMQ and libzmq only.
 
-## MOM charts (3 files)
+## MOM charts (5 files)
 
 Outputs: `moms/throughput.svg`, `moms/latency.svg` (no explicit spin),
-and `moms/latency_spin.svg` (Aeron and OMQ with receive spin).
+and `moms/latency_spin.svg` (Aeron, iceoryx2, and OMQ with receive spin),
+plus `moms/fanout_network.svg` and `moms/fanout_local.svg`.
 Generate with `omq_bench chart mom`. TCP, QUIC, and DART use consistent
 red, blue, and orange colors, with 1 owned IO thread each. OMQ latency uses
 matched CLIENT/SERVER runs in `mom-omq.jsonl`: 0 or 50 us application spin;
 DART also sets the same IO spin budget. Aeron uses a SHARED Media Driver
 and continuously polling application threads. Its cached version is in the legend.
 External rows and TCP/QUIC throughput come from `comparisons.jsonl`.
+iceoryx2 uses SHM with continuously polling readers, copy-in byte slices,
+borrowed receive, and safe overflow disabled. Its separate peer workspace pins
+v0.10.0; the existing rivals wrapper collects `iceoryx2-shm-2proc` rows.
+Require all 15 throughput and six appropriate latency points for each direct
+two-process rival. Missing cohorts must fail before replacing any SVG.
 DART adaptive throughput uses `mom-omq.jsonl`, a 512-message window,
 1 s warmup, 3 s timing, 2 s drain, and three repeats at all 15 TCP chart sizes.
 Latency uses a 256-message window, 2,000 warmup and 10,000 measured exchanges,
 three passes at 16 B, 32 B, 64 B, 256 B, 1 KiB, and 4 KiB. Select the middle
 p99 run; its p50 and p99.9 supply the whiskers. Require clean, verified,
 complete cohorts with one binary digest and CPU placement `1,2,0,3,5,4`.
+IPC appears in both latency charts with matched CLIENT/SERVER, 0/50 us receive
+spin and no IO spin.
+
+Fan-out reads `mom-fanout.jsonl`, kind `pub_sub_verified`. Require every 16/64/256/
+1024/4096/16384 B point at 1/4/32 subscriber sockets/handles for each series.
+Use two processes and one application thread per reader. OMQ sockets share a
+receiver context and its one IO thread, matching main's PUB/SUB layout.
+Network: OMQ TCP/QUIC/DART, libzmq TCP, zenoh TCP, Aeron UDP. Local: OMQ IPC,
+libzmq IPC, iceoryx2 SHM, Aeron IPC. One publisher; three 3-second windows after
+1-second warmup. Every reader must verify all offered messages, with no sequence
+gaps, duplicates, or corruption. Score: publications / max(sender elapsed,
+slowest reader elapsed), normalized per reader. Whiskers span the three windows.
+Publisher CPUs 1-2; receiver CPUs 3-4. Label oversubscribed reader counts,
+SHM copy-in/borrowed receive, and Aeron's shared IPC driver. Validate both fan-out
+cohorts before replacing any MOM SVG.
+Require `process_layout=two-process-shared-receiver`, `subscriber_processes=1`,
+and `subscriber_threads=peers`. Exclude earlier independent-process trial rows.
+zenoh/Aeron coalesce network delivery inside the receiving session/image; label
+the two-process layout. Refresh IPC latency after transport changes.
 
 ## Secondary comparison charts (6 files)
 

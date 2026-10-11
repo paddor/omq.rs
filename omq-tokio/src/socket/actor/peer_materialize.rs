@@ -181,6 +181,7 @@ fn prepare_wire_driver(
     )
     .with_actor_data_inbox(data_inbox_rx)
     .with_socket_close_state(socket.recv_tx.clone())
+    .with_latency_polling(ipc_latency_polling(socket, endpoint, latency_profile))
     .with_receive_profile(
         crate::engine::driver::ReceiveProfile::from_workload_for_socket(
             workload_profile,
@@ -239,6 +240,10 @@ fn prepare_wire_driver(
         io_thread,
     );
     Some((peer_driver, entry, io_assignment))
+}
+
+fn ipc_latency_polling(socket: &SocketDriver, endpoint: &Endpoint, latency: bool) -> bool {
+    cfg!(unix) && matches!(endpoint, Endpoint::Ipc(_)) && latency && socket.io_pool.owns_runtime()
 }
 
 fn wire_peer_entry(
@@ -950,7 +955,7 @@ fn attach_yring_recv_bypass(
                 }),
                 space: space.clone(),
             });
-            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id, false);
+            PeerLifecycle::new(socket).register_tcp_consumer(cons, space, peer_id, true);
             sink
         });
 

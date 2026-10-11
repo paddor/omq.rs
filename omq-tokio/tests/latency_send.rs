@@ -1,4 +1,4 @@
-//! TCP latency admission, allocation and partial-write regressions.
+//! Latency admission, allocation and partial-write regressions.
 mod test_support;
 
 use bytes::Bytes;
@@ -107,11 +107,25 @@ async fn full_identity_retry_allocates_nothing_and_preserves_original() {
 
 #[tokio::test]
 async fn latency_partial_tcp_writes_preserve_fifo() {
+    partial_writes_preserve_fifo("tcp").await;
+}
+
+#[tokio::test]
+async fn latency_partial_ipc_writes_preserve_fifo() {
+    partial_writes_preserve_fifo("ipc").await;
+}
+
+async fn partial_writes_preserve_fifo(transport: &str) {
     for kind in [SocketType::Channel, SocketType::Peer, SocketType::Pair] {
         let context = Context::new();
         let server = context.socket(kind, options(b"server", WorkloadProfile::Latency));
         let client = context.socket(kind, options(b"client", WorkloadProfile::Latency));
-        let endpoint = server.bind(test_support::tcp_loopback(0)).await.unwrap();
+        let endpoint = if transport == "ipc" {
+            test_support::ipc_endpoint("latency-partial")
+        } else {
+            test_support::tcp_loopback(0)
+        };
+        let endpoint = server.bind(endpoint).await.unwrap();
         client.connect(endpoint).await.unwrap();
         client.wait_connected(1, DEADLINE).await.unwrap();
         server.wait_connected(1, DEADLINE).await.unwrap();

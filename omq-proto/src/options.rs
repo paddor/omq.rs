@@ -121,7 +121,9 @@ pub struct Options {
     /// latency profile; all other socket types use the throughput profile.
     /// For ping-pong SERVER/CLIENT or ROUTER/DEALER workloads, set this
     /// explicitly on both endpoints.
-    /// This profile does not enable receive spinning; see [`Self::recv_spin`].
+    /// On owned runtimes, Unix IPC latency drivers briefly keep the reactor
+    /// polling after traffic, consuming additional IO CPU. Blocking receives
+    /// spin only when [`Self::recv_spin`] is enabled.
     pub workload_profile: Option<WorkloadProfile>,
 
     /// Send-side high-water mark as a message count.

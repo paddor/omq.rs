@@ -78,8 +78,9 @@ continuously. Colors identify the same implementation in both panels.
 
 Lines show p99 round-trip latency. Whiskers span p50 to p99.9; values above
 the linear axis are labeled at the plot edge.
-IPC is a 2026-10-11 baseline from the recorded OMQ binary. IPC latency is being
-optimized; these measurements are not an achievable-latency ceiling.
+IPC was remeasured on 2026-10-11 after bounded reactor polling was added to
+owned latency drivers. Values reflect the recorded binary and spin budget;
+transport optimization continues.
 
 ## Verified Pub/Sub Fan-out
 

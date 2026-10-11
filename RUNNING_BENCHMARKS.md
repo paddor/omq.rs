@@ -484,8 +484,8 @@ remote-host fan-out. Payload publication copies in;
 iceoryx2 receive borrows. Logical GB/s does not imply a full payload scan.
 Missing or invalid full cohorts fail before any MOM SVG is replaced. The
 existing PUB/SUB cache is excluded because it does not verify every delivery.
-IPC latency rows are a dated baseline while that transport is being optimized,
-not an achievable-latency ceiling.
+Refresh IPC latency after transport changes. Each cohort records its binary
+revision and receive-spin budget; measurements describe that configuration.
 
 ### Cross-library Comparison Charts
 

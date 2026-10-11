@@ -15,7 +15,9 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use omq_proto::TrySendError;
 use omq_proto::endpoint::Endpoint;
@@ -26,6 +28,51 @@ use crate::context::Context;
 use crate::socket::handle::Socket as AsyncSocket;
 use crate::socket::monitor::{ConnectionStatus, MonitorStream, PeerInfo};
 pub use crate::socket::recv::BlockingRecvCancel;
+
+/// Limits and cancellation for one [`Socket::dispatch`] call.
+/// Unset limits are unlimited.
+#[derive(Clone, Debug, Default)]
+pub struct DispatchOptions {
+    /// Stop after this many complete messages; zero receives nothing.
+    pub max_messages: Option<usize>,
+    /// Stop after at least this many application-visible payload bytes,
+    /// finishing the crossing message; zero receives nothing.
+    pub max_bytes: Option<usize>,
+    /// Stop after this duration, including idle waits and handler execution.
+    /// Checked between messages; a running handler is not interrupted.
+    pub time_limit: Option<Duration>,
+    /// Stop between messages and wake idle dispatch when canceled.
+    /// Use a separate handle for each concurrent call.
+    pub cancel: Option<Arc<BlockingRecvCancel>>,
+}
+
+/// Why a blocking dispatch call returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchExit {
+    /// The complete-message limit was reached.
+    MessageLimit,
+    /// The payload-byte limit was reached or crossed.
+    ByteLimit,
+    /// The call-wide deadline expired.
+    TimeLimit,
+    /// The cancellation handle was canceled.
+    Canceled,
+    /// The socket receive path closed.
+    Closed,
+    /// The handler returned `ControlFlow::Break`.
+    HandlerBreak,
+}
+
+/// Application-visible messages and bytes processed by a dispatch call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DispatchReport {
+    /// Complete messages passed to the handler.
+    pub messages: usize,
+    /// Total payload bytes passed to the handler.
+    pub bytes: usize,
+    /// The condition that ended this call.
+    pub exit: DispatchExit,
+}
 
 /// Receive waker registered by [`Socket::register_recv_waker`].
 /// Dropping it unregisters the waker.
@@ -296,6 +343,100 @@ impl Socket {
     /// [`crate::Options::recv_spin`] optionally polls before parking.
     pub fn recv(&self) -> Result<Message> {
         self.inner.blocking_recv()
+    }
+
+    /// Receive and handle messages synchronously on the calling OS thread.
+    ///
+    /// The handler receives an owned message outside receive locks and may
+    /// borrow local state or send replies. Defaults wait until socket closure
+    /// or handler `Break`; [`DispatchOptions`] adds limits and cancellation.
+    /// Returns processed counts and an exit reason in [`DispatchReport`].
+    ///
+    /// Uses [`crate::Options::recv_spin`] before parking when empty. Stopping
+    /// or unwinding leaves unread messages available; other receivers on
+    /// socket clones compete for the same messages.
+    ///
+    /// # Errors
+    /// Returns receive errors other than closure or the configured deadline.
+    ///
+    /// ```no_run
+    /// # fn example(socket: &omq_tokio::blocking::Socket) -> omq_tokio::Result<()> {
+    /// use std::ops::ControlFlow;
+    /// use omq_tokio::blocking::DispatchOptions;
+    /// let _report = socket.dispatch(
+    ///     DispatchOptions { max_messages: Some(100), ..Default::default() },
+    ///     |_message| {
+    ///         // Process the owned message on this application thread.
+    ///         ControlFlow::Continue(())
+    ///     },
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn dispatch(
+        &self,
+        options: DispatchOptions,
+        mut handler: impl FnMut(Message) -> ControlFlow<()>,
+    ) -> Result<DispatchReport> {
+        let DispatchOptions {
+            max_messages,
+            max_bytes,
+            time_limit,
+            cancel,
+        } = options;
+        let deadline = time_limit.and_then(|time| Instant::now().checked_add(time));
+        let cancel = cancel.as_deref();
+        let _cancel_guard = cancel.map(|cancel| {
+            cancel.register(&std::thread::current());
+            crate::engine::signal::BlockingRecvCancelGuard { cancel }
+        });
+        let mut report = DispatchReport {
+            messages: 0,
+            bytes: 0,
+            exit: DispatchExit::Closed,
+        };
+        let mut budget = crate::flow::DrainBudget::WORKER;
+        loop {
+            let exit = if cancel.is_some_and(BlockingRecvCancel::is_canceled) {
+                Some(DispatchExit::Canceled)
+            } else if max_messages.is_some_and(|max| report.messages >= max) {
+                Some(DispatchExit::MessageLimit)
+            } else if max_bytes.is_some_and(|max| report.bytes >= max) {
+                Some(DispatchExit::ByteLimit)
+            } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Some(DispatchExit::TimeLimit)
+            } else {
+                None
+            };
+            if let Some(exit) = exit {
+                report.exit = exit;
+                return Ok(report);
+            }
+            let message = match self.inner.blocking_recv_for_dispatch(deadline, cancel) {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    report.exit = DispatchExit::Canceled;
+                    return Ok(report);
+                }
+                Err(Error::Closed) => return Ok(report),
+                Err(Error::Timeout) if deadline.is_some() => {
+                    report.exit = DispatchExit::TimeLimit;
+                    return Ok(report);
+                }
+                Err(error) => return Err(error),
+            };
+            let bytes = message.byte_len();
+            report.messages = report.messages.saturating_add(1);
+            report.bytes = report.bytes.saturating_add(bytes);
+            if handler(message).is_break() {
+                report.exit = DispatchExit::HandlerBreak;
+                return Ok(report);
+            }
+            if !budget.account(bytes) {
+                std::thread::yield_now();
+                budget.reset();
+            }
+        }
     }
 
     /// Receive one complete message, or return `WouldBlock` on timeout.

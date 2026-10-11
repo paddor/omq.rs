@@ -605,6 +605,7 @@ dependencies = [
  "nix",
  "omq-proto",
  "parking_lot",
+ "pin-project-lite",
  "quinn",
  "rand",
  "rustc-hash",

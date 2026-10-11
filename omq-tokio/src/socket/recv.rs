@@ -735,10 +735,22 @@ impl SpscAwareRecv {
         &self,
         cancel: &BlockingRecvCancel,
     ) -> Result<Option<Message>> {
+        self.blocking_recv_registered_cancelable_until(cancel, None)
+    }
+
+    #[inline]
+    pub(crate) fn blocking_recv_registered_cancelable_until(
+        &self,
+        cancel: &BlockingRecvCancel,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Message>> {
         let mut waiter = None;
         let mut woke_without_message = false;
         loop {
-            match self.try_drain_with_spin(None, || cancel.is_canceled()) {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(Error::Timeout);
+            }
+            match self.try_drain_with_spin(deadline, || cancel.is_canceled()) {
                 DrainResult::Message(msg) => return Ok(Some(msg)),
                 DrainResult::Closed => return Err(Error::Closed),
                 DrainResult::Empty => {
@@ -767,7 +779,15 @@ impl SpscAwareRecv {
                     if cancel.is_canceled() {
                         return Ok(None);
                     }
-                    waiter.park();
+                    if let Some(deadline) = deadline {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(Error::Timeout);
+                        }
+                        waiter.park_timeout(remaining);
+                    } else {
+                        waiter.park();
+                    }
                     woke_without_message = true;
                 }
             }

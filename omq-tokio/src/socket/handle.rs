@@ -648,6 +648,30 @@ impl Socket {
         }
     }
 
+    /// Send messages through normal socket routing as a sink.
+    ///
+    /// Polls on the application's executor, with at most one pending message,
+    /// and yields cooperatively under load. Pin it before using `SinkExt`.
+    /// `flush` completes the pending send; closing flushes the adapter and
+    /// leaves the socket open. Dropping it discards its pending unsent message.
+    /// Tries [`Self::try_send`] before waiting via [`Self::send`]; REQ/REP
+    /// sends use `send` directly. Normal backpressure and routing rules apply.
+    ///
+    /// ```no_run
+    /// # async fn example(socket: &omq_tokio::Socket) -> omq_tokio::Result<()> {
+    /// use futures::{SinkExt, pin_mut, stream};
+    /// use omq_tokio::Message;
+    /// let mut source = stream::iter([Ok(Message::single("hello"))]);
+    /// let sink = socket.sink();
+    /// pin_mut!(sink);
+    /// sink.send_all(&mut source).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sink(&self) -> impl futures::Sink<Message, Error = Error> + Send + '_ {
+        super::send_sink::MessageSink::new(self, |message| self.send(message))
+    }
+
     /// Non-blocking send.
     ///
     /// Routes through the `SendSubmitter` directly (no actor hop), mirroring
@@ -868,6 +892,34 @@ impl Socket {
         }
     }
 
+    /// Stream owned messages through normal socket receive admission.
+    ///
+    /// Polls on the application's executor and yields cooperatively under load.
+    /// Closure ends the stream; other receive errors are yielded once, then it
+    /// ends. Pin the stream before calling `StreamExt::next`.
+    ///
+    /// Streams, `recv`, and socket clones compete for the same messages.
+    /// Dropping the stream leaves unread messages available.
+    /// Uses [`Self::try_recv`] for ready messages and [`Self::recv`] to wait;
+    /// REQ/REP receives use `recv` directly.
+    ///
+    /// ```no_run
+    /// # async fn example(socket: &omq_tokio::Socket) -> omq_tokio::Result<()> {
+    /// use futures::{StreamExt, pin_mut};
+    /// let messages = socket.message();
+    /// pin_mut!(messages);
+    /// while let Some(message) = messages.next().await {
+    ///     let _message = message?;
+    ///     // Process the owned message on the application task.
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn message(&self) -> impl futures::stream::FusedStream<Item = Result<Message>> + Send + '_ {
+        super::recv_stream::MessageStream::new(self, || self.recv())
+    }
+
     /// Blocking receive for sync callers. Register the caller and park until
     /// a valid complete message arrives.
     pub(crate) fn blocking_recv(&self) -> Result<Message> {
@@ -934,6 +986,49 @@ impl Socket {
             let byte_len = message.byte_len();
             if let Some(message) = self.prepare_external_recv(message) {
                 return Ok(Some(message));
+            }
+            if !budget.account(byte_len) {
+                std::thread::yield_now();
+                budget.reset();
+            }
+        }
+    }
+
+    /// Apply receive admission while respecting a dispatch-wide deadline.
+    pub(crate) fn blocking_recv_for_dispatch(
+        &self,
+        deadline: Option<std::time::Instant>,
+        cancel: Option<&BlockingRecvCancel>,
+    ) -> Result<Option<Message>> {
+        if deadline.is_none()
+            && cancel.is_none()
+            && !matches!(self.inner.socket_type, SocketType::Req | SocketType::Rep)
+        {
+            return self.inner.recv_rx.blocking_recv().map(Some);
+        }
+        let mut budget = DrainBudget::WORKER;
+        loop {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return Err(Error::Timeout);
+            }
+            let received = if let Some(cancel) = cancel {
+                self.inner
+                    .recv_rx
+                    .blocking_recv_registered_cancelable_until(cancel, deadline)?
+            } else if let Some(deadline) = deadline {
+                Some(self.inner.recv_rx.blocking_recv_until(deadline)?)
+            } else {
+                Some(self.inner.recv_rx.blocking_recv()?)
+            };
+            let Some(message) = received else {
+                return Ok(None);
+            };
+            let byte_len = message.byte_len();
+            if let Some(message) = self.prepare_external_recv(message) {
+                return Ok(Some(message));
+            }
+            if cancel.is_some_and(BlockingRecvCancel::is_canceled) {
+                return Ok(None);
             }
             if !budget.account(byte_len) {
                 std::thread::yield_now();

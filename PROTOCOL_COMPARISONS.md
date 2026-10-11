@@ -4,8 +4,8 @@ These charts compare OMQ/ZMTP with other messaging and RPC protocols on one
 host. One-flow and verified multi-reader fan-out charts are separate. Aeron uses loopback UDP,
 iceoryx2 uses shared memory, and iroh uses loopback QUIC; OMQ includes TCP,
 QUIC, and DART with adaptive congestion control. IPC appears in both latency panels.
-External benchmark adapters and run instructions remain on the `other-moms`
-branch.
+External adapters and run instructions are in [scripts/rivals](scripts/rivals/README.md)
+and [RUNNING_BENCHMARKS.md](RUNNING_BENCHMARKS.md).
 
 ## Setup
 
@@ -58,7 +58,7 @@ every hop.
 ## Producer/Consumer Throughput
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/moms/throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
+  <img src="doc/charts/moms/throughput.svg" alt="Producer/consumer throughput: direct, RPC, and brokered messaging" width="950">
 </p>
 
 ## Request/Reply-Like Latency
@@ -69,11 +69,11 @@ spin; DART also spins its IO task for 50 us. Aeron and iceoryx2 applications pol
 continuously. Colors identify the same implementation in both panels.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/moms/latency.svg" alt="Echo RTT without explicit receive spinning" width="850">
+  <img src="doc/charts/moms/latency.svg" alt="Echo RTT without explicit receive spinning" width="850">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/moms/latency_spin.svg" alt="Echo RTT with receive spinning" width="850">
+  <img src="doc/charts/moms/latency_spin.svg" alt="Echo RTT with receive spinning" width="850">
 </p>
 
 Lines show p99 round-trip latency. Whiskers span p50 to p99.9; values above
@@ -111,11 +111,11 @@ coalesce the network copy before local fan-out. This is a two-process logical
 subscriber comparison, not fan-out to separate remote hosts.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/moms/fanout_network.svg" alt="Verified fan-out over loopback TCP, QUIC, and UDP" width="950">
+  <img src="doc/charts/moms/fanout_network.svg" alt="Verified fan-out over loopback TCP, QUIC, and UDP" width="950">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paddor/omq.rs/other-moms/doc/charts/moms/fanout_local.svg" alt="Verified fan-out over local IPC and shared memory" width="950">
+  <img src="doc/charts/moms/fanout_local.svg" alt="Verified fan-out over local IPC and shared memory" width="950">
 </p>
 
 These charts compare direct pub/sub implementations. The existing iroh/gRPC

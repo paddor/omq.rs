@@ -64,7 +64,8 @@ r0z-async supports Unix. Neither dependency enters the OMQ or pyomq builds.
 
 For direct blocking-peer experiments, `OMQ_BENCH_RECV_SPIN_US=50` sets
 `Options::recv_spin(Duration::from_micros(50))` on both endpoints. Unset or
-zero disables spinning, including for REQ/REP's default latency profile.
+zero disables application receive spinning. Owned IPC latency drivers still
+poll briefly after IO progress.
 Use separate experiment data files when comparing spin budgets.
 
 `omq-tokio-2ut-blocking` measures inproc with two application threads using
@@ -128,11 +129,16 @@ submits one message. Receive turns use a 128-message, 64 KiB budget, permitting
 one larger message. Each turn has one clock check; boundary-crossing turns are
 excluded.
 
-The main TCP PUB/SUB chart uses one publisher and 32 subscriber sockets in a
-second process. Blocking OMQ and libzmq use one application thread per process;
-the receiver fair-drains subscribers and parks when all are empty. Both
-processes use the same configured IO-thread count and, with taskset enabled,
-two CPU cores each.
+TCP and IPC PUB/SUB comparisons use one publisher and all subscriber sockets in
+a second process. Blocking OMQ and libzmq default to one application thread per process;
+the receiver fair-drains subscribers and parks when all are empty. By default,
+both processes use the same configured IO-thread count and, with taskset enabled,
+two CPU cores each. `--pubsub-receiver-io-threads`, `--pubsub-receiver-workers`,
+and `--pubsub-receiver-cpus` give the receiver a fixed larger budget to measure
+publisher IO scaling. Workers own disjoint socket subsets and use the same
+bounded fair drain and measurement deadline. Cache rows record receiver
+placement and CPU time; chart IO labels refer to the publisher, with fixed
+receiver IO and worker counts shown in the title when recorded.
 
 ## Updating Charts
 
@@ -434,6 +440,36 @@ cargo run --release -p omq-bench -- run comparisons --omq \
 cargo run --release -p omq-bench -- chart comparison
 cargo run --release -p omq-bench -- chart main
 ```
+
+Refresh the IPC PUB/SUB chart with 4 and 32 subscribers:
+
+```sh
+OMQ_BENCH_TASKSET=1 cargo run --release -p omq-bench -- run comparisons \
+  --impl libzmq --impl libzmq-2t --impl omq-tokio-1t --impl omq-tokio-2t \
+  --transport ipc --no-throughput --no-latency --pubsub-peers 4,32 --rounds 3 \
+  --sizes 16,64,256,1024 \
+  --pubsub-receiver-io-threads 3 --pubsub-receiver-workers 4 \
+  --pubsub-receiver-cpus 0,3-5
+```
+
+Repeat the benchmark with `--sizes 4096,16384 --pubsub-receiver-workers 1`
+for larger messages, then generate the chart:
+
+```sh
+cargo run --release -p omq-bench -- chart pubsub
+```
+
+Refresh IPC REQ/REP, including the 50 microsecond receive-spin series:
+
+```sh
+cargo run --release -p omq-bench -- run comparisons \
+  --impl libzmq --impl omq-tokio-1t --impl omq-tokio-1t-spin50 --impl omq-tokio-ct \
+  --transport ipc --no-throughput --no-pubsub --sizes 16,64,256,1024,4096 \
+  --latency-iterations 100000 --latency-warmup 20000 --rounds 3
+cargo run --release -p omq-bench -- chart comparison
+```
+
+Latency rounds retain the median-p99 run with its matching p50 and p99.9.
 
 Full refresh after omq/rzmq changes (all impls, all transports):
 

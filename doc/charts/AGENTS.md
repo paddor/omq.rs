@@ -83,6 +83,23 @@ disjoint socket subsets: 4 workers through 1 KiB, 1 for larger messages.
 Each cell retains the median of three runs. Receiver CPU usage is recorded
 separately.
 
+## SHM comparisons (3 files)
+
+Generate with `omq_bench chart shm`; runner commands are in
+[`RUNNING_BENCHMARKS.md`](../../RUNNING_BENCHMARKS.md).
+Data: `shm-{pubsub,pushpull,reqrep}.jsonl`. Series: inproc pool, IPC, SHM, SHM pool.
+
+| file | workload |
+|------|----------|
+| `shm/pubsub.svg` | RADIO/DISH, 4/32 readers |
+| `shm/pushpull.svg` | SCATTER/GATHER, one sender/receiver |
+| `shm/reqrep.svg` | CLIENT/SERVER, 0/50 us receive spin |
+
+Use complete verified cohorts; exclude ordinary inproc from the pooled baseline.
+GB/s axes are logarithmic; msg/s stays linear. Latency plots p99 with p50-p99.9
+whiskers, non-spinning above spinning, on 0-120 us axes with 20 us ticks.
+Use the usual subtitle without hostnames or CPU counts.
+
 ## Fan-out / fan-in charts (2 files)
 
 Data: `comparisons.jsonl`, kind `fan_out`/`fan_in`.

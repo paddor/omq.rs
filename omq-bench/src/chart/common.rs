@@ -55,6 +55,12 @@ pub(crate) struct FairnessEntry {
 
 pub(crate) type FairnessMap = BTreeMap<u64, BTreeMap<String, FairnessEntry>>;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GbsScale {
+    Linear,
+    Logarithmic,
+}
+
 #[derive(Clone, Copy)]
 enum LegendVersionMode {
     Hide,
@@ -726,6 +732,7 @@ fn draw_whiskers<DB: DrawingBackend>(
     present: &[&Impl],
     chart_vals: &ValMap,
     fairness: &FairnessMap,
+    transform: impl Fn(f64) -> f64,
 ) {
     let cap_hw = 0.06;
 
@@ -744,7 +751,7 @@ fn draw_whiskers<DB: DrawingBackend>(
                 continue;
             }
 
-            let project = |v: f64| agg * v / f.median;
+            let project = |v: f64| transform(agg * v / f.median);
             let y_min = project(f.min);
             let y_p25 = project(f.p25);
             let y_p75 = project(f.p75);
@@ -992,7 +999,14 @@ pub(crate) fn draw_msgs_panel(
         .draw()?;
 
     if let Some(fair) = fairness {
-        draw_whiskers(&mut chart, sizes, present, msgs, fair);
+        draw_whiskers(
+            &mut chart,
+            sizes,
+            present,
+            msgs,
+            fair,
+            std::convert::identity,
+        );
     }
 
     for imp in present.iter().rev() {
@@ -1065,7 +1079,14 @@ pub(crate) fn draw_gbs_panel(
                 (sz, gbs)
             })
             .collect();
-        draw_whiskers(&mut chart, sizes, present, &gbs_tput, fair);
+        draw_whiskers(
+            &mut chart,
+            sizes,
+            present,
+            &gbs_tput,
+            fair,
+            std::convert::identity,
+        );
     }
 
     for imp in present.iter().rev() {
@@ -1212,16 +1233,49 @@ fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + Valu
     root.fill(&BACKGROUND_COLOR)?;
     let (chart_area, table_area) = root.split_vertically(chart_h);
 
+    draw_latency_panel(
+        &chart_area,
+        "p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)",
+        sizes,
+        &present,
+        lat,
+        lat_axis,
+        36,
+        annotate_clipped,
+    )?;
+
+    draw_legend_table_with_versions(
+        &table_area,
+        &present,
+        cpu,
+        if cpu.is_empty() { "" } else { "req CPU%" },
+        if cpu.is_empty() { "" } else { "rep CPU%" },
+        version_mode,
+    )?;
+    root.present()?;
+    drop(root);
+
+    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_latency_panel<DB: DrawingBackend, Y: Ranged<ValueType = f64> + ValueFormatter<f64>>(
+    area: &DrawingArea<DB, plotters::coord::Shift>,
+    caption: &str,
+    sizes: &[u64],
+    present: &[&Impl],
+    lat: &LatencyMap,
+    lat_axis: Y,
+    top_margin: u32,
+    annotate_clipped: bool,
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     let n = sizes.len();
     let bounds = lat_axis.range();
-    let mut chart = ChartBuilder::on(&chart_area)
-        .caption(
-            "p99 round-trip latency; whiskers: p50 to p99.9 (lower is better)",
-            ("sans-serif", 12).into_font().color(&TEXT_COLOR),
-        )
+    let mut chart = ChartBuilder::on(area)
+        .caption(caption, ("sans-serif", 12).into_font().color(&TEXT_COLOR))
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
         .set_label_area_size(LabelAreaPosition::Left, 60)
-        .margin_top(36)
+        .margin_top(top_margin)
         .margin_left(10)
         .margin_right(30)
         .build_cartesian_2d(-0.15..(n - 1) as f64 + 0.15, lat_axis)?;
@@ -1234,7 +1288,7 @@ fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + Valu
                 .get(v.round() as usize)
                 .map_or(String::new(), |&s| fmt_size(s))
         })
-        .y_label_formatter(&|v| fmt_us(*v))
+        .y_label_formatter(&|v| format!("{v:.0} \u{03bc}s"))
         .y_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .x_label_style(("sans-serif", 10).into_font().color(&TEXT_COLOR))
         .light_line_style(TRANSPARENT)
@@ -1245,7 +1299,7 @@ fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + Valu
     draw_latency_ranges(
         &mut chart,
         sizes,
-        &present,
+        present,
         lat,
         bounds.clone(),
         annotate_clipped,
@@ -1278,18 +1332,57 @@ fn draw_latency_single_panel_with_version_mode<Y: Ranged<ValueType = f64> + Valu
         )?;
     }
 
-    draw_legend_table_with_versions(
-        &table_area,
-        &present,
-        cpu,
-        if cpu.is_empty() { "" } else { "req CPU%" },
-        if cpu.is_empty() { "" } else { "rep CPU%" },
-        version_mode,
-    )?;
+    Ok(())
+}
+
+/// Draw stacked latency panels with one transport legend and a shared axis.
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn draw_multirow_latency(
+    out_path: &Path,
+    title: &str,
+    sizes: &[u64],
+    impls: &[Impl],
+    rows: &[(&str, &LatencyMap)],
+    maximum_us: u32,
+    step_us: usize,
+    subtitle: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let present: Vec<_> = impls
+        .iter()
+        .filter(|imp| {
+            rows.iter().any(|(_, lat)| {
+                sizes.iter().any(|size| {
+                    lat.get(size)
+                        .is_some_and(|values| values.contains_key(imp.key))
+                })
+            })
+        })
+        .collect();
+    let width = 850;
+    let panel_height = 300;
+    let gap = 30;
+    let top_margin = 56;
+    let chart_height = top_margin + rows.len() as u32 * (panel_height + gap) - gap;
+    let legend_height = 30 + present.len() as u32 * 16;
+    let height = chart_height + legend_height;
+    let root = SVGBackend::new(out_path, (width, height)).into_drawing_area();
+    root.fill(&BACKGROUND_COLOR)?;
+    for (index, (caption, lat)) in rows.iter().enumerate() {
+        let y = top_margin + index as u32 * (panel_height + gap);
+        let area = root.clone().shrink((0, y), (width, panel_height));
+        let axis = LatencyAxis(
+            (0.0..f64::from(maximum_us)).into(),
+            (0..=maximum_us).step_by(step_us).map(f64::from).collect(),
+        );
+        draw_latency_panel(&area, caption, sizes, &present, lat, axis, 0, true)?;
+    }
+    let legend = root
+        .clone()
+        .shrink((0, chart_height), (width, legend_height));
+    draw_legend_table(&legend, &present, &BTreeMap::new(), "", "")?;
     root.present()?;
     drop(root);
-
-    postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
+    postprocess_svg(out_path, width, height, title, subtitle)
 }
 
 fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
@@ -1302,6 +1395,8 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     // Draw ranges behind the p99 lines and dots. All three values come from
     // the same measured run, not from variation between runs.
+    let pixels = chart.plotting_area().get_pixel_range().1;
+    let label_step = 14.0 * (bounds.end - bounds.start) / f64::from(pixels.end - pixels.start);
     let mut label_rows: Vec<Vec<std::ops::Range<i32>>> = Vec::new();
     for imp in present.iter().rev() {
         let stroke = imp.color.mix(0.65).stroke_width(1);
@@ -1371,7 +1466,7 @@ fn draw_latency_ranges<DB: DrawingBackend, Y: Ranged<ValueType = f64>>(
                     label,
                     (
                         x + if boundary { -0.05 } else { 0.05 },
-                        bounds.end - 4.0 - row as f64 * 3.0,
+                        bounds.end - 4.0 - row as f64 * label_step,
                     ),
                     style,
                 )))?;
@@ -1443,7 +1538,7 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
         )?;
     }
     if !large.is_empty() {
-        draw_gbs_panel_log(&right_area, &large, &present, tput)?;
+        draw_gbs_panel_log(&right_area, &large, &present, tput, None)?;
     }
 
     draw_legend_table(&table_area, &present, cpu, snd_label, rcv_label)?;
@@ -1453,19 +1548,31 @@ pub(crate) fn draw_throughput_dual_panel_log_gbs(
     postprocess_svg(out_path, width, total_h, title, hw_label.as_deref())
 }
 
-fn draw_gbs_panel_log(
-    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
-    sizes: &[u64],
-    present: &[&Impl],
-    tput: &ValMap,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let gbs_vals: Vec<f64> = sizes
-        .iter()
-        .filter_map(|s| tput.get(s))
-        .flat_map(|m| m.values())
-        .map(|v| v / 1000.0)
-        .filter(|&v| v > 0.0)
+fn log_gbs_range(gbs_tput: &ValMap, fairness: Option<&FairnessMap>) -> Option<(f64, f64)> {
+    let mut gbs_vals: Vec<f64> = gbs_tput
+        .values()
+        .flat_map(|values| values.values().copied())
+        .filter(|v| v.is_finite() && *v > 0.0)
         .collect();
+    if let Some(fairness) = fairness {
+        for (size, values) in gbs_tput {
+            for (key, value) in values {
+                if let Some(spread) = fairness.get(size).and_then(|values| values.get(key))
+                    && spread.median > 0.0
+                {
+                    gbs_vals.extend(
+                        [spread.min, spread.max]
+                            .map(|rate| value * rate / spread.median)
+                            .into_iter()
+                            .filter(|v| v.is_finite() && *v > 0.0),
+                    );
+                }
+            }
+        }
+    }
+    if gbs_vals.is_empty() {
+        return None;
+    }
     let lo = gbs_vals
         .iter()
         .copied()
@@ -1477,11 +1584,36 @@ fn draw_gbs_panel_log(
         .copied()
         .fold(0.0_f64, f64::max)
         .log10()
-        .ceil();
+        .ceil()
+        .max(lo + 1.0);
+    Some((lo, hi))
+}
+
+fn draw_gbs_panel_log(
+    area: &DrawingArea<SVGBackend<'_>, plotters::coord::Shift>,
+    sizes: &[u64],
+    present: &[&Impl],
+    tput: &ValMap,
+    fairness: Option<&FairnessMap>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let gbs_tput: ValMap = sizes
+        .iter()
+        .filter_map(|size| {
+            let values = tput
+                .get(size)?
+                .iter()
+                .map(|(key, value)| (key.clone(), value / 1000.0))
+                .collect();
+            Some((*size, values))
+        })
+        .collect();
+    let Some((lo, hi)) = log_gbs_range(&gbs_tput, fairness) else {
+        return Ok(());
+    };
 
     let mut chart = ChartBuilder::on(area)
         .caption(
-            "medium/large messages (higher is better)",
+            "medium/large messages (log scale; higher is better)",
             ("sans-serif", 12).into_font().color(&TEXT_COLOR),
         )
         .set_label_area_size(LabelAreaPosition::Bottom, 28)
@@ -1494,6 +1626,7 @@ fn draw_gbs_panel_log(
     chart
         .configure_mesh()
         .x_labels(sizes.len())
+        .y_labels((hi - lo) as usize + 1)
         .x_label_formatter(&|v| {
             sizes
                 .get(v.round() as usize)
@@ -1509,6 +1642,10 @@ fn draw_gbs_panel_log(
         .bold_line_style(GRID_COLOR)
         .axis_style(AXIS_COLOR)
         .draw()?;
+
+    if let Some(fairness) = fairness {
+        draw_whiskers(&mut chart, sizes, present, &gbs_tput, fairness, f64::log10);
+    }
 
     for imp in present.iter().rev() {
         let pts: Vec<(f64, f64)> = sizes
@@ -1560,6 +1697,8 @@ pub(crate) fn draw_multirow_throughput(
     snd_label: &str,
     rcv_label: &str,
     fairness: Option<&[&FairnessMap]>,
+    gbs_scale: GbsScale,
+    hw_label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let present: Vec<&Impl> = impls
         .iter()
@@ -1592,7 +1731,6 @@ pub(crate) fn draw_multirow_throughput(
     let chart_total = row_count * panel_h + (row_count - 1) * row_gap + top_margin;
     let total_h = chart_total + table_h;
     let width = 950u32;
-    let hw_label = detect_hardware();
 
     let root = SVGBackend::new(out_path, (width, total_h)).into_drawing_area();
     root.fill(&BACKGROUND_COLOR)?;
@@ -1633,15 +1771,20 @@ pub(crate) fn draw_multirow_throughput(
             )?;
         }
         if !large.is_empty() && gbs_max > 0.0 {
-            draw_gbs_panel(
-                &right_area,
-                &large,
-                &present,
-                tput,
-                gbs_max,
-                gbs_ticks,
-                row_fair,
-            )?;
+            match gbs_scale {
+                GbsScale::Logarithmic => {
+                    draw_gbs_panel_log(&right_area, &large, &present, tput, row_fair)?;
+                }
+                GbsScale::Linear => draw_gbs_panel(
+                    &right_area,
+                    &large,
+                    &present,
+                    tput,
+                    gbs_max,
+                    gbs_ticks,
+                    row_fair,
+                )?,
+            }
         }
     }
 
@@ -1651,14 +1794,7 @@ pub(crate) fn draw_multirow_throughput(
     root.present()?;
     drop(root);
 
-    postprocess_multirow_svg(
-        out_path,
-        width,
-        total_h,
-        title,
-        hw_label.as_deref(),
-        &row_titles,
-    )
+    postprocess_multirow_svg(out_path, width, total_h, title, hw_label, &row_titles)
 }
 
 fn postprocess_multirow_svg(

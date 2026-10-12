@@ -24,6 +24,12 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum ChartSub {
+    /// Local RADIO/DISH, SCATTER/GATHER, and CLIENT/SERVER transport comparisons.
+    Shm {
+        /// Refresh SHM series while retaining cached inproc/IPC baselines.
+        #[arg(long)]
+        cached_baselines: bool,
+    },
     /// Main TCP overview charts.
     Main,
     /// Per-transport PUSH/PULL and REQ/REP charts.

@@ -27,6 +27,53 @@ fn options() -> Options {
     Options::default().send_hwm(8).recv_hwm(8)
 }
 
+#[tokio::test]
+async fn scatter_queued_batches_preserve_order_across_storage_and_size_changes() {
+    let sizes = [16, 55, 64, 256, 4096, 32 * 1024, 128 * 1024];
+    for hwm in [1, 3, 64, 256] {
+        let context = Context::new();
+        let options = Options::default().send_hwm(hwm).recv_hwm(hwm);
+        let gather = context.socket(SocketType::Gather, options.clone());
+        let address = gather.bind(endpoint()).await.unwrap();
+        let scatter = context.socket(SocketType::Scatter, options);
+        scatter.connect(address).await.unwrap();
+        scatter.wait_connected(1, DEADLINE).await.unwrap();
+        let pool = shm_payload_pool([(128 * 1024, 512)]).unwrap();
+        let receiver = tokio::spawn(async move {
+            for sequence in 0..1024_u64 {
+                let message = receive(&gather).await;
+                let bytes = message.part_slice(0).unwrap();
+                let size = sizes[sequence as usize / 64 % sizes.len()];
+                assert_eq!(message.len(), 1);
+                assert_eq!(bytes.len(), size);
+                assert_eq!(&bytes[..8], &sequence.to_le_bytes());
+                assert!(bytes[8..].iter().all(|byte| *byte == 0xa5));
+                if sequence.is_multiple_of(64) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            gather.close().await.unwrap();
+        });
+        for sequence in 0..1024_u64 {
+            let size = sizes[sequence as usize / 64 % sizes.len()];
+            let mut bytes = vec![0xa5; size];
+            bytes[..8].copy_from_slice(&sequence.to_le_bytes());
+            let message = if (sequence / 32).is_multiple_of(2) {
+                pool.message(size, |body| body.copy_from_slice(&bytes))
+                    .unwrap()
+            } else {
+                Message::from_slice(&bytes)
+            };
+            scatter.send(message).await.unwrap();
+        }
+        tokio::time::timeout(DEADLINE, receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        scatter.close().await.unwrap();
+    }
+}
+
 async fn receive(socket: &Socket) -> Message {
     tokio::time::timeout(DEADLINE, socket.recv())
         .await

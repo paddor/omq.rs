@@ -12,6 +12,7 @@ use crate::jsonl;
 mod point_to_point;
 
 type ChartResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type Cohorts = BTreeMap<(String, String), Vec<Value>>;
 
 const READERS: &[u64] = &[4, 32];
 const SIZES: &[u64] = &[
@@ -145,7 +146,7 @@ fn find<'a>(rows: &'a [Value], implementation: &str, size: u64, readers: u64) ->
 }
 
 fn latest_complete<'a>(
-    cohorts: &'a BTreeMap<(String, String), Vec<Value>>,
+    cohorts: &'a Cohorts,
     implementations: &[Impl],
     sizes: &[u64],
 ) -> Option<&'a [Value]> {
@@ -162,6 +163,19 @@ fn latest_complete<'a>(
             })
         })
         .map(Vec::as_slice)
+}
+
+fn load_cohorts(cache: &Path, family: &str) -> Cohorts {
+    let mut cohorts = Cohorts::new();
+    for (_, row) in jsonl::load_jsonl::<Value>(&cache.join(format!("shm-{family}.jsonl"))) {
+        if let (Some(run), Some(digest)) = (row["run_id"].as_str(), row["binary_sha256"].as_str()) {
+            cohorts
+                .entry((run.into(), digest.into()))
+                .or_default()
+                .push(row);
+        }
+    }
+    cohorts
 }
 
 fn build_panels(
@@ -229,8 +243,8 @@ fn generate_from(cache: &Path, directory: &Path, cached_baselines: bool) -> Char
     // Attempt every family before reporting incomplete cohorts or IO errors.
     let results = [
         generate_pubsub(cache, directory, cached_baselines),
-        point_to_point::generate(cache, directory, false),
-        point_to_point::generate(cache, directory, true),
+        point_to_point::generate(cache, directory, false, cached_baselines),
+        point_to_point::generate(cache, directory, true, cached_baselines),
     ];
     let errors: Vec<_> = results
         .into_iter()
@@ -245,15 +259,7 @@ fn generate_from(cache: &Path, directory: &Path, cached_baselines: bool) -> Char
 }
 
 fn generate_pubsub(cache: &Path, directory: &Path, cached_baselines: bool) -> ChartResult {
-    let mut cohorts: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
-    for (_, row) in jsonl::load_jsonl::<Value>(&cache.join("shm-pubsub.jsonl")) {
-        if let (Some(run), Some(digest)) = (row["run_id"].as_str(), row["binary_sha256"].as_str()) {
-            cohorts
-                .entry((run.into(), digest.into()))
-                .or_default()
-                .push(row);
-        }
-    }
+    let cohorts = load_cohorts(cache, "pubsub");
     if cohorts.is_empty() {
         return Ok(());
     }
@@ -368,7 +374,7 @@ mod tests {
         rows
     }
 
-    fn point_cohort(latency: bool) -> Vec<Value> {
+    pub(super) fn point_cohort(latency: bool) -> Vec<Value> {
         let sizes = if latency {
             common::COMPARISON_LATENCY_SIZES
         } else {

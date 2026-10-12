@@ -1,6 +1,6 @@
 //! Verified SCATTER/GATHER throughput and CLIENT/SERVER latency cohorts.
 
-use super::{ChartResult, IMPLS, SIZES, common, jsonl};
+use super::{ChartResult, IMPLS, SIZES, common};
 use common::{FairnessEntry, FairnessMap, LatencyEntry, LatencyMap, ValMap};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -111,7 +111,7 @@ fn find<'a>(
         .find(|row| verified(row, implementation, size, latency, spin))
 }
 
-fn load(cache: &Path, latency: bool) -> ChartResult<Option<Vec<Value>>> {
+fn load(cache: &Path, latency: bool, cached_baselines: bool) -> ChartResult<Option<Vec<Value>>> {
     let name = if latency { "reqrep" } else { "pushpull" };
     let sizes = if latency {
         common::COMPARISON_LATENCY_SIZES
@@ -119,36 +119,60 @@ fn load(cache: &Path, latency: bool) -> ChartResult<Option<Vec<Value>>> {
         SIZES
     };
     let spins: &[u64] = if latency { &[0, 50] } else { &[0] };
-    let mut cohorts: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
-    for (_, row) in jsonl::load_jsonl::<Value>(&cache.join(format!("shm-{name}.jsonl"))) {
-        if let (Some(run), Some(digest)) = (row["run_id"].as_str(), row["binary_sha256"].as_str()) {
-            cohorts
-                .entry((run.into(), digest.into()))
-                .or_default()
-                .push(row);
-        }
-    }
+    let cohorts = super::load_cohorts(cache, name);
     if cohorts.is_empty() {
         return Ok(None);
     }
-    let cohort = cohorts
-        .into_values()
-        .rev()
-        .find(|rows| {
-            IMPLS.iter().all(|implementation| {
-                sizes.iter().all(|&size| {
-                    spins
+    let groups = if cached_baselines {
+        vec![&IMPLS[..2], &IMPLS[2..]]
+    } else {
+        vec![IMPLS]
+    };
+    let mut selected = Vec::new();
+    for implementations in groups {
+        let cohort = cohorts
+            .values()
+            .rev()
+            .find(|rows| complete(rows, implementations, sizes, latency, spins))
+            .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
+        eprintln!(
+            "SHM {name}: implementations={}, run={}, binary={}",
+            implementations
+                .iter()
+                .map(|item| item.key)
+                .collect::<Vec<_>>()
+                .join(","),
+            cohort[0]["run_id"],
+            cohort[0]["binary_sha256"]
+        );
+        selected.extend(
+            cohort
+                .iter()
+                .filter(|row| {
+                    implementations
                         .iter()
-                        .all(|&spin| find(rows, implementation.key, size, latency, spin).is_some())
+                        .any(|implementation| row["impl"] == implementation.key)
                 })
-            })
+                .cloned(),
+        );
+    }
+    Ok(Some(selected))
+}
+
+fn complete(
+    rows: &[Value],
+    implementations: &[common::Impl],
+    sizes: &[u64],
+    latency: bool,
+    spins: &[u64],
+) -> bool {
+    implementations.iter().all(|implementation| {
+        sizes.iter().all(|&size| {
+            spins
+                .iter()
+                .all(|&spin| find(rows, implementation.key, size, latency, spin).is_some())
         })
-        .ok_or_else(|| format!("missing complete verified SHM {name} cohort"))?;
-    eprintln!(
-        "SHM {name}: run={}, binary={}",
-        cohort[0]["run_id"], cohort[0]["binary_sha256"]
-    );
-    Ok(Some(cohort))
+    })
 }
 
 fn throughput(directory: &Path, rows: &[Value]) -> ChartResult {
@@ -253,13 +277,87 @@ fn latency(directory: &Path, rows: &[Value]) -> ChartResult {
     Ok(())
 }
 
-pub(super) fn generate(cache: &Path, directory: &Path, is_latency: bool) -> ChartResult {
-    let Some(rows) = load(cache, is_latency)? else {
+pub(super) fn generate(
+    cache: &Path,
+    directory: &Path,
+    is_latency: bool,
+    cached_baselines: bool,
+) -> ChartResult {
+    let Some(rows) = load(cache, is_latency, cached_baselines)? else {
         return Ok(());
     };
     if is_latency {
         latency(directory, &rows)
     } else {
         throughput(directory, &rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write_rows(path: &Path, rows: &[Value]) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).unwrap();
+        for row in rows {
+            serde_json::to_writer(&mut file, row).unwrap();
+            writeln!(file).unwrap();
+        }
+    }
+
+    #[test]
+    fn cached_baselines_select_complete_shared_cohorts_and_reject_partial_refreshes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cache =
+            std::env::temp_dir().join(format!("omq-shm-point-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&cache).unwrap();
+        for latency in [false, true] {
+            let path = cache.join(if latency {
+                "shm-reqrep.jsonl"
+            } else {
+                "shm-pushpull.jsonl"
+            });
+            let mut rows = super::super::tests::point_cohort(latency);
+            for row in &mut rows {
+                let shared = row["impl"].as_str().unwrap().starts_with("shm");
+                row["run_id"] = json!(if shared { "b-shared" } else { "a-baseline" });
+                row["binary_sha256"] = row["run_id"].clone();
+            }
+            let mut partial = rows
+                .iter()
+                .find(|row| row["impl"] == "shm")
+                .unwrap()
+                .clone();
+            partial["run_id"] = json!("c-incomplete");
+            partial["binary_sha256"] = json!("newer-binary");
+            rows.push(partial);
+            write_rows(&path, &rows);
+            assert!(load(&cache, latency, false).is_err());
+            let selected = load(&cache, latency, true).unwrap().unwrap();
+            assert_eq!(selected.len(), rows.len() - 1);
+            for row in selected {
+                assert_eq!(
+                    row["binary_sha256"],
+                    if row["impl"].as_str().unwrap().starts_with("shm") {
+                        "b-shared"
+                    } else {
+                        "a-baseline"
+                    }
+                );
+            }
+            let missing = rows
+                .iter()
+                .position(|row| row["impl"] == "shm-pool")
+                .unwrap();
+            rows.remove(missing);
+            write_rows(&path, &rows);
+            assert!(load(&cache, latency, true).is_err());
+        }
+        std::fs::remove_dir_all(cache).unwrap();
     }
 }

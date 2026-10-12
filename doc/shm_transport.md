@@ -32,15 +32,15 @@ never grows the pool; ordinary preparation retains heap fallback.
 
 ## Batches and leases
 
-Already queued publications with the same group may share a batch:
+Already queued messages with the same envelope may share a batch:
 
 | Bodies | Shared layout |
 |--------|---------------|
 | Ordinary | count, little-endian `u64` sizes, contiguous payloads |
 | SHM pool | count, little-endian `u64` sizes, region coordinates |
 
-Limits: 64 messages, 256 KiB shared storage/metadata, 16 KiB per copied body,
-8 MiB total referenced payload. Batching never waits for more messages.
+Limits: 256 messages, 256 KiB shared storage/metadata, 16 KiB per copied body.
+Referenced payload bytes do not limit batches. Batching never waits for more messages.
 Each recipient holds one lease per body or batch; every message counts against
 send HWM. Final owners complete leases through shared atomics. Clones and byte
 views retain ownership; a borrowed batch body retains the whole batch lease.

@@ -426,6 +426,21 @@ pub struct Message {
 }
 
 impl Message {
+    /// Whether the last body is retained by a pool or backend payload owner.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn has_external_body_owner(&self) -> bool {
+        let external = |payload: &Payload| matches!(payload.inner, PayloadInner::Shared(_));
+        match &self.inner {
+            MessageInner::Single(payload) => external(payload),
+            MessageInner::RoutedShared { .. } | MessageInner::PrefixedShared { .. } => true,
+            MessageInner::Multi(parts) | MessageInner::RoutedMulti { parts, .. } => {
+                parts.last().is_some_and(external)
+            }
+            _ => false,
+        }
+    }
+
     /// Conservative storage retained by this message, including its value,
     /// multipart table capacity, and each payload's allocation backing.
     /// Shared allocations are counted separately for each view. Returns

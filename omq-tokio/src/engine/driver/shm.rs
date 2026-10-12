@@ -24,6 +24,15 @@ use {
 pub(super) struct Outbound {
     state: ShmState,
     pending: VecDeque<Message>,
+    batch: Option<PreparedBatch>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PreparedBatch {
+    message: Message,
+    count: usize,
+    kind: omq_shm::BatchKind,
 }
 
 #[cfg(target_os = "linux")]
@@ -32,6 +41,7 @@ impl Outbound {
         Self {
             state,
             pending: VecDeque::new(),
+            batch: None,
         }
     }
 
@@ -53,12 +63,12 @@ impl Outbound {
         let started = Instant::now();
         let mut budget = DrainBudget::new(max_msgs, max_batch_bytes());
         self.pending.push_back(first.clone());
-        let _ = budget.account(first.byte_len());
+        let _ = budget.account(std::mem::size_of::<Message>());
         while !budget.exhausted() && started.elapsed() < OUTBOUND_BATCH_TIME {
             let Some(message) = try_recv() else {
                 break;
             };
-            let _ = budget.account(message.byte_len());
+            let _ = budget.account(std::mem::size_of::<Message>());
             self.pending.push_back(message);
         }
         let count = budget.msgs();
@@ -70,16 +80,104 @@ impl Outbound {
         let mut state = self.state.lock().expect("SHM connection");
         let mut budget = DrainBudget::new(OUTBOUND_BATCH_MAX_MSGS, max_batch_bytes());
         while !budget.exhausted() {
+            if self.batch.is_none() {
+                self.batch = prepare_batch(&state, &self.pending, &budget)?;
+            }
+            if let Some(batch) = &self.batch {
+                if !state.encode_batch_and_frame(&batch.message, batch.kind, frames)? {
+                    break;
+                }
+                for _ in 0..batch.count {
+                    let message = self.pending.pop_front().expect("packed SHM message");
+                    let _ = budget.account(batch_work_bytes(&message, batch.kind));
+                }
+                self.batch = None;
+                continue;
+            }
             let Some(message) = self.pending.front() else {
                 break;
             };
             if !state.encode_and_frame(message, frames)? {
                 break;
             }
-            let _ = budget.account(message.byte_len());
+            let _ = budget.account(omq_shm::send_work_bytes(message));
             self.pending.pop_front();
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_batch(
+    state: &omq_shm::Connection,
+    pending: &VecDeque<Message>,
+    drain: &DrainBudget,
+) -> Result<Option<PreparedBatch>> {
+    use omq_shm::{BATCH_MAX_MESSAGES, BatchKind, COPIED_BATCH_MAX_BODY, COPY_THRESHOLD};
+
+    if pending.len() < 2 || state.batch_capacity() < 2 || drain.remaining_msgs() < 2 {
+        return Ok(None);
+    }
+    let Some(first) = pending
+        .front()
+        .filter(|message| (1..=2).contains(&message.len()))
+    else {
+        return Ok(None);
+    };
+    let body_index = first.len() - 1;
+    let first_size = first.part_slice(body_index).expect("SHM body").len();
+    let kind = if first_size > COPY_THRESHOLD && omq_shm::is_pooled(first) {
+        BatchKind::Referenced
+    } else {
+        BatchKind::Copied
+    };
+    let limit = state.batch_capacity().min(drain.remaining_msgs());
+    let mut budget = DrainBudget::new(limit, max_batch_bytes().saturating_sub(drain.bytes()));
+    let mut messages = smallvec::SmallVec::<[&Message; BATCH_MAX_MESSAGES]>::new();
+    for message in pending.iter().take(limit) {
+        if budget.exhausted()
+            || message.len() != first.len()
+            || message.routing_id() != first.routing_id()
+            || (body_index != 0 && message.part_slice(0) != first.part_slice(0))
+        {
+            break;
+        }
+        let size = message.part_slice(body_index).expect("SHM body").len();
+        match kind {
+            BatchKind::Copied if size > COPIED_BATCH_MAX_BODY => break,
+            BatchKind::Referenced if !omq_shm::is_pooled(message) => break,
+            _ => {}
+        }
+        let bytes = batch_work_bytes(message, kind);
+        if bytes > max_batch_bytes().saturating_sub(drain.bytes() + budget.bytes()) {
+            break;
+        }
+        messages.push(message);
+        let _ = budget.account(bytes);
+    }
+    if messages.len() < 2 {
+        return Ok(None);
+    }
+    Ok(state
+        .prepare_batch(&messages, kind)?
+        .map(|message| PreparedBatch {
+            message,
+            count: messages.len(),
+            kind,
+        }))
+}
+
+#[cfg(target_os = "linux")]
+fn batch_work_bytes(message: &Message, kind: omq_shm::BatchKind) -> usize {
+    match kind {
+        omq_shm::BatchKind::Copied => message.byte_len(),
+        omq_shm::BatchKind::Referenced => {
+            let length = message
+                .part_slice(message.len() - 1)
+                .expect("SHM body")
+                .len();
+            message.byte_len() - length + omq_shm::REFERENCE_ENTRY_BYTES
+        }
     }
 }
 

@@ -13,20 +13,19 @@ use crate::{
 };
 
 /// Maximum independently delivered messages in one shared batch.
-pub const BATCH_MAX_MESSAGES: usize = 64;
+pub const BATCH_MAX_MESSAGES: usize = 256;
 /// Maximum shared batch bytes, including the count and body lengths.
 pub const BATCH_MAX_BYTES: usize = 256 * 1024;
 /// Maximum body copied once into a shared publication batch.
 pub const COPIED_BATCH_MAX_BODY: usize = 16 * 1024;
-/// Maximum application bytes retained by one zero-copy publication batch.
-pub const REFERENCE_BATCH_MAX_PAYLOAD: usize = 8 * 1024 * 1024;
 const REGION_TOKEN: usize = std::mem::size_of::<u32>();
 const BODY_OFFSET: usize = REGION_TOKEN + std::mem::size_of::<u64>();
 const COORDINATE_BYTES: usize = BODY_OFFSET + std::mem::size_of::<u64>();
 pub(crate) const COUNT_BYTES: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZE_BYTES: usize = std::mem::size_of::<u64>();
 const MIN_STORAGE_BYTES: usize = 64;
-const REFERENCE_BYTES: usize = SIZE_BYTES + COORDINATE_BYTES;
+/// Bytes per length-and-coordinate entry in a reference batch.
+pub const REFERENCE_ENTRY_BYTES: usize = SIZE_BYTES + COORDINATE_BYTES;
 
 /// Layout of application bodies in a shared publication batch.
 #[derive(Clone, Copy, Debug)]
@@ -93,7 +92,7 @@ pub fn prepare_batch(pool: &PayloadPool, messages: &[&Message]) -> Result<Option
         bytes[..COUNT_BYTES].copy_from_slice(&(messages.len() as u16).to_le_bytes());
         let mut offset = COUNT_BYTES + messages.len() * SIZE_BYTES;
         for (index, message) in messages.iter().enumerate() {
-            let body = message.part_slice(1).expect("batch body");
+            let body = crate::body(message).expect("batch body");
             let size = COUNT_BYTES + index * SIZE_BYTES;
             bytes[size..size + SIZE_BYTES].copy_from_slice(&(body.len() as u64).to_le_bytes());
             bytes[offset..offset + body.len()].copy_from_slice(body);
@@ -104,10 +103,7 @@ pub fn prepare_batch(pool: &PayloadPool, messages: &[&Message]) -> Result<Option
     else {
         return Ok(None);
     };
-    Ok(Some(Message::with_prefix(
-        first.part_bytes(0).expect("batch envelope"),
-        body,
-    )))
+    Ok(Some(with_envelope(first, body)))
 }
 
 pub(crate) fn storage_length(messages: &[&Message], kind: BatchKind) -> Result<Option<usize>> {
@@ -115,12 +111,18 @@ pub(crate) fn storage_length(messages: &[&Message], kind: BatchKind) -> Result<O
         return Err(invalid("invalid SHM batch count").into());
     }
     let first = messages[0];
+    if !(1..=2).contains(&first.len()) {
+        return Err(invalid("invalid SHM batch envelope").into());
+    }
     let mut bodies = 0_usize;
     for message in messages {
-        if message.len() != 2 || message.part_slice(0) != first.part_slice(0) {
+        if message.len() != first.len()
+            || (first.len() == 2 && message.part_slice(0) != first.part_slice(0))
+            || message.routing_id() != first.routing_id()
+        {
             return Err(invalid("SHM batch envelopes differ").into());
         }
-        let length = message.part_slice(1).expect("batch body").len();
+        let length = crate::body(message)?.len();
         if matches!(kind, BatchKind::Copied) && length > COPIED_BATCH_MAX_BODY {
             return Err(invalid("SHM batch body is too large").into());
         }
@@ -128,10 +130,7 @@ pub(crate) fn storage_length(messages: &[&Message], kind: BatchKind) -> Result<O
     }
     let length = match kind {
         BatchKind::Copied => COUNT_BYTES + messages.len() * SIZE_BYTES + bodies,
-        BatchKind::Referenced if bodies <= REFERENCE_BATCH_MAX_PAYLOAD => {
-            COUNT_BYTES + messages.len() * REFERENCE_BYTES
-        }
-        BatchKind::Referenced => return Ok(None),
+        BatchKind::Referenced => COUNT_BYTES + messages.len() * REFERENCE_ENTRY_BYTES,
     };
     // Metadata must exceed both inline capacities to use mapped pool storage.
     Ok((length <= BATCH_MAX_BYTES).then_some(length.max(MIN_STORAGE_BYTES)))
@@ -167,8 +166,8 @@ pub fn prepare_reference_batch(
         group,
         _sources: sources.retained,
     });
-    Ok(Some(Message::with_prefix(
-        messages[0].part_bytes(0).expect("batch envelope"),
+    Ok(Some(with_envelope(
+        messages[0],
         Message::from(Payload::from_shared_owner(owner)),
     )))
 }
@@ -189,7 +188,7 @@ impl Sources {
             slots: Vec::with_capacity(messages.len()),
         };
         for message in messages {
-            let body = message.part_slice(1).expect("batch body");
+            let body = crate::body(message).ok()?;
             let slot = find_slot(body)?;
             if !sources
                 .regions
@@ -231,7 +230,7 @@ impl Sources {
             bytes[coordinate + BODY_OFFSET..coordinate + COORDINATE_BYTES]
                 .copy_from_slice(&(reference.offset as u64).to_le_bytes());
         }
-        bytes[COUNT_BYTES + self.references.len() * REFERENCE_BYTES..].fill(0);
+        bytes[COUNT_BYTES + self.references.len() * REFERENCE_ENTRY_BYTES..].fill(0);
     }
 
     fn attach(&self, metadata: &crate::Slot, group: &Arc<LeaseGroup>) {
@@ -267,10 +266,10 @@ pub(super) fn decode(
     views: &crate::views::Views,
     messages: &mut VecDeque<Message>,
 ) -> Result<()> {
-    if message.len() != 2 {
+    if !(1..=2).contains(&message.len()) {
         return Err(invalid("invalid SHM batch envelope").into());
     }
-    let bytes = message.part_slice(1).expect("batch body");
+    let bytes = crate::body(message)?;
     let count = count(bytes)?;
     let decoded = message_decoder(message);
     let batch = message.last_payload().expect("batch owner");
@@ -307,17 +306,15 @@ pub(super) fn decode(
 
 pub(super) fn references(bytes: &[u8]) -> Result<impl Iterator<Item = Reference> + '_> {
     let count = count(bytes)?;
-    let end = COUNT_BYTES + count * REFERENCE_BYTES;
+    let end = COUNT_BYTES + count * REFERENCE_ENTRY_BYTES;
     if bytes.len() != end.max(MIN_STORAGE_BYTES) || bytes[end..].iter().any(|&byte| byte != 0) {
         return Err(invalid("invalid SHM reference table length or padding").into());
     }
-    let mut total = 0_u64;
     for index in 0..count {
         let size = COUNT_BYTES + index * SIZE_BYTES;
         let length = read_u64(bytes, size);
         let coordinate = COUNT_BYTES + count * SIZE_BYTES + index * COORDINATE_BYTES;
-        total = total.saturating_add(length);
-        if total > REFERENCE_BATCH_MAX_PAYLOAD as u64
+        if length > isize::MAX as u64
             || usize::try_from(read_u64(bytes, coordinate + BODY_OFFSET)).is_err()
         {
             return Err(invalid("SHM reference batch exceeds payload limits").into());
@@ -346,10 +343,10 @@ pub(super) fn decode_references(
     mut region: impl FnMut(u32, u64) -> Option<Arc<Mapping>>,
     messages: &mut VecDeque<Message>,
 ) -> Result<()> {
-    if message.len() != 2 {
+    if !(1..=2).contains(&message.len()) {
         return Err(invalid("invalid SHM reference batch envelope").into());
     }
-    let bytes = message.part_slice(1).expect("batch references");
+    let bytes = crate::body(message)?;
     let decoded = message_decoder(message);
     let batch = message.last_payload().expect("batch owner");
     messages.reserve(count(bytes)?);
@@ -369,14 +366,32 @@ pub(super) fn decode_references(
 fn message_decoder(source: &Message) -> impl Fn(Payload) -> Message {
     // Keep one Bytes prefix per batch. Converting it to an inline Payload
     // and back would allocate a new Bytes prefix for each delivered body.
-    let envelope = source.part_bytes(0).expect("batch envelope");
+    let envelope = (source.len() == 2).then(|| source.part_bytes(0).expect("batch envelope"));
     let routing_id = source.routing_id();
     move |body| {
-        let message = Message::with_prefix(envelope.clone(), Message::from(body));
+        let message = Message::from(body);
+        let message = if let Some(envelope) = &envelope {
+            Message::with_prefix(envelope.clone(), message)
+        } else {
+            message
+        };
         if let Some(id) = routing_id {
             message.with_routing_id(id)
         } else {
             message
         }
+    }
+}
+
+fn with_envelope(source: &Message, body: Message) -> Message {
+    let message = if source.len() == 2 {
+        Message::with_prefix(source.part_bytes(0).expect("batch envelope"), body)
+    } else {
+        body
+    };
+    if let Some(id) = source.routing_id() {
+        message.with_routing_id(id)
+    } else {
+        message
     }
 }

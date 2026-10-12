@@ -592,19 +592,20 @@ impl LaneWorker {
             // directly by the caller and can encode independently.
             let mut budget = DrainBudget::WORKER;
             #[cfg(target_os = "linux")]
-            if !self.peers.is_empty() && self.peers.values().all(|peer| peer.slot.is_shm()) {
-                // Shared references do not copy application bytes during this
-                // drain. Retain a byte bound while allowing large-body batches.
-                budget = DrainBudget::new(
-                    budget.remaining_msgs(),
-                    omq_shm::REFERENCE_BATCH_MAX_PAYLOAD,
-                );
-            }
+            let shm_only =
+                !self.peers.is_empty() && self.peers.values().all(|peer| peer.slot.is_shm());
             let mut drained = false;
             self.data_rx.prefetch();
             while let Some(data) = self.data_rx.pop() {
                 drained = true;
                 let msg_bytes = data.byte_len();
+                #[cfg(target_os = "linux")]
+                let msg_bytes = if shm_only {
+                    let LaneData::Dispatch(dispatch) = &data;
+                    omq_shm::send_work_bytes(&dispatch.msg)
+                } else {
+                    msg_bytes
+                };
                 batch.push(data);
                 if !budget.account(msg_bytes) {
                     break;
@@ -688,7 +689,7 @@ impl LaneWorker {
             return None;
         }
         let mut messages = SmallVec::<[&Message; omq_shm::BATCH_MAX_MESSAGES]>::new();
-        let mut budget = DrainBudget::new(limit, omq_shm::REFERENCE_BATCH_MAX_PAYLOAD);
+        let mut budget = DrainBudget::new(limit, omq_shm::BATCH_MAX_BYTES);
         let mut packed_bytes = BATCH_COUNT_BYTES;
         for data in batch.iter().take(limit) {
             let LaneData::Dispatch(dispatch) = data;
@@ -699,19 +700,20 @@ impl LaneWorker {
                 break;
             }
             let body_length = dispatch.msg.part_slice(1)?.len();
-            if body_length > omq_shm::REFERENCE_BATCH_MAX_PAYLOAD.saturating_sub(budget.bytes()) {
-                break;
-            }
-            if !referenced {
-                packed_bytes += std::mem::size_of::<u64>() + body_length;
-                if body_length > omq_shm::COPIED_BATCH_MAX_BODY
-                    || packed_bytes > omq_shm::BATCH_MAX_BYTES
-                {
+            let bytes = if referenced {
+                omq_shm::REFERENCE_ENTRY_BYTES
+            } else {
+                if body_length > omq_shm::COPIED_BATCH_MAX_BODY {
                     break;
                 }
+                std::mem::size_of::<u64>() + body_length
+            };
+            packed_bytes += bytes;
+            if packed_bytes > omq_shm::BATCH_MAX_BYTES {
+                break;
             }
             messages.push(&dispatch.msg);
-            if !budget.account(body_length) {
+            if !budget.account(bytes) {
                 break;
             }
         }
@@ -2117,7 +2119,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn shm_reference_batches_admit_exact_body_limit() {
+    fn shm_reference_batches_do_not_charge_application_payload_bytes() {
         const SIZE: usize = 1024 * 1024;
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let state = omq_shm::Connection::new(&stream, 16, None).unwrap();
@@ -2134,12 +2136,9 @@ mod tests {
                 })
             })
             .collect();
-        // A shared envelope does not consume the referenced-body byte budget.
-        // The ninth body exceeds that budget, so only eight may be admitted.
         let (_, count, referenced) = worker.prepare_shm_batch(&batch).unwrap();
         assert!(referenced);
-        assert_eq!(count * SIZE, omq_shm::REFERENCE_BATCH_MAX_PAYLOAD);
-        assert_eq!(count, 8);
+        assert_eq!(count, batch.len());
     }
 
     fn poll_once<F: std::future::Future>(

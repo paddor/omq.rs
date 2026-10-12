@@ -581,6 +581,24 @@ impl Connection {
         Ok(true)
     }
 
+    /// Maximum logical messages that can share one outgoing batch.
+    #[must_use]
+    pub fn batch_capacity(&self) -> usize {
+        self.hwm.min(crate::BATCH_MAX_MESSAGES)
+    }
+
+    /// Pack queued bodies into socket storage without waiting or exceeding HWM.
+    /// `None` means insufficient storage or a batch above this connection's HWM.
+    ///
+    /// # Errors
+    /// Returns an error for invalid counts, envelopes, or body sizes.
+    pub fn prepare_batch(&self, messages: &[&Message], kind: BatchKind) -> Result<Option<Message>> {
+        if messages.len() > self.hwm {
+            return Ok(None);
+        }
+        self.send_pool.prepare_batch(messages, kind)
+    }
+
     /// Publish a prepared batch with one lease and logical HWM credit.
     /// `false` means retain this batch and wait for connection credit.
     ///

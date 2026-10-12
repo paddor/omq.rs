@@ -8,4 +8,5 @@ pub(crate) mod main_tcp;
 pub(crate) mod pubsub;
 mod pushpull_compression;
 pub(crate) mod quic;
+pub(crate) mod shm;
 pub(crate) mod zstd;

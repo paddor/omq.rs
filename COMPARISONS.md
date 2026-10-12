@@ -127,6 +127,28 @@ N-to-1 PUSH/PULL over TCP.
   <img src="doc/charts/pubsub/curve_tcp.svg" alt="CURVE PUB/SUB throughput: TCP" width="850">
 </p>
 
+## Shared Memory
+
+OMQ over inproc, IPC, SHM, and SHM producer pools.
+
+### RADIO/DISH Throughput
+
+<p align="center">
+  <img src="doc/charts/shm/pubsub.svg" alt="RADIO/DISH throughput: inproc vs IPC vs SHM, 4 and 32 readers" width="950">
+</p>
+
+### SCATTER/GATHER Throughput
+
+<p align="center">
+  <img src="doc/charts/shm/pushpull.svg" alt="SCATTER/GATHER throughput: inproc vs IPC vs SHM" width="950">
+</p>
+
+### CLIENT/SERVER Latency
+
+<p align="center">
+  <img src="doc/charts/shm/reqrep.svg" alt="CLIENT/SERVER latency: inproc vs IPC vs SHM, with and without receive spin" width="850">
+</p>
+
 ## QUIC vs CURVE/TCP
 
 These charts compare QUIC with CURVE over TCP on loopback.

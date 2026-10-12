@@ -142,6 +142,22 @@ receiver IO and worker counts shown in the title when recorded.
 
 ## Updating Charts
 
+### Shared-memory comparisons
+
+```sh
+export CARGO_TARGET_DIR=/mnt/bench/tmp/cargo-target
+cargo build --release --manifest-path scripts/shm_bench_peer/Cargo.toml
+ruby scripts/run_shm_pubsub.rb
+ruby scripts/run_shm_pubsub.rb --pattern scatter-gather
+ruby scripts/run_shm_pubsub.rb --pattern client-server
+cargo run --release -p omq-bench -- chart shm
+```
+
+Writes `doc/charts/shm/{pubsub,pushpull,reqrep}.svg` from append-only
+`shm-{pubsub,pushpull,reqrep}.jsonl`.
+For SHM-only fan-out refreshes, run with `--impls shm,shm-pool`, then chart
+with `--cached-baselines` to retain cached inproc/IPC baselines.
+
 Main Rust/comparison latency panels plot p99 round-trip latency, with whiskers
 from p50 to p99.9. Each point uses all three percentiles from the same measured
 run, and the Y axis includes the full whisker range.

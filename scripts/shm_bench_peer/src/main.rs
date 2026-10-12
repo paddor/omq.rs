@@ -1,0 +1,414 @@
+//! Verified RADIO/DISH fan-out over inproc, IPC, and shared memory.
+
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use omq_tokio::{Context, Message, Options, PayloadPool, SocketType};
+use serde_json::json;
+
+mod point_to_point;
+
+const DEADLINE: Duration = Duration::from_secs(30);
+const PROBE: u64 = u64::MAX;
+const SIZES: &[usize] = &[
+    16, 64, 256, 1024, 4096, 16384, 131_072, 1_048_576, 8_388_608,
+];
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Clone)]
+struct Config {
+    implementation: String,
+    publisher: bool,
+    size: usize,
+    readers: usize,
+    id: usize,
+    directory: PathBuf,
+}
+
+impl Config {
+    fn parse() -> Result<Self, Error> {
+        let args: Vec<_> = std::env::args().collect();
+        if args.len() != 7 {
+            return Err("usage: transport pub|sub size readers id directory".into());
+        }
+        let config = Self {
+            implementation: args[1].clone(),
+            publisher: match args[2].as_str() {
+                "pub" => true,
+                "sub" => false,
+                _ => return Err("unknown role".into()),
+            },
+            size: args[3].parse()?,
+            readers: args[4].parse()?,
+            id: args[5].parse()?,
+            directory: PathBuf::from(&args[6]),
+        };
+        if !["inproc", "ipc", "shm", "shm-pool"].contains(&config.implementation.as_str())
+            || !SIZES.contains(&config.size)
+            || ![4, 32].contains(&config.readers)
+            || config.id >= config.readers
+        {
+            return Err("invalid transport, size, or reader count".into());
+        }
+        Ok(config)
+    }
+
+    fn endpoint(&self) -> String {
+        match self.implementation.as_str() {
+            "inproc" => "inproc://shm-comparison".into(),
+            "ipc" => format!("ipc://{}", self.directory.join("data.sock").display()),
+            "tcp" => std::fs::read_to_string(self.directory.join("endpoint"))
+                .unwrap_or_else(|_| "tcp://127.0.0.1:0".into()),
+            _ => format!("shm://{}", self.directory.join("data.sock").display()),
+        }
+    }
+
+    fn control(&self) -> PathBuf {
+        self.directory.join("control.sock")
+    }
+
+    fn hwm(&self) -> usize {
+        (32 * 1024 * 1024 / self.size).clamp(4, 256)
+    }
+
+    fn pool_slots(&self) -> usize {
+        (64 * 1024 * 1024 / self.size).clamp(4, 1024)
+    }
+}
+
+struct Port {
+    socket: omq_tokio::blocking::Socket,
+    pool: Option<PayloadPool>,
+    messages: Vec<Message>,
+    next: usize,
+    batch: usize,
+}
+
+impl Port {
+    fn open(config: &Config, context: &Context) -> Result<Self, Error> {
+        let hwm = u32::try_from(config.hwm())?;
+        let options = Options {
+            xpub_nodrop: true,
+            send_hwm: hwm,
+            recv_hwm: hwm,
+            recv_batching: true,
+            workload_profile: Some(omq_tokio::options::WorkloadProfile::Throughput),
+            ..Options::default()
+        };
+        let socket = context.blocking_socket(
+            if config.publisher {
+                SocketType::Radio
+            } else {
+                SocketType::Dish
+            },
+            options,
+        );
+        if config.publisher {
+            socket.bind(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
+        } else {
+            socket.join("fanout")?;
+            socket.connect(config.endpoint().parse::<omq_tokio::Endpoint>()?)?;
+        }
+        let pool = if config.publisher {
+            let classes = [(config.size, config.pool_slots())];
+            match config.implementation.as_str() {
+                "inproc" => Some(PayloadPool::new(classes)?),
+                "shm-pool" => Some(omq_tokio::shm_payload_pool(classes)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            socket,
+            pool,
+            messages: Vec::with_capacity(256),
+            next: 0,
+            batch: (1024 * 1024 / config.size).clamp(1, 256),
+        })
+    }
+
+    fn send(&self, bytes: &[u8], _checked: bool) -> Result<(), Error> {
+        let body = prepare_message(bytes, self.pool.as_ref())?;
+        let group = bytes::Bytes::from_static(b"fanout");
+        self.socket.send_group(group, body)?;
+        Ok(())
+    }
+
+    fn receive(&mut self, check: &mut dyn FnMut(&[u8]) -> Result<(), Error>) -> Result<(), Error> {
+        if self.next == self.messages.len() {
+            self.messages.clear();
+            let started = Instant::now();
+            loop {
+                match self
+                    .socket
+                    .try_recv_many_into(self.batch, &mut self.messages)
+                {
+                    Ok(count) if count > 0 => break,
+                    Ok(_) | Err(omq_tokio::Error::WouldBlock) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                if started.elapsed() >= DEADLINE {
+                    return Err("receive timeout".into());
+                }
+                std::thread::yield_now();
+            }
+            self.next = 0;
+        }
+        let message = &self.messages[self.next];
+        check(
+            message
+                .len()
+                .checked_sub(1)
+                .and_then(|index| message.part_slice(index))
+                .ok_or("empty message")?,
+        )?;
+        self.next += 1;
+        Ok(())
+    }
+}
+
+fn prepare_message(bytes: &[u8], pool: Option<&PayloadPool>) -> Result<Message, Error> {
+    Ok(if let Some(pool) = pool {
+        let mut started = None;
+        loop {
+            if let Some(message) =
+                pool.try_message(bytes.len(), |body| body.copy_from_slice(bytes))?
+            {
+                break message;
+            }
+            if started.get_or_insert_with(Instant::now).elapsed() >= DEADLINE {
+                return Err("pool credit timeout".into());
+            }
+            std::thread::yield_now();
+        }
+    } else {
+        Message::from_slice(bytes)
+    })
+}
+
+fn connect(path: &Path) -> Result<UnixStream, Error> {
+    let started = Instant::now();
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(DEADLINE))?;
+                return Ok(stream);
+            }
+            Err(error) if started.elapsed() >= DEADLINE => return Err(error.into()),
+            Err(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+fn subscribe(config: &Config, mut port: Port) -> Result<(), Error> {
+    let mut control = connect(&config.control())?;
+    let mut ready = false;
+    for round in 0..4_u64 {
+        let mut received = 0_u64;
+        let mut started = None;
+        let mut ended = false;
+        let batch = (1024 * 1024 / config.size).clamp(1, 256);
+        while !ended {
+            for _ in 0..batch {
+                port.receive(&mut |bytes| {
+                    if bytes.len() == 8 {
+                        let marker = u64::from_le_bytes(bytes.try_into()?);
+                        if marker == PROBE {
+                            if !ready {
+                                control.write_all(&[1])?;
+                                ready = true;
+                            }
+                        } else if marker == PROBE - 1 - round {
+                            ended = true;
+                        } else {
+                            return Err("unexpected round marker".into());
+                        }
+                    } else {
+                        if !ready
+                            || ended
+                            || bytes.len() != config.size
+                            || bytes[..8] != received.to_le_bytes()
+                            || bytes[config.size - 1] != 0xa5
+                        {
+                            return Err(format!(
+                                "reader {} wrong length/sequence/sentinel at {received}",
+                                config.id
+                            )
+                            .into());
+                        }
+                        started.get_or_insert_with(Instant::now);
+                        received += 1;
+                    }
+                    Ok(())
+                })?;
+                if ended {
+                    break;
+                }
+            }
+        }
+        let elapsed = started.ok_or("empty round")?.elapsed().as_secs_f64();
+        if std::env::var_os("OMQ_SHM_BENCH_DEBUG").is_some() {
+            eprintln!(
+                "reader {} round {round}: {received} messages in {elapsed}s",
+                config.id
+            );
+        }
+        control.write_all(&received.to_le_bytes())?;
+        control.write_all(&elapsed.to_le_bytes())?;
+    }
+    // Keep the data port alive until the publisher has verified every reader.
+    let mut done = [0];
+    control.read_exact(&mut done)?;
+    Ok(())
+}
+
+fn publish(config: &Config, port: &Port) -> Result<(), Error> {
+    let listener = UnixListener::bind(config.control())?;
+    listener.set_nonblocking(true)?;
+    std::fs::write(config.directory.join("ready"), b"ready")?;
+    let started = Instant::now();
+    let mut readers = Vec::with_capacity(config.readers);
+    while readers.len() < config.readers {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(true)?;
+                readers.push((stream, false));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if started.elapsed() >= DEADLINE {
+            return Err("connection timeout".into());
+        }
+    }
+    while readers.iter().any(|(_, ready)| !ready) {
+        port.send(&PROBE.to_le_bytes(), false)?;
+        for (stream, ready) in &mut readers {
+            if !*ready {
+                match stream.read(&mut [0]) {
+                    Ok(1) => *ready = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    _ => return Err("readiness connection closed".into()),
+                }
+            }
+        }
+        if started.elapsed() >= DEADLINE {
+            return Err("subscription timeout".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for (stream, _) in &readers {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(DEADLINE))?;
+    }
+    let mut bytes = vec![0xa5; config.size];
+    let batch = (1024 * 1024 / config.size).clamp(1, 256);
+    for round in 0..4_u64 {
+        let duration = Duration::from_secs(if round == 0 { 1 } else { 3 });
+        let started = Instant::now();
+        let mut sent = 0_u64;
+        while started.elapsed() < duration {
+            for _ in 0..batch {
+                bytes[..8].copy_from_slice(&sent.to_le_bytes());
+                port.send(&bytes, true)?;
+                sent += 1;
+            }
+        }
+        let sender_elapsed = started.elapsed().as_secs_f64();
+        port.send(&(PROBE - 1 - round).to_le_bytes(), true)?;
+        if std::env::var_os("OMQ_SHM_BENCH_DEBUG").is_some() {
+            eprintln!("publisher round {round}: {sent} messages in {sender_elapsed}s; marker sent");
+        }
+        let mut counts = Vec::with_capacity(config.readers);
+        let mut elapsed = Vec::with_capacity(config.readers);
+        for (id, (stream, _)) in readers.iter_mut().enumerate() {
+            let mut ack = [0; 16];
+            stream.read_exact(&mut ack).map_err(|error| {
+                format!("reader {id} round {round} acknowledgment failed: {error}")
+            })?;
+            let count = u64::from_le_bytes(ack[..8].try_into()?);
+            let seconds = f64::from_le_bytes(ack[8..].try_into()?);
+            if count != sent || !seconds.is_finite() || seconds <= 0.0 {
+                return Err(format!(
+                    "delivery mismatch: sent {sent}, reader {count}, elapsed {seconds}"
+                )
+                .into());
+            }
+            counts.push(count);
+            elapsed.push(seconds);
+        }
+        if round > 0 {
+            let total_elapsed = elapsed.iter().copied().fold(sender_elapsed, f64::max);
+            let rate = sent as f64 / total_elapsed;
+            println!(
+                "{}",
+                json!({"event":"result", "implementation":config.implementation,
+                "msg_size":config.size,"readers":config.readers,"round":round,
+                "send_hwm":config.hwm(),"recv_hwm":config.hwm(),
+                "pool_slots":if port.pool.is_some() { config.pool_slots() } else { 0 },
+                "shm_max_memory":if matches!(config.implementation.as_str(), "shm" | "shm-pool") {
+                    Some(omq_tokio::options::DEFAULT_SHM_MAX_MEMORY)
+                } else { None },
+                "offered":sent,"reader_counts":counts,"reader_elapsed":elapsed,
+                "sender_elapsed":sender_elapsed,"elapsed":total_elapsed,"msgs_s":rate,
+                "aggregate_msgs_s":rate * config.readers as f64,"mbps":rate * config.size as f64 / 1e6,
+                "missing":0,"duplicates":0,"gaps":0,"corrupt":0})
+            );
+        }
+    }
+    for (stream, _) in &mut readers {
+        stream.write_all(&[1])?;
+    }
+    Ok(())
+}
+
+fn subscribers(config: &Config, context: &Context) -> Result<(), Error> {
+    let mut workers = Vec::with_capacity(config.readers);
+    for id in 0..config.readers {
+        let mut config = config.clone();
+        config.id = id;
+        config.publisher = false;
+        let context = context.clone();
+        workers.push(std::thread::spawn(move || {
+            let port = Port::open(&config, &context)?;
+            subscribe(&config, port)
+        }));
+    }
+    for worker in workers {
+        worker.join().map_err(|_| "subscriber thread panicked")??;
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "scatter-gather" | "client-server"))
+    {
+        return point_to_point::run();
+    }
+    let config = Config::parse()?;
+    let context = Context::new();
+    if config.publisher {
+        let port = Port::open(&config, &context)?;
+        if config.implementation == "inproc" {
+            std::thread::scope(|scope| {
+                let receiver = scope.spawn(|| subscribers(&config, &context));
+                let result = publish(&config, &port);
+                receiver
+                    .join()
+                    .map_err(|_| "subscriber process panicked")??;
+                result
+            })
+        } else {
+            publish(&config, &port)
+        }
+    } else {
+        subscribers(&config, &context)
+    }
+}

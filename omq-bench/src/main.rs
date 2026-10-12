@@ -25,6 +25,9 @@ fn main() {
             RunSub::QuinnDatagram(args) => bench::datagram::quinn::run(args),
         },
         Command::Chart { sub } => match sub {
+            Some(ChartSub::Shm { cached_baselines }) => {
+                chart::shm::generate(cached_baselines).expect("generate SHM charts");
+            }
             Some(ChartSub::Main) => chart::main_tcp::generate(),
             Some(ChartSub::Comparison) => chart::comparison::generate(),
             Some(ChartSub::Pubsub) => chart::pubsub::generate(),
@@ -38,6 +41,7 @@ fn main() {
                 chart::main_tcp::generate();
                 chart::comparison::generate();
                 chart::pubsub::generate();
+                chart::shm::generate(false).expect("generate SHM charts");
                 chart::fanio::generate();
                 chart::quic::generate();
                 chart::dart::generate();

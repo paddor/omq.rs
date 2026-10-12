@@ -307,6 +307,11 @@ impl IoPoolHandle {
         }
     }
 
+    /// Whether tasks run on a runtime owned by OMQ.
+    pub(crate) fn owns_runtime(&self) -> bool {
+        self.pool.is_some()
+    }
+
     /// Whether data-plane tasks run on owned runtimes separate from the
     /// primary socket runtime.
     pub(crate) fn has_dedicated_io_threads(&self) -> bool {
@@ -824,6 +829,16 @@ mod tests {
         assert_eq!(pool.assign_thread(), 0);
         assert_eq!(thread_name(&pool, 0), "single/IO/0");
         pool.shutdown();
+    }
+
+    #[tokio::test]
+    async fn io_pool_distinguishes_owned_and_borrowed_runtimes() {
+        let borrowed = super::Context::current();
+        assert!(!borrowed.inner.io_pool_handle().owns_runtime());
+        for io_threads in [1, 2] {
+            let owned = super::Context::with_config(super::ContextConfig { io_threads });
+            assert!(owned.inner.io_pool_handle().owns_runtime());
+        }
     }
 
     #[test]

@@ -56,6 +56,44 @@ async fn ipc_req_rep_roundtrip() {
     assert_eq!(reply, Message::single("pong"));
 }
 
+#[test]
+fn ipc_owned_req_rep_after_idle_with_and_without_recv_spin() {
+    const EXCHANGES: usize = 64;
+    const DEADLINE: Duration = Duration::from_secs(5);
+    for spin in [Duration::ZERO, Duration::from_micros(50)] {
+        let context = omq_tokio::Context::new();
+        let options = Options::default().recv_spin(spin).linger(DEADLINE);
+        let rep = context.blocking_socket(SocketType::Rep, options.clone());
+        let req = context.blocking_socket(SocketType::Req, options);
+        let endpoint = rep.bind(temp_ipc("owned-req-rep")).unwrap();
+        req.connect(endpoint).unwrap();
+        req.wait_connected(1, DEADLINE).unwrap();
+        let responder = std::thread::spawn(move || {
+            for _ in 0..2 * 3 * EXCHANGES {
+                let message = rep.recv_timeout(DEADLINE).unwrap();
+                rep.send_timeout(message, DEADLINE).unwrap();
+            }
+            rep.close().unwrap();
+        });
+        for _ in 0..2 {
+            // Let the IO polling window expire before restarting traffic.
+            std::thread::sleep(Duration::from_millis(10));
+            for size in [16, 256, 1024] {
+                for sequence in 0..EXCHANGES {
+                    let message = Message::multipart([
+                        bytes::Bytes::from_static(b"topic"),
+                        bytes::Bytes::from(vec![sequence as u8; size]),
+                    ]);
+                    req.send_timeout(message.clone(), DEADLINE).unwrap();
+                    assert_eq!(req.recv_timeout(DEADLINE).unwrap(), message);
+                }
+            }
+        }
+        responder.join().unwrap();
+        req.close().unwrap();
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ipc_abstract_push_pull_roundtrip() {

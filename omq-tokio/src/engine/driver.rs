@@ -52,6 +52,7 @@ const RECV_LARGE_BYTES: usize = 1024 * 1024;
 const RECV_MEDIUM_TIME: Duration = Duration::from_micros(200);
 const RECV_LARGE_TIME: Duration = Duration::from_micros(200);
 const OUTBOUND_BATCH_TIME: Duration = Duration::from_millis(1);
+const IPC_LATENCY_POLL_WINDOW: Duration = Duration::from_micros(50);
 const RECV_POOL_MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const RECV_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -744,6 +745,8 @@ where
     arena_threshold: usize,
     arena_cap: usize,
     receive_profile: ReceiveProfile,
+    /// Keep owned IPC latency drivers runnable briefly after wire progress.
+    latency_polling: bool,
     decoded_payload_pool: Option<omq_proto::PayloadPool>,
     recv_ip_rate_limiter: Option<(Arc<SharedIpRateLimiter>, IpAddr)>,
     socket_close_state: Option<Arc<crate::socket::recv::SharedRecvPipe>>,
@@ -847,6 +850,7 @@ where
             arena_threshold: omq_proto::frame_buffer::ARENA_THRESHOLD,
             arena_cap: omq_proto::frame_buffer::ARENA_INITIAL_CAP,
             receive_profile: ReceiveProfile::Throughput,
+            latency_polling: false,
             decoded_payload_pool: None,
             recv_ip_rate_limiter: None,
             socket_close_state: None,
@@ -952,6 +956,11 @@ where
     #[must_use]
     pub(crate) fn with_send_pipe(mut self, rx: SendPipeConsumer) -> Self {
         self.send_pipe_rx = Some(rx);
+        self
+    }
+
+    pub(crate) fn with_latency_polling(mut self, enabled: bool) -> Self {
+        self.latency_polling = enabled;
         self
     }
 
@@ -1076,6 +1085,7 @@ where
             setup_cancel,
             socket_close_state,
             completion: _,
+            latency_polling,
         } = self;
         if setup_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(Error::HandshakeFailed("transport setup timeout".into()));
@@ -1128,6 +1138,7 @@ where
         let mut pending_receive = None;
         let mut pending_large = None;
         let mut pending_input_error = None;
+        let mut poll_until = None;
 
         let mut peer_events = PeerEventDispatch::for_xpub(notify_xpub);
         let legacy_events = peer_out.legacy_sender();
@@ -1654,6 +1665,9 @@ where
                     }
                 }, if want_write || shutdown_ready => {
                     res?;
+                    if latency_polling {
+                        poll_until = Instant::now().checked_add(IPC_LATENCY_POLL_WINDOW);
+                    }
                     if shutdown_ready {
                         return Ok(());
                     }
@@ -1693,6 +1707,9 @@ where
                 }, if pending_input_error.is_none() && !recv_blocked && !connection.has_pending_input() && !discard_pending && !connection.is_closed() => {
                     if !claim_direct_writer(transmit_slot.as_deref()) { return Ok(()); }
                     let n = res?;
+                    if latency_polling {
+                        poll_until = Instant::now().checked_add(IPC_LATENCY_POLL_WINDOW);
+                    }
                     if n == 0 {
                         mark_peer_dead(transmit_slot.as_deref());
                         cancel.cancel();
@@ -1787,6 +1804,12 @@ where
                 }
 
                 () = tokio::task::yield_now(), if control_exhausted => {}
+
+                // Keep the reactor polling for a follow-up send or reply.
+                // Yield every turn; idle and backpressured peers still park.
+                () = tokio::task::yield_now(), if poll_until.is_some_and(|deadline| {
+                    graceful_close.is_none() && !recv_blocked && Instant::now() < deadline
+                }) => {}
 
             }
         }

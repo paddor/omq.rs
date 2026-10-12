@@ -106,6 +106,11 @@ Application handles enqueue raw messages; drivers own their encoding and
 transmission. Closing a socket either drains accepted output within its linger
 deadline or cancels the driver tasks.
 
+Owned runtimes keep latency-profile Unix IPC drivers runnable briefly after
+wire progress. Drivers yield between reactor polls and sleep after the idle
+window or when receive backpressure blocks them. Application receive spinning
+is controlled separately by `recv_spin`.
+
 A latency-profile plain-TCP route can perform one immediate nonblocking
 vectored write from the caller: framed small messages and headers from the
 slot arena, large payloads from their own buffers. The connection driver owns
